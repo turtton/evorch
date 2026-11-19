@@ -101,6 +101,8 @@ struct Core {
     capture_len: Option<u64>,
     notices: (Vec<String>, Vec<String>),
     cdp_result: Value,
+    /// Operation queries that arrived while the session was detached.
+    queried_detached: usize,
 }
 
 impl Core {
@@ -125,6 +127,7 @@ impl Core {
             capture_len: None,
             notices: (Vec::new(), Vec::new()),
             cdp_result: json!({"ok": true}),
+            queried_detached: 0,
         }
     }
 
@@ -280,6 +283,13 @@ impl Core {
         self.queries.push(query.clone());
         let reply = match query {
             Query::Browser(BrowserQuery::GetRendererOperation { operation_id }) => {
+                if !self.detached.is_empty() {
+                    // A detached session answers nothing about its operations.
+                    self.queried_detached += 1;
+                    return FeatureReply::Query(Err(
+                        FeatureError::new("session is detached").with_code(ErrorCode::NotFound)
+                    ));
+                }
                 let state = self.states[operation_id.as_str()].clone();
                 QueryReply::Browser(BrowserReply::Operation(RendererOperation {
                     operation_id: operation_id.clone(),
@@ -1328,7 +1338,7 @@ fn after_the_grace_or_a_core_restart_nothing_is_reopened_by_itself() {
     // The core restarted: it does not know the session.
     let mut rig = Rig::new();
     rig.open(1);
-    rig.core.detached = std::mem::take(&mut rig.core.tabs);
+    rig.core.tabs.clear();
     rig.core.script(
         "resume",
         Script::Refuse(FeatureError::new("no such session").with_code(ErrorCode::NotFound)),
@@ -1670,4 +1680,256 @@ fn queued_artifacts_are_bounded_and_open_preview_does_no_io() {
     rig.pump();
     assert!(rig.harness.state().feature.previews.len() <= MAX_PREVIEWS);
     let _ = rig.now();
+}
+
+// ---- review fixes ------------------------------------------------------------
+
+fn key_info(name: &str) -> input::KeyInfo {
+    input::KeyInfo {
+        key: name.to_owned(),
+        code: "KeyX",
+        vk: 88,
+    }
+}
+
+fn key_down(name: &str) -> Input {
+    Input::KeyDown {
+        key: key_info(name),
+        modifiers: 0,
+    }
+}
+
+fn key_up(name: &str) -> Input {
+    Input::KeyUp {
+        key: key_info(name),
+        modifiers: 0,
+    }
+}
+
+fn fill_with_chars(queue: &mut InputQueue) {
+    for i in 0..500 {
+        queue.push(Input::Char {
+            text: i.to_string(),
+            modifiers: 0,
+        });
+    }
+}
+
+#[test]
+fn a_failed_or_unknown_resize_is_not_sent_again_by_itself() {
+    for script in [Script::Refuse(busy(RetryAdvice::Never)), Script::Lost] {
+        let mut rig = Rig::new();
+        rig.open(1);
+        rig.core.script_n("resize", script, 50);
+        rig.harness.set_size(vec2(500.0, 480.0));
+        for _ in 0..12 {
+            rig.pump();
+            rig.advance(ops::OP_TIMEOUT + Duration::from_secs(1));
+        }
+        assert_eq!(rig.core.count("resize"), 1);
+        // Another size is the next try.
+        rig.harness.set_size(vec2(420.0, 480.0));
+        rig.pump();
+        assert_eq!(rig.core.count("resize"), 2);
+    }
+}
+
+#[test]
+fn a_key_repeat_never_loses_the_release_of_a_sent_press() {
+    let mut queue = InputQueue::default();
+    queue.push(key_down("a"));
+    fill_with_chars(&mut queue);
+    for _ in 0..10_000 {
+        queue.push(key_down("a"));
+    }
+    assert!(queue.bookkeeping() <= 2, "{}", queue.bookkeeping());
+    queue.push(key_up("a"));
+    assert!(
+        drain(&mut queue).contains(&key_up("a")),
+        "the page would keep the key down"
+    );
+}
+
+#[test]
+fn a_dropped_first_press_drops_its_repeats_and_its_release_with_bounded_bookkeeping() {
+    let mut queue = InputQueue::default();
+    fill_with_chars(&mut queue);
+    for _ in 0..10_000 {
+        queue.push(key_down("b"));
+    }
+    assert!(queue.bookkeeping() <= 1);
+    queue.push(key_up("b"));
+    let inputs = drain(&mut queue);
+    assert!(!inputs.iter().any(|i| matches!(i, Input::KeyUp { .. })));
+    assert_eq!(queue.bookkeeping(), 0);
+}
+
+#[test]
+fn a_press_repeated_while_the_queue_is_full_keeps_its_release() {
+    let mut queue = InputQueue::default();
+    let press = |x| Input::Press {
+        x,
+        y: 0.0,
+        button: Button::Left,
+        buttons: 1,
+        modifiers: 0,
+        count: 1,
+    };
+    queue.push(press(1.0));
+    fill_with_chars(&mut queue);
+    queue.push(press(2.0));
+    queue.push(Input::Release {
+        x: 2.0,
+        y: 0.0,
+        button: Button::Left,
+        buttons: 0,
+        modifiers: 0,
+        count: 1,
+    });
+    assert!(
+        drain(&mut queue)
+            .iter()
+            .any(|i| matches!(i, Input::Release { .. }))
+    );
+}
+
+#[test]
+fn the_keys_held_at_once_are_limited_so_every_release_fits() {
+    let mut queue = InputQueue::default();
+    for n in 0..200 {
+        queue.push(key_down(&format!("k{n}")));
+    }
+    for n in 0..200 {
+        queue.push(key_up(&format!("k{n}")));
+    }
+    let inputs = drain(&mut queue);
+    let downs = inputs
+        .iter()
+        .filter(|i| matches!(i, Input::KeyDown { .. }))
+        .count();
+    let ups = inputs
+        .iter()
+        .filter(|i| matches!(i, Input::KeyUp { .. }))
+        .count();
+    assert_eq!(downs, ups, "every key that went down comes up");
+    assert!(queue.bookkeeping() == 0);
+}
+
+fn capture_blob(rig: &Rig, transfer_id: u64) -> DataPayload {
+    DataPayload::Blob(Blob {
+        start: BlobStart {
+            core_epoch: 7,
+            transfer_id,
+            source: BlobSource::Capture,
+            media_type: MediaType::Png,
+            total_bytes: rig.core.capture.len() as u64,
+            digest: [0; 32],
+        },
+        bytes: rig.core.capture.clone(),
+    })
+}
+
+#[test]
+fn a_second_capture_while_one_is_on_its_way_is_not_started() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    let id = rig.preview(0).id;
+    rig.request(UiRequest::Do(id, Action::Capture));
+    let tag = rig.core.starts.last().unwrap().0;
+    let starts = rig.core.starts.len();
+    rig.request(UiRequest::Do(id, Action::Capture));
+    assert_eq!(rig.core.count("capture"), 1);
+    assert_eq!(rig.core.starts.len(), starts);
+    // The blob slot of the one capture is given back when its bytes are taken.
+    let blob = capture_blob(&rig, 1);
+    rig.publish(tag, blob);
+    rig.harness.run_steps(1);
+    for action in std::mem::take(&mut rig.harness.state_mut().frame.data) {
+        rig.data_action(action);
+    }
+    assert_eq!(rig.core.cancels.iter().filter(|t| **t == tag).count(), 1);
+    let Capture::Decoding(job) = &rig.preview(0).capture else {
+        panic!("decoding was expected");
+    };
+    job.wait_ready();
+    rig.pump();
+    assert!(matches!(rig.preview(0).capture, Capture::Idle));
+    // Then it is allowed again.
+    rig.request(UiRequest::Do(id, Action::Capture));
+    assert_eq!(rig.core.count("capture"), 2);
+}
+
+#[test]
+fn an_operation_in_flight_during_a_short_disconnect_waits_for_the_resume() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    rig.core.script("capture", Script::Hold);
+    let id = rig.preview(0).id;
+    rig.request(UiRequest::Do(id, Action::Capture));
+    let operation = rig.core.held.keys().next().unwrap().clone();
+    rig.core.detached = std::mem::take(&mut rig.core.tabs);
+    rig.reset();
+    rig.advance(Duration::from_secs(1));
+    rig.pump();
+    assert_eq!(rig.core.queried_detached, 0, "asked before the resume");
+    assert_eq!(rig.core.count("resume"), 1);
+    assert_eq!(rig.preview(0).phase, Phase::Open);
+    // The operation is asked about again once the session is back.
+    rig.release(&operation);
+    rig.pump();
+    assert_eq!(rig.preview(0).phase, Phase::Open);
+    assert_eq!(rig.core.count("capture"), 1);
+    assert_eq!(rig.core.count("open"), 1);
+}
+
+#[test]
+fn what_waited_for_a_lost_preview_is_forgotten() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    rig.core.script("capture", Script::Hold);
+    let id = rig.preview(0).id;
+    rig.request(UiRequest::Do(id, Action::Capture));
+    rig.core.detached = std::mem::take(&mut rig.core.tabs);
+    rig.reset();
+    rig.advance(Duration::from_secs(31));
+    rig.pump();
+    assert!(matches!(rig.preview(0).phase, Phase::Lost(_)));
+    assert!(rig.preview(0).lane.is_none());
+    let queries = rig.core.queries.len();
+    rig.advance(Duration::from_secs(120));
+    rig.pump();
+    assert_eq!(rig.core.queries.len(), queries);
+}
+
+#[test]
+fn decoder_threads_are_limited_and_count_until_they_really_end() {
+    use std::sync::mpsc;
+    let decoders = frame::Decoders::default();
+    let ctx = egui::Context::default();
+    let blocked = |decoders: &frame::Decoders| {
+        let (release, wait) = mpsc::channel::<()>();
+        let job = frame::DecodeJob::start_with(vec![0; 16], ctx.clone(), decoders, move |_| {
+            wait.recv().ok();
+            Ok(egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]))
+        });
+        (job, release)
+    };
+    let (first, release_first) = blocked(&decoders);
+    let (second, release_second) = blocked(&decoders);
+    assert!(first.is_some() && second.is_some());
+    let (third, _) = blocked(&decoders);
+    assert!(third.is_none(), "every decoder is busy");
+    // A dropped job still holds its thread until the decode ends.
+    drop(first);
+    assert_eq!(decoders.active(), 2);
+    assert!(blocked(&decoders).0.is_none());
+    release_first.send(()).unwrap();
+    decoders.wait_at_most(1);
+    let (fourth, release_fourth) = blocked(&decoders);
+    assert!(fourth.is_some());
+    release_second.send(()).unwrap();
+    release_fourth.send(()).unwrap();
+    decoders.wait_at_most(0);
+    assert_eq!(decoders.active(), 0);
+    drop(second);
 }

@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 pub(super) const MAX_QUEUED: usize = 128;
 /// Room kept for releases beyond [`MAX_QUEUED`].
 const RELEASE_RESERVE: usize = 32;
+/// Keys that may be down at once; with the buttons they fit in the reserve.
+const MAX_HELD_KEYS: usize = 24;
 const MAX_WHEEL_DELTA: f64 = 10_000.0;
 const LINE_HEIGHT: f32 = 40.0;
 const DOUBLE_CLICK_SECONDS: f64 = 0.5;
@@ -233,10 +235,21 @@ pub(super) struct InputQueue {
     dropped: u64,
     /// Buttons whose press was dropped: the release is dropped with it.
     dropped_buttons: u32,
+    /// Keys whose first press was dropped (each once): their release is dropped.
     dropped_keys: Vec<KeyInfo>,
+    /// Buttons and keys whose press was queued and whose release was not: the
+    /// releases the reserve is kept for.
+    down_buttons: u32,
+    down_keys: Vec<KeyInfo>,
 }
 
 impl InputQueue {
+    /// Entries of the held and dropped press bookkeeping.
+    #[cfg(test)]
+    pub fn bookkeeping(&self) -> usize {
+        self.down_keys.len() + self.dropped_keys.len()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.items.len()
@@ -252,6 +265,8 @@ impl InputQueue {
         self.items.clear();
         self.dropped_buttons = 0;
         self.dropped_keys.clear();
+        self.down_buttons = 0;
+        self.down_keys.clear();
     }
 
     fn make_room(&mut self) -> bool {
@@ -310,6 +325,7 @@ impl InputQueue {
                     self.dropped_buttons &= !button.bit();
                     self.dropped += 1;
                 } else if self.items.len() < MAX_QUEUED + RELEASE_RESERVE {
+                    self.down_buttons &= !button.bit();
                     self.items.push_back(input);
                 } else {
                     self.dropped += 1;
@@ -320,9 +336,41 @@ impl InputQueue {
                     self.dropped_keys.remove(at);
                     self.dropped += 1;
                 } else if self.items.len() < MAX_QUEUED + RELEASE_RESERVE {
+                    if let Some(at) = self.down_keys.iter().position(|k| k == key) {
+                        self.down_keys.remove(at);
+                    }
                     self.items.push_back(input);
                 } else {
                     self.dropped += 1;
+                }
+            }
+            Input::Press { button, .. } => {
+                if self.make_room() {
+                    self.dropped_buttons &= !button.bit();
+                    self.down_buttons |= button.bit();
+                    self.items.push_back(input);
+                } else {
+                    self.dropped += 1;
+                    // A press that is down already was sent: its release must be too.
+                    if self.down_buttons & button.bit() == 0 {
+                        self.dropped_buttons |= button.bit();
+                    }
+                }
+            }
+            Input::KeyDown { ref key, .. } => {
+                let repeat = self.down_keys.contains(key);
+                let held = repeat || self.down_keys.len() < MAX_HELD_KEYS;
+                if held && self.make_room() {
+                    if !repeat {
+                        self.down_keys.push(key.clone());
+                        self.dropped_keys.retain(|k| k != key);
+                    }
+                    self.items.push_back(input);
+                } else {
+                    self.dropped += 1;
+                    if !repeat && !self.dropped_keys.contains(key) {
+                        self.dropped_keys.push(key.clone());
+                    }
                 }
             }
             other => {
@@ -330,11 +378,6 @@ impl InputQueue {
                     self.items.push_back(other);
                 } else {
                     self.dropped += 1;
-                    match other {
-                        Input::Press { button, .. } => self.dropped_buttons |= button.bit(),
-                        Input::KeyDown { key, .. } => self.dropped_keys.push(key),
-                        _ => {}
-                    }
                 }
             }
         }

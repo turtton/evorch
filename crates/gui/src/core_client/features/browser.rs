@@ -57,7 +57,7 @@ use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, FeatureRequest,
     data::{DataNotice, DataPayload, DataSource},
 };
-use frame::{DecodeJob, bgra_to_image};
+use frame::{DecodeJob, Decoders, bgra_to_image};
 use ops::{Clock, Failure, Finished, OpId, Ops};
 use preview::{
     Action, Capture, InspectKind, Inspection, MAX_RESULT_BYTES, Notices, Phase, Preview, PreviewId,
@@ -146,6 +146,9 @@ struct Recovery {
     since: Instant,
     resumed: bool,
     resuming: Option<OpId>,
+    /// The resume was asked for because a tab was missing (not only because an
+    /// open was in flight): a refusal then means the tab is gone.
+    for_missing: bool,
     /// The tab list is to be read (again) before anything else is decided.
     probe_due: bool,
 }
@@ -180,6 +183,7 @@ enum UiRequest {
 
 pub struct BrowserFeature {
     clock: Clock,
+    decoders: Decoders,
     queue: VecDeque<ArtifactRef>,
     ops: Ops<Purpose>,
     session: SessionState,
@@ -221,6 +225,7 @@ impl BrowserFeature {
     fn with_clock(clock: Clock) -> Self {
         Self {
             clock,
+            decoders: Decoders::default(),
             queue: VecDeque::new(),
             ops: Ops::default(),
             session: SessionState::None,
@@ -294,8 +299,9 @@ impl BrowserFeature {
     }
 
     /// The one place that ends a stream: the data connection is cancelled, the
-    /// picture dropped and the subscription and the tab's streaming are undone
-    /// (queued with the tab's other requests, so their order holds).
+    /// frame picture dropped and the subscription and the tab's streaming are
+    /// undone (queued with the tab's other requests, so their order holds). A
+    /// Capture (receiving, decoding or shown) is separate and is not touched.
     fn stop_stream(&mut self, idx: usize, ctx: &mut FeatureContext<'_>) {
         let now = self.clock.now();
         let p = &mut self.previews[idx];
@@ -361,13 +367,18 @@ impl BrowserFeature {
     fn flush(&mut self, ctx: &mut FeatureContext<'_>, now: Instant) {
         for _ in 0..8 {
             let mut sent = 0;
-            let (finished, wake) = self.ops.drive(now, &mut |tag, request| {
-                sent += 1;
-                match request {
-                    FeatureRequest::Command(command) => ctx.command(tag, command),
-                    FeatureRequest::Query(query) => ctx.query(tag, query),
-                }
-            });
+            let recovering = matches!(&self.session, SessionState::Recovering(rec) if !rec.resumed);
+            let (finished, wake) = self.ops.drive(
+                now,
+                &|purpose| recovering && purpose.preview().is_some(),
+                &mut |tag, request| {
+                    sent += 1;
+                    match request {
+                        FeatureRequest::Command(command) => ctx.command(tag, command),
+                        FeatureRequest::Query(query) => ctx.query(tag, query),
+                    }
+                },
+            );
             if let Some(at) = wake {
                 self.wake_at(at);
             }
@@ -599,6 +610,7 @@ impl BrowserFeature {
         // 3. Resize to the area, at most once in an interval.
         if let Some(want) = p.want_viewport
             && want != tab.viewport
+            && p.resize_failed != Some(want)
         {
             match p.last_resize {
                 Some(last) if now.duration_since(last) < RESIZE_INTERVAL => {
@@ -619,7 +631,11 @@ impl BrowserFeature {
                 }
             }
         }
-        // 4. What the user asked for.
+        // 4. What the user asked for. One Capture at a time: a second one would
+        // overwrite the data tag of the first and leave its blob slot taken.
+        if matches!(p.capture, Capture::Receiving(_) | Capture::Decoding(_)) {
+            p.actions.retain(|a| *a != Action::Capture);
+        }
         if let Some(action) = p.actions.pop_front() {
             let (purpose, command) = match action {
                 Action::Capture => {
@@ -772,6 +788,11 @@ impl BrowserFeature {
                                 ctx,
                             );
                         } else {
+                            if let Purpose::Resize(_, viewport) = purpose {
+                                // Not sent again for this size, whatever the reason: a
+                                // new size is the next try.
+                                self.previews[idx].resize_failed = Some(*viewport);
+                            }
                             let what = match purpose {
                                 Purpose::Input(_) => "入力",
                                 Purpose::Resize(..) => "サイズ変更",
@@ -835,7 +856,15 @@ impl BrowserFeature {
                     Err(failure) => failure.describe(),
                     Ok(_) => "予期しない応答を受け取りました".to_owned(),
                 };
-                self.abandon_recovery(&why);
+                if rec.for_missing {
+                    self.abandon_recovery(&why);
+                } else {
+                    // Nothing was missing: the session was not detached, and what
+                    // is in flight is asked about as usual.
+                    rec.resuming = None;
+                    rec.resumed = true;
+                    self.probe = Probe::Need;
+                }
             }
         }
     }
@@ -850,6 +879,24 @@ impl BrowserFeature {
                 p.phase = Phase::Lost(format!(
                     "セッションを再開できません（{why}）。もう一度開いてください"
                 ));
+            }
+        }
+        self.forget_lost_operations();
+    }
+
+    /// What was asked for a preview that is lost is not waited for any more.
+    fn forget_lost_operations(&mut self) {
+        let lost: Vec<PreviewId> = self
+            .previews
+            .iter()
+            .filter(|p| matches!(p.phase, Phase::Lost(_)))
+            .map(|p| p.id)
+            .collect();
+        self.ops
+            .abandon_where(|purpose| purpose.preview().is_some_and(|id| lost.contains(&id)));
+        for p in &mut self.previews {
+            if matches!(p.phase, Phase::Lost(_)) {
+                p.lane = None;
             }
         }
     }
@@ -988,6 +1035,10 @@ impl BrowserFeature {
         ctx: &mut FeatureContext<'_>,
     ) {
         let Some(idx) = self.index(pid) else { return };
+        // After a reset the capture is no longer waited for.
+        if !matches!(self.previews[idx].capture, Capture::Receiving(None)) {
+            return;
+        }
         match (result, operation) {
             (
                 Ok(RendererOutput::Capture {
@@ -1090,7 +1141,12 @@ impl BrowserFeature {
         let SessionState::Recovering(rec) = &mut self.session else {
             return;
         };
-        if missing && !rec.resumed && now.duration_since(rec.since) < GRACE {
+        let opening = self
+            .previews
+            .iter()
+            .any(|p| matches!(p.phase, Phase::Opening(_)));
+        if (missing || opening) && !rec.resumed && now.duration_since(rec.since) < GRACE {
+            rec.for_missing = missing;
             let command = Command::Browser(BrowserCommand::ResumeRendererSession {
                 session: rec.session.clone(),
                 token: rec.token.clone(),
@@ -1099,11 +1155,7 @@ impl BrowserFeature {
             return;
         }
         // An open that is still in flight needs the session to stay.
-        if self
-            .previews
-            .iter()
-            .any(|p| matches!(p.phase, Phase::Opening(_)))
-        {
+        if opening && rec.resumed {
             return;
         }
         let rec = match mem::replace(&mut self.session, SessionState::None) {
@@ -1122,6 +1174,7 @@ impl BrowserFeature {
                 );
             }
         }
+        self.forget_lost_operations();
         self.lost_at = None;
         if kept || rec.resumed {
             self.session = SessionState::Ready {
@@ -1183,7 +1236,13 @@ impl BrowserFeature {
                         if blob.start.source == BlobSource::Capture
                             && blob.start.media_type == MediaType::Png =>
                     {
-                        Capture::Decoding(DecodeJob::start(blob.bytes, egui_ctx.clone()))
+                        match DecodeJob::start(blob.bytes, egui_ctx.clone(), &self.decoders) {
+                            Some(job) => Capture::Decoding(job),
+                            None => Capture::Failed(
+                                "画像の展開が混み合っています。少し待ってからもう一度試してください"
+                                    .to_owned(),
+                            ),
+                        }
                     }
                     _ => Capture::Failed("キャプチャの形式が不正です".to_owned()),
                 };
@@ -1335,6 +1394,7 @@ impl Feature for BrowserFeature {
                     since,
                     resumed: false,
                     resuming: None,
+                    for_missing: false,
                     probe_due: true,
                 });
             }

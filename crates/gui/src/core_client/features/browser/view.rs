@@ -104,7 +104,11 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
                 }
                 Stream::Off | Stream::Live { .. } => {}
             }
-            if ui.button("キャプチャ").clicked() {
+            let capturing = matches!(p.capture, Capture::Receiving(_) | Capture::Decoding(_));
+            if ui
+                .add_enabled(!capturing, egui::Button::new("キャプチャ"))
+                .clicked()
+            {
                 requests.push(UiRequest::Do(id, Action::Capture));
             }
             if ui.button("通知").clicked() {

@@ -279,9 +279,12 @@ impl<P: Clone> Ops<P> {
     }
 
     /// Send what is due, end what ran out of time, and say when to look again.
+    /// What `hold` selects is not sent or asked for now (a session being
+    /// resumed answers nothing about its operations yet); it keeps its state.
     pub fn drive(
         &mut self,
         now: Instant,
+        hold: &dyn Fn(&P) -> bool,
         send: &mut dyn FnMut(u64, FeatureRequest),
     ) -> (Vec<Finished<P>>, Option<Instant>) {
         let mut finished = Vec::new();
@@ -290,6 +293,13 @@ impl<P: Clone> Ops<P> {
         let ids: Vec<OpId> = self.ops.keys().copied().collect();
         for id in ids {
             let stage = self.ops[&id].stage.clone();
+            if matches!(
+                stage,
+                Stage::Ready | Stage::Backoff { .. } | Stage::NeedQuery { .. }
+            ) && hold(&self.ops[&id].purpose)
+            {
+                continue;
+            }
             match stage {
                 Stage::Ready => {
                     let tag = self.tag(id);

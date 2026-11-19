@@ -2,11 +2,15 @@
 //!
 //! Receiving is the shared connection's business; this runs on the GUI thread
 //! at render time (a frame is converted and uploaded once, at most one frame
-//! per tab per render) except for the PNG decode, which runs on one helper
-//! thread and hands the image back through a channel the render polls.
-use std::{io::Cursor, sync::mpsc};
+//! per tab per render) except for the PNG decode, which runs on a helper
+//! thread (a few at most) and hands the image back through a channel the
+//! render polls.
+use std::{
+    io::Cursor,
+    sync::{Arc, Condvar, Mutex, mpsc},
+};
 
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+use egui::{Color32, ColorImage, Context, TextureHandle, TextureOptions};
 use image::{ImageReader, Limits};
 use workbench_client::renderer::Frame;
 
@@ -51,14 +55,18 @@ pub(super) fn bgra_to_image(frame: &Frame) -> Result<ColorImage, PixelError> {
     if frame.bgra.len() < stride * (h - 1) + row {
         return Err(PixelError::Short);
     }
-    let mut rgba = Vec::with_capacity(row * h);
+    let mut pixels = Vec::with_capacity(w * h);
     for line in 0..h {
         let start = line * stride;
-        for px in frame.bgra[start..start + row].as_chunks::<4>().0 {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
+        pixels.extend(
+            frame.bgra[start..start + row]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|px| Color32::from_rgba_premultiplied(px[2], px[1], px[0], px[3])),
+        );
     }
-    Ok(ColorImage::from_rgba_premultiplied([w, h], &rgba))
+    Ok(ColorImage::new([w, h], pixels))
 }
 
 /// A decoded Capture: dimensions are read from the header and checked before
@@ -83,33 +91,91 @@ pub(super) fn decode_capture(bytes: &[u8]) -> Result<ColorImage, PixelError> {
     Ok(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
-/// One decode in the background. Dropping it discards the result.
+/// Decoder threads that may be alive at once. A decode cannot be interrupted,
+/// so a thread counts until it really ends, also when its job was dropped.
+pub(super) const MAX_DECODERS: usize = 2;
+
+/// How many decoder threads are alive. Cloned into each thread; the count is
+/// released when the thread ends.
+#[derive(Clone, Default)]
+pub(super) struct Decoders(Arc<(Mutex<usize>, Condvar)>);
+
+struct Permit(Decoders);
+
+impl Decoders {
+    fn acquire(&self) -> Option<Permit> {
+        let mut active = self.0.0.lock().ok()?;
+        if *active >= MAX_DECODERS {
+            return None;
+        }
+        *active += 1;
+        Some(Permit(self.clone()))
+    }
+
+    /// Blocks until at most `n` decoder threads are alive (tests: the signal
+    /// that a thread ended).
+    #[cfg(test)]
+    pub fn wait_at_most(&self, n: usize) {
+        let guard = self.0.0.lock().unwrap();
+        drop(self.0.1.wait_while(guard, |active| *active > n).unwrap());
+    }
+
+    #[cfg(test)]
+    pub fn active(&self) -> usize {
+        *self.0.0.lock().unwrap()
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if let Ok(mut active) = (self.0).0.0.lock() {
+            *active -= 1;
+        }
+        (self.0).0.1.notify_all();
+    }
+}
+
+/// One decode in the background. Dropping it discards the result; the thread
+/// still counts against [`MAX_DECODERS`] until it ends.
 pub(super) struct DecodeJob {
     result: mpsc::Receiver<Result<ColorImage, PixelError>>,
     /// A result a test took off the channel to know the decode finished.
     #[cfg(test)]
-    waited: std::sync::Mutex<Option<Result<ColorImage, PixelError>>>,
+    waited: Mutex<Option<Result<ColorImage, PixelError>>>,
 }
 
 impl DecodeJob {
-    pub fn start(bytes: Vec<u8>, repaint: Context) -> Self {
+    /// `None` when every decoder is busy or the thread cannot start; the
+    /// bytes are dropped then.
+    pub fn start(bytes: Vec<u8>, repaint: Context, decoders: &Decoders) -> Option<Self> {
+        Self::start_with(bytes, repaint, decoders, decode_capture)
+    }
+
+    pub fn start_with(
+        bytes: Vec<u8>,
+        repaint: Context,
+        decoders: &Decoders,
+        decode: impl FnOnce(&[u8]) -> Result<ColorImage, PixelError> + Send + 'static,
+    ) -> Option<Self> {
+        let permit = decoders.acquire()?;
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("browser-capture-decode".into())
             .spawn(move || {
-                let result = decode_capture(&bytes);
+                let result = decode(&bytes);
                 drop(bytes);
                 // A dropped job has no receiver; the image is discarded here.
                 if tx.send(result).is_ok() {
                     repaint.request_repaint();
                 }
+                drop(permit);
             })
-            .ok();
-        Self {
+            .ok()?;
+        Some(Self {
             result: rx,
             #[cfg(test)]
-            waited: std::sync::Mutex::default(),
-        }
+            waited: Mutex::default(),
+        })
     }
 
     /// The result if the decode finished. A decode that could not even start

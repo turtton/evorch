@@ -141,6 +141,8 @@ pub(super) struct Preview {
     pub lane: Option<OpId>,
     pub want_viewport: Option<RendererViewport>,
     pub last_resize: Option<Instant>,
+    /// A size whose resize failed or ended unknown: it is not sent again by itself.
+    pub resize_failed: Option<RendererViewport>,
     pub input: InputQueue,
     pub translator: Translator,
     pub focused: bool,
@@ -172,6 +174,7 @@ impl Preview {
             lane: None,
             want_viewport: None,
             last_resize: None,
+            resize_failed: None,
             input: InputQueue::default(),
             translator: Translator::default(),
             focused: false,
@@ -197,6 +200,7 @@ impl Preview {
         self.stream = Stream::Off;
         self.attempts = 0;
         self.streaming_asked = false;
+        self.resize_failed = None;
         self.cooldown = None;
         self.input.clear();
         self.translator = Translator::default();
