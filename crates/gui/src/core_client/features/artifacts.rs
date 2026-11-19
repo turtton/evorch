@@ -33,7 +33,9 @@ mod text;
 
 use super::data::{DataNotice, DataPayload, DataSource};
 use super::layout::paged_list;
-use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply};
+use super::{
+    Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Visibility,
+};
 use problem::Problem;
 use text::TextBody;
 use workbench_protocol::{
@@ -326,6 +328,16 @@ impl ArtifactsFeature {
                     }
                 });
             }
+        }
+    }
+
+    /// Follow the selection: another thread's state is dropped, never shown.
+    fn enter_scope(&mut self, ctx: &FeatureContext<'_>) {
+        let selection = ctx.selection();
+        let scope = selection.project.clone().zip(selection.thread.clone());
+        if scope != self.scope {
+            self.leave_scope();
+            self.scope = scope;
         }
     }
 
@@ -686,6 +698,28 @@ impl Feature for ArtifactsFeature {
         self.scope = None;
     }
 
+    /// The control session is gone and the shared actor dropped every data request:
+    /// nothing read, decoded or held for the thread stays (the text included), and
+    /// what was queued to cancel is void. Late replies find no tag and are dropped.
+    /// Only invalidation, no I/O, as the connection calls this at once. The queries
+    /// are reads, so no tag has an outcome to reconcile.
+    fn disconnected(&mut self) {
+        self.reset();
+    }
+
+    /// The project or thread changed (or this is the first pass): the old thread's
+    /// body, texture and data slot go now, whether or not the panel is drawn. The
+    /// cancel of the slot is queued here and sent by `maintain`.
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        self.enter_scope(ctx);
+    }
+
+    /// Every pass, collapsed, minimized or disconnected too: queued cancels go out.
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, _visibility: Visibility) {
+        self.enter_scope(ctx);
+        self.flush(ctx);
+    }
+
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
         let FeatureReply::Query(result) = reply else {
             return;
@@ -722,12 +756,7 @@ impl Feature for ArtifactsFeature {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        let selection = ctx.selection();
-        let scope = selection.project.clone().zip(selection.thread.clone());
-        if scope != self.scope {
-            self.leave_scope();
-            self.scope = scope;
-        }
+        self.enter_scope(ctx);
         self.flush(ctx);
         if self.scope.is_none() {
             ui.weak("プロジェクトとスレッドを選ぶと、その成果物を表示します。");

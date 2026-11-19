@@ -5,6 +5,7 @@
 //! Nothing waits on a clock: replies and data are delivered by the test, and a
 //! decode is waited for on its own thread.
 use super::*;
+use crate::core_client::CoreClientScreen;
 use crate::core_client::{
     cache::Cache,
     features::{
@@ -1032,4 +1033,242 @@ fn a_decode_that_is_abandoned_leaves_no_image_behind_and_blocks_no_new_one() {
         harness.state().body(),
         Body::Failed(Problem::Disconnected)
     ));
+}
+
+/// The feature as the production composition holds it, with a handle on it so a
+/// test can look at what it keeps. Every hook is forwarded unchanged.
+struct Held(std::sync::Arc<std::sync::Mutex<ArtifactsFeature>>);
+
+impl Held {
+    fn feature(&self) -> std::sync::MutexGuard<'_, ArtifactsFeature> {
+        self.0.lock().unwrap()
+    }
+}
+
+impl Feature for Held {
+    fn id(&self) -> FeatureId {
+        FeatureId::Artifacts
+    }
+    fn title(&self) -> &'static str {
+        "Artifacts"
+    }
+    fn availability(&self) -> Availability {
+        self.feature().availability()
+    }
+    fn reset(&mut self) {
+        self.feature().reset();
+    }
+    fn disconnected(&mut self) {
+        self.feature().disconnected();
+    }
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        self.feature().selection_changed(ctx);
+    }
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        self.feature().maintain(ctx, visibility);
+    }
+    fn reply(&mut self, tag: u64, reply: FeatureReply) {
+        self.feature().reply(tag, reply);
+    }
+    fn data(&mut self, tag: u64, notice: DataNotice) {
+        self.feature().data(tag, notice);
+    }
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.feature().render(ui, ctx);
+    }
+}
+
+type Wire = tokio::sync::mpsc::Receiver<crate::core_client::connection::Action>;
+
+/// The screen with the real `Features` around the artifact feature, selecting
+/// `t1`, connected with the capabilities the feature needs.
+fn composition() -> (
+    CoreClientScreen,
+    std::sync::Arc<std::sync::Mutex<crate::core_client::Shared>>,
+    std::sync::Arc<std::sync::Mutex<ArtifactsFeature>>,
+    Wire,
+) {
+    use crate::core_client::features::Features;
+    let feature = std::sync::Arc::new(std::sync::Mutex::new(ArtifactsFeature::default()));
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(crate::core_client::Shared {
+        connected: true,
+        capabilities: vec![Capability::Queries, Capability::Commands],
+        features: Features {
+            features: vec![Box::new(Held(feature.clone()))],
+            data: DataInbox::default(),
+            selection: None,
+            expanded: Default::default(),
+        },
+        ..crate::core_client::Shared::default()
+    }));
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
+    screen.project = Some(project("p"));
+    screen.selected = Some(thread("t1"));
+    (screen, shared, feature, rx)
+}
+
+fn compose(
+    ctx: &egui::Context,
+    screen: &mut CoreClientScreen,
+    events: Vec<egui::Event>,
+) -> (Vec<egui::epaint::ClippedShape>, Vec<egui::TextureId>) {
+    let input = egui::RawInput {
+        events,
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        screen.logic(ui.ctx());
+        screen.ui(ui);
+    });
+    let freed = output.textures_delta.free.iter().copied().collect();
+    output.textures_delta.clear();
+    (output.shapes, freed)
+}
+
+/// Click the title of the feature's header, which opens or closes it.
+fn toggle_header(ctx: &egui::Context, screen: &mut CoreClientScreen) {
+    fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == "Artifacts" => {
+                Some(text.pos + text.galley.rect.center().to_vec2())
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let pos = compose(ctx, screen, vec![])
+        .0
+        .iter()
+        .find_map(|s| find(&s.shape))
+        .expect("the header title was drawn");
+    for pressed in [true, false] {
+        compose(
+            ctx,
+            screen,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+}
+
+fn data_cancels(wire: &mut Wire) -> Vec<u64> {
+    let mut tags = Vec::new();
+    while let Ok(action) = wire.try_recv() {
+        if let crate::core_client::connection::Action::Data(action) = action {
+            assert!(matches!(action.request, DataRequest::Cancel));
+            tags.push(action.tag);
+        }
+    }
+    tags
+}
+
+/// An opened artifact as a frame leaves it: `body` shown, `data_tag` its data slot.
+fn opened(note: &ArtifactRef, body: Body, data_tag: Option<u64>) -> Open {
+    Open {
+        serial: 1,
+        reference: note.clone(),
+        title: "memo".to_owned(),
+        meta: Some(meta(note, "memo", "text/plain", 99)),
+        meta_tag: None,
+        data_tag,
+        body,
+    }
+}
+
+fn text_view(read_tag: Option<u64>) -> Body {
+    Body::Text(TextView {
+        body: TextBody::default(),
+        read_tag,
+        problem: None,
+    })
+}
+
+#[test]
+fn a_selection_change_drops_the_body_texture_and_slot_while_the_panel_is_collapsed() {
+    let (mut screen, _shared, feature, mut wire) = composition();
+    let ctx = egui::Context::default();
+    compose(&ctx, &mut screen, vec![]);
+    assert_eq!(
+        feature.lock().unwrap().scope,
+        Some((project("p"), thread("t1"))),
+        "the first pass follows the selection"
+    );
+    toggle_header(&ctx, &mut screen);
+    while wire.try_recv().is_ok() {}
+    // Something is open for t1: a picture on screen, its slot held.
+    let picture = reference("t1", 1);
+    let texture = ctx.load_texture("shot", egui::ColorImage::example(), Default::default());
+    let texture_id = texture.id();
+    feature.lock().unwrap().open = Some(opened(
+        &picture,
+        Body::Image(ImageView::Shown {
+            texture,
+            size: [1, 1],
+        }),
+        Some(7),
+    ));
+    compose(&ctx, &mut screen, vec![]);
+    assert!(
+        feature.lock().unwrap().open.is_some(),
+        "the same selection keeps what is open"
+    );
+    assert!(data_cancels(&mut wire).is_empty());
+    // Another thread is selected while the body is collapsed (never drawn).
+    screen.selected = Some(thread("t2"));
+    let (_, freed) = compose(&ctx, &mut screen, vec![]);
+    let held = feature.lock().unwrap();
+    assert!(held.open.is_none(), "the old body is gone");
+    assert_eq!(held.scope, Some((project("p"), thread("t2"))));
+    drop(held);
+    assert!(
+        freed.contains(&texture_id),
+        "the texture is freed in the same pass"
+    );
+    assert_eq!(
+        data_cancels(&mut wire),
+        [7],
+        "the slot is released at the actor"
+    );
+}
+
+#[test]
+fn a_disconnect_drops_the_text_at_once_and_a_late_chunk_is_not_shown() {
+    let (mut screen, shared, feature, mut wire) = composition();
+    let ctx = egui::Context::default();
+    compose(&ctx, &mut screen, vec![]);
+    let note = reference("t1", 2);
+    feature.lock().unwrap().open = Some(opened(&note, text_view(Some(5)), None));
+    feature.lock().unwrap().serial = 1;
+    feature
+        .lock()
+        .unwrap()
+        .reply(5, content(&note, 0, "half", false));
+    assert!(feature.lock().unwrap().open.is_some());
+    while wire.try_recv().is_ok() {}
+    // No composition runs between the loss and the check.
+    shared.lock().unwrap().disconnect();
+    let mut held = feature.lock().unwrap();
+    assert!(
+        held.open.is_none(),
+        "the text is dropped when the connection is lost"
+    );
+    assert!(held.items.is_empty() && held.list.is_none());
+    held.reply(5, content(&note, 4, "late", true));
+    assert!(
+        held.open.is_none(),
+        "a reply that arrives later finds nothing to show"
+    );
+    drop(held);
+    // While disconnected the feature is still maintained, and nothing is sent for the dropped slot.
+    compose(&ctx, &mut screen, vec![]);
+    assert!(feature.lock().unwrap().open.is_none());
+    assert!(data_cancels(&mut wire).is_empty());
 }
