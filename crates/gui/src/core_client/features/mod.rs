@@ -55,9 +55,27 @@
 //! built-in selector stays as it is while no feature replaces it. The `workspace`
 //! feature draws its own selector by implementing [`Feature::render_selector`]
 //! and returning `true`, and only an available feature is asked.
+//! ## Binary data (Stage 16b, PR I -> A/B)
+//!
+//! PR A owns only artifacts.rs/artifacts/; PR B owns only browser.rs/browser/.
+//! The shared actor owns connect/bind/read/cancel/join. Use start_data/cancel_data
+//! and take_data, not another connection. A uses DataSource::Artifact, B uses
+//! Frames/Capture. Tags identify the feature's selection: do not reuse a tag for
+//! a different selection until cancellation/replacement. Reset invalidates all
+//! old requests and payloads; mutation-receipt correlation above is unchanged.
+//! DataNotice carries only a state signal, never bytes. Ready means inspect the
+//! latest-slot; Completed means that data stream ended, NOT operation success.
+//! Explicitly cancel/restart a completed blob tag to release its slot reservation.
+//! Features must discard decoded state on Cancelled/reset and bound their own
+//! decoded images/textures. Only GUI rendering may upload textures.
+//! Artifact->preview passes only ArtifactRef through open_preview; the browser
+//! callback queues it (no I/O); PR B later creates its session and OpenPreview.
+//! No automatic retry, reconnect bind or mutation replay is introduced here.
+//!
 pub mod artifacts;
 pub mod auth;
 pub mod browser;
+pub mod data;
 pub mod diagnostics;
 pub mod evaluation;
 pub mod execution;
@@ -74,6 +92,8 @@ pub mod workspace;
 mod layout;
 
 use super::cache::Cache;
+use data::{DataAction, DataInbox, DataNotice, DataPayload, DataRequest, DataSource};
+use workbench_protocol::namespaces::artifacts::ArtifactRef;
 use workbench_protocol::{
     commands::{Command, CommandReply},
     events::UiEvent,
@@ -256,6 +276,8 @@ pub struct FeatureView<'a> {
 pub struct FeatureFrame {
     pub actions: Vec<FeatureAction>,
     pub navigation: Vec<Navigation>,
+    pub data: Vec<DataAction>,
+    pub previews: Vec<ArtifactRef>,
 }
 
 /// What asking the features for the selector came to.
@@ -274,6 +296,7 @@ pub struct FeatureContext<'a> {
     feature: FeatureId,
     view: FeatureView<'a>,
     frame: &'a mut FeatureFrame,
+    data: &'a mut DataInbox,
 }
 
 impl FeatureContext<'_> {
@@ -310,6 +333,32 @@ impl FeatureContext<'_> {
         self.frame.navigation.push(navigation);
     }
 
+    /// Start/restart a binary request. Only explicit calls bind; nothing is replayed.
+    pub fn start_data(&mut self, tag: u64, source: DataSource) {
+        self.data_action(tag, DataRequest::Start(source));
+    }
+    pub fn cancel_data(&mut self, tag: u64) {
+        self.data_action(tag, DataRequest::Cancel);
+    }
+    fn data_action(&mut self, tag: u64, request: DataRequest) {
+        self.frame.data.push(DataAction {
+            feature: self.feature,
+            tag,
+            generation: self.data.generation(self.feature),
+            request,
+        });
+    }
+    /// Consume at most one latest payload, on the GUI thread. Do not keep a history.
+    pub fn take_data(&mut self, tag: u64) -> Option<DataPayload> {
+        self.data.take(self.feature, tag)
+    }
+    /// PR A emits only a verified reference; PR B queues it and owns OpenPreview.
+    pub fn open_preview(&mut self, artifact: ArtifactRef) {
+        if self.feature == FeatureId::Artifacts {
+            self.frame.previews.push(artifact);
+        }
+    }
+
     fn push(&mut self, tag: u64, request: FeatureRequest) {
         self.frame.actions.push(FeatureAction {
             feature: self.feature,
@@ -338,6 +387,13 @@ pub trait Feature: Send {
 
     /// The answer to the request tagged `tag`.
     fn reply(&mut self, _tag: u64, _reply: FeatureReply) {}
+
+    /// A signal to inspect the latest-slot, never a payload. Keep this callback short.
+    fn data(&mut self, _tag: u64, _notice: DataNotice) {}
+
+    /// Browser only: enqueue this reference for later UI processing. No I/O, work,
+    /// or synchronous OpenPreview here; the shared actor must not be blocked.
+    fn open_preview(&mut self, _artifact: ArtifactRef) {}
 
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
@@ -368,11 +424,13 @@ pub trait Feature: Send {
 /// feature's own file, not this.
 pub struct Features {
     features: Vec<Box<dyn Feature>>,
+    pub(crate) data: DataInbox,
 }
 
 impl Default for Features {
     fn default() -> Self {
         Self {
+            data: DataInbox::default(),
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -410,6 +468,7 @@ impl Features {
     /// events that arrived during the snapshot, then the replies that were held
     /// for it. In this order, so a reset never discards a held reply.
     pub fn begin_session(&mut self, delivered: &[UiEvent], held: Vec<HeldReply>) {
+        self.clear_data();
         begin_session(&mut self.features, delivered, held);
     }
 
@@ -429,6 +488,27 @@ impl Features {
         self.reply(action.feature, action.tag, reply);
     }
 
+    pub(crate) fn data_notice(&mut self, feature: FeatureId, tag: u64, notice: DataNotice) {
+        if let Some(f) = self.features.iter_mut().find(|f| f.id() == feature) {
+            f.data(tag, notice);
+        }
+    }
+    pub(crate) fn clear_data(&mut self) {
+        for f in &self.features {
+            self.data.reset(f.id());
+        }
+    }
+    /// Local artifact-to-browser routing. Only references cross the boundary.
+    pub fn open_preview(&mut self, artifact: ArtifactRef) {
+        if let Some(f) = self
+            .features
+            .iter_mut()
+            .find(|f| f.id() == FeatureId::Browser)
+        {
+            f.open_preview(artifact);
+        }
+    }
+
     /// The features shown for a connection with `capabilities`.
     pub fn available(&self, connected: bool, capabilities: &[Capability]) -> Vec<FeatureId> {
         available_ids(&self.features, connected, capabilities)
@@ -441,12 +521,12 @@ impl Features {
 
     /// Draw every available feature and return what they asked for.
     pub fn render(&mut self, ui: &mut egui::Ui, view: FeatureView<'_>) -> FeatureFrame {
-        render_all(&mut self.features, ui, view)
+        render_all(&mut self.features, &mut self.data, ui, view)
     }
 
     /// Let the available features draw the selector, in order, until one does.
     pub fn render_selector(&mut self, ui: &mut egui::Ui, view: FeatureView<'_>) -> SelectorOutcome {
-        render_selector(&mut self.features, ui, view)
+        render_selector(&mut self.features, &mut self.data, ui, view)
     }
 
     /// What the placeholder features say they cannot do (title and note), for
@@ -515,6 +595,7 @@ fn available_ids(
 
 fn render_all(
     features: &mut [Box<dyn Feature>],
+    data: &mut DataInbox,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
 ) -> FeatureFrame {
@@ -533,6 +614,7 @@ fn render_all(
                     feature: feature.id(),
                     view,
                     frame: &mut frame,
+                    data,
                 };
                 egui::CollapsingHeader::new(feature.title())
                     .default_open(true)
@@ -544,6 +626,7 @@ fn render_all(
 
 fn render_selector(
     features: &mut [Box<dyn Feature>],
+    data: &mut DataInbox,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
 ) -> SelectorOutcome {
@@ -556,6 +639,7 @@ fn render_selector(
             feature: feature.id(),
             view,
             frame: &mut frame,
+            data,
         };
         if feature.render_selector(ui, &mut ctx) {
             return SelectorOutcome {

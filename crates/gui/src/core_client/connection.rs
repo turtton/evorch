@@ -1,6 +1,10 @@
 //! The single desktop actor. Closing the UI drops the connection; it never
 //! schedules a stop. Only explicit human actions can issue state-changing wire
 //! commands, and a command with a lost reply is reconciled, never replayed.
+mod data;
+use super::features::data::DataAction;
+use data::DataReaders;
+
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -46,6 +50,7 @@ pub enum Action {
     /// A request of a feature (`features/`): typed, tagged, answered through
     /// `Shared::features`. The feature gets no connection of its own.
     Feature(FeatureAction),
+    Data(DataAction),
     Reconnect,
     Shutdown,
 }
@@ -204,9 +209,9 @@ pub async fn serve(
             s.connected = false;
             s.status = "コアへ接続中…".into();
         });
-        let connected = launcher.connect_or_start().await;
-        let client = match connected {
-            Ok(client) => client,
+        let connected = launcher.connect_or_start_with_endpoint().await;
+        let (client, endpoint) = match connected {
+            Ok(connected) => (connected.client, connected.endpoint),
             Err(e) => {
                 update(&shared, &ctx, |s| {
                     s.status = format!("接続失敗（fallback しません）: {e}")
@@ -218,9 +223,11 @@ pub async fn serve(
             }
         };
         reconcile_uncertain(&client, &shared, &ctx, &mut uncertain, &mut held).await;
+        let mut data = DataReaders::default();
         let mut resync = true;
         let mut reconnect_requested = false;
         'session: while resync {
+            data.stop(&shared, &ctx).await;
             resync = false;
             let mut stream = match client
                 .subscribe(Subscribe {
@@ -255,6 +262,7 @@ pub async fn serve(
             loop {
                 let upload = next_upload(&shared, &uncertain);
                 tokio::select! {
+                    _ = client.closed() => break,
                     () = std::future::ready(()), if upload.is_some() => {
                         let (command, pending) = upload.expect("upload branch enabled");
                         send_command(&client, &shared, &ctx, &mut uncertain, command, pending).await;
@@ -266,9 +274,9 @@ pub async fn serve(
                         if !valid { resync = true; break; }
                     }
                     action = actions.recv() => {
-                        let Some(action) = action else { discard_unused(&client, &shared).await; return };
+                        let Some(action) = action else { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; return };
                         if matches!(action, Action::Reconnect) { reconnect_requested = true; break 'session; }
-                        if matches!(action, Action::Shutdown) { discard_unused(&client, &shared).await; return; }
+                        if matches!(action, Action::Shutdown) { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
                                 send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command(draft)).await;
@@ -282,6 +290,7 @@ pub async fn serve(
                                     update(&shared, &ctx, |s| s.features.reply(feature, tag, FeatureReply::Query(result)));
                                 }
                             },
+                            Action::Data(action) => data.handle(action, &endpoint, &client, &shared, &ctx).await,
                             Action::History(thread, older) => {
                                 let cursor = if older { shared.lock().unwrap().cache.older.get(thread.as_str()).cloned().flatten() } else { None };
                                 let reply = client.query(Query::Conversation(ConversationQuery::ReadCommittedHistory(ReadCommittedHistory {
@@ -332,6 +341,7 @@ pub async fn serve(
                 }
             }
         }
+        data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| s.connected = false);
         if reconnect_requested {
             continue;
@@ -627,6 +637,15 @@ async fn wait_reconnect(
                     s.attachment_draft(project, thread.as_str(), file).uploading = false;
                 }
                 Action::Feature(action) => s.features.refuse(&action, "disconnected"),
+                Action::Data(action) if s.features.data.current(&action) => {
+                    s.features.data_notice(
+                        action.feature,
+                        action.tag,
+                        super::features::data::DataNotice::Failed(FeatureError::new(
+                            "disconnected",
+                        )),
+                    );
+                }
                 _ => (),
             }
             s.status =
@@ -741,7 +760,13 @@ mod tests {
         }
     }
 
-    async fn connect() -> (WorkbenchClient, workbench_client::fake::FakeServer) {
+    pub(super) async fn connect() -> (WorkbenchClient, workbench_client::fake::FakeServer) {
+        connect_epoch(7).await
+    }
+
+    pub(super) async fn connect_epoch(
+        epoch: u64,
+    ) -> (WorkbenchClient, workbench_client::fake::FakeServer) {
         use workbench_protocol::handshake::{
             ActivityCounts, BuildInfo, Capability, CoreState, CoreStatus, ProtocolVersion,
             ServerHello, WireLimits,
@@ -755,7 +780,7 @@ mod tests {
                 revision: None,
             },
             core: workbench_protocol::ids::CoreIdentity::new("core-1").unwrap(),
-            instance_epoch: workbench_protocol::wire::InstanceEpoch(7),
+            instance_epoch: workbench_protocol::wire::InstanceEpoch(epoch),
             limits: WireLimits::default(),
             status: CoreStatus {
                 state: CoreState::Ready,

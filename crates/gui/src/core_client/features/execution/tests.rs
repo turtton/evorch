@@ -38,6 +38,7 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
                 selection: &screen.selection,
             };
             let mut ctx = FeatureContext {
+                data: &mut super::super::data::DataInbox::default(),
                 feature: screen.feature.id(),
                 view,
                 frame: &mut screen.frame,

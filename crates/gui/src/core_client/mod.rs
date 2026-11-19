@@ -295,6 +295,12 @@ fn apply_frame(
     selected: &mut Option<ThreadId>,
     frame: FeatureFrame,
 ) {
+    for action in frame.data {
+        enqueue(tx, shared, Action::Data(action));
+    }
+    for artifact in frame.previews {
+        shared.features.open_preview(artifact);
+    }
     for action in frame.actions {
         enqueue(tx, shared, Action::Feature(action));
     }
@@ -369,6 +375,17 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
     }
     if let Err(error) = tx.try_send(action) {
         match error.into_inner() {
+            Action::Data(action) => {
+                if shared.features.data.current(&action) {
+                    shared.features.data_notice(
+                        action.feature,
+                        action.tag,
+                        features::data::DataNotice::Failed(features::FeatureError::new(
+                            "client queue is full or closed",
+                        )),
+                    );
+                }
+            }
             Action::Feature(action) => {
                 shared
                     .features
@@ -715,6 +732,8 @@ mod navigation_tests {
         let (id, thread) = ids();
         let (mut project, mut selected) = (None, None);
         let frame = |navigation| FeatureFrame {
+            data: Vec::new(),
+            previews: Vec::new(),
             actions: vec![],
             navigation: vec![navigation],
         };

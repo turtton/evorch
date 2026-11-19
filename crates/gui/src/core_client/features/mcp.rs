@@ -2000,6 +2000,7 @@ mod tests {
                         frame,
                     } = window;
                     let mut context = FeatureContext {
+                        data: &mut crate::core_client::features::data::DataInbox::default(),
                         feature: FeatureId::Mcp,
                         view: crate::core_client::features::FeatureView {
                             connected: true,

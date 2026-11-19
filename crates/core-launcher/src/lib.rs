@@ -82,6 +82,13 @@ pub enum LaunchStage {
     AlreadyRunning,
 }
 
+/// A control connection and the exact endpoint selected by discovery.
+/// Keep the endpoint in the connection actor; never give it to a feature.
+pub struct ConnectedCore {
+    pub client: WorkbenchClient,
+    pub endpoint: PathBuf,
+}
+
 pub struct Launcher {
     config: ConfigIdentity,
     binary: CoreBinary,
@@ -128,11 +135,23 @@ impl Launcher {
         &self,
         observe: impl Fn(LaunchStage),
     ) -> Result<WorkbenchClient, LaunchError> {
+        self.connect_or_start_with_endpoint_observed(observe)
+            .await
+            .map(|connected| connected.client)
+    }
+    /// Connect once, retaining the selected endpoint for subordinate data readers.
+    pub async fn connect_or_start_with_endpoint(&self) -> Result<ConnectedCore, LaunchError> {
+        self.connect_or_start_with_endpoint_observed(|_| ()).await
+    }
+    async fn connect_or_start_with_endpoint_observed(
+        &self,
+        observe: impl Fn(LaunchStage),
+    ) -> Result<ConnectedCore, LaunchError> {
         tokio::time::timeout(self.diagnostic_after, self.run(&observe))
             .await
             .map_err(|_| LaunchError::NotReady)?
     }
-    async fn connect(&self) -> Result<Option<WorkbenchClient>, LaunchError> {
+    async fn connect(&self) -> Result<Option<ConnectedCore>, LaunchError> {
         let mut candidates = Vec::new();
         if let Some(record) = self.config.read_record()? {
             candidates.push((record.socket, Some(record.epoch)));
@@ -171,11 +190,14 @@ impl Launcher {
                 // mismatched hint; reread it after acquiring launch instead.
                 return Ok(None);
             }
-            return Ok(Some(client));
+            return Ok(Some(ConnectedCore {
+                client,
+                endpoint: socket,
+            }));
         }
         Ok(None)
     }
-    async fn run(&self, observe: &impl Fn(LaunchStage)) -> Result<WorkbenchClient, LaunchError> {
+    async fn run(&self, observe: &impl Fn(LaunchStage)) -> Result<ConnectedCore, LaunchError> {
         if let Some(client) = self.connect().await? {
             return Ok(client);
         }

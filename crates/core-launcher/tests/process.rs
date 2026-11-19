@@ -529,6 +529,15 @@ fn absent_or_stale_endpoint_record_does_not_replace_a_live_standard_endpoint() {
         .unwrap();
     assert_eq!(client.server_hello().instance_epoch.0, record.epoch);
     drop(client);
+    let connected = rt
+        .block_on(local_launcher(&r).connect_or_start_with_endpoint())
+        .unwrap();
+    assert_eq!(connected.endpoint, record.socket);
+    assert_eq!(
+        connected.client.server_hello().instance_epoch.0,
+        record.epoch
+    );
+    drop(connected);
     let live_epoch = record.epoch;
     let mut record = record;
     record.epoch = record.epoch.wrapping_add(1).max(1);
