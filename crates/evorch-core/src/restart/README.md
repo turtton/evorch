@@ -196,6 +196,9 @@ remains D-3a2 and is not added here.
 | --- | --- |
 | Startup default project recovers with an XDG-only catalog, preserving provider wire/cache prefix | `startup_recovery::startup_default_project_recovers_from_xdg_cache_only` |
 | Non-startup project retains config_dir/catalog and its canonical pins; no cross-project catalog grant | Host `bootstrap::recovery::catalog::tests::nonstartup_project_keeps_its_config_catalog_and_canonical_pins_without_admission` |
+| Different-build raw exec with unchanged catalogs preserves input-derived cache prefix | `planned_exec_cache::raw_exec_different_build_unchanged_catalog_preserves_cache_prefix` |
+| Changed builtin catalog grants exactly one tools-only boundary, then reuses the new prefix | `planned_exec_cache::raw_exec_different_build_changed_catalog_has_one_tools_only_boundary` |
+| Changed builtin catalog preserves disconnected MCP specs and prefix across raw exec | `planned_exec_cache::raw_exec_changed_builtin_catalog_preserves_disconnected_mcp_prefix` |
 | Actual prepared raw exec, same PID/image, uninterrupted lifetime exclusion | `planned_exec::prepared_raw_exec_reaches_product_bootstrap_with_multiple_checkpoints` |
 | Inherited FD validation before new inbox/DB; no invalid-entry Cold fallback | `planned_exec::product_rejects_unexpected_inherited_fd_without_cold_fallback` |
 | One physical adoption, Ready, rejected second entry without row mutation | Positive product process scenario (independent DB and /proc readback) |
@@ -261,6 +264,12 @@ explicitly select Edit; no selection is guessed from captured input.
 - **5b:** CLI invocation/token continuity and its distinct reconnect deadlines;
   ordinary conversation follow-up routing here is not CLI invocation resumption.
 - **D-3a2:** bounded explicit-shutdown watchdog, unchanged and out of scope here.
+- **F4:** same-build product-to-product real exec remains separate. The raw
+  cache fixtures use different predecessor/successor images.
+- **MCP evidence:** no-I/O is structural with no server configured; the MCP
+  seam is used only by the predecessor.
+- **Affinity evidence:** ChatCompletions checks the DB and ProviderInput;
+  Responses E2E separately checks wire affinity.
 - **Performance:** preflight/description/rechecks hash the whole ELF roughly a
   dozen times. Private stripped process fixtures preserve executable/data
   section bytes and hash/describe/exec the same copy. Release ELF size, hash
