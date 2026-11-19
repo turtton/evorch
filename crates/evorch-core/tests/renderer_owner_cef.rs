@@ -618,7 +618,7 @@ mod data_plane {
                 snapshot: ObservationSnapshot {
                     scope: scope.clone(),
                     revision: 1,
-                    state: ObservationState::Starting,
+                    state: ObservationState::Live,
                     tabs: vec![],
                     active_tab: None,
                     activity: vec![]
