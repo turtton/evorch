@@ -213,11 +213,29 @@ struct Received {
     gaps: u64,
 }
 
-fn client_reader(mut socket: UnixStream, epoch: Instant) -> Received {
+/// The measurement window, in nanoseconds since the run began, shared by every
+/// reader: a frame counts only when it completed inside `[start, end)`, so the
+/// count and the wall time it is divided by describe the same interval.
+struct Window {
+    start: AtomicU64,
+    end: AtomicU64,
+}
+impl Window {
+    fn new() -> Self {
+        Self {
+            start: AtomicU64::new(u64::MAX),
+            end: AtomicU64::new(u64::MAX),
+        }
+    }
+    fn contains(&self, at: u64) -> bool {
+        at >= self.start.load(Ordering::SeqCst) && at < self.end.load(Ordering::SeqCst)
+    }
+}
+
+fn client_reader(mut socket: UnixStream, epoch: Instant, window: &Window) -> Received {
     let mut out = Received::default();
     let mut buffer: Vec<u8> = Vec::new();
     let mut last = 0u64;
-    let mut seen = 0u64;
     loop {
         let mut head = [0u8; SUB_HEADER];
         if socket.read_exact(&mut head).is_err() {
@@ -231,8 +249,7 @@ fn client_reader(mut socket: UnixStream, epoch: Instant) -> Received {
             return out;
         }
         let done = nanos(epoch);
-        seen += 1;
-        if seen > WARMUP_FRAMES {
+        if window.contains(done) {
             out.frames += 1;
             out.latency_ms
                 .push(done.saturating_sub(t0) as f64 / 1_000_000.0);
@@ -260,6 +277,7 @@ pub fn run(p: Params) -> Value {
         let hub = Arc::clone(hub);
         threads.push(thread::spawn(move || core_reader(core_end, &hub, epoch)));
     }
+    let window = Arc::new(Window::new());
     let mut readers = Vec::new();
     let mut idle_ends = Vec::new();
     for index in 0..p.subs + p.stalled {
@@ -269,7 +287,10 @@ pub fn run(p: Params) -> Value {
         let hub = Arc::clone(&hubs[index % p.tabs]);
         threads.push(thread::spawn(move || sender(send_end, &hub, p)));
         if index < p.subs {
-            readers.push(thread::spawn(move || client_reader(client_end, epoch)));
+            let window = Arc::clone(&window);
+            readers.push(thread::spawn(move || {
+                client_reader(client_end, epoch, &window)
+            }));
         } else {
             idle_ends.push(client_end);
         }
@@ -281,7 +302,9 @@ pub fn run(p: Params) -> Value {
     PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
     let (mem0, ticks0) = procfs::own();
     let start = Instant::now();
+    window.start.store(nanos(epoch), Ordering::SeqCst);
     thread::park_timeout(Duration::from_secs(p.secs));
+    window.end.store(nanos(epoch), Ordering::SeqCst);
     let wall = start.elapsed().as_secs_f64();
     let (mem1, ticks1) = procfs::own();
     let peak = PEAK.load(Ordering::SeqCst);
@@ -326,7 +349,15 @@ pub fn run(p: Params) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
+    /// The allocation counters are process-wide: tests that read them take turns.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     fn tiny(share: bool, chunk: usize, stalled: usize) -> Params {
         Params {
             width: 64,
@@ -343,6 +374,7 @@ mod tests {
 
     #[test]
     fn every_variant_delivers_whole_frames_to_the_readers_that_read() {
+        let _turn = serial();
         for (share, chunk, stalled) in [(true, 0, 0), (true, 1000, 1), (false, 4096, 1)] {
             let out = run(tiny(share, chunk, stalled));
             assert!(
@@ -354,6 +386,7 @@ mod tests {
 
     #[test]
     fn counted_allocations_are_returned() {
+        let _turn = serial();
         let before = LIVE.load(Ordering::SeqCst);
         drop(Buf::new(1024));
         assert_eq!(LIVE.load(Ordering::SeqCst), before);
