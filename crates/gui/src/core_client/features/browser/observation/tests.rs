@@ -122,6 +122,8 @@ struct Core {
     keys: HashMap<u64, DataKey>,
     navigations: Vec<Navigation>,
     refuse_subscribe: Option<FeatureError>,
+    /// Scopes whose incarnation the core no longer accepts.
+    revoked: Vec<ObservationScope>,
 }
 
 use crate::core_client::features::FeatureError;
@@ -184,6 +186,11 @@ impl Core {
             Query::Browser(BrowserQuery::ListAgentRuns { .. }) => ObservationReply::Runs {
                 scopes: self.scopes.clone(),
             },
+            Query::Browser(BrowserQuery::GetAgentObservation { scope })
+                if self.revoked.contains(scope) =>
+            {
+                ObservationReply::State(ObservationState::Revoked)
+            }
             Query::Browser(BrowserQuery::GetAgentObservation { scope }) => {
                 ObservationReply::Snapshot(Box::new(snapshot(scope, self.activity.clone())))
             }
@@ -746,6 +753,7 @@ fn a_stopped_run_keeps_its_last_picture_and_is_not_started_again() {
 fn a_revoked_run_leaves_no_picture() {
     let mut rig = Rig::new(&["run-1"]);
     rig.watch("run-1", 1);
+    rig.core.revoked = vec![scope("run-1")];
     rig.event(ObservationState::Revoked);
     let feature = &rig.state().feature;
     assert!(feature.live.is_none() && feature.stopped.is_empty());
@@ -809,6 +817,7 @@ fn a_stream_that_ends_before_its_revocation_still_loses_its_picture() {
         1,
         "kept as a still picture for now"
     );
+    rig.core.revoked = vec![scope("run-1")];
     rig.notify(subscription, ObservationState::Revoked, 1);
     assert!(rig.state().feature.stopped.is_empty());
     rig.harness.get_by_label_contains(NOTE_REVOKED);
@@ -821,6 +830,7 @@ fn a_late_revocation_of_an_old_run_leaves_the_new_watch_alone() {
     let old = rig.subscription();
     rig.watch("run-2", 1);
     assert_eq!(rig.state().feature.stopped.len(), 1);
+    rig.core.revoked = vec![scope("run-1")];
     rig.notify(old, ObservationState::Revoked, 1);
     let feature = &rig.state().feature;
     assert!(feature.stopped.is_empty(), "the old run's picture is gone");
@@ -843,6 +853,7 @@ fn a_late_revocation_names_only_its_own_incarnation() {
     assert_eq!(fresh.incarnation.as_str(), "i2");
     rig.publish(tag, frame(&fresh, 1, 1));
     rig.pump();
+    rig.core.revoked = vec![scope("run-1")];
     rig.notify(old, ObservationState::Revoked, 1);
     let live = rig
         .state()
@@ -912,10 +923,85 @@ fn a_state_change_with_an_unchanged_revision_is_applied() {
     let mut revoked = Rig::new(&["run-1"]);
     revoked.watch("run-1", 1);
     let subscription = revoked.subscription();
+    revoked.core.revoked = vec![scope("run-1")];
     revoked.notify(subscription, ObservationState::Revoked, 1);
     assert!(revoked.state().feature.live.is_none());
     assert!(
         revoked.state().feature.stopped.is_empty(),
         "a revoked run does not"
+    );
+}
+
+#[test]
+fn the_revocation_of_an_old_subscription_does_not_stop_a_valid_new_watch() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.visible(false);
+    rig.visible(true);
+    let tag = rig.live_tag();
+    let scope = rig.live_scope();
+    rig.publish(tag, frame(&scope, 1, 1));
+    rig.pump();
+    assert_eq!(rig.core.subscribes(), 2);
+    let checks = rig.core.snapshots();
+    rig.notify(old, ObservationState::Revoked, 1);
+    assert!(
+        rig.core.snapshots() > checks,
+        "the scope is checked, not assumed"
+    );
+    let feature = &rig.state().feature;
+    let live = feature.live.as_ref().expect("the watch goes on");
+    assert!(live.shown.is_some());
+    assert!(feature.hold.is_none());
+    assert_eq!(rig.core.subscribes(), 2, "and is not subscribed again");
+}
+
+#[test]
+fn a_notice_of_a_subscription_nobody_remembers_still_revokes_what_the_core_revoked() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    let picture_of = scope("run-1");
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    for _ in 0..20 {
+        rig.visible(true);
+        rig.visible(false);
+    }
+    assert_eq!(
+        rig.state().feature.stopped.len(),
+        1,
+        "watches without a frame leave the picture alone"
+    );
+    rig.core.revoked = vec![picture_of];
+    rig.notify(oid(9999), ObservationState::Revoked, 1);
+    assert!(rig.state().feature.stopped.is_empty());
+}
+
+#[test]
+fn a_late_revocation_leaves_the_stopped_view_of_a_newer_incarnation_alone() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.visible(false);
+    rig.core.scopes = vec![scope_in("t", "run-1", "i2")];
+    rig.visible(true);
+    let (tag, fresh) = (rig.live_tag(), rig.live_scope());
+    rig.publish(tag, frame(&fresh, 1, 1));
+    rig.pump();
+    rig.event(ObservationState::Stopped);
+    rig.core.revoked = vec![scope("run-1")];
+    rig.notify(old, ObservationState::Revoked, 1);
+    let feature = &rig.state().feature;
+    assert_eq!(
+        feature.stopped.len(),
+        1,
+        "the newer incarnation's picture stays"
+    );
+    assert_eq!(feature.stopped[0].scope.incarnation.as_str(), "i2");
+    assert_eq!(
+        feature.hold.as_ref().map(|h| h.message.as_str()),
+        Some(NOTE_STOPPED),
+        "it is not marked revoked"
     );
 }

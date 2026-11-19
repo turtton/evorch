@@ -53,8 +53,9 @@ pub fn owns_tag(tag: u64) -> bool {
 /// Unsubscribes waiting to be sent; a dropped one is released by the core's own
 /// bind window.
 const MAX_UNSUBSCRIBES: usize = 8;
-/// Ended subscriptions remembered; far more than the stopped pictures kept.
-const MAX_ENDED: usize = 16;
+/// Scopes waiting to be checked against the core, at most one per picture kept
+/// and the live one.
+const MAX_VERIFY: usize = MAX_STOPPED_IMAGES + 1;
 
 const NOTE_STOPPED: &str = "The page was closed.";
 const NOTE_UNAVAILABLE: &str = "このrunのブラウザは観測できません";
@@ -81,6 +82,8 @@ enum Request {
         thread: ThreadId,
     },
     Snapshot(ObservationScope),
+    /// Whether the incarnation of the scope is still valid.
+    Verify(ObservationScope),
     Subscribe(ObservationScope),
     Token {
         scope: ObservationScope,
@@ -159,8 +162,6 @@ struct Stopped {
     snapshot: Option<ObservationSnapshot>,
     shown: Shown,
     note: Option<String>,
-    /// The subscription the picture came from: a late notice names it.
-    subscription: Option<ObservationId>,
 }
 
 /// Why the observation of a target is not started again by itself.
@@ -186,8 +187,8 @@ pub struct ObservationFeature {
     /// Data slots to give back.
     cancels: Vec<u64>,
     outbox: VecDeque<ObservationId>,
-    /// Subscriptions that ended recently, with their scope, for a notice that comes late.
-    ended: VecDeque<(ObservationId, ObservationScope)>,
+    /// Scopes whose validity is to be read from the core.
+    verify: VecDeque<ObservationScope>,
 }
 
 impl Default for ObservationFeature {
@@ -205,7 +206,7 @@ impl Default for ObservationFeature {
             requests: HashMap::new(),
             cancels: Vec::new(),
             outbox: VecDeque::new(),
-            ended: VecDeque::new(),
+            verify: VecDeque::new(),
         }
     }
 }
@@ -250,45 +251,34 @@ impl ObservationFeature {
         self.requests.clear();
         self.cancels.clear();
         self.outbox.clear();
-        self.ended.clear();
+        self.verify.clear();
         self.navigated = false;
     }
 
-    fn release_stage(&mut self, scope: &ObservationScope, stage: &Stage) {
+    fn release_stage(&mut self, stage: &Stage) {
         if let Some(data) = stage.data() {
             self.cancels.push(data);
         }
-        if let Some(subscription) = stage.subscription() {
-            if self.outbox.len() < MAX_UNSUBSCRIBES {
-                self.outbox.push_back(subscription.clone());
-            }
-            // The end of a stream can overtake the notice of why it ended; the
-            // subscription stays known for that notice.
-            self.ended.retain(|(s, _)| s != subscription);
-            self.ended.push_back((subscription.clone(), scope.clone()));
-            while self.ended.len() > MAX_ENDED {
-                self.ended.pop_front();
-            }
+        if let Some(subscription) = stage.subscription()
+            && self.outbox.len() < MAX_UNSUBSCRIBES
+        {
+            self.outbox.push_back(subscription.clone());
         }
     }
 
-    fn scope_of(&self, subscription: &ObservationId) -> Option<ObservationScope> {
-        if let Some(live) = &self.live
-            && live.stage.subscription() == Some(subscription)
-        {
-            return Some(live.scope.clone());
+    /// Ask the core whether the incarnation of `scope` is still valid. The end
+    /// of one subscription says nothing about it (a disconnect or an expired
+    /// bind ends a subscription too), so only the core's answer revokes.
+    fn queue_verify(&mut self, scope: &ObservationScope) {
+        let same = |s: &ObservationScope| s.run == scope.run && s.incarnation == scope.incarnation;
+        let asked = self.verify.iter().any(same)
+            || self
+                .requests
+                .values()
+                .any(|r| matches!(r, Request::Verify(s) if same(s)));
+        if !asked && self.verify.len() < MAX_VERIFY {
+            self.verify.push_back(scope.clone());
         }
-        if let Some(stopped) = self
-            .stopped
-            .iter()
-            .find(|s| s.subscription.as_ref() == Some(subscription))
-        {
-            return Some(stopped.scope.clone());
-        }
-        self.ended
-            .iter()
-            .find(|(s, _)| s == subscription)
-            .map(|(_, scope)| scope.clone())
     }
 
     /// The incarnation of `scope` is no longer valid, whichever state its
@@ -299,7 +289,10 @@ impl ObservationFeature {
             self.revoke();
         }
         self.stopped.retain(|s| !same(&s.scope));
-        if self.live.is_none() && self.target.as_ref().is_some_and(|t| t.run == scope.run) {
+        let newer = matches!(&self.runs, Runs::Loaded(scopes)
+            if scopes.iter().any(|s| s.run == scope.run && s.incarnation != scope.incarnation));
+        if self.live.is_none() && !newer && self.target.as_ref().is_some_and(|t| t.run == scope.run)
+        {
             self.hold_for(scope, NOTE_REVOKED.to_owned());
         }
     }
@@ -315,10 +308,9 @@ impl ObservationFeature {
     /// The run stops being watched; its last picture stays as a still one.
     fn end_live(&mut self, note: Option<String>) {
         let Some(live) = self.live.take() else { return };
-        self.release_stage(&live.scope, &live.stage);
+        self.release_stage(&live.stage);
         if let Some(shown) = live.shown {
             self.push_stopped(Stopped {
-                subscription: live.stage.subscription().cloned(),
                 scope: live.scope,
                 snapshot: live.snapshot,
                 shown,
@@ -353,7 +345,7 @@ impl ObservationFeature {
             return;
         };
         if let Some(live) = self.live.take() {
-            self.release_stage(&live.scope, &live.stage);
+            self.release_stage(&live.stage);
         }
         self.stopped.retain(|s| s.scope.run != scope.run);
         self.hold_for(&scope, NOTE_REVOKED.to_owned());
@@ -471,21 +463,28 @@ impl ObservationFeature {
         }
     }
 
+    /// The core's answer about a scope: only "revoked" changes anything. An
+    /// answer that cannot be read keeps what is on screen, which the core
+    /// would have to revoke itself.
+    fn on_verified(&mut self, scope: &ObservationScope, reply: &FeatureReply) {
+        let revoked = match reply {
+            FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                ObservationReply::State(state),
+            )))) => *state == ObservationState::Revoked,
+            FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                ObservationReply::Snapshot(snapshot),
+            )))) => snapshot.scope == *scope && snapshot.state == ObservationState::Revoked,
+            _ => false,
+        };
+        if revoked {
+            self.revoke_scope(scope);
+        }
+    }
+
     fn on_snapshot_reply(&mut self, scope: ObservationScope, reply: FeatureReply) {
         if !self.live.as_ref().is_some_and(|l| l.scope == scope) {
             // The watch ended before this answer: only a revocation still matters.
-            let revoked = match &reply {
-                FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
-                    ObservationReply::State(state),
-                )))) => *state == ObservationState::Revoked,
-                FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
-                    ObservationReply::Snapshot(snapshot),
-                )))) => snapshot.scope == scope && snapshot.state == ObservationState::Revoked,
-                _ => false,
-            };
-            if revoked {
-                self.revoke_scope(&scope);
-            }
+            self.on_verified(&scope, &reply);
             return;
         }
         let Some(live) = &mut self.live else { return };
@@ -514,6 +513,14 @@ impl ObservationFeature {
     fn flush(&mut self, ctx: &mut FeatureContext<'_>) {
         for tag in std::mem::take(&mut self.cancels) {
             ctx.cancel_data(tag);
+        }
+        while let Some(scope) = self.verify.pop_front() {
+            let tag = self.tag();
+            self.requests.insert(tag, Request::Verify(scope.clone()));
+            ctx.query(
+                tag,
+                Query::Browser(BrowserQuery::GetAgentObservation { scope }),
+            );
         }
         while let Some(subscription) = self.outbox.pop_front() {
             let tag = self.tag();
@@ -690,17 +697,21 @@ impl Feature for ObservationFeature {
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
         if let Some(live) = self.live.take() {
-            self.release_stage(&live.scope, &live.stage);
+            self.release_stage(&live.stage);
         }
-        self.ended.clear();
         self.stopped.clear();
+        self.verify.clear();
         self.runs = Runs::Unknown;
         self.relist = false;
         self.hold = None;
         self.navigated = false;
         // A reply still to come for a subscription is answered with its release.
-        self.requests
-            .retain(|_, r| !matches!(r, Request::List { .. } | Request::Snapshot(_)));
+        self.requests.retain(|_, r| {
+            !matches!(
+                r,
+                Request::List { .. } | Request::Snapshot(_) | Request::Verify(_)
+            )
+        });
         let selection = ctx.selection();
         if self.target.as_ref().is_some_and(|t| {
             selection.project.as_ref() != Some(&t.project)
@@ -721,16 +732,28 @@ impl Feature for ObservationFeature {
         {
             match changed.state {
                 ObservationState::Starting | ObservationState::Live => live.stale = true,
+                // The end of this subscription, not necessarily of the incarnation.
+                ObservationState::Revoked => {
+                    let scope = live.scope.clone();
+                    self.finish(NOTE_ENDED);
+                    self.queue_verify(&scope);
+                }
                 other => self.apply_state(other),
             }
             return;
         }
-        // Another subscription, or one whose stream already ended: only a
-        // revocation still concerns what is on screen.
-        if changed.state == ObservationState::Revoked
-            && let Some(scope) = self.scope_of(&changed.subscription)
-        {
-            self.revoke_scope(&scope);
+        // Another subscription, or one whose stream already ended: the notice
+        // names no scope, so everything on screen is checked with the core.
+        if changed.state == ObservationState::Revoked {
+            let scopes: Vec<_> = self
+                .stopped
+                .iter()
+                .map(|s| s.scope.clone())
+                .chain(self.live.as_ref().map(|l| l.scope.clone()))
+                .collect();
+            for scope in &scopes {
+                self.queue_verify(scope);
+            }
         }
     }
 
@@ -757,6 +780,7 @@ impl Feature for ObservationFeature {
                 }
             }
             Request::Snapshot(scope) => self.on_snapshot_reply(scope, reply),
+            Request::Verify(scope) => self.on_verified(&scope, &reply),
             Request::Subscribe(scope) => self.on_subscribe_reply(scope, reply, tag),
             Request::Token {
                 scope,
