@@ -498,3 +498,193 @@ run ごとに大きく動く（720p×30fps の 1 tab は、旧手順で 1.4ms、
   再現手順に含めていない。
 - 計測ツールは単独 package のため lefthook と CI の対象外。手で
   `scripts/measure-renderer.sh --check` を実行する（§1）。
+
+## 8. 16a-2 F3: data plane の fan-out（`fanout`、2026-11、同一 process の prototype）
+
+F3 の設計（1 tab の latest frame を複数の data 接続へ配る）の前に、構造だけを
+同じにした prototype で決めた。helper も CEF も使わない。helper 役の thread が
+socket pair へ frame を書き（ack を待つ）、core 役の reader が 1 つの buffer に読んで
+tab の latest として公開し、subscriber ごとの sender thread が自分の socket へ書き、
+client 役の reader が全 byte を受ける。latency は core が最初の byte を観測した時刻から
+client が frame の全 byte を持つまで（受け入れ基準の p95 ≤ 33ms と同じ区間）。
+`share=1` は全 sender が 1 つの `Arc` の allocation を書く。`share=0` は sender ごとに
+copy する。stalled は接続して読まない subscriber。4K（33,177,600 byte）、30fps、8 秒、
+24 論理 CPU の共有 workstation、1 回ずつ。
+
+| tab | subscriber | share | chunk | p50 ms | p95 ms | max ms | 欠落 frame | 最大の生存 frame memory | CPU（1 core 比） |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 共有 | 64KiB | 9.3 | 10.8 | 12.8 | 0 | 63 MiB | 46% |
+| 1 | 4 | 共有 | 64KiB | 12.5 | 15.0 | 16.6 | 0 | 63 MiB | 183% |
+| 1 | 4 | copy | 64KiB | 24.4 | 26.8 | 29.9 | 0 | 190 MiB | 336% |
+| 4 | 8 | 共有 | 64KiB | 28.3 | 32.1 | 42.1 | 0 | 253 MiB | 844% |
+| 4 | 8 | copy | 64KiB | 112.9 | 140.5 | 172.0 | 577 | 633 MiB | 1396% |
+| 4 | 8（+読まない 4） | 共有 | 64KiB | 26.8 | 29.4 | 34.6 | 0 | 380 MiB | 811% |
+| 1 | 4 | 共有 | 1 write | 11.7 | 14.3 | 16.2 | 0 | 63 MiB | 167% |
+| 1 | 4 | 共有 | 1MiB | 13.3 | 15.0 | 16.2 | 0 | 63 MiB | 191% |
+| 4 | 8（720p、60fps） | 共有 | 64KiB | 3.1 | 3.6 | 4.4 | 0 | 28 MiB | 189% |
+
+決めたこと:
+
+- **1 つの allocation を全 subscriber で共有する（`Arc`）。** copy は 4K の 4 tab × 8
+  subscriber で p95 140ms、frame の欠落、peak 633MiB となり、基準も memory の予算も
+  満たさない。共有なら p95 32.1ms。
+- **write の単位は 64KiB。** 1 write、64KiB、1MiB の差は誤差内（p95 14.3〜15.0ms）。
+  1 write は flow control の細かさを失うので、64KiB を採る。
+- **S ≤ 8 subscriber、T ≤ 4 tab を上限にする。値は上げない。** 4K の最悪構成の p95 は
+  32.1ms で、33ms の基準に余裕がほとんどない（max は 42ms）。
+- **読まない subscriber は frame を握ったままになる**（上の +4 行で peak が +127 MiB）。
+  よって no-progress timeout（5 秒）で切り、その間に握れる量を予算で数える。
+- 限界: 同一 process・thread の prototype で、実 helper、core の async 層、GUI の表示は
+  含まない。実装後に同じ区間を実装の上で再測定し（F3 の最終 commit）、基準を確かめる。
+
+## 9. 16a-2 F3: 製品実装の再測定（`renderer_data_plane_measure`、2026-11）
+
+§8 の prototype ではなく、出荷する経路を測った。core は `HostBackend` と
+`unix::connection` の実物で、client は `workbench_client::renderer::DataChannel` の実物。
+helper は fake helper（`evorch-renderer-test-helper`）に 1 つだけ足した合成の producer で、
+tab の viewport の frame を 30fps で、先頭 8 byte に wall clock（ns）を書いて publish
+する。同じ時計を helper・core・client が共有するので、latency は「helper が stamp してから
+client が全 byte を持つまで」になる。
+
+- 実行: `cargo nextest run --release -p evorch-core --features renderer-test-helper
+  --test renderer_data_plane_measure --run-ignored only --no-capture`（1 scenario 1
+  process、`EVORCH_MEASURE_OUT=<file>` で JSON 行を追記）。全 test が `#[ignore]` で、
+  CI の時間 assertion にはしない（plan §5「性能閾値を共有 CI の不安定な時間 assertion に
+  しない」）。判定はこの文書の同一環境の証跡で行う。
+- fake helper には、`synth-<N>fps` という名前の link 越しに起動されたときだけ合成 producer
+  が動く（core は helper の環境を消すので、起動名が唯一の入口）。通常の試験の動作は変えない。
+- 区間は plan の「core が helper 出力の最初の byte を観測してから」より前（helper の stamp）から
+  始まる。helper → core の区間（publish の copy、frame channel への write、core の read）を
+  含むので、受け入れ基準の区間より長い（厳しい側）。この区間は 4K の 1 reader の p50 12ms 前後
+  のうち数 ms 分。core が最初の byte を観測した時刻は process の外から取れないので、引いた
+  値は載せない。
+- 窓は 8 秒、先頭 10 frame は統計から外す。環境は §1 の「環境」と同じ（Ryzen 9 7900、24 論理
+  CPU、共有 workstation。実行中の loadavg は 1 分値で 7〜10。他の作業が常時動いている）。
+  client は core と同じ process にいるので、CPU と RSS は core と全 client の合計。
+- 製品の上限が先に効く構成がある。subscription は **core 全体で 8**、tab は 4、4K は 30fps 以上
+  では 1 つの stream だけ（`budget.rs`）で、その subscription は 4 まで。よって §8 の「4 tab × 8 subscriber」は製品では作れず、
+  720p は 4 tab × 2、1080p は 4 tab × 2、4K は 1 tab × 4 が最大（下記の制限）。4K の複数 tab は
+  `Busy` で拒否される（これは設計どおり。F3 の前から同じ）。
+
+**製品実装（chunk を共有 frame から vectored write、client は body を `Vec` へ直接 read）**
+
+| viewport | tab × reader（+停止） | 配送 fps / reader | p50 ms | p95 ms | p99 ms | max ms | 最悪 reader の p95 ms | CPU（core 数） | RSS peak MiB |
+|---|---|---|---|---|---|---|---|---|---|
+| 1280×720 | 1 × 1 | 29.99 | 1.56 | 2.24 | 3.88 | 8.7 | 2.24 | 0.06 | 65 |
+| | 4 × 1 | 29.99 | 4.04 | 6.66 | 8.28 | 9.6 | 7.11 | 0.33 | 86 |
+| | 1 × 8 | 29.99 | 3.43 | 6.39 | 10.62 | 20.9 | 6.74 | 0.74 | 89 |
+| | 4 × 2 | 29.99 | 3.74 | 4.99 | 5.70 | 7.8 | 5.37 | 0.54 | 101 |
+| 1920×1080 | 4 × 2 | 29.99 | 8.68 | 11.19 | 13.12 | 19.0 | 12.25 | 1.09 | 158 |
+| 3840×2160 | 1 × 1 | 30.00 | 11.72 | 13.84 | 14.94 | 16.5 | 13.84 | 0.36 | 149 |
+| | 1 × 4 | 30.00 | 15.46 | 18.53 | 19.44 | 20.3 | 18.56 | 1.88 | 244 |
+| | 1 × 4（+停止 1）※ | 29.99 | 15.23 | 17.22 | 18.42 | 20.3 | 17.33 | 1.78 | 275 |
+
+※ この行（旧 scenario `k4_1tab_4reader_1stalled`）は subscription 5 つ（reader 4 + 停止 1）で、4K の上限 4 を入れる**前**の値。製品では 5 つ目が `Busy` になるので、この構成は作れない。現在の scenario は `k4_1tab_3reader_1stalled`（reader 3 + 停止 1 = 4 subscription）で、値は下の「9.1」の表にある。
+
+1 回ずつの測定で誤差は載せていない。停止 reader は latency の判定から外してあり、4K の 4 reader
+で停止 1 つを足しても通常 reader は劣化しない（p95 18.5 → 17.2ms。差は誤差内）。全 reader が
+全 frame を受け、配送 fps は要求の 30.0 と同じ（欠落は 1 reader あたり 0.1 frame 未満）。
+
+**4K × 8 reader は基準を安定して満たさず、製品で 4 に制限した**。8 reader の 4K（1 tab）を
+繰り返し測ると、次のようになった（`renderer_data_plane_measure` の旧 scenario
+`k4_1tab_8reader`。制限の後は作れないので scenario からは外した）。
+
+| 実装 | p95 ms（実行順） |
+|---|---|
+| 変更前（chunk ごとに `Vec` へ copy して write、client は一度 `body` に読んでから copy） | 34.65（最悪 reader 35.20） |
+| 現在（vectored write、client の直接 read） | 30.18、31.21、30.72、80.72、61.20、36.83、85.04、32.40、31.02、39.43、98.65、32.29 |
+
+12 回のうち 33ms 以下は 6 回（30.2〜32.4）で、残りの 6 回（36.8〜98.7）は外れ値（他の
+作業が動いている間に起きたと見ているが、確かめていない）。同じ負荷（loadavg 約 8）でも
+外れる回と通る回があった。4K × 8 は 8 × 33MB × 30 = 約 8GB/s を UDS で送る（kernel の copy が
+送受で 2 回）ので、この workstation では CPU とメモリ帯域の上限に近い。**基準（p95 ≤ 33ms）を
+安定して満たしたとは言えない**ので、閾値は緩めず、構成を制限した（親の承認済みの判断）。
+
+- **制限**: 1 tab の frame が 4K（`3840×2160`）かつ 30fps 以上のとき、その tab の frame
+  subscription は **4**（`MAX_FOUR_K_FRAME_SUBSCRIPTIONS`）。一般の上限（core 全体で 8）は
+  変えない。4K・30fps 以上は budget でも 1 つの stream しか持てない（排他）ので、実際の
+  使い方（4K を 8 つの表示先が同時に見る）は想定外としてよい。
+- **5 つ目の拒否**: `Busy`、`RetryAdvice::AfterResync`（subscription が 1 つ終われば空くので、
+  状態を読み直して決め直せる）。拒否は既存の subscription、data 接続、stream に触れない。
+- **途中で 4K になる場合**: 新しく追加する subscription だけを拒否し、すでにあるもの
+  （最大 8）は保つ（切らない）。試験（`renderer_data_plane_uds`）で固定した: 4K で 4 つまで
+  受け付け 5 つ目は `Busy`、1080p に下げると同じ tab が 8 つまで受け付け 9 つ目は一般の上限で
+  `Busy`、その 8 つを保ったまま 4K に戻すと新規は `Busy`・既存の binding は有効。
+- **その残りの p95**: 4 を超えた subscription が残った 4K の tab の p95 は、この制限では
+  保証しない。8 reader の測定（上の表）が当てはまり、基準を外れうる（33ms 超が 12 回中
+  6 回）。この状態は、既存の subscription を保つ方針の帰結で、tab を 4K へ resize した
+  利用者が、すでに 5 つ以上の表示先を持っているときに限る。subscription の終了で
+  4 以下に戻れば、次の表の値に戻る。
+- **4K × 4 reader の p95**: 同じ構成を 12 回（各 8 秒、loadavg 5.5〜9.7）測って
+  p95 は 18.8〜25.7ms（中央 19.9ms、1 回だけ 25.7、他は 21.5 以下）、p50 は 15.5〜19.3ms、
+  最悪 reader の p95 は 19.1〜26.1ms、CPU は 1.85〜2.38 core。12 回すべて 33ms 以下。
+  最初の 1 回（上の表）は 18.5ms。
+
+比較した変更（plan §5「不合格時は chunk、vectored write、再利用、単一購読経路を比較する」）:
+
+- **vectored write と client の直接 read（採用）**: header と共有 frame の slice を 1 回の
+  `write_vectored` で送り、chunk ごとの `Vec` の確保と copy をなくした。client は body を
+  `read_buf` で呼び出し側の `Vec` に直接読み、`resize` の zero 埋めと中間 buffer からの copy を
+  なくした。4K × 8 の p95 は 34.65 → 30.2〜32.4ms（quiet な回。外れ値は残った）。
+- **送信側の `SO_SNDBUF` を 4MiB にする（不採用）**: 5 回とも p95 33.0〜44.1ms で CPU は 7.8 → 11.2
+  core に増え、悪化した。戻した。
+- **chunk の大きさ**: §8 の prototype で 1 write・64KiB・1MiB の差が誤差内だったので、
+  protocol の値（64KiB）は変えない。
+- **単一購読経路**: 4K の frame を 1 本の経路で配るのは、subscription ごとの接続という
+  F3 の設計の外になるので比べていない。
+
+**ベースラインとの比較**（§5.5）。720p×30fps の 1 tab は、直結の配送 30.0fps に対し proxy の
+「最初の byte → client」p95 が 1.35ms、製品は 2.24ms（helper の stamp から。上の区間の違いを
+含む）。4K×30fps の 1 tab は、同 8.78ms に対し 13.84ms。どちらも基準の 33ms の半分以下で、
+frame は欠落していない。4 tab（720p）は、baseline の 4 tab 合計 119.95fps に当たる
+29.99fps / tab を保った。
+
+**測れていないもの**
+
+- 実 helper と CEF を通した性能。実 CEF の e2e（`renderer_owner_cef`）は動作の確認で、時間は測らない。
+  helper → core の区間は §5.5 の実測（4K×1 tab で 2 hop 区間 p95 8.78ms）が最新。
+- 実 CEF 越しの PSS・allocation（下の 9.1 は fake helper の値で、helper 側の PSS は合成 producer のもの）。
+- 専用機での測定。共有 workstation のため、4K × 8 reader のばらつき（制限の理由）が load による
+  ものか実装によるものかは切り分けられていない。
+- macOS / Windows。この data plane は Linux の UDS だけ（既存の方針）。
+
+### 9.1 PSS・allocation・heap（fake helper、2026-11、窓を揃えた harness）
+
+§9 の表を測った harness から、集計の窓を直して測り直した。**すべての reader は、同じ
+`[start, end)` の窓（start は streaming を有効にしてから warm-up の 12 frame 分の時間が
+過ぎた時刻、end は経過時間を確定した時刻）に受け取った frame だけを、latency・frame 数・
+allocation の分母に数える**。経過時間・CPU・allocation の差分も、同じ start から取る。
+8 秒窓、30fps、24 論理 CPU の共有 workstation（実行中の loadavg は 11 前後）。counting global
+allocator の数は core・全 client・harness が同じ process にいる合計で、helper は別 process なので
+含まない。PSS は `/proc/<pid>/smaps_rollup` を core の process と helper の子 process で別々に読む。
+stalled の scenario は上限 4 を守る `k4_1tab_3reader_1stalled`。
+
+| scenario | frame 数 | p50 ms | p95 ms | p99 ms | max ms | fps/reader | CPU | RSS MiB | PSS core / helper MiB | allocs/frame | alloc B/frame | 窓内の 1MiB 以上の確保 | window 開始時の heap MiB | close 要求の 2 秒後の heap MiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p720_1tab_1reader | 247 | 1.69 | 2.59 | 3.51 | 4.7 | 30.10 | 0.08 | 65 | 61 / 8 | 467 | 30921 | 0 | 13 | 9 |
+| p720_4tab_1reader | 992 | 3.27 | 6.23 | 8.73 | 10.6 | 30.11 | 0.35 | 86 | 82 / 40 | 170 | 9172 | 0 | 34 | 9 |
+| p720_1tab_8reader | 1976 | 3.63 | 5.76 | 8.24 | 17.7 | 30.02 | 0.70 | 90 | 86 / 8 | 119 | 5353 | 0 | 37 | 9 |
+| p720_4tab_2reader | 1970 | 3.57 | 5.01 | 6.02 | 8.1 | 30.02 | 0.53 | 100 | 97 / 33 | 120 | 5458 | 0 | 48 | 9 |
+| p1080_4tab_2reader | 1984 | 10.11 | 13.93 | 15.69 | 20.0 | 30.07 | 1.40 | 158 | 155 / 88 | 190 | 6588 | 0 | 105 | 18 |
+| k4_1tab_1reader | 247 | 12.61 | 17.27 | 18.71 | 19.1 | 30.04 | 0.41 | 149 | 145 / 64 | 926 | 38798 | 0 | 97 | 65 |
+| k4_1tab_4reader | 992 | 21.45 | 26.32 | 27.99 | 31.2 | 29.99 | 2.61 | 244 | 241 / 64 | 618 | 16208 | 0 | 192 | 65 |
+| k4_1tab_3reader_1stalled | 738 | 15.01 | 17.20 | 18.48 | 18.9 | 29.94 | 1.27 | 244 | 241 / 64 | 656 | 18882 | 0 | 192 | 65 |
+
+- **p95 はすべて 33ms 以下**（最大は `k4_1tab_4reader` の 26.32ms。この run は loadavg 約 11 で、§9 の 12 回
+  の p95 18.8〜25.7ms より高い側に出た）。§9 の表は窓の数え方が違う（先頭 10 frame を数で外し、接続が
+  終わるまで数えた）ので、二つの値は同じ測定の再現ではなく、同じ基準に対する別の証跡として読む。
+  `k4_1tab_1reader` の p95 は run ごとに 14〜25.7ms の幅があった（§9.1 の前の 5 回: 14.15〜17.76ms）。
+- **steady state で frame ごとの大きい確保はない**: 窓内の 1MiB 以上の確保は全 scenario で 0 回、
+  live heap の窓内の増分（peak）も 0 だった。frame の buffer は warm-up の間に pool が持ち終わり、
+  窓の間は再利用されている。window 開始時の heap（4K の 4 reader で 192MiB）は、その pool と
+  各 reader が持つ frame の合計。allocs/frame の多くは header・chunk の小さい確保で、reader が
+  増えるほど 1 frame あたりは減る（frame の共有）。
+- **close 後の heap**: 全 client の接続を閉じ、`CloseRendererSession` を**要求**して 2 秒待った後の heap は、
+  720p で約 9MiB、1080p で約 18MiB、4K で約 65MiB（4K の frame 約 33MB の 2 枚ぶんに近い）。
+  close は要求しただけで、**完了したかどうかも、何がこの heap を保持しているかも確かめていない**。
+  観測した事実は、reader の数（1〜4）を変えても 4K では同じ約 65MiB で、reader ごとの保持は
+  見えないこと、だけ。原因の特定と、close の完了後に 0 近くへ戻るかの確認は未実施。
+- PSS は core の process が RSS とほぼ同じ（client も同じ process）。helper の PSS は fake helper の合成
+  producer の値で、4K で約 64MiB、tab 数にほぼ比例する。
+- 元の JSONL（この表と §9 の追加の繰り返しの run）は PR #693 のコメントに添付した。
+- 実 CEF の helper の PSS と、close の完了後の heap は測っていない。

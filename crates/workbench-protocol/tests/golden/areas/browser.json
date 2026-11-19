@@ -1,4 +1,20 @@
 {
+  "command/browser/bind_renderer_data": {
+    "payload": {
+      "payload": {
+        "channel_id": "1234567890abcdef1234567890abcdef",
+        "source": {
+          "payload": {
+            "subscription": "1234567890abcdef1234567890abcdef",
+            "token": "1234567890abcdef1234567890abcdef"
+          },
+          "type": "frames"
+        }
+      },
+      "type": "bind_renderer_data"
+    },
+    "type": "browser"
+  },
   "command/browser/capture_renderer_tab": {
     "payload": {
       "payload": {

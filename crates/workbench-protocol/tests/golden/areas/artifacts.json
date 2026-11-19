@@ -1,4 +1,19 @@
 {
+  "command/artifacts/bind_artifact_content": {
+    "payload": {
+      "payload": {
+        "artifact": {
+          "artifact_id": "artifact-1234567890abcdef1234567890abcdef",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "project": "project-1",
+          "thread": "thread-1"
+        },
+        "channel_id": "1234567890abcdef1234567890abcdef"
+      },
+      "type": "bind_artifact_content"
+    },
+    "type": "artifacts"
+  },
   "command/artifacts/open_preview": {
     "payload": {
       "payload": {

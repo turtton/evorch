@@ -8,8 +8,8 @@
 //! accepted so the core starts it like the real helper, and is otherwise
 //! unused). Not shipped; built only with the `renderer-test-helper` feature.
 use renderer_ipc::{
-    Backend, BackendContext, ExitReason, Notices, OpenArtifact, RemoteError, ServeConfig, TabId,
-    Viewport, serve,
+    Backend, BackendContext, ExitReason, FrameQueue, Notices, OpenArtifact, RemoteError,
+    ServeConfig, TabId, Viewport, serve,
 };
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
@@ -23,6 +23,67 @@ struct Blank {
     /// How many `DOM.getDocument` probes reached this helper.
     probes: std::sync::atomic::AtomicUsize,
     shutdown_gate: Option<std::path::PathBuf>,
+    frames: std::sync::Arc<FrameQueue>,
+    /// How many frames were published; the fill byte of the next one.
+    painted: std::sync::atomic::AtomicU8,
+    /// Set when the helper was started through a link named `synth-<N>fps`
+    /// (the core clears the environment, so the name is the only channel):
+    /// paint stamped frames of the tab's viewport at N per second while
+    /// streaming is on, for the measurement of the data plane.
+    synth_fps: Option<u32>,
+    /// Per tab: its viewport and the flag that keeps its producer running.
+    synth: std::sync::Mutex<
+        std::collections::BTreeMap<
+            TabId,
+            (Viewport, std::sync::Arc<std::sync::atomic::AtomicBool>),
+        >,
+    >,
+}
+
+impl Blank {
+    /// One 4x2 frame whose bytes all equal how many frames came before it.
+    /// Painting is driven by a request (streaming on, resize), never a timer.
+    /// Stamps every frame with the wall clock (nanoseconds since the Unix
+    /// epoch) in its first eight bytes, taken right before it is published, so
+    /// a reader in another process can tell how long the frame took to arrive.
+    fn synthesize(&self, tab: TabId, fps: u32) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some((viewport, on)) = self.synth.lock().unwrap().get(&tab).cloned() else {
+            return;
+        };
+        if on.swap(true, SeqCst) {
+            return;
+        }
+        let frames = self.frames.clone();
+        std::thread::spawn(move || {
+            let mut bgra = vec![0x40u8; viewport.width as usize * viewport.height as usize * 4];
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let mut next = std::time::Instant::now();
+            while on.load(SeqCst) {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                bgra[..8].copy_from_slice(&stamp.to_le_bytes());
+                frames.publish(tab, viewport.width, viewport.height, &bgra);
+                next += interval;
+                let now = std::time::Instant::now();
+                if next > now {
+                    std::thread::park_timeout(next - now);
+                } else {
+                    next = now;
+                }
+            }
+        });
+    }
+
+    fn paint(&self, tab: TabId) {
+        let fill = self
+            .painted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1);
+        self.frames.publish(tab, 4, 2, &[fill; 4 * 2 * 4]);
+    }
 }
 
 impl Backend for Blank {
@@ -31,12 +92,30 @@ impl Backend for Blank {
         open: &OpenArtifact,
         _files: Vec<(String, String, Vec<u8>)>,
     ) -> Result<Viewport, RemoteError> {
+        if self.synth_fps.is_some() {
+            self.synth.lock().unwrap().insert(
+                open.tab,
+                (open.viewport, std::sync::Arc::new(Default::default())),
+            );
+        }
         Ok(open.viewport)
     }
-    fn resize(&self, _: TabId, _: Viewport) -> Result<(), RemoteError> {
+    fn resize(&self, tab: TabId, _: Viewport) -> Result<(), RemoteError> {
+        self.paint(tab);
         Ok(())
     }
-    fn set_streaming(&self, _: TabId, _: bool) -> Result<(), RemoteError> {
+    fn set_streaming(&self, tab: TabId, enabled: bool) -> Result<(), RemoteError> {
+        if let Some(fps) = self.synth_fps {
+            if enabled {
+                self.synthesize(tab, fps);
+            } else if let Some((_, on)) = self.synth.lock().unwrap().get(&tab) {
+                on.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            return Ok(());
+        }
+        if enabled {
+            self.paint(tab);
+        }
         Ok(())
     }
     fn set_frame_rate(&self, _: TabId, _: u8) -> Result<(), RemoteError> {
@@ -88,7 +167,11 @@ impl Backend for Blank {
     fn take_notices(&self, _: TabId) -> Result<Notices, RemoteError> {
         Ok(Notices::default())
     }
-    fn close_tab(&self, _: TabId) {}
+    fn close_tab(&self, tab: TabId) {
+        if let Some((_, on)) = self.synth.lock().unwrap().remove(&tab) {
+            on.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     fn shutdown(&self) {
         if let Some(path) = &self.shutdown_gate {
             use std::io::{Read, Write};
@@ -97,6 +180,16 @@ impl Backend for Blank {
             gate.read_exact(&mut [0]).unwrap();
         }
     }
+}
+
+fn synth_fps() -> Option<u32> {
+    let name = std::env::args_os().next().map(std::path::PathBuf::from)?;
+    name.file_name()?
+        .to_str()?
+        .strip_prefix("synth-")?
+        .strip_suffix("fps")?
+        .parse()
+        .ok()
 }
 
 fn adopt(fd: impl AsFd) -> std::io::Result<UnixStream> {
@@ -242,10 +335,14 @@ fn main() -> ExitCode {
         control,
         frames,
         ServeConfig::default(),
-        move |_: BackendContext| {
+        move |context: BackendContext| {
             Ok(Blank {
                 probes: Default::default(),
                 shutdown_gate,
+                frames: context.frames,
+                painted: Default::default(),
+                synth_fps: synth_fps(),
+                synth: Default::default(),
             })
         },
     );

@@ -21,15 +21,14 @@ pub trait ArtifactPages: Send + Sync {
     async fn open(&self, key: &str, html: Vec<u8>) -> Result<Arc<dyn ArtifactPage>, String>;
 
     /// Metadata has already passed inspect's conversation ownership check.
-    /// Older providers can keep their existing page-opening behavior.
+    /// Every provider states what it does with the record: there is no
+    /// default that would silently drop it.
     async fn open_artifact(
         &self,
         key: &str,
         html: Vec<u8>,
-        _record: &super::ArtifactRecord,
-    ) -> Result<Arc<dyn ArtifactPage>, String> {
-        self.open(key, html).await
-    }
+        record: &super::ArtifactRecord,
+    ) -> Result<Arc<dyn ArtifactPage>, String>;
 
     fn page(&self, key: &str) -> Option<Arc<dyn ArtifactPage>>;
 

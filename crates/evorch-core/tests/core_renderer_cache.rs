@@ -14,7 +14,6 @@
 //! boundary. Every wait is a lifecycle event of the run, never a duration.
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use event_bus::AgentRunPhase;
 use sandbox::CredentialStore as _;
 use serde_json::{Value, json};
@@ -41,252 +40,9 @@ impl runtime::SandboxFactory for Unisolated {
     }
 }
 
-/// The model of a core that predates the artifact provider: it forwards every
-/// call of the production model and hides `inspect_artifact` from the tool array,
-/// which is exactly the catalog such a core sent. The switch ends the pretence, as
-/// the upgraded core does when it resumes the conversation.
-struct WithoutArtifactTool(
-    Arc<dyn runtime::AgentModel>,
-    Arc<std::sync::atomic::AtomicBool>,
-);
-
-impl WithoutArtifactTool {
-    fn visible(&self, tools: &[providers::ToolSpec]) -> Vec<providers::ToolSpec> {
-        let hidden = self.1.load(std::sync::atomic::Ordering::SeqCst);
-        tools
-            .iter()
-            .filter(|tool| !(hidden && tool.name.ends_with(runtime::artifacts::INSPECT_ARTIFACT)))
-            .cloned()
-            .collect()
-    }
-}
-
-type Invocation = runtime::AgentInvocationContext;
-type Rt<T> = Result<T, runtime::RuntimeError>;
-
-#[async_trait]
-impl runtime::AgentModel for WithoutArtifactTool {
-    fn validate_checkpoint_compatibility(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        pins: &[runtime::RoutePinRecord],
-        input: Option<&runtime::quiesce::ProviderInput>,
-    ) -> Rt<()> {
-        self.0
-            .validate_checkpoint_compatibility(invocation, role, pins, input)
-    }
-    fn adopt_recovery_checkpoint(
-        &self,
-        run_id: &str,
-        pins: &[runtime::RoutePinRecord],
-        input: Option<&runtime::quiesce::ProviderInput>,
-    ) {
-        self.0.adopt_recovery_checkpoint(run_id, pins, input);
-    }
-    fn checkpoint_provider_input(&self, run_id: &str) -> Option<runtime::quiesce::ProviderInput> {
-        self.0.checkpoint_provider_input(run_id)
-    }
-    fn restore_checkpoint_provider_state(
-        &self,
-        run_id: &str,
-        role: runtime::Role,
-        category: Option<&str>,
-        input: &runtime::quiesce::ProviderInput,
-    ) {
-        self.0
-            .restore_checkpoint_provider_state(run_id, role, category, input);
-    }
-    fn narrows_edit_tools(&self) -> bool {
-        self.0.narrows_edit_tools()
-    }
-    fn edit_tool_for_run(
-        &self,
-        run_id: &str,
-        role: runtime::Role,
-        category: Option<&str>,
-    ) -> Option<config::EditToolConfig> {
-        self.0.edit_tool_for_run(run_id, role, category)
-    }
-    fn edit_tools_by_run(
-        &self,
-    ) -> std::collections::BTreeMap<(String, String), config::EditToolConfig> {
-        self.0.edit_tools_by_run()
-    }
-    fn restore_edit_tools(
-        &self,
-        history: &std::collections::BTreeMap<(String, String), config::EditToolConfig>,
-    ) {
-        self.0.restore_edit_tools(history);
-    }
-    fn model_switch_prepared(&self, invocation: &Invocation, role: runtime::Role, selected: &str) {
-        self.0.model_switch_prepared(invocation, role, selected);
-    }
-    fn image_generation_enabled(&self) -> bool {
-        self.0.image_generation_enabled()
-    }
-    fn web_search_provider(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        tools: &[providers::ToolSpec],
-        usage_sink: Arc<dyn Fn(providers::Usage) + Send + Sync>,
-    ) -> Rt<Option<Arc<dyn tools::search::SearchProvider>>> {
-        self.0
-            .web_search_provider(invocation, role, &self.visible(tools), usage_sink)
-    }
-    fn requires_admission(&self) -> bool {
-        self.0.requires_admission()
-    }
-    async fn admit(&self, invocation: &Invocation, role: runtime::Role) -> Rt<()> {
-        self.0.admit(invocation, role).await
-    }
-    async fn compact_context(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        instructions: &[providers::Message],
-        tools: &[providers::ToolSpec],
-    ) -> Rt<Option<providers::CompactionResult>> {
-        self.0
-            .compact_context(
-                invocation,
-                role,
-                messages,
-                instructions,
-                &self.visible(tools),
-            )
-            .await
-    }
-    async fn prepare_replay_context(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        tools: &[providers::ToolSpec],
-        replay: &runtime::ResponsesReplayState,
-    ) -> Rt<()> {
-        self.0
-            .prepare_replay_context(invocation, role, messages, &self.visible(tools), replay)
-            .await
-    }
-    async fn resolve_replay_scope(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        tools: &[providers::ToolSpec],
-    ) -> Rt<Option<providers::ResolvedResponsesScope>> {
-        self.0
-            .resolve_replay_scope(invocation, role, &self.visible(tools))
-            .await
-    }
-    async fn complete_streaming_with_replay(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        tools: &[providers::ToolSpec],
-        bus: &event_bus::EventBus,
-        replay: &runtime::ResponsesReplayState,
-    ) -> Rt<providers::ChatResponse> {
-        self.0
-            .complete_streaming_with_replay(
-                invocation,
-                role,
-                messages,
-                &self.visible(tools),
-                bus,
-                replay,
-            )
-            .await
-    }
-    async fn complete(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        tools: &[providers::ToolSpec],
-    ) -> Rt<providers::ChatResponse> {
-        self.0
-            .complete(invocation, role, messages, &self.visible(tools))
-            .await
-    }
-    async fn complete_structured(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        schema: &providers::JsonSchema,
-    ) -> Rt<providers::ChatResponse> {
-        self.0
-            .complete_structured(invocation, role, messages, schema)
-            .await
-    }
-    async fn complete_streaming(
-        &self,
-        invocation: &Invocation,
-        role: runtime::Role,
-        messages: &[providers::Message],
-        tools: &[providers::ToolSpec],
-        bus: &event_bus::EventBus,
-    ) -> Rt<providers::ChatResponse> {
-        self.0
-            .complete_streaming(invocation, role, messages, &self.visible(tools), bus)
-            .await
-    }
-    fn selected_model(&self, role: runtime::Role, category: Option<&str>) -> String {
-        self.0.selected_model(role, category)
-    }
-    fn chain_models(&self, role: runtime::Role, category: Option<&str>) -> Vec<String> {
-        self.0.chain_models(role, category)
-    }
-    fn selected_model_for_run(
-        &self,
-        run_id: &str,
-        role: runtime::Role,
-        category: Option<&str>,
-    ) -> String {
-        self.0.selected_model_for_run(run_id, role, category)
-    }
-    fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
-        self.0.catalog_context_window(selected_model)
-    }
-    fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
-        self.0.available_profiles()
-    }
-    fn selected_reasoning_effort(
-        &self,
-        role: runtime::Role,
-        category: Option<&str>,
-    ) -> Option<String> {
-        self.0.selected_reasoning_effort(role, category)
-    }
-    fn binding_preview(
-        &self,
-        role: runtime::Role,
-        category: Option<&str>,
-    ) -> Option<config::types::agents::ResolvedAgentBinding> {
-        self.0.binding_preview(role, category)
-    }
-    fn route_pins(&self, run_id: &str) -> Vec<runtime::RoutePinRecord> {
-        self.0.route_pins(run_id)
-    }
-    fn restore_route_pins(&self, run_id: &str, pins: &[runtime::RoutePinRecord]) {
-        self.0.restore_route_pins(run_id, pins);
-    }
-    fn output_limit_catalogs(&self) -> Option<runtime::compose::OutputLimitCatalogs> {
-        self.0.output_limit_catalogs()
-    }
-    fn restore_output_limit_catalogs(&self, shared: &runtime::compose::OutputLimitCatalogs) {
-        self.0.restore_output_limit_catalogs(shared);
-    }
-    fn route_pins_by_run(
-        &self,
-    ) -> std::collections::BTreeMap<String, Vec<runtime::RoutePinRecord>> {
-        self.0.route_pins_by_run()
-    }
-}
+#[path = "renderer_support/without_artifact_tool.rs"]
+mod without_artifact_tool;
+use without_artifact_tool::WithoutArtifactTool;
 
 fn tool_names(provider: &cache::Provider, request: &Value) -> Vec<String> {
     request["tools"]
@@ -557,6 +313,106 @@ fn assert_frozen_with_artifact_tool(provider: &cache::Provider, requests: &[Valu
     }
 }
 
+#[cfg(feature = "renderer-test-helper")]
+#[path = "renderer_support/data_peer.rs"]
+mod data_peer;
+
+/// A client of the running core on its Unix socket opens a preview of the
+/// agent's artifact and moves bytes over data connections: raw frames, a
+/// refused binding and an artifact that has no image form. None of it may
+/// reach the provider, so the caller's assertions on the recorded requests
+/// cover the data plane too. Everything it opens is closed again.
+#[cfg(feature = "renderer-test-helper")]
+async fn data_plane_traffic(running: &Running, world: &World, artifact: &str) {
+    use data_peer::{Peer, refusal};
+    use sha2::{Digest, Sha256};
+    use workbench_protocol::errors::ErrorCode;
+    use workbench_protocol::ids::{ProjectId, ThreadId};
+    use workbench_protocol::namespaces::artifacts::ArtifactRef;
+    use workbench_protocol::namespaces::browser::*;
+
+    let socket = world.project.sockets().join("data-plane-cache.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let backend = Arc::new(evorch_core::backend::HostBackend::new(
+        running.core.host.clone(),
+        "data-plane-cache".into(),
+    ));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (backend, stopped) = (backend.clone(), stopped.clone());
+            tokio::spawn(async move {
+                let _ = evorch_core::unix::connection(stream, backend, stopped).await;
+            });
+        }
+    });
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(world.root.join("page.html")).unwrap())
+    );
+    let page = ArtifactRef {
+        project: ProjectId::new("p").unwrap(),
+        thread: ThreadId::new("t1").unwrap(),
+        artifact_id: artifact.into(),
+        digest,
+    };
+    let mut a = Peer::connect(&socket, "client-a").await;
+    let b = Peer::connect(&socket, "client-b").await;
+    let session = a.session().await;
+    let tab = a.open(&page, &session).await;
+    let subscribe = a
+        .browser(BrowserCommand::SubscribeRendererFrames {
+            tab: tab.reference.clone(),
+        })
+        .await
+        .unwrap();
+    let RendererOutput::Subscription {
+        subscription,
+        token,
+        ..
+    } = a.output(&subscribe).await
+    else {
+        panic!("not a subscription")
+    };
+    assert_eq!(
+        refusal(
+            b.channel()
+                .await
+                .bind_frames(&b.client, subscription.clone(), token.clone())
+                .await
+        ),
+        ErrorCode::PermissionDenied
+    );
+    let mut frames = a
+        .channel()
+        .await
+        .bind_frames(&a.client, subscription, token)
+        .await
+        .unwrap();
+    a.browser(BrowserCommand::SetRendererStreaming {
+        tab: tab.reference.clone(),
+        enabled: true,
+    })
+    .await
+    .unwrap();
+    assert!(frames.next_frame().await.unwrap().is_some());
+    assert_eq!(
+        refusal(a.channel().await.bind_artifact(&a.client, page).await),
+        ErrorCode::InvalidRequest
+    );
+    let close = a
+        .browser(BrowserCommand::CloseRendererSession { session })
+        .await
+        .unwrap();
+    a.output(&close).await;
+    drop((a, b, frames));
+    let _ = stop.send(true);
+    server.abort();
+}
+
 /// The catalog is the same whether the helper was never started, is running, was
 /// killed, or cannot be started at all; the tool results differ, the wire prefix
 /// only grows.
@@ -610,6 +466,8 @@ async fn catalog_scenario(subscription: bool, helper: Helper) {
         )
         .await;
     if helper != Helper::Absent {
+        #[cfg(feature = "renderer-test-helper")]
+        data_plane_traffic(&running, &world, &id).await;
         // The helper is stopped cleanly and a later open starts a new one.
         let owner = running.core.host.lock().unwrap().renderer_owner().unwrap();
         owner.stop().await.unwrap();

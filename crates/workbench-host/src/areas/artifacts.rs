@@ -62,6 +62,20 @@ impl ArtifactsArea {
         )
     }
 
+    /// The blob of an image artifact for a data connection.
+    pub(crate) fn image_blob(
+        &self,
+        record: &runtime::artifacts::ArtifactRecord,
+    ) -> Result<
+        (
+            workbench_protocol::namespaces::browser::data::BlobStart,
+            Box<dyn std::io::Read + Send>,
+        ),
+        workbench_protocol::errors::WorkbenchError,
+    > {
+        content::image_blob(self.store.as_ref().ok_or_else(storage_error)?, record)
+    }
+
     pub(super) fn new(
         store: Arc<runtime::artifacts::ArtifactStore>,
         renderer: Option<RendererOwner>,

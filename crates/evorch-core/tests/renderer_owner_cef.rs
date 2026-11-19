@@ -1,5 +1,7 @@
 //! Real CEF through the production core owner, with test-only subreaper checks.
 #![cfg(all(target_os = "linux", feature = "renderer-test-helper"))]
+#[path = "renderer_support/data_peer.rs"]
+mod data_peer;
 #[path = "renderer_support/mod.rs"]
 mod support;
 use renderer_ipc::{OpenArtifact, SessionId, TabId, Viewport};
@@ -367,4 +369,355 @@ async fn the_core_inspect_artifact_tool_runs_open_snapshot_click_screenshot_clos
         .unwrap();
     core.runtime.wait(run).await.unwrap();
     core.shutdown().await.unwrap();
+}
+
+/// The client library, the core's Unix socket, the host and the real helper
+/// with real CEF behind it: frames, a DOM read, a Capture PNG and an image
+/// artifact each reach their client on their own data connection, several
+/// connections at once, with one that never reads (plan §8, F3).
+mod data_plane {
+    use super::{Unisolated, data_peer::Peer, data_peer::refusal, executable};
+    use std::{sync::Arc, time::Duration};
+
+    use evorch_core::{backend::HostBackend, unix};
+    use runtime::artifacts::{CaptureRequest, store_with_refs};
+    use workbench_client::renderer::FrameStream;
+    use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
+    use workbench_protocol::{
+        errors::ErrorCode,
+        ids::{ProjectId, ThreadId},
+        namespaces::{
+            artifacts::ArtifactRef,
+            browser::data::{BlobSource, MediaType},
+            browser::*,
+        },
+    };
+    use workspace_state::{
+        ProjectId as StateProject, SidebarDocument, SidebarStore, ThreadId as StateThread,
+        ThreadRecord,
+    };
+
+    /// A real 1x1 PNG, stored as an image artifact.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    /// Only a stuck CEF may reach this; every wait below ends on an event.
+    const GUARD: Duration = Duration::from_secs(90);
+
+    struct Idle;
+    #[async_trait::async_trait]
+    impl runtime::AgentModel for Idle {
+        async fn complete(
+            &self,
+            _: &runtime::AgentInvocationContext,
+            _: runtime::Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+            unreachable!("no turn runs in this fixture")
+        }
+        fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
+            "renderer-data-plane-cef".into()
+        }
+    }
+
+    /// Frames until one of the wanted size arrives (a size change repaints).
+    async fn frame_of(frames: &mut FrameStream, width: u32, height: u32) -> Vec<u8> {
+        tokio::time::timeout(GUARD, async {
+            loop {
+                let frame = frames.next_frame().await.unwrap().expect("a frame");
+                if (frame.start.width, frame.start.height) == (width, height) {
+                    assert_eq!(frame.start.stride, width * 4);
+                    assert_eq!(frame.bgra.len() as u32, width * height * 4);
+                    return frame.bgra;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no {width}x{height} frame arrived"))
+    }
+
+    /// The page paints its whole viewport green, so a real paint is told from
+    /// the blank frame before it by the centre pixel (BGRA).
+    async fn painted_frame(frames: &mut FrameStream, width: u32, height: u32) {
+        tokio::time::timeout(GUARD, async {
+            loop {
+                let bgra = frame_of(frames, width, height).await;
+                let at = (((height / 2) * width + width / 2) * 4) as usize;
+                if bgra[at] < 40 && bgra[at + 1] > 200 && bgra[at + 2] < 40 {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the green page was never painted")
+    }
+
+    #[test]
+    #[ignore = "requires actual CEF; mandatory cef-e2e supplies EVORCH_RENDERER_EXE"]
+    fn frames_dom_capture_and_images_reach_clients_through_the_core_and_real_cef() {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        // SAFETY: single-threaded here, and the runtime that reads it is built
+        // below; the only value this process sets is the real renderer.
+        unsafe { std::env::set_var("EVORCH_RENDERER_EXEC", executable()) };
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(dir, root));
+    }
+
+    async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
+        let project_root = root.join("one");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let store = SidebarStore::new(root.join("sidebar.json"));
+        let mut document = SidebarDocument::default();
+        document
+            .sidebar
+            .add_project(StateProject::new("p1"), "p1", &project_root)
+            .unwrap();
+        document.sidebar.threads.push(ThreadRecord::new(
+            StateThread::new("t1"),
+            StateProject::new("p1"),
+            "t1",
+        ));
+        document.sidebar.refresh_derived();
+        {
+            let lock = store.lock().unwrap();
+            store.write(&lock, &document).unwrap();
+        }
+        let mut core = BootstrappedHost::open_with_test_seams(
+            BootstrapOptions {
+                config_dir: root.clone(),
+                project_root: project_root.clone(),
+                ownership_root: dir.sockets().into(),
+            },
+            TestSeams {
+                model: Arc::new(Idle),
+                sandbox: Arc::new(Unisolated),
+            },
+        )
+        .await
+        .unwrap();
+        let writer = core.composition.storage_writer.clone();
+        writer
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "t1".into(),
+                project_id: Some("p1".into()),
+                project_root: Some(project_root.to_string_lossy().into_owned()),
+                title: Some("t1".into()),
+                root_run_id: Some("r1".into()),
+                ..Default::default()
+            }])
+            .unwrap();
+        std::fs::write(
+            project_root.join("page.html"),
+            "<!doctype html><body style=\"background:#00ff00\"><button>Add</button></body>",
+        )
+        .unwrap();
+        std::fs::write(project_root.join("tiny.png"), TINY_PNG).unwrap();
+        let artifacts = store_with_refs(root.join("artifacts"), writer).unwrap();
+        let capture = |file: &str| {
+            let record = artifacts
+                .capture(
+                    &project_root,
+                    None,
+                    &project_root.join(file),
+                    CaptureRequest {
+                        title: file,
+                        caption: None,
+                        run_id: "r1".into(),
+                        root_run_id: "r1".into(),
+                        thread_id: Some("t1".into()),
+                    },
+                )
+                .unwrap();
+            (
+                ArtifactRef {
+                    project: ProjectId::new("p1").unwrap(),
+                    thread: ThreadId::new("t1").unwrap(),
+                    artifact_id: record.artifact_id.clone(),
+                    digest: record.sha256.clone(),
+                },
+                record,
+            )
+        };
+        let (page, _) = capture("page.html");
+        let (image, image_record) = capture("tiny.png");
+
+        let socket = dir.sockets().join("renderer-data-plane-cef.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let backend = Arc::new(HostBackend::new(core.host.clone(), "data-plane-cef".into()));
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (backend, stopped) = (backend.clone(), stopped.clone());
+                tokio::spawn(async move {
+                    let _ = unix::connection(stream, backend, stopped).await;
+                });
+            }
+        });
+
+        let mut a = Peer::connect(&socket, "client-a").await;
+        let b = Peer::connect(&socket, "client-b").await;
+        let session = a.session().await;
+        let tab = a.open(&page, &session).await;
+
+        // Three subscriptions of one tab: two readers and one that never reads.
+        let mut tokens = Vec::new();
+        for _ in 0..3 {
+            let op = a
+                .browser(BrowserCommand::SubscribeRendererFrames {
+                    tab: tab.reference.clone(),
+                })
+                .await
+                .unwrap();
+            let RendererOutput::Subscription {
+                subscription,
+                token,
+                ..
+            } = a.output(&op).await
+            else {
+                panic!("not a subscription")
+            };
+            tokens.push((subscription, token));
+        }
+        // Another client cannot use what A was given.
+        assert_eq!(
+            refusal(
+                b.channel()
+                    .await
+                    .bind_frames(&b.client, tokens[0].0.clone(), tokens[0].1.clone())
+                    .await
+            ),
+            ErrorCode::PermissionDenied
+        );
+        let mut bound = Vec::new();
+        for (subscription, token) in &tokens {
+            bound.push(
+                a.channel()
+                    .await
+                    .bind_frames(&a.client, subscription.clone(), token.clone())
+                    .await
+                    .unwrap(),
+            );
+        }
+        let stalled = bound.pop().unwrap();
+        let mut second = bound.pop().unwrap();
+        let mut first = bound.pop().unwrap();
+        a.browser(BrowserCommand::SetRendererStreaming {
+            tab: tab.reference.clone(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+        // Real pixels of the real page, on two connections at once.
+        painted_frame(&mut first, 1024, 768).await;
+        painted_frame(&mut second, 1024, 768).await;
+
+        // The DOM, through the control channel and the helper.
+        let cdp = a
+            .browser(BrowserCommand::RendererCdp {
+                tab: tab.reference.clone(),
+                method: "DOM.getDocument".into(),
+                params: serde_json::json!({ "depth": -1 }),
+            })
+            .await
+            .unwrap();
+        let RendererOutput::Cdp { result } = a.output(&cdp).await else {
+            panic!("not a CDP result")
+        };
+        assert!(result.to_string().contains("BUTTON"), "{result}");
+
+        // Capture: a PNG of the 1024x768 viewport, on a data connection.
+        let op = a
+            .browser(BrowserCommand::CaptureRendererTab {
+                tab: tab.reference.clone(),
+            })
+            .await
+            .unwrap();
+        let RendererOutput::Capture {
+            capture_id,
+            byte_len,
+        } = a.output(&op).await
+        else {
+            panic!("not a capture")
+        };
+        assert_eq!(
+            refusal(
+                b.channel()
+                    .await
+                    .bind_capture(&b.client, op.clone(), capture_id.clone())
+                    .await
+            ),
+            ErrorCode::PermissionDenied
+        );
+        let blob = a
+            .channel()
+            .await
+            .bind_capture(&a.client, op.clone(), capture_id)
+            .await
+            .unwrap();
+        assert_eq!(blob.start().source, BlobSource::Capture);
+        assert_eq!(blob.start().media_type, MediaType::Png);
+        assert_eq!(blob.start().total_bytes, byte_len);
+        let png = blob.read_to_end(64 << 20).await.unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 1024);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 768);
+
+        // An image artifact: its original bytes and stored digest.
+        let blob = a
+            .channel()
+            .await
+            .bind_artifact(&a.client, image.clone())
+            .await
+            .unwrap();
+        let digest: String = blob
+            .start()
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(digest, image_record.sha256);
+        assert_eq!(blob.read_to_end(1 << 20).await.unwrap(), TINY_PNG);
+
+        // The third connection holds frames it never reads. Each resize makes
+        // the helper paint again, and both readers still get every new size.
+        for (width, height) in [(800, 600), (1024, 768), (640, 480), (1280, 720)] {
+            a.browser(BrowserCommand::ResizeRendererTab {
+                tab: tab.reference.clone(),
+                viewport: RendererViewport { width, height },
+            })
+            .await
+            .unwrap();
+            frame_of(&mut first, width, height).await;
+            frame_of(&mut second, width, height).await;
+        }
+
+        let close = a
+            .browser(BrowserCommand::CloseRendererTab {
+                tab: tab.reference.clone(),
+            })
+            .await
+            .unwrap();
+        a.output(&close).await;
+        let close = a
+            .browser(BrowserCommand::CloseRendererSession { session })
+            .await
+            .unwrap();
+        a.output(&close).await;
+        drop((a, b, first, second, stalled));
+        let _ = stop.send(true);
+        server.abort();
+        core.shutdown().await.unwrap();
+    }
 }

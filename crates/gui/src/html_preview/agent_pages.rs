@@ -125,6 +125,15 @@ impl ArtifactPages for CefArtifactPages {
         Ok(page)
     }
 
+    async fn open_artifact(
+        &self,
+        key: &str,
+        html: Vec<u8>,
+        _record: &runtime::artifacts::ArtifactRecord,
+    ) -> Result<Arc<dyn ArtifactPage>, String> {
+        self.open(key, html).await
+    }
+
     fn page(&self, key: &str) -> Option<Arc<dyn ArtifactPage>> {
         self.inner
             .lock()

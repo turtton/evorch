@@ -53,11 +53,17 @@ impl CommandHost {
         restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         local_surface(provenance)?;
-        let ArtifactsCommand::OpenPreview {
-            artifact,
-            session,
-            viewport,
-        } = command;
+        let (artifact, session, viewport) = match command {
+            ArtifactsCommand::OpenPreview {
+                artifact,
+                session,
+                viewport,
+            } => (artifact, session, viewport),
+            ArtifactsCommand::BindArtifactContent {
+                channel_id,
+                artifact,
+            } => return self.bind_artifact_content(&channel_id, &artifact, provenance),
+        };
         let record = self.renderer_artifact_record(&artifact)?;
         let operation_id = self
             .areas
@@ -171,6 +177,34 @@ impl CommandHost {
             return Err(not_found());
         }
         Ok(())
+    }
+    /// Verified like `ReadContent`: the thread and project checks and the stored
+    /// record come first; then the channel (which must be waiting for a
+    /// binding) takes the image bytes. Every failure after the surface check is
+    /// the same denial for a channel, so a caller learns nothing about channels.
+    fn bind_artifact_content(
+        &self,
+        channel: &workbench_protocol::namespaces::browser::RendererId,
+        artifact: &ArtifactRef,
+        provenance: &Provenance,
+    ) -> Result<CommandReply, WorkbenchError> {
+        let record = self.renderer_artifact_record(artifact)?;
+        let service = self.areas.browser.service().map_err(|_| surface_denied())?;
+        let plane = self
+            .areas
+            .browser
+            .renderer
+            .as_ref()
+            .map(|owner| owner.data_plane())
+            .ok_or_else(surface_denied)?;
+        if !plane.is_pending(channel) {
+            return Err(surface_denied());
+        }
+        let (start, reader) = self.areas.artifacts.image_blob(&record)?;
+        service.bind_image(channel, start, reader, provenance)?;
+        Ok(CommandReply::with_result(CommandResult::Artifacts(
+            ArtifactsResult::Bound {},
+        )))
     }
     pub(super) fn renderer_artifact_record(
         &self,

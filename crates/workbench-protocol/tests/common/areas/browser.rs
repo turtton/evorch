@@ -65,6 +65,13 @@ pub fn samples() -> AreaSamples {
         },
         BrowserCommand::SubscribeRendererFrames { tab: tab_ref() },
         BrowserCommand::UnsubscribeRendererFrames { subscription: id() },
+        BrowserCommand::BindRendererData {
+            channel_id: id(),
+            source: RendererDataSource::Frames {
+                subscription: id(),
+                token: id(),
+            },
+        },
     ]
     .into_iter()
     .map(Command::Browser)

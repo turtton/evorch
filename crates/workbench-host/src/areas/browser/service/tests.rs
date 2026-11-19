@@ -59,6 +59,7 @@ impl Fixture {
             gate: HostRestartGate::default(),
             connections: Arc::default(),
             source: projection.source("browser").unwrap(),
+            capture_budget: Arc::new(tokio::sync::Semaphore::new(MAX_CAPTURE_BYTES)),
             state: Mutex::default(),
         });
         service.start().unwrap();
@@ -259,6 +260,9 @@ async fn disconnect_revokes_frame_leases_and_resume_rotates_token_without_transf
                 id: renderer_ipc::TabId(1),
             },
             expires: Instant::now() + GRACE,
+            token: id(),
+            slot: None,
+            bound: None,
         },
     );
     assert_eq!(f.service.reconnect_grace().until, None);
@@ -382,6 +386,46 @@ async fn metadata_observation_never_grants_mutation_or_cross_surface_access() {
     f.finish().await;
 }
 
+/// The Web surface may read metadata only: even with the owner's client id it can
+/// neither start frame delivery nor take a Capture, so it never holds a lease or
+/// an operation a data connection could bind (F3 sends bodies to the desktop
+/// and CLI surfaces only; Web support is a separate plan).
+#[tokio::test]
+async fn the_web_surface_cannot_obtain_frames_or_a_capture_even_as_the_owner() {
+    let f = Fixture::new();
+    let owner = provenance("owner", Surface::Desktop);
+    let web = provenance("owner", Surface::Web);
+    let (session, _) = f.session(&owner);
+    let tab = live_tab(&session, owner.client_id.clone());
+    let reference = tab.public.reference.clone();
+    f.service
+        .state
+        .lock()
+        .unwrap()
+        .tabs
+        .insert(reference.id.as_str().to_owned(), tab);
+    for command in [
+        BrowserCommand::SubscribeRendererFrames {
+            tab: reference.clone(),
+        },
+        BrowserCommand::SetRendererStreaming {
+            tab: reference.clone(),
+            enabled: true,
+        },
+        BrowserCommand::CaptureRendererTab {
+            tab: reference.clone(),
+        },
+    ] {
+        let error = f.command(&web, command).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+    }
+    {
+        let state = f.service.state.lock().unwrap();
+        assert!(state.subscriptions.is_empty());
+    }
+    f.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn private_operation_count_bytes_and_ttl_are_bounded_and_late_completion_stays_cancelled() {
     let f = Fixture::new();
@@ -473,5 +517,94 @@ async fn private_operation_count_bytes_and_ttl_are_bounded_and_late_completion_s
             .reserve(&mut f.service.state.lock().unwrap(), &p, None, None)
             .is_ok()
     );
+    f.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_place_is_held_until_its_lease_lets_go() {
+    let f = Fixture::new();
+    let plane = f.service.owner.data_plane();
+    let mut places = (0..data::MAX_FRAME_SUBSCRIPTIONS)
+        .map(|_| plane.frame_slot().unwrap())
+        .collect::<Vec<_>>();
+    assert!(plane.frame_slot().is_none());
+    // The subscription ends while its lease (and so its socket) is still
+    // closing: that lease keeps the place.
+    let held_by_lease = places.pop().unwrap();
+    let held_by_subscription = held_by_lease.clone();
+    drop(held_by_subscription);
+    assert!(plane.frame_slot().is_none());
+    drop(held_by_lease);
+    assert!(plane.frame_slot().is_some());
+    f.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_revoked_capture_keeps_its_budget_until_the_last_transfer_lets_go() {
+    let f = Fixture::new();
+    let owner = provenance("owner", Surface::Desktop);
+    let client = owner.client_id.clone().unwrap();
+    let connection = f.service.connections.open(client.clone());
+    let budget = f.service.capture_budget.clone();
+    let acquire = |len: usize| {
+        budget
+            .clone()
+            .try_acquire_many_owned(u32::try_from(len).unwrap())
+            .ok()
+    };
+    // The rest of the budget is taken by other Captures, so what the stored
+    // Capture holds is all that could be given back.
+    let blob = workbench_protocol::namespaces::browser::data::MAX_CAPTURE_BLOB_BYTES as usize;
+    let _others = acquire(MAX_CAPTURE_BYTES - blob).unwrap();
+    // A Capture of the largest size a data connection may carry, as the
+    // capture command stores it.
+    let operation = id();
+    let capture_id = id();
+    f.service.state.lock().unwrap().captures.insert(
+        capture_id.as_str().to_owned(),
+        Capture {
+            tab: Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            },
+            bytes: Arc::new(HeldBytes {
+                bytes: vec![0; blob],
+                _share: acquire(blob).unwrap(),
+            }),
+            expires: Instant::now() + GRACE,
+            operation: operation.clone(),
+            connection_epoch: Some(connection.epoch()),
+            client: client.clone(),
+            surface: owner.surface,
+            bound: None,
+        },
+    );
+    assert!(acquire(1).is_none(), "the stored Capture is counted");
+    // A data connection binds it through the real binding path and keeps its lease.
+    let channel = f.service.owner.data_plane().open_channel().unwrap();
+    let channel_id = channel.id().clone();
+    f.service
+        .bind_data(
+            &mut f.service.state.lock().unwrap(),
+            &channel_id,
+            &RendererDataSource::Capture {
+                operation_id: operation,
+                capture_id: capture_id.clone(),
+            },
+            &client,
+            &owner,
+        )
+        .unwrap();
+    let lease = channel.bound().await.expect("the channel was bound");
+    // The Capture is revoked (its control connection ends) while the lease
+    // still holds the bytes: the budget stays taken, so another Capture is refused.
+    drop(connection);
+    assert!(f.service.state.lock().unwrap().captures.is_empty());
+    assert!(
+        acquire(1).is_none(),
+        "the lease still holds the revoked Capture's bytes"
+    );
+    drop(lease);
+    assert!(acquire(blob).is_some());
     f.finish().await;
 }

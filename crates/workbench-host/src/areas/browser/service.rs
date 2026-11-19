@@ -1,4 +1,5 @@
 //! Private renderer state: receipts/events carry ids; only local, authorized queries read outputs.
+use super::renderer::data::Revocation;
 use super::renderer::{OwnerError, Phase, RendererOwner, Tab};
 use crate::{
     areas::{AreaHandles, AreaTasks, ProjectionSource},
@@ -21,6 +22,7 @@ use workbench_protocol::{
     ids::ClientId,
     namespaces::{artifacts::ArtifactRef, browser::*},
 };
+mod bind;
 mod operations;
 #[cfg(test)]
 mod tests;
@@ -47,6 +49,33 @@ fn denied() -> WorkbenchError {
 }
 fn busy() -> WorkbenchError {
     error(ErrorCode::Busy, "renderer private resource budget is full")
+}
+/// All image transfer places are in use; the same request can be sent again.
+fn busy_retry() -> WorkbenchError {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        "too many image transfers",
+        RetryAdvice::SameRequest,
+    )
+}
+/// The tab's 4K stream has all the subscriptions it may have. A subscription
+/// ending frees a place, so deciding again after a fresh read is right.
+fn four_k_busy() -> WorkbenchError {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        "a 4K frame stream has reached its subscription limit",
+        RetryAdvice::AfterResync,
+    )
+}
+/// Whether the tab's frames are a 4K stream at 30fps or more, as the budget counts it.
+fn is_four_k_stream(viewport: RendererViewport, fps: u8) -> bool {
+    fps >= 30
+        && renderer_ipc::Viewport {
+            width: viewport.width,
+            height: viewport.height,
+        }
+        .frame_bytes()
+            == renderer_ipc::MAX_FRAME_BYTES
 }
 fn local(p: &Provenance) -> Result<&ClientId, WorkbenchError> {
     p.validate().map_err(|_| denied())?;
@@ -85,10 +114,38 @@ struct Operation {
     bytes: usize,
     cancel: tokio::sync::watch::Sender<bool>,
 }
+/// The bytes of a Capture and the share of the Capture budget they occupy. The
+/// share returns when the last reference is dropped: the Capture entry, and
+/// every transfer still reading from it after the entry was revoked.
+struct HeldBytes {
+    bytes: Vec<u8>,
+    _share: tokio::sync::OwnedSemaphorePermit,
+}
+impl std::ops::Deref for HeldBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+/// An image artifact transfer: the host's half of its lease, tied to the
+/// control connection that bound it so a disconnect or a drain ends it.
+struct ImageTransfer {
+    client: ClientId,
+    connection_epoch: Option<ConnectionEpoch>,
+    revocation: Revocation,
+}
 struct Capture {
     tab: Tab,
-    bytes: Vec<u8>,
+    bytes: Arc<HeldBytes>,
     expires: Instant,
+    /// The Capture operation that produced it; the binding names it again.
+    operation: RendererId,
+    client: ClientId,
+    surface: Surface,
+    connection_epoch: Option<ConnectionEpoch>,
+    /// Set once a data connection is bound: the transfer is then the only
+    /// reader and the Capture goes with it.
+    bound: Option<Revocation>,
 }
 struct Subscription {
     client: ClientId,
@@ -97,6 +154,18 @@ struct Subscription {
     session: Option<String>,
     tab: Tab,
     expires: Instant,
+    token: RendererId,
+    /// A place of the core-wide subscription limit; the lease keeps it too.
+    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    /// Set once a data connection is bound. The token is spent then; dropping
+    /// the subscription drops this and ends the lease.
+    bound: Option<Revocation>,
+}
+fn alive_after(bound: &Option<Revocation>, expires: Instant, now: Instant) -> bool {
+    match bound {
+        Some(revocation) => !revocation.finished(),
+        None => expires > now,
+    }
 }
 /// A copy of when the preview control grace of a disconnected client ends.
 ///
@@ -115,6 +184,7 @@ struct State {
     operations: HashMap<String, Operation>,
     captures: HashMap<String, Capture>,
     subscriptions: HashMap<String, Subscription>,
+    images: HashMap<String, ImageTransfer>,
 }
 pub(crate) struct RendererService {
     epoch: u64,
@@ -124,6 +194,8 @@ pub(crate) struct RendererService {
     gate: HostRestartGate,
     connections: Arc<ConnectionHooks>,
     source: ProjectionSource,
+    /// Bytes of Captures that exist, whether in `state` or still being sent.
+    capture_budget: Arc<tokio::sync::Semaphore>,
     state: Mutex<State>,
 }
 impl RendererService {
@@ -141,6 +213,7 @@ impl RendererService {
             source: handles
                 .source("browser")
                 .map_err(|e| BootstrapError::from(e.to_string()))?,
+            capture_budget: Arc::new(tokio::sync::Semaphore::new(MAX_CAPTURE_BYTES)),
             state: Mutex::default(),
         });
         service.start()?;
@@ -162,6 +235,14 @@ impl RendererService {
                 state.subscriptions.retain(|_, lease| {
                     &lease.client != client
                         || lease.connection_epoch.is_some_and(|epoch| epoch > ended)
+                });
+                state.captures.retain(|_, capture| {
+                    &capture.client != client
+                        || capture.connection_epoch.is_some_and(|epoch| epoch > ended)
+                });
+                state.images.retain(|_, image| {
+                    &image.client != client
+                        || image.connection_epoch.is_some_and(|epoch| epoch > ended)
                 });
             }
         }));
@@ -299,6 +380,7 @@ impl RendererService {
         }
         state.captures.clear();
         state.subscriptions.clear();
+        state.images.clear();
     }
     fn prune(&self) {
         if self.gate.phase() != HostRestartPhase::Open {
@@ -338,12 +420,13 @@ impl RendererService {
             .values()
             .map(|tab| tab.physical)
             .collect::<Vec<_>>();
-        state
-            .captures
-            .retain(|_, capture| capture.expires > now && live.contains(&capture.tab));
-        state
-            .subscriptions
-            .retain(|_, lease| lease.expires > now && live.contains(&lease.tab));
+        state.captures.retain(|_, capture| {
+            alive_after(&capture.bound, capture.expires, now) && live.contains(&capture.tab)
+        });
+        state.subscriptions.retain(|_, lease| {
+            alive_after(&lease.bound, lease.expires, now) && live.contains(&lease.tab)
+        });
+        state.images.retain(|_, image| !image.revocation.finished());
         for operation in state.operations.values_mut() {
             if operation
                 .tab

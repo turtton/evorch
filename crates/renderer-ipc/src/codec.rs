@@ -181,17 +181,41 @@ pub fn write_message(
     stream.flush().map_err(|e| classify(&e, false))
 }
 
-/// Reads one message.
-///
-/// The first byte waits for the stream's current read timeout (none for an
-/// idle control reader); once a message has begun, the rest must arrive within
-/// `message_timeout`. `body_buf` is reused for the body so a steady frame
-/// stream does not allocate per frame.
+/// What to do with a body whose header and meta were already read.
+pub enum Admit {
+    /// Read the body into this buffer (cleared first, grown to the body's
+    /// length). The caller reserved whatever the buffer costs.
+    Read(Vec<u8>),
+    /// Read the body and drop it without buffering, to stay in step with the
+    /// stream (for example a stale frame or one over a memory budget).
+    Discard,
+}
+
+/// Reads one message. The first byte waits for the stream's current read
+/// timeout (none for an idle control reader); once a message has begun, the
+/// rest must arrive within `message_timeout`. `body_buf` is reused for the
+/// body so a steady frame stream does not allocate per frame.
 pub fn read_message(
     stream: &UnixStream,
     limits: Limits,
-    mut body_buf: Vec<u8>,
+    body_buf: Vec<u8>,
     message_timeout: Duration,
+) -> Result<Message, CodecError> {
+    let mut buffer = Some(body_buf);
+    read_message_with(stream, limits, message_timeout, |_, _, _| {
+        Ok(Admit::Read(buffer.take().unwrap_or_default()))
+    })
+}
+
+/// Like [`read_message`], but `admit` sees the kind, the meta and the announced
+/// body length **before any body byte is read or buffered**, and decides
+/// whether to buffer, discard or reject it. A discarded body comes back empty.
+/// The meta is already bounded by `limits`, so `admit` may decode it freely.
+pub fn read_message_with(
+    stream: &UnixStream,
+    limits: Limits,
+    message_timeout: Duration,
+    admit: impl FnOnce(Kind, &[u8], usize) -> Result<Admit, CodecError>,
 ) -> Result<Message, CodecError> {
     let mut reader = stream;
     let idle = stream.read_timeout().map_err(|e| classify(&e, false))?;
@@ -211,23 +235,19 @@ pub fn read_message(
     stream
         .set_read_timeout(Some(message_timeout.max(Duration::from_millis(1))))
         .map_err(|e| classify(&e, true))?;
-    let result = read_rest(&mut reader, &mut head, limits, &mut body_buf);
+    let result = read_rest(&mut reader, &mut head, limits, admit);
     let restore = stream.set_read_timeout(idle);
-    let (kind, meta) = result?;
+    let (kind, meta, body) = result?;
     restore.map_err(|e| classify(&e, true))?;
-    Ok(Message {
-        kind,
-        meta,
-        body: body_buf,
-    })
+    Ok(Message { kind, meta, body })
 }
 
 fn read_rest(
     reader: &mut &UnixStream,
     head: &mut [u8; HEADER_LEN],
     limits: Limits,
-    body_buf: &mut Vec<u8>,
-) -> Result<(Kind, Vec<u8>), CodecError> {
+    admit: impl FnOnce(Kind, &[u8], usize) -> Result<Admit, CodecError>,
+) -> Result<(Kind, Vec<u8>, Vec<u8>), CodecError> {
     reader
         .read_exact(&mut head[1..])
         .map_err(|e| classify(&e, true))?;
@@ -259,17 +279,29 @@ fn read_rest(
     reader
         .read_exact(&mut meta)
         .map_err(|e| classify(&e, true))?;
-    body_buf.clear();
-    // `take` + `read_to_end` fills the buffer without first zeroing it.
-    body_buf.reserve(body_len);
-    let read = reader
-        .take(body_len as u64)
-        .read_to_end(body_buf)
-        .map_err(|e| classify(&e, true))?;
-    if read != body_len {
-        return Err(CodecError::Truncated);
+    match admit(kind, &meta, body_len)? {
+        Admit::Read(mut body_buf) => {
+            body_buf.clear();
+            // `take` + `read_to_end` fills the buffer without first zeroing it.
+            body_buf.reserve(body_len);
+            let read = reader
+                .take(body_len as u64)
+                .read_to_end(&mut body_buf)
+                .map_err(|e| classify(&e, true))?;
+            if read != body_len {
+                return Err(CodecError::Truncated);
+            }
+            Ok((kind, meta, body_buf))
+        }
+        Admit::Discard => {
+            let copied = io::copy(&mut reader.take(body_len as u64), &mut io::sink())
+                .map_err(|e| classify(&e, true))?;
+            if copied != body_len as u64 {
+                return Err(CodecError::Truncated);
+            }
+            Ok((kind, meta, Vec::new()))
+        }
     }
-    Ok((kind, meta))
 }
 
 /// Serializes a meta document.
@@ -312,6 +344,43 @@ mod tests {
         let second = read_message(&b, FRAME_LIMITS, first.body, SHORT).unwrap();
         assert_eq!(second.body, [9; 16]);
         assert_eq!(second.body.capacity(), capacity);
+    }
+
+    #[test]
+    fn a_discarded_body_is_consumed_and_the_next_message_stays_in_step() {
+        let (a, b) = pair();
+        write_message(&a, Kind::Frame, b"{}", &[7; 4096], FRAME_LIMITS).unwrap();
+        write_message(&a, Kind::Frame, b"{\"n\":2}", &[1, 2], FRAME_LIMITS).unwrap();
+        let first = read_message_with(&b, FRAME_LIMITS, SHORT, |kind, meta, len| {
+            assert_eq!((kind, meta, len), (Kind::Frame, b"{}".as_slice(), 4096));
+            Ok(Admit::Discard)
+        })
+        .unwrap();
+        assert!(first.body.is_empty() && first.body.capacity() == 0);
+        let second = read_message(&b, FRAME_LIMITS, Vec::new(), SHORT).unwrap();
+        assert_eq!(second.body, [1, 2]);
+    }
+
+    #[test]
+    fn a_rejected_message_is_refused_before_any_body_byte_is_read() {
+        let (a, b) = pair();
+        // The body never arrives: only a refusal made before reading it can
+        // return without waiting for the message timeout.
+        let mut header = b"ERIP".to_vec();
+        header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        header.extend_from_slice(&[Kind::Frame as u8, 0]);
+        header.extend_from_slice(&2u32.to_le_bytes());
+        header.extend_from_slice(&1_000_000u32.to_le_bytes());
+        (&a).write_all(&header).unwrap();
+        (&a).write_all(b"{}").unwrap();
+        let error = read_message_with(&b, FRAME_LIMITS, SHORT, |_, _, len| {
+            Err(CodecError::Malformed(format!("{len} is not acceptable")))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CodecError::Malformed("1000000 is not acceptable".to_owned())
+        );
     }
 
     #[test]

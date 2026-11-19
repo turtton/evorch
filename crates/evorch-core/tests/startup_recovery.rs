@@ -24,6 +24,10 @@ use workbench_host::bootstrap::{
     models::{ProductionModel, compose_production_model},
 };
 
+#[path = "renderer_support/without_artifact_tool.rs"]
+mod without_artifact_tool;
+use without_artifact_tool::WithoutArtifactTool;
+
 struct WaitModel {
     inputs: std::sync::Mutex<BTreeMap<String, runtime::quiesce::ProviderInput>>,
     source: bool,
@@ -344,6 +348,15 @@ async fn open(
         },
     )
     .unwrap();
+    // A core from before the artifact provider sent no `inspect_artifact`.
+    let model: Arc<dyn runtime::AgentModel> = if mode.ends_with("_old") {
+        Arc::new(WithoutArtifactTool(
+            model,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ))
+    } else {
+        model
+    };
     let waiting_model = (mode.ends_with("_wait") || mode.ends_with("_delegate"))
         .then(|| Arc::new(WaitModel::new(mode)));
     let model: Arc<dyn runtime::AgentModel> = waiting_model
@@ -654,6 +667,12 @@ async fn startup_subprocess_worker() {
                 .unwrap();
         }
         turn(&mut events, run).await;
+        if mode == "restore_twice" {
+            host.runtime
+                .send_message(run, "And once more after the boundary".into())
+                .unwrap();
+            turn(&mut events, run).await;
+        }
         let cached = if waiting_model.is_some() {
             0
         } else {
@@ -851,6 +870,64 @@ async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_recovery_of_a_conversation_from_before_the_artifact_tool_gets_one_tools_only_boundary()
+ {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
+        ScriptedResponse::text_stream("before", "mock-model", ["Waiting for the user"]),
+        ScriptedResponse::text_stream("after", "mock-model", ["Restored in another process"]),
+        ScriptedResponse::text_stream("again", "mock-model", ["The next turn"]),
+    ]);
+    let dir = fixture(&mock);
+    let mut first = Process::spawn(&dir, "capture_old");
+    first.checkpoint("captured").await;
+    first.kill().await;
+    let mut second = Process::spawn(&dir, "restore_twice");
+    second.checkpoint("bootstrapped").await;
+    second.checkpoint("restored").await;
+    assert!(second.child.wait().await.unwrap().success());
+    let requests = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .map(|r| r.body)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    let names = |request: &Value| -> Vec<String> {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let offers = |request: &Value| {
+        names(request)
+            .iter()
+            .filter(|name| name.ends_with("inspect_artifact"))
+            .count()
+    };
+    assert_eq!(
+        offers(&requests[0]),
+        0,
+        "the old core sent no artifact tool"
+    );
+    // The boundary: the resumed run sees the current catalog, which differs
+    // from the stored one by `inspect_artifact` alone ...
+    assert_eq!(offers(&requests[1]), 1);
+    let before = names(&requests[0]);
+    let after = names(&requests[1]);
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(before.iter().all(|name| after.contains(name)));
+    // ... and nothing else changed: with the old array put back, the request
+    // is an ordinary append to the stored conversation.
+    let mut as_before = requests[1].clone();
+    as_before["tools"] = requests[0]["tools"].clone();
+    assert_append_only(CacheProtocol::OpenAi, &requests[0], &as_before).unwrap();
+    // The turn after the boundary reuses the new prefix.
+    assert_eq!(requests[1]["tools"], requests[2]["tools"]);
+    assert_append_only(CacheProtocol::OpenAi, &requests[1], &requests[2]).unwrap();
+}
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_prepared_process_crash_quarantines_the_reserved_claim() {
     crash_boundary("prepared", "Prepared", false).await;

@@ -12,11 +12,14 @@ use serde_json::json;
 
 /// Connects a real client to a hand-driven helper that has answered `Hello`.
 fn connect_to_raw_helper() -> (RendererClient, RawPeer) {
+    connect_to_raw_helper_with(ClientConfig::new(GENERATION))
+}
+
+fn connect_to_raw_helper_with(config: ClientConfig) -> (RendererClient, RawPeer) {
     let (control_core, control_helper) = std::os::unix::net::UnixStream::pair().unwrap();
     let (frames_core, frames_helper) = std::os::unix::net::UnixStream::pair().unwrap();
-    let connecting: JoinHandle<_> = std::thread::spawn(move || {
-        RendererClient::connect(control_core, frames_core, ClientConfig::new(GENERATION))
-    });
+    let connecting: JoinHandle<_> =
+        std::thread::spawn(move || RendererClient::connect(control_core, frames_core, config));
     let (hello, _) = read_request_frame(&control_helper);
     assert!(matches!(hello.request, Request::Hello { .. }));
     raw_response(&control_helper, GENERATION, hello.id.0, hello_ok(), &[]);
@@ -135,7 +138,9 @@ fn damaged_frames_end_the_connection_and_fail_what_is_pending() {
             max_meta: usize::MAX,
             max_body: usize::MAX,
         };
-        write_message(&peer.frames, Kind::Frame, &meta, &body, wide).unwrap();
+        // The client refuses a bad frame as soon as it has read the meta, so it may
+        // close before the body is written: a failed write is the refusal itself.
+        let _ = write_message(&peer.frames, Kind::Frame, &meta, &body, wide);
         let result = waiting.join().unwrap();
         assert!(
             matches!(
@@ -309,4 +314,86 @@ fn latest_slots_are_tab_scoped_and_close_discards_late_frames() {
     read_ack(&peer);
     assert!(client.wait_frame_for(TabId(1), None).is_none());
     client.close();
+}
+
+#[test]
+fn a_frame_over_the_memory_budget_is_acknowledged_and_discarded_unbuffered() {
+    let mut config = ClientConfig::new(GENERATION);
+    config.frame_pool = FramePool::new(8);
+    let pool = config.frame_pool.clone();
+    let (client, peer) = connect_to_raw_helper_with(config);
+    send_frame(&peer, &frame_meta(GENERATION, 1, 1, 1), &[1; 4]);
+    assert_eq!(read_ack(&peer), Ack { seq: 1 });
+    let held = client
+        .wait_newer_frame(TabId(1), None, NEVER)
+        .unwrap()
+        .expect("the first frame is the latest");
+    send_frame(&peer, &frame_meta(GENERATION, 2, 1, 1), &[2; 4]);
+    assert_eq!(read_ack(&peer), Ack { seq: 2 });
+    // The held frame and the new latest fill the budget; a third has no room.
+    send_frame(&peer, &frame_meta(GENERATION, 3, 1, 1), &[3; 4]);
+    assert_eq!(
+        read_ack(&peer),
+        Ack { seq: 3 },
+        "the helper is acknowledged even when the core has no room"
+    );
+    assert_eq!(client.stats().over_budget_frames, 1);
+    assert_eq!(pool.budget().used(), 8);
+    let latest = client
+        .wait_newer_frame(TabId(1), Some(1), NEVER)
+        .unwrap()
+        .unwrap();
+    assert_eq!((latest.seq, latest.bgra.as_slice()), (2, [2; 4].as_slice()));
+    // Letting go of the held frame makes room again.
+    drop(held);
+    send_frame(&peer, &frame_meta(GENERATION, 4, 1, 1), &[4; 4]);
+    assert_eq!(read_ack(&peer), Ack { seq: 4 });
+    let latest = client
+        .wait_newer_frame(TabId(1), Some(2), NEVER)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.seq, 4);
+    assert_eq!(client.stats().over_budget_frames, 1);
+}
+
+#[test]
+fn every_reader_of_the_latest_frame_shares_one_allocation() {
+    let (client, peer) = connect_to_raw_helper();
+    send_frame(&peer, &frame_meta(GENERATION, 1, 1, 1), &[9; 4]);
+    read_ack(&peer);
+    let first = client
+        .wait_newer_frame(TabId(1), None, NEVER)
+        .unwrap()
+        .unwrap();
+    let second = client
+        .wait_newer_frame(TabId(1), None, NEVER)
+        .unwrap()
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert!(
+        client
+            .wait_newer_frame(TabId(1), Some(1), std::time::Duration::from_millis(30))
+            .unwrap()
+            .is_none(),
+        "nothing newer than the sequence already seen"
+    );
+}
+
+#[test]
+fn a_frame_whose_size_disagrees_with_its_metadata_is_refused_before_its_body() {
+    let (client, peer) = connect_to_raw_helper();
+    let meta = frame_meta(GENERATION, 1, 1, 1);
+    let mut header = b"ERIP".to_vec();
+    header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    header.extend_from_slice(&[Kind::Frame as u8, 0]);
+    header.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+    // A 1x1 frame is four bytes; this header claims 1 MiB and sends none.
+    header.extend_from_slice(&(1u32 << 20).to_le_bytes());
+    (&peer.frames).write_all(&header).unwrap();
+    (&peer.frames).write_all(&meta).unwrap();
+    let ended = client.wait_closed_for(std::time::Duration::from_secs(5));
+    assert!(
+        matches!(ended, Some(CloseReason::ProtocolViolation(_))),
+        "{ended:?}"
+    );
 }
