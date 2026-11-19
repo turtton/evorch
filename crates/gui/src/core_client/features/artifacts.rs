@@ -147,10 +147,18 @@ impl ArtifactsFeature {
     }
 
     fn close_open(&mut self) {
-        if let Some(open) = self.open.take()
-            && let Some(tag) = open.data_tag
-        {
-            self.to_cancel.push(tag);
+        if let Some(open) = self.open.take() {
+            self.abandon_decode(open.serial);
+            if let Some(tag) = open.data_tag {
+                self.to_cancel.push(tag);
+            }
+        }
+    }
+
+    /// Nobody waits for the decode of this opening any more.
+    fn abandon_decode(&mut self, serial: u64) {
+        if let Some(job) = self.job.as_mut().filter(|job| job.serial == serial) {
+            job.abandon();
         }
     }
 
@@ -330,12 +338,17 @@ impl ArtifactsFeature {
     /// The work a frame owes the opened artifact: the next chunk, the data
     /// request, the bytes that arrived, the decode that finished.
     fn pump(&mut self, egui_ctx: &egui::Context, ctx: &mut FeatureContext<'_>) {
-        if let Some(job) = &self.job
-            && let Some(result) = job.poll()
-        {
-            let serial = job.serial;
-            self.job = None;
-            self.decoded(egui_ctx, serial, result);
+        if let Some(job) = &self.job {
+            match job.poll() {
+                Some(result) => {
+                    let serial = job.serial;
+                    self.job = None;
+                    self.decoded(egui_ctx, serial, result);
+                }
+                // An abandoned decode that has ended frees the way for the next one.
+                None if job.abandoned() && job.finished() => self.job = None,
+                None => {}
+            }
         }
         enum Step {
             Read(u64),
@@ -695,6 +708,7 @@ impl Feature for ArtifactsFeature {
         let Some(open) = self.open.as_mut().filter(|o| o.data_tag == Some(tag)) else {
             return;
         };
+        let serial = open.serial;
         let lost = match notice {
             // Ready is acted on at the next frame (take); the rest is bookkeeping.
             DataNotice::Started | DataNotice::Ready | DataNotice::Completed => return,
@@ -704,6 +718,7 @@ impl Feature for ArtifactsFeature {
         // The slot is gone with a failure or a cancellation: drop what was decoded.
         open.data_tag = None;
         open.body = Body::Failed(lost);
+        self.abandon_decode(serial);
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {

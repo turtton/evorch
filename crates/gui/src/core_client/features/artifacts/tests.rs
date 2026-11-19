@@ -891,3 +891,145 @@ fn a_connection_lost_while_an_image_is_received_leaves_nothing_to_show() {
     );
     assert!(matches!(rig.body(), Body::Failed(Problem::Busy(_))));
 }
+
+/// A 1×1 PNG whose compressed ICC profile expands to `icc_bytes`: the decoder
+/// expands it while it is created, long before any pixel.
+fn png_with_icc(icc_bytes: usize) -> Vec<u8> {
+    use ::image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+    let mut bytes = Vec::new();
+    let mut encoder = PngEncoder::new(&mut bytes);
+    encoder.set_icc_profile(vec![0; icc_bytes]).unwrap();
+    encoder
+        .write_image(&[0, 0, 0, 0], 1, 1, ExtendedColorType::Rgba8)
+        .unwrap();
+    bytes
+}
+
+#[test]
+fn compressed_metadata_never_reaches_the_decoder_so_it_allocates_nothing_large() {
+    // The profile is 48 MiB once expanded, a few KiB on the wire. Decoding it as
+    // is allocates it in one piece while the decoder is created.
+    let bomb = png_with_icc(48 * 1024 * 1024);
+    assert!(bomb.len() < 256 * 1024, "{}", bomb.len());
+    let stripped = image::strip_png(&bomb).unwrap();
+    assert!(
+        !stripped.windows(4).any(|w| w == b"iCCP"),
+        "the profile is dropped before a decoder exists"
+    );
+    let (decoded, largest) =
+        alloc_probe::largest_allocation(|| image::decode(&bomb, MediaType::Png));
+    assert_eq!(decoded.unwrap().size, [1, 1]);
+    assert!(
+        largest < 1024 * 1024,
+        "the largest single allocation while decoding was {largest} bytes"
+    );
+    // A broken chunk stream is refused, not guessed at.
+    assert!(image::strip_png(b"not a png at all").is_err());
+    assert!(image::strip_png(&bomb[..bomb.len() / 2]).is_err());
+}
+
+/// Counts the largest single allocation of the calling thread while armed: the
+/// decode under test runs on it.
+mod alloc_probe {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct Probe;
+
+    fn note(size: usize) {
+        let _ = ARMED.try_with(|armed| {
+            if armed.get() {
+                let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(size)));
+            }
+        });
+    }
+
+    // SAFETY: every call is forwarded to `System` unchanged; only a size is noted.
+    unsafe impl GlobalAlloc for Probe {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static PROBE: Probe = Probe;
+
+    pub(super) fn largest_allocation<T>(run: impl FnOnce() -> T) -> (T, usize) {
+        LARGEST.with(|largest| largest.set(0));
+        ARMED.with(|armed| armed.set(true));
+        let result = run();
+        ARMED.with(|armed| armed.set(false));
+        (result, LARGEST.with(Cell::get))
+    }
+}
+
+#[test]
+fn a_decode_that_is_abandoned_leaves_no_image_behind_and_blocks_no_new_one() {
+    let picture = reference("t1", 1);
+    let bytes = png(4, 3);
+    let len = bytes.len() as u64;
+    let mut harness = harness(Rig::new("t1"));
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(vec![meta(&picture, "shot.png", "image/png", len)], None),
+    );
+    let sent = open_row(
+        &mut harness,
+        "shot.png",
+        &meta(&picture, "shot.png", "image/png", len),
+    );
+    let data_tag = sent.started[0].0;
+    harness
+        .state_mut()
+        .publish_blob(data_tag, digest(1), len, bytes);
+    harness.step();
+    assert!(matches!(
+        harness.state().body(),
+        Body::Image(ImageView::Decoding)
+    ));
+    // The connection is lost while the decode runs.
+    harness.state_mut().inbox.reset(FeatureId::Artifacts);
+    harness
+        .state_mut()
+        .feature
+        .data(data_tag, DataNotice::Cancelled);
+    let job = harness
+        .state_mut()
+        .feature
+        .job
+        .as_mut()
+        .expect("still running or done");
+    assert!(job.abandoned(), "nobody waits for its result");
+    // The thread ends by itself; its result is dropped, not left in a channel.
+    job.join();
+    harness.step();
+    assert!(
+        harness.state().feature.job.is_none(),
+        "the next decode may start"
+    );
+    assert!(matches!(
+        harness.state().body(),
+        Body::Failed(Problem::Disconnected)
+    ));
+}
