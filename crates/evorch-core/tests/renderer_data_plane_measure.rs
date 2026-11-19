@@ -32,6 +32,90 @@ use workspace_state::{
 mod data_peer;
 use data_peer::Peer;
 
+/// Counts what this process allocates (the core, its clients and the test
+/// harness; the helper is another process). Heap bytes still live after the
+/// transfers are released are what the data plane retains.
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Allocations of 1 MiB or more: frame-sized buffers, not bookkeeping.
+    pub static LARGE: AtomicU64 = AtomicU64::new(0);
+    pub static LIVE: AtomicU64 = AtomicU64::new(0);
+    pub static PEAK: AtomicU64 = AtomicU64::new(0);
+
+    pub struct Counting;
+    // SAFETY: every call is forwarded to `System` unchanged; only counters are touched.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            LIVE.fetch_sub(layout.size() as u64, Relaxed);
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            LIVE.fetch_sub(layout.size() as u64, Relaxed);
+            note(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+    fn note(size: usize) {
+        CALLS.fetch_add(1, Relaxed);
+        BYTES.fetch_add(size as u64, Relaxed);
+        if size >= 1 << 20 {
+            LARGE.fetch_add(1, Relaxed);
+        }
+        let live = LIVE.fetch_add(size as u64, Relaxed) + size as u64;
+        PEAK.fetch_max(live, Relaxed);
+    }
+}
+#[global_allocator]
+static ALLOCATOR: counting::Counting = counting::Counting;
+
+/// Frames the readers have received so far.
+static FRAMES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Proportional set size in KiB of `pid` (`self` for this process).
+fn pss_kib(pid: &str) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("Pss:"))
+                .map(|rest| {
+                    rest.trim()
+                        .trim_end_matches(" kB")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0)
+                })
+        })
+        .unwrap_or(0)
+}
+
+/// PSS in KiB of this process's child processes (the helper).
+fn children_pss_kib() -> u64 {
+    let me = std::process::id();
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{name}/stat")).ok()?;
+            let after = &stat[stat.rfind(')')? + 2..];
+            let parent: u32 = after.split(' ').nth(1)?.parse().ok()?;
+            (parent == me).then(|| pss_kib(&name))
+        })
+        .sum()
+}
+
 const FPS: u32 = 30;
 const WINDOW: Duration = Duration::from_secs(8);
 /// Frames dropped from each reader's statistics while the pipeline warms up.
@@ -271,6 +355,7 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
                     loop {
                         match stream.next_frame_into(&mut bytes).await {
                             Ok(Some(_)) => {
+                                FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let received = now_nanos();
                                 let stamp = u64::from_le_bytes(bytes[..8].try_into().unwrap());
                                 stats.frames += 1;
@@ -298,7 +383,15 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         peers.push((peer, session, tab));
     }
 
+    use std::sync::atomic::Ordering::Relaxed;
     let cpu_before = cpu_seconds();
+    let (calls_before, bytes_before, large_before) = (
+        counting::CALLS.load(Relaxed),
+        counting::BYTES.load(Relaxed),
+        counting::LARGE.load(Relaxed),
+    );
+    let live_before = counting::LIVE.load(Relaxed);
+    counting::PEAK.store(live_before, Relaxed);
     let started = std::time::Instant::now();
     for (peer, _, tab) in &peers {
         peer.browser(BrowserCommand::SetRendererStreaming {
@@ -309,9 +402,21 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         .unwrap();
     }
     // The measurement window itself: a load duration, not a synchronization.
-    tokio::time::sleep(WINDOW).await;
+    let (mut pss_core, mut pss_helper) = (0, 0);
+    while started.elapsed() < WINDOW {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        pss_core = pss_core.max(pss_kib("self"));
+        pss_helper = pss_helper.max(children_pss_kib());
+    }
     let cpu = cpu_seconds() - cpu_before;
     let elapsed = started.elapsed().as_secs_f64();
+    let seen = FRAMES_SEEN.load(Relaxed).max(1);
+    let (calls, bytes, large) = (
+        counting::CALLS.load(Relaxed) - calls_before,
+        counting::BYTES.load(Relaxed) - bytes_before,
+        counting::LARGE.load(Relaxed) - large_before,
+    );
+    let peak_live = counting::PEAK.load(Relaxed).saturating_sub(live_before);
     let rss_peak_mib = status_kib("VmHWM:") / 1024;
     // Closing the session closes its tab; nothing waits for the result, because
     // the tab going away may cancel the close operation itself.
@@ -352,6 +457,22 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         "cpu_cores": cpu / elapsed,
         "rss_peak_mib": rss_peak_mib,
     });
+    // Everything is released: what stays on the heap is retained by the data
+    // plane. The wait is a settling time for background tasks, not a
+    // synchronization with the transfers (readers have all ended above).
+    drop((peers, held));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let retained = counting::LIVE.load(Relaxed).saturating_sub(live_before);
+    let mut line = line;
+    line["frames_received_in_window"] = seen.into();
+    line["pss_core_process_mib"] = (pss_core / 1024).into();
+    line["pss_helper_mib"] = (pss_helper / 1024).into();
+    line["allocs_per_received_frame"] = (calls as f64 / seen as f64).into();
+    line["alloc_bytes_per_received_frame"] = (bytes as f64 / seen as f64).into();
+    line["large_allocs_in_window"] = large.into();
+    line["large_allocs_per_received_frame"] = (large as f64 / seen as f64).into();
+    line["peak_live_heap_mib"] = (peak_live / (1 << 20)).into();
+    line["retained_heap_after_close_kib"] = (retained / 1024).into();
     println!("MEASURE {line}");
     if let Some(path) = std::env::var_os("EVORCH_MEASURE_OUT") {
         use std::io::Write;
@@ -362,7 +483,6 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
             .unwrap();
         writeln!(file, "{line}").unwrap();
     }
-    drop((peers, held));
     let _ = stop.send(true);
     server.abort();
     core.shutdown().await.unwrap();
@@ -392,4 +512,4 @@ scenario!(p720_4tab_2reader, 1280, 720, 4, 2, 0);
 scenario!(p1080_4tab_2reader, 1920, 1080, 4, 2, 0);
 scenario!(k4_1tab_1reader, 3840, 2160, 1, 1, 0);
 scenario!(k4_1tab_4reader, 3840, 2160, 1, 4, 0);
-scenario!(k4_1tab_4reader_1stalled, 3840, 2160, 1, 4, 1);
+scenario!(k4_1tab_3reader_1stalled, 3840, 2160, 1, 3, 1);
