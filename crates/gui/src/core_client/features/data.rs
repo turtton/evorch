@@ -123,11 +123,27 @@ struct Slot {
     source: DataSource,
     payload: Option<DataPayload>,
 }
+/// What the latest-slot inbox has done with frames since the client started: counters only,
+/// no payload. A frame replaced before it was taken is a skip of the display side (the slot
+/// keeps the latest one), so `received - replaced` is what a feature could show at most.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DataStats {
+    /// Frames accepted into a slot.
+    pub frames_received: u64,
+    /// Accepted frames overwritten by a newer one before the feature took them.
+    pub frames_replaced: u64,
+    /// Frames the feature took.
+    pub frames_taken: u64,
+    /// Bytes of frames and blobs waiting in slots right now.
+    pub bytes_held: u64,
+}
+
 #[derive(Default)]
 pub(crate) struct DataInbox {
     generations: HashMap<FeatureId, u64>,
     serial: u64,
     slots: HashMap<(FeatureId, u64), Slot>,
+    stats: DataStats,
 }
 impl DataInbox {
     pub fn generation(&self, feature: FeatureId) -> u64 {
@@ -218,15 +234,36 @@ impl DataInbox {
         {
             return false;
         }
+        if matches!(payload, DataPayload::Frame(_)) {
+            self.stats.frames_received += 1;
+            if matches!(slot.payload, Some(DataPayload::Frame(_))) {
+                self.stats.frames_replaced += 1;
+            }
+        }
         slot.payload = Some(payload);
         true
+    }
+    pub fn stats(&self) -> DataStats {
+        DataStats {
+            bytes_held: self
+                .slots
+                .values()
+                .filter_map(|s| s.payload.as_ref())
+                .map(|p| p.bytes() as u64)
+                .sum(),
+            ..self.stats
+        }
     }
     pub fn remove(&mut self, feature: FeatureId, tag: u64) -> bool {
         self.slots.remove(&(feature, tag)).is_some()
     }
     /// Move, do not clone. At most one latest frame/blob exists per request.
     pub fn take(&mut self, feature: FeatureId, tag: u64) -> Option<DataPayload> {
-        self.slots.get_mut(&(feature, tag))?.payload.take()
+        let payload = self.slots.get_mut(&(feature, tag))?.payload.take();
+        if matches!(payload, Some(DataPayload::Frame(_))) {
+            self.stats.frames_taken += 1;
+        }
+        payload
     }
     #[cfg(test)]
     pub fn usage(&self) -> (usize, u64, u64) {

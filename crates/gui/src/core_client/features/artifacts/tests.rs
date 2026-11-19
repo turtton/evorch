@@ -996,6 +996,9 @@ mod alloc_probe {
             unsafe { System.alloc_zeroed(layout) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // The old block is given up as the new one is taken: a buffer that grows
+            // by doubling must not count every size it passed through as held.
+            forget(layout.size());
             note(new_size);
             unsafe { System.realloc(ptr, layout, new_size) }
         }
@@ -1136,6 +1139,7 @@ fn composition() -> (
             data: DataInbox::default(),
             selection: None,
             expanded: Default::default(),
+            reveal: None,
         },
         ..crate::core_client::Shared::default()
     }));

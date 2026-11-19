@@ -126,7 +126,9 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
     });
 
     let width = ui.available_width().max(MIN_VIEWPORT as f32);
-    let height = (width * 0.6).clamp(200.0, 640.0);
+    // 16:9: the area of a 1280-wide window is 1280x720 and of a 3840-wide one 3840x2160,
+    // the sizes the measurements name (docs/renderer-measurement.md).
+    let height = (width * 9.0 / 16.0).clamp(200.0, MAX_HEIGHT as f32);
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
     let clipped = rect.intersect(ui.clip_rect());
     p.visible = ui.is_visible()
@@ -173,6 +175,16 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
 
     if let Some(status) = &p.status {
         ui.colored_label(warn, status);
+    }
+    // A resize that failed or ended unknown is not sent again by itself for the same
+    // size; this is the explicit way to try it again.
+    if p.resize_failed.is_some()
+        && ui
+            .button("サイズ変更を再試行")
+            .on_hover_text("同じサイズでもう一度送ります")
+            .clicked()
+    {
+        requests.push(UiRequest::Retry(id));
     }
     if p.input.dropped() > 0 {
         ui.weak(format!("{} 件の入力を省きました", p.input.dropped()));

@@ -444,6 +444,15 @@ pub trait Feature: Send {
     ) {
     }
 
+    /// The client is leaving for good (a clean exit, not a lost connection). Names
+    /// what only this client holds in the core and no longer needs, as commands the
+    /// actor sends once on a best-effort basis. Never name anything a run, another
+    /// client or the core's own execution holds: a kill sends nothing at all, so the
+    /// core must keep everything else running either way.
+    fn release(&mut self) -> Vec<Command> {
+        Vec::new()
+    }
+
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
 
@@ -475,6 +484,8 @@ pub struct Features {
     features: Vec<Box<dyn Feature>>,
     selection: Option<Selection>,
     expanded: std::collections::HashMap<FeatureId, bool>,
+    /// A section the composition was asked to open and scroll to at the next pass.
+    reveal: Option<FeatureId>,
     pub(crate) data: DataInbox,
 }
 
@@ -484,6 +495,7 @@ impl Default for Features {
             data: DataInbox::default(),
             selection: None,
             expanded: Default::default(),
+            reveal: None,
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -571,7 +583,9 @@ impl Features {
             f.observe_run(target);
         }
     }
-    /// Local artifact-to-browser routing. Only references cross the boundary.
+    /// Local artifact-to-browser routing. Only references cross the boundary. The
+    /// browser section opens and is scrolled into view: a preview queued while it is
+    /// collapsed would otherwise never start.
     pub fn open_preview(&mut self, artifact: ArtifactRef) {
         if let Some(f) = self
             .features
@@ -579,7 +593,38 @@ impl Features {
             .find(|f| f.id() == FeatureId::Browser)
         {
             f.open_preview(artifact);
+            self.reveal = Some(FeatureId::Browser);
         }
+    }
+
+    /// Open the section of `feature` and scroll it into view at the next pass.
+    pub fn reveal(&mut self, feature: FeatureId) {
+        self.reveal = Some(feature);
+    }
+
+    /// Whether the section of `feature` is shown for this connection.
+    pub fn is_shown(
+        &self,
+        feature: FeatureId,
+        connected: bool,
+        capabilities: &[Capability],
+    ) -> bool {
+        self.features
+            .iter()
+            .any(|f| f.id() == feature && is_available(f.as_ref(), connected, capabilities))
+    }
+
+    /// Counters of the binary slots, for measurements and diagnostics.
+    pub fn data_stats(&self) -> data::DataStats {
+        self.data.stats()
+    }
+
+    /// What the client alone holds in the core, to let go of when it exits cleanly.
+    pub fn release_commands(&mut self) -> Vec<Command> {
+        self.features
+            .iter_mut()
+            .flat_map(|feature| feature.release())
+            .collect()
     }
 
     /// The features shown for a connection with `capabilities`.
@@ -633,6 +678,7 @@ impl Features {
             &mut self.features,
             &mut self.data,
             &mut self.expanded,
+            &mut self.reveal,
             ui,
             view,
             selection_changed,
@@ -724,6 +770,7 @@ fn render_all(
     features: &mut [Box<dyn Feature>],
     data: &mut DataInbox,
     expanded: &mut std::collections::HashMap<FeatureId, bool>,
+    reveal: &mut Option<FeatureId>,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
     selection_changed: bool,
@@ -736,11 +783,18 @@ fn render_all(
         .max_height(ui.available_height())
         .show(ui, |ui| {
             for feature in features.iter_mut() {
-                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     feature_header_id(ui, feature.id()),
                     true,
                 );
+                let revealed = *reveal == Some(feature.id());
+                if revealed {
+                    *reveal = None;
+                    if is_available(feature.as_ref(), view.connected, view.capabilities) {
+                        state.set_open(true);
+                    }
+                }
                 let mut visibility = Visibility {
                     available: is_available(feature.as_ref(), view.connected, view.capabilities),
                     expanded: state.is_open(),
@@ -756,6 +810,9 @@ fn render_all(
                 if !visibility.available {
                     maintain_feature(feature.as_mut(), &mut ctx, selection_changed, visibility);
                     continue;
+                }
+                if revealed {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
                 }
                 let mut clicked = false;
                 let mut header = state.show_header(ui, |ui| {

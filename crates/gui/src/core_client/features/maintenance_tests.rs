@@ -9,6 +9,7 @@ enum Observed {
     Maintain(Visibility, bool),
     Render,
     Disconnected,
+    Preview,
 }
 type Log = Arc<Mutex<Vec<Observed>>>;
 struct Probe {
@@ -27,6 +28,9 @@ impl Feature for Probe {
     }
     fn disconnected(&mut self) {
         self.log.lock().unwrap().push(Observed::Disconnected);
+    }
+    fn open_preview(&mut self, _artifact: ArtifactRef) {
+        self.log.lock().unwrap().push(Observed::Preview);
     }
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
         self.log.lock().unwrap().push(Observed::Selection(
@@ -56,6 +60,7 @@ fn features(log: &Log, availability: Availability) -> Features {
         data: DataInbox::default(),
         selection: None,
         expanded: Default::default(),
+        reveal: None,
     }
 }
 fn take(log: &Log) -> Vec<Observed> {
@@ -83,19 +88,22 @@ fn compose(
     output
 }
 fn title_position(shapes: &[egui::epaint::ClippedShape]) -> egui::Pos2 {
-    fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
+    text_position(shapes, "maintenance probe")
+}
+fn text_position(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> egui::Pos2 {
+    fn find(shape: &egui::Shape, wanted: &str) -> Option<egui::Pos2> {
         match shape {
-            egui::Shape::Text(text) if text.galley.text() == "maintenance probe" => {
+            egui::Shape::Text(text) if text.galley.text() == wanted => {
                 Some(text.pos + text.galley.rect.center().to_vec2())
             }
-            egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, wanted)),
             _ => None,
         }
     }
     shapes
         .iter()
-        .find_map(|s| find(&s.shape))
-        .expect("feature title was drawn")
+        .find_map(|s| find(&s.shape, wanted))
+        .unwrap_or_else(|| panic!("{wanted:?} was drawn"))
 }
 fn assert_cancels(
     rx: &mut tokio::sync::mpsc::Receiver<crate::core_client::connection::Action>,
@@ -489,4 +497,137 @@ fn native_logic_only_minimization_delivers_maintenance_and_cancel_without_a_ui_p
         )]
     );
     assert_cancels(&mut rx, 1);
+}
+
+fn click(ctx: &egui::Context, screen: &mut CoreClientScreen, pos: egui::Pos2) {
+    for pressed in [true, false] {
+        let mut input = input(false);
+        input.events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        compose(ctx, screen, input);
+    }
+}
+
+fn picture() -> ArtifactRef {
+    ArtifactRef {
+        project: ProjectId::new("p").unwrap(),
+        thread: ThreadId::new("t").unwrap(),
+        artifact_id: format!("artifact-{}", "07".repeat(16)),
+        digest: "07".repeat(32),
+    }
+}
+
+#[test]
+fn a_preview_asked_for_in_a_collapsed_section_opens_the_section_so_it_can_start() {
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: features(&log, Availability::Implemented { required: &[] }),
+        ..Shared::default()
+    }));
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
+    let ctx = egui::Context::default();
+    let first = compose(&ctx, &mut screen, input(false));
+    click(&ctx, &mut screen, title_position(&first.shapes));
+    take(&log);
+    compose(&ctx, &mut screen, input(false));
+    let collapsed = take(&log);
+    assert!(
+        matches!(collapsed.as_slice(), [Observed::Maintain(v, true)] if !v.expanded),
+        "the click collapsed the section: {collapsed:?}"
+    );
+    // The same route the artifacts feature takes: the frame's reference reaches the
+    // browser feature and the section is opened for it.
+    shared.lock().unwrap().features.open_preview(picture());
+    compose(&ctx, &mut screen, input(false));
+    let opened = take(&log);
+    assert_eq!(opened.first(), Some(&Observed::Preview));
+    assert!(
+        opened
+            .iter()
+            .any(|o| matches!(o, Observed::Maintain(v, true) if v.expanded)),
+        "{opened:?}"
+    );
+    assert!(opened.contains(&Observed::Render), "{opened:?}");
+    // Asking once opens once: the user may collapse the section again.
+    let again = compose(&ctx, &mut screen, input(false));
+    click(&ctx, &mut screen, title_position(&again.shapes));
+    take(&log);
+    compose(&ctx, &mut screen, input(false));
+    assert!(
+        !take(&log).contains(&Observed::Render),
+        "a spent request is not repeated"
+    );
+}
+
+#[test]
+fn a_preview_the_core_cannot_show_is_refused_with_a_message_not_queued() {
+    let log = Log::default();
+    let mut shared = Shared {
+        connected: true,
+        capabilities: vec![],
+        features: features(
+            &log,
+            Availability::Implemented {
+                required: &[Capability::Queries],
+            },
+        ),
+        ..Shared::default()
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let (mut project, mut selected) = (None, None);
+    crate::core_client::apply_frame(
+        &tx,
+        &mut shared,
+        &mut project,
+        &mut selected,
+        FeatureFrame {
+            previews: vec![picture()],
+            ..FeatureFrame::default()
+        },
+    );
+    assert!(take(&log).is_empty(), "nothing reached the feature");
+    assert!(shared.status.contains("プレビュー"), "{}", shared.status);
+}
+
+#[test]
+fn the_conversation_row_button_opens_the_section_of_what_the_thread_produced() {
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: features(&log, Availability::Implemented { required: &[] }),
+        ..Shared::default()
+    }));
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(
+        shared.clone(),
+        tx,
+        Some(ProjectId::new("p").unwrap()),
+        Some(ThreadId::new("t").unwrap()),
+    );
+    let ctx = egui::Context::default();
+    let first = compose(&ctx, &mut screen, input(false));
+    click(&ctx, &mut screen, title_position(&first.shapes));
+    take(&log);
+    let collapsed = compose(&ctx, &mut screen, input(false));
+    assert!(!take(&log).contains(&Observed::Render));
+    // The button of the conversation row, clicked like a user does.
+    click(
+        &ctx,
+        &mut screen,
+        text_position(&collapsed.shapes, "プレビュー / 検査"),
+    );
+    compose(&ctx, &mut screen, input(false));
+    assert!(
+        take(&log).contains(&Observed::Render),
+        "the section the button names is opened and drawn"
+    );
 }

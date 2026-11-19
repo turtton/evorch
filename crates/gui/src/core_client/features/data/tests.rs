@@ -67,6 +67,30 @@ fn latest_slot_replaces_instead_of_queuing_and_reset_discards_payloads_and_old_r
     assert!(inbox.contains(new));
 }
 #[test]
+fn the_counters_tell_replaced_frames_from_taken_ones_and_forget_nothing_on_reset() {
+    let mut inbox = DataInbox::default();
+    let key = inbox
+        .claim(&action(&inbox, FeatureId::Browser, 3), source())
+        .unwrap();
+    for sequence in 1..=5 {
+        assert!(inbox.publish(key, frame(sequence)));
+    }
+    assert_eq!(inbox.stats().bytes_held, 4, "one latest frame is held");
+    assert!(inbox.take(FeatureId::Browser, 3).is_some());
+    assert!(inbox.take(FeatureId::Browser, 3).is_none());
+    assert_eq!(
+        inbox.stats(),
+        DataStats {
+            frames_received: 5,
+            frames_replaced: 4,
+            frames_taken: 1,
+            bytes_held: 0,
+        }
+    );
+    inbox.reset(FeatureId::Browser);
+    assert_eq!(inbox.stats().frames_received, 5, "counters outlive a reset");
+}
+#[test]
 fn slot_count_and_total_receive_budget_include_incoming_buffers_and_completed_blobs() {
     let mut inbox = DataInbox::default();
     for tag in 0..MAX_FRAME_SUBSCRIPTIONS as u64 {
