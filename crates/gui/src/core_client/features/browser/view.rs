@@ -137,9 +137,12 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
         && clipped.height() >= MIN_VISIBLE_PX;
     // One CSS pixel per frame pixel: the page is laid out at the size of the
     // area in points, and shown stretched over it on a denser display.
+    // A texture may not be larger than the device allows (egui refuses it), so the page
+    // is never asked to be larger than that either.
+    let side = ui.ctx().input(|i| i.max_texture_side) as u32;
     p.want_viewport = Some(RendererViewport {
-        width: (width.round() as u32).clamp(MIN_VIEWPORT, MAX_WIDTH),
-        height: (height.round() as u32).clamp(MIN_VIEWPORT, MAX_HEIGHT),
+        width: (width.round() as u32).clamp(MIN_VIEWPORT, MAX_WIDTH.min(side.max(MIN_VIEWPORT))),
+        height: (height.round() as u32).clamp(MIN_VIEWPORT, MAX_HEIGHT.min(side.max(MIN_VIEWPORT))),
     });
 
     let painter = ui.painter_at(rect);
