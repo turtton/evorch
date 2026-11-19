@@ -51,24 +51,36 @@ if [[ $unit != *-probe ]]; then
         exit 1
     fi
 fi
-if [[ $unit == *-probe ]]; then
-    cpu="" mem=""
-    for p in "${props[@]}"; do
-        case $p in
-            CPUQuota=*) cpu=${p#CPUQuota=}; cpu=${cpu%\%} ;;
-            MemoryMax=*) mem=${p#MemoryMax=} ;;
-        esac
-    done
-    n=${mem%[KMGT]}
-    case $mem in
-        *K) n=$((n * 1024)) ;;
-        *M) n=$((n * 1024 * 1024)) ;;
-        *G) n=$((n * 1024 * 1024 * 1024)) ;;
-        *T) n=$((n * 1024 * 1024 * 1024 * 1024)) ;;
+cpu="" mem=""
+for p in "${props[@]}"; do
+    case $p in
+        CPUQuota=*) cpu=${p#CPUQuota=}; cpu=${cpu%\%} ;;
+        MemoryMax=*) mem=${p#MemoryMax=} ;;
     esac
+done
+n=${mem%[KMGT]}
+case $mem in
+    *K) n=$((n * 1024)) ;;
+    *M) n=$((n * 1024 * 1024)) ;;
+    *G) n=$((n * 1024 * 1024 * 1024)) ;;
+    *T) n=$((n * 1024 * 1024 * 1024 * 1024)) ;;
+esac
+if [[ $unit == *-probe ]]; then
     printf '%s 100000\n%s\n' "$((cpu * 1000))" "$n"
     exit 0
 fi
+# A fake cgroup tree for the scope's first process; MOCK_UNLIMITED leaves the limits out.
+cgdir=$MOCK_STATE/cgroup/mock/$unit.scope
+mkdir -p "$cgdir"
+if [[ ${MOCK_UNLIMITED:-} == 1 ]]; then
+    echo "max 100000" >"$cgdir/cpu.max"
+    echo max >"$cgdir/memory.max"
+else
+    echo "$((cpu * 1000)) 100000" >"$cgdir/cpu.max"
+    echo "$n" >"$cgdir/memory.max"
+fi
+echo "0::/mock/$unit.scope" >"$MOCK_STATE/proc-cgroup-$unit"
+export REPRO_TEST_PROC_CGROUP=$MOCK_STATE/proc-cgroup-$unit REPRO_TEST_CGROUP_ROOT=$MOCK_STATE/cgroup
 echo $$ >"$MOCK_STATE/active/$unit"
 exec "$@"
 EOF
@@ -80,13 +92,17 @@ verb=""
 unit=""
 for a in "${args[@]}"; do
     case $a in
-        is-active | stop | kill) verb=$a ;;
+        is-active | stop | kill | show) verb=$a ;;
         *.scope) unit=${a%.scope} ;;
     esac
 done
 file=$MOCK_STATE/active/$unit
 alive() { [[ -f $file ]] && kill -0 "$(cat "$file")" 2>/dev/null; }
 case $verb in
+    show)
+        if [[ ${MOCK_NO_TIME:-} == 1 ]]; then echo infinity; else echo 50s; fi
+        exit 0
+        ;;
     is-active) alive; exit $? ;;
     stop)
         echo "stop $unit" >>"$MOCK_STATE/stops"
@@ -113,7 +129,7 @@ fail() {
 reset() {
     rm -rf -- "$state"
     mkdir -p "$state/active"
-    unset MOCK_FAIL_REAL MOCK_COLLIDE MOCK_DELAY
+    unset MOCK_FAIL_REAL MOCK_COLLIDE MOCK_DELAY MOCK_UNLIMITED MOCK_NO_TIME
 }
 # run NAME ARGS...: runs the script, leaves stdout in $out, stderr in $err, status in $rc.
 run() {
@@ -257,15 +273,43 @@ expect_rc no-systemd-run 125
 expect_contains no-systemd-run "$err" 'sandbox_access=unsandboxed'
 if [[ -s $work/out ]]; then fail "no-systemd-run: the command ran"; fi
 
-# 9. The in-scope launcher refuses to start stressors outside a matching scope
-#    and rejects malformed arguments, whoever calls it.
+# 9. The in-scope launcher never runs the command, with or without stress, outside
+#    a scope that carries the expected limits, and rejects malformed arguments,
+#    whoever calls it.
+reset
+export MOCK_UNLIMITED=1
+run -- printf ran
+expect_rc unlimited-scope 125
+expect_contains unlimited-scope "$err" "cpu.max is 'max 100000'"
+expect_contains unlimited-scope "$err" 'sandbox_access=unsandboxed'
+if [[ -n $out ]]; then fail "unlimited-scope: the command ran: $out"; fi
+reset
+export MOCK_NO_TIME=1
+run -- printf ran
+expect_rc no-time-limit 125
+expect_contains no-time-limit "$err" 'no time limit'
+if [[ -n $out ]]; then fail "no-time-limit: the command ran: $out"; fi
+reset
+run --stress-cpus 1 -- printf ran
+expect_rc stress-limited 0
+if [[ $out != ran ]]; then fail "stress-limited: expected the command to run inside a verified scope, got: $out"; fi
+reset
+export MOCK_UNLIMITED=1
+run --stress-cpus 1 -- printf ran
+expect_rc stress-unlimited 125
+if [[ -n $out ]]; then fail "stress-unlimited: the command ran: $out"; fi
+unset MOCK_UNLIMITED
 unit=evorch-repro-1-abcdefabcdef-1
 launcher() { "$BASH" "$script" --internal-scope-run "$@" >"$work/out" 2>"$work/err" && rc=0 || rc=$?; err=$(<"$work/err"); }
 rm -f "$work/marker" "$work/stressed"
 launcher "$unit" "$work/marker" 2 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
 if [[ $rc -eq 0 ]]; then fail "launcher: started stressors outside a scope"; fi
-expect_contains launcher "$err" 'refusing to start stressors'
+expect_contains launcher "$err" 'refusing to run'
 if [[ -e $work/marker || -e $work/stressed ]]; then fail "launcher: marker or command created outside a scope"; fi
+launcher "$unit" "$work/marker" 0 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
+if [[ $rc -eq 0 ]]; then fail "launcher: ran the command without stress outside a scope"; fi
+expect_contains launcher-nostress "$err" 'refusing to run'
+if [[ -e $work/marker || -e $work/stressed ]]; then fail "launcher: marker or command created outside a scope (no stress)"; fi
 launcher not-a-unit "$work/marker" 2 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
 expect_rc launcher-unit 2
 launcher "$unit" "$work/marker" 999 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"

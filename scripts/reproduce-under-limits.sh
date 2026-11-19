@@ -74,11 +74,11 @@ now_ms() {
 signal_name() { kill -l "$1" 2>/dev/null || printf 'signal %s' "$1"; }
 
 # Internal mode, executed INSIDE the scope as the scope's first process. It
-# proves to the parent that the scope was really created (marker file), then
-# either becomes the command or, with stress, runs it next to CPU stressors.
-# Stressors are only started after the scope identity and its CPU, memory and
-# time limits were read back, so load can never be generated outside the limits.
-# All arguments are validated because anybody can call this mode directly.
+# reads back the scope identity and its CPU, memory and time limits, and only
+# then proves to the parent that the scope is real (marker file) and either
+# becomes the command or, with stress, runs it next to CPU stressors. Neither the
+# command nor any load is started outside the limits, whoever calls this mode.
+# All arguments are validated for the same reason.
 scope_run() {
     local unit=${1:-} marker=${2:-} stress=${3:-} stress_secs=${4:-}
     local want_cpu=${5:-} want_mem=${6:-} ctl=${7:-} sep=${8:-}
@@ -90,11 +90,6 @@ scope_run() {
     [[ $stress =~ ^[0-9]{1,3}$ ]] || die "$EX_USAGE" "internal: bad stressor count"
     stress=$((10#$stress))
     if ((stress > MAX_STRESS_CPUS)); then die "$EX_USAGE" "internal: too many stressors"; fi
-    if ((stress == 0)); then
-        : >"$marker" || die "$EX_NO_LIMITS" "cannot write the start marker"
-        exec "$@"
-    fi
-
     [[ $stress_secs =~ ^[0-9]{1,5}$ ]] || die "$EX_USAGE" "internal: bad stress duration"
     stress_secs=$((10#$stress_secs))
     if ((stress_secs < 1 || stress_secs > MAX_TIMEOUT + 60)); then die "$EX_USAGE" "internal: stress duration out of range"; fi
@@ -102,20 +97,24 @@ scope_run() {
     [[ $want_mem =~ ^[1-9][0-9]*$ ]] || die "$EX_USAGE" "internal: bad expected memory.max"
     [[ -x $ctl ]] || die "$EX_USAGE" "internal: systemctl not executable"
 
-    cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)
-    [[ $cg == */"$unit.scope" ]] || die "$EX_NO_LIMITS" "refusing to start stressors: not inside $unit.scope (cgroup: ${cg:-unknown})"
-    d=/sys/fs/cgroup$cg
+    # The REPRO_TEST_* variables only redirect where the cgroup files are read
+    # from, so that the regression tests can feed fake cgroup trees; every check
+    # below still runs against whatever they point to.
+    cg=$(sed -n 's/^0:://p' "${REPRO_TEST_PROC_CGROUP:-/proc/self/cgroup}" 2>/dev/null || true)
+    [[ $cg == */"$unit.scope" ]] || die "$EX_NO_LIMITS" "refusing to run: not inside $unit.scope (cgroup: ${cg:-unknown})"
+    d=${REPRO_TEST_CGROUP_ROOT:-/sys/fs/cgroup}$cg
     got=""
     read -r got <"$d/cpu.max" 2>/dev/null || true
-    [[ $got == "$want_cpu" ]] || die "$EX_NO_LIMITS" "refusing to start stressors: cpu.max is '$got', expected '$want_cpu'"
+    [[ $got == "$want_cpu" ]] || die "$EX_NO_LIMITS" "refusing to run: cpu.max is '$got', expected '$want_cpu'"
     got=""
     read -r got <"$d/memory.max" 2>/dev/null || true
-    [[ $got == "$want_mem" ]] || die "$EX_NO_LIMITS" "refusing to start stressors: memory.max is '$got', expected '$want_mem'"
+    [[ $got == "$want_mem" ]] || die "$EX_NO_LIMITS" "refusing to run: memory.max is '$got', expected '$want_mem'"
     got=$("$ctl" --user show --property=RuntimeMaxUSec --value "$unit.scope" 2>/dev/null || true)
     if [[ -z $got || $got == infinity ]]; then
-        die "$EX_NO_LIMITS" "refusing to start stressors: the scope has no time limit (RuntimeMaxUSec='${got}')"
+        die "$EX_NO_LIMITS" "refusing to run: the scope has no time limit (RuntimeMaxUSec='${got}')"
     fi
     : >"$marker" || die "$EX_NO_LIMITS" "cannot write the start marker"
+    if ((stress == 0)); then exec "$@"; fi
 
     local -a pids=()
     if command -v stress-ng >/dev/null 2>&1; then
