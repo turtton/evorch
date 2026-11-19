@@ -81,12 +81,8 @@ enum Request {
         project: ProjectId,
         thread: ThreadId,
     },
-    Snapshot {
-        scope: ObservationScope,
-        /// The answer also says whether the scope is still valid.
-        verify: bool,
-    },
-    /// Whether the incarnation of the scope is still valid.
+    Snapshot(ObservationScope),
+    /// Whether the scope is still valid, asked when no snapshot of it is.
     Verify(ObservationScope),
     Subscribe(ObservationScope),
     Token {
@@ -157,8 +153,6 @@ struct Live {
     snapshot_in_flight: bool,
     /// The snapshot should be read again (a change was signalled).
     stale: bool,
-    /// A revocation notice asked the next snapshot to confirm this scope too.
-    verify: bool,
     shown: Option<Shown>,
 }
 
@@ -193,7 +187,9 @@ pub struct ObservationFeature {
     /// Data slots to give back.
     cancels: Vec<u64>,
     outbox: VecDeque<ObservationId>,
-    /// Scopes whose validity is to be read from the core.
+    /// Scopes (exact, generations included) to be confirmed by the core. Apart
+    /// from the live watch: a scope leaves only with the core's answer about it,
+    /// or when the whole session or selection is dropped.
     verify: VecDeque<ObservationScope>,
 }
 
@@ -272,26 +268,63 @@ impl ObservationFeature {
         }
     }
 
-    /// Ask the core whether `scope` (the exact scope, generations included) is
-    /// still valid. The end of one subscription says nothing about it (a
-    /// disconnect or an expired bind ends a subscription too), so the core's
-    /// answer decides, and an answer that does not confirm it counts as lost.
-    /// The live scope is confirmed by its next snapshot, which is read anyway.
+    /// A `Revoked` notice ends one subscription, not necessarily a scope (a
+    /// disconnect or an expired bind ends a subscription too). So whatever is
+    /// on screen is put to the core, and an answer that does not confirm a
+    /// scope counts as lost. A scope that cannot be queued at all is dropped.
     fn queue_verify(&mut self, scope: &ObservationScope) {
-        if let Some(live) = &mut self.live
-            && live.scope == *scope
-        {
-            live.verify = true;
-            live.stale = true;
+        if self.verify.contains(scope) {
             return;
         }
-        let asked = self.verify.contains(scope)
-            || self
+        if self.verify.len() < MAX_VERIFY {
+            self.verify.push_back(scope.clone());
+        } else {
+            self.revoke_scope(scope);
+        }
+    }
+
+    /// The core's answer about a pending scope: it leaves the queue, and what
+    /// the answer does not confirm is dropped. `true` if it was dropped.
+    fn settle(&mut self, scope: &ObservationScope, reply: &FeatureReply) -> bool {
+        let Some(at) = self.verify.iter().position(|s| s == scope) else {
+            return false;
+        };
+        self.verify.remove(at);
+        if Self::confirms(reply, scope) {
+            return false;
+        }
+        self.revoke_scope(scope);
+        true
+    }
+
+    /// Put every pending scope to the core, unless a snapshot of it is already
+    /// asked: that answer serves the confirmation too. The live scope is asked
+    /// as its own snapshot.
+    fn dispatch_verify(&mut self, ctx: &mut FeatureContext<'_>) {
+        let pending: Vec<_> = self.verify.iter().cloned().collect();
+        for scope in pending {
+            let asked = self
                 .requests
                 .values()
-                .any(|r| matches!(r, Request::Verify(s) if s == scope));
-        if !asked && self.verify.len() < MAX_VERIFY {
-            self.verify.push_back(scope.clone());
+                .any(|r| matches!(r, Request::Snapshot(s) | Request::Verify(s) if *s == scope));
+            if asked {
+                continue;
+            }
+            let tag = self.tag();
+            match &mut self.live {
+                Some(live) if live.scope == scope => {
+                    live.snapshot_in_flight = true;
+                    live.stale = false;
+                    self.requests.insert(tag, Request::Snapshot(scope.clone()));
+                }
+                _ => {
+                    self.requests.insert(tag, Request::Verify(scope.clone()));
+                }
+            }
+            ctx.query(
+                tag,
+                Query::Browser(BrowserQuery::GetAgentObservation { scope }),
+            );
         }
     }
 
@@ -504,16 +537,13 @@ impl ObservationFeature {
         }
     }
 
-    fn on_verified(&mut self, scope: &ObservationScope, reply: &FeatureReply) {
-        if !Self::confirms(reply, scope) {
-            self.revoke_scope(scope);
+    fn on_snapshot_reply(&mut self, scope: ObservationScope, reply: FeatureReply) {
+        if self.settle(&scope, &reply) {
+            return;
         }
-    }
-
-    fn on_snapshot_reply(&mut self, scope: ObservationScope, verify: bool, reply: FeatureReply) {
         if !self.live.as_ref().is_some_and(|l| l.scope == scope) {
-            // The watch ended before this answer. A confirmation is still
-            // owed; otherwise only a revocation the core states matters.
+            // The watch ended before this answer: only a revocation the core
+            // states still matters.
             let stated = matches!(
                 &reply,
                 FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
@@ -523,13 +553,9 @@ impl ObservationFeature {
                     BrowserReply::AgentObservation(ObservationReply::Snapshot(s)),
                 )))
                     if s.scope == scope && s.state == ObservationState::Revoked);
-            if stated || verify {
-                self.on_verified(&scope, &reply);
+            if stated {
+                self.revoke_scope(&scope);
             }
-            return;
-        }
-        if verify && !Self::confirms(&reply, &scope) {
-            self.revoke();
             return;
         }
         let Some(live) = &mut self.live else { return };
@@ -559,14 +585,7 @@ impl ObservationFeature {
         for tag in std::mem::take(&mut self.cancels) {
             ctx.cancel_data(tag);
         }
-        while let Some(scope) = self.verify.pop_front() {
-            let tag = self.tag();
-            self.requests.insert(tag, Request::Verify(scope.clone()));
-            ctx.query(
-                tag,
-                Query::Browser(BrowserQuery::GetAgentObservation { scope }),
-            );
-        }
+        self.dispatch_verify(ctx);
         while let Some(subscription) = self.outbox.pop_front() {
             let tag = self.tag();
             self.requests.insert(tag, Request::Unsubscribe);
@@ -627,7 +646,6 @@ impl ObservationFeature {
                 snapshot: None,
                 snapshot_in_flight: false,
                 stale: true,
-                verify: false,
                 shown: None,
             });
         }
@@ -676,16 +694,9 @@ impl ObservationFeature {
         if live.stale && !live.snapshot_in_flight {
             live.stale = false;
             live.snapshot_in_flight = true;
-            let verify = std::mem::take(&mut live.verify);
             let scope = live.scope.clone();
             let tag = self.tag();
-            self.requests.insert(
-                tag,
-                Request::Snapshot {
-                    scope: scope.clone(),
-                    verify,
-                },
-            );
+            self.requests.insert(tag, Request::Snapshot(scope.clone()));
             ctx.query(
                 tag,
                 Query::Browser(BrowserQuery::GetAgentObservation { scope }),
@@ -762,7 +773,7 @@ impl Feature for ObservationFeature {
         self.requests.retain(|_, r| {
             !matches!(
                 r,
-                Request::List { .. } | Request::Snapshot { .. } | Request::Verify(_)
+                Request::List { .. } | Request::Snapshot(_) | Request::Verify(_)
             )
         });
         let selection = ctx.selection();
@@ -780,32 +791,33 @@ impl Feature for ObservationFeature {
             return;
         };
         // The revision is not compared: a state change may come with the same one.
-        if let Some(live) = &mut self.live
-            && live.stage.subscription() == Some(&changed.subscription)
-        {
-            match changed.state {
-                ObservationState::Starting | ObservationState::Live => live.stale = true,
-                // The end of this subscription, not necessarily of the incarnation.
-                ObservationState::Revoked => {
-                    let scope = live.scope.clone();
-                    self.finish(NOTE_ENDED);
-                    self.queue_verify(&scope);
-                }
-                other => self.apply_state(other),
-            }
-            return;
-        }
-        // Another subscription, or one whose stream already ended: the notice
-        // names no scope, so everything on screen is checked with the core.
         if changed.state == ObservationState::Revoked {
+            // Whichever subscription it was, the same is put to the core: every
+            // picture kept and the live scope.
             let scopes: Vec<_> = self
                 .stopped
                 .iter()
                 .map(|s| s.scope.clone())
                 .chain(self.live.as_ref().map(|l| l.scope.clone()))
                 .collect();
+            if self
+                .live
+                .as_ref()
+                .is_some_and(|l| l.stage.subscription() == Some(&changed.subscription))
+            {
+                self.finish(NOTE_ENDED);
+            }
             for scope in &scopes {
                 self.queue_verify(scope);
+            }
+            return;
+        }
+        if let Some(live) = &mut self.live
+            && live.stage.subscription() == Some(&changed.subscription)
+        {
+            match changed.state {
+                ObservationState::Starting | ObservationState::Live => live.stale = true,
+                other => self.apply_state(other),
             }
         }
     }
@@ -832,8 +844,10 @@ impl Feature for ObservationFeature {
                     _ => self.runs = Runs::Failed(NOTE_UNEXPECTED.to_owned()),
                 }
             }
-            Request::Snapshot { scope, verify } => self.on_snapshot_reply(scope, verify, reply),
-            Request::Verify(scope) => self.on_verified(&scope, &reply),
+            Request::Snapshot(scope) => self.on_snapshot_reply(scope, reply),
+            Request::Verify(scope) => {
+                self.settle(&scope, &reply);
+            }
             Request::Subscribe(scope) => self.on_subscribe_reply(scope, reply, tag),
             Request::Token {
                 scope,

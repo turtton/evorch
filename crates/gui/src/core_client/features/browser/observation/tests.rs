@@ -1128,3 +1128,84 @@ fn one_snapshot_answers_both_the_refresh_and_the_confirmation() {
     );
     assert!(rig.state().feature.live.is_some());
 }
+
+#[test]
+fn a_revocation_of_the_new_generation_before_its_stream_ends_still_checks_the_old_picture() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.scopes = vec![scope_gen("run-1", 2)];
+    rig.visible(true);
+    let tag = rig.live_tag();
+    assert_eq!(rig.live_scope().page_generation, 2);
+    assert_eq!(
+        rig.state().feature.stopped.len(),
+        1,
+        "generation 1 waits, 2 has no frame"
+    );
+    rig.core.revoked = vec![scope_gen("run-1", 1)];
+    rig.event(ObservationState::Revoked);
+    assert!(
+        rig.state().feature.live.is_none(),
+        "its own subscription ended"
+    );
+    assert!(
+        rig.state().feature.stopped.is_empty(),
+        "the generation 1 picture was checked and dropped"
+    );
+    rig.feature().data(tag, DataNotice::Completed);
+    rig.pump();
+    assert!(rig.state().feature.stopped.is_empty());
+}
+
+#[test]
+fn a_hidden_view_still_checks_what_an_old_notice_put_in_question() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.visible(false);
+    rig.core.revoked = vec![scope("run-1")];
+    rig.harness.state_mut().visible = true;
+    rig.harness.run_steps(2);
+    let before = rig.core.snapshots();
+    rig.feature()
+        .event(&UiEvent::Browser(BrowserEvent::AgentObservationChanged(
+            ObservationEvent {
+                subscription: old,
+                revision: 1,
+                state: ObservationState::Revoked,
+            },
+        )));
+    rig.harness.state_mut().visible = false;
+    rig.pump();
+    assert_eq!(rig.core.snapshots(), before + 1, "the check was still sent");
+    assert!(
+        rig.state().feature.stopped.is_empty(),
+        "and the picture went"
+    );
+    assert!(rig.state().feature.verify.is_empty());
+}
+
+#[test]
+fn a_pending_check_survives_the_end_of_the_watch_and_leaves_with_its_answer() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let scope = rig.live_scope();
+    let subscription = rig.subscription();
+    rig.feature()
+        .event(&UiEvent::Browser(BrowserEvent::AgentObservationChanged(
+            ObservationEvent {
+                subscription,
+                revision: 1,
+                state: ObservationState::Revoked,
+            },
+        )));
+    assert!(rig.state().feature.live.is_none());
+    assert_eq!(
+        rig.state().feature.verify,
+        [scope],
+        "not tied to the live watch"
+    );
+    rig.pump();
+    assert!(rig.state().feature.verify.is_empty());
+}
