@@ -1,5 +1,5 @@
-//! Planned-only successor pipeline. Product argv/lifecycle integration belongs
-//! to 4b-D-3; no restart command or hidden product test entry is enabled here.
+//! Planned-only successor pipeline. The product entry inspects inherited FDs
+//! before creating its inbox; no public restart command is enabled here.
 use core_instance::{
     ConfigIdentity, InheritedHandoffProof, Instance,
     handoff::{
@@ -63,6 +63,20 @@ impl PlannedBoot {
         entry: HandoffEntry,
     ) -> Result<(Self, InheritedHandoffProof), BootstrapError> {
         Self::adopt_entry_inner(config, parent, entry, |config, parent, entry, _| {
+            Instance::adopt_handoff(config, parent, entry)
+        })
+    }
+    /// Production endpoint policy, under the same physical-adopt deadline.
+    pub fn adopt_default_entry(
+        config: ConfigIdentity,
+        entry: HandoffEntry,
+    ) -> Result<(Self, InheritedHandoffProof), BootstrapError> {
+        Self::adopt_entry_inner(config, Path::new("/tmp"), entry, |config, _, entry, _| {
+            let socket = config.default_socket()?;
+            let parent = socket
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| std::io::Error::other("invalid default IPC parent"))?;
             Instance::adopt_handoff(config, parent, entry)
         })
     }
@@ -298,6 +312,16 @@ impl PlannedBoot {
     }
 }
 impl PendingPlannedHost {
+    pub fn web_config(&self, enabled: bool) -> workbench_web::WebServerConfig {
+        workbench_web::WebServerConfig {
+            enabled: enabled || self.host.config.web.enabled,
+            bind: ([127, 0, 0, 1], self.host.config.web.port).into(),
+            allowed_hosts: self.host.config.web.allowed_hosts.clone(),
+            allowed_origins: self.host.config.web.allowed_origins.clone(),
+            ..Default::default()
+        }
+    }
+
     pub fn control_host(&self) -> Arc<std::sync::Mutex<workbench_host::CommandHost>> {
         self.host.host.clone()
     }

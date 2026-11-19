@@ -1,5 +1,6 @@
 use super::*;
 mod last;
+mod latch;
 use core_launcher::handoff::{
     CurrentElf, HandoffDescription, ProbeLimits, SchemaRange,
     targets::{RestartTarget, TargetRequirements, TargetSelection},

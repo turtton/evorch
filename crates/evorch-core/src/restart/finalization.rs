@@ -223,11 +223,11 @@ impl RestartCoordinator {
             }
             Err(error) => Err(error),
         };
-        // The D-3 raw boundary is deliberately not connected. All successful
-        // preparation paths have already entered synchronous FailedClosed recovery.
+        // A successful raw exec never returns. Every returned path stays closed;
+        // diagnostic ownership has been restored before invalidating this TX.
         let reason = result
             .err()
-            .unwrap_or_else(|| "raw exec is prohibited until D-3".into());
+            .unwrap_or_else(|| "raw exec returned without replacement".into());
         {
             let mut state = self.0.state.lock().unwrap();
             if let Some(attempt) = &state.attempt {

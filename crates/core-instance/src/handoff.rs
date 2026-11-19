@@ -168,6 +168,18 @@ impl AsFd for ShutdownInbox {
     }
 }
 impl ShutdownInbox {
+    /// Allocation-free, non-consuming final exec check. Errors prohibit exec.
+    /// The stopped reader remains owned; pending signals survive a failed exec.
+    pub fn is_pending(&self) -> io::Result<bool> {
+        let mut fd = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = cvt(unsafe { libc::poll(&mut fd, 1, 0) })?;
+        Ok(ready != 0)
+    }
+
     pub fn read_pending(&self) -> io::Result<Vec<ShutdownSignal>> {
         let mut pending = Vec::new();
         // Bound a read even under a continuous signal flood. Standard signals
@@ -471,7 +483,24 @@ impl PreparedExec<'_> {
     /// exec-prohibition latch immediately before this call. The final spawn/FD
     /// fence must remain held; inventoried descriptors must not close/reuse.
     pub unsafe fn raw_exec(mut self) -> io::Result<Infallible> {
-        let result = (|| {
+        // SAFETY: same final-fence contract as this method.
+        let error = unsafe { self.raw_exec_under_latch() };
+        if let Err(restore) = self.restore_failed_exec() {
+            return Err(io::Error::other(format!(
+                "exec failed: {error}; FD restore failed: {restore}"
+            )));
+        }
+        Err(error)
+    }
+    /// The syscall-only portion of raw_exec. No allocation, cleanup or formatting,
+    /// including on error. The caller MUST release its lifecycle/runtime latches
+    /// before calling restore_failed_exec and doing diagnostic recovery.
+    ///
+    /// # Safety
+    /// The same stopped-reader, pending/latch and stable-FD fence requirements as
+    /// raw_exec apply. A returned error is not permission to resume business.
+    pub unsafe fn raw_exec_under_latch(&mut self) -> io::Error {
+        let attempt = || -> io::Result<Infallible> {
             cloexec_all(&self.flags, false)?;
             set_flags(self.instance._lifetime.as_raw_fd(), 0)?;
             set_flags(self.ticket.as_raw_fd(), 0)?;
@@ -480,7 +509,7 @@ impl PreparedExec<'_> {
                     set_flags(*fd, 0)?;
                 }
             }
-            // SAFETY: pointer arrays and their CString backing are owned here.
+            // SAFETY: pointer arrays and CString backing were prepared beforehand.
             unsafe {
                 libc::execve(
                     self.path.as_ptr(),
@@ -489,20 +518,24 @@ impl PreparedExec<'_> {
                 );
             }
             Err(io::Error::last_os_error())
-        })();
-        // Roll back only inventoried stable descriptors; atomic-CLOEXEC FDs
-        // created later are intentionally absent. Keep the ticket alive here.
-        let mut restore_error = None;
-        for (fd, flags) in self.flags.drain(..) {
-            if let Err(error) = set_flags(fd, flags) {
-                restore_error = Some(error);
+        };
+        match attempt() {
+            Err(error) => error,
+            Ok(never) => match never {},
+        }
+    }
+    /// Failed branch only, outside lifecycle/runtime locks. Restore all stable
+    /// inventoried flags, even when an earlier restoration fails.
+    pub fn restore_failed_exec(&mut self) -> io::Result<()> {
+        let mut failure = None;
+        for (fd, flags) in &self.flags {
+            if let Err(error) = set_flags(*fd, *flags) {
+                failure = Some(error);
             }
         }
-        match restore_error {
-            None => result,
-            Some(error) => Err(io::Error::other(format!(
-                "exec failed: {result:?}; restoring descriptor flags failed: {error}"
-            ))),
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
