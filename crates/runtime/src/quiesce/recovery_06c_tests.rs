@@ -437,35 +437,170 @@ async fn unresolved_stop_requires_live_owner_and_exact_claim_new_identity() {
 
 #[tokio::test]
 async fn storage_prepared_proof_does_not_authorize_a_corrupt_runtime_root() {
+    use storage::recovery::restart::{RestartExpectedMember, RestartMetadata, RestartMutation};
+
     let f = Fixture::new(0);
     let run = saved(&f).await;
-    let runtime = new_process(&f);
-    let paused = prepare(&f, &runtime);
-    let claim = paused.claim().clone();
     let db = storage::Database::open(&f.config).unwrap();
-    let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
-    let json: String = conn
-        .query_row(
-            "SELECT record_json FROM recovery_members WHERE manifest_id=?1",
-            [&claim.manifest_id],
-            |r| r.get(0),
+    let manifest = db
+        .recovery_manifests()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .record
+        .unwrap();
+    let member = &manifest.members[0];
+    let record: RunRecoveryRecord = serde_json::from_str(&member.record_json).unwrap();
+    let handle = f._storage.handle();
+    let id = "corrupt-runtime-root";
+    // Bind the healthy expected identities, but seal the malformed opaque runtime
+    // payload below. A valid storage digest/proof is not runtime graph authority.
+    let mut tx = handle
+        .mutate_restart(
+            id.into(),
+            None,
+            RestartMutation::Create(Box::new(RestartMetadata {
+                restart_id: id.into(),
+                capture_id: "corrupt-runtime-root/capture".into(),
+                config_identity: "fixture-config".into(),
+                old_epoch: 1,
+                successor_epoch: 2,
+                old_build: "fixture-build".into(),
+                successor_build: "fixture-build".into(),
+                target_identity: "fixture-target".into(),
+                handoff_version: 1,
+                snapshot_version: 1,
+                storage_version: 62,
+                old_builtin_tool_names: Default::default(),
+                old_compiled_catalog_fingerprint: None,
+                new_compiled_catalog_fingerprint: None,
+                old_effective_tools_fingerprint: None,
+                new_effective_tools_fingerprint: None,
+            })),
         )
         .unwrap();
-    let mut record: serde_json::Value = serde_json::from_str(&json).unwrap();
-    record["root"] = serde_json::json!(claim.members[0].new_incarnation);
-    conn.execute(
-        "UPDATE recovery_members SET record_json=?2 WHERE manifest_id=?1",
-        rusqlite::params![claim.manifest_id, serde_json::to_string(&record).unwrap()],
-    )
-    .unwrap();
+    tx = handle
+        .mutate_restart(
+            id.into(),
+            Some(tx.revision),
+            RestartMutation::BeginCapture(vec![RestartExpectedMember {
+                run_id: member.run_id.clone(),
+                incarnation: member.incarnation.clone(),
+                root_run_id: record.root.to_string(),
+                thread_id: record.thread.clone(),
+                intent_revision: member.intent_revision,
+                snapshot: member.snapshot.clone(),
+                owner_id: None,
+                owner_generation: None,
+                lane_id: None,
+            }]),
+        )
+        .unwrap();
+    tx = handle
+        .mutate_restart(
+            id.into(),
+            Some(tx.revision),
+            RestartMutation::BindComponent {
+                manifest_id: manifest.manifest_id.clone(),
+            },
+        )
+        .unwrap();
+    let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    let mut corrupt: serde_json::Value = serde_json::from_str(&member.record_json).unwrap();
+    let wrong_root = RunId::new(u64::MAX);
+    assert_ne!(wrong_root, run);
+    corrupt["root"] = serde_json::json!(wrong_root);
+    assert_eq!(
+        conn.execute(
+            "UPDATE recovery_members SET record_json=?2 WHERE manifest_id=?1",
+            rusqlite::params![
+                manifest.manifest_id,
+                serde_json::to_string(&corrupt).unwrap()
+            ],
+        )
+        .unwrap(),
+        1
+    );
+    tx = handle
+        .mutate_restart(id.into(), Some(tx.revision), RestartMutation::Commit)
+        .unwrap();
+    handle
+        .mutate_restart(
+            id.into(),
+            Some(tx.revision),
+            RestartMutation::Arm {
+                nonce_hash: "fixture-nonce".into(),
+            },
+        )
+        .unwrap();
+    let successor = new_process(&f);
+    db.validate_restart_capture_digest(id).unwrap();
+
+    // Only storage prepares this claim: runtime preparation would itself inspect
+    // the malformed graph instead of testing the prepared-proof adoption guard.
+    let root = f._dir.path().join("ownership");
+    let leases =
+        storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO).unwrap();
+    let startup = leases
+        .recovery_startup_complete(&f.config.db_path, &root)
+        .unwrap();
+    let claim = handle
+        .claim_recovery_component(
+            storage::recovery::RecoveryClaimRequest {
+                claim_id: "corrupt-runtime-root/claim".into(),
+                manifest_id: manifest.manifest_id.clone(),
+                incarnations: vec![(
+                    run.to_string(),
+                    crate::runtime::ExecutionControl::new(false)
+                        .publication()
+                        .incarnation(),
+                )],
+            },
+            &startup,
+            &root,
+        )
+        .unwrap();
     let (proof, startup, root) = evidence(&f, &claim.claim_id);
     let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
-    let successor = new_process(&f);
     let (_owner, authority) = authority(&f, run);
-    assert!(
-        successor
-            .adopt_prepared_claim(proof, startup, &root, &authority)
-            .is_err()
+    let error = successor
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .err()
+        .expect("corrupt root must be rejected");
+    assert_eq!(
+        error,
+        crate::RuntimeError::Model {
+            reason: "durable intent: prepared root mismatch".into()
+        }
+    );
+    assert!(!successor.has_paused_recovery());
+    assert!(successor.list_agents().is_empty());
+    assert_eq!(db.recovery_claim_snapshot(&claim.claim_id).unwrap(), before);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.model.admission_calls.load(Ordering::SeqCst), 0);
+
+    // A later payload change must still be rejected by the earlier digest fence,
+    // even when that change repairs the root. Never rewrite the sealed digest.
+    assert_eq!(
+        conn.execute(
+            "UPDATE recovery_members SET record_json=?2 WHERE manifest_id=?1",
+            rusqlite::params![manifest.manifest_id, member.record_json],
+        )
+        .unwrap(),
+        1
+    );
+    let (proof, startup, root) = evidence(&f, &claim.claim_id);
+    // The snapshot includes the payload changed by this second fault injection.
+    let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
+    let error = successor
+        .adopt_prepared_claim(proof, startup, &root, &authority)
+        .err()
+        .expect("post-Commit tampering must be rejected");
+    assert_eq!(
+        error,
+        crate::RuntimeError::Model {
+            reason: "durable intent: serialization failed: restart manifest digest changed".into()
+        }
     );
     assert!(!successor.has_paused_recovery());
     assert!(successor.list_agents().is_empty());

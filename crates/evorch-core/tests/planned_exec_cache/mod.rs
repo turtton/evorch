@@ -87,8 +87,8 @@ context_window_tokens = 1000000
         cache.join("models-dev.json"),
     )
     .unwrap();
-    // CoreGraphRecovery deliberately owns its own current catalog directory,
-    // rather than falling back to the routed model's XDG cache or the network.
+    // The shared resolver uses XDG for the startup/default project and
+    // config/catalog for other registered projects; provision both local caches.
     let recovery_catalog = config.join("catalog");
     std::fs::create_dir(&recovery_catalog).unwrap();
     std::fs::copy(
