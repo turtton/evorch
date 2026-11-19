@@ -77,6 +77,15 @@ impl Shared {
                 .any(|i| i.reference.is_none() || i.uploading)
     }
 
+    /// A control-session transition, not a render-time observation. Call once so
+    /// a collapsed/minimized feature cannot retain core-derived bodies or textures.
+    fn disconnect(&mut self) {
+        if self.connected {
+            self.connected = false;
+            self.features.disconnected();
+        }
+    }
+
     fn attachment_draft(
         &mut self,
         project: ProjectId,
@@ -415,12 +424,48 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
 }
 
 impl eframe::App for CoreClientApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.screen.logic(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.screen.ui(ui);
     }
 }
 
 impl CoreClientScreen {
+    /// eframe calls logic without any UI pass while the native window is minimized.
+    /// Keep the two maintenance paths disjoint, including a minimized root whose
+    /// visible child viewport causes eframe to call both logic and ui.
+    fn logic(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().minimized.unwrap_or(false)) {
+            return;
+        }
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let selection = Selection {
+            project: self.project.clone(),
+            thread: self.selected.clone(),
+        };
+        let s = &mut *shared;
+        let view = FeatureView {
+            connected: s.connected,
+            capabilities: &s.capabilities,
+            cache: &s.cache,
+            selection: &selection,
+        };
+        let frame = s.features.maintain_minimized(view);
+        apply_frame(
+            &self.actions,
+            &mut shared,
+            &mut self.project,
+            &mut self.selected,
+            frame,
+        );
+    }
+
     fn draw(&mut self, ui: &mut egui::Ui) {
         let mut shared = self
             .shared
