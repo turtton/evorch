@@ -14,14 +14,18 @@ use workbench_client::{
 };
 use workbench_protocol::namespaces::browser::data::{BlobSource, BlobStart, DataError};
 
+struct Reader {
+    key: DataKey,
+    task: JoinHandle<()>,
+}
 #[derive(Default)]
 pub(super) struct DataReaders {
-    jobs: HashMap<(FeatureId, u64), JoinHandle<()>>,
+    jobs: HashMap<(FeatureId, u64), Reader>,
 }
 impl Drop for DataReaders {
     fn drop(&mut self) {
         for job in self.jobs.values() {
-            job.abort();
+            job.task.abort();
         }
     }
 }
@@ -39,24 +43,25 @@ impl DataReaders {
             }
         });
         if let Some(job) = self.jobs.remove(&(feature, tag)) {
-            job.abort();
-            let _ = job.await;
+            job.task.abort();
+            let _ = job.task.await;
         }
     }
     /// Invalidate slots BEFORE cancelling tasks. Join every reader BEFORE a new
     /// endpoint/epoch/snapshot may bind, including same-epoch reconnects.
     pub async fn stop(&mut self, shared: &Arc<Mutex<Shared>>, ctx: &egui::Context) {
         update(shared, ctx, |s| {
+            let active: Vec<_> = s.features.data.tags().collect();
             s.features.clear_data();
-            for &(feature, tag) in self.jobs.keys() {
+            for (feature, tag) in active {
                 s.features.data_notice(feature, tag, DataNotice::Cancelled);
             }
         });
         for job in self.jobs.values() {
-            job.abort();
+            job.task.abort();
         }
         for (_, job) in self.jobs.drain() {
-            let _ = job.await;
+            let _ = job.task.await;
         }
     }
     pub async fn handle(
@@ -76,58 +81,70 @@ impl DataReaders {
             return;
         };
         let source = source.clone();
-        let mut key = None;
-        update(shared, ctx, |s| {
-            // Joining a replaced reader can yield to a concurrent feature reset.
-            if !s.features.data.current(&action) {
-                return;
+        let key = loop {
+            let mut key = None;
+            let mut stale = Vec::new();
+            update(shared, ctx, |s| {
+                // Reset may race a join. Inspect readers and claim under the same
+                // lock: no new reservation can overlap an old-generation buffer.
+                if !s.features.data.current(&action) {
+                    return;
+                }
+                stale = self
+                    .jobs
+                    .iter()
+                    .filter(|(_, job)| job.task.is_finished() || !s.features.data.contains(job.key))
+                    .map(|(id, _)| *id)
+                    .collect();
+                if !stale.is_empty() {
+                    return;
+                }
+                if !s.connected || client.connection_state() != ConnectionState::Connected {
+                    s.features.data_notice(
+                        action.feature,
+                        action.tag,
+                        DataNotice::Failed(FeatureError::new("disconnected")),
+                    );
+                    return;
+                }
+                if let DataSource::Frames { tab, .. } = &source
+                    && tab.core_epoch != client.server_hello().instance_epoch.0
+                {
+                    s.features.data_notice(
+                        action.feature,
+                        action.tag,
+                        DataNotice::Failed(FeatureError::new("stale renderer epoch")),
+                    );
+                    return;
+                }
+                match s.features.data.claim(&action, source.clone()) {
+                    Ok(k) => key = Some(k),
+                    Err(e) => {
+                        s.features
+                            .data_notice(action.feature, action.tag, DataNotice::Failed(e))
+                    }
+                }
+            });
+            if stale.is_empty() {
+                let Some(key) = key else {
+                    return;
+                };
+                break key;
             }
-            if !s.connected || client.connection_state() != ConnectionState::Connected {
-                s.features.data_notice(
-                    action.feature,
-                    action.tag,
-                    DataNotice::Failed(FeatureError::new("disconnected")),
-                );
-                return;
+            for id in stale {
+                if let Some(job) = self.jobs.remove(&id) {
+                    job.task.abort();
+                    let _ = job.task.await;
+                }
             }
-            if let DataSource::Frames { tab, .. } = &source
-                && tab.core_epoch != client.server_hello().instance_epoch.0
-            {
-                s.features.data_notice(
-                    action.feature,
-                    action.tag,
-                    DataNotice::Failed(FeatureError::new("stale renderer epoch")),
-                );
-                return;
-            }
-            match s.features.data.claim(&action, source.clone()) {
-                Ok(k) => key = Some(k),
-                Err(e) => s
-                    .features
-                    .data_notice(action.feature, action.tag, DataNotice::Failed(e)),
-            }
-        });
-        let Some(key) = key else {
-            return;
         };
-        let finished: Vec<_> = self
-            .jobs
-            .iter()
-            .filter(|(_, j)| j.is_finished())
-            .map(|(k, _)| *k)
-            .collect();
-        for id in finished {
-            if let Some(job) = self.jobs.remove(&id) {
-                let _ = job.await;
-            }
-        }
         let (endpoint, client, shared, ctx) = (
             endpoint.to_owned(),
             client.clone(),
             shared.clone(),
             ctx.clone(),
         );
-        self.jobs.insert((key.feature, key.tag), tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             // Dropping this future also drops a partially connected/binding socket.
             // Bind is ephemeral: no receipt query, retry or automatic rebind.
             tokio::select! {
@@ -143,7 +160,9 @@ impl DataReaders {
                     }
                 }
             }
-        }));
+        });
+        self.jobs
+            .insert((key.feature, key.tag), Reader { key, task });
     }
 }
 fn finish(

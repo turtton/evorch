@@ -158,6 +158,7 @@ async fn disconnect_during_bind_closes_the_data_socket_and_empties_the_slot() {
         .jobs
         .remove(&(FeatureId::Browser, 1))
         .unwrap()
+        .task
         .await
         .unwrap();
     eof(&mut peer).await;
@@ -229,6 +230,7 @@ async fn reset_discards_a_frame_that_finishes_late_and_never_signals_ready() {
         .jobs
         .remove(&(FeatureId::Browser, 1))
         .unwrap()
+        .task
         .await
         .unwrap();
     eof(&mut peer).await;
@@ -273,6 +275,7 @@ async fn data_epoch_must_match_control_and_latest_frames_do_not_accumulate() {
         .jobs
         .remove(&(FeatureId::Browser, 1))
         .unwrap()
+        .task
         .await
         .unwrap();
     assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
@@ -349,8 +352,17 @@ async fn blob_completes_in_a_slot_and_old_epoch_header_is_rejected_without_readi
             .jobs
             .remove(&(FeatureId::Browser, 1))
             .unwrap()
+            .task
             .await
             .unwrap();
+        if epoch == 7 {
+            // The completed slot outlives its reaped task and decoded pixels may
+            // still be displayed by the feature. Disconnect cleanup must signal it.
+            assert!(readers.jobs.is_empty());
+            readers.stop(&shared, &ctx).await;
+            assert_eq!(notices.try_recv().unwrap(), DataNotice::Cancelled);
+            assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+        }
     }
     assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
     readers.stop(&shared, &ctx).await;
@@ -410,4 +422,104 @@ async fn new_control_epoch_refuses_old_tab_and_requires_an_explicit_new_request(
     readers.stop(&shared, &ctx).await;
     eof(&mut peer).await;
     assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn repeated_reset_joins_old_tags_before_reserving_more_readers_and_never_misdelivers_cancel()
+{
+    let (_dir, listener, path) = setup_listener();
+    let (client, mut core) = crate::core_client::connection::tests::connect().await;
+    let (shared, mut notices) = shared();
+    let ctx = egui::Context::default();
+    let mut readers = DataReaders::default();
+    let mut old_peer = None;
+    for tag in 0..(MAX_FRAME_SUBSCRIPTIONS * 2) as u64 {
+        let mut request = action(&shared, source());
+        request.tag = tag;
+        readers.handle(request, &path, &client, &shared, &ctx).await;
+        // Assert before awaiting EOF so a regression fails rather than hanging.
+        assert_eq!(readers.jobs.len(), 1);
+        if let Some(mut peer) = old_peer.take() {
+            eof(&mut peer).await;
+        }
+        let peer = offer(&listener).await;
+        bound(&mut core).await;
+        notice(&mut notices, DataNotice::Started).await;
+        shared
+            .lock()
+            .unwrap()
+            .features
+            .data
+            .reset(FeatureId::Browser);
+        assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+        assert!(notices.try_recv().is_err());
+        old_peer = Some(peer);
+    }
+    readers.stop(&shared, &ctx).await;
+    eof(&mut old_peer.unwrap()).await;
+    assert!(readers.jobs.is_empty());
+    assert!(notices.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn typed_cancel_joins_and_releases_a_bind_but_a_pre_reset_cancel_cannot_cancel_its_replacement()
+ {
+    let (_dir, listener, path) = setup_listener();
+    let (client, mut core) = crate::core_client::connection::tests::connect().await;
+    let (shared, mut notices) = shared();
+    let ctx = egui::Context::default();
+    let mut readers = DataReaders::default();
+    readers
+        .handle(action(&shared, source()), &path, &client, &shared, &ctx)
+        .await;
+    let mut peer = offer(&listener).await;
+    let pending_bind = core.recv_request().await.unwrap();
+    let mut cancel = action(&shared, source());
+    cancel.request = DataRequest::Cancel;
+    readers.handle(cancel, &path, &client, &shared, &ctx).await;
+    assert_eq!(notices.try_recv().unwrap(), DataNotice::Cancelled);
+    assert!(readers.jobs.is_empty());
+    assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+    eof(&mut peer).await;
+    core.reply(
+        &pending_bind.request_id,
+        ReplyResult::Success(ReplyPayload::Command(CommandReply::accepted())),
+    );
+
+    readers
+        .handle(action(&shared, source()), &path, &client, &shared, &ctx)
+        .await;
+    let mut old_peer = offer(&listener).await;
+    bound(&mut core).await;
+    notice(&mut notices, DataNotice::Started).await;
+    let mut stale_cancel = action(&shared, source());
+    stale_cancel.request = DataRequest::Cancel;
+    shared
+        .lock()
+        .unwrap()
+        .features
+        .data
+        .reset(FeatureId::Browser);
+    readers
+        .handle(action(&shared, source()), &path, &client, &shared, &ctx)
+        .await;
+    eof(&mut old_peer).await;
+    let mut replacement = offer(&listener).await;
+    bound(&mut core).await;
+    notice(&mut notices, DataNotice::Started).await;
+    readers
+        .handle(stale_cancel, &path, &client, &shared, &ctx)
+        .await;
+    assert_eq!(readers.jobs.len(), 1);
+    assert!(notices.try_recv().is_err());
+    frame(&mut replacement, 1, 7).await;
+    notice(&mut notices, DataNotice::Ready).await;
+    assert_eq!(shared.lock().unwrap().features.data.usage().1, 4);
+    let mut cancel = action(&shared, source());
+    cancel.request = DataRequest::Cancel;
+    readers.handle(cancel, &path, &client, &shared, &ctx).await;
+    assert_eq!(notices.try_recv().unwrap(), DataNotice::Cancelled);
+    assert!(readers.jobs.is_empty());
+    assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+    eof(&mut replacement).await;
 }

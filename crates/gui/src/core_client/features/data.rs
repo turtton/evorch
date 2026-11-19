@@ -169,6 +169,10 @@ impl DataInbox {
         );
         Ok(key)
     }
+    /// Includes completed slots after their reader task has been reaped.
+    pub fn tags(&self) -> impl Iterator<Item = (FeatureId, u64)> + '_ {
+        self.slots.keys().copied()
+    }
     pub fn contains(&self, key: DataKey) -> bool {
         self.slots
             .get(&(key.feature, key.tag))
