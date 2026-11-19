@@ -26,12 +26,11 @@
 //! * Mutations of one tab go out one at a time (subscription changes, resize,
 //!   user actions, then input), so a press is never overtaken by its release. Moves,
 //!   wheel steps and resizes are coalesced; the queue is bounded.
-//! * Only what render can observe stops a stream: a tab that is not selected,
-//!   or whose area is not on screen ([`BrowserFeature::stop_stream`] is the one
-//!   place that does it). While the feature is collapsed or the window is
-//!   minimized the shared render loop does not call [`Feature::render`], so a
-//!   running stream continues (bounded by the latest-slot: one frame per tab) until
-//!   a hidden hook of the shared loop (follow-up of PR V) calls it.
+//! * A stream stops when its tab is not selected, its area is not on screen, or the
+//!   whole area is not visible. [`BrowserFeature::stop_stream`] is the one place that
+//!   does it; `Feature::maintain` calls it (through the drive step) while the area is
+//!   collapsed, minimized or unavailable, where `render` is not called. Nothing is
+//!   ingested or drawn then, and `disconnected` drops pictures at once.
 //! * After a reconnect within the same core epoch the tab is found again
 //!   (`ListRendererTabs`) and, inside the 30 seconds grace, the session is
 //!   resumed. After a core restart, an expired grace or a helper crash the preview is
@@ -55,6 +54,7 @@ use std::{
 
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, FeatureRequest,
+    Visibility,
     data::{DataNotice, DataPayload, DataSource},
 };
 use frame::{DecodeJob, Decoders, bgra_to_image};
@@ -244,6 +244,17 @@ impl BrowserFeature {
             requests: Vec::new(),
             wake: None,
             notice: None,
+        }
+    }
+
+    /// What came back since the last pass: finished operations and the tab list.
+    fn settle(&mut self, ctx: &mut FeatureContext<'_>) {
+        let now = self.clock.now();
+        for f in mem::take(&mut self.done) {
+            self.on_finished(f, ctx, now);
+        }
+        if let Some(tabs) = self.tabs.take() {
+            self.on_tabs(tabs, now);
         }
     }
 
@@ -1454,16 +1465,40 @@ impl Feature for BrowserFeature {
         self.queue.push_back(artifact);
     }
 
+    fn disconnected(&mut self) {
+        // The data connections are gone with the control session: no texture,
+        // decoded image or stream state may outlive it. What was asked of the
+        // core is settled by `reset` when a session is back.
+        self.data_tags.clear();
+        for p in &mut self.previews {
+            p.forget_connection();
+            p.visible = false;
+        }
+    }
+
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        if visibility.is_visible() {
+            // `render` follows and does the work with the texture context.
+            return;
+        }
+        // Collapsed, minimized or unavailable: nothing is on screen, so no
+        // frame is wanted. The drive step ends the stream through `stop_stream`
+        // and sends what that queued; there is no texture context here, so
+        // nothing is ingested or drawn until the area is shown again.
+        for p in &mut self.previews {
+            p.visible = false;
+        }
+        if !ctx.connected() {
+            return;
+        }
+        self.settle(ctx);
+        self.drive(ctx);
+    }
+
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         let egui_ctx = ui.ctx().clone();
         self.accept_queue();
-        let now = self.clock.now();
-        for f in mem::take(&mut self.done) {
-            self.on_finished(f, ctx, now);
-        }
-        if let Some(tabs) = self.tabs.take() {
-            self.on_tabs(tabs, now);
-        }
+        self.settle(ctx);
         self.ingest(ctx, &egui_ctx);
         self.draw(ui);
         self.drive(ctx);

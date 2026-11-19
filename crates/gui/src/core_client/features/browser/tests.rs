@@ -12,7 +12,7 @@ use std::{
 };
 
 use egui::{Event, Key, Modifiers, PointerButton, Rect, pos2, vec2};
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::{Value, json};
 use workbench_client::renderer::Frame;
 use workbench_protocol::{
@@ -30,7 +30,7 @@ use workbench_protocol::{
 
 use super::{
     super::{
-        FeatureAction, FeatureFrame, FeatureView, Selection,
+        FeatureAction, FeatureFrame, FeatureView, Features, Selection,
         data::{Blob, DataAction, DataInbox, DataKey, DataRequest},
     },
     frame::{PixelError, bgra_to_image, decode_capture},
@@ -1932,4 +1932,381 @@ fn decoder_threads_are_limited_and_count_until_they_really_end() {
     decoders.wait_at_most(0);
     assert_eq!(decoders.active(), 0);
     drop(second);
+}
+
+// ---- the real composition ----------------------------------------------------
+
+/// The browser behind the shared `Features`, so the tests can look inside it.
+struct Forward(Arc<std::sync::Mutex<BrowserFeature>>);
+
+impl Forward {
+    fn with<T>(&self, f: impl FnOnce(&mut BrowserFeature) -> T) -> T {
+        f(&mut self.0.lock().unwrap())
+    }
+}
+
+impl Feature for Forward {
+    fn id(&self) -> FeatureId {
+        FeatureId::Browser
+    }
+    fn title(&self) -> &'static str {
+        "Browser"
+    }
+    fn availability(&self) -> Availability {
+        self.with(|f| f.availability())
+    }
+    fn reset(&mut self) {
+        self.with(|f| f.reset());
+    }
+    fn disconnected(&mut self) {
+        self.with(|f| f.disconnected());
+    }
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        self.with(|f| f.selection_changed(ctx));
+    }
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        self.with(|f| f.maintain(ctx, visibility));
+    }
+    fn event(&mut self, event: &UiEvent) {
+        self.with(|f| f.event(event));
+    }
+    fn reply(&mut self, tag: u64, reply: FeatureReply) {
+        self.with(|f| f.reply(tag, reply));
+    }
+    fn data(&mut self, tag: u64, notice: DataNotice) {
+        self.with(|f| f.data(tag, notice));
+    }
+    fn open_preview(&mut self, artifact: ArtifactRef) {
+        self.with(|f| f.open_preview(artifact));
+    }
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.with(|f| f.render(ui, ctx));
+    }
+}
+
+struct CompState {
+    features: Features,
+    selection: Selection,
+    cache: Cache,
+    frames: Vec<FeatureFrame>,
+}
+
+struct Comp {
+    harness: Harness<'static, CompState>,
+    feature: Arc<std::sync::Mutex<BrowserFeature>>,
+    core: Core,
+    now_ms: Arc<AtomicU64>,
+}
+
+const CAPS: [Capability; 2] = [Capability::Queries, Capability::Commands];
+
+impl Comp {
+    fn new() -> Self {
+        let base = Instant::now();
+        let now_ms = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let now_ms = now_ms.clone();
+            Clock::from_fn(move || base + Duration::from_millis(now_ms.load(Ordering::SeqCst)))
+        };
+        let feature = Arc::new(std::sync::Mutex::new(BrowserFeature::with_clock(clock)));
+        let state = CompState {
+            features: Features {
+                features: vec![Box::new(Forward(feature.clone()))],
+                data: DataInbox::default(),
+                selection: None,
+                expanded: Default::default(),
+            },
+            selection: Selection {
+                project: Some(ProjectId::new("p").unwrap()),
+                thread: None,
+            },
+            cache: Cache::default(),
+            frames: Vec::new(),
+        };
+        let harness = Harness::builder().with_size(SIZE).build_ui_state(
+            |ui, state: &mut CompState| {
+                let view = FeatureView {
+                    connected: true,
+                    capabilities: &CAPS,
+                    cache: &state.cache,
+                    selection: &state.selection,
+                };
+                let frame = state.features.render(ui, view);
+                state.frames.push(frame);
+            },
+            state,
+        );
+        Self {
+            harness,
+            feature,
+            core: Core::new(),
+            now_ms,
+        }
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut BrowserFeature) -> T) -> T {
+        f(&mut self.feature.lock().unwrap())
+    }
+
+    fn advance(&self, by: Duration) {
+        self.now_ms
+            .fetch_add(by.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Answers what a frame asked for, the way the shared connection would.
+    fn serve(&mut self, frame: FeatureFrame) -> bool {
+        let busy = !frame.actions.is_empty() || !frame.data.is_empty();
+        let state = self.harness.state_mut();
+        for action in frame.data {
+            let tag = action.tag;
+            match &action.request {
+                DataRequest::Start(source) => {
+                    self.core.starts.push((tag, source.clone()));
+                    match state.features.data.claim(&action, source.clone()) {
+                        Ok(key) => {
+                            self.core.keys.insert(tag, key);
+                            state.features.data_notice(
+                                FeatureId::Browser,
+                                tag,
+                                DataNotice::Started,
+                            );
+                        }
+                        Err(error) => state.features.data_notice(
+                            FeatureId::Browser,
+                            tag,
+                            DataNotice::Failed(error),
+                        ),
+                    }
+                }
+                DataRequest::Cancel => {
+                    self.core.cancels.push(tag);
+                    self.core.keys.remove(&tag);
+                    state.features.data.remove(FeatureId::Browser, tag);
+                    state
+                        .features
+                        .data_notice(FeatureId::Browser, tag, DataNotice::Cancelled);
+                }
+            }
+        }
+        for action in frame.actions {
+            let reply = match &action.request {
+                FeatureRequest::Command(command) => self.core.command(command),
+                FeatureRequest::Query(query) => self.core.query(query),
+            };
+            state.features.reply(action.feature, action.tag, reply);
+        }
+        busy
+    }
+
+    /// Composes and serves until nothing more is asked.
+    fn pump(&mut self) {
+        for _ in 0..60 {
+            self.harness.run_steps(2);
+            let frames = std::mem::take(&mut self.harness.state_mut().frames);
+            let mut busy = false;
+            for frame in frames {
+                busy |= self.serve(frame);
+            }
+            if !busy {
+                return;
+            }
+        }
+        panic!("the feature kept asking");
+    }
+
+    /// The native logic path of a minimized window: no render, no texture
+    /// context, only the shared maintenance.
+    fn pump_minimized(&mut self) {
+        for _ in 0..60 {
+            let state = self.harness.state_mut();
+            let view = FeatureView {
+                connected: true,
+                capabilities: &CAPS,
+                cache: &state.cache,
+                selection: &state.selection,
+            };
+            let frame = state.features.maintain_minimized(view);
+            if !self.serve(frame) {
+                return;
+            }
+        }
+        panic!("the feature kept asking");
+    }
+
+    fn open(&mut self, n: u64) -> u64 {
+        self.harness.state_mut().features.open_preview(artifact(n));
+        self.pump();
+        self.with(|f| match &f.previews[0].stream {
+            Stream::Live { tag, .. } => *tag,
+            other => panic!("not live: {other:?}"),
+        })
+    }
+
+    fn toggle_header(&mut self) {
+        self.harness.get_by_label("Browser").click();
+        self.harness.run_steps(2);
+    }
+}
+
+#[test]
+fn a_collapsed_area_ends_its_stream_and_a_shown_one_starts_it_again() {
+    let mut comp = Comp::new();
+    let tag = comp.open(1);
+    assert!(comp.core.cancels.is_empty());
+    comp.toggle_header();
+    comp.pump();
+    assert!(
+        comp.core.cancels.contains(&tag),
+        "the cancel reached the connection"
+    );
+    assert_eq!(comp.core.count("unsubscribe"), 1);
+    assert_eq!(comp.core.count("streaming"), 2, "on, then off");
+    comp.with(|f| {
+        assert!(matches!(f.previews[0].stream, Stream::Off));
+        assert!(f.previews[0].picture.texture().is_none());
+    });
+    assert_eq!(comp.harness.state().features.data.usage().0, 0);
+    // Still collapsed: it stays off, however long it takes.
+    comp.advance(Duration::from_secs(10));
+    comp.pump();
+    assert_eq!(comp.core.count("subscribe"), 1);
+    // Expanded again: subscribed again once the cooldown is over.
+    comp.toggle_header();
+    comp.advance(Duration::from_secs(1));
+    comp.pump();
+    assert_eq!(comp.core.count("subscribe"), 2);
+    comp.with(|f| assert!(matches!(f.previews[0].stream, Stream::Live { .. })));
+}
+
+#[test]
+fn a_minimized_window_ends_its_stream_without_a_render() {
+    let mut comp = Comp::new();
+    let tag = comp.open(1);
+    comp.pump_minimized();
+    assert!(comp.core.cancels.contains(&tag));
+    assert_eq!(comp.core.count("unsubscribe"), 1);
+    comp.with(|f| assert!(matches!(f.previews[0].stream, Stream::Off)));
+    // The window is back: the next render subscribes again.
+    comp.advance(Duration::from_secs(1));
+    comp.pump();
+    assert_eq!(comp.core.count("subscribe"), 2);
+}
+
+#[test]
+fn a_disconnect_drops_the_pictures_at_once() {
+    let mut comp = Comp::new();
+    let tag = comp.open(1);
+    let frame = {
+        let tab = comp.with(|f| f.previews[0].tab.clone().unwrap());
+        bgra_frame(&tab, 1, 8, 4)
+    };
+    let key = comp.core.keys[&tag];
+    comp.harness
+        .state_mut()
+        .features
+        .data
+        .publish(key, DataPayload::Frame(frame));
+    comp.harness
+        .state_mut()
+        .features
+        .data_notice(FeatureId::Browser, tag, DataNotice::Ready);
+    comp.pump();
+    comp.with(|f| assert!(f.previews[0].picture.texture().is_some()));
+    comp.harness.state_mut().features.disconnected();
+    comp.with(|f| {
+        let p = &f.previews[0];
+        assert!(p.picture.texture().is_none());
+        assert!(matches!(p.stream, Stream::Off));
+        assert!(f.data_tags.is_empty());
+    });
+}
+
+// ---- decode in flight ----------------------------------------------------------
+
+/// A decode that stays in flight until the returned sender is used.
+fn held_decode(rig: &mut Rig) -> (frame::DecodeJob, std::sync::mpsc::Sender<()>) {
+    let decoders = rig.feature().decoders.clone();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let job = frame::DecodeJob::start_with(
+        vec![0; 16],
+        egui::Context::default(),
+        &decoders,
+        move |_| {
+            wait.recv().ok();
+            Ok(egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]))
+        },
+    )
+    .expect("a free decoder");
+    (job, release)
+}
+
+#[test]
+fn a_capture_asked_for_while_one_decodes_is_not_started() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    let id = rig.preview(0).id;
+    let (job, release) = held_decode(&mut rig);
+    rig.feature().previews[0].capture = Capture::Decoding(job);
+    rig.request(UiRequest::Do(id, Action::Capture));
+    assert_eq!(rig.core.count("capture"), 0);
+    assert!(matches!(rig.preview(0).capture, Capture::Decoding(_)));
+    release.send(()).unwrap();
+    let Capture::Decoding(job) = &rig.preview(0).capture else {
+        unreachable!()
+    };
+    job.wait_ready();
+    rig.pump();
+    assert!(matches!(rig.preview(0).capture, Capture::Idle));
+    rig.request(UiRequest::Do(id, Action::Capture));
+    assert_eq!(rig.core.count("capture"), 1);
+}
+
+#[test]
+fn a_reset_or_a_closed_preview_drops_the_image_but_the_thread_counts_until_it_ends() {
+    for close in [false, true] {
+        let mut rig = Rig::new();
+        rig.open(1);
+        let id = rig.preview(0).id;
+        let decoders = rig.feature().decoders.clone();
+        let (job, release) = held_decode(&mut rig);
+        rig.feature().previews[0].capture = Capture::Decoding(job);
+        if close {
+            rig.request(UiRequest::Close(id));
+            assert!(rig.harness.state().feature.previews.is_empty());
+        } else {
+            rig.reset();
+            assert!(matches!(rig.preview(0).capture, Capture::Idle));
+        }
+        // The image is discarded, but the thread has not ended.
+        assert_eq!(decoders.active(), 1);
+        release.send(()).unwrap();
+        decoders.wait_at_most(0);
+        assert_eq!(decoders.active(), 0);
+    }
+}
+
+#[test]
+fn a_capture_that_finds_every_decoder_busy_is_refused_and_gives_its_slot_back() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    let id = rig.preview(0).id;
+    let decoders = rig.feature().decoders.clone();
+    let held: Vec<_> = (0..frame::MAX_DECODERS)
+        .map(|_| held_decode(&mut rig))
+        .collect();
+    rig.request(UiRequest::Do(id, Action::Capture));
+    let tag = rig.core.starts.last().unwrap().0;
+    let blob = capture_blob(&rig, 1);
+    rig.publish(tag, blob);
+    rig.harness.run_steps(1);
+    for action in std::mem::take(&mut rig.harness.state_mut().frame.data) {
+        rig.data_action(action);
+    }
+    assert!(matches!(rig.preview(0).capture, Capture::Failed(_)));
+    assert!(rig.core.cancels.contains(&tag));
+    assert_eq!(decoders.active(), frame::MAX_DECODERS);
+    for (_job, release) in held {
+        release.send(()).unwrap();
+    }
+    decoders.wait_at_most(0);
 }

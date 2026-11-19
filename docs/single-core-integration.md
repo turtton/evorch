@@ -437,17 +437,17 @@ decoded on one background thread.
 | Operations during a reconnect | a pending operation of a preview is not asked about, and nothing new is sent for it, before the session is back (a detached session refuses it); the Resume goes first and the operations are asked again afterwards |
 | Reconnect | within the same core epoch the tab is found again with `ListRendererTabs`; when the session is detached it is resumed (`ResumeRendererSession`) inside the 30 s grace, counted by the client from the first loss. After the grace, a core restart or a helper crash the preview is `Lost` and only the user's "open again" opens it; nothing is reopened or replayed by itself |
 
-Known limitation (decided with the plan owner, option A): `render_all` does not
-call `Feature::render` while a `CollapsingHeader` is closed or the window is
-minimized, and `cancel_data` and commands can only be issued from `render`
-through the `FeatureContext`. The feature therefore stops a stream for what
-`render` can observe (a tab that is not selected, an area that is not on
-screen, a closing animation) in one function, `stop_stream`, but a collapsed
-feature or a minimized window keeps streaming. The cost is bounded: the shared
-slot keeps one frame per tab (tested), the stream is limited by the core's
-frame rate, and nothing is decoded or uploaded while nothing is drawn. The
-shared hook that calls the feature with a context on non-drawn passes (so
-`stop_stream` can run then) is a follow-up of PR V.
+Hidden areas (Stage 16b PR I2 hooks): `Feature::maintain` runs on every composition pass and on the
+minimized logic tick, with the area's `Visibility`. While the area is not visible (collapsed,
+minimized or unavailable) the feature marks its previews as not shown and runs the drive step
+without a texture context: `stop_stream` cancels the data connection, drops the frame texture
+and queues the unsubscribe and streaming-off commands, and nothing new is subscribed until the
+area is drawn again (then the next render subscribes after the short cooldown). Frames and a
+received Capture are neither decoded nor uploaded while hidden (there is no texture context);
+the inbox slot keeps at most one frame per tab. `Feature::disconnected` (no context) drops the
+frame texture, the Capture image and the stream state at once and forgets the data tags; the
+operations are settled by `reset` when a session is back. `selection_changed` is not used: the
+previews belong to artifacts the user opened, not to the selected project or thread.
 
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
