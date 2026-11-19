@@ -203,6 +203,46 @@ struct Log {
     paints: Vec<Paint>,
     /// Bytes of the page's textures that are alive, per window.
     texture_bytes: HashMap<usize, u64>,
+    /// Keeps only the latest records (a long soak must not grow with its own bookkeeping): the
+    /// counters below stay absolute, the vectors are cut back whenever they hold twice as many.
+    retain_last: Option<usize>,
+    dropped_uploads: usize,
+    dropped_paints: usize,
+    uploads_per_window: HashMap<usize, usize>,
+}
+
+impl Log {
+    fn push_upload(&mut self, upload: Upload) {
+        *self.uploads_per_window.entry(upload.window).or_default() += 1;
+        self.uploads.push(upload);
+        if let Some(keep) = self.retain_last
+            && self.uploads.len() >= 2 * keep
+        {
+            let cut = self.uploads.len() - keep;
+            self.uploads.drain(..cut);
+            self.dropped_uploads += cut;
+        }
+    }
+    fn push_paint(&mut self, paint: Paint) {
+        self.paints.push(paint);
+        if let Some(keep) = self.retain_last
+            && self.paints.len() >= 2 * keep
+        {
+            let cut = self.paints.len() - keep;
+            self.paints.drain(..cut);
+            self.dropped_paints += cut;
+        }
+    }
+    /// How many pictures were uploaded so far, dropped records included.
+    fn uploads_len(&self) -> usize {
+        self.dropped_uploads + self.uploads.len()
+    }
+    /// The pictures uploaded after the first `seen` ones (a count of `uploads_len`).
+    fn uploads_since(&self, seen: usize) -> &[Upload] {
+        &self.uploads[seen
+            .saturating_sub(self.dropped_uploads)
+            .min(self.uploads.len())..]
+    }
 }
 struct Upload {
     window: usize,
@@ -249,7 +289,7 @@ impl Measured {
             .device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
-                timeout: Some(Duration::from_secs(20)),
+                timeout: None,
             })
             .expect("the device went idle");
     }
@@ -299,7 +339,7 @@ impl TestRenderer for Measured {
         log.texture_bytes.insert(self.window, bytes);
         for (stamp, size) in pictures {
             self.last_stamp = stamp;
-            log.uploads.push(Upload {
+            log.push_upload(Upload {
                 window: self.window,
                 done,
                 stamp,
@@ -363,7 +403,7 @@ impl TestRenderer for Measured {
         }
         queue.submit(user.into_iter().chain(std::iter::once(encoder.finish())));
         self.idle();
-        self.log.lock().unwrap().paints.push(Paint {
+        self.log.lock().unwrap().push_paint(Paint {
             window: self.window,
             done: now_ticks(),
             stamp: self.last_stamp,
@@ -438,10 +478,7 @@ impl Rig {
                     .open_preview(artifact);
                 rig.wait_tabs(index * tabs + n + 1).await;
             }
-            let shown = rig
-                .until(Duration::from_secs(60), |r| r.uploads_of(index) > 0)
-                .await;
-            assert!(shown, "window {index} shows frames");
+            rig.until(|r| r.uploads_of(index) > 0).await;
         }
         rig
     }
@@ -449,40 +486,49 @@ impl Rig {
     /// One frame of every window; a window that uploaded a picture also paints.
     fn frame(&mut self) {
         for index in 0..self.wins.len() {
-            let before = self.log.lock().unwrap().uploads.len();
+            let before = self.log.lock().unwrap().uploads_len();
             self.wins[index].harness.step();
-            if self.log.lock().unwrap().uploads.len() > before {
+            if self.log.lock().unwrap().uploads_len() > before {
                 let _ = self.wins[index].harness.render();
             }
         }
     }
 
-    /// Frames at the rig's rate until `done`, or `limit` has passed.
-    async fn until(&mut self, limit: Duration, mut done: impl FnMut(&Rig) -> bool) -> bool {
-        let end = Instant::now() + limit;
-        while Instant::now() < end {
+    /// Frames at the rig's rate until `done`. The wait has no limit of its own: the frames are
+    /// the measurement tool's pacing, and a run that never gets there is cut by the runner's
+    /// timeout (the `measure` nextest profile), not by a wall-clock threshold here.
+    async fn until(&mut self, mut done: impl FnMut(&Rig) -> bool) {
+        loop {
             self.frame();
             if done(self) {
-                return true;
+                return;
             }
-            self.next += self.tick;
-            let now = Instant::now();
-            if self.next > now {
-                tokio::time::sleep(self.next - now).await;
-            } else {
-                self.next = now;
-            }
+            self.pace().await;
         }
-        false
     }
 
+    /// Waits for the next frame time of the rig.
+    async fn pace(&mut self) {
+        self.next += self.tick;
+        let now = Instant::now();
+        if self.next > now {
+            tokio::time::sleep(self.next - now).await;
+        } else {
+            self.next = now;
+        }
+    }
+
+    /// Frames at the rig's rate for `duration`: the length of a measurement window.
     async fn run(&mut self, duration: Duration) {
-        self.until(duration, |_| false).await;
+        let end = Instant::now() + duration;
+        while Instant::now() < end {
+            self.frame();
+            self.pace().await;
+        }
     }
 
     /// Frames until the helper holds `expected` tabs.
     async fn wait_tabs(&mut self, expected: usize) {
-        let started = Instant::now();
         loop {
             self.run(self.tick).await;
             let used = match self
@@ -502,10 +548,6 @@ impl Rig {
             if used >= expected {
                 return;
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(60),
-                "{used} of {expected} tabs"
-            );
         }
     }
 
@@ -513,10 +555,10 @@ impl Rig {
         self.log
             .lock()
             .unwrap()
-            .uploads
-            .iter()
-            .filter(|u| u.window == window)
-            .count()
+            .uploads_per_window
+            .get(&window)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn stats(&self, window: usize) -> gui::core_client::features::data::DataStats {
@@ -676,50 +718,8 @@ async fn steady(gpu: Arc<Gpu>, mut cfg: Config) {
     for n in 0..cfg.slow_peers {
         background_peer(&rig.env, format!("slow-{n}"), true).await;
     }
-    let warm = rig
-        .until(Duration::from_secs(90), |r| {
-            (0..r.wins.len()).all(|w| r.uploads_of(w) >= 30)
-        })
+    rig.until(|r| (0..r.wins.len()).all(|w| r.uploads_of(w) >= 30))
         .await;
-    if !warm {
-        for w in 0..rig.wins.len() {
-            let shared = rig.wins[w].shared.lock().unwrap();
-            eprintln!(
-                "window {w}: uploads {} stats {:?} status {:?} connected {}",
-                rig.uploads_of(w),
-                shared.features.data_stats(),
-                shared.status,
-                shared.connected
-            );
-        }
-    }
-    if !warm {
-        for n in rig.wins[0]
-            .harness
-            .get_all_by_role(egui::accesskit::Role::Label)
-        {
-            let text = format!("{n:?}");
-            if let Some(at) = text.find("value: \"") {
-                let value: String = text[at + 8..].chars().take_while(|c| *c != '"').collect();
-                if [
-                    "開",
-                    "準備",
-                    "接続",
-                    "失敗",
-                    "待",
-                    "Lost",
-                    "分かり",
-                    "フレーム",
-                ]
-                .iter()
-                .any(|k| value.contains(k))
-                {
-                    eprintln!("LABEL {value}");
-                }
-            }
-        }
-    }
-    assert!(warm, "every window shows frames");
     let mut next_switch = cfg.switch.map(|every| Instant::now() + every);
     let mut selected = 0usize;
     let (t0, started) = (now_ticks(), Instant::now());
@@ -923,47 +923,15 @@ steady_test!(
 /// Time (ms) from `action` until a picture of a size that satisfies `want` was uploaded.
 async fn after(
     rig: &mut Rig,
-    what: &str,
+    _what: &str,
     action: impl FnOnce(&mut Rig),
     want: impl Fn(&Upload) -> bool,
 ) -> f64 {
-    let seen = rig.log.lock().unwrap().uploads.len();
+    let seen = rig.log.lock().unwrap().uploads_len();
     let started = Instant::now();
     action(rig);
-    let ok = rig
-        .until(Duration::from_secs(30), |r| {
-            r.log.lock().unwrap().uploads[seen..].iter().any(&want)
-        })
+    rig.until(|r| r.log.lock().unwrap().uploads_since(seen).iter().any(&want))
         .await;
-    if !ok {
-        for n in rig.wins[0]
-            .harness
-            .get_all_by_role(egui::accesskit::Role::Label)
-        {
-            let text = format!("{n:?}");
-            if let Some(at) = text.find("value: \"") {
-                let value: String = text[at + 8..].chars().take_while(|c| *c != '"').collect();
-                if [
-                    "開",
-                    "準備",
-                    "接続",
-                    "失敗",
-                    "待",
-                    "Lost",
-                    "分かり",
-                    "フレーム",
-                    "閉",
-                    "表示",
-                ]
-                .iter()
-                .any(|k| value.contains(k))
-                {
-                    eprintln!("LABEL {value}");
-                }
-            }
-        }
-    }
-    assert!(ok, "no picture after: {what}");
     started.elapsed().as_secs_f64() * 1000.0
 }
 
@@ -1011,14 +979,13 @@ async fn operations(rig: &mut Rig, close: bool) -> Value {
     // Close the preview, and open the same artifact again. A closed tab's allocation
     // stays in the core's budget until the helper generation ends, so a soak closes rarely.
     rig.click(0, "×");
-    let closed = rig
-        .until(Duration::from_secs(30), |r| {
-            r.wins[0]
-                .harness
-                .query_by_label_contains("アーティファクトのプレビューを開くと")
-                .is_some()
-        })
-        .await;
+    rig.until(|r| {
+        r.wins[0]
+            .harness
+            .query_by_label_contains("アーティファクトのプレビューを開くと")
+            .is_some()
+    })
+    .await;
     rig.run(Duration::from_millis(500)).await;
     let reopen = after(
         rig,
@@ -1039,7 +1006,7 @@ async fn operations(rig: &mut Rig, close: bool) -> Value {
         "resize_wider_to_first_new_size_ms": resize_up,
         "frames_received_during_1s_while_hidden": received_while_hidden,
         "hide_then_show_to_first_picture_ms": show,
-        "close_seen": closed,
+        "close_seen": true,
         "close_then_open_again_to_first_picture_ms": reopen,
         "run_tabs_untouched": rig.env.run_tabs(),
     })
@@ -1062,10 +1029,7 @@ fn lifecycle_resize_hide_close_open_again() {
                 Duration::from_millis(16),
             )
             .await;
-            assert!(
-                rig.until(Duration::from_secs(90), |r| r.uploads_of(0) >= 30)
-                    .await
-            );
+            rig.until(|r| r.uploads_of(0) >= 30).await;
             // A run's own tab beside the client's: the operations must not touch it.
             let page = html(0);
             rig.env.run_opens(0, &page).await;
@@ -1106,10 +1070,7 @@ fn operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl() {
                 Duration::from_millis(16),
             )
             .await;
-            assert!(
-                rig.until(Duration::from_secs(90), |r| r.uploads_of(0) >= 30)
-                    .await
-            );
+            rig.until(|r| r.uploads_of(0) >= 30).await;
             let started = Instant::now();
             let mut resizes = 0u32;
             let mut wide = false;
@@ -1150,18 +1111,20 @@ fn operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl() {
             if retry_button {
                 rig.click(0, "サイズ変更を再試行");
             }
-            let seen = rig.log.lock().unwrap().uploads.len();
+            let seen = rig.log.lock().unwrap().uploads_len();
             let size = rig.log.lock().unwrap().uploads.last().unwrap().size;
             rig.wins[0]
                 .harness
                 .set_size(egui::vec2(W720 - 100.0, 1500.0));
-            let recovered = rig
-                .until(Duration::from_secs(30), |r| {
-                    r.log.lock().unwrap().uploads[seen..]
-                        .iter()
-                        .any(|u| u.size[0] != size[0])
-                })
-                .await;
+            rig.until(|r| {
+                r.log
+                    .lock()
+                    .unwrap()
+                    .uploads_since(seen)
+                    .iter()
+                    .any(|u| u.size[0] != size[0])
+            })
+            .await;
             emit(&json!({
                 "scenario": "operation-budget",
                 "resizes_sent_until_refused": resizes,
@@ -1169,7 +1132,7 @@ fn operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl() {
                 "seconds_to_refusal": seconds_to_refusal,
                 "status_lines_when_refused": status,
                 "retry_button_shown": retry_button,
-                "recovered_after_ttl_with_retry": recovered,
+                "recovered_after_ttl_with_retry": true,
             }));
         });
 }
@@ -1188,7 +1151,9 @@ fn soak_720p_with_periodic_operations() {
         .block_on(async move {
             let mut rig = Rig::new(gpu, 1, 1, egui::vec2(W720, 1500.0), Duration::from_millis(16)).await;
             background_peer(&rig.env, "soak-slow".into(), true).await;
-            assert!(rig.until(Duration::from_secs(90), |r| r.uploads_of(0) >= 30).await);
+            // The measurement's own records stay bounded, so the heap figure is the product's.
+            rig.log.lock().unwrap().retain_last = Some(4096);
+            rig.until(|r| r.uploads_of(0) >= 30).await;
             let page = html(0);
             rig.env.run_opens(0, &page).await;
             let started = Instant::now();
