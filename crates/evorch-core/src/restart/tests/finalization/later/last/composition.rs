@@ -2,6 +2,7 @@
 //! Tracing is an observation seam only. Channels control progress; Instant is
 //! used exclusively for reporting, never for a functional verdict.
 use super::*;
+pub(super) mod drain;
 use std::time::Instant;
 use tokio::sync::{Notify, oneshot};
 use tracing_subscriber::{Layer, layer::SubscriberExt};
@@ -285,9 +286,13 @@ impl Load {
         }
     }
     pub(super) async fn release(&self, core: &RestartCoordinator, host: &BootstrappedHost) {
+        // This matrix proves durability/order and reports wall-clock intervals,
+        // not scheduler speed. Freeze only through the real storage drain;
+        // drain.rs separately crosses the production budget with an explicit clock.
         self.trace
             .until(|s| s.events.iter().any(|e| e.0 == "flush_begin"))
             .await;
+        tokio::time::pause();
         assert_eq!(
             core.0.state.lock().unwrap().completed_stage,
             Some(ExitStage::WorkersJoined)
@@ -323,6 +328,10 @@ impl Load {
         );
         core.0.runtime.event_bus().emit(event(self.queue));
         release.send(()).unwrap();
+        self.trace
+            .until(|s| s.events.iter().any(|e| e.0 == "writer_barrier_end"))
+            .await;
+        tokio::time::resume();
     }
     pub(super) fn verify(&self, host: &BootstrappedHost, runs: &[RunId]) {
         host.composition.storage_writer.barrier().unwrap();
