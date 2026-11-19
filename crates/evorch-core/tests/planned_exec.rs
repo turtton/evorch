@@ -34,13 +34,17 @@ impl Drop for Child {
 }
 #[test]
 fn prepared_raw_exec_reaches_product_bootstrap_with_multiple_checkpoints() {
-    product_handoff(false);
+    product_handoff(false, false);
 }
 #[test]
 fn product_rejects_unexpected_inherited_fd_without_cold_fallback() {
-    product_handoff(true);
+    product_handoff(true, false);
 }
-fn product_handoff(bad_fd: bool) {
+#[test]
+fn product_preflight_metadata_mismatch_invalidates_the_same_transaction() {
+    product_handoff(false, true);
+}
+fn product_handoff(bad_fd: bool, metadata_mismatch: bool) {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let config_dir = root.path().join("config");
     let state = root.path().join("state");
@@ -56,6 +60,10 @@ fn product_handoff(bad_fd: bool) {
             .env("EVORCH_MASKED_TEST_CHILD", "1")
             .env("EVORCH_D3B_ROOT", root.path())
             .env("EVORCH_D3B_BAD_FD", if bad_fd { "1" } else { "0" })
+            .env(
+                "EVORCH_D3B_METADATA_MISMATCH",
+                if metadata_mismatch { "1" } else { "0" },
+            )
             .env("EVORCH_D3B_PRODUCT", &product)
             .env("XDG_RUNTIME_DIR", sockets.path())
             .env("XDG_STATE_HOME", &state)
@@ -91,15 +99,25 @@ fn product_handoff(bad_fd: bool) {
         line.clear();
         let count = output.read_line(&mut line).unwrap();
         if count == 0 {
-            assert!(bad_fd, "product failed before Ready");
-            assert!(!child.0.wait().unwrap().success());
+            assert!(bad_fd || metadata_mismatch, "product failed before Ready");
+            assert_eq!(child.0.wait().unwrap().success(), metadata_mismatch);
+            assert!(!Path::new(&format!("/proc/{}", child.0.id())).exists());
             let db = storage::Database::open(&storage::StorageConfig {
                 db_path: config_dir.join("evorch-events.db"),
                 ..Default::default()
             })
             .unwrap();
             let tx = db.restart_transaction("d3b").unwrap().unwrap();
-            assert_eq!(tx.phase, RestartPhase::Armed);
+            assert_eq!(
+                tx.phase,
+                if metadata_mismatch {
+                    RestartPhase::Invalidated
+                } else {
+                    RestartPhase::Armed
+                }
+            );
+            assert_eq!(tx.metadata.restart_id, "d3b");
+            assert_eq!(tx.metadata.capture_id, "d3b-capture");
             assert_eq!(tx.adopted_epoch, None);
             assert_eq!(tx.ready_at_ms, None);
             assert_eq!(tx.expected.len(), 3);
@@ -116,7 +134,10 @@ fn product_handoff(bad_fd: bool) {
             .ok()
             .is_some_and(|v| v["status"] == "ready")
         {
-            assert!(!bad_fd, "unexpected inherited FD must fail before Adopt");
+            assert!(
+                !bad_fd && !metadata_mismatch,
+                "invalid entry or metadata must fail before Adopt"
+            );
             break;
         }
     }
@@ -270,13 +291,25 @@ fn m2_product_worker() {
             core_launcher::handoff::targets::TargetRequirements { handoff: 1, snapshot: 1, storage_schema: schema, protocol: description.protocol, platform: &description.platform }, core_launcher::handoff::ProbeLimits::default(), std::future::pending()).await.unwrap()
             .before_capture(&current, core_launcher::handoff::ProbeLimits::default(), std::future::pending()).await.unwrap();
         let target = FinalizationTarget::new(current, checked).with_environment(FinalizationEnvironment::new(instance.clone(), signal_entry::mask().clone(), signals.clone(), driver.control_drain(), vec!["--config-dir".into(), config_dir.into_os_string()]));
+        let metadata_mismatch = std::env::var("EVORCH_D3B_METADATA_MISMATCH").unwrap() == "1";
+        let old_build = core_instance::handoff::running_elf_identity().unwrap();
+        let successor_build = if metadata_mismatch { assert_ne!(old_build, build); old_build.clone() } else { build };
         let metadata = RestartMetadata { restart_id: "d3b".into(), capture_id: "d3b-capture".into(), config_identity: instance.identity.clone(), old_epoch: backend.hello().instance_epoch.0,
-            successor_epoch: backend.hello().instance_epoch.0.checked_add(1).unwrap(), old_build: core_instance::handoff::running_elf_identity().unwrap(), successor_build: build, target_identity: "target".into(), handoff_version: 1, snapshot_version: 1, storage_version: schema,
+            successor_epoch: backend.hello().instance_epoch.0.checked_add(1).unwrap(), old_build, successor_build, target_identity: "target".into(), handoff_version: 1, snapshot_version: 1, storage_version: schema,
             old_builtin_tool_names: BTreeSet::new(), old_compiled_catalog_fingerprint: None, new_compiled_catalog_fingerprint: None, old_effective_tools_fingerprint: None, new_effective_tools_fingerprint: None };
         let tx = host.composition.storage_writer.mutate_restart("d3b".into(), None, RestartMutation::Create(Box::new(metadata))).unwrap();
         println!("D3B-BEFORE {}", serde_json::json!({"pid":std::process::id(), "runs":runs.iter().map(ToString::to_string).collect::<Vec<_>>()})); std::io::stdout().flush().unwrap();
         tokio::task::spawn_blocking(|| { let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap(); assert_eq!(line, "exec\n"); }).await.unwrap();
         core.start_finalization(id, &mut host, tx, target).unwrap();
+        if metadata_mismatch {
+            // Actual product preflight succeeded; only the durable successor
+            // identity disagrees. The same M2 transaction must fail closed.
+            assert!(core.wait_finalization(id).await.is_err());
+            assert!(host.runtime.producer_gate().try_enter().is_none());
+            assert!(core.cancel(id).is_err());
+            let _ = host.shutdown().await;
+            return;
+        }
         // The lifecycle services the real listener/control drain until exec replaces
         // all threads. A returned finalization is a failure, never resumed business.
         tokio::select! {
