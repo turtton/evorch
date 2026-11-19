@@ -7,9 +7,13 @@ pub use holds::RestartHolds;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-// D-2b design values, unchanged. D-2c-3 measures the real composition.
+// D-2b design values, unchanged.
 const REAP_LIMIT: Duration = Duration::from_secs(1);
 const JOIN_LIMIT: Duration = Duration::from_secs(1);
+// One budget for flush + subscriber/bridge-worker join + writer barrier.
+// D-2c-3 observed a healthy local maximum flush ACK of 3.8054s; 10s allows
+// headroom, not a fleet-tail guarantee. Expiry prohibits M2, never cancels I/O.
+const STORAGE_DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExitStage {
@@ -303,36 +307,35 @@ impl PlannedExit {
                 if self.flushing.is_none() {
                     let mut bridge = self.bridge.take().ok_or("planned bridge missing")?;
                     self.flushing = Some(tokio::task::spawn_blocking(move || {
-                        let result = if bounded {
-                            bridge
-                                .flush()
-                                .map_err(|e| e.to_string())
-                                .and_then(|()| bridge.try_shutdown().map_err(|e| e.to_string()))
-                                .and_then(|()| {
-                                    tracing::debug!(target: "restart_drain", phase = "writer_barrier_begin");
-                                    let result = bridge.handle().barrier().map_err(|e| e.to_string());
-                                    tracing::debug!(target: "restart_drain", phase = "writer_barrier_end", ok = result.is_ok());
-                                    result
-                                })
-                        } else {
-                            // Cleanup must join the subscriber even when its final flush failed.
-                            let mut failure = None;
-                            remember(&mut failure, bridge.flush().map_err(|e| e.to_string()));
-                            remember(
-                                &mut failure,
-                                bridge.try_shutdown().map_err(|e| e.to_string()),
-                            );
-                            remember(
-                                &mut failure,
-                                bridge.handle().barrier().map_err(|e| e.to_string()),
-                            );
-                            failure.map_or(Ok(()), Err)
-                        };
+                        let mut failure = None;
+                        remember(&mut failure, bridge.flush().map_err(|e| e.to_string()));
+                        // The same task may outlive its M2 budget. Always reclaim
+                        // the subscriber, including a late failed/unknown ACK;
+                        // cleanup must not inherit an unjoined short-circuit.
+                        remember(
+                            &mut failure,
+                            bridge.try_shutdown().map_err(|e| e.to_string()),
+                        );
+                        if !bounded || failure.is_none() {
+                            tracing::debug!(target: "restart_drain", phase = "writer_barrier_begin");
+                            let result = bridge.handle().barrier().map_err(|e| e.to_string());
+                            tracing::debug!(target: "restart_drain", phase = "writer_barrier_end", ok = result.is_ok());
+                            remember(&mut failure, result);
+                        }
+                        let result = failure.map_or(Ok(()), Err);
                         (bridge, result)
                     }));
                 }
-                // No new bridge deadline: D-2c-3 must measure it first.
-                let joined = self.flushing.as_mut().unwrap().await;
+                let joined = if bounded {
+                    // Borrow the handle: timeout drops only this wait, not the
+                    // task/bridge. FailedClosed cleanup awaits this exact task
+                    // without a new budget; late success cannot advance M2.
+                    tokio::time::timeout(STORAGE_DRAIN_LIMIT, self.flushing.as_mut().unwrap())
+                        .await
+                        .map_err(|_| "storage drain deadline exceeded")?
+                } else {
+                    self.flushing.as_mut().unwrap().await
+                };
                 self.flushing = None;
                 let (bridge, result) = joined.map_err(|_| "planned bridge worker panicked")?;
                 self.bridge = Some(bridge);

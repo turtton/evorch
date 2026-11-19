@@ -25,8 +25,46 @@ M2 stage 5 is **not a SQLite writer join**:
 
 The final usage flush is measured separately from pushing the last queue items.
 The core bootstrap's ordinary usage tick is 5 seconds; neither that interval nor
-a flush ACK is a drain/join receipt. No new bridge deadline is introduced.
-The existing whole-cohort 10s, reap 1s and worker-join 1s limits are unchanged.
+a flush ACK is a drain/join receipt. The existing whole-cohort 10s, reap 1s and
+worker-join 1s limits are unchanged.
+
+## Storage drain budget (4b-D-3a)
+
+Stage 5 has one **10s budget**, shared by the FIFO flush ACK, subscriber stop /
+final snapshot / final usage flush / bridge-worker and subscriber joins, and the
+separate SQLite writer barrier. It is not renewed between those operations. It
+is separate from Preparing's cohort budget and from the fixed 120s successor
+boot deadline, which has not started at stage 5.
+
+D-2c-3 measured a maximum healthy local flush ACK of 3805.400ms (about 3.8s)
+across 80 cells; the other drain intervals were much smaller. A 1s or 5s budget
+would respectively exclude this observed workload or leave little headroom.
+10s provides about 2.6x that maximum without extending any existing budget.
+This is a conservative fail-closed policy choice, **not** a fleet-tail or slow
+disk guarantee. Larger databases / slower disks may exceed it and must not exec.
+
+On expiry, only the borrowed wait is cancelled. The shared `PlannedExit` keeps
+the exact join handle, whose task still owns the bridge and storage. Neither
+abort, detach, owner stop/release nor business resumption is allowed. The
+coordinator invalidates the same captured transaction and publishes FailedClosed;
+its independent cleanup and operator shutdown await the retained task to actual
+completion, without minting a new M2 budget. A late success cannot complete stage
+5 or retry M2. An unknown/failed flush ACK still leads to subscriber/bridge-worker
+reclamation within that same task; its failure remains sticky. This deadline
+bounds restart progress, **not** total process exit or uninterruptible storage
+I/O. The SQLite writer stays alive for diagnostic/invalidation readback.
+
+The production composition deadline matrix uses channels to hold real flush,
+final-usage-flush and writer-barrier workers plus explicit virtual-clock advances.
+Its seven cells cover expiry at each point, late unknown ACK cleanup, a shared
+4s + 4s + 2s budget, completion released at 9.999s, and operator shutdown while
+the task is held. Expiry advances across Tokio's next millisecond timer tick;
+no wall-clock wait or yield loop drives the test. It independently reads three
+same-owner parked checkpoints before operator shutdown, verifies owner/generation
+and writer retention, proves shutdown waits for the held task without changing
+the captured manifest, and checks that late completion never reopens M2/business.
+Existing composition workload and failure tests remain: they protect different
+contracts (actual durability, load/backpressure, panics and invalidation retry).
 
 ## Tests and observation
 

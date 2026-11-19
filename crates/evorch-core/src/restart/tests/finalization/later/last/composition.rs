@@ -2,6 +2,7 @@
 //! Tracing is an observation seam only. Channels control progress; Instant is
 //! used exclusively for reporting, never for a functional verdict.
 use super::*;
+pub(super) mod drain;
 use std::time::Instant;
 use tokio::sync::{Notify, oneshot};
 use tracing_subscriber::{Layer, layer::SubscriberExt};

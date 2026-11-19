@@ -107,6 +107,11 @@ async fn matrix(group: &str, expected_cells: usize, expected_signals: usize) {
 #[ignore = "single-threaded-entry subprocess, invoked by the matrix parent"]
 async fn final_three_process_worker() {
     let group = std::env::var("EVORCH_M2_MATRIX_GROUP").unwrap();
+    #[cfg(feature = "bootstrap-test-support")]
+    if group == "composition_drain_deadlines" {
+        composition::drain::run().await;
+        return;
+    }
     if group == "composition_faults" {
         composition::faults().await;
         return;
