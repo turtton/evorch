@@ -60,6 +60,37 @@ nextest の `slow-timeout` / `terminate-after` (`.config/nextest.toml`) が担�
 許容する。その場合はテストコメントに「なぜイベント駆動でないか」の
 根拠を書くこと。可能なら対象に通知機構を追加する側の変更を優先する。
 
+## flaky や hang の再現
+
+flaky な失敗や hang を再現したいとき、負荷を「かけて試す」前に、次の順番で絞り込む。
+後ろの手段ほど共有マシンへの影響が大きい。
+
+1. **テスト側で競合箇所を狙う** — `Barrier` / `Notify` / `oneshot` などで、競合が起きる
+   interleaving をテスト内で決定的に作る。再現できれば負荷は要らず、そのまま回帰テストになる。
+2. **並列度を下げる** — `cargo nextest run --test-threads 1`、
+   `#[tokio::test(flavor = "multi_thread", worker_threads = 1)]` や current_thread
+   ランタイムで、スケジューリングの揺れを減らす/変える。
+3. **それでも資源不足の状態が必要な場合に限り**、`scripts/reproduce-under-limits.sh` を使う。
+
+```sh
+scripts/reproduce-under-limits.sh --cpus 1 --memory 2G --timeout 180s --repeat 20 -- \
+    cargo nextest run -p <crate> <filter>
+# 競合する負荷も同じ制限内でかけたい場合 (任意)
+scripts/reproduce-under-limits.sh --cpus 1 --timeout 180s --stress-cpus 4 -- <command...>
+```
+
+- command とその子孫すべてを systemd の user scope (CPUQuota / MemoryMax / TasksMax) に閉じ込め、
+  時間上限 (既定 300s) で scope ごと止める。`--repeat N` は何回中何回失敗したかを集計する。
+- 制限をかけられないときは、制限なしでは実行せず非 0 (125) で終了する。
+- **制限のない場所で負荷を生成しない**。`while :; do :; done` を sandbox 内で多数走らせる、
+  `stress-ng` を直接起動する、といった方法は、共有マシンの CPU を長時間使い切る事故
+  (実際に 2 回発生、10〜20 分) の原因になる。負荷が要る場合は `--stress-cpus K` を使う。
+  これは同じ制限付き scope の中でだけ起動される。
+- sandbox の中には `systemd-run` がなく `/sys` も見えないため、このスクリプトは**使えない**
+  (125 で終了する)。承認を得て、`sandbox_access=unsandboxed` と justification
+  (例: 「flaky テストを CPU/メモリ制限下で再現するため」) を付けて、sandbox の外で実行する。
+- cargo のビルドが重い場合は、先にビルドを済ませて(制限なしで)、制限下ではテストの実行だけにする。
+
 ## レビュー時のチェックリスト
 
 - [ ] 変更対象に隣接する低価値・重複テストを確認し、必要に応じて整理したか
