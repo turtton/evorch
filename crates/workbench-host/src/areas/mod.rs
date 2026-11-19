@@ -56,6 +56,8 @@ use workbench_protocol::errors::WorkbenchError;
 /// What an area service may use, all of it already owned by the bootstrap.
 pub struct AreaHandles {
     pub runtime: AgentRuntime,
+    /// The executor-owned browser behind a read-only, injectable observation port.
+    pub agent_observation: Option<Arc<dyn browser::observation::AgentObservationPort>>,
     pub config: Arc<config::Config>,
     pub config_dir: PathBuf,
     pub project_root: PathBuf,

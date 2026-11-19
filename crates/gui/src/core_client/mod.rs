@@ -307,6 +307,9 @@ fn apply_frame(
     for action in frame.data {
         enqueue(tx, shared, Action::Data(action));
     }
+    for target in frame.observations {
+        shared.features.observe_run(target);
+    }
     for artifact in frame.previews {
         shared.features.open_preview(artifact);
     }
@@ -779,6 +782,7 @@ mod navigation_tests {
         let frame = |navigation| FeatureFrame {
             data: Vec::new(),
             previews: Vec::new(),
+            observations: Vec::new(),
             actions: vec![],
             navigation: vec![navigation],
         };

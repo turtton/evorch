@@ -192,3 +192,65 @@ fn artifact_preview_route_only_passes_a_reference_to_the_browser_queue() {
     }
     assert_eq!(*log.lock().unwrap(), [artifact]);
 }
+
+#[test]
+fn agent_and_renderer_share_eight_slots_and_agent_identity_and_payload_kind_are_fenced() {
+    use workbench_protocol::namespaces::browser::observation::{
+        ObservationId, ObservationScope, data::AgentFrameStart,
+    };
+    let scope = ObservationScope {
+        project: ProjectId::new("p").unwrap(),
+        thread: ThreadId::new("t").unwrap(),
+        run: workbench_protocol::ids::RunId::new("r").unwrap(),
+        incarnation: workbench_protocol::ids::RunId::new("i").unwrap(),
+        core_epoch: 7,
+        browser_generation: 1,
+        page_generation: 1,
+    };
+    let source_agent = DataSource::AgentFrames {
+        scope: scope.clone(),
+        subscription: ObservationId::new("a".repeat(32)).unwrap(),
+        token: ObservationId::new("b".repeat(32)).unwrap(),
+    };
+    let mut inbox = DataInbox::default();
+    for tag in 0..7 {
+        inbox
+            .claim(&action(&inbox, FeatureId::Browser, tag), source())
+            .unwrap();
+    }
+    let key = inbox
+        .claim(
+            &action(&inbox, FeatureId::Browser, 1 << 63),
+            source_agent.clone(),
+        )
+        .unwrap();
+    assert!(
+        inbox
+            .claim(&action(&inbox, FeatureId::Browser, 99), source_agent)
+            .is_err()
+    );
+    assert!(
+        !inbox.publish(key, frame(1)),
+        "renderer BGRA cannot enter agent RGBA slot"
+    );
+    let make = |scope| {
+        DataPayload::AgentFrame(workbench_client::renderer::observation::AgentFrame {
+            start: AgentFrameStart {
+                scope,
+                tab: ObservationId::new("a".repeat(32)).unwrap(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                stride: 4,
+                total_bytes: 4,
+            },
+            rgba: vec![1; 4],
+        })
+    };
+    let mut stale = scope.clone();
+    stale.incarnation = workbench_protocol::ids::RunId::new("old").unwrap();
+    assert!(!inbox.publish(key, make(stale)));
+    assert!(inbox.publish(key, make(scope.clone())));
+    inbox.reset(FeatureId::Browser);
+    assert!(!inbox.publish(key, make(scope)));
+}

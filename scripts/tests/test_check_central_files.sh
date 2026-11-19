@@ -23,6 +23,21 @@ files() { printf '%s\n' "$@" > "$work/files"; }
 
 "$central" --check-data > /dev/null || { echo "FAIL: the data files are inconsistent" >&2; exit 1; }
 
+# O-I owns composition; the three observation workers own disjoint leaves.
+files crates/workbench-host/src/areas/browser/observation/source.rs
+expect ok "O-S owns the source leaf" "$central" --scope pr16bos --files-from "$work/files"
+expect fail "O-H cannot edit the source leaf" "$central" --scope pr16boh --files-from "$work/files"
+files crates/workbench-host/src/areas/browser/observation/service.rs
+expect ok "O-H owns the service leaf" "$central" --scope pr16boh --files-from "$work/files"
+expect fail "O-S cannot edit the service leaf" "$central" --scope pr16bos --files-from "$work/files"
+files crates/gui/src/core_client/features/browser/observation.rs
+expect ok "O-G owns the GUI observation leaf" "$central" --scope pr16bog --files-from "$work/files"
+expect fail "B cannot edit O-G" "$central" --scope pr16bb --files-from "$work/files"
+files crates/gui/src/core_client/features/browser.rs
+expect fail "B cannot edit the browser composition root" "$central" --scope pr16bb --files-from "$work/files"
+expect fail "O-G cannot edit the browser composition root" "$central" --scope pr16bog --files-from "$work/files"
+expect ok "O-I owns the browser composition root" "$central" --scope integration --files-from "$work/files"
+
 # A feature PR inside its own area passes.
 files crates/workbench-host/src/areas/settings.rs \
   crates/workbench-host/src/areas/settings/save.rs \

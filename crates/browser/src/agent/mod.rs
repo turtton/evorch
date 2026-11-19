@@ -5,6 +5,7 @@
 mod chromium;
 mod connection;
 mod keys;
+pub mod observation;
 mod page;
 mod proxy;
 mod snapshot;

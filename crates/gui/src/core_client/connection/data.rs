@@ -117,6 +117,16 @@ impl DataReaders {
                     );
                     return;
                 }
+                if let DataSource::AgentFrames { scope, .. } = &source
+                    && scope.core_epoch != client.server_hello().instance_epoch.0
+                {
+                    s.features.data_notice(
+                        action.feature,
+                        action.tag,
+                        DataNotice::Failed(FeatureError::new("stale agent epoch")),
+                    );
+                    return;
+                }
                 match s.features.data.claim(&action, source.clone()) {
                     Ok(k) => key = Some(k),
                     Err(e) => {
@@ -211,6 +221,21 @@ async fn receive(
     let epoch = client.server_hello().instance_epoch.0;
     let channel = DataChannel::connect(endpoint).await?;
     match source {
+        DataSource::AgentFrames {
+            scope,
+            subscription,
+            token,
+        } => {
+            let mut frames = channel
+                .bind_agent_frames(client, scope, subscription, token)
+                .await?;
+            finish(shared, ctx, key, DataNotice::Started, false);
+            while let Some(frame) = frames.next_frame().await? {
+                if !publish(shared, ctx, key, DataPayload::AgentFrame(frame)) {
+                    return Ok(());
+                }
+            }
+        }
         DataSource::Frames {
             tab,
             subscription,
@@ -244,7 +269,7 @@ async fn receive(
                         .bind_capture(client, operation_id.clone(), capture_id.clone())
                         .await?
                 }
-                DataSource::Frames { .. } => unreachable!(),
+                DataSource::Frames { .. } | DataSource::AgentFrames { .. } => unreachable!(),
             };
             let start = blob.start().clone();
             if start.core_epoch != epoch {

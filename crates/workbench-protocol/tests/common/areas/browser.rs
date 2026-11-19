@@ -30,6 +30,17 @@ fn tab() -> RendererTab {
 pub fn samples() -> AreaSamples {
     let mut out = AreaSamples::none("browser");
     out.commands = vec![
+        BrowserCommand::SubscribeAgentFrames {
+            scope: observation_scope(),
+        },
+        BrowserCommand::UnsubscribeAgentFrames {
+            subscription: observation_id(),
+        },
+        BrowserCommand::BindAgentData {
+            subscription: observation_id(),
+            token: observation_id(),
+            channel_id: id(),
+        },
         BrowserCommand::CreateRendererSession {},
         BrowserCommand::ResumeRendererSession {
             session: session(),
@@ -77,6 +88,16 @@ pub fn samples() -> AreaSamples {
     .map(Command::Browser)
     .collect();
     out.queries = vec![
+        BrowserQuery::ListAgentRuns {
+            project: observation_scope().project,
+            thread: observation_scope().thread,
+        },
+        BrowserQuery::GetAgentObservation {
+            scope: observation_scope(),
+        },
+        BrowserQuery::GetAgentSubscription {
+            subscription: observation_id(),
+        },
         BrowserQuery::GetRendererStatus {},
         BrowserQuery::ListRendererTabs {
             offset: 0,
@@ -89,6 +110,11 @@ pub fn samples() -> AreaSamples {
     .map(Query::Browser)
     .collect();
     out.ui_events = vec![
+        BrowserEvent::AgentObservationChanged(observation::ObservationEvent {
+            subscription: observation_id(),
+            revision: 1,
+            state: observation::ObservationState::Live,
+        }),
         BrowserEvent::RendererChanged { id: id() },
         BrowserEvent::TabChanged { id: id() },
         BrowserEvent::OperationChanged { id: id() },
@@ -97,6 +123,9 @@ pub fn samples() -> AreaSamples {
     .map(UiEvent::Browser)
     .collect();
     out.query_replies = vec![
+        BrowserReply::AgentObservation(observation::ObservationReply::Runs {
+            scopes: vec![observation_scope()],
+        }),
         BrowserReply::Status(RendererStatus {
             core_epoch: 17,
             generation: 2,
@@ -122,4 +151,19 @@ pub fn samples() -> AreaSamples {
     .map(QueryReply::Browser)
     .collect();
     out
+}
+
+fn observation_id() -> observation::ObservationId {
+    observation::ObservationId::new("a".repeat(32)).unwrap()
+}
+fn observation_scope() -> observation::ObservationScope {
+    observation::ObservationScope {
+        project: workbench_protocol::ids::ProjectId::new("project").unwrap(),
+        thread: workbench_protocol::ids::ThreadId::new("thread").unwrap(),
+        run: workbench_protocol::ids::RunId::new("run").unwrap(),
+        incarnation: workbench_protocol::ids::RunId::new("incarnation").unwrap(),
+        core_epoch: 17,
+        browser_generation: 1,
+        page_generation: 2,
+    }
 }

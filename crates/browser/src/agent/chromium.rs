@@ -44,6 +44,7 @@ pub struct LaunchOptions {
 /// A headless Chromium for agents, launched on first use. Each key (a run)
 /// gets its own tabs; every request of every tab passes `policy`.
 pub struct AgentBrowser {
+    pub execution_stamps: super::observation::ExecutionStamps,
     options: LaunchOptions,
     state: tokio::sync::Mutex<Option<Running>>,
     shared: Arc<Shared>,
@@ -110,6 +111,7 @@ impl AgentBrowser {
             front: Arc::default(),
         });
         Self {
+            execution_stamps: Default::default(),
             options,
             state: tokio::sync::Mutex::new(None),
             shared,

@@ -25,6 +25,8 @@ use crate::tools::{
     ApplyPatch, Edit, GitDiff, Grep, Read, RunJs, Shell, WebFetch, WebSearch, Write,
 };
 
+#[cfg(test)]
+mod browser_observation_tests;
 mod prepared;
 mod specs;
 mod workspace_boundary;
@@ -170,6 +172,7 @@ pub struct ToolExecutor {
         Arc<browser::agent::AgentBrowser>,
         crate::tools::BrowserToolOptions,
     )>,
+    browser_execution: Option<Arc<browser::agent::observation::ExecutionStamp>>,
     browser_provider: Option<Arc<dyn browser::agent::PageProvider>>,
     host_tools: Vec<Arc<dyn Tool>>,
 }
@@ -189,6 +192,7 @@ impl ToolExecutor {
             file_boundary: RwLock::new(None),
             file_escalation: RwLock::new(None),
             agent_browser: None,
+            browser_execution: None,
             browser_provider: None,
             host_tools: Vec::new(),
         }
@@ -272,6 +276,7 @@ impl ToolExecutor {
                     .clone(),
             ),
             agent_browser: self.agent_browser.clone(),
+            browser_execution: self.browser_execution.clone(),
             browser_provider: self.browser_provider.clone(),
             host_tools: self.host_tools.clone(),
         };
@@ -711,6 +716,15 @@ impl ToolExecutor {
         self.with_browser_provider(browser, options)
     }
 
+    /// Run-executor-only handoff of the immutable runtime incarnation. Does
+    /// not launch Chromium or stamp any existing page.
+    pub fn with_browser_execution(mut self, run: String, incarnation: String) -> Self {
+        self.browser_execution = Some(Arc::new(browser::agent::observation::ExecutionStamp {
+            run,
+            incarnation,
+        }));
+        self
+    }
     /// Registers the same agent browser tools as `parent`, if it has any.
     pub fn inherit_agent_browser(self, parent: &ToolExecutor) -> Self {
         match parent.agent_browser.clone() {
@@ -921,6 +935,24 @@ impl ToolExecutor {
 
     #[allow(clippy::too_many_arguments)]
     async fn execute_inner(
+        &self,
+        ctx: &ToolExecutionContext,
+        tool_name: &str,
+        call_id: &str,
+        args: serde_json::Value,
+        authorized: Option<Action>,
+        search_provider: Option<&dyn crate::search::SearchProvider>,
+    ) -> Result<ToolResult, ToolError> {
+        let work =
+            self.execute_stamped_inner(ctx, tool_name, call_id, args, authorized, search_provider);
+        if let Some(stamp) = &self.browser_execution {
+            browser::agent::observation::with_execution_stamp(stamp.clone(), work).await
+        } else {
+            work.await
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_stamped_inner(
         &self,
         ctx: &ToolExecutionContext,
         tool_name: &str,

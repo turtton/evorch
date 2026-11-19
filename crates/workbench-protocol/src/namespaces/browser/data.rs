@@ -12,7 +12,7 @@
 //!     u32 BE 16, then one record prefix with kind = Hello and no meta/body
 //! record:
 //!     magic "EVRD", version u16, kind u16, meta_len u32, body_len u32   (16 bytes, LE)
-//!     meta (fixed layout per kind, little-endian, at most 1 KiB)
+//!     meta (fixed layout per kind, at most 1 KiB; AgentFrameStart alone 2 KiB)
 //!     body (Chunk only, at most 64 KiB)
 //! ```
 //!
@@ -33,7 +33,7 @@ use super::{MAX_RENDERER_TABS, RendererId, RendererViewport};
 pub const MAGIC: [u8; 4] = *b"EVRD";
 pub const VERSION: u16 = 1;
 pub const PREFIX_LEN: usize = 16;
-/// Largest meta of any record.
+/// Original renderer record cap. AgentFrameStart has its own fixed 2 KiB cap.
 pub const MAX_META_BYTES: usize = 1024;
 /// Largest `Chunk` body. A write or read unit, not a limit on a frame.
 pub const CHUNK_BYTES: usize = 64 * 1024;
@@ -101,6 +101,7 @@ pub enum Kind {
     Ack = 7,
     /// Core to client, last: the connection ends after it.
     Error = 8,
+    AgentFrameStart = 9,
 }
 
 impl Kind {
@@ -114,6 +115,7 @@ impl Kind {
             6 => Self::End,
             7 => Self::Ack,
             8 => Self::Error,
+            9 => Self::AgentFrameStart,
             _ => return None,
         })
     }
@@ -124,6 +126,7 @@ impl Kind {
             Self::Hello => 0,
             Self::Channel => ChannelOffer::LEN,
             Self::FrameStart => FrameStart::LEN,
+            Self::AgentFrameStart => super::observation::data::AgentFrameStart::LEN,
             Self::BlobStart => BlobStart::LEN,
             Self::Chunk => ChunkMeta::LEN,
             Self::End => EndMeta::LEN,
@@ -161,11 +164,18 @@ impl Prefix {
         let kind = Kind::from_wire(wire).ok_or(DataError::UnknownKind(wire))?;
         let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         let body_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-        if meta_len > MAX_META_BYTES {
+        // Agent RGBA metadata carries a full, independent execution scope.
+        // Renderer records keep their original cap and exact kind length.
+        let meta_max = if kind == Kind::AgentFrameStart {
+            super::observation::data::AgentFrameStart::LEN
+        } else {
+            MAX_META_BYTES
+        };
+        if meta_len > meta_max {
             return Err(DataError::TooLarge {
                 field: "meta",
                 len: meta_len as u64,
-                max: MAX_META_BYTES as u64,
+                max: meta_max as u64,
             });
         }
         if body_len > CHUNK_BYTES {

@@ -230,6 +230,14 @@ impl RendererOwner {
         ledger: SpawnLedger,
         config: OwnerConfig,
     ) -> Result<Self, SpawnError> {
+        Self::new_with_data_plane(tasks, ledger, config, data::DataPlane::default())
+    }
+    pub(crate) fn new_with_data_plane(
+        tasks: &AreaTasks,
+        ledger: SpawnLedger,
+        config: OwnerConfig,
+        plane: data::DataPlane,
+    ) -> Result<Self, SpawnError> {
         let (commands, rx) = mpsc::channel(16);
         let (status, view) = watch::channel(Status {
             phase: Phase::Stopped,
@@ -248,7 +256,7 @@ impl RendererOwner {
             commands,
             status: view,
             cleanup,
-            plane: data::DataPlane::default(),
+            plane,
             frames,
             run_tabs: Arc::default(),
             #[cfg(test)]

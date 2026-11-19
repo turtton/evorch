@@ -590,6 +590,68 @@ mod data_plane {
             };
             tokens.push((subscription, token));
         }
+        // Mixed agent/renderer occupancy must use the SAME eight frame slots,
+        // while the real CEF streams below still deliver unchanged BGRA frames.
+        let agent_occupants = {
+            use workbench_host::{
+                areas::browser::observation::{
+                    ObservedPage, fake::FakeObservationPort, service::ObservationService,
+                },
+                connections::ConnectionHooks,
+            };
+            use workbench_protocol::{
+                envelope::{Provenance, Surface},
+                ids::{ClientId, RunId},
+                namespaces::browser::observation::*,
+            };
+            let scope = ObservationScope {
+                project: ProjectId::new("p1").unwrap(),
+                thread: ThreadId::new("t1").unwrap(),
+                run: RunId::new("r1").unwrap(),
+                incarnation: RunId::new("test-incarnation").unwrap(),
+                core_epoch: 1,
+                browser_generation: 1,
+                page_generation: 1,
+            };
+            let port = Arc::new(FakeObservationPort::default());
+            assert!(port.publish(ObservedPage {
+                snapshot: ObservationSnapshot {
+                    scope: scope.clone(),
+                    revision: 1,
+                    state: ObservationState::Starting,
+                    tabs: vec![],
+                    active_tab: None,
+                    activity: vec![]
+                },
+                frame: None
+            }));
+            let hooks = Arc::new(ConnectionHooks::default());
+            let client = ClientId::new("budget-test").unwrap();
+            let connection = hooks.open(client.clone());
+            let p = Provenance::human(Surface::Desktop, client);
+            let plane = core.host.lock().unwrap().renderer_data_plane().unwrap();
+            let service = ObservationService::new(Some(port), plane, hooks, 1);
+            for _ in 0..5 {
+                assert!(matches!(
+                    service
+                        .command(
+                            BrowserCommand::SubscribeAgentFrames {
+                                scope: scope.clone()
+                            },
+                            &p
+                        )
+                        .unwrap(),
+                    ObservationResult::Subscribed { .. }
+                ));
+            }
+            assert_eq!(
+                service
+                    .command(BrowserCommand::SubscribeAgentFrames { scope }, &p)
+                    .unwrap(),
+                ObservationResult::State(ObservationState::Capacity)
+            );
+            (service, connection)
+        };
         // Another client cannot use what A was given.
         assert_eq!(
             refusal(
@@ -715,7 +777,7 @@ mod data_plane {
             .await
             .unwrap();
         a.output(&close).await;
-        drop((a, b, first, second, stalled));
+        drop((a, b, first, second, stalled, agent_occupants));
         let _ = stop.send(true);
         server.abort();
         core.shutdown().await.unwrap();

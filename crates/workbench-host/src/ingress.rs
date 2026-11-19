@@ -567,11 +567,7 @@ impl CommandHost {
     /// and this is not the reconnect-grace accessor: that one only tells when
     /// previews expire.
     pub fn renderer_data_plane(&self) -> Option<crate::areas::browser::renderer::data::DataPlane> {
-        self.areas
-            .browser
-            .renderer
-            .as_ref()
-            .map(|owner| owner.data_plane())
+        Some(self.areas.browser.data.clone())
     }
 
     /// Answer `query` for `session`.

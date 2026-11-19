@@ -137,6 +137,7 @@ async fn serve(
     match bound {
         Some(Lease::Frames(lease)) => frames(lease, read, write, shutdown).await,
         Some(Lease::Blob(lease)) => blob(lease, read, write, shutdown).await,
+        Some(Lease::AgentFrames(lease)) => agent_frames(lease, read, write, shutdown).await,
         None => finish(&mut write, ErrorCode::Denied).await,
     }
 }
@@ -332,6 +333,51 @@ async fn blob(
         }
     }
 }
+
+async fn agent_frames(
+    mut lease: workbench_host::areas::browser::renderer::data::AgentFrameLease,
+    mut read: OwnedReadHalf,
+    mut write: OwnedWriteHalf,
+    shutdown: &mut watch::Receiver<bool>,
+) -> io::Result<()> {
+    let mut revoked = lease.revoked();
+    let mut order = SequenceGuard::default();
+    let mut probe = [0; 1];
+    loop {
+        let frame = tokio::select! {
+            biased;
+            ()=revoked.wait()=>return finish(&mut write,ErrorCode::Closed).await,
+            _=shutdown.changed()=>return Ok(()),
+            _=read.read(&mut probe)=>return Ok(()),
+            frame=lease.next()=>frame,
+        };
+        let Some(frame) = frame else {
+            return finish(&mut write, ErrorCode::Closed).await;
+        };
+        if !lease.current() {
+            return finish(&mut write, ErrorCode::Closed).await;
+        }
+        order.accept(frame.start.sequence).map_err(protocol)?;
+        let sending = async {
+            send(&mut write, &frame.start.encode().map_err(protocol)?).await?;
+            body(&mut write, frame.start.sequence, &frame.rgba).await?;
+            ack(&mut read, frame.start.sequence).await
+        };
+        let stop = tokio::select! {
+            biased;
+            ()=lease.invalidated()=>Stop::Revoked,
+            stop=transfer(sending,&mut revoked,shutdown)=>stop?,
+        };
+        match stop {
+            Stop::Done => (),
+            Stop::Revoked => return finish(&mut write, ErrorCode::Closed).await,
+            Stop::Shutdown => return Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests;
 
 #[cfg(test)]
 mod tests {
