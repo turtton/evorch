@@ -478,18 +478,23 @@ pub trait Feature: Send {
     }
 }
 
+/// Sections the composition was asked to open, and the ones moved to the top of the column.
+#[derive(Default)]
+struct Pins {
+    /// Opened at the next pass.
+    reveal: Option<FeatureId>,
+    /// The latest first: what the user was taken to (an artifact's preview, the artifacts of
+    /// the conversation) is where they look, not somewhere far down a long column.
+    pinned: Vec<FeatureId>,
+}
+
 /// The registration of every feature. A PR implementing a feature changes the
 /// feature's own file, not this.
 pub struct Features {
     features: Vec<Box<dyn Feature>>,
     selection: Option<Selection>,
     expanded: std::collections::HashMap<FeatureId, bool>,
-    /// A section the composition was asked to open at the next pass.
-    reveal: Option<FeatureId>,
-    /// Sections moved to the top of the column, the latest first: what the user was taken
-    /// to (an artifact's preview, the artifacts of the conversation) is where they look,
-    /// not somewhere far down a long column.
-    pinned: Vec<FeatureId>,
+    pins: Pins,
     pub(crate) data: DataInbox,
 }
 
@@ -499,8 +504,7 @@ impl Default for Features {
             data: DataInbox::default(),
             selection: None,
             expanded: Default::default(),
-            reveal: None,
-            pinned: Vec::new(),
+            pins: Pins::default(),
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -605,10 +609,10 @@ impl Features {
     /// Open the section of `feature` and move it to the top of the column at the next pass.
     /// The two latest stay there, so the artifact list stays above its preview.
     pub fn reveal(&mut self, feature: FeatureId) {
-        self.reveal = Some(feature);
-        self.pinned.retain(|f| *f != feature);
-        self.pinned.insert(0, feature);
-        self.pinned.truncate(2);
+        self.pins.reveal = Some(feature);
+        self.pins.pinned.retain(|f| *f != feature);
+        self.pins.pinned.insert(0, feature);
+        self.pins.pinned.truncate(2);
     }
 
     /// Whether the section of `feature` is shown for this connection.
@@ -687,8 +691,7 @@ impl Features {
             &mut self.features,
             &mut self.data,
             &mut self.expanded,
-            &mut self.reveal,
-            &self.pinned,
+            &mut self.pins,
             ui,
             view,
             selection_changed,
@@ -780,8 +783,7 @@ fn render_all(
     features: &mut [Box<dyn Feature>],
     data: &mut DataInbox,
     expanded: &mut std::collections::HashMap<FeatureId, bool>,
-    reveal: &mut Option<FeatureId>,
-    pinned: &[FeatureId],
+    pins: &mut Pins,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
     selection_changed: bool,
@@ -789,13 +791,14 @@ fn render_all(
     let mut frame = FeatureFrame::default();
     // The features are stacked in one scrolling column, as tall as the space given to it,
     // the pinned sections first.
-    let mut order: Vec<usize> = pinned
+    let mut order: Vec<usize> = pins
+        .pinned
         .iter()
         .filter_map(|id| features.iter().position(|f| f.id() == *id))
         .collect();
     let rest: Vec<usize> = (0..features.len()).filter(|i| !order.contains(i)).collect();
     order.extend(rest);
-    let opening = reveal.take();
+    let opening = pins.reveal.take();
     egui::ScrollArea::vertical()
         .id_salt("features")
         .auto_shrink([false, true])

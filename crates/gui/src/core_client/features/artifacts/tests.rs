@@ -1139,8 +1139,7 @@ fn composition() -> (
             data: DataInbox::default(),
             selection: None,
             expanded: Default::default(),
-            reveal: None,
-            pinned: Vec::new(),
+            pins: Default::default(),
         },
         ..crate::core_client::Shared::default()
     }));

@@ -60,8 +60,7 @@ fn features(log: &Log, availability: Availability) -> Features {
         data: DataInbox::default(),
         selection: None,
         expanded: Default::default(),
-        reveal: None,
-        pinned: Vec::new(),
+        pins: Default::default(),
     }
 }
 fn take(log: &Log) -> Vec<Observed> {

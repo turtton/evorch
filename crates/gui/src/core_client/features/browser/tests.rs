@@ -2044,8 +2044,7 @@ impl Comp {
                 data: DataInbox::default(),
                 selection: None,
                 expanded: Default::default(),
-                reveal: None,
-                pinned: Vec::new(),
+                pins: Default::default(),
             },
             selection: Selection {
                 project: Some(ProjectId::new("p").unwrap()),
