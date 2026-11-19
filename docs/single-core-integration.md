@@ -407,6 +407,44 @@ F4: the restart integration test that execs the production binary (the
 catalog-toggle tests here do not replace it) and the remaining integration
 fixes. The Web decision stays with the Web client plan.
 
+## Stage 16b PR B: the renderer preview screen (`core_client` browser feature)
+
+The browser feature (`crates/gui/src/core_client/features/browser.rs` and
+`browser/`) shows an artifact's preview from the core's renderer. It owns no
+helper process and no CEF; the old `html_preview.rs` only served as the
+reference for what the screen shows. Agent browser observation (PR O) is not
+part of it.
+
+Flow: `open_preview(ArtifactRef)` (called by the artifacts feature) only queues
+the reference; a later `render` creates the session once, sends `OpenPreview`,
+queries the operation, subscribes to the tab's frames (`SubscribeRendererFrames`,
+then `start_data(DataSource::Frames)`), turns streaming on and shows the latest
+frame as a texture. `Capture` results are taken with `DataSource::Capture` and
+decoded on one background thread.
+
+| Contract | Behaviour |
+|---|---|
+| `Accepted` | never a result. The operation is read with `GetRendererOperation` until `Completed`, `Failed` or `Cancelled`; an `OperationChanged` event or a reset asks again, nothing polls on a timer |
+| Unknown outcome | a command whose reply was lost is not sent again. A resolved reply for the same tag continues it; otherwise it ends as unknown after 30 s. An unknown `OpenPreview` is settled through `ListRendererTabs`, never by a resend |
+| Busy | repeated only for `Busy` with `RetryAdvice::SameRequest`, at most 3 times, with growing delays; `Never` and `AfterResync` wait for the user (after the tab list is read again) |
+| Frames | the BGRA frame is checked (size 1..=3840x2160, stride, length) and converted on the GUI thread, one per tab per render; the shared slot holds one frame per tab, so a slow render drops the older ones. A frame of another core epoch, generation or tab is not shown |
+| Input | egui events become `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.imeSetComposition` and `Input.insertText` (all in the renderer's CDP allowlist). Coordinates are the area's points scaled to the page's CSS size, so display density and resizes do not move the pointer. Moves, wheel steps and resizes are merged; the queue is bounded (128, plus a reserve for releases) and a dropped press drops its release. One request per tab is in flight at a time, so a release never overtakes its press. While an IME composition is active, keys and the committing Enter are withheld; losing focus releases what is held |
+| Results | notices (64 lines of at most 512 characters), inspection output (32 KiB) and Capture images (the 3840x2160 decode limit, 16 MiB body) are bounded. A Capture's blob slot is cancelled as soon as its bytes are taken |
+| Discarding | a reset, a cancelled operation, a failed stream or a stopped stream drops the texture and any decoded or decoding image |
+| Reconnect | within the same core epoch the tab is found again with `ListRendererTabs`; when the session is detached it is resumed (`ResumeRendererSession`) inside the 30 s grace, counted by the client from the first loss. After the grace, a core restart or a helper crash the preview is `Lost` and only the user's "open again" opens it; nothing is reopened or replayed by itself |
+
+Known limitation (decided with the plan owner, option A): `render_all` does not
+call `Feature::render` while a `CollapsingHeader` is closed or the window is
+minimized, and `cancel_data` and commands can only be issued from `render`
+through the `FeatureContext`. The feature therefore stops a stream for what
+`render` can observe (a tab that is not selected, an area that is not on
+screen, a closing animation) in one function, `stop_stream`, but a collapsed
+feature or a minimized window keeps streaming. The cost is bounded: the shared
+slot keeps one frame per tab (tested), the stream is limited by the core's
+frame rate, and nothing is decoded or uploaded while nothing is drawn. The
+shared hook that calls the feature with a context on non-drawn passes (so
+`stop_stream` can run then) is a follow-up of PR V.
+
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
 `evorch maintenance backfill-events` is a task of the core's `maintenance` area
