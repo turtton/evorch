@@ -63,6 +63,7 @@ fn revocation() -> (Revocation, Revoked) {
 pub enum Lease {
     Frames(FrameLease),
     Blob(BlobLease),
+    AgentFrames(AgentFrameLease),
 }
 
 /// Raw frames of one tab, each one the latest at the time it is taken.
@@ -292,7 +293,26 @@ impl DataPlane {
         )
     }
 
-    /// A blob lease reading `reader`, valid until the returned [`Revocation`]
+    pub(crate) fn agent_lease(
+        slot: Arc<OwnedSemaphorePermit>,
+        port: Arc<dyn super::super::observation::AgentObservationPort>,
+        scope: workbench_protocol::namespaces::browser::observation::ObservationScope,
+        feed: super::super::observation::ObservationFeed,
+    ) -> (Lease, Revocation) {
+        let (revocation, revoked) = revocation();
+        (
+            Lease::AgentFrames(AgentFrameLease {
+                _slot: slot,
+                port,
+                scope,
+                updates: feed.updates,
+                after: None,
+                revoked,
+            }),
+            revocation,
+        )
+    }
+    /// A blob lease reading its reader, valid until the returned [`Revocation`]
     /// drops. `None`: all transfer slots are in use.
     pub(crate) fn blob_lease(
         &self,
@@ -320,4 +340,51 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Source-native RGBA observation, independent of renderer tab identity.
+pub struct AgentFrameLease {
+    _slot: Arc<OwnedSemaphorePermit>,
+    port: Arc<dyn super::super::observation::AgentObservationPort>,
+    scope: workbench_protocol::namespaces::browser::observation::ObservationScope,
+    updates: watch::Receiver<Option<Arc<super::super::observation::ObservedPage>>>,
+    after: Option<u64>,
+    revoked: Revoked,
+}
+impl AgentFrameLease {
+    pub fn revoked(&self) -> Revoked {
+        self.revoked.clone()
+    }
+    pub fn current(&self) -> bool {
+        self.revoked.0.has_changed().is_ok() && self.port.current(&self.scope)
+    }
+    /// Wakes even when invalidation happens during an in-flight transfer.
+    pub async fn invalidated(&self) {
+        let mut updates = self.updates.clone();
+        loop {
+            if !self.current() || updates.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+    pub async fn next(&mut self) -> Option<Arc<super::super::observation::ObservedFrame>> {
+        loop {
+            if !self.current() || self.updates.has_changed().is_err() {
+                return None;
+            }
+            let page = self.updates.borrow_and_update().clone()?;
+            if !page.validate() || page.snapshot.scope != self.scope {
+                return None;
+            }
+            if let Some(frame) = &page.frame
+                && self.after.is_none_or(|seq| frame.start.sequence > seq)
+            {
+                self.after = Some(frame.start.sequence);
+                return Some(frame.clone());
+            }
+            if self.updates.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
 }

@@ -39,6 +39,7 @@
 //!   only as the core advises, a few times.
 mod frame;
 mod input;
+pub mod observation;
 mod ops;
 mod preview;
 mod view;
@@ -182,6 +183,7 @@ enum UiRequest {
 }
 
 pub struct BrowserFeature {
+    observation: observation::ObservationFeature,
     clock: Clock,
     decoders: Decoders,
     /// Data tags whose stream ended by itself: the shared slot is kept until
@@ -227,6 +229,7 @@ fn backoff(attempts: u8) -> Duration {
 impl BrowserFeature {
     fn with_clock(clock: Clock) -> Self {
         Self {
+            observation: Default::default(),
             clock,
             decoders: Decoders::default(),
             pending_cancel: Vec::new(),
@@ -1394,6 +1397,7 @@ impl Feature for BrowserFeature {
     }
 
     fn reset(&mut self) {
+        self.observation.reset();
         let now = self.clock.now();
         self.pending_cancel.clear();
         self.ops.on_reset(now);
@@ -1439,6 +1443,7 @@ impl Feature for BrowserFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
+        self.observation.event(event);
         match event {
             UiEvent::Browser(BrowserEvent::OperationChanged { .. }) => self.ops.on_event(),
             UiEvent::Browser(
@@ -1449,6 +1454,10 @@ impl Feature for BrowserFeature {
     }
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
+        if observation::owns_tag(tag) {
+            self.observation.reply(tag, reply);
+            return;
+        }
         if self.probe == Probe::Sent(tag) {
             self.probe = Probe::Idle;
             self.tabs = Some(match reply {
@@ -1469,6 +1478,10 @@ impl Feature for BrowserFeature {
     }
 
     fn data(&mut self, tag: u64, notice: DataNotice) {
+        if observation::owns_tag(tag) {
+            self.observation.data(tag, notice);
+            return;
+        }
         self.on_data(tag, notice);
     }
 
@@ -1483,6 +1496,7 @@ impl Feature for BrowserFeature {
     }
 
     fn disconnected(&mut self) {
+        self.observation.disconnected();
         // The data connections are gone with the control session: no texture,
         // decoded image or stream state may outlive it. What was asked of the
         // core is settled by `reset` when a session is back.
@@ -1494,7 +1508,19 @@ impl Feature for BrowserFeature {
         }
     }
 
+    fn observe_run(
+        &mut self,
+        target: workbench_protocol::namespaces::browser::observation::ObservationTarget,
+    ) {
+        self.observation.observe_run(target);
+    }
+
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        self.observation.selection_changed(ctx);
+    }
+
     fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        self.observation.maintain(ctx, visibility);
         if visibility.is_visible() {
             // `render` follows and does the work with the texture context.
             return;
@@ -1514,6 +1540,7 @@ impl Feature for BrowserFeature {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.observation.render(ui, ctx);
         let egui_ctx = ui.ctx().clone();
         self.accept_queue();
         self.settle(ctx);

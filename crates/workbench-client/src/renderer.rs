@@ -26,6 +26,7 @@
 //! contiguous offsets, an exact end). Any violation ends the stream; a
 //! transfer is never resumed.
 
+pub mod observation;
 use crate::{ClientError, WorkbenchClient};
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

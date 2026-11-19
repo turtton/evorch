@@ -728,6 +728,24 @@ pub(crate) async fn run_agent(
         {
             return;
         }
+        // Every canonical execution, including restored/no-sandbox paths, hands
+        // its own incarnation to the executor. This changes no provider schema.
+        match state
+            .shared
+            .executor
+            .fork_with_run_tools(std::iter::empty())
+        {
+            Ok(executor) => {
+                state.shared.executor = Arc::new(executor.with_browser_execution(
+                    state.task.run_id.to_string(),
+                    state.task.publication.incarnation(),
+                ))
+            }
+            Err(error) => {
+                state.finish_error(error.to_string());
+                return;
+            }
+        }
         // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
         // 決まるため、LoopState 構築後に確定させる。
         let selected_model = state

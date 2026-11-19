@@ -76,3 +76,10 @@ crates/storage/src/migrations.rs
 crates/storage/src/migrations/*
 crates/storage/undo/*
 crates/storage/tests/platform_suite/migration.rs
+
+# Stage 16b O-I: contract and B/observation submodule composition are fixed
+# before O-S/O-H/O-G branch. Their leaf files are in feature-scopes.txt.
+crates/gui/src/core_client/features/browser.rs
+crates/workbench-host/src/areas/browser/observation.rs
+crates/workbench-protocol/src/namespaces/browser/observation.rs
+crates/workbench-protocol/src/namespaces/browser/observation/data.rs

@@ -1,4 +1,15 @@
 {
+  "command/browser/bind_agent_data": {
+    "payload": {
+      "payload": {
+        "channel_id": "1234567890abcdef1234567890abcdef",
+        "subscription": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "type": "bind_agent_data"
+    },
+    "type": "browser"
+  },
   "command/browser/bind_renderer_data": {
     "payload": {
       "payload": {
@@ -164,6 +175,23 @@
     },
     "type": "browser"
   },
+  "command/browser/subscribe_agent_frames": {
+    "payload": {
+      "payload": {
+        "scope": {
+          "browser_generation": 1,
+          "core_epoch": 17,
+          "incarnation": "incarnation",
+          "page_generation": 2,
+          "project": "project",
+          "run": "run",
+          "thread": "thread"
+        }
+      },
+      "type": "subscribe_agent_frames"
+    },
+    "type": "browser"
+  },
   "command/browser/subscribe_renderer_frames": {
     "payload": {
       "payload": {
@@ -190,12 +218,47 @@
     },
     "type": "browser"
   },
+  "command/browser/unsubscribe_agent_frames": {
+    "payload": {
+      "payload": {
+        "subscription": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "type": "unsubscribe_agent_frames"
+    },
+    "type": "browser"
+  },
   "command/browser/unsubscribe_renderer_frames": {
     "payload": {
       "payload": {
         "subscription": "1234567890abcdef1234567890abcdef"
       },
       "type": "unsubscribe_renderer_frames"
+    },
+    "type": "browser"
+  },
+  "query/browser/get_agent_observation": {
+    "payload": {
+      "payload": {
+        "scope": {
+          "browser_generation": 1,
+          "core_epoch": 17,
+          "incarnation": "incarnation",
+          "page_generation": 2,
+          "project": "project",
+          "run": "run",
+          "thread": "thread"
+        }
+      },
+      "type": "get_agent_observation"
+    },
+    "type": "browser"
+  },
+  "query/browser/get_agent_subscription": {
+    "payload": {
+      "payload": {
+        "subscription": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "type": "get_agent_subscription"
     },
     "type": "browser"
   },
@@ -228,6 +291,16 @@
     },
     "type": "browser"
   },
+  "query/browser/list_agent_runs": {
+    "payload": {
+      "payload": {
+        "project": "project",
+        "thread": "thread"
+      },
+      "type": "list_agent_runs"
+    },
+    "type": "browser"
+  },
   "query/browser/list_renderer_tabs": {
     "payload": {
       "payload": {
@@ -235,6 +308,28 @@
         "offset": 0
       },
       "type": "list_renderer_tabs"
+    },
+    "type": "browser"
+  },
+  "query_reply/browser/agent_observation": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "scopes": [
+            {
+              "browser_generation": 1,
+              "core_epoch": 17,
+              "incarnation": "incarnation",
+              "page_generation": 2,
+              "project": "project",
+              "run": "run",
+              "thread": "thread"
+            }
+          ]
+        },
+        "type": "runs"
+      },
+      "type": "agent_observation"
     },
     "type": "browser"
   },
@@ -338,6 +433,17 @@
         ]
       },
       "type": "tabs"
+    },
+    "type": "browser"
+  },
+  "ui_event/browser/agent_observation_changed": {
+    "payload": {
+      "payload": {
+        "revision": 1,
+        "state": "live",
+        "subscription": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "type": "agent_observation_changed"
     },
     "type": "browser"
   },

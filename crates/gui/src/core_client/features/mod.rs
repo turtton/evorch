@@ -281,6 +281,7 @@ pub struct FeatureFrame {
     pub navigation: Vec<Navigation>,
     pub data: Vec<DataAction>,
     pub previews: Vec<ArtifactRef>,
+    pub observations: Vec<workbench_protocol::namespaces::browser::observation::ObservationTarget>,
 }
 
 /// What asking the features for the selector came to.
@@ -362,6 +363,15 @@ impl FeatureContext<'_> {
         }
     }
 
+    /// Typed View-to-run intent, processed once after this composition pass.
+    pub fn observe_run(
+        &mut self,
+        target: workbench_protocol::namespaces::browser::observation::ObservationTarget,
+    ) {
+        self.frame.observations.clear();
+        self.frame.observations.push(target);
+    }
+
     fn push(&mut self, tag: u64, request: FeatureRequest) {
         self.frame.actions.push(FeatureAction {
             feature: self.feature,
@@ -426,6 +436,13 @@ pub trait Feature: Send {
     /// Browser only: enqueue this reference for later UI processing. No I/O, work,
     /// or synchronous OpenPreview here; the shared actor must not be blocked.
     fn open_preview(&mut self, _artifact: ArtifactRef) {}
+
+    /// Browser-only, typed View-to-run observation intent; callback does no I/O.
+    fn observe_run(
+        &mut self,
+        _target: workbench_protocol::namespaces::browser::observation::ObservationTarget,
+    ) {
+    }
 
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
@@ -540,6 +557,18 @@ impl Features {
     pub(crate) fn clear_data(&mut self) {
         for f in &self.features {
             self.data.reset(f.id());
+        }
+    }
+    pub fn observe_run(
+        &mut self,
+        target: workbench_protocol::namespaces::browser::observation::ObservationTarget,
+    ) {
+        if let Some(f) = self
+            .features
+            .iter_mut()
+            .find(|f| f.id() == FeatureId::Browser)
+        {
+            f.observe_run(target);
         }
     }
     /// Local artifact-to-browser routing. Only references cross the boundary.

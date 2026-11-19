@@ -20,6 +20,11 @@ pub const MAX_DATA_BYTES: u64 = 2 * MAX_FRAME_SUBSCRIPTIONS as u64 * MAX_FRAME_B
 
 #[derive(Debug, Clone)]
 pub enum DataSource {
+    AgentFrames {
+        scope: workbench_protocol::namespaces::browser::observation::ObservationScope,
+        subscription: workbench_protocol::namespaces::browser::observation::ObservationId,
+        token: workbench_protocol::namespaces::browser::observation::ObservationId,
+    },
     Frames {
         tab: RendererTabRef,
         subscription: RendererId,
@@ -33,18 +38,21 @@ pub enum DataSource {
 }
 impl DataSource {
     pub(crate) fn is_frame(&self) -> bool {
-        matches!(self, Self::Frames { .. })
+        matches!(self, Self::Frames { .. } | Self::AgentFrames { .. })
     }
     pub(crate) fn max_bytes(&self) -> u64 {
         match self {
             Self::Frames { .. } => MAX_FRAME_BYTES,
+            Self::AgentFrames { .. } => {
+                workbench_protocol::namespaces::browser::observation::MAX_FRAME_BYTES
+            }
             Self::Artifact(_) => MAX_IMAGE_BLOB_BYTES,
             Self::Capture { .. } => MAX_CAPTURE_BLOB_BYTES,
         }
     }
     fn reservation(&self) -> u64 {
         if self.is_frame() {
-            2 * MAX_FRAME_BYTES
+            2 * self.max_bytes()
         } else {
             self.max_bytes() + CHUNK_BYTES as u64
         }
@@ -89,6 +97,7 @@ pub struct Blob {
 }
 #[derive(Debug)]
 pub enum DataPayload {
+    AgentFrame(workbench_client::renderer::observation::AgentFrame),
     Frame(Frame),
     Blob(Blob),
 }
@@ -96,6 +105,7 @@ impl DataPayload {
     fn bytes(&self) -> usize {
         match self {
             Self::Frame(f) => f.bgra.len(),
+            Self::AgentFrame(f) => f.rgba.len(),
             Self::Blob(b) => b.bytes.len(),
         }
     }
@@ -188,7 +198,23 @@ impl DataInbox {
             return false;
         };
         if payload.bytes() as u64 > slot.source.max_bytes()
-            || matches!(&payload, DataPayload::Frame(_)) != slot.source.is_frame()
+            || !matches!(
+                (&slot.source, &payload),
+                (DataSource::Frames { .. }, DataPayload::Frame(_))
+                    | (DataSource::AgentFrames { .. }, DataPayload::AgentFrame(_))
+                    | (
+                        DataSource::Artifact(_) | DataSource::Capture { .. },
+                        DataPayload::Blob(_)
+                    )
+            )
+        {
+            return false;
+        }
+        if let (DataSource::AgentFrames { scope, .. }, DataPayload::AgentFrame(frame)) =
+            (&slot.source, &payload)
+            && (frame.start.scope != *scope
+                || frame.start.validate().is_err()
+                || frame.rgba.len() as u64 != frame.start.total_bytes)
         {
             return false;
         }

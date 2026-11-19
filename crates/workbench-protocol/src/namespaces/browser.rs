@@ -12,6 +12,7 @@ use serde_json::Value;
 use super::artifacts::ArtifactRef;
 
 pub mod data;
+pub mod observation;
 
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "create_renderer_session",
@@ -29,14 +30,25 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "subscribe_renderer_frames",
     "unsubscribe_renderer_frames",
     "bind_renderer_data",
+    "subscribe_agent_frames",
+    "unsubscribe_agent_frames",
+    "bind_agent_data",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "get_renderer_status",
     "list_renderer_tabs",
     "get_renderer_tab",
     "get_renderer_operation",
+    "list_agent_runs",
+    "get_agent_observation",
+    "get_agent_subscription",
 ];
-pub const EVENT_TYPES: &[&str] = &["renderer_changed", "tab_changed", "operation_changed"];
+pub const EVENT_TYPES: &[&str] = &[
+    "renderer_changed",
+    "tab_changed",
+    "operation_changed",
+    "agent_observation_changed",
+];
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 /// Bound on the complete serialized JSON result of a public CDP operation.
 pub const MAX_CDP_RESULT_BYTES: usize = 256 * 1024;
@@ -113,6 +125,17 @@ impl RendererViewport {
     deny_unknown_fields
 )]
 pub enum BrowserCommand {
+    SubscribeAgentFrames {
+        scope: observation::ObservationScope,
+    },
+    UnsubscribeAgentFrames {
+        subscription: observation::ObservationId,
+    },
+    BindAgentData {
+        subscription: observation::ObservationId,
+        token: observation::ObservationId,
+        channel_id: RendererId,
+    },
     CreateRendererSession {},
     ResumeRendererSession {
         session: RendererSessionRef,
@@ -225,6 +248,7 @@ impl BrowserCommand {
     deny_unknown_fields
 )]
 pub enum BrowserResult {
+    AgentObservation(observation::ObservationResult),
     Accepted { operation_id: RendererId },
 }
 
@@ -236,10 +260,27 @@ pub enum BrowserResult {
     deny_unknown_fields
 )]
 pub enum BrowserQuery {
+    ListAgentRuns {
+        project: crate::ids::ProjectId,
+        thread: crate::ids::ThreadId,
+    },
+    GetAgentObservation {
+        scope: observation::ObservationScope,
+    },
+    GetAgentSubscription {
+        subscription: observation::ObservationId,
+    },
     GetRendererStatus {},
-    ListRendererTabs { offset: u32, limit: u32 },
-    GetRendererTab { tab: RendererTabRef },
-    GetRendererOperation { operation_id: RendererId },
+    ListRendererTabs {
+        offset: u32,
+        limit: u32,
+    },
+    GetRendererTab {
+        tab: RendererTabRef,
+    },
+    GetRendererOperation {
+        operation_id: RendererId,
+    },
 }
 impl BrowserQuery {
     pub fn required_capability(&self) -> Capability {
@@ -364,6 +405,7 @@ pub struct RendererOperation {
     deny_unknown_fields
 )]
 pub enum BrowserReply {
+    AgentObservation(observation::ObservationReply),
     Status(RendererStatus),
     Tabs { tabs: Vec<RendererTab>, more: bool },
     Tab(Box<RendererTab>),
@@ -371,6 +413,9 @@ pub enum BrowserReply {
 }
 impl BrowserReply {
     pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
+        if let Self::AgentObservation(reply) = self {
+            reply.validate()?;
+        }
         if let Self::Tabs { tabs, .. } = self {
             check_count("renderer.tabs", tabs.len(), MAX_RENDERER_TABS)?;
         }
@@ -397,6 +442,7 @@ impl BrowserReply {
     deny_unknown_fields
 )]
 pub enum BrowserEvent {
+    AgentObservationChanged(observation::ObservationEvent),
     RendererChanged { id: RendererId },
     TabChanged { id: RendererId },
     OperationChanged { id: RendererId },

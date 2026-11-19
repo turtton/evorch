@@ -588,7 +588,18 @@ impl BootstrappedHost {
         // start their background work only through `area_tasks`, which the
         // shutdown below stops and drains.
         let area_tasks = AreaTasks::new(tokio::runtime::Handle::current());
+        let agent_observation = executor.agent_browser().map(|browser| {
+            Arc::new(
+                crate::areas::browser::observation::source::AgentObservationSource::new(
+                    browser,
+                    runtime.browser_execution_reader(),
+                    command_host.projection().instance_epoch().get(),
+                    area_tasks.clone(),
+                ),
+            ) as Arc<dyn crate::areas::browser::observation::AgentObservationPort>
+        });
         let areas = Areas::new(&AreaHandles {
+            agent_observation,
             runtime: runtime.clone(),
             config: Arc::new(config.clone()),
             config_dir: options.config_dir.clone(),

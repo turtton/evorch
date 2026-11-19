@@ -527,6 +527,9 @@ impl RendererService {
         self.prune();
         let state = self.state.lock().unwrap();
         Ok(match query {
+            BrowserQuery::ListAgentRuns { .. }
+            | BrowserQuery::GetAgentObservation { .. }
+            | BrowserQuery::GetAgentSubscription { .. } => return Err(denied()),
             BrowserQuery::GetRendererStatus {} => {
                 let status = self.owner.status();
                 BrowserReply::Status(RendererStatus {

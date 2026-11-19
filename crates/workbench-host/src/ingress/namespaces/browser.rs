@@ -20,6 +20,22 @@ impl CommandHost {
         restart: crate::bootstrap::restart::HostCommandPermit,
     ) -> Result<CommandReply, WorkbenchError> {
         local_surface(provenance)?;
+        if matches!(
+            &command,
+            BrowserCommand::SubscribeAgentFrames { .. }
+                | BrowserCommand::UnsubscribeAgentFrames { .. }
+                | BrowserCommand::BindAgentData { .. }
+        ) {
+            let service = self
+                .areas
+                .browser
+                .observation
+                .as_ref()
+                .ok_or_else(crate::areas::browser::service::unavailable)?;
+            return Ok(CommandReply::with_result(CommandResult::Browser(
+                BrowserResult::AgentObservation(service.command(command, provenance)?),
+            )));
+        }
         self.renderer_sync_runs()?;
         let service = self.areas.browser.service()?;
         if let Some(artifact) = service.command_artifact(&command, provenance)? {
@@ -37,6 +53,22 @@ impl CommandHost {
         provenance: &Provenance,
     ) -> Result<QueryReply, WorkbenchError> {
         local_surface(provenance)?;
+        if matches!(
+            query,
+            BrowserQuery::ListAgentRuns { .. }
+                | BrowserQuery::GetAgentObservation { .. }
+                | BrowserQuery::GetAgentSubscription { .. }
+        ) {
+            let service = self
+                .areas
+                .browser
+                .observation
+                .as_ref()
+                .ok_or_else(crate::areas::browser::service::unavailable)?;
+            return Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                service.query(query, provenance)?,
+            )));
+        }
         self.renderer_sync_runs()?;
         let service = self.areas.browser.service()?;
         let reply = match query {
@@ -151,7 +183,8 @@ impl CommandHost {
     ) -> crate::bootstrap::restart::CommandAccess {
         use crate::bootstrap::restart::CommandAccess;
         match command {
-            BrowserCommand::CloseRendererSession { .. }
+            BrowserCommand::UnsubscribeAgentFrames { .. }
+            | BrowserCommand::CloseRendererSession { .. }
             | BrowserCommand::CloseRendererTab { .. }
             | BrowserCommand::UnsubscribeRendererFrames { .. } => CommandAccess::Stop,
             _ => CommandAccess::NewWork,

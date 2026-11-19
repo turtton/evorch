@@ -4,7 +4,9 @@ mod admission;
 mod artifacts;
 mod benchmark;
 pub(crate) use benchmark::production_executor as benchmark_executor;
+mod browser_observation;
 mod cancellation;
+pub use browser_observation::{BrowserExecutionObservation, BrowserExecutionReader};
 #[cfg(feature = "recovery-test-support")]
 mod restart_test_support;
 #[cfg(test)]
