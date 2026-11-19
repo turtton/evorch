@@ -648,7 +648,66 @@ frame は欠落していない。4 tab（720p）は、baseline の 4 tab 合計 
   ものか実装によるものかは切り分けられていない。
 - macOS / Windows。この data plane は Linux の UDS だけ（既存の方針）。
 
-### 9.1 PSS・allocation・heap（fake helper、2026-11、窓を揃えた harness）
+### 9.1 PSS・allocation・heap（fake helper、2026-11、frame 数を reader の join 後に確定する harness）
+
+§9.1 の旧い測定（下の「9.1.1 旧い値」）では、frame 数を、各 reader が受信のたびに共有 counter
+(`FRAMES_SEEN`) へ足した値で、窓の終わりの時刻に**読んでいた**。reader が窓内の時刻で frame を
+受け取った直後、counter に足す前に窓が閉じると、その frame は latency・fps には入るのに、
+allocation／frame の分母（`seen`）には入らない。この競合を直した。
+
+- **frame 数の確定**: reader は `(受信時刻, helper の stamp)` を記録するだけにし、数えない。窓の
+  内外の判定、frame 数、latency、worst reader の p95、reader ごとの最少 frame 数は、すべての
+  reader を join した後に、窓の最終の境界 `[start, end)` で 1 回だけ確定する（`totals`）。
+  allocation／frame の分母（`seen`）も、この合計（= `frames_received_in_window`）で、live の
+  counter は使わない。
+- **fps／reader の分母**: 窓の実際の長さ（`end - start`、JSON の `window_secs`）。以前は
+  `Instant` の経過時間で、数える窓と別の時計だった。窓は 8 秒を 500ms 刻みで待つので、実際は
+  8.19〜8.25 秒になる（旧い測定も同じ待ち方）。
+- **回帰試験**: `a_frame_received_in_the_window_is_counted_even_when_recorded_after_it_closed`
+  （通常の試験。`#[ignore]` ではない）。reader が窓内の時刻で frame を受け取った後、記録する前に
+  barrier で止め、その間に窓を閉じ、解放して join する。窓内の frame が 1 回だけ数えられ、窓の外の
+  frame が数えられないことを、sleep なしで固定している。
+- 窓の開始・warm-up（streaming を有効にしてから 12 frame 分の時間）・8 秒窓・30fps・24 論理 CPU の
+  共有 workstation・counting global allocator と PSS の取り方は、旧い測定と同じ。`--release` で、
+  1 scenario 1 process。各 run の開始時の loadavg（1 分値）は、
+  p720_1tab_1reader 12.65 / p720_4tab_1reader 11.79 / p720_1tab_8reader 10.75 / p720_4tab_2reader 10.25 / p1080_4tab_2reader 10.36 / k4_1tab_1reader 9.30 / k4_1tab_4reader 9.17 / k4_1tab_3reader_1stalled 8.67。
+  CPU の差分と allocation の差分は、これまでどおり window 開始から、窓を閉じた時点まで。
+  frame 数だけが join 後に確定した値になる。
+
+| scenario | frame 数 | p50 ms | p95 ms | p99 ms | max ms | fps/reader | CPU | RSS MiB | PSS core / helper MiB | allocs/frame | alloc B/frame | 窓内の 1MiB 以上の確保 | window 開始時の heap MiB | close 要求の 2 秒後の heap MiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p720_1tab_1reader | 246 | 1.48 | 2.03 | 2.52 | 3.0 | 30.04 | 0.08 | 65 | 61 / 8 | 475 | 31598 | 0 | 13 | 9 |
+| p720_4tab_1reader | 984 | 3.30 | 4.26 | 4.74 | 5.6 | 30.00 | 0.29 | 87 | 83 / 29 | 173 | 9445 | 0 | 34 | 9 |
+| p720_1tab_8reader | 1976 | 3.40 | 3.95 | 4.37 | 6.1 | 30.07 | 0.85 | 89 | 86 / 8 | 120 | 5493 | 0 | 37 | 9 |
+| p720_4tab_2reader | 1984 | 4.24 | 6.15 | 6.77 | 8.2 | 30.06 | 0.60 | 100 | 97 / 36 | 122 | 5630 | 0 | 48 | 9 |
+| p1080_4tab_2reader | 1976 | 9.08 | 12.06 | 13.33 | 18.2 | 29.99 | 1.16 | 158 | 154 / 96 | 192 | 6744 | 0 | 105 | 18 |
+| k4_1tab_1reader | 246 | 11.94 | 14.04 | 15.38 | 17.1 | 30.01 | 0.38 | 148 | 145 / 64 | 922 | 38574 | 0 | 97 | 65 |
+| k4_1tab_4reader | 988 | 16.93 | 19.35 | 20.24 | 23.5 | 30.02 | 2.07 | 244 | 240 / 64 | 619 | 16327 | 0 | 192 | 65 |
+| k4_1tab_3reader_1stalled | 738 | 14.65 | 16.70 | 17.65 | 18.2 | 29.95 | 1.26 | 244 | 240 / 64 | 655 | 18874 | 0 | 192 | 65 |
+
+- **旧い値との差**: 窓内の frame 数は、1 reader あたり約 246 frame（8.19〜8.25 秒 × 30fps）。
+  旧い値（`p720_1tab_1reader` の 247、`p720_4tab_1reader` の 992、`k4_1tab_4reader` の
+  992）との差は 1 reader あたり高々 2 frame で、窓の長さと開始の位相が run ごとに違う範囲に収まる。
+  別の run なので、競合そのものが旧い値の frame 数をどれだけ減らしていたかは、この比較からは
+  分からない（回帰試験が、競合の再現と修正を決定的に確かめる）。
+  allocs/frame と alloc B/frame は、旧い値から最大でも数 % の違い（`p720_1tab_8reader` の
+  119 → 120、`k4_1tab_4reader` の 618 → 619）で、結論は変わらない。
+- **latency の p95 は、8 scenario 中 7 つで旧い値より低く、`p720_4tab_2reader` だけ高かった**
+  （5.01 → 6.15ms）。全体の最大は `k4_1tab_4reader` の 19.35ms（旧い値は 26.32ms）で、
+  1080p の `p1080_4tab_2reader` は 12.06ms。これは harness の修正の効果ではなく、実行時の
+  負荷の違い（旧い値は loadavg 11 前後、今回は 8.7〜12.7 から下がる途中）だと見ているが、確かめて
+  いない。窓内の 1MiB 以上の確保は全 scenario で 0、live heap の窓内の増分も 0 で、steady state で
+  frame ごとの大きい確保がない、という結論は同じ。
+- **close 後の heap**: 旧い値と同じ（720p で約 9MiB、1080p で約 18MiB、4K で約 65MiB）。
+  `CloseRendererSession` を**要求**して 2 秒待った後の値で、close の完了も、何がこの heap を保持して
+  いるかも確かめていない（旧い値から変わらない。未実施）。
+- 元の JSONL は、この follow-up PR のコメントに添付した。旧い測定の JSONL は PR #693 のコメント。
+- 実 CEF の helper の PSS と、close の完了後の heap は、この PR でも測っていない。
+
+#### 9.1.1 旧い値（frame 数を窓の終わりの時刻に読んでいた harness、履歴）
+
+次の節は、上の直しの前の測定で、**履歴として原文のまま残す**。frame 数と allocation／frame の
+分母は、窓の終わりの競合を含みうる。現在の値は上の 9.1 の表。
 
 §9 の表を測った harness から、集計の窓を直して測り直した。**すべての reader は、同じ
 `[start, end)` の窓（start は streaming を有効にしてから warm-up の 12 frame 分の時間が

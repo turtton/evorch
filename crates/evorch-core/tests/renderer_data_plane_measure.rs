@@ -80,17 +80,39 @@ mod counting {
 #[global_allocator]
 static ALLOCATOR: counting::Counting = counting::Counting;
 
-/// Frames the readers have received so far.
-static FRAMES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// The measurement window, in `now_nanos` time. Frames count only inside
-/// `[start, end)`; both are unset until the window is open and closed.
-static WINDOW_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-static WINDOW_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-
-fn window_contains(at: u64) -> bool {
-    use std::sync::atomic::Ordering::Relaxed;
-    at >= WINDOW_START.load(Relaxed) && at < WINDOW_END.load(Relaxed)
+/// The measurement window, in `now_nanos` time: `[start, end)`. Both are unset
+/// until the window is open and closed. Which frames fall inside is decided only
+/// after every reader has ended (see [`totals`]), by the final bounds, so a
+/// frame still being recorded when the window closes is neither lost nor
+/// counted by a snapshot taken too early.
+struct Window {
+    start: std::sync::atomic::AtomicU64,
+    end: std::sync::atomic::AtomicU64,
+}
+impl Window {
+    fn new() -> Self {
+        Self {
+            start: std::sync::atomic::AtomicU64::new(u64::MAX),
+            end: std::sync::atomic::AtomicU64::new(u64::MAX),
+        }
+    }
+    fn open(&self, at: u64) {
+        self.start.store(at, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn close(&self, at: u64) {
+        self.end.store(at, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn contains(&self, at: u64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        at >= self.start.load(Relaxed) && at < self.end.load(Relaxed)
+    }
+    fn span_secs(&self) -> f64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.end
+            .load(Relaxed)
+            .saturating_sub(self.start.load(Relaxed)) as f64
+            / 1e9
+    }
 }
 
 /// Proportional set size in KiB of `pid` (`self` for this process).
@@ -202,13 +224,63 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[(((sorted.len() - 1) as f64) * p).round() as usize]
 }
 
+/// What one reading subscription saw: when each frame was received and when the
+/// helper stamped it. Nothing is counted here; [`totals`] applies the window
+/// once every reader has ended.
 #[derive(Default)]
 struct Reader {
-    latencies_ms: Vec<f64>,
-    /// Frames received inside the window.
+    /// `(received, stamped)` of every frame, window or not, in `now_nanos` time.
+    arrivals: Vec<(u64, u64)>,
+}
+impl Reader {
+    fn arrived(&mut self, received: u64, stamped: u64) {
+        self.arrivals.push((received, stamped));
+    }
+}
+
+/// The frames of all readers inside the window, counted after every reader has
+/// ended. This is the only source of the frame count and so of the denominators
+/// of the per-frame figures.
+struct Totals {
     frames: u64,
     /// Every frame received, window or not.
     received: u64,
+    /// Latencies of the frames inside the window, sorted.
+    latencies_ms: Vec<f64>,
+    worst_reader_p95_ms: f64,
+    /// The fewest window frames any one reader got.
+    fewest_reader_frames: u64,
+}
+fn totals(window: &Window, readers: &[Reader]) -> Totals {
+    let mut all = Vec::new();
+    let mut worst_reader_p95_ms = 0f64;
+    let mut fewest_reader_frames = u64::MAX;
+    let mut received = 0;
+    for reader in readers {
+        received += reader.arrivals.len() as u64;
+        let mut own = reader
+            .arrivals
+            .iter()
+            .filter(|(at, _)| window.contains(*at))
+            .map(|(at, stamped)| at.saturating_sub(*stamped) as f64 / 1e6)
+            .collect::<Vec<_>>();
+        fewest_reader_frames = fewest_reader_frames.min(own.len() as u64);
+        own.sort_by(f64::total_cmp);
+        worst_reader_p95_ms = worst_reader_p95_ms.max(percentile(&own, 0.95));
+        all.extend(own);
+    }
+    all.sort_by(f64::total_cmp);
+    Totals {
+        frames: all.len() as u64,
+        received,
+        latencies_ms: all,
+        worst_reader_p95_ms,
+        fewest_reader_frames: if readers.is_empty() {
+            0
+        } else {
+            fewest_reader_frames
+        },
+    }
 }
 
 fn run_scenario(scenario: Scenario) {
@@ -316,6 +388,7 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
 
     // One client per tab, each with its own session, so the subscription
     // limit of a client never decides the scenario.
+    let window = Arc::new(Window::new());
     let mut peers = Vec::new();
     let mut readers = Vec::new();
     let mut held = Vec::new();
@@ -371,20 +444,13 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
                             Ok(Some(_)) => {
                                 let received = now_nanos();
                                 let stamp = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                                stats.received += 1;
-                                if window_contains(received) {
-                                    FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    stats.frames += 1;
-                                    stats
-                                        .latencies_ms
-                                        .push(received.saturating_sub(stamp) as f64 / 1e6);
-                                }
+                                stats.arrived(received, stamp);
                             }
                             other => {
                                 eprintln!(
                                     "reader ended: {:?} after {} frames",
                                     other.map(|_| ()),
-                                    stats.received
+                                    stats.arrivals.len()
                                 );
                                 return stats;
                             }
@@ -421,10 +487,10 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
     let live_before = counting::LIVE.load(Relaxed);
     let heap_at_window_start = live_before.saturating_sub(heap_at_test_start);
     counting::PEAK.store(live_before, Relaxed);
-    // Every reader counts a frame only when it was received inside
-    // [start, end), the interval the elapsed time below describes.
+    // A frame counts when it was received inside [start, end); readers only
+    // record arrivals, and the count is made after they have all ended.
     let started = std::time::Instant::now();
-    WINDOW_START.store(now_nanos(), Relaxed);
+    window.open(now_nanos());
     // The measurement window itself: a load duration, not a synchronization.
     let (mut pss_core, mut pss_helper) = (0, 0);
     while started.elapsed() < WINDOW {
@@ -432,10 +498,9 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         pss_core = pss_core.max(pss_kib("self"));
         pss_helper = pss_helper.max(children_pss_kib());
     }
-    WINDOW_END.store(now_nanos(), Relaxed);
+    window.close(now_nanos());
     let cpu = cpu_seconds() - cpu_before;
     let elapsed = started.elapsed().as_secs_f64();
-    let seen = FRAMES_SEEN.load(Relaxed).max(1);
     let (calls, bytes, large) = (
         counting::CALLS.load(Relaxed) - calls_before,
         counting::BYTES.load(Relaxed) - bytes_before,
@@ -452,19 +517,22 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
             })
             .await;
     }
-    let mut latencies = Vec::new();
-    let mut frames = 0u64;
-    let mut worst_reader_p95 = 0f64;
+    // The frame count, and so every per-frame denominator below, is fixed here,
+    // after every reader has been joined.
+    let mut ended = Vec::new();
     for reader in readers {
-        let stats = reader.await.unwrap();
-        assert!(stats.frames > 0, "a reading subscription got no frame");
-        let mut own = stats.latencies_ms.clone();
-        own.sort_by(f64::total_cmp);
-        worst_reader_p95 = worst_reader_p95.max(percentile(&own, 0.95));
-        latencies.extend(stats.latencies_ms);
-        frames += stats.frames;
+        ended.push(reader.await.unwrap());
     }
-    latencies.sort_by(f64::total_cmp);
+    let totals = totals(&window, &ended);
+    assert!(
+        totals.fewest_reader_frames > 0,
+        "a reading subscription got no frame"
+    );
+    let latencies = totals.latencies_ms;
+    let frames = totals.frames;
+    let worst_reader_p95 = totals.worst_reader_p95_ms;
+    let seen = frames.max(1);
+    let window_secs = window.span_secs();
     let subscribers = scenario.tabs * scenario.readers;
     let line = serde_json::json!({
         "scenario": scenario.name,
@@ -477,8 +545,8 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         "p99_ms": percentile(&latencies, 0.99),
         "max_ms": latencies.last().copied().unwrap_or(0.0),
         "worst_reader_p95_ms": worst_reader_p95,
-        "delivered_fps_per_reader": frames as f64 / subscribers as f64 / elapsed,
-        "missed_frames_per_reader": (FPS as f64 * elapsed) - frames as f64 / subscribers as f64,
+        "delivered_fps_per_reader": frames as f64 / subscribers as f64 / window_secs,
+        "missed_frames_per_reader": (FPS as f64 * window_secs) - frames as f64 / subscribers as f64,
         "cpu_cores": cpu / elapsed,
         "rss_peak_mib": rss_peak_mib,
     });
@@ -491,7 +559,9 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         .load(Relaxed)
         .saturating_sub(heap_at_test_start);
     let mut line = line;
-    line["frames_received_in_window"] = seen.into();
+    line["frames_received_in_window"] = frames.into();
+    line["frames_received_total"] = totals.received.into();
+    line["window_secs"] = window_secs.into();
     line["pss_core_process_mib"] = (pss_core / 1024).into();
     line["pss_helper_mib"] = (pss_helper / 1024).into();
     line["allocs_per_received_frame"] = (calls as f64 / seen as f64).into();
@@ -541,3 +611,41 @@ scenario!(p1080_4tab_2reader, 1920, 1080, 4, 2, 0);
 scenario!(k4_1tab_1reader, 3840, 2160, 1, 1, 0);
 scenario!(k4_1tab_4reader, 3840, 2160, 1, 4, 0);
 scenario!(k4_1tab_3reader_1stalled, 3840, 2160, 1, 3, 1);
+
+/// The end of the window races with a reader that has already received a frame
+/// inside it. The barriers hold that reader between receiving (the timestamp is
+/// taken) and recording, close the window meanwhile, and only then let it go:
+/// the frame must still be counted, once, in the count the per-frame figures
+/// divide by, and a frame received after the close must not.
+#[test]
+fn a_frame_received_in_the_window_is_counted_even_when_recorded_after_it_closed() {
+    use std::sync::Barrier;
+    let window = Arc::new(Window::new());
+    let received = Arc::new(Barrier::new(2));
+    let closed = Arc::new(Barrier::new(2));
+    let reader = {
+        let (received, closed) = (received.clone(), closed.clone());
+        std::thread::spawn(move || {
+            let mut reader = Reader::default();
+            // Received at 15 ms, inside [10 ms, 20 ms), stamped 5 ms earlier.
+            let at = 15_000_000;
+            received.wait();
+            closed.wait();
+            reader.arrived(at, at - 5_000_000);
+            // Received at 25 ms, after the window closed.
+            reader.arrived(25_000_000, 24_000_000);
+            reader
+        })
+    };
+    window.open(10_000_000);
+    received.wait();
+    window.close(20_000_000);
+    closed.wait();
+    let ended = [reader.join().unwrap()];
+    let totals = totals(&window, &ended);
+    assert_eq!(totals.frames, 1);
+    assert_eq!(totals.received, 2);
+    assert_eq!(totals.latencies_ms, vec![5.0]);
+    assert_eq!(totals.fewest_reader_frames, 1);
+    assert!((window.span_secs() - 0.01).abs() < 1e-12);
+}

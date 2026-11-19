@@ -520,22 +520,248 @@ async fn private_operation_count_bytes_and_ttl_are_bounded_and_late_completion_s
     f.finish().await;
 }
 
+/// A frame connection the service can lease from. No helper runs in these
+/// tests, so the peers of its two channels are kept here and never speak.
+struct FramePeer {
+    _control: std::os::unix::net::UnixStream,
+    _frames: std::os::unix::net::UnixStream,
+}
+fn install_frame_source(f: &Fixture) -> FramePeer {
+    let (control, peer_control) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (frames, peer_frames) = std::os::unix::net::UnixStream::pair().unwrap();
+    // The reader jobs are never started: nothing reads these frames.
+    let (client, _jobs) = renderer_ipc::RendererClient::prepare(
+        control,
+        frames,
+        renderer_ipc::ClientConfig::new(renderer_ipc::RendererGeneration(1)),
+    )
+    .unwrap();
+    f.service.owner.install_ready_helper(1, Arc::new(client));
+    FramePeer {
+        _control: peer_control,
+        _frames: peer_frames,
+    }
+}
+/// Inserts a tab of the viewport `(width, height)` at 30fps that `owner` owns.
+fn insert_tab(
+    f: &Fixture,
+    session: &RendererSessionRef,
+    owner: &Provenance,
+    physical: u64,
+    (width, height): (u32, u32),
+) -> RendererTabRef {
+    let mut tab = live_tab(session, owner.client_id.clone());
+    tab.physical.id = renderer_ipc::TabId(physical);
+    tab.public.viewport = RendererViewport { width, height };
+    let reference = tab.public.reference.clone();
+    f.service
+        .state
+        .lock()
+        .unwrap()
+        .tabs
+        .insert(reference.id.as_str().to_owned(), tab);
+    reference
+}
+fn output(f: &Fixture, p: &Provenance, operation_id: RendererId) -> RendererOutput {
+    let BrowserReply::Operation(RendererOperation {
+        state: RendererOperationState::Completed { output },
+        ..
+    }) = f
+        .service
+        .query(&BrowserQuery::GetRendererOperation { operation_id }, p)
+        .unwrap()
+    else {
+        panic!("the operation did not complete")
+    };
+    output
+}
+/// The public commands a client sends to read a tab's frames.
+struct Frames<'a> {
+    f: &'a Fixture,
+    owner: &'a Provenance,
+}
+impl Frames<'_> {
+    fn subscribe(&self, tab: &RendererTabRef) -> Result<(RendererId, RendererId), WorkbenchError> {
+        let op = self.f.command(
+            self.owner,
+            BrowserCommand::SubscribeRendererFrames { tab: tab.clone() },
+        )?;
+        let RendererOutput::Subscription {
+            subscription,
+            token,
+            ..
+        } = output(self.f, self.owner, op)
+        else {
+            panic!("not a subscription")
+        };
+        Ok((subscription, token))
+    }
+    fn unsubscribe(&self, subscription: &RendererId) {
+        self.f
+            .command(
+                self.owner,
+                BrowserCommand::UnsubscribeRendererFrames {
+                    subscription: subscription.clone(),
+                },
+            )
+            .unwrap();
+    }
+    /// Opens a data channel and binds the subscription to it through the
+    /// control command, as a client does. The lease is what the data
+    /// connection then holds.
+    async fn bind(
+        &self,
+        (subscription, token): (RendererId, RendererId),
+    ) -> crate::areas::browser::renderer::data::Lease {
+        let channel = self.f.service.owner.data_plane().open_channel().unwrap();
+        self.f
+            .command(
+                self.owner,
+                BrowserCommand::BindRendererData {
+                    channel_id: channel.id().clone(),
+                    source: RendererDataSource::Frames {
+                        subscription,
+                        token,
+                    },
+                },
+            )
+            .unwrap();
+        channel.bound().await.expect("the channel was bound")
+    }
+}
+fn refusal(result: Result<(RendererId, RendererId), WorkbenchError>) -> (ErrorCode, RetryAdvice) {
+    let error = result.expect_err("the subscription must be refused");
+    (error.code, error.retry)
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_subscription_place_is_held_until_its_lease_lets_go() {
     let f = Fixture::new();
-    let plane = f.service.owner.data_plane();
-    let mut places = (0..data::MAX_FRAME_SUBSCRIPTIONS)
-        .map(|_| plane.frame_slot().unwrap())
+    let owner = provenance("owner", Surface::Desktop);
+    let _connection = f.service.connections.open(owner.client_id.clone().unwrap());
+    let _peer = install_frame_source(&f);
+    let (session, _) = f.session(&owner);
+    let tab = insert_tab(&f, &session, &owner, 1, (1024, 768));
+    let frames = Frames {
+        f: &f,
+        owner: &owner,
+    };
+    let mut subscriptions = (0..data::MAX_FRAME_SUBSCRIPTIONS)
+        .map(|_| frames.subscribe(&tab).unwrap())
         .collect::<Vec<_>>();
-    assert!(plane.frame_slot().is_none());
-    // The subscription ends while its lease (and so its socket) is still
-    // closing: that lease keeps the place.
-    let held_by_lease = places.pop().unwrap();
-    let held_by_subscription = held_by_lease.clone();
-    drop(held_by_subscription);
-    assert!(plane.frame_slot().is_none());
-    drop(held_by_lease);
-    assert!(plane.frame_slot().is_some());
+    let general = (ErrorCode::Busy, RetryAdvice::Never);
+    assert_eq!(refusal(frames.subscribe(&tab)), general);
+
+    // A subscription that never got a data connection gives its place back
+    // when it ends.
+    let unbound = subscriptions.pop().unwrap();
+    frames.unsubscribe(&unbound.0);
+    let replacement = frames.subscribe(&tab).unwrap();
+    assert_eq!(refusal(frames.subscribe(&tab)), general);
+    subscriptions.push(replacement);
+
+    // Two subscriptions end while their leases (and so their sockets) are
+    // still closing: the leases keep the places, whatever order they go in.
+    let (first, second) = (subscriptions.pop().unwrap(), subscriptions.pop().unwrap());
+    let (first_subscription, second_subscription) = (first.0.clone(), second.0.clone());
+    let lease_a = frames.bind(first).await;
+    let lease_b = frames.bind(second).await;
+    frames.unsubscribe(&first_subscription);
+    frames.unsubscribe(&second_subscription);
+    assert!(f.service.state.lock().unwrap().subscriptions.len() < data::MAX_FRAME_SUBSCRIPTIONS);
+    assert_eq!(refusal(frames.subscribe(&tab)), general);
+    drop(lease_b);
+    let one = frames.subscribe(&tab).unwrap();
+    assert_eq!(refusal(frames.subscribe(&tab)), general);
+    drop(lease_a);
+    let two = frames.subscribe(&tab).unwrap();
+    assert_eq!(refusal(frames.subscribe(&tab)), general);
+    // What is left is the limit, not a leaked place.
+    assert_eq!(
+        f.service.state.lock().unwrap().subscriptions.len(),
+        data::MAX_FRAME_SUBSCRIPTIONS
+    );
+    drop((one, two));
+    f.finish().await;
+}
+
+/// A 4K stream has four subscriptions of its own, counted from the live
+/// subscriptions of its tab. The places of the core-wide limit are still held
+/// by a lease that outlives its subscription, and the refusal then is the
+/// general one, not the 4K advice.
+#[tokio::test(start_paused = true)]
+async fn a_four_k_subscription_limit_and_its_lease_release_are_counted_separately() {
+    let f = Fixture::new();
+    let owner = provenance("owner", Surface::Desktop);
+    let _connection = f.service.connections.open(owner.client_id.clone().unwrap());
+    let _peer = install_frame_source(&f);
+    let (session, _) = f.session(&owner);
+    let four_k = insert_tab(&f, &session, &owner, 1, (3840, 2160));
+    let other = insert_tab(&f, &session, &owner, 2, (1024, 768));
+    let frames = Frames {
+        f: &f,
+        owner: &owner,
+    };
+    let mut live = (0..data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS)
+        .map(|_| frames.subscribe(&four_k).unwrap())
+        .collect::<Vec<_>>();
+    let four_k_busy = (ErrorCode::Busy, RetryAdvice::AfterResync);
+    assert_eq!(refusal(frames.subscribe(&four_k)), four_k_busy);
+    // The other tab takes the rest of the core-wide places.
+    let rest = (data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS..data::MAX_FRAME_SUBSCRIPTIONS)
+        .map(|_| frames.subscribe(&other).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refusal(frames.subscribe(&other)),
+        (ErrorCode::Busy, RetryAdvice::Never)
+    );
+
+    // A 4K subscription ends but its lease still holds the core-wide place:
+    // the tab's own count has room, the core does not.
+    let ended = live.pop().unwrap();
+    let ended_subscription = ended.0.clone();
+    let lease = frames.bind(ended).await;
+    frames.unsubscribe(&ended_subscription);
+    assert_eq!(
+        refusal(frames.subscribe(&four_k)),
+        (ErrorCode::Busy, RetryAdvice::Never)
+    );
+    drop(lease);
+    live.push(frames.subscribe(&four_k).unwrap());
+    // The four are back, so the 4K limit speaks again.
+    assert_eq!(refusal(frames.subscribe(&four_k)), four_k_busy);
+    drop((live, rest));
+    f.finish().await;
+}
+
+/// The status override of the test helper stands in only for a helper that
+/// never ran: a stop, which the actor reports as generation 0 too, is seen.
+#[tokio::test(start_paused = true)]
+async fn the_installed_helper_status_gives_way_to_the_actors_own_stop() {
+    let f = Fixture::new();
+    let _peer = install_frame_source(&f);
+    let owner = &f.service.owner;
+    assert_eq!(owner.status().phase, Phase::Ready);
+    assert_eq!(owner.status().generation, 1);
+    assert!(
+        owner
+            .frame_source(Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            })
+            .is_some()
+    );
+    owner.stop().await.unwrap();
+    assert_eq!(owner.status().phase, Phase::Stopped);
+    assert_eq!(owner.status().generation, 0);
+    assert!(
+        owner
+            .frame_source(Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            })
+            .is_none()
+    );
     f.finish().await;
 }
 
