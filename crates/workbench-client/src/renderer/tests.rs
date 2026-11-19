@@ -1,5 +1,5 @@
 use super::*;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use workbench_protocol::namespaces::browser::data::{BlobSource, CHUNK_BYTES, MediaType};
 
@@ -383,7 +383,8 @@ async fn a_stream_is_closed_by_an_error_and_by_a_cancelled_read() {
     far.write_all(&frame_start(1, 1, 1).encode()).await.unwrap();
     let cancelled = poll_once(frames.next_frame()).await;
     assert!(cancelled.is_none(), "the read was waiting for the chunks");
-    far.write_all(&chunks(1, &[1u8; 4])).await.unwrap();
+    ended_by_the_other_side(&mut far).await;
+    let _ = far.write_all(&chunks(1, &[1u8; 4])).await;
     assert!(matches!(
         frames.next_frame().await,
         Err(DataClientError::Closed)
@@ -394,11 +395,25 @@ async fn a_stream_is_closed_by_an_error_and_by_a_cancelled_read() {
     let mut blob = blob_stream_for(&mut far, near, 4).await;
     let cancelled = poll_once(blob.next_chunk()).await;
     assert!(cancelled.is_none());
-    far.write_all(&chunks(9, &[1u8; 4])).await.unwrap();
+    ended_by_the_other_side(&mut far).await;
+    let _ = far.write_all(&chunks(9, &[1u8; 4])).await;
     assert!(matches!(
         blob.next_chunk().await,
         Err(DataClientError::Closed)
     ));
+}
+
+/// The peer sees the connection end (an end of stream or a reset) without the
+/// stream being used again: dropping a read's future closed it. The wait is
+/// bounded by `poll_once`, so a regression fails instead of hanging the test.
+async fn ended_by_the_other_side(far: &mut UnixStream) {
+    let mut rest = Vec::new();
+    let ended = poll_once(far.read_to_end(&mut rest))
+        .await
+        .expect("the cancelled read left its connection open");
+    if ended.is_ok() {
+        assert!(rest.is_empty());
+    }
 }
 
 /// Polls `future` while the runtime has other work to do and drops it if it is

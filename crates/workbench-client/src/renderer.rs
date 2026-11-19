@@ -242,31 +242,32 @@ impl DataChannel {
 /// A data connection that ends with its first error and with a read that was
 /// cancelled half way: what is left on the wire then starts inside a record, and
 /// a transfer is never resumed.
+///
+/// A read takes the stream out of the link and owns it while it runs, so
+/// dropping the read's future drops, and so closes, the socket at that moment.
+/// Only a read that finished without error hands the stream back.
 struct Link {
     stream: Option<UnixStream>,
-    reading: bool,
 }
 impl Link {
     fn new(stream: UnixStream) -> Self {
         Self {
             stream: Some(stream),
-            reading: false,
         }
     }
-    /// The stream for one read. A read that did not finish (its future was
-    /// dropped) leaves the connection unusable: it is closed here.
-    fn begin(&mut self) -> Result<&mut UnixStream, DataClientError> {
-        if self.reading {
-            self.stream = None;
-        }
-        self.reading = true;
-        self.stream.as_mut().ok_or(DataClientError::Closed)
+    /// The stream for one read.
+    fn take(&mut self) -> Result<UnixStream, DataClientError> {
+        self.stream.take().ok_or(DataClientError::Closed)
     }
-    /// Closes the connection when the read failed.
-    fn end<T>(&mut self, result: Result<T, DataClientError>) -> Result<T, DataClientError> {
-        match &result {
-            Ok(_) => self.reading = false,
-            Err(_) => self.stream = None,
+    /// Keeps the stream for the next read when the read succeeded; on an error
+    /// it is dropped (closed) here.
+    fn give_back<T>(
+        &mut self,
+        stream: UnixStream,
+        result: Result<T, DataClientError>,
+    ) -> Result<T, DataClientError> {
+        if result.is_ok() {
+            self.stream = Some(stream);
         }
         result
     }
@@ -310,9 +311,9 @@ impl FrameStream {
         &mut self,
         bytes: &mut Vec<u8>,
     ) -> Result<Option<FrameStart>, DataClientError> {
-        let stream = self.link.begin()?;
-        let result = read_frame(stream, &mut self.order, &mut self.target, bytes).await;
-        self.link.end(result)
+        let mut stream = self.link.take()?;
+        let result = read_frame(&mut stream, &mut self.order, &mut self.target, bytes).await;
+        self.link.give_back(stream, result)
     }
 
     /// Like [`next_frame_into`](Self::next_frame_into) with a new buffer.
@@ -421,15 +422,15 @@ impl BlobStream {
         if self.done {
             return Ok(None);
         }
-        let stream = self.link.begin()?;
+        let mut stream = self.link.take()?;
         let result = read_chunk(
-            stream,
+            &mut stream,
             &mut self.body,
             &mut self.transfer,
             self.start.transfer_id,
         )
         .await;
-        let chunk = self.link.end(result)?;
+        let chunk = self.link.give_back(stream, result)?;
         self.done = !chunk;
         Ok(chunk.then_some(self.body.as_slice()))
     }
