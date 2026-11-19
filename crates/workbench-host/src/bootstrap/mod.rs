@@ -428,7 +428,10 @@ impl BootstrappedHost {
             credential_store: credentials.clone(),
             bus: bus.clone(),
             env: Arc::new(routing::ProcessEnv),
-            model_catalog_dir: None,
+            model_catalog_dir: Some(
+                project_models::ModelCatalogResolver::new(&options)
+                    .for_project(Some(&options.project_root)),
+            ),
         };
         let live = if fixed_model.is_none() && !config.providers.is_empty() {
             Some(Arc::new(runtime::compose::SwitchableModel::new(
@@ -465,7 +468,10 @@ impl BootstrappedHost {
         let composition_input = RuntimeComposition {
             config: &config,
             user_config_dir: Some(options.config_dir.clone()),
-            model_catalog_dir: Some(options.config_dir.join("catalog")),
+            model_catalog_dir: Some(
+                project_models::ModelCatalogResolver::new(&options)
+                    .for_project(Some(&options.project_root)),
+            ),
             bus: bus.clone(),
             executor: executor.clone(),
             credential_store: credentials.clone(),
@@ -764,6 +770,7 @@ impl BootstrappedHost {
                 .start(
                     core_startup::CoreStartupInputs {
                         mode: deferred.mode,
+                        host: self.host.clone(),
                         options: deferred.options.clone(),
                         runtime: self.runtime.clone(),
                         owner: self.owner.clone(),

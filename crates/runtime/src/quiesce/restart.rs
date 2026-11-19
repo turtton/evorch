@@ -246,6 +246,29 @@ impl AgentRuntime {
         RestartAttemptState::Superseded
     }
 
+    /// Hold the read-only execution prohibition latch across a minimal synchronous
+    /// raw boundary. Never await, allocate, log, perform DB I/O or re-enter this
+    /// runtime from the callback. Returning (including a failed exec) releases it.
+    pub fn with_active_restart_attempt<T>(
+        &self,
+        attempt: &RestartAttempt,
+        raw: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let inner = self.shared.quiesce.lock();
+        if !Arc::ptr_eq(&attempt.owner, &self.shared.dispatch_tails)
+            || attempt.generation != inner.generation
+            || !inner.requested
+            || inner.cancelling
+            || inner.shutting_down
+            || matches!(inner.phase, QuiesceState::Failed { .. })
+        {
+            return None;
+        }
+        let result = raw();
+        drop(inner);
+        Some(result)
+    }
+
     pub fn subscribe_restart_state(&self) -> watch::Receiver<u64> {
         self.shared.quiesce.subscribe()
     }

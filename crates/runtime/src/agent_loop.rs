@@ -37,6 +37,7 @@ mod shell_wait_tests;
 mod stop_context;
 mod team;
 mod tool_calls;
+pub(crate) mod tool_catalog;
 pub(crate) mod tools_waiting;
 mod wake_adoption;
 
@@ -758,26 +759,31 @@ pub(crate) async fn run_agent(
                     .model
                     .selected_model(state.task.role, state.task.config.category.as_deref())
             });
-        state.tool_specs = visible_tool_specs(
+        let run_js_settings = state
+            .runtime()
+            .map(|r| r.run_js_settings())
+            .unwrap_or_default();
+        state.tool_specs = tool_catalog::compose(
             standard_tool_specs(&state.shared.executor),
             &state.policy,
-            state.skills().is_some(),
-            state.task.parent.is_some() || benchmark_replay,
-            state
-                .runtime()
-                .is_some_and(|runtime| runtime.web_tools_enabled()),
+            tool_catalog::CatalogOptions {
+                skills: state.skills().is_some(),
+                child: state.task.parent.is_some() || benchmark_replay,
+                web: state.runtime().is_some_and(|r| r.web_tools_enabled()),
+                artifacts: state
+                    .runtime()
+                    .is_some_and(|r| r.artifact_pages().is_some()),
+                run_js: state.task.config.team.is_none()
+                    && state.runtime().is_some_and(|r| {
+                        r.run_js_offered_to(state.task.role, state.task.config.category.as_deref())
+                    }),
+                run_js_settings: &run_js_settings,
+                family: classify(&selected_model),
+            },
         );
-        let artifact_pages = state
-            .runtime()
-            .is_some_and(|runtime| runtime.artifact_pages().is_some());
-        retain_backed_tools(&mut state.tool_specs, artifact_pages);
-        state.apply_run_js();
         if !is_restored {
             state.add_team_tools();
         }
-        // Family-scoped description variation keeps the request prefix stable within a model family,
-        // so prompt-cache hit rates are unaffected.
-        append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
         if benchmark_mode {
             state.filter_benchmark_tools();
         }

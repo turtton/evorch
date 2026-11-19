@@ -83,7 +83,13 @@ impl CoreStartupHook for CoreGraphRecovery {
                 read_env: false,
                 ..Default::default()
             })?;
-            let catalog = RecoveryCatalog::preload(&inputs.options, &config, services).await?;
+            let catalog = RecoveryCatalog::preload_for_projects(
+                &inputs.options,
+                &config,
+                &inputs.projects,
+                services,
+            )
+            .await?;
             catalog.publish_projects(&inputs.runtime, &inputs.projects);
             let diagnostics = RecoveryDiagnostics::default();
             let output = diagnostics.clone();
@@ -100,6 +106,10 @@ impl CoreStartupHook for CoreGraphRecovery {
                         return Ok(());
                     }
                 };
+                if let Err(reason) = workbench_host::bootstrap::recovery::authority::claim_planned_owner_threads(&inputs.runtime, &inputs.owner) {
+                    let _ = ready.send(Err(format!("planned owner adoption: {reason:?}")));
+                    return Ok(());
+                }
                 let scan = match coordinator.scan() {
                     Ok(scan) => scan,
                     Err(reason) => {
@@ -110,7 +120,7 @@ impl CoreStartupHook for CoreGraphRecovery {
                 let mut report = RecoveryStartupReport { scan, components: vec![] };
                 let mut retry = BTreeSet::new();
                 for component in &report.scan.components {
-                    let outcome = attempt(&coordinator, &inputs.runtime, component);
+                    let outcome = attempt(&coordinator, &inputs.runtime, &inputs.host, component);
                     if outcome.state == RecoveryState::Blocked { retry.insert(component.manifest_id.clone()); }
                     report.components.push(outcome);
                 }
@@ -152,7 +162,7 @@ impl CoreStartupHook for CoreGraphRecovery {
                                 }
                             }
                             for component in scan.components.iter().filter(|c| retry.contains(&c.manifest_id)).cloned().collect::<Vec<_>>() {
-                                let outcome = attempt(&coordinator, &inputs.runtime, &component);
+                                let outcome = attempt(&coordinator, &inputs.runtime, &inputs.host, &component);
                                 if outcome.state != RecoveryState::Blocked { retry.remove(&component.manifest_id); }
                                 if let Some(current) = report.components.iter_mut().find(|c| c.manifest_id == component.manifest_id) { *current = outcome; }
                             }
@@ -175,6 +185,7 @@ impl CoreStartupHook for CoreGraphRecovery {
 fn attempt(
     coordinator: &StartupCoordinator<'_>,
     runtime: &runtime::AgentRuntime,
+    host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
     component: &ComponentStatus,
 ) -> RecoveryDiagnostic {
     let (state, reason) = match component.disposition {
@@ -191,8 +202,23 @@ fn attempt(
         Disposition::Prepared | Disposition::AwaitingAuthority => {
             match coordinator
                 .prepare(&component.manifest_id)
-                .and_then(|prepared| prepared.activate(runtime))
-            {
+                .and_then(|prepared| {
+                    let bindings = prepared.command_bindings();
+                    let guard = host
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .service()
+                        .begin_root_recovery(bindings)
+                        .map_err(|_| StartupBlocked::CurrentBindingRequired)?;
+                    // No host lock spans activation/DB/runtime work. The guard
+                    // also removes the admission fence on error or unwind.
+                    let runs = prepared.activate(runtime)?;
+                    host.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .service_mut()
+                        .complete_root_recovery(guard);
+                    Ok(runs)
+                }) {
                 Ok(_) => (RecoveryState::Activated, None),
                 Err(StartupBlocked::OwnerBlocked) => {
                     (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))

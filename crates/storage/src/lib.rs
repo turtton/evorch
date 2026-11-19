@@ -142,3 +142,35 @@ pub mod plan_write_gate;
 /// Full-body read instrumentation, available only to test consumers.
 #[cfg(feature = "test-support")]
 pub mod test_support;
+
+/// Read-only format range accepted by this build, without opening a database.
+pub fn supported_schema_versions() -> Result<std::ops::RangeInclusive<u32>, StorageError> {
+    let maximum = u32::try_from(migrations::MIGRATIONS.len())
+        .map_err(|_| StorageError::OutOfRange("migration count"))?;
+    let minimum = migrations::MESSAGE_ROWS_VERSION
+        .max(migrations::PROVENANCE_ROWS_VERSION)
+        .max(migrations::EVENT_BODIES_VERSION);
+    Ok(minimum..=maximum)
+}
+
+#[cfg(test)]
+mod supported_schema_tests {
+    #[test]
+    fn supported_range_tracks_every_current_format_gate_at_the_lower_boundary() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrations::apply_migrations(&conn).unwrap();
+        let range = super::supported_schema_versions().unwrap();
+        conn.pragma_update(None, "user_version", range.start() - 1)
+            .unwrap();
+        assert!(crate::migrations::require_current_format(&conn).is_err());
+        conn.pragma_update(None, "user_version", range.start())
+            .unwrap();
+        assert!(
+            crate::migrations::require_current_format(&conn).is_ok(),
+            "a newly added format gate must update the public supported range"
+        );
+        conn.pragma_update(None, "user_version", range.end() + 1)
+            .unwrap();
+        assert!(crate::migrations::require_current_format(&conn).is_err());
+    }
+}

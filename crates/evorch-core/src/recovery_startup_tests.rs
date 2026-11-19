@@ -66,9 +66,25 @@ async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
     )
     .unwrap();
     let mut services = BackgroundServices::default();
-    let catalog = RecoveryCatalog::preload(options, &Default::default(), &mut services)
-        .await
-        .unwrap();
+    // These fixed-model unit fixtures use an explicit project-local catalog,
+    // not the startup production model. Keep them off the process/user XDG cache.
+    let catalog_options = BootstrapOptions {
+        project_root: options.project_root.join("another-startup-project"),
+        ..options.clone()
+    };
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(
+        &workbench_protocol::ids::ProjectId::new("fixture").unwrap(),
+        options.project_root.clone(),
+    );
+    let catalog = RecoveryCatalog::preload_for_projects(
+        &catalog_options,
+        &Default::default(),
+        &projects,
+        &mut services,
+    )
+    .await
+    .unwrap();
     services.shutdown().await.unwrap();
     catalog
 }
@@ -273,13 +289,25 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
                 RecoveryCatalog::default(),
             )
             .unwrap();
+            let db = storage::Database::open(&config).unwrap();
+            let tx = db.restart_for_manifest(&manifests[0]).unwrap().unwrap();
+            assert!(tx.ready_at_ms.is_some());
             assert_eq!(
-                observed.scan().unwrap().components[0].disposition,
-                Disposition::AlreadyActivated
+                tx.phase,
+                storage::recovery::restart::RestartPhase::Completed
+            );
+            assert_eq!(
+                db.recovery_claims().unwrap()[0].state,
+                storage::recovery::RecoveryClaimState::Activated
+            );
+            assert!(
+                observed.scan().unwrap().components.is_empty(),
+                "Ready plus FULL ACK is completed, not a repeated recovery alert"
             );
             assert_eq!(
                 observed.prepare(&manifests[0]).err().unwrap(),
-                StartupBlocked::AlreadyActivated
+                StartupBlocked::NeedsAttention,
+                "a completed manifest cannot be prepared or replayed"
             );
             assert_eq!(model.admissions.load(Ordering::SeqCst), before + 1);
             second.stop(run, runtime::StopScope::Subtree).unwrap();
@@ -287,13 +315,28 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         } else {
             adopted.release(&second).unwrap();
             assert!(!second.has_paused_recovery());
+            let db = storage::Database::open(&config).unwrap();
             assert_eq!(
-                reopened.scan().unwrap().components[0].disposition,
-                Disposition::Released
+                db.restart_for_manifest(&manifests[0])
+                    .unwrap()
+                    .unwrap()
+                    .phase,
+                storage::recovery::restart::RestartPhase::Completed
+            );
+            assert_eq!(
+                db.recovery_claims().unwrap()[0].state,
+                storage::recovery::RecoveryClaimState::Released {
+                    reason: "core_startup_declined".into()
+                }
+            );
+            assert!(
+                reopened.scan().unwrap().components.is_empty(),
+                "Ready plus release is completed without a recovery alert"
             );
             assert_eq!(
                 reopened.prepare(&manifests[0]).err().unwrap(),
-                StartupBlocked::Released
+                StartupBlocked::NeedsAttention,
+                "a released completed manifest cannot be prepared again"
             );
             assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         }

@@ -154,3 +154,15 @@ mod continuity;
 
 #[cfg(feature = "recovery-test-support")]
 pub use runtime::{RecoveryActivationBoundary, TerminalTailLease};
+
+/// Pure compiled standard-tool metadata, without a runtime/executor or side effects.
+pub fn compiled_standard_tool_catalog() -> Vec<providers::ToolSpec> {
+    tools::compiled_catalog::standard_tools()
+        .into_iter()
+        .map(|s| providers::ToolSpec {
+            name: s.name,
+            description: s.description,
+            input_schema: s.input_schema,
+        })
+        .collect()
+}

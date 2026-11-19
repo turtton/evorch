@@ -236,6 +236,8 @@ pub(crate) struct Shared {
     next_message_id: AtomicU64,
     active_restart_capture: OnceLock<String>,
     planned_adoption: OnceLock<core_instance::InheritedHandoffProof>,
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    restart_builtin_catalog_fixture: OnceLock<Vec<providers::ToolSpec>>,
     recovery_message_ids_safe: AtomicBool,
     #[cfg(feature = "recovery-test-support")]
     recovery_probe: OnceLock<recovery_activation::RecoveryActivationProbe>,
@@ -887,6 +889,8 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                #[cfg(any(test, feature = "recovery-test-support"))]
+                restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),
@@ -1292,6 +1296,8 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                #[cfg(any(test, feature = "recovery-test-support"))]
+                restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
                 #[cfg(feature = "recovery-test-support")]
                 recovery_probe: OnceLock::new(),

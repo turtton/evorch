@@ -229,7 +229,7 @@ impl RestartCoordinator {
         // CString backing, pointer arrays, ticket and FD rollback data are owned
         // by PreparedExec. No preparation is repeated after owner stop.
         tracing::debug!(target: "restart_drain", phase = "fd_prepare_begin");
-        let _prepared = environment
+        let mut prepared = environment
             .instance
             .prepare_exec_handoff(
                 &environment.mask,
@@ -277,28 +277,67 @@ impl RestartCoordinator {
             owner: &owner,
         };
         tracing::debug!(target: "restart_drain", phase = "owner_stop_begin");
-        let result = owner.stop_worker_for_exec().map_err(text);
-        // NO await / DB / allocation-heavy work on the successful side of this
-        // boundary. D-3 will insert only pending/latch check + prepared raw call.
-        // Today take the explicitly prohibited branch immediately, synchronously.
-        self.fail_finalization_closed(if result.is_ok() {
-            Some(ExitStage::OwnerStopped)
-        } else {
-            None
-        });
-        // Failed branch only; do not insert tracing/allocation in the future raw-exec window.
-        tracing::debug!(target: "restart_drain", phase = "owner_stop_end", ok = result.is_ok());
-        drop(recovery); // failed branch only: heartbeat/diagnostic restoration
+        let stopped_owner = owner.stop_worker_for_exec().map_err(text);
         #[cfg(test)]
-        if result.is_ok()
+        if stopped_owner.is_ok()
             && let Some(after) = &target.after
         {
             after(ExitStage::OwnerStopped);
         }
-        drop(stopped); // same registered AsyncFd restored, including pending signals
-        result?;
-        Err("raw exec is prohibited until D-3".into())
+        // The successful stage-11 tail is only latch/pending checks plus the
+        // prebuilt raw boundary. No notifications, allocation, logging or DB.
+        let completed = stopped_owner.is_ok().then_some(ExitStage::OwnerStopped);
+        let raw = if stopped_owner.is_ok() {
+            self.with_exec_latches(id, || {
+                match stopped.exec_pending() {
+                    Ok(false) => {
+                        // SAFETY: first_five closed/reaped the spawn ledger;
+                        // control and signal readers stopped, owners joined;
+                        // Instance, target, ticket and inventoried FDs stay owned.
+                        Ok(unsafe { prepared.raw_exec_under_latch() })
+                    }
+                    _ => Err("pending shutdown signal or unreadable inbox"),
+                }
+            })
+        } else {
+            None
+        };
+        // Only failures return. Release both latches BEFORE rollback, diagnostic
+        // owner recovery, logging and the same-TX invalidation in the driver.
+        let result = match (stopped_owner, raw) {
+            (Err(error), _) => Err(error),
+            (Ok(()), None) => Err("raw exec prohibited by lifecycle/runtime latch".into()),
+            (Ok(()), Some(Err(reason))) => Err(reason.into()),
+            (Ok(()), Some(Ok(error))) => match prepared.restore_failed_exec() {
+                Ok(()) => Err(format!("raw exec failed: {error}")),
+                Err(restore) => Err(format!(
+                    "raw exec failed: {error}; FD restore failed: {restore}"
+                )),
+            },
+        };
+        tracing::debug!(target: "restart_drain", phase = "owner_stop_end", ok = completed.is_some());
+        self.fail_finalization_closed(completed);
+        drop(recovery); // heartbeat/diagnostic restoration, never business
+        drop(stopped); // same AsyncFd restored; pending signals were not consumed
+        result
     }
+    /// One synchronous linearization window against lifecycle and runtime Stop.
+    /// The callback may only check pending signals and enter the raw syscall.
+    pub(in crate::restart) fn with_exec_latches<T>(
+        &self,
+        id: RestartId,
+        raw: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.0.state.lock().unwrap();
+        if state.id != Some(id) || state.phase != RestartPhase::Finalizing {
+            return None;
+        }
+        let attempt = state.attempt.as_ref()?;
+        let result = self.0.runtime.with_active_restart_attempt(attempt, raw);
+        drop(state);
+        result
+    }
+
     fn fail_finalization_closed(&self, completed: Option<ExitStage>) {
         let mut state = self.0.state.lock().unwrap();
         if let Some(completed) = completed {
@@ -308,7 +347,7 @@ impl RestartCoordinator {
             let _ = self
                 .0
                 .runtime
-                .fail_restart_attempt(attempt, "raw exec prohibited");
+                .fail_restart_attempt(attempt, "raw exec failed or prohibited");
         }
         if state.phase != RestartPhase::ShuttingDown {
             self.0

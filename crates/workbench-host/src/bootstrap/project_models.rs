@@ -2,6 +2,32 @@
 //! the bus and the user configuration. Runtime caches each project's context.
 use super::BootstrapOptions;
 use std::sync::Arc;
+
+/// The model and recovery paths must select the same on-disk catalog. Resolve
+/// XDG once per resolver; an absent run project uses the startup model.
+#[derive(Clone)]
+pub(super) struct ModelCatalogResolver {
+    startup_project: std::path::PathBuf,
+    startup_directory: std::path::PathBuf,
+    other_directory: std::path::PathBuf,
+}
+impl ModelCatalogResolver {
+    pub(super) fn new(options: &super::BootstrapOptions) -> Self {
+        Self {
+            startup_project: options.project_root.clone(),
+            startup_directory: catalog::default_cache_dir(),
+            other_directory: options.config_dir.join("catalog"),
+        }
+    }
+    pub(super) fn for_project(&self, root: Option<&std::path::Path>) -> std::path::PathBuf {
+        if root.is_none_or(|root| root == self.startup_project) {
+            self.startup_directory.clone()
+        } else {
+            self.other_directory.clone()
+        }
+    }
+}
+
 type LiveProjects = Arc<
     std::sync::Mutex<
         std::collections::BTreeMap<std::path::PathBuf, Arc<runtime::compose::SwitchableModel>>,
@@ -41,7 +67,9 @@ pub(super) fn resolver(
                     credential_store: credentials.clone(),
                     bus: bus.clone(),
                     env: Arc::new(routing::ProcessEnv),
-                    model_catalog_dir: Some(options.config_dir.join("catalog")),
+                    model_catalog_dir: Some(
+                        ModelCatalogResolver::new(&options).for_project(Some(root)),
+                    ),
                     load_options: config::LoadOptions {
                         project_dir: Some(root.to_path_buf()),
                         user_config_dir: Some(options.config_dir.clone()),
@@ -65,6 +93,8 @@ pub(super) fn resolver(
     let reload: super::evaluation::Reload = Box::new(move || {
         let models = reload_models.lock().unwrap().clone();
         for (root, model) in models {
+            let model_catalog_dir =
+                Some(ModelCatalogResolver::new(&reload_options).for_project(Some(&root)));
             let load_options = config::LoadOptions {
                 project_dir: Some(root),
                 user_config_dir: Some(reload_options.config_dir.clone()),
@@ -77,7 +107,7 @@ pub(super) fn resolver(
                 credential_store: reload_credentials.clone(),
                 bus: reload_bus.clone(),
                 env: Arc::new(routing::ProcessEnv),
-                model_catalog_dir: None,
+                model_catalog_dir,
             };
             model.replace(
                 super::models::compose_production_model(&config, &context)

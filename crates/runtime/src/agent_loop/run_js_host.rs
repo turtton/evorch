@@ -89,15 +89,6 @@ impl LoopState {
                 .any(|spec| spec.name == tools::tools::run_js::NAME)
     }
 
-    pub(super) fn apply_run_js(&mut self) {
-        let settings = self
-            .runtime()
-            .map(|runtime| runtime.run_js_settings())
-            .unwrap_or_default();
-        let offered = self.run_js_in_scope();
-        apply_run_js_specs(&mut self.tool_specs, offered, &settings);
-    }
-
     /// The host that runs the calls of `run_js` programs in this run.
     pub(super) fn run_js_host(&self, base: &ToolExecutionContext) -> Option<Arc<RuntimeRunJsHost>> {
         if !self.run_js_offered() {

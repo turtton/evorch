@@ -1,7 +1,7 @@
 # M2 production composition evidence (4b-D-2c-3)
 
 Restart is still an internal coordinator, not a public capability. M2 stage 12
-(raw exec), CLI continuity and successor dispatch remain disconnected.
+(raw exec) and internal product successor dispatch are now connected (D-3b); public restart commands and CLI continuity remain deferred to 5a/5b.
 
 ## Ownership and completion
 
@@ -111,8 +111,8 @@ completed and the writer can still accept a barrier. An additional internal
 audit event then proves the final snapshot is distinct from that ACK. Independent
 SQL readback checks every workload event exactly once. All three runs belonging
 to one owner/generation retain their captured snapshot receipts and parked-run
-inventory. All successful drain cells intentionally end FailedClosed at the
-disconnected raw-exec boundary.
+inventory. Drain-only cells deliberately remove their fixture entry after owner stop and
+exercise real execve failure/FD rollback. Product-success cells are separate.
 
 Failure cells drop the real ACK sender by panicking its worker, panic the real
 subscriber OS thread after its persistence worker has joined, fail a real
@@ -132,3 +132,146 @@ command, environment, raw results, failure results and D-3 handoff.
 The existing final-business/usage durability test also uses production cold-core
 bootstrap: independent DB reads verify the final event, per-request usage and
 aggregated usage bucket, in addition to the repeated queue-order measurements.
+
+## D-3b: internal product exec/bootstrap connection
+
+After stage 11, the successful tail holds synchronous lifecycle/runtime
+execution-prohibition latches, checks the stopped signalfd without consuming it,
+and calls the prepared raw syscall boundary. It does not await, access SQLite,
+allocate/format strings, notify or log. Only a failed return releases the
+latches, restores FD flags/diagnostic ownership and invalidates the same TX;
+old business never resumes. A successful exec replaces the process image while
+retaining the lifetime-lock OFD and one-use ticket. Product entry classifies
+planned mode and inspects inherited descriptors before creating an inbox,
+runtime or database; failed validation never falls back to Cold.
+
+The hidden read-only `--describe-handoff` preflight is not a protocol capability
+or a user restart operation. It opens no DB/owner/lease/lock and starts no
+resident service. Its storage range comes from the migration registry and
+all canonical current-format gates; protocol comes from ProtocolVersion::CURRENT. Its
+standard-tools-v1 identity covers only the eight compiled standard tools:
+read, edit, write, apply_patch, grep, shell, git_diff and run_js, in the same
+name-sorted metadata order as actual standard registration. A parity test
+compares names, descriptions, schemas and order without changing registration.
+Optional network/web/browser tools, host and runtime meta tools, configuration,
+MCP and skills are **not** included in this preflight catalog identity. It is
+neither an effective per-run catalog nor permission to change the prompt.
+
+Per-incarnation ToolSnapshot is the boundary authority, separate from the
+standard-eight preflight identity. M2 snapshots the actual sent ProviderInput
+before Commit against the full build-owned base-executor registry plus runtime
+META_OPS and host builtins. The role-independent name set comes from
+AgentRuntime::restart_builtin_tool_names(); callers constructing RestartMetadata
+must use that accessor. Metadata never filters the actual build registry, and
+storage requires exact name-set equality. Visible entries overlay the exact
+effective specs (including run_js hints and provider edit narrowing); hidden
+entries keep their raw registry specs, with registry order preserved. Planned
+recovery compares the current full builtin
+preview with this evidence after Ready but before FULL activation ACK. The
+pure composition helper is shared with the live loop. Saved FrozenMcpSnapshot
+metadata is restored through the same inert registration API and name-permission
+helper as the real loop, using a disposable bus/executor: no discovery, credentials,
+server process or connection. An absent snapshot never invents external tools.
+External tool definitions remain unchanged and do not acquire a build-change grant. Non-tool context,
+execution authority, history, ToolResults and affinity must remain identical.
+Only a verified different build with changed builtin schema/description/order
+may consume one tools-only boundary; same build and unchanged catalogs grant
+none. Missing or unexplainable builtin evidence fails closed, never grants an
+unverified boundary or rewrites sent history.
+
+Normal model construction and recovery share ModelCatalogResolver: the startup
+project uses the XDG models.dev cache, other registered projects use
+config_dir/catalog (including after reload). Preload deduplicates only the
+current projects' effective directories, and publication/refresh stays with each
+canonical project's catalog. A missing default-project cache cannot borrow
+another project's metadata to admit a graph. UsagePricing remains unchanged.
+
+Public restart/quarantine operations and capability publication, client
+reconnection and CLI continuity remain 5a/5b work. The explicit-shutdown watchdog
+remains D-3a2 and is not added here.
+
+### Product and full-core contract matrix
+
+| Contract | Executable coverage |
+| --- | --- |
+| Startup default project recovers with an XDG-only catalog, preserving provider wire/cache prefix | `startup_recovery::startup_default_project_recovers_from_xdg_cache_only` |
+| Non-startup project retains config_dir/catalog and its canonical pins; no cross-project catalog grant | Host `bootstrap::recovery::catalog::tests::nonstartup_project_keeps_its_config_catalog_and_canonical_pins_without_admission` |
+| Different-build raw exec with unchanged catalogs preserves input-derived cache prefix | `planned_exec_cache::raw_exec_different_build_unchanged_catalog_preserves_cache_prefix` |
+| Changed builtin catalog grants exactly one tools-only boundary, then reuses the new prefix | `planned_exec_cache::raw_exec_different_build_changed_catalog_has_one_tools_only_boundary` |
+| Changed builtin catalog preserves disconnected MCP specs and prefix across raw exec | `planned_exec_cache::raw_exec_changed_builtin_catalog_preserves_disconnected_mcp_prefix` |
+| Actual prepared raw exec, same PID/image, uninterrupted lifetime exclusion | `planned_exec::prepared_raw_exec_reaches_product_bootstrap_with_multiple_checkpoints` |
+| Inherited FD validation before new inbox/DB; no invalid-entry Cold fallback | `planned_exec::product_rejects_unexpected_inherited_fd_without_cold_fallback` |
+| One physical adoption, Ready, rejected second entry without row mutation | Positive product process scenario (independent DB and /proc readback) |
+| Three same-owner parked checkpoints and capture digest survive exec | Positive product process scenario (member/snapshot/owner inventory readback) |
+| Planned owner proof claims parked-only/non-resumed graph owners; ordinary shutdown releases them without activation or binding | Positive product process scenario (owner generation/readback, no Activated claim, command-wire missing-root rejection, shutdown Released state) |
+| Mismatched owner proof never falls back to normal claim or clears a hold | `planned_exec::product_owner_proof_mismatch_leaves_the_hold_and_checkpoint_intact`: mutation only between raw exec and product entry, physical adoption then fail-closed boot diagnostic, original owner/generation retained |
+| Successful product preflight but mismatched durable successor identity | `planned_exec::product_preflight_metadata_mismatch_invalidates_the_same_transaction`; same TX/capture invalidation, closed producer gate, rejected cancellation |
+| Final signal restore, control/web request and delivery drain | `final_signal_restore_and_web_drain_matrix`: all 10 cells / 6 real signal deliveries; drain-only Release cells force real execve ENOENT after owner stop |
+| Stages 9–11 failure/Stop/shutdown and raw synchronous latch ordering | Three stage matrices plus `later::latch` tests |
+| Current command bindings reflect successful resumed roots, including owner retry | `startup_recovery` ordinary CommandHost follow-ups; `startup_owner_blocked_retry_binds_the_captured_root_before_ordinary_send` |
+| Activation/publication gap cannot create a new conversation | `workbench-host::recovery_bindings`: protocol Busy/SameRequest, unchanged submission retry, no new run; error/unwind/cancel unfence; newer-root non-overwrite |
+| Pre-ACK tools match provider-visible edit selection | `runtime::compose::tests::edit_tools::planned_preview_matches_provider_wire_for_edit_patch_switchable_readonly_and_child`: 10 HTTP cells, ordered names/descriptions/schemas; unresolved selection negative |
+| Same-build tools drift never grants a schema boundary | `startup_same_build_tools_difference_is_needs_attention_without_provider_admission` |
+| Missing predecessor tool evidence does not grant activation/binding | `startup_missing_predecessor_tool_evidence_never_activates_or_publishes_bindings` |
+| Cold retains quarantine, never promotes Captured into runnable binding | `startup_cold_captured_graph_never_adopts_or_calls_the_provider` and cold/ACK-loss subprocess checks |
+
+Recovery assembles current-directory bindings outside CommandHost's mutex.
+Only roots admitted by CurrentRecoveryAuthority and selected for resume are
+candidates. A per-thread RAII admission fence spans activation outside the host
+lock and the short successful publication; a command arriving in that gap gets
+Busy with SameRequest advice (the existing wire vocabulary), never a new run.
+Error, unwind and task cancellation remove the fence without publishing a
+binding. Initial startup does not serve Ready before this work; the same fence
+also protects retries while an already-ready core serves commands. Neither the
+host mutex nor its fence mutex is held through await, runtime activation or DB
+work. This is routing synchronization, not a grant of execution authority.
+Cold still quarantines Captured graphs; this change does not widen cold recovery.
+
+Planned bootstrap claims every same-TX owner hold with the inherited physical
+proof, including parked-only threads and graphs rejected by current authority.
+Ownership exclusion is not execution authority: those checkpoints and quarantine/
+NeedsAttention remain intact, with no implicit activation or command binding.
+Mismatched proof leaves the hold untouched and records a diagnostic; ordinary
+claim is never a fallback. Claimed owners enter the successor inventory and its
+normal shutdown quiesce/release path. 5a must provide user-facing release/resume
+operations for the successor-owned graphs which cannot resume automatically.
+
+Logical graph-recovery fixtures now retain CaptureTools from the saved
+ResumeIntent ProviderInput before Commit, using the production pure snapshot and
+permission-fingerprint functions. They are not physical-exec evidence and never
+substitute for the product process tests. The pre-artifact fixture explicitly
+declares different old/new build IDs and its old compiled builtin names; the
+default same-build identity remains unchanged and rejects unexplained tool drift.
+This post-Ready seam records Ready before planned graph startup, just as product
+boot does. An instance-scoped, once-only raw catalog override exists only under
+cfg(any(test, feature="recovery-test-support")) to model a predecessor build;
+normal M2 capture and visible overlay still run, and an effective compiled tool
+missing from the override fails closed. No-feature product builds contain no
+override field, API, or branch.
+
+The pre-ACK preview uses the provider boundary's pure edit selection/narrowing,
+not the wider authorized catalog. Routed Edit/ApplyPatch selections and a
+Switchable fixed-model fallback therefore agree with the tools actually sent.
+An unresolved narrowing model fails closed before FULL activation (NeedsAttention;
+internal reason: `planned tool preview: current edit-tool selection unavailable`).
+Production routed profiles select an interface and Switchable legacy models
+explicitly select Edit; no selection is guessed from captured input.
+
+### Remaining follow-ups
+
+- **5a:** publish restart/capability/quarantine operations and client reconnect;
+  retain these internal entry, lifetime, activation and fail-closed invariants.
+- **5b:** CLI invocation/token continuity and its distinct reconnect deadlines;
+  ordinary conversation follow-up routing here is not CLI invocation resumption.
+- **D-3a2:** bounded explicit-shutdown watchdog, unchanged and out of scope here.
+- **F4:** same-build product-to-product real exec remains separate. The raw
+  cache fixtures use different predecessor/successor images.
+- **MCP evidence:** no-I/O is structural with no server configured; the MCP
+  seam is used only by the predecessor.
+- **Affinity evidence:** ChatCompletions checks the DB and ProviderInput;
+  Responses E2E separately checks wire affinity.
+- **Performance:** preflight/description/rechecks hash the whole ELF roughly a
+  dozen times. Private stripped process fixtures preserve executable/data
+  section bytes and hash/describe/exec the same copy. Release ELF size, hash
+  timing and fleet-tail costs remain **unmeasured**; no probe/boot deadline was
+  extended. Safe hash reuse is a separate optimization, not assumed evidence.

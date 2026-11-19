@@ -9,6 +9,8 @@ use workbench_host::bootstrap::{BootstrapError, BootstrapOptions, BootstrappedHo
 use workbench_web::{WebServer, WebServerConfig};
 
 mod args;
+#[cfg(target_os = "linux")]
+mod planned_entry;
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -34,7 +36,43 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<(), BootstrapError> {
     #[cfg(target_os = "linux")]
     let mask = core_instance::handoff::BlockedShutdownSignals::at_entry()?;
+    #[cfg(target_os = "linux")]
+    let entry = core_instance::handoff::entry::EntryOptions::parse(std::env::args_os().skip(1))?;
+    // Inspect before config/DB/runtime/any new ShutdownInbox. Never fall back to Cold.
+    #[cfg(target_os = "linux")]
+    let inherited = match entry.mode {
+        core_instance::handoff::entry::BootMode::Cold => None,
+        core_instance::handoff::entry::BootMode::PlannedHandoff(handoff) => {
+            // SAFETY: exclusive OS FDs at single-threaded process entry.
+            Some(unsafe { handoff.inspect()? })
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let args = args::parse(
+        entry
+            .args
+            .into_iter()
+            .map(|arg| arg.into_string().map_err(|_| "invalid UTF-8 option"))
+            .collect::<Result<Vec<_>, _>>()?,
+    )?;
+    #[cfg(not(target_os = "linux"))]
     let args = args::parse(std::env::args().skip(1))?;
+    #[cfg(target_os = "linux")]
+    if let Some(inherited) = inherited {
+        if args.mode != args::Mode::Serve || args.launch_fd.is_some() {
+            return Err("invalid planned handoff mode".into());
+        }
+        return planned_entry::run(args, mask, inherited);
+    }
+    #[cfg(target_os = "linux")]
+    if entry.describe {
+        serde_json::to_writer(
+            std::io::stdout(),
+            &evorch_core::handoff_description::describe()?,
+        )?;
+        println!();
+        return Ok(());
+    }
     if args::write_read_only(
         &args.mode,
         &mut std::io::stdout(),

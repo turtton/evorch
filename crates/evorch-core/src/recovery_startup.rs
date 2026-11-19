@@ -397,6 +397,14 @@ impl<'a> StartupCoordinator<'a> {
             config_dir: &self.inputs.options.config_dir,
         }
         .resolve(&records, &resume)?;
+        if authority.members.values().any(|config| {
+            !self
+                .catalog
+                .is_available_for_project(config.project_root.as_deref())
+        }) {
+            return Err(StartupBlocked::CatalogUnavailable);
+        }
+        let mut command_bindings = Vec::new();
         // This trusted binding comes from the current host directory/permit,
         // never from a saved recipe. Install it before the run loop freezes its
         // tools, or a restored conversation silently loses plan_read and plan_update.
@@ -406,6 +414,10 @@ impl<'a> StartupCoordinator<'a> {
                     .ownership
                     .as_ref()
                     .ok_or(StartupBlocked::OwnerBlocked)?;
+                let binding = bindings
+                    .get(&permit.thread_id)
+                    .ok_or(StartupBlocked::CurrentBindingRequired)?;
+                command_bindings.push((permit.thread_id.clone(), binding));
                 let _generation = permit
                     .mutation_guard()
                     .map_err(|_| StartupBlocked::OwnerBlocked)?;
@@ -472,10 +484,16 @@ impl<'a> StartupCoordinator<'a> {
             .runtime
             .restore_relations_and_continuations(&mut paused)
             .map_err(|_| StartupBlocked::NeedsAttention)?;
+        self.inputs
+            .runtime
+            .prepare_planned_component_tool_evidence(&paused, &authority, &models)
+            .inspect_err(|error| tracing::warn!(%error, "planned startup tool evidence rejected"))
+            .map_err(|_| StartupBlocked::NeedsAttention)?;
         Ok(PreparedStartupComponent {
             paused,
             authority,
             models,
+            command_bindings,
         })
     }
 }
@@ -485,8 +503,12 @@ pub struct PreparedStartupComponent {
     paused: PausedRecoveryComponent,
     authority: CurrentRecoveryAuthority,
     models: RecoveryModels,
+    command_bindings: Vec<(String, workbench_host::lane::ThreadBinding)>,
 }
 impl PreparedStartupComponent {
+    pub fn command_bindings(&self) -> Vec<(String, workbench_host::lane::ThreadBinding)> {
+        self.command_bindings.clone()
+    }
     pub fn claim_id(&self) -> &str {
         &self.paused.claim().claim_id
     }

@@ -433,8 +433,195 @@ impl AgentRuntime {
         let probe = crate::learning_jobs::ProcOriginProbe::new(&self.learning_origin());
         self.quarantine_cold_learning(&probe)
     }
+    /// Metadata-only build-owned names for a caller constructing RestartMetadata.
+    /// This is deliberately broader than --describe-handoff's standard-tools-v1.
+    pub fn restart_builtin_tool_names(&self) -> BTreeSet<String> {
+        self.restart_builtin_tool_catalog(&[])
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect()
+    }
+    /// Metadata-only full build registry with exact visible projections overlaid.
+    /// Handoff capture and fixture builders must not use the role-filtered list
+    /// as the build-owned name set. This does not register or execute any tool.
+    pub fn restart_builtin_tool_catalog(
+        &self,
+        effective: &[providers::ToolSpec],
+    ) -> Vec<providers::ToolSpec> {
+        let executor = self
+            .shared
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.restart_builtin_catalog_from_executor(&executor, effective)
+    }
+    fn restart_builtin_catalog_from_executor(
+        &self,
+        executor: &::tools::ToolExecutor,
+        effective: &[providers::ToolSpec],
+    ) -> Vec<providers::ToolSpec> {
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if let Some(raw) = self.shared.restart_builtin_catalog_fixture.get() {
+            return crate::agent_loop::tool_catalog::overlay_builtin_catalog(
+                raw.clone(),
+                effective,
+            );
+        }
+        crate::agent_loop::tool_catalog::builtin_catalog(executor, effective)
+    }
+    /// Explicit predecessor-build fixture only; scoped to this runtime instance.
+    /// Raw build metadata may be replaced once, never provider-visible projections.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn set_restart_builtin_catalog_for_fixture(
+        &self,
+        raw: Vec<providers::ToolSpec>,
+    ) -> Result<(), RuntimeError> {
+        self.shared
+            .restart_builtin_catalog_fixture
+            .set(raw)
+            .map_err(|_| error("fixture builtin catalog already fixed"))
+    }
+    fn validated_restart_builtin_catalog(
+        &self,
+        executor: &::tools::ToolExecutor,
+        effective: &[providers::ToolSpec],
+    ) -> Result<Vec<providers::ToolSpec>, RuntimeError> {
+        let catalog = self.restart_builtin_catalog_from_executor(executor, effective);
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if self.shared.restart_builtin_catalog_fixture.get().is_some() {
+            let compiled = crate::agent_loop::tool_catalog::builtin_catalog(executor, &[]);
+            if effective.iter().any(|tool| {
+                compiled.iter().any(|s| s.name == tool.name)
+                    && !catalog.iter().any(|s| s.name == tool.name)
+            }) {
+                return Err(error(
+                    "effective builtin missing from fixture build catalog",
+                ));
+            }
+        }
+        Ok(catalog)
+    }
     /// Predecessor-only: fix the exact effective schemas and non-tool authority after
     /// expected capture has been persisted, before committing/arming the restart.
+    /// M2 adapter: snapshot the actual sent input before Commit. Metadata names
+    /// select compiled builtins, never rewrite schemas or invent a fresh request.
+    pub fn persist_restart_tool_snapshots(
+        &self,
+        session: &mut RestartCaptureSession,
+    ) -> Result<(), RuntimeError> {
+        self.validate_capture_session(session)?;
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        let tx = store
+            .with_database(|db| db.restart_transaction(&session.restart_id))
+            .map_err(error)?
+            .ok_or_else(|| error("missing capture"))?;
+        for member in &tx.expected {
+            let row = store
+                .with_database(|db| db.resume_intent(&member.run_id))
+                .map_err(error)?
+                .ok_or_else(|| error("capture intent missing"))?;
+            let intent = crate::quiesce::ResumeIntent::decode(row).map_err(error)?;
+            let Some(input) = intent.provider_input else {
+                continue;
+            };
+            let catalog = {
+                let executor = self
+                    .shared
+                    .executor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.validated_restart_builtin_catalog(&executor, &input.request.tools)?
+            };
+            let policy = self.execution_policy(Role::from_name(&intent.role).map_err(error)?);
+            self.persist_restart_tool_snapshot(
+                session,
+                intent.run_id,
+                &catalog,
+                &policy_fingerprint(&policy)?,
+            )?;
+        }
+        Ok(())
+    }
+    /// Preview only the compiled part. External schemas are preserved exactly;
+    /// the real loop performs its ordinary external/config compatibility checks.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_planned_run_tools(
+        &self,
+        run: RunId,
+        incarnation: &str,
+        input: &crate::quiesce::ProviderInput,
+        config: &RunConfig,
+        role: Role,
+        parent: Option<RunId>,
+        model: &Arc<dyn AgentModel>,
+        mcp: Option<&::tools::mcp::types::FrozenMcpSnapshot>,
+    ) -> Result<(), RuntimeError> {
+        self.read_adopted_restart(false)?;
+        let project = self.shared.run_project(config);
+        let shared = loop_shared(&Arc::downgrade(&self.shared), project.as_deref())
+            .ok_or_else(|| error("no runtime"))?;
+        // The actual restored loop registers this same frozen catalog before
+        // composing tools. No discovery, credentials or mutable live catalog.
+        let raw = crate::agent_loop::tool_catalog::restored_specs(&shared.executor, mcp)
+            .map_err(|kind| error(format!("saved MCP metadata invalid: {kind:?}")))?;
+
+        let mut policy = self
+            .execution_policy(role)
+            .for_run_config(config, parent.is_none())
+            .with_image_generation(model.image_generation_enabled());
+        if self.goal_thread(run).is_none() {
+            policy.capabilities.allowed_tools.remove("plan_read");
+            policy.capabilities.allowed_tools.remove("plan_update");
+        }
+        if let Some(snapshot) = mcp {
+            crate::agent_loop::tool_catalog::allow_saved_mcp_tools(&mut policy, snapshot);
+        }
+        let settings = self.run_js_settings();
+        let family =
+            crate::prompt::classify(&model.selected_model(role, config.category.as_deref()));
+        let effective = crate::agent_loop::tool_catalog::compose(
+            raw,
+            &policy,
+            crate::agent_loop::tool_catalog::CatalogOptions {
+                skills: shared.skills.is_some(),
+                child: parent.is_some(),
+                web: self.web_tools_enabled(),
+                artifacts: self.artifact_pages().is_some(),
+                run_js: config.team.is_none()
+                    && self.run_js_offered_to(role, config.category.as_deref()),
+                run_js_settings: &settings,
+                family,
+            },
+        );
+        // Compare provider-visible tools, not the wider authorized catalog.
+        let effective = crate::edit_tools::preview(
+            model.as_ref(),
+            &run.to_string(),
+            role,
+            config.category.as_deref(),
+            &effective,
+        )?;
+        let catalog = self.validated_restart_builtin_catalog(&shared.executor, &effective)?;
+        let mut candidate = input.clone();
+        candidate.request.tools = effective;
+        let evidence = self.prepare_restart_tool_evidence(
+            run,
+            incarnation,
+            &candidate,
+            &catalog,
+            &policy_fingerprint(&policy)?,
+        )?;
+        if let Some(boundary) = self.consume_restart_tool_boundary(evidence, candidate.clone())?
+            && boundary.apply(input)? != candidate
+        {
+            return Err(error("tool boundary candidate changed"));
+        }
+        Ok(())
+    }
     pub fn persist_restart_tool_snapshot(
         &self,
         session: &mut RestartCaptureSession,
@@ -649,7 +836,7 @@ fn error(e: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(e)
 }
 
-fn tool_snapshot(
+pub(super) fn tool_snapshot(
     input: &crate::quiesce::ProviderInput,
     catalog: &[providers::ToolSpec],
     permissions: &str,
@@ -671,4 +858,16 @@ fn tool_snapshot(
             .map_err(error)?,
         stable_context: restart_digest(&(stable, permissions)).map_err(error)?,
     })
+}
+
+// Role/build-derived tool grants are compared as ordered catalog evidence. The
+// non-tool execution authority must remain identical across the handoff.
+pub(super) fn policy_fingerprint(p: &crate::ExecutionPolicy) -> Result<String, RuntimeError> {
+    restart_digest(&(
+        &p.role_name,
+        p.capabilities.can_delegate,
+        p.escalation_approval,
+        p.escalate_to_user_on_deny,
+    ))
+    .map_err(error)
 }

@@ -3,6 +3,33 @@
 use config::EditToolConfig;
 use providers::ToolSpec;
 
+/// The provider owns candidate selection; a fixed/legacy model always uses Edit.
+/// An unresolved route must not guess an editing interface during recovery.
+pub(crate) fn selection(narrows: bool, selected: Option<EditToolConfig>) -> Option<EditToolConfig> {
+    if narrows {
+        selected
+    } else {
+        Some(EditToolConfig::Edit)
+    }
+}
+
+pub(crate) fn preview(
+    model: &dyn crate::AgentModel,
+    run: &str,
+    role: crate::Role,
+    category: Option<&str>,
+    tools: &[ToolSpec],
+) -> Result<Vec<ToolSpec>, crate::RuntimeError> {
+    let selected = selection(
+        model.narrows_edit_tools(),
+        model.edit_tool_for_run(run, role, category),
+    )
+    .ok_or_else(|| crate::RuntimeError::Model {
+        reason: "planned tool preview: current edit-tool selection unavailable".into(),
+    })?;
+    Ok(narrow(tools, selected))
+}
+
 pub(crate) fn narrow(tools: &[ToolSpec], choice: EditToolConfig) -> Vec<ToolSpec> {
     tools
         .iter()
@@ -23,7 +50,11 @@ pub(crate) fn for_model<'a>(
     if model.narrows_edit_tools() {
         tools.into()
     } else {
-        narrow(tools, EditToolConfig::Edit).into()
+        narrow(
+            tools,
+            selection(false, None).expect("legacy model has a fixed edit interface"),
+        )
+        .into()
     }
 }
 

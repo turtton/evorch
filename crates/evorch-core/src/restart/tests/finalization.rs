@@ -27,12 +27,14 @@ fn metadata() -> RestartMetadata {
 }
 
 fn transaction(host: &BootstrappedHost) -> RestartTransaction {
+    let mut metadata = metadata();
+    metadata.old_builtin_tool_names = host.runtime.restart_builtin_tool_names();
     host.composition
         .storage_writer
         .mutate_restart(
             "restart".into(),
             None,
-            RestartMutation::Create(Box::new(metadata())),
+            RestartMutation::Create(Box::new(metadata)),
         )
         .unwrap()
 }

@@ -13,6 +13,7 @@ pub enum CoreBootMode {
 
 /// Owned current-process inputs. No recipe can manufacture this lease proof.
 pub struct CoreStartupInputs {
+    pub host: Arc<std::sync::Mutex<crate::CommandHost>>,
     pub mode: CoreBootMode,
     pub options: BootstrapOptions,
     pub runtime: AgentRuntime,

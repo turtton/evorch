@@ -148,12 +148,9 @@ impl LoopState {
                     Ok(executor) => {
                         // These concrete names belong only to this run and role.
                         // Never change Role defaults or the run_js fixed allowlist.
-                        self.policy.capabilities.allowed_tools.extend(
-                            lease
-                                .snapshot()
-                                .tools
-                                .iter()
-                                .map(|tool| tool.public_name.clone()),
+                        super::tool_catalog::allow_saved_mcp_tools(
+                            &mut self.policy,
+                            lease.snapshot(),
                         );
                         self.shared.executor = Arc::new(executor);
                         self.mcp_lease = Some(lease.clone());

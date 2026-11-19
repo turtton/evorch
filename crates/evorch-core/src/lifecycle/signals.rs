@@ -26,8 +26,12 @@ impl OperatorSignals {
     /// Install the mask before threads. In a successor, create this only AFTER
     /// inherited-FD inspection. No handler or second signalfd is installed.
     pub fn new(mask: &BlockedShutdownSignals) -> io::Result<Self> {
+        Self::from_inbox(mask.inbox()?)
+    }
+    /// Transfer the bootstrap inbox after its watchdog has stopped.
+    pub fn from_inbox(inbox: ShutdownInbox) -> io::Result<Self> {
         Ok(Self(Arc::new(Mutex::new(Reader {
-            inbox: Some(AsyncFd::new(mask.inbox()?)?),
+            inbox: Some(AsyncFd::new(inbox)?),
             shutdown: false,
             wake: None,
         }))))
@@ -87,6 +91,19 @@ impl OperatorSignals {
     }
 }
 impl StoppedSignals {
+    /// No allocation, logging or signal consumption inside the final latch.
+    pub(crate) fn exec_pending(&self) -> io::Result<bool> {
+        let state = self.owner.0.lock().unwrap();
+        if state.shutdown {
+            return Ok(true);
+        }
+        self.inbox
+            .as_ref()
+            .expect("owned stopped reader")
+            .get_ref()
+            .is_pending()
+    }
+
     /// Nonblocking, also covers a shutdown consumed before the transfer.
     pub fn check_pending(&self) -> io::Result<()> {
         let mut state = self.owner.0.lock().unwrap();

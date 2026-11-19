@@ -253,6 +253,19 @@ async fn cell_loaded(
     } else {
         None
     };
+    // These legacy cells audit the returned failure/cleanup path, not successor
+    // bootstrap. Remove only the fixture entry AFTER heavy preparation, so they
+    // now exercise real execve ENOENT + FD rollback rather than the old D-3 stub.
+    let previous_after = target.after.take();
+    let entry_path = dir.path().join("target");
+    target.after = Some(Arc::new(move |now| {
+        if let Some(after) = &previous_after {
+            after(now);
+        }
+        if now == ExitStage::OwnerStopped {
+            std::fs::remove_file(&entry_path).unwrap();
+        }
+    }));
     let tx = create(&host, metadata);
     let reached = Arc::new(Mutex::new(Vec::new()));
     let previous = target.observe.take();

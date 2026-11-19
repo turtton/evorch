@@ -923,7 +923,11 @@ impl RoutedModel {
                 CapabilitySupport::Unsupported => false,
                 CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
             };
-            let edit_tool = provider.profile.edit_tool_for(&route.model_id);
+            let edit_tool = crate::edit_tools::selection(
+                true,
+                Some(provider.profile.edit_tool_for(&route.model_id)),
+            )
+            .expect("resolved provider has an edit interface");
             let tools = if model_allows_tools && provider.client.capabilities().tool_use {
                 crate::edit_tools::narrow(tools, edit_tool)
             } else {

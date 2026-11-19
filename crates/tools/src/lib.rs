@@ -50,3 +50,6 @@ pub use tools::{
     ApplyPatch, BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, Edit, GitDiff, Grep,
     GuardPolicy, Read, RunJs, Shell, WebFetch, WebSearch, Write, browser_tools,
 };
+
+/// Side-effect-free identity of the compiled standard tools; not an effective run catalog.
+pub mod compiled_catalog;

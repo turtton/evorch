@@ -4,75 +4,9 @@ mod learning;
 mod preparing;
 mod shutdown;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
-#[derive(Default)]
-struct Model(
-    std::sync::atomic::AtomicUsize,
-    Mutex<std::collections::BTreeMap<String, runtime::quiesce::ProviderInput>>,
-);
-#[async_trait::async_trait]
-impl runtime::AgentModel for Model {
-    fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
-        "restart-fixture".into()
-    }
-    fn requires_admission(&self) -> bool {
-        false
-    }
-    fn checkpoint_provider_input(&self, run: &str) -> Option<runtime::quiesce::ProviderInput> {
-        self.1.lock().unwrap().get(run).cloned()
-    }
-    async fn admit(
-        &self,
-        _: &runtime::AgentInvocationContext,
-        _: runtime::Role,
-    ) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    async fn complete(
-        &self,
-        invocation: &runtime::AgentInvocationContext,
-        _: runtime::Role,
-        messages: &[providers::Message],
-        tools: &[providers::ToolSpec],
-    ) -> Result<providers::ChatResponse, RuntimeError> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Live idle fixtures checkpoint the actual input seen by this model,
-        // including run affinity; never fabricate a fresh request at capture.
-        self.1.lock().unwrap().insert(
-            invocation.run_id.clone(),
-            runtime::quiesce::ProviderInput {
-                profile: "restart-fixture".into(),
-                protocol: model::ApiProtocol::OpenAiCompletions,
-                edit_tool: config::EditToolConfig::Edit,
-                affinity_key: invocation.run_id.clone(),
-                replay: None,
-                request: providers::ChatRequest {
-                    model: "restart-fixture".into(),
-                    messages: messages.to_vec(),
-                    tools: tools.to_vec(),
-                    tool_choice: None,
-                    temperature: None,
-                    max_tokens: None,
-                    reasoning_effort: None,
-                    service_tier: None,
-                    output_schema: None,
-                    observation: None,
-                    responses_replay: None,
-                },
-            },
-        );
-        Ok(providers::ChatResponse {
-            message: providers::Message {
-                role: providers::Role::Assistant,
-                content: vec![providers::ContentBlock::Text {
-                    text: "completed".into(),
-                }],
-            },
-            usage: Default::default(),
-            usage_reported: true,
-            finish_reason: providers::FinishReason::Stop,
-        })
-    }
-}
+#[path = "../../shared-test-support/restart_model.rs"]
+mod restart_model;
+use restart_model::{Direct, Model};
 // These fixtures explicitly reach an idle safe point before restart. PreparingDrains
 // intentionally permits provider work, so scheduling request immediately after
 // delegate is no longer evidence that a live loop was parked.
@@ -109,16 +43,6 @@ async fn resume_idle(runtime: &AgentRuntime, run: RunId) {
         runtime.wait(run).await.unwrap(),
         event_bus::AgentRunPhase::Stopped
     );
-}
-struct Direct;
-impl runtime::SandboxFactory for Direct {
-    fn build(
-        &self,
-        _: &runtime::ExecutionPolicy,
-        _: &runtime::WorkspaceMounts,
-    ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
-        Ok(Arc::new(sandbox::DirectSandbox::new_unchecked()))
-    }
 }
 async fn boot() -> (tempfile::TempDir, BootstrappedHost) {
     boot_with_model(Arc::new(Model::default())).await
