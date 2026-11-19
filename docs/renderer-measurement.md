@@ -692,8 +692,9 @@ allocation／frame の分母（`seen`）には入らない。この競合を直�
   分からない（回帰試験が、競合の再現と修正を決定的に確かめる）。
   allocs/frame と alloc B/frame は、旧い値から最大でも数 % の違い（`p720_1tab_8reader` の
   119 → 120、`k4_1tab_4reader` の 618 → 619）で、結論は変わらない。
-- **latency の p95 は、旧い値より低い側に出た**（最大は `p1080_4tab_2reader` の 12.06ms、
-  4K の 4 reader は 19.35ms、旧い値は 26.32ms）。これは harness の修正の効果ではなく、実行時の
+- **latency の p95 は、8 scenario 中 7 つで旧い値より低く、`p720_4tab_2reader` だけ高かった**
+  （5.01 → 6.15ms）。全体の最大は `k4_1tab_4reader` の 19.35ms（旧い値は 26.32ms）で、
+  1080p の `p1080_4tab_2reader` は 12.06ms。これは harness の修正の効果ではなく、実行時の
   負荷の違い（旧い値は loadavg 11 前後、今回は 8.7〜12.7 から下がる途中）だと見ているが、確かめて
   いない。窓内の 1MiB 以上の確保は全 scenario で 0、live heap の窓内の増分も 0 で、steady state で
   frame ごとの大きい確保がない、という結論は同じ。

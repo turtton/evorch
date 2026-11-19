@@ -734,6 +734,37 @@ async fn a_four_k_subscription_limit_and_its_lease_release_are_counted_separatel
     f.finish().await;
 }
 
+/// The status override of the test helper stands in only for a helper that
+/// never ran: a stop, which the actor reports as generation 0 too, is seen.
+#[tokio::test(start_paused = true)]
+async fn the_installed_helper_status_gives_way_to_the_actors_own_stop() {
+    let f = Fixture::new();
+    let _peer = install_frame_source(&f);
+    let owner = &f.service.owner;
+    assert_eq!(owner.status().phase, Phase::Ready);
+    assert_eq!(owner.status().generation, 1);
+    assert!(
+        owner
+            .frame_source(Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            })
+            .is_some()
+    );
+    owner.stop().await.unwrap();
+    assert_eq!(owner.status().phase, Phase::Stopped);
+    assert_eq!(owner.status().generation, 0);
+    assert!(
+        owner
+            .frame_source(Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            })
+            .is_none()
+    );
+    f.finish().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_revoked_capture_keeps_its_budget_until_the_last_transfer_lets_go() {
     let f = Fixture::new();

@@ -204,6 +204,10 @@ impl TabCleanup {
         self.finished.notify_waiters();
     }
 }
+/// Test-only: an installed status and the receiver that notices the actor's
+/// next publication.
+#[cfg(test)]
+type InstalledStatus = (Status, watch::Receiver<Status>);
 #[derive(Clone)]
 pub struct RendererOwner {
     body_budget: Arc<tokio::sync::Semaphore>,
@@ -214,9 +218,10 @@ pub struct RendererOwner {
     frames: FrameSource,
     pub(crate) run_tabs:
         Arc<std::sync::Mutex<std::collections::HashMap<String, super::run_pages::RunTab>>>,
-    /// Test-only: the status reported while the actor has published none.
+    /// Test-only: the status reported until the actor publishes one after it was
+    /// installed, with the receiver that notices that publication.
     #[cfg(test)]
-    test_status: Arc<std::sync::Mutex<Option<Status>>>,
+    test_status: Arc<std::sync::Mutex<Option<InstalledStatus>>>,
 }
 impl RendererOwner {
     /// Installs an idle watcher only. No process, IPC reader or directory yet.
@@ -251,17 +256,16 @@ impl RendererOwner {
         })
     }
     pub fn status(&self) -> Status {
-        let status = *self.status.borrow();
-        // The override stands in only for a helper that never ran; once the
-        // actor publishes a status of its own, that one is the truth.
+        // The override stands in for a helper that never ran; any status the
+        // actor publishes after the install (a stop included, whatever its
+        // generation) is the truth from then on.
         #[cfg(test)]
-        if status.phase == Phase::Stopped
-            && status.generation == 0
-            && let Some(installed) = *self.test_status.lock().unwrap()
+        if let Some((installed, seen)) = &*self.test_status.lock().unwrap()
+            && !seen.has_changed().unwrap_or(true)
         {
-            return installed;
+            return *installed;
         }
-        status
+        *self.status.borrow()
     }
     /// The data connections of this owner: channels, bindings and leases.
     pub fn data_plane(&self) -> data::DataPlane {
@@ -277,11 +281,16 @@ impl RendererOwner {
     #[cfg(test)]
     pub(crate) fn install_ready_helper(&self, generation: u64, client: Arc<RendererClient>) {
         self.frames.set(generation, client);
-        *self.test_status.lock().unwrap() = Some(Status {
-            phase: Phase::Ready,
-            generation,
-            tabs: 0,
-        });
+        let mut seen = self.status.clone();
+        seen.mark_unchanged();
+        *self.test_status.lock().unwrap() = Some((
+            Status {
+                phase: Phase::Ready,
+                generation,
+                tabs: 0,
+            },
+            seen,
+        ));
     }
     pub fn subscribe(&self) -> watch::Receiver<Status> {
         self.status.clone()
