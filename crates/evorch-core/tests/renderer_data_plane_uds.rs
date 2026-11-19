@@ -9,13 +9,15 @@ use std::sync::Arc;
 
 use evorch_core::{backend::HostBackend, unix};
 use runtime::artifacts::{CaptureRequest, store_with_refs};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use workbench_client::renderer::DataClientError;
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::{
+    commands::Command,
     errors::{ErrorCode, RetryAdvice},
     ids::{ProjectId, ThreadId},
     namespaces::{
-        artifacts::ArtifactRef,
+        artifacts::{ArtifactRef, ArtifactsCommand},
         browser::data::{self, BlobSource, MediaType},
         browser::*,
     },
@@ -102,6 +104,86 @@ async fn subscribe_to(a: &Peer, tab: &RendererTab) -> Result<RendererId, ErrorCo
         tab: tab.reference.clone(),
     })
     .await
+}
+
+/// One record of a data connection that carries no body.
+async fn record(stream: &mut tokio::net::UnixStream) -> (data::Kind, Vec<u8>) {
+    let mut prefix = [0u8; data::PREFIX_LEN];
+    stream.read_exact(&mut prefix).await.unwrap();
+    let prefix = data::Prefix::parse(&prefix).unwrap();
+    assert_eq!(prefix.body_len, 0);
+    let mut meta = vec![0u8; prefix.meta_len];
+    stream.read_exact(&mut meta).await.unwrap();
+    (prefix.kind, meta)
+}
+
+/// An image transfer belongs to the control connection that asked for it, and
+/// ends with it.
+///
+/// The data connection is read raw and never acknowledges, so the core can
+/// neither finish the transfer nor wait for anything but its owner: however
+/// large the socket buffers are, the connection ends only because the owner
+/// left. Reading to the end of the stream is the event that is awaited. What
+/// arrives is whole records only (the BlobStart already read, chunks in
+/// order, perhaps the End), then the `Error(Closed)` record, then the end of
+/// the stream. Ending by the no-progress window instead would lack that record.
+async fn image_transfer_ends_with_its_control_connection(
+    socket: &std::path::Path,
+    image: &ArtifactRef,
+    image_len: u64,
+) {
+    let owner = Peer::connect(socket, "client-c").await;
+    let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    stream.write_all(&data::encode_hello()).await.unwrap();
+    let (kind, meta) = record(&mut stream).await;
+    assert_eq!(kind, data::Kind::Channel);
+    let offer = data::ChannelOffer::decode(&meta).unwrap();
+    owner
+        .client
+        .command(Command::Artifacts(ArtifactsCommand::BindArtifactContent {
+            channel_id: offer.channel,
+            artifact: image.clone(),
+        }))
+        .await
+        .unwrap();
+    let (kind, meta) = record(&mut stream).await;
+    assert_eq!(kind, data::Kind::BlobStart);
+    assert_eq!(
+        data::BlobStart::decode(&meta).unwrap().total_bytes,
+        image_len
+    );
+
+    drop(owner);
+    let mut offset = 0u64;
+    loop {
+        let mut prefix = [0u8; data::PREFIX_LEN];
+        stream.read_exact(&mut prefix).await.unwrap();
+        let prefix = data::Prefix::parse(&prefix).unwrap();
+        let mut meta = vec![0u8; prefix.meta_len];
+        stream.read_exact(&mut meta).await.unwrap();
+        let mut body = vec![0u8; prefix.body_len];
+        stream.read_exact(&mut body).await.unwrap();
+        match prefix.kind {
+            data::Kind::Chunk => {
+                assert_eq!(data::ChunkMeta::decode(&meta).unwrap().offset, offset);
+                offset += body.len() as u64;
+            }
+            data::Kind::End => assert_eq!(offset, image_len),
+            data::Kind::Error => {
+                assert_eq!(
+                    data::ErrorMeta::decode(&meta).unwrap().code,
+                    data::ErrorCode::Closed
+                );
+                break;
+            }
+            other => panic!("unexpected record {other:?}"),
+        }
+    }
+    assert_eq!(
+        stream.read(&mut [0u8; 1]).await.unwrap(),
+        0,
+        "the Error record is the last"
+    );
 }
 
 async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
@@ -192,22 +274,6 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     let socket = dir.sockets().join("renderer-data-plane.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let backend = Arc::new(HostBackend::new(core.host.clone(), "data-plane".into()));
-    // Hooks run in the order they were registered, so this one runs after the
-    // renderer service's own: when it fires, the service has dropped what the
-    // ended connection of "client-c" held.
-    let c_left = Arc::new(tokio::sync::Notify::new());
-    {
-        let c_left = c_left.clone();
-        core.host
-            .lock()
-            .unwrap()
-            .connections()
-            .register(Arc::new(move |client, _| {
-                if client.as_str() == "client-c" {
-                    c_left.notify_one();
-                }
-            }));
-    }
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let cancellation_backend = backend.clone();
     let cancellation_shutdown = stopped.clone();
@@ -466,7 +532,11 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     else {
         panic!("not a subscription")
     };
-    a.channel()
+    // The stream stays open until the end of the test: a subscription whose
+    // data connection has ended is released by the service, and the count of
+    // eight below must not depend on when that happens.
+    let _first_held_stream = a
+        .channel()
         .await
         .bind_frames(&a.client, subscription, token)
         .await
@@ -488,7 +558,8 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     else {
         panic!("not a subscription")
     };
-    a.channel()
+    let _second_held_stream = a
+        .channel()
         .await
         .bind_frames(&a.client, subscription, token)
         .await
@@ -499,25 +570,8 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
         .await
         .unwrap();
     a.output(&close).await;
-    // An image transfer belongs to the control connection that asked for it:
-    // the image is larger than the socket buffers, so the core is still
-    // sending when that connection ends, and the transfer ends with it.
-    let c = Peer::connect(&socket, "client-c").await;
-    let blob = c
-        .channel()
-        .await
-        .bind_artifact(&c.client, large_image.clone())
-        .await
-        .unwrap();
-    assert_eq!(blob.start().total_bytes, large.len() as u64);
-    drop(c);
-    // Wait for lifecycle completion; nextest owns the deadlock watchdog.
-    c_left.notified().await;
-    let ended = blob.read_to_end(8 << 20).await;
-    assert!(
-        ended.is_err(),
-        "the image arrived whole after its connection ended"
-    );
+    image_transfer_ends_with_its_control_connection(&socket, &large_image, large.len() as u64)
+        .await;
 
     drop((a, b));
     let _ = stop.send(true);

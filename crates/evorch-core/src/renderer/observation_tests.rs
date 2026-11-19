@@ -95,7 +95,7 @@ async fn fake_subscribe_bind_wire_ack_cancel_joins_without_renderer() {
     let (ours, mut peer) = tokio::net::UnixStream::pair().unwrap();
     let (read, write) = ours.into_split();
     let (_stop, mut stopped) = watch::channel(false);
-    let sender = agent_frames(lease, read, write, &mut stopped);
+    let sender = agent_frames(lease, read, Out::new(write), &mut stopped);
     let receiver = async {
         let mut bytes = vec![0; start.encode().unwrap().len()];
         peer.read_exact(&mut bytes).await.unwrap();
