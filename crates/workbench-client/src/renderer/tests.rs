@@ -40,11 +40,7 @@ fn chunks(id: u64, bytes: &[u8]) -> Vec<u8> {
 }
 
 fn frame_stream(stream: UnixStream) -> FrameStream {
-    FrameStream {
-        stream,
-        body: Vec::new(),
-        order: SequenceGuard::default(),
-    }
+    FrameStream::new(stream)
 }
 
 async fn blob_stream(stream: UnixStream) -> Result<BlobStream, DataClientError> {
@@ -293,4 +289,129 @@ async fn a_denied_bind_surfaces_the_core_error_not_a_blob() {
         blob_stream(near).await,
         Err(DataClientError::Remote(ErrorCode::Denied))
     ));
+}
+
+#[tokio::test]
+async fn a_chunk_that_breaks_the_transfer_is_refused_before_its_body_is_read() {
+    let (near, mut far) = UnixStream::pair().unwrap();
+    let mut frames = frame_stream(near);
+    // The frame has 4 bytes; the chunk announces 64 KiB and its body never comes.
+    far.write_all(&frame_start(1, 1, 1).encode()).await.unwrap();
+    far.write_all(&ChunkMeta { id: 1, offset: 0 }.encode_head(CHUNK_BYTES))
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    let error = poll_once(frames.next_frame_into(&mut bytes))
+        .await
+        .expect("refused without waiting for the body")
+        .err()
+        .unwrap();
+    assert!(matches!(error, DataClientError::Protocol(_)), "{error:?}");
+    assert!(bytes.capacity() < CHUNK_BYTES, "{}", bytes.capacity());
+
+    let (near, mut far) = UnixStream::pair().unwrap();
+    let mut blob = blob_stream_for(&mut far, near, 4).await;
+    far.write_all(&ChunkMeta { id: 9, offset: 0 }.encode_head(CHUNK_BYTES))
+        .await
+        .unwrap();
+    let error = poll_once(blob.next_chunk())
+        .await
+        .expect("refused without waiting for the body")
+        .err()
+        .unwrap();
+    assert!(matches!(error, DataClientError::Protocol(_)), "{error:?}");
+    assert!(blob.body.capacity() < CHUNK_BYTES);
+}
+
+async fn blob_stream_for(far: &mut UnixStream, near: UnixStream, total: u64) -> BlobStream {
+    far.write_all(&blob_start(total, BlobSource::Capture).encode())
+        .await
+        .unwrap();
+    blob_stream(near).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_frame_of_another_core_generation_or_tab_is_refused() {
+    let variants: [fn(&mut FrameStart); 3] = [
+        |start| start.core_epoch = 9,
+        |start| start.generation = 3,
+        |start| start.tab = id('b'),
+    ];
+    for change in variants {
+        let (near, mut far) = UnixStream::pair().unwrap();
+        let mut frames = frame_stream(near);
+        let bytes = [1u8; 4];
+        far.write_all(&frame_start(1, 1, 1).encode()).await.unwrap();
+        far.write_all(&chunks(1, &bytes)).await.unwrap();
+        assert!(frames.next_frame().await.unwrap().is_some());
+        let _ = read_ack(&mut far).await;
+        let mut other = frame_start(2, 1, 1);
+        change(&mut other);
+        far.write_all(&other.encode()).await.unwrap();
+        far.write_all(&chunks(2, &bytes)).await.unwrap();
+        assert!(matches!(
+            frames.next_frame().await,
+            Err(DataClientError::Protocol(DataError::OutOfOrder(_)))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_stream_is_closed_by_an_error_and_by_a_cancelled_read() {
+    // A violation closes the connection: the next valid frame is not read.
+    let (near, mut far) = UnixStream::pair().unwrap();
+    let mut frames = frame_stream(near);
+    let mut bad = frame_start(1, 1, 1);
+    bad.stride = 8;
+    far.write_all(&bad.encode()).await.unwrap();
+    assert!(frames.next_frame().await.is_err());
+    // The connection is closed, so these writes may already fail.
+    let _ = far.write_all(&frame_start(2, 1, 1).encode()).await;
+    let _ = far.write_all(&chunks(2, &[1u8; 4])).await;
+    assert!(matches!(
+        frames.next_frame().await,
+        Err(DataClientError::Closed)
+    ));
+    // The core's side of the connection sees it end.
+    let mut rest = Vec::new();
+    far.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty(), "nothing is acknowledged");
+
+    // A read that is cancelled half way leaves a position nobody can trust.
+    let (near, mut far) = UnixStream::pair().unwrap();
+    let mut frames = frame_stream(near);
+    far.write_all(&frame_start(1, 1, 1).encode()).await.unwrap();
+    let cancelled = poll_once(frames.next_frame()).await;
+    assert!(cancelled.is_none(), "the read was waiting for the chunks");
+    far.write_all(&chunks(1, &[1u8; 4])).await.unwrap();
+    assert!(matches!(
+        frames.next_frame().await,
+        Err(DataClientError::Closed)
+    ));
+
+    // The same for a blob.
+    let (near, mut far) = UnixStream::pair().unwrap();
+    let mut blob = blob_stream_for(&mut far, near, 4).await;
+    let cancelled = poll_once(blob.next_chunk()).await;
+    assert!(cancelled.is_none());
+    far.write_all(&chunks(9, &[1u8; 4])).await.unwrap();
+    assert!(matches!(
+        blob.next_chunk().await,
+        Err(DataClientError::Closed)
+    ));
+}
+
+/// Polls `future` while the runtime has other work to do and drops it if it is
+/// still waiting after that: the read is then cancelled.
+async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..1000 {
+        let polled =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await;
+        if let std::task::Poll::Ready(value) = polled {
+            return Some(value);
+        }
+        tokio::task::yield_now().await;
+    }
+    None
 }
