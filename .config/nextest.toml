@@ -7,3 +7,9 @@ test-threads = 4
 # 共有 CI ランナーの負荷で正当なテストが遅延しても失敗にしないため
 # period を大きく取り、その後の terminate のみを担う。
 slow-timeout = { period = "180s", terminate-after = 1, grace-period = "30s" }
+
+# The ignored display measurements (crates/core-client-e2e/tests/display_measure.rs) include a
+# 30-minute soak; run them with `-P measure`. Hang detection stays with the runner.
+[profile.measure]
+inherits = "default"
+slow-timeout = { period = "1800s", terminate-after = 3, grace-period = "60s" }
