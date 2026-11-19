@@ -407,6 +407,48 @@ F4: the restart integration test that execs the production binary (the
 catalog-toggle tests here do not replace it) and the remaining integration
 fixes. The Web decision stays with the Web client plan.
 
+## Stage 16b PR B: the renderer preview screen (`core_client` browser feature)
+
+The browser feature (`crates/gui/src/core_client/features/browser.rs` and
+`browser/`) shows an artifact's preview from the core's renderer. It owns no
+helper process and no CEF; the old `html_preview.rs` only served as the
+reference for what the screen shows. Agent browser observation (PR O) is not
+part of it.
+
+Flow: `open_preview(ArtifactRef)` (called by the artifacts feature) only queues
+the reference; a later `render` creates the session once, sends `OpenPreview`,
+queries the operation, subscribes to the tab's frames (`SubscribeRendererFrames`,
+then `start_data(DataSource::Frames)`), turns streaming on and shows the latest
+frame as a texture. `Capture` results are taken with `DataSource::Capture` and
+decoded on one background thread.
+
+| Contract | Behaviour |
+|---|---|
+| `Accepted` | never a result. The operation is read with `GetRendererOperation` until `Completed`, `Failed` or `Cancelled`; an `OperationChanged` event or a reset asks again, nothing polls on a timer |
+| Unknown outcome | a command whose reply was lost is not sent again. A resolved reply for the same tag continues it; otherwise it ends as unknown after 30 s. An unknown `OpenPreview` is settled through `ListRendererTabs`, never by a resend |
+| Busy | repeated only for `Busy` with `RetryAdvice::SameRequest`, at most 3 times, with growing delays; `Never` and `AfterResync` wait for the user (after the tab list is read again) |
+| Frames | the BGRA frame is checked (size 1..=3840x2160, stride, length) and converted on the GUI thread, one per tab per render; the shared slot holds one frame per tab, so a slow render drops the older ones. A frame of another core epoch, generation or tab is not shown |
+| Input | egui events become `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.imeSetComposition` and `Input.insertText` (all in the renderer's CDP allowlist). Coordinates are the area's points scaled to the page's CSS size, so display density and resizes do not move the pointer. Moves, wheel steps and resizes are merged; the queue is bounded (128, plus a reserve for releases) and a dropped press drops its release. One request per tab is in flight at a time, so a release never overtakes its press. While an IME composition is active, keys and the committing Enter are withheld; losing focus releases what is held |
+| Results | notices (64 lines of at most 512 characters), inspection output (32 KiB) and Capture images (the 3840x2160 decode limit, 16 MiB body) are bounded. A Capture's blob slot is cancelled as soon as its bytes are taken |
+| Discarding | a reset or a lost preview drops the frame texture and the Capture image (decoded or decoding); a cancelled or failed Capture drops its image; a stopped or failed stream drops the frame texture only, and a shown Capture image stays until the next Capture, a reset or the preview's end |
+| Capture | one at a time per preview (the button is disabled and a queued second request is dropped), so a data tag is never overwritten and its blob slot is always cancelled. The decode runs on at most 2 threads; a thread counts until it really ends, also when its job was dropped, and a Capture that finds none free is refused with a message |
+| Resize | the same size is not sent again after it failed or ended unknown, also across a re-sync of the same tab (a different wished size, a reopen or a retry lifts it; going back to a size that failed is a new wish); a new size is the next try, at most once in 100 ms |
+| Held keys | a key repeat is a repeat of an accepted press, never a new press that may be dropped; at most 24 keys are held at once so every release fits in the reserve, which a new press never uses (pointer motion is given up instead) |
+| Operations during a reconnect | a pending operation of a preview is not asked about, and nothing new is sent for it, before the session is back (a detached session refuses it); the Resume goes first and the operations are asked again afterwards |
+| Reconnect | within the same core epoch the tab is found again with `ListRendererTabs`; when the session is detached it is resumed (`ResumeRendererSession`) inside the 30 s grace, counted by the client from the first loss. After the grace, a core restart or a helper crash the preview is `Lost` and only the user's "open again" opens it; nothing is reopened or replayed by itself |
+
+Hidden areas (Stage 16b PR I2 hooks): `Feature::maintain` runs on every composition pass and on the
+minimized logic tick, with the area's `Visibility`. While the area is not visible (collapsed,
+minimized or unavailable) the feature marks its previews as not shown and runs the drive step
+without a texture context: `stop_stream` cancels the data connection, drops the frame texture
+and queues the unsubscribe and streaming-off commands, and nothing new is subscribed until the
+area is drawn again (then the next render subscribes after the short cooldown). Frames and a
+received Capture are neither decoded nor uploaded while hidden (there is no texture context);
+the inbox slot keeps at most one frame per tab. `Feature::disconnected` (no context) drops the
+frame texture, the Capture image and the stream state at once and forgets the data tags; the
+operations are settled by `reset` when a session is back. `selection_changed` is not used: the
+previews belong to artifacts the user opened, not to the selected project or thread.
+
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
 `evorch maintenance backfill-events` is a task of the core's `maintenance` area
