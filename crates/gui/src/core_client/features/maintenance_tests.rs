@@ -55,6 +55,7 @@ fn features(log: &Log, availability: Availability) -> Features {
         })],
         data: DataInbox::default(),
         selection: None,
+        expanded: Default::default(),
     }
 }
 fn take(log: &Log) -> Vec<Observed> {
@@ -74,7 +75,10 @@ fn compose(
     screen: &mut CoreClientScreen,
     input: egui::RawInput,
 ) -> egui::FullOutput {
-    let mut output = ctx.run_ui(input, |ui| screen.ui(ui));
+    let mut output = ctx.run_ui(input, |ui| {
+        screen.logic(ui.ctx());
+        screen.ui(ui);
+    });
     output.textures_delta.clear();
     output
 }
@@ -358,4 +362,131 @@ fn expanded_minimize_restore_and_disconnect_preserve_visibility_and_invalidate_d
     assert_ne!(cancel.generation, old_action.generation);
     assert!(shared.lock().unwrap().features.data.current(&cancel));
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn native_logic_only_minimization_delivers_maintenance_and_cancel_without_a_ui_pass() {
+    use crate::core_client::CoreClientApp;
+    use eframe::App;
+
+    fn native_ui(
+        ctx: &egui::Context,
+        app: &mut CoreClientApp,
+        frame: &mut eframe::Frame,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        // eframe::Integration::update runs these in this order in each UI pass.
+        let mut output = ctx.run_ui(input, |ui| {
+            app.logic(ui.ctx(), frame);
+            app.ui(ui, frame);
+        });
+        output.textures_delta.clear();
+        output
+    }
+    fn native_logic(ctx: &egui::Context, app: &mut CoreClientApp, frame: &mut eframe::Frame) {
+        // eframe::Integration::update_logic_only uses run_logic, not run_ui.
+        // The unchanged pass number proves this is not another forced UI pass.
+        let before = ctx.cumulative_pass_nr();
+        let _ = ctx.run_logic(&input(true), |ctx| app.logic(ctx, frame));
+        assert_eq!(ctx.cumulative_pass_nr(), before);
+    }
+
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: features(&log, Availability::Implemented { required: &[] }),
+        ..Shared::default()
+    }));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let task = runtime.spawn(async {});
+    let mut app = CoreClientApp {
+        screen: CoreClientScreen::new(shared, tx, None, None),
+        _runtime: runtime,
+        task,
+    };
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    let minimized = Visibility {
+        available: true,
+        expanded: true,
+        minimized: true,
+    };
+
+    // Starting minimized must also work before there has ever been a UI pass.
+    native_logic(&ctx, &mut app, &mut frame);
+    assert_eq!(
+        take(&log),
+        [
+            Observed::Selection(None, None),
+            Observed::Maintain(minimized, true)
+        ]
+    );
+    assert_cancels(&mut rx, 1);
+    let project = ProjectId::new("hidden-selection").unwrap();
+    app.screen.project = Some(project.clone());
+    native_logic(&ctx, &mut app, &mut frame);
+    assert_eq!(
+        take(&log),
+        [
+            Observed::Selection(Some(project), None),
+            Observed::Maintain(minimized, true)
+        ]
+    );
+    assert_cancels(&mut rx, 1);
+
+    let visible = Visibility {
+        minimized: false,
+        ..minimized
+    };
+    let output = native_ui(&ctx, &mut app, &mut frame, input(false));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(visible, true), Observed::Render]
+    );
+    assert_cancels(&mut rx, 0);
+    let pos = title_position(&output.shapes);
+    for pressed in [true, false] {
+        let mut input = input(false);
+        input.events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        native_ui(&ctx, &mut app, &mut frame, input);
+    }
+    take(&log);
+    while rx.try_recv().is_ok() {}
+    let collapsed_minimized = Visibility {
+        expanded: false,
+        ..minimized
+    };
+    native_logic(&ctx, &mut app, &mut frame);
+    assert_eq!(take(&log), [Observed::Maintain(collapsed_minimized, true)]);
+    assert_cancels(&mut rx, 1);
+
+    // A visible child can make eframe run UI even with the root minimized.
+    // Calling BOTH actual App entry points must still maintain/cancel only once.
+    native_ui(&ctx, &mut app, &mut frame, input(true));
+    assert_eq!(take(&log), [Observed::Maintain(collapsed_minimized, true)]);
+    assert_cancels(&mut rx, 1);
+    native_ui(&ctx, &mut app, &mut frame, input(false));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(
+            Visibility {
+                minimized: false,
+                ..collapsed_minimized
+            },
+            true
+        )]
+    );
+    assert_cancels(&mut rx, 1);
 }
