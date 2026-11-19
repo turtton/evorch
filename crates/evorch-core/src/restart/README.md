@@ -179,6 +179,13 @@ may consume one tools-only boundary; same build and unchanged catalogs grant
 none. Missing or unexplainable builtin evidence fails closed, never grants an
 unverified boundary or rewrites sent history.
 
+Normal model construction and recovery share ModelCatalogResolver: the startup
+project uses the XDG models.dev cache, other registered projects use
+config_dir/catalog (including after reload). Preload deduplicates only the
+current projects' effective directories, and publication/refresh stays with each
+canonical project's catalog. A missing default-project cache cannot borrow
+another project's metadata to admit a graph. UsagePricing remains unchanged.
+
 Public restart/quarantine operations and capability publication, client
 reconnection and CLI continuity remain 5a/5b work. The explicit-shutdown watchdog
 remains D-3a2 and is not added here.
@@ -187,6 +194,8 @@ remains D-3a2 and is not added here.
 
 | Contract | Executable coverage |
 | --- | --- |
+| Startup default project recovers with an XDG-only catalog, preserving provider wire/cache prefix | `startup_recovery::startup_default_project_recovers_from_xdg_cache_only` |
+| Non-startup project retains config_dir/catalog and its canonical pins; no cross-project catalog grant | Host `bootstrap::recovery::catalog::tests::nonstartup_project_keeps_its_config_catalog_and_canonical_pins_without_admission` |
 | Actual prepared raw exec, same PID/image, uninterrupted lifetime exclusion | `planned_exec::prepared_raw_exec_reaches_product_bootstrap_with_multiple_checkpoints` |
 | Inherited FD validation before new inbox/DB; no invalid-entry Cold fallback | `planned_exec::product_rejects_unexpected_inherited_fd_without_cold_fallback` |
 | One physical adoption, Ready, rejected second entry without row mutation | Positive product process scenario (independent DB and /proc readback) |

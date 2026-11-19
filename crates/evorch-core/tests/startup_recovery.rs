@@ -390,7 +390,7 @@ async fn open(
                 "EVORCH_STARTUP_TEST_KEY",
                 "offline-test-key",
             )])),
-            model_catalog_dir: Some(root.join("catalog")),
+            model_catalog_dir: None,
         },
     )
     .unwrap();
@@ -818,6 +818,7 @@ impl Process {
                 "startup_subprocess_worker",
                 "--nocapture",
             ])
+            .env("XDG_CACHE_HOME", dir.path().join("xdg-cache"))
             .env("EVORCH_STARTUP_ROOT", dir.path())
             .env("EVORCH_STARTUP_SOCKETS", dir.sockets())
             .env("EVORCH_STARTUP_MODE", mode)
@@ -872,6 +873,13 @@ context_window_tokens = 1000000
 "#,
             mock.base_url()
         ),
+    )
+    .unwrap();
+    let xdg_catalog = dir.path().join("xdg-cache/evorch");
+    std::fs::create_dir_all(&xdg_catalog).unwrap();
+    std::fs::copy(
+        test_support::model_catalog_dir().join("models-dev.json"),
+        xdg_catalog.join("models-dev.json"),
     )
     .unwrap();
     std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
@@ -984,11 +992,22 @@ async fn startup_owner_blocked_retry_binds_the_captured_root_before_ordinary_sen
 
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
+    process_cache_with_catalog_location(false).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_default_project_recovers_from_xdg_cache_only() {
+    process_cache_with_catalog_location(true).await;
+}
+async fn process_cache_with_catalog_location(xdg_only: bool) {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         ScriptedResponse::text_stream("before", "mock-model", ["Waiting for the user"]),
         ScriptedResponse::text_stream("after", "mock-model", ["Restored in another process"]),
     ]);
     let dir = fixture(&mock);
+    if xdg_only {
+        std::fs::remove_file(dir.path().join("catalog/models-dev.json")).unwrap();
+        assert!(dir.path().join("xdg-cache/evorch/models-dev.json").exists());
+    }
     let mut first = Process::spawn(&dir, "capture");
     let captured = first.checkpoint("captured").await;
     first.kill().await;
@@ -1429,12 +1448,12 @@ async fn catalog_outage(fetch_fails: bool) {
     };
     let db = storage::Database::open(&storage).unwrap();
     let claims = db.recovery_claims().unwrap();
-    std::fs::remove_file(dir.path().join("catalog/models-dev.json")).unwrap();
+    std::fs::remove_file(dir.path().join("xdg-cache/evorch/models-dev.json")).unwrap();
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.path().join("catalog/models-dev.lock"))
+        .open(dir.path().join("xdg-cache/evorch/models-dev.lock"))
         .unwrap();
     if !fetch_fails {
         lock.lock().unwrap();
@@ -1488,7 +1507,7 @@ async fn startup_catalog_fetch_failure_holds_graph_and_recovers_unrelated_lane()
 async fn startup_catalog_outage_without_graphs_does_not_prevent_core_boot() {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![]);
     let dir = fixture(&mock);
-    std::fs::remove_file(dir.path().join("catalog/models-dev.json")).unwrap();
+    std::fs::remove_file(dir.path().join("xdg-cache/evorch/models-dev.json")).unwrap();
     let proxy = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
         .respond_with(wiremock::ResponseTemplate::new(503))

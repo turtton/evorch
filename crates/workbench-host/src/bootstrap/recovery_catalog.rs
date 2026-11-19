@@ -1,57 +1,93 @@
 //! Synchronous publication on canonical project model pins, with owned refresh.
+use super::super::project_models::ModelCatalogResolver;
 use super::super::{BootstrapError, BootstrapOptions, services::BackgroundServices};
 use runtime::{AgentModel, AgentRuntime, CurrentRecoveryAuthority, RecoveryModels};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 #[derive(Default)]
 struct Published {
-    catalog: Option<Arc<catalog::ModelCatalog>>,
-    models: Vec<Arc<dyn AgentModel>>,
+    resolver: Option<ModelCatalogResolver>,
+    catalogs: BTreeMap<PathBuf, Arc<catalog::ModelCatalog>>,
+    models: Vec<(PathBuf, Arc<dyn AgentModel>)>,
 }
-/// Process-local current catalog, never serialized or restored from a recipe.
+/// Process-local current catalogs, never serialized or restored from a recipe.
 #[derive(Clone, Default)]
 pub struct RecoveryCatalog(Arc<Mutex<Published>>);
 impl RecoveryCatalog {
-    /// Await bounded catalog loading BEFORE scanning or constructing recovery
-    /// authorities. Any stale refresh is owned by the host's service lifetime.
-    /// Legacy embedded bootstrap does not call this entry point.
+    /// Preload the startup project's catalog. Legacy embedded bootstrap does not
+    /// call this entry point. Hosts with registered projects use preload_for_projects.
     pub async fn preload(
         options: &BootstrapOptions,
         config: &config::Config,
         services: &mut BackgroundServices,
     ) -> Result<Self, BootstrapError> {
-        let directory = options.config_dir.join("catalog");
-        if config.providers.is_empty() && !directory.join("models-dev.json").exists() {
-            return Ok(Self::default()); // Explicit unconfigured health mode.
-        }
-        let current = Self::default();
-        let mut catalog = match catalog::ModelCatalog::load_or_refresh(&directory).await {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                // A public catalog outage blocks recovery, not the core or
-                // independent lane producers. Do not substitute saved metadata.
-                tracing::warn!(%error, "recovery catalog unavailable; graph components held");
-                return Ok(current);
+        Self::preload_roots(options, config, [options.project_root.clone()], services).await
+    }
+    /// Await bounded loading of each current project's effective catalog BEFORE
+    /// graph scan. A missing catalog blocks only projects using that directory.
+    pub fn preload_for_projects<'a>(
+        options: &'a BootstrapOptions,
+        config: &'a config::Config,
+        projects: &dyn crate::projects::ProjectDirectory,
+        services: &'a mut BackgroundServices,
+    ) -> impl std::future::Future<Output = Result<Self, BootstrapError>> + Send + 'a {
+        // ProjectDirectory is Send, not Sync: snapshot the current roots before
+        // returning a host-owned Send future, never borrow the directory across I/O.
+        let roots = projects
+            .entries()
+            .into_iter()
+            .map(|(_, root)| root)
+            .chain(std::iter::once(options.project_root.clone()))
+            .collect::<Vec<_>>();
+        Self::preload_roots(options, config, roots, services)
+    }
+    async fn preload_roots(
+        options: &BootstrapOptions,
+        config: &config::Config,
+        roots: impl IntoIterator<Item = PathBuf>,
+        services: &mut BackgroundServices,
+    ) -> Result<Self, BootstrapError> {
+        let resolver = ModelCatalogResolver::new(options);
+        let directories = roots
+            .into_iter()
+            .map(|root| resolver.for_project(Some(&root)))
+            .collect::<BTreeSet<_>>();
+        let current = Self(Arc::new(Mutex::new(Published {
+            resolver: Some(resolver),
+            ..Default::default()
+        })));
+        for directory in directories {
+            if config.providers.is_empty() && !directory.join("models-dev.json").exists() {
+                continue; // Explicit unconfigured health mode; no discovery/network.
             }
-        };
-        let refresh = catalog.take_refresh();
-        current.publish(catalog);
-        if let Some(refresh) = refresh {
-            let target = current.clone();
-            services.start("recovery-catalog", |stop| async move {
-                // Do not detach/abort an async refresh containing blocking cache
-                // I/O. Shutdown joins it, even when stop precedes its completion.
-                if let Ok(Ok(catalog)) = refresh.await {
-                    target.publish(catalog);
+            let mut catalog = match catalog::ModelCatalog::load_or_refresh(&directory).await {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    tracing::warn!(%error, directory = %directory.display(), "recovery catalog unavailable; corresponding graph components held");
+                    continue;
                 }
-                let _ = stop.await;
-                Ok(())
-            });
+            };
+            let refresh = catalog.take_refresh();
+            current.publish(&directory, catalog);
+            if let Some(refresh) = refresh {
+                let target = current.clone();
+                services.start("recovery-catalog", |stop| async move {
+                    // Shutdown joins blocking cache I/O; never detach/abort it.
+                    if let Ok(Ok(catalog)) = refresh.await {
+                        target.publish(&directory, catalog);
+                    }
+                    let _ = stop.await;
+                    Ok(())
+                });
+            }
         }
         Ok(current)
     }
-    /// Publish on current registered projects BEFORE graph scan. No saved recipe
-    /// or ownership claim is needed to load a model's public catalog.
+    /// Publish only the matching directory on each canonical current project.
     pub fn publish_projects(
         &self,
         runtime: &AgentRuntime,
@@ -63,39 +99,45 @@ impl RecoveryCatalog {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_, root) in projects.entries() {
             let model = runtime.recovery_model_for_catalog(&runtime::RunConfig {
-                project_root: Some(root),
+                project_root: Some(root.clone()),
                 ..Default::default()
             });
-            if state.models.iter().any(|known| Arc::ptr_eq(known, &model)) {
-                continue;
-            }
-            if let Some(catalog) = &state.catalog {
-                model.publish_model_catalog(catalog.clone());
-            }
-            state.models.push(model);
+            state.register(Some(&root), model);
         }
     }
     pub fn is_available(&self) -> bool {
-        self.0
+        !self
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .catalog
-            .is_some()
+            .catalogs
+            .is_empty()
     }
-    fn publish(&self, catalog: catalog::ModelCatalog) {
+    pub fn is_available_for_project(&self, root: Option<&Path>) -> bool {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .resolver
+            .as_ref()
+            .is_some_and(|resolver| state.catalogs.contains_key(&resolver.for_project(root)))
+    }
+    fn publish(&self, directory: &Path, catalog: catalog::ModelCatalog) {
         let catalog = Arc::new(catalog);
         let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for model in &state.models {
-            model.publish_model_catalog(catalog.clone());
+        for (known, model) in &state.models {
+            if known == directory {
+                model.publish_model_catalog(catalog.clone());
+            }
         }
-        state.catalog = Some(catalog);
+        state.catalogs.insert(directory.to_path_buf(), catalog);
     }
-    /// Call before pure descriptor validation and retain these exact pins for
-    /// adoption/activation. A reload requires a new call (not an old wrapper).
-    /// This never calls admission or complete and never starts provider work.
+    /// Retain these exact current pins through adoption and activation. No model
+    /// admission/complete is called; a reload requires fresh canonical pins.
     pub fn pin(
         &self,
         runtime: &AgentRuntime,
@@ -106,19 +148,31 @@ impl RecoveryCatalog {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for run in authority.members.keys() {
-            let Some(model) = models.model(*run) else {
-                continue;
-            };
-            if state.models.iter().any(|known| Arc::ptr_eq(known, &model)) {
-                continue;
+        for (run, config) in &authority.members {
+            if let Some(model) = models.model(*run) {
+                state.register(config.project_root.as_deref(), model);
             }
-            if let Some(catalog) = &state.catalog {
-                model.publish_model_catalog(catalog.clone());
-            }
-            state.models.push(model);
         }
         models
+    }
+}
+impl Published {
+    fn register(&mut self, root: Option<&Path>, model: Arc<dyn AgentModel>) {
+        let Some(resolver) = &self.resolver else {
+            return;
+        };
+        let directory = resolver.for_project(root);
+        if self
+            .models
+            .iter()
+            .any(|(known, pin)| known == &directory && Arc::ptr_eq(pin, &model))
+        {
+            return;
+        }
+        if let Some(catalog) = self.catalogs.get(&directory) {
+            model.publish_model_catalog(catalog.clone());
+        }
+        self.models.push((directory, model));
     }
 }
 
@@ -153,7 +207,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn publication_uses_the_canonical_project_context_without_admission() {
+    async fn nonstartup_project_keeps_its_config_catalog_and_canonical_pins_without_admission() {
         let dir = test_socket_dir::SplitDir::new();
         let directory = dir.path().join("catalog");
         std::fs::create_dir(&directory).unwrap();
@@ -175,10 +229,26 @@ mod tests {
             project_root: dir.path().to_path_buf(),
         };
         let mut services = BackgroundServices::default();
-        let catalog = RecoveryCatalog::preload(&options, &Default::default(), &mut services)
-            .await
-            .unwrap();
-        assert!(catalog.is_available());
+        let other = dir.path().join("other");
+        let resolver = ModelCatalogResolver::new(&options);
+        assert_eq!(resolver.for_project(Some(&other)), directory);
+        assert_eq!(
+            resolver.for_project(Some(dir.path())),
+            catalog::default_cache_dir()
+        );
+        let catalog = RecoveryCatalog::preload_roots(
+            &options,
+            &Default::default(),
+            [other.clone()],
+            &mut services,
+        )
+        .await
+        .unwrap();
+        assert!(catalog.is_available_for_project(Some(&other)));
+        assert!(
+            !catalog.is_available_for_project(Some(dir.path())),
+            "another project's catalog cannot authorize the default project"
+        );
         assert!(services.names().next().is_none());
         let default = Arc::new(Model::default());
         let project = Arc::new(Model::default());
@@ -245,9 +315,14 @@ mod tests {
             ownership_root: dir.sockets().to_path_buf(),
             project_root: dir.path().to_path_buf(),
         };
-        let catalog = RecoveryCatalog::preload(&options, &Default::default(), &mut services)
-            .await
-            .unwrap();
+        let catalog = RecoveryCatalog::preload_roots(
+            &options,
+            &Default::default(),
+            [dir.path().join("other")],
+            &mut services,
+        )
+        .await
+        .unwrap();
         assert!(!catalog.is_available());
         assert!(!dir.path().join("catalog").exists());
         assert!(services.names().next().is_none());

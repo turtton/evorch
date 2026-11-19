@@ -83,7 +83,13 @@ impl CoreStartupHook for CoreGraphRecovery {
                 read_env: false,
                 ..Default::default()
             })?;
-            let catalog = RecoveryCatalog::preload(&inputs.options, &config, services).await?;
+            let catalog = RecoveryCatalog::preload_for_projects(
+                &inputs.options,
+                &config,
+                &inputs.projects,
+                services,
+            )
+            .await?;
             catalog.publish_projects(&inputs.runtime, &inputs.projects);
             let diagnostics = RecoveryDiagnostics::default();
             let output = diagnostics.clone();

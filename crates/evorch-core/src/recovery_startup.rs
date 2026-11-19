@@ -397,6 +397,13 @@ impl<'a> StartupCoordinator<'a> {
             config_dir: &self.inputs.options.config_dir,
         }
         .resolve(&records, &resume)?;
+        if authority.members.values().any(|config| {
+            !self
+                .catalog
+                .is_available_for_project(config.project_root.as_deref())
+        }) {
+            return Err(StartupBlocked::CatalogUnavailable);
+        }
         let mut command_bindings = Vec::new();
         // This trusted binding comes from the current host directory/permit,
         // never from a saved recipe. Install it before the run loop freezes its

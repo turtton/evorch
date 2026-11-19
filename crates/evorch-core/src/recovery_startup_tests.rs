@@ -66,9 +66,25 @@ async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
     )
     .unwrap();
     let mut services = BackgroundServices::default();
-    let catalog = RecoveryCatalog::preload(options, &Default::default(), &mut services)
-        .await
-        .unwrap();
+    // These fixed-model unit fixtures use an explicit project-local catalog,
+    // not the startup production model. Keep them off the process/user XDG cache.
+    let catalog_options = BootstrapOptions {
+        project_root: options.project_root.join("another-startup-project"),
+        ..options.clone()
+    };
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(
+        &workbench_protocol::ids::ProjectId::new("fixture").unwrap(),
+        options.project_root.clone(),
+    );
+    let catalog = RecoveryCatalog::preload_for_projects(
+        &catalog_options,
+        &Default::default(),
+        &projects,
+        &mut services,
+    )
+    .await
+    .unwrap();
     services.shutdown().await.unwrap();
     catalog
 }
