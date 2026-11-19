@@ -528,6 +528,15 @@ impl Rig {
         self.preview(index).tab.clone().expect("an open tab")
     }
 
+    /// Waits for a decode that is still running (it may be done already: the
+    /// render only polls), then lets the feature take the result.
+    fn finish_decode(&mut self) {
+        if let Capture::Decoding(job) = &self.preview(0).capture {
+            job.wait_ready();
+        }
+        self.pump();
+    }
+
     fn request(&mut self, request: UiRequest) {
         self.feature().requests.push(request);
         self.pump();
@@ -1515,11 +1524,7 @@ fn a_capture_is_taken_as_a_blob_decoded_in_the_background_and_shown() {
     }
     assert!(rig.core.cancels.contains(&tag));
     assert_eq!(rig.harness.state().inbox.usage().0, 1);
-    let Capture::Decoding(job) = &rig.preview(0).capture else {
-        panic!("decoding was expected");
-    };
-    job.wait_ready();
-    rig.pump();
+    rig.finish_decode();
     assert!(matches!(rig.preview(0).capture, Capture::Idle));
     assert_eq!(
         rig.preview(0).capture_picture.texture().unwrap().size(),
@@ -1554,11 +1559,7 @@ fn a_capture_over_the_limit_or_not_an_image_is_refused() {
     };
     rig.publish(tag, DataPayload::Blob(blob));
     rig.harness.run_steps(1);
-    let Capture::Decoding(job) = &rig.preview(0).capture else {
-        panic!("decoding was expected");
-    };
-    job.wait_ready();
-    rig.pump();
+    rig.finish_decode();
     assert!(matches!(rig.preview(0).capture, Capture::Failed(_)));
     assert!(rig.preview(0).capture_picture.texture().is_none());
 }
@@ -1583,11 +1584,7 @@ fn a_cancelled_capture_and_a_reset_drop_the_image() {
     };
     rig.publish(tag, DataPayload::Blob(blob));
     rig.harness.run_steps(1);
-    let Capture::Decoding(job) = &rig.preview(0).capture else {
-        panic!("decoding was expected");
-    };
-    job.wait_ready();
-    rig.pump();
+    rig.finish_decode();
     assert!(rig.preview(0).capture_picture.texture().is_some());
 
     // The next capture is cancelled: the earlier image is not left as its result.
@@ -1841,11 +1838,7 @@ fn a_second_capture_while_one_is_on_its_way_is_not_started() {
         rig.data_action(action);
     }
     assert_eq!(rig.core.cancels.iter().filter(|t| **t == tag).count(), 1);
-    let Capture::Decoding(job) = &rig.preview(0).capture else {
-        panic!("decoding was expected");
-    };
-    job.wait_ready();
-    rig.pump();
+    rig.finish_decode();
     assert!(matches!(rig.preview(0).capture, Capture::Idle));
     // Then it is allowed again.
     rig.request(UiRequest::Do(id, Action::Capture));
@@ -2348,4 +2341,24 @@ fn a_stream_that_ended_by_itself_gives_its_slot_back() {
     rig.feature().data(tag, DataNotice::Completed);
     rig.pump();
     assert!(rig.core.cancels.contains(&tag), "the slot would stay taken");
+}
+
+#[test]
+fn going_back_to_a_size_that_failed_sends_the_resize_again() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    rig.core
+        .script("resize", Script::Refuse(busy(RetryAdvice::Never)));
+    let step = Duration::from_millis(500);
+    rig.harness.set_size(vec2(500.0, 480.0));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 1, "A fails");
+    rig.advance(step);
+    rig.harness.set_size(vec2(420.0, 480.0));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 2, "B is sent");
+    rig.advance(step);
+    rig.harness.set_size(vec2(500.0, 480.0));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 3, "A is a new wish");
 }

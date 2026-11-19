@@ -628,6 +628,10 @@ impl BrowserFeature {
             merge_wake(&mut self.wake, until);
         }
         // 3. Resize to the area, at most once in an interval.
+        // A failure holds only for the size that failed: a different wish lifts it.
+        if p.resize_failed.is_some() && p.resize_failed != p.want_viewport {
+            p.resize_failed = None;
+        }
         if let Some(want) = p.want_viewport
             && want != tab.viewport
             && p.resize_failed != Some(want)
