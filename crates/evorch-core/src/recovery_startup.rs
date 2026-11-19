@@ -397,6 +397,7 @@ impl<'a> StartupCoordinator<'a> {
             config_dir: &self.inputs.options.config_dir,
         }
         .resolve(&records, &resume)?;
+        let mut command_bindings = Vec::new();
         // This trusted binding comes from the current host directory/permit,
         // never from a saved recipe. Install it before the run loop freezes its
         // tools, or a restored conversation silently loses plan_read and plan_update.
@@ -406,6 +407,10 @@ impl<'a> StartupCoordinator<'a> {
                     .ownership
                     .as_ref()
                     .ok_or(StartupBlocked::OwnerBlocked)?;
+                let binding = bindings
+                    .get(&permit.thread_id)
+                    .ok_or(StartupBlocked::CurrentBindingRequired)?;
+                command_bindings.push((permit.thread_id.clone(), binding));
                 let _generation = permit
                     .mutation_guard()
                     .map_err(|_| StartupBlocked::OwnerBlocked)?;
@@ -480,6 +485,7 @@ impl<'a> StartupCoordinator<'a> {
             paused,
             authority,
             models,
+            command_bindings,
         })
     }
 }
@@ -489,8 +495,12 @@ pub struct PreparedStartupComponent {
     paused: PausedRecoveryComponent,
     authority: CurrentRecoveryAuthority,
     models: RecoveryModels,
+    command_bindings: Vec<(String, workbench_host::lane::ThreadBinding)>,
 }
 impl PreparedStartupComponent {
+    pub fn command_bindings(&self) -> Vec<(String, workbench_host::lane::ThreadBinding)> {
+        self.command_bindings.clone()
+    }
     pub fn claim_id(&self) -> &str {
         &self.paused.claim().claim_id
     }

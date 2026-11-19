@@ -34,6 +34,15 @@ impl CommandHost {
         &self,
         command: &Command,
     ) -> Result<HostCommandPermit, WorkbenchError> {
+        if let Command::Conversation(ConversationCommand::SendChat(send)) = command
+            && self.service.root_recovery_pending(send.thread.as_str())
+        {
+            return Err(WorkbenchError::new(
+                ErrorCode::Busy,
+                "restart_busy: restoring conversation; retry the same request",
+                RetryAdvice::SameRequest,
+            ));
+        }
         let access = command_access(command, |thread| self.chat_access(thread));
         self.service
             .restart_gate()

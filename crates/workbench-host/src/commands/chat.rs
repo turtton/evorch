@@ -65,6 +65,13 @@ impl CommandService {
         resume_only: bool,
         mut initial: RunConfig,
     ) -> Vec<HostEvent> {
+        if self.root_recovery_pending(&submission.thread_id) {
+            return vec![HostEvent::chat_rejected(
+                &submission.thread_id,
+                RejectKind::Busy,
+                "restart_busy: restoring conversation; retry the same request",
+            )];
+        }
         if !resume_only {
             // Host-generated goal/answer chats have no GUI submission row; give
             // them their own ID rather than storing the empty string.

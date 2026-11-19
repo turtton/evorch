@@ -753,6 +753,7 @@ impl BootstrappedHost {
                 .start(
                     core_startup::CoreStartupInputs {
                         mode: deferred.mode,
+                        host: self.host.clone(),
                         options: deferred.options.clone(),
                         runtime: self.runtime.clone(),
                         owner: self.owner.clone(),

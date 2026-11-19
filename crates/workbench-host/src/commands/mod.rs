@@ -16,6 +16,8 @@ mod compaction;
 mod goal;
 mod lanes;
 mod question;
+mod recovery;
+pub use recovery::RootRecoveryGuard;
 mod stop;
 mod types;
 
@@ -80,6 +82,7 @@ pub struct CommandService {
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
+    recovering_roots: Arc<std::sync::Mutex<BTreeSet<String>>>,
     runtime: AgentRuntime,
     shell_cwd: Option<PathBuf>,
     handle: tokio::runtime::Handle,
@@ -103,6 +106,7 @@ impl CommandService {
             team_writer: None,
             memory_config: None,
             runtime,
+            recovering_roots: Default::default(),
             shell_cwd: None,
             handle,
             bindings: ThreadBindings::default(),
