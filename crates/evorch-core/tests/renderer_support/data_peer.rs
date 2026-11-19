@@ -138,6 +138,7 @@ pub fn refusal<T>(result: Result<T, DataClientError>) -> ErrorCode {
 }
 impl Peer {
     /// The refusal of a command, with the advice that comes with it.
+    #[allow(dead_code, reason = "shared by test binaries that do not all use it")]
     pub async fn refused(
         &self,
         command: BrowserCommand,
