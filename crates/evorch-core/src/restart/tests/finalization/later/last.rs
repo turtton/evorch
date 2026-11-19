@@ -270,7 +270,12 @@ async fn cell_loaded(
         }
         let mut control_client = if let Some((mut stream, ready, release)) = control_client {
             use workbench_protocol::{handshake::*, ids::ClientId};
-            ready.await.unwrap();
+            ready.await.unwrap_or_else(|_| {
+                panic!(
+                    "finalization ended before control checkpoint: {:?}",
+                    saved(&host)
+                )
+            });
             let hello = ClientHello {
                 supported_versions: vec![ProtocolVersion::CURRENT],
                 required_capabilities: vec![],

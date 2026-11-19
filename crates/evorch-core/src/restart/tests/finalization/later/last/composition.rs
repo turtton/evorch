@@ -286,6 +286,10 @@ impl Load {
         }
     }
     pub(super) async fn release(&self, core: &RestartCoordinator, host: &BootstrappedHost) {
+        // This matrix proves durability/order and reports wall-clock intervals,
+        // not scheduler speed. Freeze only through the real storage drain;
+        // drain.rs separately crosses the production budget with an explicit clock.
+        tokio::time::pause();
         self.trace
             .until(|s| s.events.iter().any(|e| e.0 == "flush_begin"))
             .await;
@@ -324,6 +328,10 @@ impl Load {
         );
         core.0.runtime.event_bus().emit(event(self.queue));
         release.send(()).unwrap();
+        self.trace
+            .until(|s| s.events.iter().any(|e| e.0 == "writer_barrier_end"))
+            .await;
+        tokio::time::resume();
     }
     pub(super) fn verify(&self, host: &BootstrappedHost, runs: &[RunId]) {
         host.composition.storage_writer.barrier().unwrap();
