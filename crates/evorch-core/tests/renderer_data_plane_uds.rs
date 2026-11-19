@@ -62,6 +62,8 @@ impl runtime::SandboxFactory for Direct {
     }
 }
 
+#[path = "renderer_support/cancelled_data.rs"]
+mod cancelled_data;
 #[path = "renderer_support/data_peer.rs"]
 mod data_peer;
 use data_peer::{Peer, refusal};
@@ -207,6 +209,8 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
             }));
     }
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let cancellation_backend = backend.clone();
+    let cancellation_shutdown = stopped.clone();
     let server = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -223,6 +227,14 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     let b = Peer::connect(&socket, "client-b").await;
     let session_a = a.session().await;
     let tab = a.open(&page, &session_a).await;
+    cancelled_data::verify(
+        dir.sockets(),
+        &cancellation_backend,
+        &cancellation_shutdown,
+        &a.client,
+        &large_image,
+    )
+    .await;
 
     // Frames: the subscription's owner binds a data connection with the
     // token it was given, and reads raw BGRA frames from it.
@@ -499,13 +511,9 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
         .unwrap();
     assert_eq!(blob.start().total_bytes, large.len() as u64);
     drop(c);
-    // The timeout is a watchdog only; the wait is for the connection's end.
-    tokio::time::timeout(std::time::Duration::from_secs(10), c_left.notified())
-        .await
-        .expect("the core saw the control connection end");
-    let ended = tokio::time::timeout(std::time::Duration::from_secs(3), blob.read_to_end(8 << 20))
-        .await
-        .expect("the transfer ended");
+    // Wait for lifecycle completion; nextest owns the deadlock watchdog.
+    c_left.notified().await;
+    let ended = blob.read_to_end(8 << 20).await;
     assert!(
         ended.is_err(),
         "the image arrived whole after its connection ended"
