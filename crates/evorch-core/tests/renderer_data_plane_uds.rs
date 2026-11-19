@@ -190,6 +190,22 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     let socket = dir.sockets().join("renderer-data-plane.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let backend = Arc::new(HostBackend::new(core.host.clone(), "data-plane".into()));
+    // Hooks run in the order they were registered, so this one runs after the
+    // renderer service's own: when it fires, the service has dropped what the
+    // ended connection of "client-c" held.
+    let c_left = Arc::new(tokio::sync::Notify::new());
+    {
+        let c_left = c_left.clone();
+        core.host
+            .lock()
+            .unwrap()
+            .connections()
+            .register(Arc::new(move |client, _| {
+                if client.as_str() == "client-c" {
+                    c_left.notify_one();
+                }
+            }));
+    }
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
         loop {
@@ -483,7 +499,10 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
         .unwrap();
     assert_eq!(blob.start().total_bytes, large.len() as u64);
     drop(c);
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The timeout is a watchdog only; the wait is for the connection's end.
+    tokio::time::timeout(std::time::Duration::from_secs(10), c_left.notified())
+        .await
+        .expect("the core saw the control connection end");
     let ended = tokio::time::timeout(std::time::Duration::from_secs(3), blob.read_to_end(8 << 20))
         .await
         .expect("the transfer ended");

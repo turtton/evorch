@@ -542,22 +542,69 @@ async fn a_subscription_place_is_held_until_its_lease_lets_go() {
 #[tokio::test(start_paused = true)]
 async fn a_revoked_capture_keeps_its_budget_until_the_last_transfer_lets_go() {
     let f = Fixture::new();
+    let owner = provenance("owner", Surface::Desktop);
+    let client = owner.client_id.clone().unwrap();
+    let connection = f.service.connections.open(client.clone());
     let budget = f.service.capture_budget.clone();
-    let share = |len: usize| {
+    let acquire = |len: usize| {
         budget
             .clone()
             .try_acquire_many_owned(u32::try_from(len).unwrap())
             .ok()
     };
-    let bytes = Arc::new(HeldBytes {
-        bytes: vec![0; MAX_CAPTURE_BYTES],
-        _share: share(MAX_CAPTURE_BYTES).unwrap(),
-    });
-    // A transfer still reads the bytes after the Capture entry is gone.
-    let transfer = bytes.clone();
-    drop(bytes);
-    assert!(share(1).is_none(), "the transfer's bytes are still counted");
-    drop(transfer);
-    assert!(share(MAX_CAPTURE_BYTES).is_some());
+    // The rest of the budget is taken by other Captures, so what the stored
+    // Capture holds is all that could be given back.
+    let blob = workbench_protocol::namespaces::browser::data::MAX_CAPTURE_BLOB_BYTES as usize;
+    let _others = acquire(MAX_CAPTURE_BYTES - blob).unwrap();
+    // A Capture of the largest size a data connection may carry, as the
+    // capture command stores it.
+    let operation = id();
+    let capture_id = id();
+    f.service.state.lock().unwrap().captures.insert(
+        capture_id.as_str().to_owned(),
+        Capture {
+            tab: Tab {
+                generation: 1,
+                id: renderer_ipc::TabId(1),
+            },
+            bytes: Arc::new(HeldBytes {
+                bytes: vec![0; blob],
+                _share: acquire(blob).unwrap(),
+            }),
+            expires: Instant::now() + GRACE,
+            operation: operation.clone(),
+            connection_epoch: Some(connection.epoch()),
+            client: client.clone(),
+            surface: owner.surface,
+            bound: None,
+        },
+    );
+    assert!(acquire(1).is_none(), "the stored Capture is counted");
+    // A data connection binds it through the real binding path and keeps its lease.
+    let channel = f.service.owner.data_plane().open_channel().unwrap();
+    let channel_id = channel.id().clone();
+    f.service
+        .bind_data(
+            &mut f.service.state.lock().unwrap(),
+            &channel_id,
+            &RendererDataSource::Capture {
+                operation_id: operation,
+                capture_id: capture_id.clone(),
+            },
+            &client,
+            &owner,
+        )
+        .unwrap();
+    let lease = channel.bound().await.expect("the channel was bound");
+    // The Capture is revoked (its control connection ends) while the lease
+    // still holds the bytes: the budget stays taken, so another Capture is refused.
+    drop(connection);
+    assert!(f.service.state.lock().unwrap().captures.is_empty());
+    assert!(
+        acquire(1).is_none(),
+        "the lease still holds the revoked Capture's bytes"
+    );
+    drop(lease);
+    assert!(acquire(blob).is_some());
     f.finish().await;
 }
