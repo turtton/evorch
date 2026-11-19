@@ -38,6 +38,12 @@ expect fail "B cannot edit the browser composition root" "$central" --scope pr16
 expect fail "O-G cannot edit the browser composition root" "$central" --scope pr16bog --files-from "$work/files"
 expect ok "O-I owns the browser composition root" "$central" --scope integration --files-from "$work/files"
 
+files crates/browser/src/agent/connection.rs crates/runtime/src/agent_loop.rs crates/runtime/src/agent_loop/browser_observation_tests.rs .github/workflows/ci.yml
+expect ok "O-S narrow approved exceptions" "$central" --scope pr16bos --files-from "$work/files"
+expect fail "O-G cannot borrow O-S exceptions" "$central" --scope pr16bog --files-from "$work/files"
+files crates/runtime/src/lib.rs crates/workbench-host/src/ingress.rs
+expect fail "O-S exceptions do not widen composition ownership" "$central" --scope pr16bos --files-from "$work/files"
+
 # A feature PR inside its own area passes.
 files crates/workbench-host/src/areas/settings.rs \
   crates/workbench-host/src/areas/settings/save.rs \
