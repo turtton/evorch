@@ -123,9 +123,10 @@ async fn record(stream: &mut tokio::net::UnixStream) -> (data::Kind, Vec<u8>) {
 /// The data connection is read raw and never acknowledges, so the core can
 /// neither finish the transfer nor wait for anything but its owner: however
 /// large the socket buffers are, the connection ends only because the owner
-/// left. Reading to the end of the stream is the event that is awaited; the
-/// core's last record then names the reason. Ending by the no-progress window
-/// instead would close the connection without that record.
+/// left. Reading to the end of the stream is the event that is awaited. What
+/// arrives is whole records only (the BlobStart already read, chunks in
+/// order, perhaps the End), then the `Error(Closed)` record, then the end of
+/// the stream. Ending by the no-progress window instead would lack that record.
 async fn image_transfer_ends_with_its_control_connection(
     socket: &std::path::Path,
     image: &ArtifactRef,
@@ -153,15 +154,35 @@ async fn image_transfer_ends_with_its_control_connection(
     );
 
     drop(owner);
-    let mut rest = Vec::new();
-    stream.read_to_end(&mut rest).await.unwrap();
-    let closed = data::ErrorMeta {
-        code: data::ErrorCode::Closed,
+    let mut offset = 0u64;
+    loop {
+        let mut prefix = [0u8; data::PREFIX_LEN];
+        stream.read_exact(&mut prefix).await.unwrap();
+        let prefix = data::Prefix::parse(&prefix).unwrap();
+        let mut meta = vec![0u8; prefix.meta_len];
+        stream.read_exact(&mut meta).await.unwrap();
+        let mut body = vec![0u8; prefix.body_len];
+        stream.read_exact(&mut body).await.unwrap();
+        match prefix.kind {
+            data::Kind::Chunk => {
+                assert_eq!(data::ChunkMeta::decode(&meta).unwrap().offset, offset);
+                offset += body.len() as u64;
+            }
+            data::Kind::End => assert_eq!(offset, image_len),
+            data::Kind::Error => {
+                assert_eq!(
+                    data::ErrorMeta::decode(&meta).unwrap().code,
+                    data::ErrorCode::Closed
+                );
+                break;
+            }
+            other => panic!("unexpected record {other:?}"),
+        }
     }
-    .encode();
-    assert!(
-        rest.ends_with(&closed),
-        "the core did not end the unacknowledged transfer by telling the owner left"
+    assert_eq!(
+        stream.read(&mut [0u8; 1]).await.unwrap(),
+        0,
+        "the Error record is the last"
     );
 }
 
