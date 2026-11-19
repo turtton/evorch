@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/reproduce-under-limits.sh without generating any
-# load and without systemd: systemd-run/systemctl are mocks that register a
-# "scope" (the pid of the command) and implement is-active/stop/kill on it.
-# What is NOT covered here (needs the host's systemd, see the PR description):
-# that the kernel really enforces the limits and that a real scope kills
-# every descendant.
+# load and without systemd.
+#
+# The production script has no test hooks. The suite instead
+#  - puts mock systemd-run/systemctl, and a recording no-op `nice`, first on PATH
+#    (so no stressor can ever be started: every call is recorded and verified),
+#  - runs a temporary COPY of the script in which only the two literal kernel
+#    paths (/proc/self/cgroup, /sys/fs/cgroup) point into a fake cgroup tree
+#    written by the mock systemd-run.
+# The unmodified script is used for everything that must hold on a real system.
+# Not covered here (needs the host's systemd, see the PR description): that the
+# kernel really enforces the limits and that a real scope kills every descendant.
 # shellcheck disable=SC2016 # the commands under test are single-quoted on purpose
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -20,9 +26,12 @@ cleanup() {
 trap cleanup EXIT
 
 state=$work/state
-mkdir -p "$state/active"
+stubs=$work/stubs
+stubs_ng=$work/stubs-ng
+minbin=$work/minbin
+mkdir -p "$state/active" "$stubs" "$stubs_ng" "$minbin"
 
-cat >"$work/systemd-run" <<'EOF'
+cat >"$stubs/systemd-run" <<'EOF'
 #!/usr/bin/env bash
 # Mock of `systemd-run --user --scope`: registers the unit with this pid, then execs.
 unit="" props=()
@@ -69,24 +78,19 @@ if [[ $unit == *-probe ]]; then
     printf '%s 100000\n%s\n' "$((cpu * 1000))" "$n"
     exit 0
 fi
-# A fake cgroup tree for the scope's first process; MOCK_UNLIMITED leaves the limits out.
+# A fake cgroup tree for the scope's first process. MOCK_CPU_MAX / MOCK_MEM_MAX
+# replace what the "kernel" reports, to model a limit that was not applied.
 cgdir=$MOCK_STATE/cgroup/mock/$unit.scope
 mkdir -p "$cgdir"
-if [[ ${MOCK_UNLIMITED:-} == 1 ]]; then
-    echo "max 100000" >"$cgdir/cpu.max"
-    echo max >"$cgdir/memory.max"
-else
-    echo "$((cpu * 1000)) 100000" >"$cgdir/cpu.max"
-    echo "$n" >"$cgdir/memory.max"
-fi
-echo "0::/mock/$unit.scope" >"$MOCK_STATE/proc-cgroup-$unit"
-export REPRO_TEST_PROC_CGROUP=$MOCK_STATE/proc-cgroup-$unit REPRO_TEST_CGROUP_ROOT=$MOCK_STATE/cgroup
+echo "${MOCK_CPU_MAX:-$((cpu * 1000)) 100000}" >"$cgdir/cpu.max"
+echo "${MOCK_MEM_MAX:-$n}" >"$cgdir/memory.max"
+echo "0::/mock/$unit.scope" >"$MOCK_STATE/proc-self-cgroup"
 echo $$ >"$MOCK_STATE/active/$unit"
 exec "$@"
 EOF
-cat >"$work/systemctl" <<'EOF'
+cat >"$stubs/systemctl" <<'EOF'
 #!/usr/bin/env bash
-# Mock of `systemctl --user is-active|stop|kill <unit>.scope`.
+# Mock of `systemctl --user is-active|stop|kill|show <unit>.scope`.
 args=("$@")
 verb=""
 unit=""
@@ -115,11 +119,33 @@ case $verb in
 esac
 exit 0
 EOF
-chmod +x "$work/systemd-run" "$work/systemctl"
+cat >"$stubs/nice" <<'EOF'
+#!/usr/bin/env bash
+# Records what would have been started as a stressor; starts nothing.
+echo "$*" >>"$MOCK_STATE/nice-calls"
+exit 0
+EOF
+cat >"$stubs_ng/stress-ng" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$stubs/systemd-run" "$stubs/systemctl" "$stubs/nice" "$stubs_ng/stress-ng"
+
+# A PATH without any stress-ng, for the busy-loop branch.
+for tool in bash env sed sleep mktemp rm nproc dirname cat cp mkdir touch printf sh true false; do
+    ln -s "$(type -P "$tool")" "$minbin/$tool"
+done
+
+# The copy of the script that reads the fake cgroup tree of the mock.
+mscript=$work/reproduce-under-limits.sh
+sed -e "s#/proc/self/cgroup#$state/proc-self-cgroup#g" -e "s#/sys/fs/cgroup#$state/cgroup#g" "$script" >"$mscript"
+if ! grep -q "$state/proc-self-cgroup" "$mscript" || ! grep -q "$state/cgroup" "$mscript"; then
+    echo "the script no longer reads /proc/self/cgroup and /sys/fs/cgroup literally; update this test" >&2
+    exit 1
+fi
 
 export MOCK_STATE=$state
-export REPRO_SYSTEMD_RUN=$work/systemd-run
-export REPRO_SYSTEMCTL=$work/systemctl
+export PATH=$stubs:$PATH
 
 failures=0
 fail() {
@@ -129,12 +155,12 @@ fail() {
 reset() {
     rm -rf -- "$state"
     mkdir -p "$state/active"
-    unset MOCK_FAIL_REAL MOCK_COLLIDE MOCK_DELAY MOCK_UNLIMITED MOCK_NO_TIME
+    unset MOCK_FAIL_REAL MOCK_COLLIDE MOCK_DELAY MOCK_CPU_MAX MOCK_MEM_MAX MOCK_NO_TIME
 }
-# run NAME ARGS...: runs the script, leaves stdout in $out, stderr in $err, status in $rc.
+# run ARGS...: runs the patched copy, leaves stdout in $out, stderr in $err, status in $rc.
 run() {
     rc=0
-    "$BASH" "$script" "$@" >"$work/out" 2>"$work/err" || rc=$?
+    "$BASH" "$mscript" "$@" >"$work/out" 2>"$work/err" || rc=$?
     out=$(<"$work/out")
     err=$(<"$work/err")
 }
@@ -146,6 +172,12 @@ expect_contains() {
     local name=$1 haystack=$2 needle=$3
     if [[ $haystack != *"$needle"* ]]; then fail "$name: missing '$needle' in: $haystack"; fi
 }
+nice_calls() {
+    if [[ -e $state/nice-calls ]]; then wc -l <"$state/nice-calls"; else echo 0; fi
+}
+
+# 0. The production script has no test hooks that could fake the verification.
+if grep -n 'REPRO_' "$script"; then fail "hooks: the script reads REPRO_* environment variables"; fi
 
 # 1. Arguments reach the command untouched, and systemd-run is told not to expand them.
 reset
@@ -251,7 +283,7 @@ reset
 rm -f "$work/pid"
 scratch_root=$work/tmp-int
 mkdir -p "$scratch_root"
-TMPDIR=$scratch_root "$BASH" "$script" --timeout 60s -- sh -c 'echo $$ >"$1"; exec sleep 30' _ "$work/pid" >/dev/null 2>"$work/err" &
+TMPDIR=$scratch_root "$BASH" "$mscript" --timeout 60s -- sh -c 'echo $$ >"$1"; exec sleep 30' _ "$work/pid" >/dev/null 2>"$work/err" &
 runner=$!
 for _ in $(seq 100); do
     [[ -s $work/pid ]] && break
@@ -267,62 +299,118 @@ if [[ -n $(ls -A "$scratch_root") ]]; then fail "interrupt: left files behind: $
 
 # 8. Without systemd-run nothing runs and the exit status is 125 with the hint.
 rc=0
-env -u REPRO_SYSTEMD_RUN -u REPRO_SYSTEMCTL PATH=/nonexistent "$BASH" "$script" -- printf ran >"$work/out" 2>"$work/err" || rc=$?
+PATH=/nonexistent "$BASH" "$script" -- printf ran >"$work/out" 2>"$work/err" || rc=$?
 err=$(<"$work/err")
 expect_rc no-systemd-run 125
 expect_contains no-systemd-run "$err" 'sandbox_access=unsandboxed'
 if [[ -s $work/out ]]; then fail "no-systemd-run: the command ran"; fi
 
-# 9. The in-scope launcher never runs the command, with or without stress, outside
-#    a scope that carries the expected limits, and rejects malformed arguments,
-#    whoever calls it.
+# 9. Neither the command nor any stressor starts unless the scope carries every
+#    expected limit: CPU, memory and the time limit are each checked on their own,
+#    with and without stress. A refusal is exit 125 with the approval hint.
+refused() {
+    local name=$1
+    shift
+    expect_rc "$name" 125
+    if [[ -n $out ]]; then fail "$name: the command ran: $out"; fi
+    if [[ $(nice_calls) -ne 0 ]]; then fail "$name: started stressors: $(<"$state/nice-calls")"; fi
+    expect_contains "$name" "$err" 'sandbox_access=unsandboxed'
+    if [[ $# -gt 0 ]]; then expect_contains "$name" "$err" "$1"; fi
+}
+for stress in 0 1; do
+    reset
+    export MOCK_CPU_MAX='max 100000' MOCK_MEM_MAX=max
+    run --stress-cpus "$stress" -- printf ran
+    refused "unlimited-scope stress=$stress" "cpu.max is 'max 100000'"
+    reset
+    export MOCK_MEM_MAX=max
+    run --stress-cpus "$stress" -- printf ran
+    refused "memory-unlimited stress=$stress" "memory.max is 'max'"
+    reset
+    export MOCK_MEM_MAX=1073741824
+    run --stress-cpus "$stress" -- printf ran
+    refused "memory-mismatch stress=$stress" "memory.max is '1073741824'"
+    reset
+    export MOCK_CPU_MAX='max 100000'
+    run --stress-cpus "$stress" -- printf ran
+    refused "cpu-unlimited stress=$stress" "cpu.max is 'max 100000'"
+    reset
+    export MOCK_CPU_MAX='20000 100000'
+    run --stress-cpus "$stress" -- printf ran
+    refused "cpu-mismatch stress=$stress" "cpu.max is '20000 100000'"
+    reset
+    export MOCK_NO_TIME=1
+    run --stress-cpus "$stress" -- printf ran
+    refused "no-time-limit stress=$stress" 'no time limit'
+done
 reset
-export MOCK_UNLIMITED=1
+
+# The stressors start in the background; the command waits until they are recorded.
+await_calls='for ((i = 0; i < 100; i++)); do
+    if [[ -e $1 ]]; then mapfile -t l <"$1"; if ((${#l[@]} >= $2)); then break; fi; fi
+    sleep 0.1
+done
+printf ran'
+
+# 9b. With every limit in place, stressors are requested only through the
+#     recording `nice` (nothing is started): busy loops without stress-ng, one
+#     stress-ng with it, none without --stress-cpus.
+reset
+PATH=$stubs:$minbin run --stress-cpus 3 -- bash -c "$await_calls" _ "$state/nice-calls" 3
+expect_rc stress-busy-loops 0
+if [[ $out != ran ]]; then fail "stress-busy-loops: the command did not run: $out"; fi
+if [[ $(nice_calls) -ne 3 ]]; then fail "stress-busy-loops: expected 3 stressors, got $(nice_calls)"; fi
+if [[ $(grep -c -- '^-n 19 timeout --signal=KILL [0-9]*s bash -c ' "$state/nice-calls") -ne 3 ]]; then
+    fail "stress-busy-loops: unexpected stressor commands: $(<"$state/nice-calls")"
+fi
+reset
+PATH=$stubs:$stubs_ng:$minbin run --stress-cpus 3 -- bash -c "$await_calls" _ "$state/nice-calls" 1
+expect_rc stress-ng 0
+if [[ $(nice_calls) -ne 1 ]] || ! grep -q -- '^-n 19 stress-ng --cpu 3 ' "$state/nice-calls"; then
+    fail "stress-ng: unexpected stressor commands: $(cat "$state/nice-calls" 2>/dev/null)"
+fi
+reset
 run -- printf ran
-expect_rc unlimited-scope 125
-expect_contains unlimited-scope "$err" "cpu.max is 'max 100000'"
-expect_contains unlimited-scope "$err" 'sandbox_access=unsandboxed'
-if [[ -n $out ]]; then fail "unlimited-scope: the command ran: $out"; fi
-reset
-export MOCK_NO_TIME=1
-run -- printf ran
-expect_rc no-time-limit 125
-expect_contains no-time-limit "$err" 'no time limit'
-if [[ -n $out ]]; then fail "no-time-limit: the command ran: $out"; fi
-reset
-run --stress-cpus 1 -- printf ran
-expect_rc stress-limited 0
-if [[ $out != ran ]]; then fail "stress-limited: expected the command to run inside a verified scope, got: $out"; fi
-reset
-export MOCK_UNLIMITED=1
-run --stress-cpus 1 -- printf ran
-expect_rc stress-unlimited 125
-if [[ -n $out ]]; then fail "stress-unlimited: the command ran: $out"; fi
-unset MOCK_UNLIMITED
+expect_rc no-stress 0
+if [[ $(nice_calls) -ne 0 ]]; then fail "no-stress: started stressors"; fi
+
+# 10. The unmodified in-scope launcher: refuses outside a scope with the limits,
+#     with or without stress, cannot be fooled by environment variables, and
+#     rejects malformed arguments, whoever calls it.
 unit=evorch-repro-1-abcdefabcdef-1
 launcher() { "$BASH" "$script" --internal-scope-run "$@" >"$work/out" 2>"$work/err" && rc=0 || rc=$?; err=$(<"$work/err"); }
+reset
 rm -f "$work/marker" "$work/stressed"
-launcher "$unit" "$work/marker" 2 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
-if [[ $rc -eq 0 ]]; then fail "launcher: started stressors outside a scope"; fi
-expect_contains launcher "$err" 'refusing to run'
-if [[ -e $work/marker || -e $work/stressed ]]; then fail "launcher: marker or command created outside a scope"; fi
-launcher "$unit" "$work/marker" 0 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
-if [[ $rc -eq 0 ]]; then fail "launcher: ran the command without stress outside a scope"; fi
-expect_contains launcher-nostress "$err" 'refusing to run'
-if [[ -e $work/marker || -e $work/stressed ]]; then fail "launcher: marker or command created outside a scope (no stress)"; fi
-launcher not-a-unit "$work/marker" 2 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
+for stress in 0 2; do
+    launcher "$unit" "$work/marker" "$stress" 10 '50000 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed"
+    if [[ $rc -eq 0 ]]; then fail "launcher stress=$stress: ran outside a scope"; fi
+    expect_contains "launcher stress=$stress" "$err" 'refusing to run'
+    if [[ -e $work/marker || -e $work/stressed ]]; then fail "launcher stress=$stress: marker or command created outside a scope"; fi
+done
+# A fake cgroup file and tree handed in through the environment change nothing.
+mkdir -p "$work/fakecg/x/$unit.scope"
+echo "50000 100000" >"$work/fakecg/x/$unit.scope/cpu.max"
+echo 268435456 >"$work/fakecg/x/$unit.scope/memory.max"
+echo "0::/x/$unit.scope" >"$work/fakecg/proc-cgroup"
+rc=0
+REPRO_TEST_PROC_CGROUP=$work/fakecg/proc-cgroup REPRO_TEST_CGROUP_ROOT=$work/fakecg \
+    "$BASH" "$script" --internal-scope-run "$unit" "$work/marker" 0 10 '50000 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed" \
+    >"$work/out" 2>"$work/err" || rc=$?
+if [[ $rc -eq 0 || -e $work/marker || -e $work/stressed ]]; then fail "launcher: environment variables faked the verification"; fi
+launcher not-a-unit "$work/marker" 2 10 '50000 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed"
 expect_rc launcher-unit 2
-launcher "$unit" "$work/marker" 999 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
+launcher "$unit" "$work/marker" 999 10 '50000 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed"
 expect_rc launcher-count 2
-launcher "$unit" "$work/marker" 2 10 'max 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
+launcher "$unit" "$work/marker" 2 10 'max 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed"
 expect_rc launcher-cpu 2
-launcher "$unit" "$work/marker" 2 10 '50000 100000' max "$work/systemctl" -- touch "$work/stressed"
+launcher "$unit" "$work/marker" 2 10 '50000 100000' max "$stubs/systemctl" -- touch "$work/stressed"
 expect_rc launcher-mem 2
-launcher "$unit" relative-marker 0 10 '50000 100000' 268435456 "$work/systemctl" -- touch "$work/stressed"
+launcher "$unit" relative-marker 0 10 '50000 100000' 268435456 "$stubs/systemctl" -- touch "$work/stressed"
 expect_rc launcher-marker 2
-launcher "$unit" "$work/marker" 2 10 '50000 100000' 268435456 "$work/systemctl"
+launcher "$unit" "$work/marker" 2 10 '50000 100000' 268435456 "$stubs/systemctl"
 expect_rc launcher-nocommand 2
 if [[ -e $work/stressed ]]; then fail "launcher: ran the command with invalid arguments"; fi
+if [[ $(nice_calls) -ne 0 ]]; then fail "launcher: started stressors"; fi
 
 if ((failures > 0)); then
     printf '%d check(s) failed\n' "$failures" >&2

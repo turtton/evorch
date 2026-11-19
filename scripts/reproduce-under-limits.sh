@@ -97,12 +97,9 @@ scope_run() {
     [[ $want_mem =~ ^[1-9][0-9]*$ ]] || die "$EX_USAGE" "internal: bad expected memory.max"
     [[ -x $ctl ]] || die "$EX_USAGE" "internal: systemctl not executable"
 
-    # The REPRO_TEST_* variables only redirect where the cgroup files are read
-    # from, so that the regression tests can feed fake cgroup trees; every check
-    # below still runs against whatever they point to.
-    cg=$(sed -n 's/^0:://p' "${REPRO_TEST_PROC_CGROUP:-/proc/self/cgroup}" 2>/dev/null || true)
+    cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)
     [[ $cg == */"$unit.scope" ]] || die "$EX_NO_LIMITS" "refusing to run: not inside $unit.scope (cgroup: ${cg:-unknown})"
-    d=${REPRO_TEST_CGROUP_ROOT:-/sys/fs/cgroup}$cg
+    d=/sys/fs/cgroup$cg
     got=""
     read -r got <"$d/cpu.max" 2>/dev/null || true
     [[ $got == "$want_cpu" ]] || die "$EX_NO_LIMITS" "refusing to run: cpu.max is '$got', expected '$want_cpu'"
@@ -229,19 +226,13 @@ sandbox_hint() {
     log "(sandbox 外での実行の承認を求めてください), with a justification such as 'reproduce a flaky test under CPU/memory limits'."
 }
 
-systemd_run=${REPRO_SYSTEMD_RUN:-}
-if [[ -z $systemd_run ]]; then
-    systemd_run=$(command -v systemd-run 2>/dev/null || true)
-fi
+systemd_run=$(command -v systemd-run 2>/dev/null || true)
 if [[ -z $systemd_run || ! -x $systemd_run ]]; then
     log "ERROR: systemd-run was not found; cannot apply resource limits."
     sandbox_hint
     exit "$EX_NO_LIMITS"
 fi
-systemctl=${REPRO_SYSTEMCTL:-}
-if [[ -z $systemctl ]]; then
-    systemctl=$(command -v systemctl 2>/dev/null || true)
-fi
+systemctl=$(command -v systemctl 2>/dev/null || true)
 if [[ -z $systemctl || ! -x $systemctl ]]; then
     systemctl="$(dirname -- "$systemd_run")/systemctl"
 fi
