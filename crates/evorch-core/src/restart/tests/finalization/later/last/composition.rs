@@ -289,10 +289,10 @@ impl Load {
         // This matrix proves durability/order and reports wall-clock intervals,
         // not scheduler speed. Freeze only through the real storage drain;
         // drain.rs separately crosses the production budget with an explicit clock.
-        tokio::time::pause();
         self.trace
             .until(|s| s.events.iter().any(|e| e.0 == "flush_begin"))
             .await;
+        tokio::time::pause();
         assert_eq!(
             core.0.state.lock().unwrap().completed_stage,
             Some(ExitStage::WorkersJoined)

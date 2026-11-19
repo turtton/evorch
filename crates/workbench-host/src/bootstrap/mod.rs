@@ -909,6 +909,7 @@ impl BootstrappedHost {
         if let Some(bridge) = &mut self.bridge {
             lane_pr::remember(&mut failure, bridge.flush());
         }
+        lane_pr::remember(&mut failure, self.cleanup_planned_exit().await);
         if drained {
             match self.owner.release_ready() {
                 Ok(true) => {
@@ -924,9 +925,6 @@ impl BootstrappedHost {
         lane_pr::remember(&mut failure, self.owner.stop_scratch_cleanup());
         if let Some(mut bridge) = self.bridge.take() {
             lane_pr::remember(&mut failure, bridge.try_shutdown());
-        }
-        if let Some(resources) = &self.planned_exit {
-            lane_pr::remember(&mut failure, resources.lock().await.cleanup().await);
         }
         failure.map_or(Ok(()), Err)
     }

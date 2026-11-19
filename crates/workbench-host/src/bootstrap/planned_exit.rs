@@ -54,6 +54,19 @@ pub struct PlannedExit {
     holds: Arc<RestartHolds>,
 }
 impl BootstrappedHost {
+    /// The bridge moved here, so ordinary shutdown must reclaim it before
+    /// releasing owners/scratch. As before, this cleanup wait has no deadline.
+    pub(super) async fn cleanup_planned_exit(&mut self) -> Result<(), String> {
+        if let Some(resources) = &self.planned_exit {
+            tracing::debug!(target: "restart_drain", phase = "planned_shutdown_cleanup_begin");
+            let result = resources.lock().await.cleanup().await;
+            tracing::debug!(target: "restart_drain", phase = "planned_shutdown_cleanup_end");
+            result
+        } else {
+            Ok(())
+        }
+    }
+
     /// Validate before the coordinator mutex: host Stop takes host -> coordinator,
     /// so capture must never take these locks in the reverse order.
     pub fn validate_planned_exit(&self, gate: &restart::HostRestartGate) -> Result<(), String> {

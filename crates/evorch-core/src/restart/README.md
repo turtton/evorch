@@ -56,15 +56,41 @@ I/O. The SQLite writer stays alive for diagnostic/invalidation readback.
 
 The production composition deadline matrix uses channels to hold real flush,
 final-usage-flush and writer-barrier workers plus explicit virtual-clock advances.
-Its seven cells cover expiry at each point, late unknown ACK cleanup, a shared
+Its eight cells cover expiry at each point, late unknown ACK cleanup, a shared
 4s + 4s + 2s budget, completion released at 9.999s, and operator shutdown while
-the task is held. Expiry advances across Tokio's next millisecond timer tick;
+the task is held both before and after expiry. Expiry advances across Tokio's next millisecond timer tick;
 no wall-clock wait or yield loop drives the test. It independently reads three
-same-owner parked checkpoints before operator shutdown, verifies owner/generation
-and writer retention, proves shutdown waits for the held task without changing
-the captured manifest, and checks that late completion never reopens M2/business.
+same-owner parked checkpoints in the populated-core cells. An explicit tracing
+checkpoint after runtime drain proves that shutdown is waiting for planned
+cleanup while the owner row, generation and scratch marker are still retained.
+The pre-expiry cell has no live run (one completed turn creates real identified
+scratch) and reaches the releasable idle-owner path: channel release permits
+cleanup to finish before ownership/scratch release. The
+post-expiry populated-core cell keeps the existing failed durable-dispatch fence,
+so ownership/scratch remain retained even after cleanup. Neither path changes the
+captured manifest or reopens M2/business.
 Existing composition workload and failure tests remain: they protect different
 contracts (actual durability, load/backpressure, panics and invalidation retry).
+
+### Explicit shutdown ordering and remaining exit bound
+
+`take_planned_exit` moves the bridge out of `BootstrappedHost`, so the ordinary
+`self.bridge.flush()` branch is skipped. Shutdown must therefore await planned
+cleanup **before** `owner.release_ready()` (which can also delete scratch), not
+only after releasing ownership. The narrowly scoped central bootstrap change
+reorders that operation and calls a private planned-exit helper; its tracing
+events observe progress only and grant no production authority.
+
+Explicit shutdown while drain is pending still waits for actual cleanup **with
+no upper bound**, as it did before this ordering fix. D-3a bounds M2 stage 5,
+not shutdown or Tokio runtime destruction. A follow-up **D-3a2** PR must design
+and independently review bounded process termination: a planned-shutdown-only
+independent watchdog with a separate 10s budget; expiry must leave owner rows
+untouched and end the process without running Drop, allowing leases to expire.
+An async timeout returning an error is insufficient because runtime destruction
+can still join outstanding blocking work, and synchronous DB calls can stall
+the executor. The termination primitive, ordinary-shutdown interaction and
+channel/injected-clock subprocess proof belong to that follow-up, not this PR.
 
 ## Tests and observation
 

@@ -6,7 +6,7 @@ use std::{future::Future, task::Poll, time::Duration};
 
 #[tokio::test]
 async fn production_composition_storage_drain_budget_retains_cleanup_and_owner() {
-    matrix("composition_drain_deadlines", 7, 0).await;
+    matrix("composition_drain_deadlines", 8, 0).await;
 }
 
 pub(in super::super) async fn run() {
@@ -23,6 +23,7 @@ pub(in super::super) async fn run() {
         ("shared", false, false, false),
         ("shared", false, true, false),
         ("flush_begin", false, false, true),
+        ("shutdown_after_expiry", false, false, true),
     ] {
         eprintln!(
             "storage-drain {phase} unknown_ack={unknown_ack} finishes={finishes} shutdown={shutdown}"
@@ -46,10 +47,47 @@ async fn cell(
     let model = Arc::new(Model::default());
     let (_dir, mut host) = boot_composition(model.clone(), true).await;
     let core = RestartCoordinator::new(&host);
-    let (runs, id) = owned_chats(&host, &core, 3).await;
+    // Active captured runs intentionally fail the shutdown durable-intent fence.
+    // The idle-owner cell exercises release_ready, rather than that earlier guard.
+    let shutdown_after_expiry = phase == "shutdown_after_expiry";
+    let parked = if operator_shutdown && !shutdown_after_expiry {
+        0
+    } else {
+        3
+    };
+    let runs = if parked == 0 {
+        let permit = host.owner.start("active").unwrap();
+        host.owner.start("idle").unwrap();
+        // A completed turn creates the real identified scratch root, while
+        // leaving no live captured run whose Stop would fail the drain fence.
+        let run = host
+            .runtime
+            .delegate_chat(
+                "active",
+                runtime::Role::Orchestrator,
+                "finish before restart".into(),
+                runtime::RunConfig {
+                    ownership: Some(permit),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        host.runtime.wait(run).await.unwrap();
+        Vec::new()
+    } else {
+        owner_runs(&host, parked).await
+    };
+    let id = seal_runs(&core, &runs).await;
     let owner = host.owner.attach("active").unwrap();
     let shared = phase == "shared";
-    let (entered, mut release) = trace.block(if shared { "flush_begin" } else { phase }, None);
+    let (entered, mut release) = trace.block(
+        if shared || shutdown_after_expiry {
+            "flush_begin"
+        } else {
+            phase
+        },
+        None,
+    );
     let later = shared.then(|| {
         (
             trace.block("subscriber_drain_begin", None),
@@ -69,6 +107,12 @@ async fn cell(
     core.start_finalization_without_target(id, &mut host, tx)
         .unwrap();
     entered.await.unwrap();
+    if operator_shutdown && !shutdown_after_expiry {
+        shutdown_while_pending(&mut host, &core, &trace, release, true).await;
+        assert_eq!(model.0.load(Ordering::SeqCst), 1);
+        tokio::time::resume();
+        return;
+    }
     if let Some(((subscriber_entered, subscriber_release), (barrier_entered, barrier_release))) =
         later
     {
@@ -137,31 +181,21 @@ async fn cell(
     assert_eq!(retained.lease.generation, owner.lease.generation);
     assert_eq!(retained.state, runtime::ownership::OwnerState::Running);
     host.composition.storage_writer.barrier().unwrap();
-    let expected = saved(&host).expected;
     if operator_shutdown {
-        core.transition_to_shutdown();
-        let mut shutdown = Box::pin(host.shutdown());
-        std::future::poll_fn(|cx| {
-            assert!(shutdown.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        release.send(()).unwrap();
-        assert!(shutdown.await.is_err());
-        // Explicit operator shutdown can replace mutable run contexts with
-        // stopped snapshots, but must not rewrite the captured manifest receipts.
-        assert_eq!(saved(&host).expected, expected);
-    } else {
-        let mut reclaimed = Box::pin(resources.lock());
-        std::future::poll_fn(|cx| {
-            assert!(reclaimed.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        release.send(()).unwrap();
-        drop(reclaimed.await);
-        verify_checkpoints(&host, &runs, false);
+        shutdown_while_pending(&mut host, &core, &trace, release, false).await;
+        assert_eq!(model.0.load(Ordering::SeqCst), 3);
+        tokio::time::resume();
+        return;
     }
+    let mut reclaimed = Box::pin(resources.lock());
+    std::future::poll_fn(|cx| {
+        assert!(reclaimed.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    drop(reclaimed.await);
+    verify_checkpoints(&host, &runs, false);
     let mut cleanup = resources.lock().await;
     let result = cleanup.cleanup().await;
     assert_eq!(result.is_err(), unknown_ack);
@@ -199,4 +233,76 @@ async fn cell(
         assert!(host.shutdown().await.is_err());
     }
     tokio::time::resume();
+}
+
+async fn shutdown_while_pending(
+    host: &mut BootstrappedHost,
+    core: &RestartCoordinator,
+    trace: &Trace,
+    release: std::sync::mpsc::Sender<()>,
+    expect_release: bool,
+) {
+    let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
+    let owner = host.owner.attach("active").unwrap();
+    let expected = saved(host).expected;
+    core.transition_to_shutdown();
+    let owner_host = host.owner.clone();
+    let scratch = owner_host.thread_scratch().thread_dir("active");
+    assert!(scratch.is_dir());
+    let marker = scratch.join("pending-drain");
+    std::fs::write(&marker, b"retained generation").unwrap();
+    let mut shutdown = Box::pin(host.shutdown());
+    tokio::select! {
+        result = &mut shutdown => panic!("shutdown finished before drain release: {result:?}"),
+        () = trace.until(|s| s.events.iter().any(|e| e.0 == "planned_shutdown_cleanup_begin")) => {}
+    }
+    // This checkpoint is after runtime drain, not merely before shutdown.
+    // PlannedExit owns the bridge, so self.bridge.flush() cannot protect us.
+    let retained = owner_host.attach("active").unwrap();
+    assert_eq!(retained.state, runtime::ownership::OwnerState::Quiescing);
+    assert_eq!(retained.lease.owner_id, owner.lease.owner_id);
+    assert_eq!(retained.lease.generation, owner.lease.generation);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"retained generation");
+    assert!(resources.try_lock().is_err());
+    assert!(
+        !trace
+            .state
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.0 == "planned_shutdown_cleanup_end")
+    );
+    release.send(()).unwrap();
+    let outcome = shutdown.await;
+    assert!(
+        trace
+            .state
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.0 == "planned_shutdown_cleanup_end")
+    );
+    let released = owner_host.attach("active").unwrap();
+    assert_eq!(
+        released.state,
+        if expect_release {
+            runtime::ownership::OwnerState::Released
+        } else {
+            runtime::ownership::OwnerState::Quiescing
+        },
+        "shutdown={outcome:?}; owner={released:?}"
+    );
+    assert_eq!(released.lease.owner_id, owner.lease.owner_id);
+    assert_eq!(released.lease.generation, owner.lease.generation);
+    if expect_release {
+        assert!(!marker.exists(), "scratch is reclaimed only after cleanup");
+    } else {
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(marker).unwrap(), b"retained generation");
+    }
+    // Explicit operator shutdown can replace mutable run contexts with
+    // stopped snapshots, but must not rewrite the captured manifest receipts.
+    assert_eq!(saved(host).expected, expected);
 }
