@@ -81,7 +81,11 @@ enum Request {
         project: ProjectId,
         thread: ThreadId,
     },
-    Snapshot(ObservationScope),
+    Snapshot {
+        scope: ObservationScope,
+        /// The answer also says whether the scope is still valid.
+        verify: bool,
+    },
     /// Whether the incarnation of the scope is still valid.
     Verify(ObservationScope),
     Subscribe(ObservationScope),
@@ -153,6 +157,8 @@ struct Live {
     snapshot_in_flight: bool,
     /// The snapshot should be read again (a change was signalled).
     stale: bool,
+    /// A revocation notice asked the next snapshot to confirm this scope too.
+    verify: bool,
     shown: Option<Shown>,
 }
 
@@ -266,32 +272,42 @@ impl ObservationFeature {
         }
     }
 
-    /// Ask the core whether the incarnation of `scope` is still valid. The end
-    /// of one subscription says nothing about it (a disconnect or an expired
-    /// bind ends a subscription too), so only the core's answer revokes.
+    /// Ask the core whether `scope` (the exact scope, generations included) is
+    /// still valid. The end of one subscription says nothing about it (a
+    /// disconnect or an expired bind ends a subscription too), so the core's
+    /// answer decides, and an answer that does not confirm it counts as lost.
+    /// The live scope is confirmed by its next snapshot, which is read anyway.
     fn queue_verify(&mut self, scope: &ObservationScope) {
-        let same = |s: &ObservationScope| s.run == scope.run && s.incarnation == scope.incarnation;
-        let asked = self.verify.iter().any(same)
+        if let Some(live) = &mut self.live
+            && live.scope == *scope
+        {
+            live.verify = true;
+            live.stale = true;
+            return;
+        }
+        let asked = self.verify.contains(scope)
             || self
                 .requests
                 .values()
-                .any(|r| matches!(r, Request::Verify(s) if same(s)));
+                .any(|r| matches!(r, Request::Verify(s) if s == scope));
         if !asked && self.verify.len() < MAX_VERIFY {
             self.verify.push_back(scope.clone());
         }
     }
 
-    /// The incarnation of `scope` is no longer valid, whichever state its
-    /// watch is in: its pictures go, those of a newer incarnation stay.
+    /// `scope` is no longer valid, whichever state its watch is in: its
+    /// pictures go, those of any other scope (a newer page generation or
+    /// incarnation of the run) stay.
     fn revoke_scope(&mut self, scope: &ObservationScope) {
-        let same = |s: &ObservationScope| s.run == scope.run && s.incarnation == scope.incarnation;
-        if self.live.as_ref().is_some_and(|l| same(&l.scope)) {
+        if self.live.as_ref().is_some_and(|l| l.scope == *scope) {
             self.revoke();
         }
-        self.stopped.retain(|s| !same(&s.scope));
-        let newer = matches!(&self.runs, Runs::Loaded(scopes)
-            if scopes.iter().any(|s| s.run == scope.run && s.incarnation != scope.incarnation));
-        if self.live.is_none() && !newer && self.target.as_ref().is_some_and(|t| t.run == scope.run)
+        self.stopped.retain(|s| s.scope != *scope);
+        let superseded = matches!(&self.runs, Runs::Loaded(scopes)
+            if scopes.iter().any(|s| s.run == scope.run && s != scope));
+        if self.live.is_none()
+            && !superseded
+            && self.target.as_ref().is_some_and(|t| t.run == scope.run)
         {
             self.hold_for(scope, NOTE_REVOKED.to_owned());
         }
@@ -347,7 +363,7 @@ impl ObservationFeature {
         if let Some(live) = self.live.take() {
             self.release_stage(&live.stage);
         }
-        self.stopped.retain(|s| s.scope.run != scope.run);
+        self.stopped.retain(|s| s.scope != scope);
         self.hold_for(&scope, NOTE_REVOKED.to_owned());
     }
 
@@ -463,28 +479,57 @@ impl ObservationFeature {
         }
     }
 
-    /// The core's answer about a scope: only "revoked" changes anything. An
-    /// answer that cannot be read keeps what is on screen, which the core
-    /// would have to revoke itself.
-    fn on_verified(&mut self, scope: &ObservationScope, reply: &FeatureReply) {
-        let revoked = match reply {
-            FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
-                ObservationReply::State(state),
-            )))) => *state == ObservationState::Revoked,
+    /// Whether an answer to `GetAgentObservation` shows `scope` to be valid:
+    /// a live snapshot, or the run stopped under the same incarnation. Anything
+    /// else (revoked, unavailable, a refusal, an unknown outcome, a reply of
+    /// another shape) does not confirm it. The host also refuses, rather than
+    /// answers, when the scope is lost between its snapshot and its own check.
+    fn confirms(reply: &FeatureReply, scope: &ObservationScope) -> bool {
+        match reply {
             FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
                 ObservationReply::Snapshot(snapshot),
-            )))) => snapshot.scope == *scope && snapshot.state == ObservationState::Revoked,
+            )))) => {
+                snapshot.scope == *scope
+                    && matches!(
+                        snapshot.state,
+                        ObservationState::Starting
+                            | ObservationState::Live
+                            | ObservationState::Stopped
+                    )
+            }
+            FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                ObservationReply::State(state),
+            )))) => *state == ObservationState::Stopped,
             _ => false,
-        };
-        if revoked {
+        }
+    }
+
+    fn on_verified(&mut self, scope: &ObservationScope, reply: &FeatureReply) {
+        if !Self::confirms(reply, scope) {
             self.revoke_scope(scope);
         }
     }
 
-    fn on_snapshot_reply(&mut self, scope: ObservationScope, reply: FeatureReply) {
+    fn on_snapshot_reply(&mut self, scope: ObservationScope, verify: bool, reply: FeatureReply) {
         if !self.live.as_ref().is_some_and(|l| l.scope == scope) {
-            // The watch ended before this answer: only a revocation still matters.
-            self.on_verified(&scope, &reply);
+            // The watch ended before this answer. A confirmation is still
+            // owed; otherwise only a revocation the core states matters.
+            let stated = matches!(
+                &reply,
+                FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                    ObservationReply::State(ObservationState::Revoked)
+                ),)))
+            ) || matches!(&reply, FeatureReply::Query(Ok(QueryReply::Browser(
+                    BrowserReply::AgentObservation(ObservationReply::Snapshot(s)),
+                )))
+                    if s.scope == scope && s.state == ObservationState::Revoked);
+            if stated || verify {
+                self.on_verified(&scope, &reply);
+            }
+            return;
+        }
+        if verify && !Self::confirms(&reply, &scope) {
+            self.revoke();
             return;
         }
         let Some(live) = &mut self.live else { return };
@@ -582,6 +627,7 @@ impl ObservationFeature {
                 snapshot: None,
                 snapshot_in_flight: false,
                 stale: true,
+                verify: false,
                 shown: None,
             });
         }
@@ -630,9 +676,16 @@ impl ObservationFeature {
         if live.stale && !live.snapshot_in_flight {
             live.stale = false;
             live.snapshot_in_flight = true;
+            let verify = std::mem::take(&mut live.verify);
             let scope = live.scope.clone();
             let tag = self.tag();
-            self.requests.insert(tag, Request::Snapshot(scope.clone()));
+            self.requests.insert(
+                tag,
+                Request::Snapshot {
+                    scope: scope.clone(),
+                    verify,
+                },
+            );
             ctx.query(
                 tag,
                 Query::Browser(BrowserQuery::GetAgentObservation { scope }),
@@ -709,7 +762,7 @@ impl Feature for ObservationFeature {
         self.requests.retain(|_, r| {
             !matches!(
                 r,
-                Request::List { .. } | Request::Snapshot(_) | Request::Verify(_)
+                Request::List { .. } | Request::Snapshot { .. } | Request::Verify(_)
             )
         });
         let selection = ctx.selection();
@@ -779,7 +832,7 @@ impl Feature for ObservationFeature {
                     _ => self.runs = Runs::Failed(NOTE_UNEXPECTED.to_owned()),
                 }
             }
-            Request::Snapshot(scope) => self.on_snapshot_reply(scope, reply),
+            Request::Snapshot { scope, verify } => self.on_snapshot_reply(scope, verify, reply),
             Request::Verify(scope) => self.on_verified(&scope, &reply),
             Request::Subscribe(scope) => self.on_subscribe_reply(scope, reply, tag),
             Request::Token {

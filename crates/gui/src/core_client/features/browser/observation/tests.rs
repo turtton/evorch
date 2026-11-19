@@ -124,6 +124,10 @@ struct Core {
     refuse_subscribe: Option<FeatureError>,
     /// Scopes whose incarnation the core no longer accepts.
     revoked: Vec<ObservationScope>,
+    /// Scopes the host refuses (it lost them between its snapshot and its own check).
+    denied: Vec<ObservationScope>,
+    /// Scopes of a run that stopped under a valid incarnation.
+    stopped_scopes: Vec<ObservationScope>,
 }
 
 use crate::core_client::features::FeatureError;
@@ -186,6 +190,16 @@ impl Core {
             Query::Browser(BrowserQuery::ListAgentRuns { .. }) => ObservationReply::Runs {
                 scopes: self.scopes.clone(),
             },
+            Query::Browser(BrowserQuery::GetAgentObservation { scope })
+                if self.denied.contains(scope) =>
+            {
+                return FeatureReply::Query(Err(FeatureError::new("denied")));
+            }
+            Query::Browser(BrowserQuery::GetAgentObservation { scope })
+                if self.stopped_scopes.contains(scope) =>
+            {
+                ObservationReply::State(ObservationState::Stopped)
+            }
             Query::Browser(BrowserQuery::GetAgentObservation { scope })
                 if self.revoked.contains(scope) =>
             {
@@ -1004,4 +1018,113 @@ fn a_late_revocation_leaves_the_stopped_view_of_a_newer_incarnation_alone() {
         Some(NOTE_STOPPED),
         "it is not marked revoked"
     );
+}
+
+fn scope_gen(run: &str, generation: u64) -> ObservationScope {
+    ObservationScope {
+        page_generation: generation,
+        ..scope(run)
+    }
+}
+
+#[test]
+fn a_notice_of_an_older_page_generation_does_not_stop_the_watch_of_a_newer_one() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.visible(false);
+    rig.core.scopes = vec![scope_gen("run-1", 2)];
+    rig.visible(true);
+    assert_eq!(rig.live_scope().page_generation, 2);
+    assert_eq!(
+        rig.state().feature.stopped.len(),
+        1,
+        "the old picture still waits"
+    );
+    rig.core.revoked = vec![scope_gen("run-1", 1)];
+    let before = rig.core.snapshots();
+    rig.notify(old, ObservationState::Revoked, 1);
+    assert_eq!(
+        rig.core.snapshots(),
+        before + 2,
+        "each exact scope is asked"
+    );
+    let feature = &rig.state().feature;
+    assert!(
+        feature.stopped.is_empty(),
+        "the old generation's picture goes"
+    );
+    assert_eq!(
+        feature
+            .live
+            .as_ref()
+            .expect("the new watch stays")
+            .scope
+            .page_generation,
+        2
+    );
+    assert!(feature.hold.is_none());
+}
+
+#[test]
+fn a_confirmation_the_host_refuses_drops_the_picture() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    rig.core.denied = vec![scope("run-1")];
+    rig.notify(oid(9999), ObservationState::Revoked, 1);
+    assert!(
+        rig.state().feature.stopped.is_empty(),
+        "unconfirmed counts as lost"
+    );
+}
+
+#[test]
+fn a_refused_confirmation_of_the_live_scope_ends_the_watch_and_its_picture() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.core.denied = vec![scope("run-1")];
+    rig.notify(oid(9999), ObservationState::Revoked, 1);
+    let feature = &rig.state().feature;
+    assert!(feature.live.is_none() && feature.stopped.is_empty());
+    assert_eq!(
+        feature.hold.as_ref().map(|h| h.message.as_str()),
+        Some(NOTE_REVOKED)
+    );
+    assert!(rig.core.subscriptions.is_empty());
+}
+
+#[test]
+fn the_live_subscription_ending_with_a_refused_confirmation_drops_its_picture() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.core.denied = vec![scope("run-1")];
+    rig.event(ObservationState::Revoked);
+    let feature = &rig.state().feature;
+    assert!(feature.live.is_none() && feature.stopped.is_empty());
+}
+
+#[test]
+fn a_run_that_only_stopped_keeps_its_picture_when_confirmed() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.stopped_scopes = vec![scope("run-1")];
+    rig.notify(oid(9999), ObservationState::Revoked, 1);
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+}
+
+#[test]
+fn one_snapshot_answers_both_the_refresh_and_the_confirmation() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let before = rig.core.snapshots();
+    rig.notify(oid(9999), ObservationState::Revoked, 1);
+    assert_eq!(
+        rig.core.snapshots(),
+        before + 1,
+        "no second query for the same scope"
+    );
+    assert!(rig.state().feature.live.is_some());
 }
