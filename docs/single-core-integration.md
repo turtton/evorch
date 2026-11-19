@@ -449,6 +449,86 @@ frame texture, the Capture image and the stream state at once and forgets the da
 operations are settled by `reset` when a session is back. `selection_changed` is not used: the
 previews belong to artifacts the user opened, not to the selected project or thread.
 
+## Stage 16b PR V: the GUI side joined (artifacts and preview reachable, exit and kill, native measurement)
+
+PR V is an integration PR (branch `feat/integration-16b-v`). It joins A (artifacts),
+B (browser preview) and the I2 hooks in the `core_client` page, proves the path
+against the real helper, and measures the interval up to the GPU upload.
+
+**Reachability.** A conversation row has two buttons, `成果物` and `プレビュー / 検査`.
+Both call `Features::reveal`, which opens the section and pins it: `Pins.reveal` is the
+open request, `Pins.pinned` holds at most two sections that are drawn first in the
+column, so a section the user asked for is on screen even when the column is long.
+`open_preview` (called by the artifact list) opens and pins the Browser section. The
+feature column is 60 % of the window high (420..1100 points). Scrolling to the section
+was tried and dropped: animated `scroll_to_cursor` and exact offsets both moved with the
+layout. A page whose core has no browser capability refuses a preview with a status
+message instead of waiting.
+
+**Exit and kill contract.** The GUI releases only what it owns: its own subscriptions
+and the preview tabs it opened itself (`ClientPreview` tabs). `Feature::release()`
+(default: nothing) returns the commands; the browser feature returns `CloseRendererTab`
+for its own tabs only. `connection.rs::release_own()` runs on `Action::Shutdown` or a
+closed queue (a clean exit). A kill sends nothing: the connection just ends, and the
+core keeps the tab for its 30 s grace so the same client can resume it. A run's tab,
+another client's tab and the helper are never touched by either path
+(`crates/evorch-core/tests/renderer_client_exit.rs` with the fake helper, and the
+real-helper `preview_cef` test).
+
+**Coexistence with the old GUI owner.** The legacy `browser_cef::CefRuntime` (in the
+old GUI process) and the core's helper run side by side with separate cache
+directories, and the whole process tree has no listening TCP/UDP socket
+(`evorch-renderer/tests/real_helper.rs`, `#[ignore]`, real CEF, run by the cef-e2e job).
+
+**Texture limit.** Before this PR a 4K preview panicked egui on a device whose
+`max_texture_side` is below 3840. The preview area is 16:9 (1280 wide gives 1280x720)
+and is clamped to the device limit; `Picture::show` refuses a larger picture. A
+failed resize is retried only by an explicit `サイズ変更を再試行` button.
+
+**Tests added.** gui lib: `maintenance_tests` (reveal, refusal status, buttons),
+`browser/tests` (release names only own tabs, retry button), `data/tests` (frame
+counters `DataStats`). Real helper (CI cef-e2e, new step "Core-client page through real
+CEF", `#[ignore]`): `core-client-e2e/tests/preview_cef.rs` runs conversation →
+`成果物` → artifact list → body → `プレビューを開く` → frames as a texture → `検査` →
+DOM result, and the exit / kill scenarios with a run-owned tab and a bystander window.
+`display_measure.rs` is a manual measurement (`#[ignore]`, asserts only that frames
+arrive; see `docs/renderer-measurement.md` §10). No fixed sleep, timeout or wall-clock
+threshold runs in shared CI.
+
+**Central and integration files changed** (`scripts/check-central-files.sh --scope integration`
+lists the first five):
+
+| File | Why |
+|---|---|
+| `crates/gui/src/core_client/mod.rs` | `features_height`, the refusal without browser capability, the conversation buttons that call `reveal` |
+| `crates/gui/src/core_client/features/mod.rs` | `Feature::release`, `Features::{reveal, is_shown, release_commands, data_stats}`, `Pins` |
+| `crates/core-client-e2e/Cargo.toml`, `Cargo.lock` | dev-dependencies of the measurement (`egui-wgpu`, tokio `time`) |
+| `.github/workflows/ci.yml` | the new cef-e2e step for `preview_cef` |
+| `crates/gui/src/core_client/connection.rs` (integration-owned, not in the central list) | `release_own()` on a clean exit |
+| A and B files edited by the integration owner: `features/browser.rs`, `browser/view.rs`, `browser/frame.rs`, `features/data.rs`, `artifacts/tests.rs`, `browser/tests.rs` | `release()`, the 16:9 clamp and retry button, `Picture::show` guard, the counters, the `Pins` field in tests, and the allocator probe's `realloc` accounting (S4) |
+| `.config/nextest.toml` | `measure` profile (30-minute runner timeout for the soak) |
+
+**Boundary to stages 19 and 20.** This PR does not remove an old GUI owner. The legacy
+in-process CEF, the old browser panels and their command paths stay until stage 19
+and stage 20 remove them; PR V only shows that they and the core's helper can run side
+by side and that the new page reaches the core through the client (the
+`check-core-client-refs.sh` baseline did not grow: the page never reaches the runtime
+or storage directly). Native-window display measurement (swapchain, vblank,
+compositor) and other operating systems are also not part of this stage.
+
+**Open findings (not fixed here; the core side is outside this scope).**
+1. `Busy: renderer private resource budget is full` appears when lifecycle rounds are
+   run 2 s apart (round 5, on the stream start after "close → open again"); never with
+   25 s between rounds. The hypothesis "64 operations per minute" is not confirmed (400
+   resizes in 64 s were not refused). A counter in the core is needed to tell the
+   candidates apart (`MAX_RENDERER_OPERATIONS = 64` held for `RESULT_TTL = 60 s`,
+   sessions, the closed-tab high-water in `areas/browser/budget.rs`).
+2. Several previews opened in one pass are refused (`Busy`) for the last ones. The
+   feature retries only `RetryAdvice::SameRequest`; the harness opens one at a time.
+3. Preview tabs are titled `artifact-<id>`, not by the artifact's title (UX follow-up).
+4. The resize retry button is covered by a unit test only; the e2e could not provoke a
+   resize refusal.
+
 ## Stage 17d-2: `maintenance backfill-events` in the core (reindex is 17d-3)
 
 `evorch maintenance backfill-events` is a task of the core's `maintenance` area
