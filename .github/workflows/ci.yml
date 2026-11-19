@@ -768,6 +768,14 @@ jobs:
           cargo build -p evorch-renderer
           export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
           cargo nextest run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
+      # Stage 16b PR V: the core-client page against a production core and the real
+      # helper (conversation -> artifact -> preview -> inspection; exit and kill).
+      - name: Core-client page through real CEF
+        run: |
+          cargo build -p evorch-renderer
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
+          cargo nextest run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
         run: |
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"

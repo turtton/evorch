@@ -61,6 +61,7 @@ fn features(log: &Log, availability: Availability) -> Features {
         selection: None,
         expanded: Default::default(),
         reveal: None,
+        pinned: Vec::new(),
     }
 }
 fn take(log: &Log) -> Vec<Observed> {

@@ -1140,6 +1140,7 @@ fn composition() -> (
             selection: None,
             expanded: Default::default(),
             reveal: None,
+            pinned: Vec::new(),
         },
         ..crate::core_client::Shared::default()
     }));

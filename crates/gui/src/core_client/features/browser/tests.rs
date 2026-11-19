@@ -2045,6 +2045,7 @@ impl Comp {
                 selection: None,
                 expanded: Default::default(),
                 reveal: None,
+                pinned: Vec::new(),
             },
             selection: Selection {
                 project: Some(ProjectId::new("p").unwrap()),

@@ -484,8 +484,12 @@ pub struct Features {
     features: Vec<Box<dyn Feature>>,
     selection: Option<Selection>,
     expanded: std::collections::HashMap<FeatureId, bool>,
-    /// A section the composition was asked to open and scroll to at the next pass.
+    /// A section the composition was asked to open at the next pass.
     reveal: Option<FeatureId>,
+    /// Sections moved to the top of the column, the latest first: what the user was taken
+    /// to (an artifact's preview, the artifacts of the conversation) is where they look,
+    /// not somewhere far down a long column.
+    pinned: Vec<FeatureId>,
     pub(crate) data: DataInbox,
 }
 
@@ -496,6 +500,7 @@ impl Default for Features {
             selection: None,
             expanded: Default::default(),
             reveal: None,
+            pinned: Vec::new(),
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -593,13 +598,17 @@ impl Features {
             .find(|f| f.id() == FeatureId::Browser)
         {
             f.open_preview(artifact);
-            self.reveal = Some(FeatureId::Browser);
+            self.reveal(FeatureId::Browser);
         }
     }
 
-    /// Open the section of `feature` and scroll it into view at the next pass.
+    /// Open the section of `feature` and move it to the top of the column at the next pass.
+    /// The two latest stay there, so the artifact list stays above its preview.
     pub fn reveal(&mut self, feature: FeatureId) {
         self.reveal = Some(feature);
+        self.pinned.retain(|f| *f != feature);
+        self.pinned.insert(0, feature);
+        self.pinned.truncate(2);
     }
 
     /// Whether the section of `feature` is shown for this connection.
@@ -679,6 +688,7 @@ impl Features {
             &mut self.data,
             &mut self.expanded,
             &mut self.reveal,
+            &self.pinned,
             ui,
             view,
             selection_changed,
@@ -771,29 +781,37 @@ fn render_all(
     data: &mut DataInbox,
     expanded: &mut std::collections::HashMap<FeatureId, bool>,
     reveal: &mut Option<FeatureId>,
+    pinned: &[FeatureId],
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
     selection_changed: bool,
 ) -> FeatureFrame {
     let mut frame = FeatureFrame::default();
-    // The features are stacked in one scrolling column, as tall as the space given to it.
+    // The features are stacked in one scrolling column, as tall as the space given to it,
+    // the pinned sections first.
+    let mut order: Vec<usize> = pinned
+        .iter()
+        .filter_map(|id| features.iter().position(|f| f.id() == *id))
+        .collect();
+    let rest: Vec<usize> = (0..features.len()).filter(|i| !order.contains(i)).collect();
+    order.extend(rest);
+    let opening = reveal.take();
     egui::ScrollArea::vertical()
         .id_salt("features")
         .auto_shrink([false, true])
         .max_height(ui.available_height())
         .show(ui, |ui| {
-            for feature in features.iter_mut() {
+            for index in order {
+                let feature = &mut features[index];
                 let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     feature_header_id(ui, feature.id()),
                     true,
                 );
-                let revealed = *reveal == Some(feature.id());
-                if revealed {
-                    *reveal = None;
-                    if is_available(feature.as_ref(), view.connected, view.capabilities) {
-                        state.set_open(true);
-                    }
+                if opening == Some(feature.id())
+                    && is_available(feature.as_ref(), view.connected, view.capabilities)
+                {
+                    state.set_open(true);
                 }
                 let mut visibility = Visibility {
                     available: is_available(feature.as_ref(), view.connected, view.capabilities),
@@ -810,9 +828,6 @@ fn render_all(
                 if !visibility.available {
                     maintain_feature(feature.as_mut(), &mut ctx, selection_changed, visibility);
                     continue;
-                }
-                if revealed {
-                    ui.scroll_to_cursor(Some(egui::Align::TOP));
                 }
                 let mut clicked = false;
                 let mut header = state.show_header(ui, |ui| {
