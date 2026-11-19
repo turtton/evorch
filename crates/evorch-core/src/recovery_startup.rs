@@ -472,6 +472,10 @@ impl<'a> StartupCoordinator<'a> {
             .runtime
             .restore_relations_and_continuations(&mut paused)
             .map_err(|_| StartupBlocked::NeedsAttention)?;
+        self.inputs
+            .runtime
+            .prepare_planned_component_tool_evidence(&paused, &authority, &models)
+            .map_err(|_| StartupBlocked::NeedsAttention)?;
         Ok(PreparedStartupComponent {
             paused,
             authority,

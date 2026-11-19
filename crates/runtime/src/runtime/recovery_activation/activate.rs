@@ -11,6 +11,46 @@ pub struct CurrentRecoveryAuthority {
 }
 
 impl AgentRuntime {
+    /// Core planned startup calls this after Ready and before FULL activation ACK.
+    pub fn prepare_planned_component_tool_evidence(
+        &self,
+        paused: &PausedRecoveryComponent,
+        authority: &CurrentRecoveryAuthority,
+        models: &RecoveryModels,
+    ) -> Result<(), RuntimeError> {
+        if !self.has_planned_restart_handoff() {
+            return Ok(());
+        }
+        for source in &paused.sources {
+            let Some(config) = authority.members.get(&source.record.run_id) else {
+                continue;
+            };
+            let Some(input) = source.intent.provider_input.as_ref() else {
+                continue;
+            };
+            self.validate_recovery_authority(source, config)?;
+            let model = models.current(self, source.record.run_id, config)?;
+            let restored = source
+                .bundle
+                .as_ref()
+                .map(|bundle| RestoredState::from_recovery_bundle(bundle, &source.record.waits))
+                .transpose()?;
+            self.prepare_planned_run_tools(
+                source.record.run_id,
+                &source.intent.incarnation,
+                input,
+                config,
+                Role::from_name(&source.record.role).map_err(error)?,
+                source.record.parent,
+                &model,
+                restored
+                    .as_ref()
+                    .and_then(|state| state.mcp_snapshot.as_ref()),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Reconnect evidence without publishing endpoints or consuming any notice.
     pub fn restore_relations_and_continuations(
         &self,

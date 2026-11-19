@@ -1,7 +1,7 @@
 # M2 production composition evidence (4b-D-2c-3)
 
 Restart is still an internal coordinator, not a public capability. M2 stage 12
-(raw exec), CLI continuity and successor dispatch remain disconnected.
+(raw exec) and internal product successor dispatch are now connected (D-3b); public restart commands and CLI continuity remain deferred to 5a/5b.
 
 ## Ownership and completion
 
@@ -111,8 +111,8 @@ completed and the writer can still accept a barrier. An additional internal
 audit event then proves the final snapshot is distinct from that ACK. Independent
 SQL readback checks every workload event exactly once. All three runs belonging
 to one owner/generation retain their captured snapshot receipts and parked-run
-inventory. All successful drain cells intentionally end FailedClosed at the
-disconnected raw-exec boundary.
+inventory. Drain-only cells deliberately remove their fixture entry after owner stop and
+exercise real execve failure/FD rollback. Product-success cells are separate.
 
 Failure cells drop the real ACK sender by panicking its worker, panic the real
 subscriber OS thread after its persistence worker has joined, fail a real
@@ -132,3 +132,46 @@ command, environment, raw results, failure results and D-3 handoff.
 The existing final-business/usage durability test also uses production cold-core
 bootstrap: independent DB reads verify the final event, per-request usage and
 aggregated usage bucket, in addition to the repeated queue-order measurements.
+
+## D-3b: internal product exec/bootstrap connection
+
+After stage 11, the successful tail holds synchronous lifecycle/runtime
+execution-prohibition latches, checks the stopped signalfd without consuming it,
+and calls the prepared raw syscall boundary. It does not await, access SQLite,
+allocate/format strings, notify or log. Only a failed return releases the
+latches, restores FD flags/diagnostic ownership and invalidates the same TX;
+old business never resumes. A successful exec replaces the process image while
+retaining the lifetime-lock OFD and one-use ticket. Product entry classifies
+planned mode and inspects inherited descriptors before creating an inbox,
+runtime or database; failed validation never falls back to Cold.
+
+The hidden read-only `--describe-handoff` preflight is not a protocol capability
+or a user restart operation. It opens no DB/owner/lease/lock and starts no
+resident service. Its storage range comes from the migration registry and
+all canonical current-format gates; protocol comes from ProtocolVersion::CURRENT. Its
+standard-tools-v1 identity covers only the eight compiled standard tools:
+read, edit, write, apply_patch, grep, shell, git_diff and run_js, in the same
+name-sorted metadata order as actual standard registration. A parity test
+compares names, descriptions, schemas and order without changing registration.
+Optional network/web/browser tools, host and runtime meta tools, configuration,
+MCP and skills are **not** included in this preflight catalog identity. It is
+neither an effective per-run catalog nor permission to change the prompt.
+
+Per-incarnation ToolSnapshot is the boundary authority. M2 snapshots the actual
+sent ProviderInput before Commit, selecting builtins using
+metadata.old_builtin_tool_names. Planned recovery compares the current builtin
+preview with this evidence after Ready but before FULL activation ACK. The
+pure composition helper is shared with the live loop. Saved FrozenMcpSnapshot
+metadata is restored through the same inert registration API and name-permission
+helper as the real loop, using a disposable bus/executor: no discovery, credentials,
+server process or connection. An absent snapshot never invents external tools.
+External tool definitions remain unchanged and do not acquire a build-change grant. Non-tool context,
+execution authority, history, ToolResults and affinity must remain identical.
+Only a verified different build with changed builtin schema/description/order
+may consume one tools-only boundary; same build and unchanged catalogs grant
+none. Missing or unexplainable builtin evidence fails closed, never grants an
+unverified boundary or rewrites sent history.
+
+Public restart/quarantine operations and capability publication, client
+reconnection and CLI continuity remain 5a/5b work. The explicit-shutdown watchdog
+remains D-3a2 and is not added here.

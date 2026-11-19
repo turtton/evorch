@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 //! Full M2 coordinator -> execve -> unmodified product argv/bootstrap. No public
 //! restart operation or reconnect client is installed. Runner owns the 60s watchdog.
+#[path = "../shared-test-support/exec_fixture.rs"]
+mod exec_fixture;
 #[path = "../shared-test-support/restart_model.rs"]
 mod restart_model;
 #[path = "../shared-test-support/signal_entry.rs"]
@@ -43,9 +45,13 @@ fn product_handoff(bad_fd: bool) {
     let config_dir = root.path().join("config");
     let state = root.path().join("state");
     let sockets = test_socket_dir::SocketDir::new();
-    let product = std::env::var("CARGO_BIN_EXE_evorch-core").unwrap();
+    let product = exec_fixture::product_copy(root.path());
+    let worker = exec_fixture::stripped_copy(
+        &std::env::current_exe().unwrap(),
+        &root.path().join("old-core-fixture"),
+    );
     let mut child = Child(
-        Command::new(std::env::current_exe().unwrap())
+        Command::new(worker)
             .args(["--ignored", "--exact", WORKER, "--nocapture"])
             .env("EVORCH_MASKED_TEST_CHILD", "1")
             .env("EVORCH_D3B_ROOT", root.path())
@@ -212,6 +218,7 @@ fn m2_product_worker() {
         let mut host = BootstrappedHost::open_for_core_with_test_seams(BootstrapOptions {
             config_dir: config_dir.clone(), project_root: root.clone(), ownership_root: root.join("state/evorch/threads"),
         }, TestSeams { model: model.clone(), sandbox: Arc::new(restart_model::Direct) }, &evorch_core::recovery_service::CoreGraphRecovery).await.unwrap();
+        eprintln!("D3B worker cold bootstrap complete");
         let config = ConfigIdentity::new(&config_dir).unwrap();
         let launch = LaunchGuard::acquire(&config).unwrap();
         let instance = Arc::new(Instance::acquire_default(&launch).unwrap()); drop(launch);
@@ -229,8 +236,10 @@ fn m2_product_worker() {
             let run = if index == 0 { host.runtime.delegate_chat("active", runtime::Role::Orchestrator, "park".into(), config).unwrap() }
                 else { host.runtime.delegate_background_as_child(runs[0], runtime::Role::Worker, "park", config).unwrap() };
             loop {
-                if matches!(events.recv().await.unwrap().kind, event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }) if run_id == run.to_string()) { break; }
+                let event = events.recv().await.unwrap();
+                if matches!(event.kind, event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Waiting, .. }) if run_id == run.to_string()) { break; }
             }
+            eprintln!("D3B worker parked {index}: {run}");
             runs.push(run);
         }
         let id = core.request_planned(BTreeMap::from([(runs[0], runtime::quiesce::RecoveryRecipe {
@@ -238,26 +247,31 @@ fn m2_product_worker() {
             goal_id: None, team: None, lane: None, descriptor: None,
         })])).unwrap();
         core.wait_sealed(id).await.unwrap();
+        eprintln!("D3B worker sealed");
         let product = std::path::PathBuf::from(std::env::var_os("EVORCH_D3B_PRODUCT").unwrap());
         let build = core_instance::handoff::elf_identity(&product).unwrap();
-        let description = core_launcher::handoff::HandoffDescription { version: 1, elf_path: product.clone(), build_identity: build.clone(), handoff_format: 1, snapshot_format: 1,
-            schema: core_launcher::handoff::SchemaRange { minimum: 1, maximum: 1000 }, protocol: 1, platform: format!("linux-{}", std::env::consts::ARCH), tool_catalog: "process-fixture".into() };
-        let target_path = root.join("entry");
-        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-        std::fs::write(&target_path, format!(
-            "#!/bin/sh\nif [ \"$1\" = --describe-handoff ]; then printf '%s\\n' {}; else {} exec {} \"$@\"; fi\n",
-            quote(&serde_json::to_string(&description).unwrap()),
-            if std::env::var("EVORCH_D3B_BAD_FD").unwrap() == "1" { "exec 9<>/dev/null;" } else { "" },
-            quote(product.to_str().unwrap())
-        )).unwrap();
-        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let described = Command::new(&product).arg("--describe-handoff").output().unwrap();
+        assert!(described.status.success(), "{}", String::from_utf8_lossy(&described.stderr));
+        let description: core_launcher::handoff::HandoffDescription = serde_json::from_slice(&described.stdout).unwrap();
+        let schema = *storage::supported_schema_versions().unwrap().end();
+        assert_eq!(description.protocol, workbench_protocol::ProtocolVersion::CURRENT.0);
+        assert_eq!(description.build_identity, build);
+        // Primary success probes and execs the unmodified product. Only this
+        // negative fixture wrapper deliberately introduces a forbidden descriptor.
+        let target_path = if std::env::var("EVORCH_D3B_BAD_FD").unwrap() == "1" {
+            let path = root.join("bad-fd-entry");
+            let quote = format!("'{}'", product.to_str().unwrap().replace('\'', "'\\''"));
+            std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" != --describe-handoff ]; then exec 9<>/dev/null; fi\nexec {quote} \"$@\"\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        } else { product.clone() };
         let current = Arc::new(core_launcher::handoff::CurrentElf::record().unwrap());
         let checked = core_launcher::handoff::targets::RestartTarget::preflight(core_launcher::handoff::targets::TargetSelection { id: "target", configured_path: Some(&target_path), timeout: std::time::Duration::from_secs(300) }, &current,
-            core_launcher::handoff::targets::TargetRequirements { handoff: 1, snapshot: 1, storage_schema: 65, protocol: 1, platform: &description.platform }, core_launcher::handoff::ProbeLimits::default(), std::future::pending()).await.unwrap()
+            core_launcher::handoff::targets::TargetRequirements { handoff: 1, snapshot: 1, storage_schema: schema, protocol: description.protocol, platform: &description.platform }, core_launcher::handoff::ProbeLimits::default(), std::future::pending()).await.unwrap()
             .before_capture(&current, core_launcher::handoff::ProbeLimits::default(), std::future::pending()).await.unwrap();
         let target = FinalizationTarget::new(current, checked).with_environment(FinalizationEnvironment::new(instance.clone(), signal_entry::mask().clone(), signals.clone(), driver.control_drain(), vec!["--config-dir".into(), config_dir.into_os_string()]));
         let metadata = RestartMetadata { restart_id: "d3b".into(), capture_id: "d3b-capture".into(), config_identity: instance.identity.clone(), old_epoch: backend.hello().instance_epoch.0,
-            successor_epoch: backend.hello().instance_epoch.0.checked_add(1).unwrap(), old_build: core_instance::handoff::running_elf_identity().unwrap(), successor_build: build, target_identity: "target".into(), handoff_version: 1, snapshot_version: 1, storage_version: 65,
+            successor_epoch: backend.hello().instance_epoch.0.checked_add(1).unwrap(), old_build: core_instance::handoff::running_elf_identity().unwrap(), successor_build: build, target_identity: "target".into(), handoff_version: 1, snapshot_version: 1, storage_version: schema,
             old_builtin_tool_names: BTreeSet::new(), old_compiled_catalog_fingerprint: None, new_compiled_catalog_fingerprint: None, old_effective_tools_fingerprint: None, new_effective_tools_fingerprint: None };
         let tx = host.composition.storage_writer.mutate_restart("d3b".into(), None, RestartMutation::Create(Box::new(metadata))).unwrap();
         println!("D3B-BEFORE {}", serde_json::json!({"pid":std::process::id(), "runs":runs.iter().map(ToString::to_string).collect::<Vec<_>>()})); std::io::stdout().flush().unwrap();

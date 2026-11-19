@@ -176,6 +176,8 @@ impl RestartCoordinator {
                 owner.capture_checkpoint(id)?;
                 runtime.persist_restart_capture_expected(&mut session)?;
                 owner.capture_checkpoint(id)?;
+                runtime.persist_restart_tool_snapshots(&mut session)?;
+                owner.capture_checkpoint(id)?;
                 runtime.read_restart_capture_records(&session)?;
                 owner.capture_checkpoint(id)?;
                 runtime.commit_restart_capture(&mut session)?;

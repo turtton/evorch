@@ -66,7 +66,12 @@ fn run() -> Result<(), BootstrapError> {
     }
     #[cfg(target_os = "linux")]
     if entry.describe {
-        return Err("handoff description is not yet published".into());
+        serde_json::to_writer(
+            std::io::stdout(),
+            &evorch_core::handoff_description::describe()?,
+        )?;
+        println!();
+        return Ok(());
     }
     if args::write_read_only(
         &args.mode,

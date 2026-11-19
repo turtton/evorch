@@ -90,6 +90,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Handoff preflight hashes whole ELF files repeatedly. Keep debug process tests
+# within the unchanged 5s probe and 60s watchdog without weakening validation.
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+
 # Named GUI dependency overrides live in .cargo/config.toml so dependency
 # caches include their optimization settings in the cache key.
 

@@ -1,5 +1,7 @@
 //! Standalone composition root and transports (ADR 0045 P7a).
 pub mod backend;
+#[cfg(target_os = "linux")]
+pub mod handoff_description;
 pub mod instance;
 pub mod lifecycle;
 #[cfg(target_os = "linux")]
