@@ -33,6 +33,42 @@ fn contract<T: DeserializeOwned>(name: &str, input: Value) {
 }
 
 #[test]
+fn attachment_schema_and_shape_validation_reject_the_same_invalid_arrays() {
+    let schema = tool_spec("delegate").input_schema;
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let good = json!({"run_id":"run-2","output_ref":format!("out-v1-sha256:{}","a".repeat(64))});
+    for invalid in [
+        Value::Null,
+        json!({}),
+        json!([null]),
+        json!([{"run_id":"run-2"}]),
+        json!([{"output_ref":"latest"}]),
+        json!([{"run_id":"run-2","output_ref":"latest"}]),
+        json!([{"run_id":"run-2","output_ref":good["output_ref"],"extra":true}]),
+        json!([good.clone(), good.clone()]),
+        Value::Array(vec![good; 5]),
+    ] {
+        let input =
+            json!({"target":{"role":"worker"},"prompt":"task","output_attachments":invalid});
+        assert!(!validator.is_valid(&input), "{input}");
+        let parsed =
+            serde_json::from_value::<Vec<crate::output_attachments::OutputAttachment>>(invalid);
+        assert!(parsed.is_err() || crate::output_attachments::validate(parsed.unwrap()).is_err());
+    }
+    for valid in [
+        json!([]),
+        json!([{"run_id":"run-2","output_ref":format!("out-v1-sha256:{}","a".repeat(64))}]),
+    ] {
+        assert!(validator.is_valid(
+            &json!({"target":{"role":"worker"},"prompt":"task","output_attachments":valid})
+        ));
+        assert!(
+            crate::output_attachments::validate(serde_json::from_value(valid).unwrap()).is_ok()
+        );
+    }
+}
+
+#[test]
 fn every_registered_meta_operation_has_a_complete_valid_contract() {
     for name in crate::META_OPS {
         let spec = tool_spec(name);
@@ -71,7 +107,8 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "delegate",
         json!({"target": {"role": "worker", "category": "deep"},
             "prompt":"Implement x; own x.rs; verify cargo test; report outcome, changes, checks and blockers.", "background":true, "interactive":true, "name":"implementation", "load_skills":["rust"],
-            "task":{"id":"task-1","paths":["src/x.rs"]}
+            "task":{"id":"task-1","paths":["src/x.rs"]},
+            "output_attachments":[{"run_id":"run-2","output_ref":format!("out-v1-sha256:{}", "a".repeat(64))}]
         }),
     );
     contract::<meta::runs::RunArgs>("run_output", json!({"run_id":"run-2"}));

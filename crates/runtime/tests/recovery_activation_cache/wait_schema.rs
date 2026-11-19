@@ -15,10 +15,14 @@ use storage::recovery::restart::tools::RestartToolsEvidence;
 pub(super) struct PredecessorCatalog {
     pub successor_tools: Mutex<Vec<ToolSpec>>,
     pub plan: bool,
+    pub output_attachments: bool,
 }
 impl PredecessorCatalog {
     fn tools(&self, successor: &[ToolSpec]) -> Vec<ToolSpec> {
         *self.successor_tools.lock().unwrap() = successor.to_vec();
+        if self.output_attachments {
+            return super::output_attachment_schema::old_tools(successor);
+        }
         if self.plan {
             return super::plan_schema::old_tools(successor);
         }

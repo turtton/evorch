@@ -195,6 +195,10 @@ pub struct RunConfig {
     pub topology: crate::CoordinationTopology,
     pub team: Option<crate::team_context::TeamContext>,
     pub team_task: Option<crate::team::TaskSpec>,
+    /// Runtime-prepared final input for output attachments, already size-checked.
+    /// Hosts leave this empty; consumed at registration instead of augmenting twice.
+    #[doc(hidden)]
+    pub prepared_initial_prompt: Option<String>,
     pub finding_store: Option<PathBuf>,
     pub team_store: Option<crate::team_context::TeamStore>,
     pub delegation_value: Option<String>,

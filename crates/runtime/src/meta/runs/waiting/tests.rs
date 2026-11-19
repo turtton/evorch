@@ -181,6 +181,12 @@ async fn any_wakes_on_one_completion_and_returns_bounded_utf8_output() {
     assert_eq!(result["completed_run_ids"], json!([first.to_string()]));
     assert_eq!(result["runs"].as_array().unwrap().len(), 1);
     assert_eq!(result["runs"][0]["output_truncated"], true);
+    let original = serde_json::to_value(runtime.run_output(parent, first).unwrap()).unwrap();
+    assert_eq!(result["runs"][0]["output_ref"], original["output_ref"]);
+    assert_eq!(
+        result["runs"][0]["output_bytes"],
+        original["output"].as_str().unwrap().len()
+    );
     assert!(result["runs"][0]["output"].as_str().unwrap().len() <= OUTPUT_BYTES);
     // Observing completion must not consume the parent's completion relay.
     assert!(!runtime.take_inbox(parent).unwrap().is_empty());

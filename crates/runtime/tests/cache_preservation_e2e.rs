@@ -17,6 +17,8 @@ mod image_generation_cache;
 mod lane_cache;
 #[path = "cache_preservation_e2e/malformed_arguments.rs"]
 mod malformed_arguments_cache;
+#[path = "output_attachments_cache/mod.rs"]
+mod output_attachments_cache;
 mod plan_boundary_cache;
 mod plan_cache;
 #[path = "read_alias_cache/mod.rs"]

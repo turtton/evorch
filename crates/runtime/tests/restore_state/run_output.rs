@@ -111,7 +111,9 @@ async fn final_text_when_background_child_completed() {
     // Then: the final output is returned, independent of completion inbox delivery.
     assert_eq!(
         result,
-        json!({"run_id":"run-2", "phase":"Done", "status":"completed", "output":"child final answer", "reason":null,
+        json!({"run_id":"run-2", "phase":"Done", "status":"completed", "output":"child final answer",
+            "output_ref":"out-v1-sha256:a004c4b0b9325a92a4361a33dc8aa062d70bf720062d5dac050500a9265dfca2",
+            "output_bytes":18, "reason":null,
             "continuable":false, "continuation_blocked":runtime::RunRestoreFailure::StorageNotConfigured.to_string()})
     );
 }
