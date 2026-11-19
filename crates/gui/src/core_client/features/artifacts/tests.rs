@@ -133,6 +133,26 @@ impl Rig {
         self.feature.render(ui, &mut ctx);
     }
 
+    fn maintain(&mut self) {
+        let mut ctx = FeatureContext {
+            feature: FeatureId::Artifacts,
+            view: FeatureView {
+                connected: true,
+                capabilities: &[],
+                cache: &self.cache,
+                selection: &self.selection,
+            },
+            frame: &mut self.frame,
+            data: &mut self.inbox,
+        };
+        let visibility = Visibility {
+            available: true,
+            expanded: false,
+            minimized: false,
+        };
+        self.feature.maintain(&mut ctx, visibility);
+    }
+
     /// The connection's side of what the feature queued.
     fn settle(&mut self) -> Sent {
         let mut sent = Sent::default();
@@ -917,8 +937,7 @@ fn compressed_metadata_never_reaches_the_decoder_so_it_allocates_nothing_large()
         !stripped.windows(4).any(|w| w == b"iCCP"),
         "the profile is dropped before a decoder exists"
     );
-    let (decoded, largest) =
-        alloc_probe::largest_allocation(|| image::decode(&bomb, MediaType::Png));
+    let (decoded, largest, _) = alloc_probe::measure(|| image::decode(&bomb, MediaType::Png));
     assert_eq!(decoded.unwrap().size, [1, 1]);
     assert!(
         largest < 1024 * 1024,
@@ -940,6 +959,8 @@ mod alloc_probe {
     thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
         static LARGEST: Cell<usize> = const { Cell::new(0) };
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
     }
 
     struct Probe;
@@ -948,6 +969,18 @@ mod alloc_probe {
         let _ = ARMED.try_with(|armed| {
             if armed.get() {
                 let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(size)));
+                let _ = LIVE.try_with(|live| {
+                    live.set(live.get() + size as isize);
+                    let _ = PEAK.try_with(|peak| peak.set(peak.get().max(live.get())));
+                });
+            }
+        });
+    }
+
+    fn forget(size: usize) {
+        let _ = ARMED.try_with(|armed| {
+            if armed.get() {
+                let _ = LIVE.try_with(|live| live.set(live.get() - size as isize));
             }
         });
     }
@@ -967,6 +1000,7 @@ mod alloc_probe {
             unsafe { System.realloc(ptr, layout, new_size) }
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            forget(layout.size());
             unsafe { System.dealloc(ptr, layout) }
         }
     }
@@ -974,12 +1008,16 @@ mod alloc_probe {
     #[global_allocator]
     static PROBE: Probe = Probe;
 
-    pub(super) fn largest_allocation<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    /// The result with the largest single allocation and the peak of bytes held at once.
+    pub(super) fn measure<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
         LARGEST.with(|largest| largest.set(0));
+        LIVE.with(|live| live.set(0));
+        PEAK.with(|peak| peak.set(0));
         ARMED.with(|armed| armed.set(true));
         let result = run();
         ARMED.with(|armed| armed.set(false));
-        (result, LARGEST.with(Cell::get))
+        let peak = PEAK.with(Cell::get).max(0) as usize;
+        (result, LARGEST.with(Cell::get), peak)
     }
 }
 
@@ -1271,4 +1309,373 @@ fn a_disconnect_drops_the_text_at_once_and_a_late_chunk_is_not_shown() {
     compose(&ctx, &mut screen, vec![]);
     assert!(feature.lock().unwrap().open.is_none());
     assert!(data_cancels(&mut wire).is_empty());
+}
+
+/// A lossy WebP whose canvas says `canvas` and whose VP8 frame says `inner`.
+fn webp_with_vp8x(canvas: (u32, u32), inner: (u16, u16)) -> Vec<u8> {
+    let mut vp8 = vec![0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a];
+    vp8.extend_from_slice(&inner.0.to_le_bytes());
+    vp8.extend_from_slice(&inner.1.to_le_bytes());
+    let mut vp8x = vec![0, 0, 0, 0];
+    vp8x.extend_from_slice(&(canvas.0 - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(canvas.1 - 1).to_le_bytes()[..3]);
+    let mut body = b"WEBP".to_vec();
+    for (kind, payload) in [(b"VP8X", &vp8x), (b"VP8 ", &vp8)] {
+        body.extend_from_slice(kind);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+/// A GIF whose screen is 1×1 and whose first frame says `frame`.
+fn gif_with_frame(frame: (u16, u16)) -> Vec<u8> {
+    let mut out = b"GIF89a".to_vec();
+    out.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+    out.extend_from_slice(&[0x2c, 0, 0, 0, 0]);
+    out.extend_from_slice(&frame.0.to_le_bytes());
+    out.extend_from_slice(&frame.1.to_le_bytes());
+    out.extend_from_slice(&[0, 2, 2, 0x4c, 0x01, 0, 0x3b]);
+    out
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// A PNG that declares a picture and carries no pixels at all.
+fn png_header_only(width: u32, height: u32, depth: u8, color: u8, interlace: u8) -> Vec<u8> {
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[depth, color, 0, 0, interlace]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// A baseline JPEG that declares `width`×`height` with three components and no scan data.
+fn jpeg_header_only(width: u16, height: u16) -> Vec<u8> {
+    let mut out = vec![0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00];
+    out.extend_from_slice(&[1; 64]);
+    out.extend_from_slice(&[0xff, 0xc0, 0x00, 0x11, 8]);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.extend_from_slice(&[3, 1, 0x22, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    for class_id in [0x00u8, 0x10] {
+        out.extend_from_slice(&[0xff, 0xc4, 0x00, 0x14, class_id, 1]);
+        out.extend_from_slice(&[0; 15]);
+        out.push(0);
+    }
+    out.extend_from_slice(&[0xff, 0xda, 0x00, 0x0c, 3, 1, 0, 2, 0, 3, 0, 0, 0x3f, 0]);
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&[0xff, 0xd9]);
+    out
+}
+
+/// Largest single allocation and peak held while `bytes` is decoded, and the verdict.
+fn measured(
+    bytes: &[u8],
+    media: MediaType,
+) -> (Result<egui::ColorImage, image::ImageProblem>, usize, usize) {
+    alloc_probe::measure(|| image::decode(bytes, media))
+}
+
+#[test]
+fn a_webp_whose_frame_is_larger_than_its_canvas_is_refused_before_anything_is_allocated() {
+    // 48 bytes: the canvas says 1×1, the VP8 frame says 16383×16383.
+    let bomb = webp_with_vp8x((1, 1), (16383, 16383));
+    assert_eq!(bomb.len(), 48);
+    let (result, largest, peak) = measured(&bomb, MediaType::Webp);
+    assert!(
+        matches!(result, Err(image::ImageProblem::TooLarge(_))),
+        "{result:?}"
+    );
+    assert!(
+        largest < 64 * 1024 && peak < 1024 * 1024,
+        "{largest} {peak}"
+    );
+    // A frame that merely differs from the canvas is refused as well, and so is
+    // one that is within the limits but not the canvas, or the other way round.
+    for (canvas, inner) in [
+        ((16, 16), (17, 16)),
+        ((9000, 1), (9000, 1)),
+        ((1, 1), (8193, 1)),
+    ] {
+        let file = webp_with_vp8x(canvas, inner);
+        let (result, largest, _) = measured(&file, MediaType::Webp);
+        assert!(result.is_err(), "{canvas:?} {inner:?}");
+        assert!(largest < 64 * 1024, "{canvas:?} {inner:?}: {largest}");
+    }
+    // The frames of an animation and a lossless frame are held to the same limits.
+    let lossless = webp_lossless((16383, 16383));
+    let (result, largest, _) = measured(&lossless, MediaType::Webp);
+    assert!(
+        matches!(result, Err(image::ImageProblem::TooLarge(_))),
+        "{result:?}"
+    );
+    assert!(largest < 64 * 1024, "{largest}");
+    let animated = webp_animated((1, 1), (16383, 16383));
+    let (result, largest, _) = measured(&animated, MediaType::Webp);
+    assert!(
+        matches!(result, Err(image::ImageProblem::TooLarge(_))),
+        "{result:?}"
+    );
+    assert!(largest < 64 * 1024, "{largest}");
+    // Not a WebP, or cut short: refused, not guessed at.
+    assert!(image::check_webp(b"RIFF....WEBX").is_err());
+    assert!(image::check_webp(&bomb[..40]).is_err());
+}
+
+#[test]
+fn a_file_that_matches_its_header_is_decoded_for_every_format_within_a_bounded_allocation() {
+    // What each decoder allocates from a header alone, at the largest size let through
+    // (a 4K frame) and beyond it: nothing is more than the budget, and what is
+    // over the limits is refused.
+    let budget = image::MAX_ALLOC as usize;
+    for (name, bytes, media, accepted) in [
+        (
+            "png 16-bit interlaced 4K",
+            png_header_only(3840, 2160, 16, 6, 1),
+            MediaType::Png,
+            true,
+        ),
+        (
+            "png 8-bit 4K",
+            png_header_only(3840, 2160, 8, 6, 0),
+            MediaType::Png,
+            true,
+        ),
+        (
+            "png 16-bit over the pixels",
+            png_header_only(8192, 8192, 16, 6, 1),
+            MediaType::Png,
+            false,
+        ),
+        (
+            "jpeg 4K",
+            jpeg_header_only(3840, 2160),
+            MediaType::Jpeg,
+            true,
+        ),
+        (
+            "jpeg over the pixels",
+            jpeg_header_only(8192, 8192),
+            MediaType::Jpeg,
+            false,
+        ),
+        (
+            "jpeg 65535 wide",
+            jpeg_header_only(65535, 65535),
+            MediaType::Jpeg,
+            false,
+        ),
+        (
+            "gif frame 65535",
+            gif_with_frame((65535, 65535)),
+            MediaType::Gif,
+            false,
+        ),
+        ("gif frame 1", gif_with_frame((1, 1)), MediaType::Gif, true),
+    ] {
+        let (result, largest, peak) = measured(&bytes, media);
+        assert!(
+            largest <= budget && peak <= 2 * budget,
+            "{name}: {largest} {peak}"
+        );
+        if !accepted {
+            assert!(
+                matches!(result, Err(image::ImageProblem::TooLarge(_))),
+                "{name}: {result:?}"
+            );
+        }
+    }
+}
+
+/// A lossless WebP frame (VP8L) that declares `size`.
+fn webp_lossless(size: (u32, u32)) -> Vec<u8> {
+    let bits = (size.0 - 1) | (size.1 - 1) << 14;
+    let mut payload = vec![0x2f];
+    payload.extend_from_slice(&bits.to_le_bytes());
+    riff(&[(b"VP8L", payload)])
+}
+
+/// An animated WebP with one frame that says `inner` inside a canvas of `canvas`.
+fn webp_animated(canvas: (u32, u32), inner: (u16, u16)) -> Vec<u8> {
+    let mut vp8x = vec![0x02, 0, 0, 0];
+    vp8x.extend_from_slice(&(canvas.0 - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(canvas.1 - 1).to_le_bytes()[..3]);
+    let mut vp8 = vec![0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a];
+    vp8.extend_from_slice(&inner.0.to_le_bytes());
+    vp8.extend_from_slice(&inner.1.to_le_bytes());
+    // x, y, width-1, height-1 (3 bytes each), duration (3), flags.
+    let mut anmf = vec![0; 6];
+    anmf.extend_from_slice(&(u32::from(inner.0) - 1).to_le_bytes()[..3]);
+    anmf.extend_from_slice(&(u32::from(inner.1) - 1).to_le_bytes()[..3]);
+    anmf.extend_from_slice(&[0, 0, 0, 0]);
+    anmf.extend_from_slice(b"VP8 ");
+    anmf.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
+    anmf.extend(vp8);
+    riff(&[(b"VP8X", vp8x), (b"ANMF", anmf)])
+}
+
+fn riff(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = b"WEBP".to_vec();
+    for (kind, payload) in chunks {
+        body.extend_from_slice(*kind);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+#[test]
+fn a_real_webp_passes_the_check_and_decodes() {
+    use ::image::{ExtendedColorType, ImageEncoder, codecs::webp::WebPEncoder};
+    let mut bytes = Vec::new();
+    WebPEncoder::new_lossless(&mut bytes)
+        .write_image(&[255; 4 * 4 * 3], 4, 3, ExtendedColorType::Rgba8)
+        .unwrap();
+    image::check_webp(&bytes).unwrap();
+    assert_eq!(image::decode(&bytes, MediaType::Webp).unwrap().size, [4, 3]);
+}
+
+#[test]
+fn a_decode_held_back_blocks_the_next_one_until_its_thread_ends_whatever_is_done_meanwhile() {
+    use std::sync::mpsc::channel;
+    let first = reference("t1", 1);
+    let second = reference("t2", 1);
+    let bytes = png(4, 3);
+    let len = bytes.len() as u64;
+    let mut harness = harness(Rig::new("t1"));
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(vec![meta(&first, "one.png", "image/png", len)], None),
+    );
+    let sent = open_row(
+        &mut harness,
+        "one.png",
+        &meta(&first, "one.png", "image/png", len),
+    );
+    let data_tag = sent.started[0].0;
+    harness
+        .state_mut()
+        .publish_blob(data_tag, digest(1), len, bytes.clone());
+    harness.step();
+    assert!(matches!(
+        harness.state().body(),
+        Body::Image(ImageView::Decoding)
+    ));
+    // The decode is replaced by one that waits for the test: it is running, and stays so.
+    let egui_ctx = harness.ctx.clone();
+    let (release, released) = channel::<()>();
+    let (started_tx, started) = channel::<()>();
+    let held_serial = harness
+        .state()
+        .feature
+        .job
+        .as_ref()
+        .expect("decoding")
+        .serial;
+    harness.state_mut().feature.job =
+        Some(image::Job::spawn_with(held_serial, egui_ctx, move || {
+            started_tx.send(()).unwrap();
+            released.recv().unwrap();
+            Ok(egui::ColorImage::example())
+        }));
+    started.recv().unwrap();
+
+    // Another thread is selected, then maintained and drawn while the worker is held.
+    harness.state_mut().selection.thread = Some(thread("t2"));
+    harness.state_mut().maintain();
+    {
+        let rig = harness.state();
+        assert!(rig.feature.open.is_none(), "the old image is gone");
+        let job = rig
+            .feature
+            .job
+            .as_ref()
+            .expect("the thread is still running");
+        assert!(job.abandoned() && !job.finished());
+        assert_eq!(job.serial, held_serial);
+    }
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(vec![meta(&second, "two.png", "image/png", len)], None),
+    );
+    let sent = open_row(
+        &mut harness,
+        "two.png",
+        &meta(&second, "two.png", "image/png", len),
+    );
+    let next_tag = sent.started[0].0;
+    harness
+        .state_mut()
+        .publish_blob(next_tag, digest(1), len, bytes);
+    for _ in 0..3 {
+        harness.state_mut().maintain();
+        harness.step();
+    }
+    {
+        let rig = harness.state();
+        let job = rig.feature.job.as_ref().expect("still the held one");
+        assert_eq!(job.serial, held_serial, "no second decode runs beside it");
+        assert!(matches!(rig.body(), Body::Image(ImageView::Receiving)));
+        assert!(
+            rig.inbox
+                .tags()
+                .any(|slot| slot == (FeatureId::Artifacts, next_tag)),
+            "the new bytes wait in their slot"
+        );
+    }
+
+    // The held thread ends; its result is dropped and the waiting bytes are decoded.
+    release.send(()).unwrap();
+    harness
+        .state_mut()
+        .feature
+        .job
+        .as_mut()
+        .expect("held")
+        .join();
+    harness.step();
+    let rig = harness.state_mut();
+    let job = rig.feature.job.take().expect("the next decode started");
+    assert_ne!(job.serial, held_serial);
+    assert!(matches!(rig.body(), Body::Image(ImageView::Decoding)));
+    let image = job.wait().expect("decodes");
+    assert_eq!(image.size, [4, 3], "the picture shown is the new one");
 }
