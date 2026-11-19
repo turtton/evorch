@@ -21,6 +21,25 @@ pub(crate) fn compose(
     append_subagent_context_note(&mut specs, options.family);
     specs
 }
+/// Full build-owned registry, not the role-visible subset. Base executors hold
+/// standard/host tools; MCP tools are registered only in disposable run forks.
+/// Preserve registry order and overlay exact provider-visible projections (run_js
+/// hints, delegate context, edit selection). Hidden builtins retain raw schemas.
+pub(crate) fn builtin_catalog(base: &tools::ToolExecutor, effective: &[ToolSpec]) -> Vec<ToolSpec> {
+    overlay_builtin_catalog(super::tool_calls::standard_tool_specs(base), effective)
+}
+/// Both live-build and fixture factories overlay through this exact projection.
+pub(crate) fn overlay_builtin_catalog(raw: Vec<ToolSpec>, effective: &[ToolSpec]) -> Vec<ToolSpec> {
+    raw.into_iter()
+        .map(|raw| {
+            effective
+                .iter()
+                .find(|tool| tool.name == raw.name)
+                .cloned()
+                .unwrap_or(raw)
+        })
+        .collect()
+}
 /// Same frozen-name permission projection used by the real restored loop.
 pub(crate) fn allow_saved_mcp_tools(
     policy: &mut crate::ExecutionPolicy,
@@ -49,6 +68,147 @@ pub(crate) fn restored_specs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn snapshot(
+        base: &tools::ToolExecutor,
+        effective: &[ToolSpec],
+    ) -> storage::recovery::restart::tools::ToolSnapshot {
+        storage::recovery::restart::tools::ToolSnapshot {
+            effective: effective
+                .iter()
+                .map(|s| serde_json::to_value(s).unwrap())
+                .collect(),
+            builtins: builtin_catalog(base, effective)
+                .iter()
+                .map(|s| serde_json::to_value(s).unwrap())
+                .collect(),
+            stable_context: "unchanged model/history/authority".into(),
+        }
+    }
+    fn boundary(
+        old: storage::recovery::restart::tools::ToolSnapshot,
+        new: storage::recovery::restart::tools::ToolSnapshot,
+    ) {
+        use storage::recovery::restart::tools::RestartToolsEvidence;
+        let evidence = RestartToolsEvidence::compare(
+            "run".into(),
+            "incarnation".into(),
+            "old-build".into(),
+            "new-build".into(),
+            old,
+            new.clone(),
+        )
+        .unwrap();
+        assert!(evidence.boundary);
+        assert!(
+            !RestartToolsEvidence::compare(
+                "run".into(),
+                "incarnation".into(),
+                "new-build".into(),
+                "new-build".into(),
+                new.clone(),
+                new
+            )
+            .unwrap()
+            .boundary
+        );
+    }
+    #[test]
+    fn full_builtin_catalog_run_js_hint_change_is_an_explained_standard_tool_boundary() {
+        use tools::Tool;
+        struct OldRead;
+        #[async_trait::async_trait]
+        impl Tool for OldRead {
+            fn name(&self) -> &str {
+                "read"
+            }
+            fn description(&self) -> &str {
+                "old read schema"
+            }
+            fn schema(&self) -> serde_json::Value {
+                let mut value = tools::Read.schema();
+                value["properties"]["old_build_option"] = serde_json::json!({"type":"boolean"});
+                value
+            }
+            fn permissions(&self) -> tools::Permissions {
+                tools::Permissions::read_only()
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+            ) -> Result<tools::ToolResult, tools::ToolError> {
+                panic!("metadata-only test executed a tool")
+            }
+        }
+        let make = || {
+            tools::ToolExecutor::with_standard_tools(
+                std::sync::Arc::new(event_bus::EventBus::new(4)),
+                std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            )
+        };
+        let mut old = make();
+        old.register(std::sync::Arc::new(OldRead)).unwrap();
+        let new = make();
+        let policy = crate::ExecutionPolicy::for_role(crate::Role::Worker);
+        let settings = config::RunJsConfig::default();
+        let effective = |base: &tools::ToolExecutor| {
+            compose(
+                super::super::tool_calls::standard_tool_specs(base),
+                &policy,
+                CatalogOptions {
+                    skills: false,
+                    child: true,
+                    web: false,
+                    artifacts: false,
+                    run_js: true,
+                    run_js_settings: &settings,
+                    family: crate::ModelFamily::Gpt5,
+                },
+            )
+        };
+        let before = effective(&old);
+        let after = effective(&new);
+        assert!(before.iter().any(|s| s.name == "run_js"));
+        assert_ne!(
+            before, after,
+            "run_js must reflect the changed compiled read schema"
+        );
+        for (base, visible) in [(&old, &before), (&new, &after)] {
+            let full = builtin_catalog(base, visible);
+            assert_eq!(
+                full.len(),
+                super::super::tool_calls::standard_tool_specs(base).len()
+            );
+            for spec in visible {
+                assert_eq!(full.iter().find(|b| b.name == spec.name), Some(spec));
+            }
+        }
+        boundary(snapshot(&old, &before), snapshot(&new, &after));
+    }
+    #[test]
+    fn full_builtin_catalog_meta_only_change_has_one_boundary_then_reuse() {
+        let base = tools::ToolExecutor::with_standard_tools(
+            std::sync::Arc::new(event_bus::EventBus::new(4)),
+            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        let raw = super::super::tool_calls::standard_tool_specs(&base);
+        let mut old = raw.clone();
+        old.iter_mut()
+            .find(|s| s.name == "wait")
+            .unwrap()
+            .description
+            .push_str(" predecessor wait schema");
+        let before = snapshot(&base, &old);
+        let after = snapshot(&base, &raw);
+        let changed = before
+            .builtins
+            .iter()
+            .zip(&after.builtins)
+            .filter(|(l, r)| l != r)
+            .map(|(l, _)| l["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(changed, ["wait"]);
+        boundary(before, after);
+    }
     #[test]
     fn live_and_preview_catalog_options_preserve_legacy_names_schema_description_and_order() {
         let bus = std::sync::Arc::new(event_bus::EventBus::new(4));

@@ -1,5 +1,6 @@
 //! Shared logical same-successor fixture, never a production authority source.
 use super::runtime;
+use storage::recovery::restart::tools::ToolSnapshot;
 use storage::recovery::restart::*;
 use storage::{Database, StorageError, StorageHandle};
 fn fixture_error(e: impl ToString) -> StorageError {
@@ -8,6 +9,17 @@ fn fixture_error(e: impl ToString) -> StorageError {
 pub fn inherited_fixture_proof(
     db: &Database,
     handle: &StorageHandle,
+) -> Result<Option<core_instance::InheritedHandoffProof>, StorageError> {
+    inherited_fixture_proof_with_metadata(db, handle, fixture_restart_metadata, |_, _| Ok(None))
+}
+pub fn inherited_fixture_proof_with_metadata(
+    db: &Database,
+    handle: &StorageHandle,
+    metadata: impl FnOnce(&str) -> RestartMetadata,
+    mut snapshot: impl FnMut(
+        &RestartExpectedMember,
+        &RestartMetadata,
+    ) -> Result<Option<ToolSnapshot>, StorageError>,
 ) -> Result<Option<core_instance::InheritedHandoffProof>, StorageError> {
     let mut transactions = db.restart_transactions().map_err(fixture_error)?;
     let tx = if let Some(tx) = transactions.pop() {
@@ -27,7 +39,7 @@ pub fn inherited_fixture_proof(
             return Ok(None);
         }
         let id = format!("fixture/{}", manifests[0].manifest_id);
-        let m = fixture_restart_metadata(&id);
+        let m = metadata(&id);
         let mut tx = handle
             .mutate_restart(id.clone(), None, RestartMutation::Create(Box::new(m)))
             .map_err(fixture_error)?;
@@ -63,6 +75,22 @@ pub fn inherited_fixture_proof(
                     Some(tx.revision),
                     RestartMutation::BindComponent {
                         manifest_id: m.manifest_id,
+                    },
+                )
+                .map_err(fixture_error)?;
+        }
+        for member in tx.expected.clone() {
+            let Some(evidence) = snapshot(&member, &tx.metadata)? else {
+                continue;
+            };
+            tx = handle
+                .mutate_restart(
+                    id.clone(),
+                    Some(tx.revision),
+                    RestartMutation::CaptureTools {
+                        run_id: member.run_id,
+                        incarnation: member.incarnation,
+                        snapshot: evidence,
                     },
                 )
                 .map_err(fixture_error)?;

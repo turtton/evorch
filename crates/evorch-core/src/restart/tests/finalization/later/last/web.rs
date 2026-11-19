@@ -141,6 +141,15 @@ pub(super) async fn cell(mode: Mode) {
         driver.control_drain(),
         vec!["--config-dir".into(), dir.path().as_os_str().to_owned()],
     ));
+    // This cell audits web drain and returned-failure cleanup, not successor
+    // bootstrap. Preserve every preparation/drain stage, then force a real
+    // execve ENOENT instead of replacing the worker with the describe-only mock.
+    let entry_path = dir.path().join("target");
+    target.after = Some(Arc::new(move |now| {
+        if now == ExitStage::OwnerStopped {
+            std::fs::remove_file(&entry_path).unwrap();
+        }
+    }));
     let reached = Arc::new(Mutex::new(Vec::new()));
     let trace = reached.clone();
     target.observe = Some(Arc::new(move |now| trace.lock().unwrap().push(now)));

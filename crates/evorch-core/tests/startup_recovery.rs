@@ -248,6 +248,32 @@ async fn turn(events: &mut event_bus::EventReceiver, run: RunId) {
     }
 }
 
+fn ordinary_send(host: &BootstrappedHost, run: RunId, text: &str) {
+    use workbench_host::commands::{ChatInput, ComposerRole, HostCommand, HostEvent};
+    let mut commands = host.host.lock().unwrap();
+    let events = commands.submit_local(
+        HostCommand::SendChat(ChatInput {
+            submission_id: uuid::Uuid::new_v4().to_string(),
+            project_root: None,
+            thread_id: "thread".into(),
+            composer_role: ComposerRole::Orchestrator,
+            text: text.into(),
+            attachments: vec![],
+            skills: vec![],
+            model_preference: None,
+            fork_seed: None,
+        }),
+        &workbench_protocol::envelope::Provenance::human(
+            workbench_protocol::envelope::Surface::Cli,
+            workbench_protocol::ids::ClientId::new("recovered-client").unwrap(),
+        ),
+    );
+    assert!(
+        matches!(events.as_slice(), [HostEvent::ChatAccepted { run_id, .. }] if run_id == &run.to_string()),
+        "{events:?}"
+    );
+}
+
 struct ProbeHook(String);
 impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
     fn start<'a>(
@@ -257,13 +283,33 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
     ) -> workbench_host::bootstrap::core_startup::CoreStartupFuture<'a> {
         use runtime::RecoveryActivationBoundary as Boundary;
         if !self.0.starts_with("cold") && self.0 != "observe" {
-            inputs.runtime.install_planned_recovery_fixture().unwrap();
+            if self.0 == "restore_twice" {
+                inputs
+                    .runtime
+                    .install_planned_recovery_fixture_with_metadata(
+                        "fixture-before-artifact",
+                        "fixture-build",
+                        inputs
+                            .runtime
+                            .restart_builtin_tool_names()
+                            .into_iter()
+                            .filter(|name| name != "inspect_artifact")
+                            .collect(),
+                    )
+                    .unwrap();
+            } else {
+                inputs.runtime.install_planned_recovery_fixture().unwrap();
+            }
             // This fixture exercises post-Ready graph recovery, not physical
             // bootstrap. Its explicit mode must agree with its injected proof;
             // planned_bootstrap.rs covers the real pre-Adopt/claim pipeline.
             if inputs.runtime.has_planned_restart_handoff() {
                 inputs.mode = workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff;
             }
+        }
+        if self.0 == "missing_tool_evidence" {
+            let db = rusqlite::Connection::open(&inputs.storage.db_path).unwrap();
+            assert!(db.execute("DELETE FROM restart_run_tools", []).unwrap() > 0);
         }
         let target = match self.0.as_str() {
             "prepared" => Some(Boundary::Prepared),
@@ -387,6 +433,10 @@ fn recipe() -> RecoveryRecipe {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "subprocess entry point; invoked with explicit private fixture arguments"]
 async fn startup_subprocess_worker() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
     let root = PathBuf::from(std::env::var_os("EVORCH_STARTUP_ROOT").unwrap());
     let sockets = PathBuf::from(std::env::var_os("EVORCH_STARTUP_SOCKETS").unwrap());
     let mode = std::env::var("EVORCH_STARTUP_MODE").unwrap();
@@ -551,6 +601,9 @@ async fn startup_subprocess_worker() {
             );
         }
         emit(json!({"phase":"bootstrapped", "pid":std::process::id(), "report":report}));
+        if mode == "restore_twice" {
+            assert_eq!(report["components"][0]["state"], "activated", "{report}");
+        }
         if mode == "catalog_failure" {
             assert_eq!(report["components"][0]["state"], "quarantined");
             assert_eq!(report["components"][0]["reason"], "needs_attention");
@@ -569,6 +622,23 @@ async fn startup_subprocess_worker() {
             return;
         }
         if mode == "lost_ack" {
+            assert!(
+                !host
+                    .host
+                    .lock()
+                    .unwrap()
+                    .service()
+                    .root_recovery_pending("thread")
+            );
+            assert!(
+                host.host
+                    .lock()
+                    .unwrap()
+                    .service()
+                    .bindings
+                    .root_of("thread")
+                    .is_none()
+            );
             assert_eq!(report["components"][0]["reason"], "already_activated");
             assert_eq!(report["components"][0]["manual_continue"], true);
             assert!(!host.runtime.has_paused_recovery());
@@ -607,7 +677,41 @@ async fn startup_subprocess_worker() {
             assert_eq!(db.recovery_claims().unwrap()[0], claim);
             return;
         }
-        if mode == "observe" || mode.starts_with("cold") {
+        if mode == "missing_tool_evidence" || mode == "same_build_tools_mismatch" {
+            assert_eq!(report["components"][0]["reason"], "needs_attention");
+            assert_ne!(report["components"][0]["state"], "activated");
+            assert!(
+                !host
+                    .host
+                    .lock()
+                    .unwrap()
+                    .service()
+                    .root_recovery_pending("thread")
+            );
+        }
+        if mode == "observe"
+            || mode.starts_with("cold")
+            || mode == "missing_tool_evidence"
+            || mode == "same_build_tools_mismatch"
+        {
+            assert!(
+                host.host
+                    .lock()
+                    .unwrap()
+                    .service()
+                    .bindings
+                    .root_of("thread")
+                    .is_none()
+            );
+            assert!(
+                host.host
+                    .lock()
+                    .unwrap()
+                    .service()
+                    .lane_bindings()
+                    .get("thread")
+                    .is_none()
+            );
             host.shutdown().await.unwrap();
             return;
         }
@@ -662,15 +766,11 @@ async fn startup_subprocess_worker() {
                 .unwrap();
         }
         if mode != "restore_question" {
-            host.runtime
-                .send_message(run, "Continue after the real process restart".into())
-                .unwrap();
+            ordinary_send(&host, run, "Continue after the real process restart");
         }
         turn(&mut events, run).await;
         if mode == "restore_twice" {
-            host.runtime
-                .send_message(run, "And once more after the boundary".into())
-                .unwrap();
+            ordinary_send(&host, run, "And once more after the boundary");
             turn(&mut events, run).await;
         }
         let cached = if waiting_model.is_some() {
@@ -783,6 +883,106 @@ context_window_tokens = 1000000
     dir
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn startup_missing_predecessor_tool_evidence_never_activates_or_publishes_bindings() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![ScriptedResponse::text_stream(
+        "before",
+        "mock-model",
+        ["Waiting"],
+    )]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(&dir, "capture");
+    source.checkpoint("captured").await;
+    source.kill().await;
+    let mut successor = Process::spawn(&dir, "missing_tool_evidence");
+    let report = successor.checkpoint("bootstrapped").await;
+    assert_eq!(
+        report["report"]["components"][0]["reason"],
+        "needs_attention"
+    );
+    assert!(successor.child.wait().await.unwrap().success());
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_same_build_tools_difference_is_needs_attention_without_provider_admission() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![ScriptedResponse::text_stream(
+        "before",
+        "mock-model",
+        ["Waiting"],
+    )]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(&dir, "capture_old");
+    source.checkpoint("captured").await;
+    source.kill().await;
+    let mut successor = Process::spawn(&dir, "same_build_tools_mismatch");
+    let report = successor.checkpoint("bootstrapped").await;
+    assert_eq!(
+        report["report"]["components"][0]["reason"],
+        "needs_attention"
+    );
+    assert!(successor.child.wait().await.unwrap().success());
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_owner_blocked_retry_binds_the_captured_root_before_ordinary_send() {
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
+        ScriptedResponse::text_stream("before", "mock-model", ["Waiting"]),
+        ScriptedResponse::text_stream("after", "mock-model", ["Same recovered conversation"]),
+    ]);
+    let dir = fixture(&mock);
+    let mut source = Process::spawn(&dir, "capture");
+    let captured = source.checkpoint("captured").await;
+    source.kill().await;
+    // Capture has already released its idle owner. A distinct live owner claims
+    // that generation before successor startup; its explicit quiesce/release is
+    // the semantic retry trigger, never a sleep or an expiry assumption.
+    let blocker = runtime::ownership::OwnerHost::open(
+        dir.sockets(),
+        Default::default(),
+        Arc::new(event_bus::EventBus::new(64)),
+    )
+    .unwrap();
+    blocker.claim(&blocker.attach("thread").unwrap()).unwrap();
+    let mut successor = Process::spawn(&dir, "restore");
+    let ready = successor.checkpoint("bootstrapped").await;
+    assert_eq!(ready["report"]["components"][0]["state"], "blocked");
+    assert_eq!(ready["report"]["components"][0]["reason"], "owner_blocked");
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+    assert!(!blocker.begin_quiesce().unwrap());
+    assert!(!blocker.release_ready().unwrap());
+    let continued = successor.checkpoint("restored").await;
+    assert_eq!(continued["run"], captured["run"]);
+    assert!(successor.child.wait().await.unwrap().success());
+    let requests = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .map(|r| r.body)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_append_only(CacheProtocol::OpenAi, &requests[0], &requests[1]).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         ScriptedResponse::text_stream("before", "mock-model", ["Waiting for the user"]),
@@ -803,7 +1003,7 @@ async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
     assert_eq!(restored["run"], captured["run"]);
     assert!(restored["cache_read_tokens"].as_u64().unwrap() > 0);
     assert!(second.child.wait().await.unwrap().success());
-    // Ready is separate from activation; 4b will publish it after endpoint readiness.
+    // The logical planned seam has already published Ready before graph startup.
     let config = storage::StorageConfig {
         db_path: dir.path().join("evorch-events.db"),
         ..Default::default()
@@ -813,20 +1013,11 @@ async fn startup_process_cache_preserves_wire_prefix_after_planned_adoption() {
         .restart_transactions()
         .unwrap()
         .remove(0);
-    let writer = storage::Storage::open(config).unwrap();
-    let completed = writer
-        .handle()
-        .mutate_restart(
-            transaction.metadata.restart_id,
-            Some(transaction.revision),
-            storage::recovery::restart::RestartMutation::Ready { at_ms: 123 },
-        )
-        .unwrap();
+    assert!(transaction.ready_at_ms.is_some());
     assert_eq!(
-        completed.phase,
+        transaction.phase,
         storage::recovery::restart::RestartPhase::Completed
     );
-    drop(writer);
     let mut cold = Process::spawn(&dir, "cold_observe");
     let observed = cold.checkpoint("bootstrapped").await;
     assert!(
@@ -937,7 +1128,7 @@ async fn startup_before_activation_ack_crash_quarantines_without_retry() {
     crash_boundary("before_ack", "BeforeFullAck", false).await;
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_after_activation_ack_crash_quarantines_without_replay() {
+async fn startup_after_activation_ack_crash_is_completed_without_replay() {
     crash_boundary("after_ack", "AfterFullAck", true).await;
 }
 async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
@@ -982,10 +1173,19 @@ async fn crash_boundary(mode: &str, boundary: &str, activated: bool) {
     let ready = recovered.checkpoint("bootstrapped").await;
     assert_ne!(ready["pid"], checkpoint["pid"]);
     if activated {
-        assert_eq!(ready["report"]["components"][0]["state"], "quarantined");
+        let tx = storage::Database::open(&config)
+            .unwrap()
+            .restart_transactions()
+            .unwrap()
+            .remove(0);
+        assert!(tx.ready_at_ms.is_some());
         assert_eq!(
-            ready["report"]["components"][0]["reason"],
-            "already_activated"
+            tx.phase,
+            storage::recovery::restart::RestartPhase::Completed
+        );
+        assert!(
+            ready["report"]["components"].as_array().unwrap().is_empty(),
+            "Ready plus FULL ACK completed the transaction; cold must not replay it"
         );
     } else {
         assert_eq!(ready["report"]["components"][0]["state"], "quarantined");

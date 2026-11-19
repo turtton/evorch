@@ -141,7 +141,8 @@ async fn seal_runs(core: &RestartCoordinator, runs: &[RunId]) -> RestartId {
     core.wait_sealed(id).await.unwrap();
     id
 }
-fn create(host: &BootstrappedHost, metadata: RestartMetadata) -> RestartTransaction {
+fn create(host: &BootstrappedHost, mut metadata: RestartMetadata) -> RestartTransaction {
+    metadata.old_builtin_tool_names = host.runtime.restart_builtin_tool_names();
     host.composition
         .storage_writer
         .mutate_restart(
