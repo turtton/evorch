@@ -21,19 +21,30 @@ use support::{Window, open_window};
 
 type NoRenderer = egui_kittest::LazyRenderer;
 
+/// Activates the widget by keyboard (focus it, then Enter), not by a pointer at the place where
+/// it was last drawn. The page is still laying out while the core's answers arrive, so a widget
+/// can move between the frame the test saw it in and the frame that handles the pointer; egui
+/// then does not count the click, and the test would wait for a result that nobody asked for.
+/// A focused widget is found by its accessibility id, wherever it has moved to.
+fn press_enter_on_focus(window: &mut Window) {
+    window.harness.run_steps(1);
+    window.harness.key_press(egui::Key::Enter);
+    window.harness.run_steps(8);
+}
+
 fn click(window: &mut Window, label: &str) {
     window
         .harness
         .get_all_by_label_contains(label)
         .next()
         .unwrap_or_else(|| panic!("{label:?} is not on the page"))
-        .click();
-    window.harness.run_steps(8);
+        .focus();
+    press_enter_on_focus(window);
 }
 
 fn click_exact(window: &mut Window, label: &str) {
-    window.harness.get_by_label(label).click();
-    window.harness.run_steps(8);
+    window.harness.get_by_label(label).focus();
+    press_enter_on_focus(window);
 }
 
 fn shows_exact(window: &Window, label: &str) -> bool {
@@ -89,25 +100,16 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
     // the top of the column, where the thread's artifact is listed.
     window.until(|w| shows_exact(w, "成果物")).await;
     click_exact(&mut window, "成果物");
-    // The opened artifact is shown under its title (exact label); the row's label is longer.
-    // The section can be cleared and listed again by a re-sync of the page, which drops an
-    // artifact that was just chosen, and a click can miss a row that moved in the frame it
-    // was sent: choose again whenever the list is there and nothing is open. The retries are
-    // counted, not timed, and a chosen artifact is opened within the frame of the click.
-    window
-        .until(|w| {
-            if shows_exact(w, "プレビューを開く") {
-                return true;
-            }
-            for _ in 0..3 {
-                if shows_exact(w, "page.html") || !shows(w, "page.html  (") {
-                    break;
-                }
-                click(w, "page.html  (");
-            }
-            false
-        })
-        .await;
+    window.until(|w| shows(w, "page.html  (")).await;
+    click(&mut window, "page.html  (");
+    // The choice is taken within the frame of the click: the artifact is opened under its
+    // title (an exact label; the row's label is longer). A click that did not land fails here
+    // by itself, not as a wait for a body that was never asked for.
+    assert!(
+        shows_exact(&window, "page.html"),
+        "the click on the artifact row was not taken"
+    );
+    window.until(|w| shows_exact(w, "プレビューを開く")).await;
     window.until(|w| shows(w, "<canvas")).await;
 
     // Its preview: the browser section opens by itself and frames reach the texture.

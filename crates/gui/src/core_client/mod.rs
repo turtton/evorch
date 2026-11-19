@@ -589,7 +589,7 @@ impl CoreClientScreen {
                 if ui.button("停止済み legacy 会話の引継ぎ").clicked() {
                     enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::PrepareExistingThread { project: project.clone(), thread: thread.clone() }), draft: None });
                 }
-                // The way from the conversation to what it produced: the section is opened and
+                // The way from the conversation to what it produced: the section is opened, pinned first and
                 // scrolled to, and follows this thread's selection by itself.
                 if ui.button("成果物").clicked() {
                     shared.features.reveal(features::FeatureId::Artifacts);
