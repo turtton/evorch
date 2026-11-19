@@ -85,13 +85,29 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
     .await;
     let mut window = open_window(&env, egui::vec2(1100.0, 1500.0), None::<NoRenderer>);
 
-    // From the conversation: its "成果物" button opens the artifacts section and scrolls to
-    // it (the section sits far below the others), where the thread's artifact is listed.
+    // From the conversation: its "成果物" button opens the artifacts section and pins it at
+    // the top of the column, where the thread's artifact is listed.
     window.until(|w| shows_exact(w, "成果物")).await;
     click_exact(&mut window, "成果物");
-    window.until(|w| shows(w, "page.html  (")).await;
-    click(&mut window, "page.html  (");
-    window.until(|w| shows_exact(w, "プレビューを開く")).await;
+    // The opened artifact is shown under its title (exact label); the row's label is longer.
+    // The section can be cleared and listed again by a re-sync of the page, which drops an
+    // artifact that was just chosen, and a click can miss a row that moved in the frame it
+    // was sent: choose again whenever the list is there and nothing is open. The retries are
+    // counted, not timed, and a chosen artifact is opened within the frame of the click.
+    window
+        .until(|w| {
+            if shows_exact(w, "プレビューを開く") {
+                return true;
+            }
+            for _ in 0..3 {
+                if shows_exact(w, "page.html") || !shows(w, "page.html  (") {
+                    break;
+                }
+                click(w, "page.html  (");
+            }
+            false
+        })
+        .await;
     window.until(|w| shows(w, "<canvas")).await;
 
     // Its preview: the browser section opens by itself and frames reach the texture.
