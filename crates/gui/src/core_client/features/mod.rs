@@ -833,6 +833,20 @@ fn render_all(
                     continue;
                 }
                 let mut clicked = false;
+                if opening == Some(feature.id()) {
+                    // The revealed section is the first of the column. Once, at the request,
+                    // every scroll area around it jumps to its header: an animation would
+                    // chase the layout while the section opens.
+                    let bar = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    );
+                    ui.scroll_to_rect_animation(
+                        bar,
+                        Some(egui::Align::Min),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
                 let mut header = state.show_header(ui, |ui| {
                     clicked = ui.selectable_label(false, feature.title()).clicked();
                 });

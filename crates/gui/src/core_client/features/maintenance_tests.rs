@@ -91,6 +91,9 @@ fn title_position(shapes: &[egui::epaint::ClippedShape]) -> egui::Pos2 {
     text_position(shapes, "maintenance probe")
 }
 fn text_position(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> egui::Pos2 {
+    try_text_position(shapes, wanted).unwrap_or_else(|| panic!("{wanted:?} was drawn"))
+}
+fn try_text_position(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> Option<egui::Pos2> {
     fn find(shape: &egui::Shape, wanted: &str) -> Option<egui::Pos2> {
         match shape {
             egui::Shape::Text(text) if text.galley.text() == wanted => {
@@ -100,10 +103,7 @@ fn text_position(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> egui::P
             _ => None,
         }
     }
-    shapes
-        .iter()
-        .find_map(|s| find(&s.shape, wanted))
-        .unwrap_or_else(|| panic!("{wanted:?} was drawn"))
+    shapes.iter().find_map(|s| find(&s.shape, wanted))
 }
 fn assert_cancels(
     rx: &mut tokio::sync::mpsc::Receiver<crate::core_client::connection::Action>,
@@ -629,5 +629,98 @@ fn the_conversation_row_button_opens_the_section_of_what_the_thread_produced() {
     assert!(
         take(&log).contains(&Observed::Render),
         "the section the button names is opened and drawn"
+    );
+}
+
+/// A section that fills the column, so what comes after it is far below.
+struct Tall;
+impl Feature for Tall {
+    fn id(&self) -> FeatureId {
+        FeatureId::Settings
+    }
+    fn title(&self) -> &'static str {
+        "tall filler"
+    }
+    fn availability(&self) -> Availability {
+        Availability::Implemented { required: &[] }
+    }
+    fn render(&mut self, ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {
+        ui.allocate_space(egui::vec2(10.0, 4000.0));
+    }
+}
+
+fn scroll(ctx: &egui::Context, screen: &mut CoreClientScreen, at: egui::Pos2, dy: f32) {
+    let mut input = input(false);
+    input.events = vec![
+        egui::Event::PointerMoved(at),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        },
+    ];
+    compose(ctx, screen, input);
+}
+
+#[test]
+fn a_revealed_section_is_brought_into_view_from_a_scrolled_page() {
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: Features {
+            features: vec![
+                Box::new(Tall),
+                Box::new(Probe {
+                    log: log.clone(),
+                    availability: Availability::Implemented { required: &[] },
+                }),
+            ],
+            data: DataInbox::default(),
+            selection: None,
+            expanded: Default::default(),
+            pins: Default::default(),
+        },
+        ..Shared::default()
+    }));
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
+    let ctx = egui::Context::default();
+    let screen_rect = ctx.content_rect();
+    let first = compose(&ctx, &mut screen, input(false));
+    // Scroll the page and the column away from their tops.
+    let tall = text_position(&first.shapes, "tall filler");
+    for _ in 0..6 {
+        scroll(&ctx, &mut screen, tall, -400.0);
+    }
+    for _ in 0..60 {
+        compose(&ctx, &mut screen, input(false));
+    }
+    let scrolled = compose(&ctx, &mut screen, input(false));
+    let visible = |output: &egui::FullOutput| {
+        try_text_position(&output.shapes, "maintenance probe")
+            .is_some_and(|p| (screen_rect.top()..screen_rect.bottom()).contains(&p.y))
+    };
+    assert!(
+        !visible(&scrolled),
+        "the section is out of view before the request"
+    );
+    shared.lock().unwrap().features.reveal(FeatureId::Browser);
+    compose(&ctx, &mut screen, input(false));
+    compose(&ctx, &mut screen, input(false));
+    let revealed = compose(&ctx, &mut screen, input(false));
+    assert!(
+        visible(&revealed),
+        "the request brings the section into view"
+    );
+    // The request is spent: the user's own scrolling afterwards is not undone.
+    for _ in 0..3 {
+        scroll(&ctx, &mut screen, tall, -400.0);
+    }
+    let again = compose(&ctx, &mut screen, input(false));
+    assert!(
+        try_text_position(&again.shapes, "maintenance probe").map(|p| p.y)
+            != try_text_position(&revealed.shapes, "maintenance probe").map(|p| p.y),
+        "scrolling after the request moves the page"
     );
 }
