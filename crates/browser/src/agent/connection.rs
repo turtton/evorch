@@ -6,7 +6,7 @@ use async_tungstenite::tungstenite::Message;
 use async_tungstenite::tungstenite::protocol::WebSocketConfig;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::AgentError;
 
@@ -54,9 +54,29 @@ pub(super) struct Connection {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, Pending>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionMessage>>>,
+    frames: Mutex<HashMap<String, watch::Sender<Option<Value>>>>,
 }
 
 impl Connection {
+    #[cfg(test)]
+    pub(super) fn test_pair() -> (Arc<Self>, mpsc::UnboundedReceiver<String>) {
+        let (outgoing, commands) = mpsc::unbounded_channel();
+        (
+            Arc::new(Self {
+                outgoing,
+                next_id: AtomicU64::new(1),
+                pending: Mutex::default(),
+                sessions: Mutex::default(),
+                frames: Mutex::default(),
+            }),
+            commands,
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn deliver(self: &Arc<Self>, message: Value) {
+        self.dispatch(&message.to_string(), &mut |_, _| {});
+    }
+
     /// Connects to `url`. Browser-level events go to `on_event` in the order
     /// they arrive, before any later message is read, so it can route a new
     /// session before that session's first event; `None` follows the last.
@@ -77,6 +97,7 @@ impl Connection {
             next_id: AtomicU64::new(1),
             pending: Mutex::default(),
             sessions: Mutex::default(),
+            frames: Mutex::default(),
         });
         let reader = Arc::clone(&connection);
         let task = tokio::spawn(async move {
@@ -96,6 +117,7 @@ impl Connection {
             }
             lock(&reader.pending).clear();
             lock(&reader.sessions).clear();
+            lock(&reader.frames).clear();
             on_event(&reader, None);
         });
         Ok((connection, task))
@@ -147,6 +169,21 @@ impl Connection {
                 .unwrap_or_default(),
         };
         match message.get("sessionId").and_then(Value::as_str) {
+            Some(session) if event.method == "Page.screencastFrame" => {
+                // Pixels never enter the ordered, general CDP event queue.
+                // Replacing a slot cannot block the socket reader. ACK on the
+                // wire, without a pending reply, also covers overwritten frames.
+                if let Some(frames) = lock(&self.frames).get(session) {
+                    frames.send_replace(Some(event.params.clone()));
+                }
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let _ = self.outgoing.send(
+                    json!({"id": id, "sessionId": session,
+                    "method": "Page.screencastFrameAck",
+                    "params": {"sessionId": event.params["sessionId"]}})
+                    .to_string(),
+                );
+            }
             Some(session) => {
                 if let Some(events) = lock(&self.sessions).get(session) {
                     let _ = events.send(SessionMessage::Event(event));
@@ -205,7 +242,16 @@ impl Connection {
         receiver
     }
 
+    pub fn frames(&self, session: &str) -> watch::Receiver<Option<Value>> {
+        let mut frames = lock(&self.frames);
+        frames
+            .entry(session.to_owned())
+            .or_insert_with(|| watch::channel(None).0)
+            .subscribe()
+    }
+
     pub fn forget(&self, session: &str) {
+        lock(&self.frames).remove(session);
         lock(&self.sessions).remove(session);
     }
 }
@@ -227,6 +273,7 @@ mod tests {
             next_id: AtomicU64::new(1),
             pending: Mutex::default(),
             sessions: Mutex::default(),
+            frames: Mutex::default(),
         });
         (connection, commands)
     }
@@ -303,5 +350,30 @@ mod tests {
             &mut |_, _| unreachable!(),
         );
         assert_eq!(reply.await.unwrap(), json!({"success": true}));
+    }
+    #[tokio::test]
+    async fn saturated_frames_are_latest_one_and_do_not_hold_cdp_replies() {
+        let (connection, mut commands) = connection();
+        let mut events = connection.subscribe("page");
+        let mut frames = connection.frames("page");
+        let reply = connection.call(Some("page"), "Runtime.evaluate", json!({}));
+        let command: Value = serde_json::from_str(&commands.recv().await.unwrap()).unwrap();
+        for sequence in 1..=64 {
+            connection.dispatch(&json!({"sessionId":"page", "method":"Page.screencastFrame", "params":{"data":sequence.to_string(),"sessionId":sequence}}).to_string(), &mut |_,_| unreachable!());
+        }
+        connection.dispatch(
+            &json!({"id":command["id"],"result":{"ok":true}}).to_string(),
+            &mut |_, _| unreachable!(),
+        );
+        // There are no pixels ahead of the reply in the general CDP queue.
+        assert!(events.recv().await.unwrap().into_event().is_none());
+        assert_eq!(reply.await.unwrap(), json!({"ok":true}));
+        frames.changed().await.unwrap();
+        assert_eq!(frames.borrow_and_update().as_ref().unwrap()["data"], "64");
+        assert!(!frames.has_changed().unwrap());
+        assert!(events.try_recv().is_err());
+        assert!(lock(&connection.pending).is_empty());
+        connection.forget("page");
+        assert!(frames.changed().await.is_err());
     }
 }

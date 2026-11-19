@@ -56,6 +56,14 @@ is_central() {
 # accessor on the host (ingress.rs) and one delegating method (areas/mod.rs). Only these reviewed paths are exempt; other scopes and
 # central files keep their fence.
 scoped_central_exception() {
+  # O-S: approved frame-only routing, canonical-execution regression and
+  # the minimal registrations for those tests (no other central ownership).
+  if [[ "$1" == pr16bos ]]; then
+    case "$2" in
+      scripts/feature-scopes.txt | scripts/check-central-files.sh | scripts/tests/test_check_central_files.sh | .github/workflows/ci.yml) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   [[ "$1" == pr16a2 ]] || return 1
   case "$2" in
     crates/workbench-protocol/src/namespaces/mod.rs | crates/workbench-protocol/tests/namespaces.rs | crates/workbench-host/Cargo.toml | crates/workbench-host/src/ingress.rs | crates/workbench-host/src/areas/mod.rs | scripts/feature-scopes.txt | scripts/check-central-files.sh | scripts/tests/test_check_central_files.sh) return 0 ;;

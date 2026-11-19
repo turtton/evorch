@@ -1,6 +1,10 @@
+use super::observation::source::{self, ExecutionPage, Feed, FeedInner, Publication};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+#[path = "observation/chromium.rs"]
+mod observation_source;
 use std::time::Duration;
 
 use chromiumoxide::{Browser, BrowserConfig};
@@ -73,6 +77,16 @@ struct Shared {
     pages: watch::Sender<Vec<String>>,
     changes: watch::Sender<u64>,
     front: Arc<Mutex<Option<String>>>,
+    generation: AtomicU64,
+    next_page: AtomicU64,
+    creation: Mutex<Option<Arc<Creation>>>,
+    targets: Mutex<HashMap<String, Weak<TabPage>>>,
+    producers: Mutex<HashMap<String, Weak<FeedInner>>>,
+}
+struct Creation {
+    stamp: Option<Arc<super::observation::ExecutionStamp>>,
+    browser_generation: u64,
+    page_generation: u64,
 }
 
 struct TabPage {
@@ -81,7 +95,10 @@ struct TabPage {
     agent: Arc<PageAgent>,
     connection: Arc<Connection>,
     ready: watch::Sender<Option<Result<(), String>>>,
-    frames: Mutex<Option<mpsc::UnboundedSender<Value>>>,
+    creation: Option<Arc<Creation>>,
+    id: String,
+    metadata: Mutex<(String, String)>,
+    streaming: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TabPage {
@@ -109,6 +126,11 @@ impl AgentBrowser {
             pages: watch::Sender::new(Vec::new()),
             changes: watch::Sender::new(0),
             front: Arc::default(),
+            generation: AtomicU64::new(1),
+            next_page: AtomicU64::new(1),
+            creation: Mutex::default(),
+            targets: Mutex::default(),
+            producers: Mutex::default(),
         });
         Self {
             execution_stamps: Default::default(),
@@ -132,70 +154,27 @@ impl AgentBrowser {
         key: &str,
         on_frame: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Screencast, AgentError> {
-        let (id, tab) = self
+        let feed = self.shared.feed(key, None)?;
+        let mut updates = feed.updates.clone();
+        let task = tokio::spawn(async move {
+            while updates.changed().await.is_ok() {
+                on_frame();
+                if updates.borrow().is_none() {
+                    break;
+                }
+            }
+            on_frame();
+        });
+        let (seen_tab, page) = self
             .shared
             .active(key)
             .ok_or_else(|| AgentError::NoPage(key.to_owned()))?;
-        let mut changes = self.shared.changes.subscribe();
-        changes.mark_unchanged();
-        let mut incoming = start_screencast(&tab).await?;
-        let (watched, observed) = watch::channel((id, Arc::clone(&tab)));
-        let shared = Arc::clone(&self.shared);
-        let key = key.to_owned();
-        let (frames_tx, frames) = watch::channel(None);
-        let task = tokio::spawn(async move {
-            let mut tab = tab;
-            loop {
-                tokio::select! {
-                    Some(frame) = incoming.recv() => {
-                        match crate::jpeg::decode_jpeg(frame["data"].as_str().unwrap_or_default(), WINDOW) {
-                            Ok(image) => {
-                                frames_tx.send_replace(Some(image));
-                            }
-                            Err(error) => tracing::debug!(%error, "agent screencast frame dropped"),
-                        }
-                        on_frame();
-                        let ack = json!({"sessionId": frame["sessionId"]});
-                        if let Err(error) = tab.raw("Page.screencastFrameAck", ack).await {
-                            tracing::debug!(%error, "agent screencast frame was not acknowledged");
-                        }
-                    }
-                    changed = changes.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        let Some((id, next)) = shared.active(&key) else {
-                            break;
-                        };
-                        if !Arc::ptr_eq(&next, &tab) {
-                            stop_screencast(&tab);
-                            match start_screencast(&next).await {
-                                Ok(frames) => incoming = frames,
-                                Err(error) => {
-                                    tracing::debug!(%error, "agent screencast could not follow the active tab");
-                                    break;
-                                }
-                            }
-                            tab = next;
-                        }
-                        let moved = watched.send_if_modified(|observed| {
-                            let moved = observed.0 != id;
-                            *observed = (id, Arc::clone(&tab));
-                            moved
-                        });
-                        if moved {
-                            on_frame();
-                        }
-                    }
-                }
-            }
-            drop(frames_tx);
-            on_frame();
-        });
         Ok(Screencast {
-            observed,
-            frames,
-            runtime: tokio::runtime::Handle::current(),
+            feed,
+            shared: Arc::clone(&self.shared),
+            key: key.to_owned(),
+            seen_tab,
+            last_agent: page.agent.clone(),
             task,
         })
     }
@@ -301,6 +280,10 @@ impl AgentBrowser {
                 }),
             )
             .await?;
+        running
+            .connection
+            .call(None, "Target.setDiscoverTargets", json!({"discover": true}))
+            .await?;
         self.shared.edit(Registry::start);
         Ok(running)
     }
@@ -332,6 +315,8 @@ impl Shared {
 
     fn reset(&self) {
         *lock(&self.connection) = None;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        lock(&self.targets).clear();
         let (max_pages, max_tabs) = self.limits;
         self.edit(|registry| *registry = Registry::new(max_pages, max_tabs));
     }
@@ -359,7 +344,26 @@ impl Shared {
             }
             return;
         };
+        if !self
+            .connection()
+            .is_some_and(|current| Arc::ptr_eq(&current, connection))
+        {
+            return;
+        }
         match event.method.as_str() {
+            "Target.targetInfoChanged" => {
+                let info = &event.params["targetInfo"];
+                if let Some(page) = info["targetId"]
+                    .as_str()
+                    .and_then(|id| lock(&self.targets).get(id).and_then(Weak::upgrade))
+                {
+                    *lock(&page.metadata) = (
+                        source::bounded(info["title"].as_str().unwrap_or_default()),
+                        source::bounded(info["url"].as_str().unwrap_or_default()),
+                    );
+                    self.changes.send_modify(|revision| *revision += 1);
+                }
+            }
             "Target.attachedToTarget" => self.attached(connection, &event.params),
             "Target.detachedFromTarget" => {
                 *lock(&self.front) = None;
@@ -383,6 +387,15 @@ impl Shared {
         else {
             return;
         };
+        // Capture immutable input before either page task is spawned. Popups
+        // inherit their opener, never the invocation of a later run incarnation.
+        let creation = match info["openerId"].as_str() {
+            Some(opener) => lock(&self.targets)
+                .get(opener)
+                .and_then(Weak::upgrade)
+                .and_then(|p| p.creation.clone()),
+            None => lock(&self.creation).clone(),
+        };
         let events = connection.subscribe(session);
         let (counts, loads) = watch::channel(Loads::default());
         let (activity, page_events) = watch::channel(PageEvents::default());
@@ -405,8 +418,16 @@ impl Shared {
             agent: Arc::new(PageAgent::new(cdp)),
             connection: Arc::clone(connection),
             ready,
-            frames: Mutex::default(),
+            creation,
+            id: format!("{:032x}", self.next_page.fetch_add(1, Ordering::Relaxed)),
+            metadata: Mutex::new((
+                source::bounded(info["title"].as_str().unwrap_or_default()),
+                source::bounded(info["url"].as_str().unwrap_or_default()),
+            )),
+            streaming: Arc::new(tokio::sync::Mutex::new(())),
         });
+        lock(&self.targets).retain(|_, page| page.strong_count() > 0);
+        lock(&self.targets).insert(target.to_owned(), Arc::downgrade(&page));
         let attached = self
             .edit(|registry| registry.attach(target, info["openerId"].as_str(), Arc::clone(&page)));
         self.close_targets(attached.evicted);
@@ -416,6 +437,7 @@ impl Shared {
             activity,
             Arc::clone(&page),
             Arc::clone(&self.policy),
+            self.changes.clone(),
         ));
         tokio::spawn(prepare(page, attached.keep));
     }
@@ -476,6 +498,7 @@ async fn pump(
     activity: watch::Sender<PageEvents>,
     page: Arc<TabPage>,
     policy: Arc<dyn RequestPolicy>,
+    changes: watch::Sender<u64>,
 ) {
     // In-flight request ids, with the loader of the document that sent each.
     let mut requests: HashMap<String, String> = HashMap::new();
@@ -483,7 +506,42 @@ async fn pump(
         let Some(event) = message.into_event() else {
             continue;
         };
+        if event.method == "Target.targetInfoChanged"
+            && event.params["targetInfo"]["targetId"].as_str() == Some(page.target.as_str())
+        {
+            let info = &event.params["targetInfo"];
+            *lock(&page.metadata) = (
+                source::bounded(info["title"].as_str().unwrap_or_default()),
+                source::bounded(info["url"].as_str().unwrap_or_default()),
+            );
+            changes.send_modify(|revision| *revision += 1);
+        }
         let main_frame = event.params["frameId"].as_str() == Some(page.target.as_str());
+        // Headless Chromium can omit the final title notification. This
+        // browser-level reply is not queued behind the session's own pump.
+        let loaded = matches!(
+            event.method.as_str(),
+            "Page.domContentEventFired" | "Page.loadEventFired"
+        ) || (event.method == "Page.frameStoppedLoading" && main_frame);
+        if loaded
+            && let Ok(reply) = page
+                .connection
+                .call(
+                    None,
+                    "Target.getTargetInfo",
+                    json!({"targetId":page.target}),
+                )
+                .await
+            && let Some(info) = reply
+                .get("targetInfo")
+                .filter(|info| info["targetId"].as_str() == Some(page.target.as_str()))
+        {
+            *lock(&page.metadata) = (
+                source::bounded(info["title"].as_str().unwrap_or_default()),
+                source::bounded(info["url"].as_str().unwrap_or_default()),
+            );
+            changes.send_modify(|revision| *revision += 1);
+        }
         let request = || event.params["requestId"].as_str().map(str::to_owned);
         let counted = match event.method.as_str() {
             "Page.frameStartedLoading" if main_frame => {
@@ -539,11 +597,6 @@ async fn pump(
             "Fetch.requestPaused" => {
                 tokio::spawn(decide(Arc::clone(&page), event.params, Arc::clone(&policy)));
             }
-            "Page.screencastFrame" => {
-                if let Some(frames) = lock(&page.frames).as_ref() {
-                    let _ = frames.send(event.params);
-                }
-            }
             _ => {}
         }
     }
@@ -592,35 +645,10 @@ async fn decide(page: Arc<TabPage>, params: Value, policy: Arc<dyn RequestPolicy
     }
 }
 
-async fn start_screencast(tab: &TabPage) -> Result<mpsc::UnboundedReceiver<Value>, AgentError> {
-    let (frames, incoming) = mpsc::unbounded_channel();
-    *lock(&tab.frames) = Some(frames);
-    tab.call(
-        "Page.startScreencast",
-        json!({
-            "format": "jpeg",
-            "quality": 60,
-            "maxWidth": WINDOW[0],
-            "maxHeight": WINDOW[1],
-        }),
-    )
-    .await?;
-    Ok(incoming)
-}
-
-fn stop_screencast(tab: &Arc<TabPage>) {
-    lock(&tab.frames).take();
-    let tab = Arc::clone(tab);
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = tab.raw("Page.stopScreencast", json!({})).await;
-        });
-    }
-}
-
 #[async_trait::async_trait]
 impl PageProvider for AgentBrowser {
     async fn page(&self, key: &str) -> Result<Arc<PageAgent>, AgentError> {
+        let stamp = self.execution_stamps.for_creation(key);
         let mut state = self.state.lock().await;
         let running = self.running(&mut state).await?;
         if let Some((_, tab)) = self.shared.edit(|registry| {
@@ -629,6 +657,13 @@ impl PageProvider for AgentBrowser {
         }) {
             return Ok(Arc::clone(&tab.agent));
         }
+        let creation = Arc::new(Creation {
+            stamp,
+            browser_generation: self.shared.generation.load(Ordering::Relaxed),
+            page_generation: self.shared.next_page.fetch_add(1, Ordering::Relaxed),
+        });
+        *lock(&self.shared.creation) = Some(creation);
+        let _creation = PendingCreation(&self.shared);
         let mut changes = self.shared.changes.subscribe();
         self.shared.edit(|registry| registry.creating(1));
         let created = running
@@ -657,7 +692,13 @@ impl PageProvider for AgentBrowser {
                 .map(|target| registry.claim(key, target))
                 .unwrap_or_default()
         });
-        let target = created.map_err(|error| AgentError::Launch(error.to_string()))?;
+        let target = match created {
+            Ok(target) => target,
+            Err(error) => {
+                lock(&self.shared.creation).take();
+                return Err(AgentError::Launch(error.to_string()));
+            }
+        };
         self.shared.close_targets(evicted);
         let _ = changes
             .wait_for(|_| {
@@ -665,6 +706,7 @@ impl PageProvider for AgentBrowser {
                 registry.active(key).is_some() || !registry.claimed(&target)
             })
             .await;
+        lock(&self.shared.creation).take();
         self.shared
             .active(key)
             .map(|(_, tab)| Arc::clone(&tab.agent))
@@ -756,56 +798,73 @@ impl PageProvider for AgentBrowser {
 /// A screencast of a run's active tab. Frames stop when it is dropped or the
 /// run's last tab closes.
 pub struct Screencast {
-    observed: watch::Receiver<(String, Arc<TabPage>)>,
-    frames: watch::Receiver<Option<image::RgbaImage>>,
-    runtime: tokio::runtime::Handle,
+    feed: Feed,
+    shared: Arc<Shared>,
+    key: String,
+    seen_tab: String,
+    last_agent: Arc<PageAgent>,
     task: tokio::task::JoinHandle<()>,
 }
-
 impl Screencast {
-    /// The observed tab, for its [`PageAgent::activity`].
     pub fn agent(&self) -> Arc<PageAgent> {
-        Arc::clone(&self.observed.borrow().1.agent)
+        self.shared
+            .active(&self.key)
+            .map(|(_, tab)| tab.agent.clone())
+            .unwrap_or_else(|| self.last_agent.clone())
     }
-
-    /// The observed tab's id, such as `t2`.
     pub fn tab(&self) -> String {
-        self.observed.borrow().0.clone()
+        self.shared
+            .active(&self.key)
+            .map(|(id, _)| id)
+            .unwrap_or_default()
     }
-
-    /// Waits until the screencast moves to another tab and returns its id;
-    /// `None` once the run's last tab has closed.
     pub async fn next_tab(&mut self) -> Option<String> {
-        self.observed.changed().await.ok()?;
-        Some(self.observed.borrow_and_update().0.clone())
-    }
-
-    /// The latest frame, once per change.
-    pub fn poll_frame(&mut self) -> Option<image::RgbaImage> {
-        match self.frames.has_changed() {
-            Ok(true) => self.frames.borrow_and_update().clone(),
-            Ok(false) | Err(_) => None,
+        loop {
+            let (now, _) = self.shared.active(&self.key)?;
+            if now != self.seen_tab {
+                self.seen_tab = now.clone();
+                return Some(now);
+            }
+            self.feed.updates.changed().await.ok()?;
+            self.feed.updates.borrow().as_ref()?;
         }
     }
-
-    /// Waits for the next frame; `None` once the run's last tab has closed.
-    pub async fn next_frame(&mut self) -> Option<image::RgbaImage> {
-        self.frames.changed().await.ok()?;
-        self.frames.borrow_and_update().clone()
+    pub fn poll_frame(&mut self) -> Option<image::RgbaImage> {
+        if !self.feed.updates.has_changed().unwrap_or(false) {
+            return None;
+        }
+        let page = self.feed.updates.borrow_and_update();
+        let frame = page.as_ref()?.frame.as_ref()?;
+        if self.shared.active(&self.key)?.1.id != frame.tab {
+            return None;
+        }
+        image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec())
     }
-
-    /// Whether the run's tabs closed, so no further frames will arrive.
+    pub async fn next_frame(&mut self) -> Option<image::RgbaImage> {
+        loop {
+            self.feed.updates.changed().await.ok()?;
+            if self.feed.updates.borrow().is_none() {
+                return None;
+            }
+            // changed() marks the version seen; read the coherent record directly.
+            let page = self.feed.updates.borrow_and_update();
+            if let Some(frame) = page.as_ref().and_then(|page| page.frame.as_ref()) {
+                if self.shared.active(&self.key)?.1.id != frame.tab {
+                    continue;
+                }
+                return image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.to_vec());
+            }
+        }
+    }
     pub fn ended(&self) -> bool {
-        self.frames.has_changed().is_err()
+        self.shared.active(&self.key).is_none()
+            || self.feed.updates.borrow().is_none()
+            || self.feed.updates.has_changed().is_err()
     }
 }
-
 impl Drop for Screencast {
     fn drop(&mut self) {
         self.task.abort();
-        let tab = Arc::clone(&self.observed.borrow().1);
-        let _guard = self.runtime.enter();
-        stop_screencast(&tab);
     }
 }
 
@@ -966,4 +1025,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct PendingCreation<'a>(&'a Shared);
+impl Drop for PendingCreation<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.creation).take();
+    }
 }

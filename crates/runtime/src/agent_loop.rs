@@ -2542,3 +2542,6 @@ mod workspace_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod browser_observation_tests;
