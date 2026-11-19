@@ -796,3 +796,158 @@ async fn fallback_edit_family_switch_resummarizes_before_rebuilding_from_origina
         ["read", "edit", "write", "shell"]
     );
 }
+
+/// Compare independently received HTTP tools with the pre-ACK projection.
+#[tokio::test]
+async fn planned_preview_matches_provider_wire_for_edit_patch_switchable_readonly_and_child() {
+    struct Legacy(Arc<dyn AgentModel>);
+    #[async_trait]
+    impl AgentModel for Legacy {
+        fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+            self.0.selected_model(role, category)
+        }
+        async fn complete(
+            &self,
+            invocation: &AgentInvocationContext,
+            role: Role,
+            messages: &[Message],
+            tools: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            self.0.complete(invocation, role, messages, tools).await
+        }
+    }
+    for (selection, switchable, legacy) in [
+        (EditToolConfig::Edit, false, false),
+        (EditToolConfig::ApplyPatch, false, false),
+        (EditToolConfig::Edit, true, false),
+        (EditToolConfig::ApplyPatch, true, false),
+        (EditToolConfig::Edit, true, true),
+    ] {
+        for readonly in [false, true] {
+            let mock = mock_openai::StreamingMockOpenAi::spawn(vec![
+                mock_openai::ScriptedResponse::text_stream("parity", "gpt-5.5", ["ok"]),
+            ]);
+            let (mut model, _) = routed_model(Ok(response()), "gpt-5.5", None);
+            let provider = model.providers.get_mut("local").unwrap();
+            provider.profile.edit_tool.profile = Some(selection);
+            provider.client = Arc::new(
+                providers::provider::openai_compatible::OpenAiCompatibleClient::new(
+                    mock.base_url(),
+                    "local",
+                    std::time::Duration::from_secs(30),
+                    None,
+                )
+                .unwrap(),
+            );
+            let mut model: Arc<dyn AgentModel> = Arc::new(model);
+            if legacy {
+                model = Arc::new(Legacy(model));
+            }
+            if switchable {
+                model = Arc::new(SwitchableModel::new(model));
+            }
+            let executor = tools::ToolExecutor::with_standard_tools(
+                Arc::new(event_bus::EventBus::new(8)),
+                Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            );
+            let policy = crate::ExecutionPolicy::for_role(if readonly {
+                Role::Explorer
+            } else {
+                Role::Worker
+            });
+            let authorized = crate::agent_loop::tool_catalog::compose(
+                crate::agent_loop::tool_catalog::restored_specs(&executor, None).unwrap(),
+                &policy,
+                crate::agent_loop::tool_catalog::CatalogOptions {
+                    skills: false,
+                    child: !readonly,
+                    web: false,
+                    artifacts: false,
+                    run_js: false,
+                    run_js_settings: &Default::default(),
+                    family: crate::ModelFamily::Gpt5,
+                },
+            );
+            let mut preview = crate::edit_tools::preview(
+                model.as_ref(),
+                "parity-run",
+                Role::Worker,
+                None,
+                &authorized,
+            )
+            .unwrap();
+            model
+                .complete(
+                    &AgentInvocationContext {
+                        run_id: "parity-run".into(),
+                        ..Default::default()
+                    },
+                    Role::Worker,
+                    &[Message {
+                        role: MessageRole::User,
+                        content: vec![ContentBlock::Text {
+                            text: "same provider input".into(),
+                        }],
+                    }],
+                    &authorized,
+                )
+                .await
+                .unwrap();
+            // OpenAI wire encoding canonically sorts by function name. Project
+            // only the expected array; never normalize the received wire.
+            preview.sort_by(|left, right| left.name.cmp(&right.name));
+            let requests = mock.recorded_requests();
+            let sent = requests
+                .iter()
+                .filter(|r| r.path == "/v1/chat/completions")
+                .collect::<Vec<_>>();
+            assert_eq!(sent.len(), 1);
+            let wire = sent[0].body["tools"].as_array().unwrap();
+            assert_eq!(
+                wire.len(),
+                preview.len(),
+                "{selection:?}/{switchable}/{legacy}/{readonly}"
+            );
+            for (actual, expected) in wire.iter().zip(preview) {
+                assert_eq!(actual["function"]["name"], expected.name);
+                assert_eq!(actual["function"]["description"], expected.description);
+                assert_eq!(actual["function"]["parameters"], expected.input_schema);
+            }
+            if readonly {
+                assert!(wire.iter().all(|tool| !matches!(
+                    tool["function"]["name"].as_str(),
+                    Some("edit" | "write" | "apply_patch")
+                )));
+            }
+        }
+    }
+}
+
+#[test]
+fn planned_preview_rejects_an_unresolved_narrowing_model_instead_of_guessing() {
+    struct Unknown;
+    #[async_trait]
+    impl AgentModel for Unknown {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "unknown".into()
+        }
+        fn narrows_edit_tools(&self) -> bool {
+            true
+        }
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            _: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            unreachable!("preview cannot call the model")
+        }
+    }
+    assert!(
+        crate::edit_tools::preview(&Unknown, "unknown", Role::Worker, None, &edit_specs())
+            .unwrap_err()
+            .to_string()
+            .contains("current edit-tool selection unavailable")
+    );
+}

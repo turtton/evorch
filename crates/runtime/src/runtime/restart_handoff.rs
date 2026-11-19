@@ -534,6 +534,14 @@ impl AgentRuntime {
                 family,
             },
         );
+        // Compare provider-visible tools, not the wider authorized catalog.
+        let effective = crate::edit_tools::preview(
+            model.as_ref(),
+            &run.to_string(),
+            role,
+            config.category.as_deref(),
+            &effective,
+        )?;
         let catalog = effective
             .iter()
             .filter(|s| !external.contains(s.name.as_str()))
@@ -769,7 +777,7 @@ fn error(e: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(e)
 }
 
-fn tool_snapshot(
+pub(super) fn tool_snapshot(
     input: &crate::quiesce::ProviderInput,
     catalog: &[providers::ToolSpec],
     permissions: &str,
@@ -795,7 +803,7 @@ fn tool_snapshot(
 
 // Role/build-derived tool grants are compared as ordered catalog evidence. The
 // non-tool execution authority must remain identical across the handoff.
-fn policy_fingerprint(p: &crate::ExecutionPolicy) -> Result<String, RuntimeError> {
+pub(super) fn policy_fingerprint(p: &crate::ExecutionPolicy) -> Result<String, RuntimeError> {
     restart_digest(&(
         &p.role_name,
         p.capabilities.can_delegate,

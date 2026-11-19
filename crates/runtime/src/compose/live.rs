@@ -110,7 +110,11 @@ impl AgentModel for SwitchableModel {
         role: Role,
         category: Option<&str>,
     ) -> Option<config::EditToolConfig> {
-        self.current().edit_tool_for_run(run_id, role, category)
+        let current = self.current();
+        crate::edit_tools::selection(
+            current.narrows_edit_tools(),
+            current.edit_tool_for_run(run_id, role, category),
+        )
     }
 
     fn edit_tools_by_run(
