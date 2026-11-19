@@ -21,7 +21,10 @@
 //! | [`Feature::reset`] | every time a new snapshot replaces the projection (connect, reconnect, resync): drop state derived from the core, but keep what identifies requests still in flight (see below) |
 //! | [`Feature::event`] | for each delivered event of the namespace the feature owns, in order, exactly once per snapshot |
 //! | [`Feature::reply`] | the answer to a request the feature sent, matched by the tag it chose |
-//! | [`Feature::render`] | each frame while the feature is available; requests and navigation go out through the [`FeatureContext`] |
+//! | [`Feature::disconnected`] | immediate, ctx-free invalidation on the actor thread; no I/O or waiting |
+//! | [`Feature::selection_changed`] | first composition and changed project/thread, before maintain |
+//! | [`Feature::maintain`] | every composition pass, regardless of availability, collapse, minimization or connection |
+//! | [`Feature::render`] | available, expanded, non-minimized bodies only; lifecycle work belongs in maintain |
 //! | [`Feature::render_selector`] | the project/thread selector at the top of the conversation view; return `true` to replace the built-in one (what was queued is applied either way) |
 //! | [`Feature::unsupported`] | a note for the list of unsupported operations while the feature is a placeholder |
 //!
@@ -368,6 +371,20 @@ impl FeatureContext<'_> {
     }
 }
 
+/// Composition state, independent of whether the feature body is drawn.
+/// Minimized and collapsed are separate: neither implies a lost connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Visibility {
+    pub available: bool,
+    pub expanded: bool,
+    pub minimized: bool,
+}
+impl Visibility {
+    pub fn is_visible(self) -> bool {
+        self.available && self.expanded && !self.minimized
+    }
+}
+
 /// One area's part of the desktop. Every method but `id` and `title` has a
 /// default that does nothing, which is what a placeholder wants.
 pub trait Feature: Send {
@@ -381,6 +398,21 @@ pub trait Feature: Send {
     /// A new snapshot replaced the projection: forget what came from the core,
     /// and keep what ties a tag of a request in flight to its meaning.
     fn reset(&mut self) {}
+
+    /// The actor lost its control session. Invalidate local state or enqueue cleanup
+    /// only: no I/O, decoding, waiting, or protocol commands on the actor thread.
+    /// Preserve request tags needed for outcome-unknown/receipt reconciliation.
+    fn disconnected(&mut self) {}
+
+    /// First composition, or its project/thread selection changed. Runs before
+    /// maintain, even while hidden/disconnected; ctx.selection() is the new value.
+    fn selection_changed(&mut self, _ctx: &mut FeatureContext<'_>) {}
+
+    /// Every composition pass, including placeholders, missing capabilities,
+    /// collapsed bodies, minimized viewports and disconnection. Use ctx for deferred
+    /// cleanup/cancel_data; render must not own lifecycle work. No pass is promised
+    /// while the native event loop itself is suspended.
+    fn maintain(&mut self, _ctx: &mut FeatureContext<'_>, _visibility: Visibility) {}
 
     /// One delivered event of this feature's namespace.
     fn event(&mut self, _event: &UiEvent) {}
@@ -424,6 +456,7 @@ pub trait Feature: Send {
 /// feature's own file, not this.
 pub struct Features {
     features: Vec<Box<dyn Feature>>,
+    selection: Option<Selection>,
     pub(crate) data: DataInbox,
 }
 
@@ -431,6 +464,7 @@ impl Default for Features {
     fn default() -> Self {
         Self {
             data: DataInbox::default(),
+            selection: None,
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -470,6 +504,14 @@ impl Features {
     pub fn begin_session(&mut self, delivered: &[UiEvent], held: Vec<HeldReply>) {
         self.clear_data();
         begin_session(&mut self.features, delivered, held);
+    }
+
+    /// Immediate invalidation, independent of the GUI composition/event loop.
+    pub fn disconnected(&mut self) {
+        self.clear_data();
+        for feature in &mut self.features {
+            feature.disconnected();
+        }
     }
 
     /// Route a delivered event to the feature owning its namespace.
@@ -521,7 +563,15 @@ impl Features {
 
     /// Draw every available feature and return what they asked for.
     pub fn render(&mut self, ui: &mut egui::Ui, view: FeatureView<'_>) -> FeatureFrame {
-        render_all(&mut self.features, &mut self.data, ui, view)
+        let selection_changed = self.selection.as_ref() != Some(view.selection);
+        self.selection = Some(view.selection.clone());
+        render_all(
+            &mut self.features,
+            &mut self.data,
+            ui,
+            view,
+            selection_changed,
+        )
     }
 
     /// Let the available features draw the selector, in order, until one does.
@@ -598,30 +648,62 @@ fn render_all(
     data: &mut DataInbox,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
+    selection_changed: bool,
 ) -> FeatureFrame {
     let mut frame = FeatureFrame::default();
+    let minimized = ui.input(|input| input.viewport().minimized.unwrap_or(false));
     // The features are stacked in one scrolling column, as tall as the space given to it.
     egui::ScrollArea::vertical()
         .id_salt("features")
         .auto_shrink([false, true])
         .max_height(ui.available_height())
         .show(ui, |ui| {
-            for feature in features
-                .iter_mut()
-                .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
-            {
+            for feature in features.iter_mut() {
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    feature_header_id(ui, feature.id()),
+                    true,
+                );
+                let mut visibility = Visibility {
+                    available: is_available(feature.as_ref(), view.connected, view.capabilities),
+                    expanded: state.is_open(),
+                    minimized,
+                };
                 let mut ctx = FeatureContext {
                     feature: feature.id(),
                     view,
                     frame: &mut frame,
                     data,
                 };
-                egui::CollapsingHeader::new(feature.title())
-                    .default_open(true)
-                    .show(ui, |ui| feature.render(ui, &mut ctx));
+                if selection_changed {
+                    feature.selection_changed(&mut ctx);
+                }
+                if !visibility.available || minimized {
+                    feature.maintain(&mut ctx, visibility);
+                    continue;
+                }
+                let mut clicked = false;
+                let mut header = state.show_header(ui, |ui| {
+                    clicked = ui.selectable_label(false, feature.title()).clicked();
+                });
+                if clicked {
+                    header.toggle();
+                }
+                // The current toggle, not animation openness, controls subscriptions.
+                visibility.expanded = header.is_open();
+                feature.maintain(&mut ctx, visibility);
+                header.body(|ui| {
+                    if visibility.is_visible() {
+                        feature.render(ui, &mut ctx);
+                    }
+                });
             }
         });
     frame
+}
+
+fn feature_header_id(ui: &egui::Ui, feature: FeatureId) -> egui::Id {
+    ui.make_persistent_id(("core-feature", feature.namespace()))
 }
 
 fn render_selector(
@@ -654,5 +736,7 @@ fn render_selector(
     }
 }
 
+#[cfg(test)]
+mod maintenance_tests;
 #[cfg(test)]
 mod tests;

@@ -206,7 +206,7 @@ pub async fn serve(
     let mut held = Vec::<HeldReply>::new();
     loop {
         update(&shared, &ctx, |s| {
-            s.connected = false;
+            s.disconnect();
             s.status = "コアへ接続中…".into();
         });
         let connected = launcher.connect_or_start_with_endpoint().await;
@@ -342,7 +342,7 @@ pub async fn serve(
             }
         }
         data.stop(&shared, &ctx).await;
-        update(&shared, &ctx, |s| s.connected = false);
+        update(&shared, &ctx, |s| s.disconnect());
         if reconnect_requested {
             continue;
         }

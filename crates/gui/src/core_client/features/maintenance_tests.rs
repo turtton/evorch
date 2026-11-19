@@ -1,0 +1,361 @@
+//! Exercise the production composition, not direct lifecycle-hook calls.
+use super::*;
+use crate::core_client::{CoreClientScreen, Shared};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, PartialEq)]
+enum Observed {
+    Selection(Option<ProjectId>, Option<ThreadId>),
+    Maintain(Visibility, bool),
+    Render,
+    Disconnected,
+}
+type Log = Arc<Mutex<Vec<Observed>>>;
+struct Probe {
+    log: Log,
+    availability: Availability,
+}
+impl Feature for Probe {
+    fn id(&self) -> FeatureId {
+        FeatureId::Browser
+    }
+    fn title(&self) -> &'static str {
+        "maintenance probe"
+    }
+    fn availability(&self) -> Availability {
+        self.availability
+    }
+    fn disconnected(&mut self) {
+        self.log.lock().unwrap().push(Observed::Disconnected);
+    }
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        self.log.lock().unwrap().push(Observed::Selection(
+            ctx.selection().project.clone(),
+            ctx.selection().thread.clone(),
+        ));
+    }
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(Observed::Maintain(visibility, ctx.connected()));
+        if !visibility.is_visible() {
+            ctx.cancel_data(9);
+        }
+    }
+    fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {
+        self.log.lock().unwrap().push(Observed::Render);
+    }
+}
+fn features(log: &Log, availability: Availability) -> Features {
+    Features {
+        features: vec![Box::new(Probe {
+            log: log.clone(),
+            availability,
+        })],
+        data: DataInbox::default(),
+        selection: None,
+    }
+}
+fn take(log: &Log) -> Vec<Observed> {
+    std::mem::take(&mut *log.lock().unwrap())
+}
+fn input(minimized: bool) -> egui::RawInput {
+    let mut input = egui::RawInput::default();
+    input
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .minimized = Some(minimized);
+    input
+}
+fn compose(
+    ctx: &egui::Context,
+    screen: &mut CoreClientScreen,
+    input: egui::RawInput,
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, |ui| screen.ui(ui));
+    output.textures_delta.clear();
+    output
+}
+fn title_position(shapes: &[egui::epaint::ClippedShape]) -> egui::Pos2 {
+    fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == "maintenance probe" => {
+                Some(text.pos + text.galley.rect.center().to_vec2())
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+            _ => None,
+        }
+    }
+    shapes
+        .iter()
+        .find_map(|s| find(&s.shape))
+        .expect("feature title was drawn")
+}
+fn assert_cancels(
+    rx: &mut tokio::sync::mpsc::Receiver<crate::core_client::connection::Action>,
+    expected: usize,
+) {
+    let mut count = 0;
+    while let Ok(action) = rx.try_recv() {
+        match action {
+            crate::core_client::connection::Action::Data(action) => {
+                assert_eq!((action.feature, action.tag), (FeatureId::Browser, 9));
+                assert!(matches!(action.request, DataRequest::Cancel));
+                count += 1;
+            }
+            _ => panic!("maintenance must not create unrelated actions"),
+        }
+    }
+    assert_eq!(
+        count, expected,
+        "cancel_data must reach the shared actor queue"
+    );
+}
+
+#[test]
+fn collapsed_selection_and_minimized_disconnect_run_maintenance_through_screen_composition() {
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: features(&log, Availability::Implemented { required: &[] }),
+        ..Shared::default()
+    }));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
+    let ctx = egui::Context::default();
+    let first = compose(&ctx, &mut screen, input(false));
+    let expanded = Visibility {
+        available: true,
+        expanded: true,
+        minimized: false,
+    };
+    assert_eq!(
+        take(&log),
+        [
+            Observed::Selection(None, None),
+            Observed::Maintain(expanded, true),
+            Observed::Render
+        ]
+    );
+    assert_cancels(&mut rx, 0);
+    let pos = title_position(&first.shapes);
+    // Real pointer input closes the production header (including its title).
+    for pressed in [true, false] {
+        let mut input = input(false);
+        input.events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        compose(&ctx, &mut screen, input);
+    }
+    take(&log);
+    while rx.try_recv().is_ok() {}
+    let project = ProjectId::new("new-project").unwrap();
+    let thread = ThreadId::new("new-thread").unwrap();
+    screen.project = Some(project.clone());
+    screen.selected = Some(thread.clone());
+    compose(&ctx, &mut screen, input(false));
+    let collapsed = Visibility {
+        expanded: false,
+        ..expanded
+    };
+    assert_eq!(
+        take(&log),
+        [
+            Observed::Selection(Some(project), Some(thread)),
+            Observed::Maintain(collapsed, true)
+        ]
+    );
+    assert_cancels(&mut rx, 1);
+    // Same selection: maintain repeats, selection_changed does not.
+    compose(&ctx, &mut screen, input(true));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(
+            Visibility {
+                minimized: true,
+                ..collapsed
+            },
+            true
+        )]
+    );
+    assert_cancels(&mut rx, 1);
+    shared.lock().unwrap().disconnect();
+    assert_eq!(
+        take(&log),
+        [Observed::Disconnected],
+        "no composition is needed for immediate invalidation"
+    );
+    shared.lock().unwrap().disconnect();
+    assert!(
+        take(&log).is_empty(),
+        "only the true -> false transition notifies"
+    );
+    compose(&ctx, &mut screen, input(true));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(
+            Visibility {
+                available: false,
+                minimized: true,
+                ..collapsed
+            },
+            false
+        )]
+    );
+    assert_cancels(&mut rx, 1);
+    // Restoring the viewport preserves collapse; the body is still not rendered.
+    compose(&ctx, &mut screen, input(false));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(
+            Visibility {
+                available: false,
+                ..collapsed
+            },
+            false
+        )]
+    );
+    assert_cancels(&mut rx, 1);
+}
+
+#[test]
+fn unavailable_and_placeholder_features_still_maintain_on_each_render_all_pass() {
+    for availability in [
+        Availability::Placeholder,
+        Availability::Implemented {
+            required: &[Capability::Queries],
+        },
+    ] {
+        let log = Log::default();
+        let mut features = features(&log, availability);
+        let ctx = egui::Context::default();
+        let cache = Cache::default();
+        let selection = Selection::default();
+        for pass in 0..2 {
+            let mut frame = None;
+            let mut output = ctx.run_ui(input(false), |ui| {
+                frame = Some(features.render(
+                    ui,
+                    FeatureView {
+                        connected: true,
+                        capabilities: &[],
+                        cache: &cache,
+                        selection: &selection,
+                    },
+                ))
+            });
+            output.textures_delta.clear();
+            let mut expected = vec![];
+            if pass == 0 {
+                expected.push(Observed::Selection(None, None));
+            }
+            expected.push(Observed::Maintain(
+                Visibility {
+                    available: false,
+                    expanded: true,
+                    minimized: false,
+                },
+                true,
+            ));
+            assert_eq!(take(&log), expected);
+            let frame = frame.unwrap();
+            assert_eq!(frame.data.len(), 1);
+            assert!(matches!(frame.data[0].request, DataRequest::Cancel));
+            assert!(frame.actions.is_empty());
+        }
+    }
+}
+
+#[test]
+fn expanded_minimize_restore_and_disconnect_preserve_visibility_and_invalidate_data() {
+    use workbench_protocol::namespaces::browser::RendererId;
+    let log = Log::default();
+    let shared = Arc::new(Mutex::new(Shared {
+        connected: true,
+        features: features(&log, Availability::Implemented { required: &[] }),
+        ..Shared::default()
+    }));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
+    let ctx = egui::Context::default();
+    compose(&ctx, &mut screen, input(false));
+    take(&log);
+    let expanded = Visibility {
+        available: true,
+        expanded: true,
+        minimized: false,
+    };
+    compose(&ctx, &mut screen, input(true));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(
+            Visibility {
+                minimized: true,
+                ..expanded
+            },
+            true
+        )]
+    );
+    assert_cancels(&mut rx, 1);
+    compose(&ctx, &mut screen, input(false));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(expanded, true), Observed::Render]
+    );
+    assert_cancels(&mut rx, 0);
+    let old_action = {
+        let mut state = shared.lock().unwrap();
+        let data = &mut state.features.data;
+        let source = DataSource::Capture {
+            operation_id: RendererId::new("a".repeat(32)).unwrap(),
+            capture_id: RendererId::new("b".repeat(32)).unwrap(),
+        };
+        let action = DataAction {
+            feature: FeatureId::Browser,
+            tag: 9,
+            generation: data.generation(FeatureId::Browser),
+            request: DataRequest::Start(source.clone()),
+        };
+        let key = data.claim(&action, source).unwrap();
+        state.disconnect();
+        assert!(!state.features.data.contains(key));
+        assert!(
+            !state.features.data.current(&action),
+            "old queued starts/cancels are stale"
+        );
+        action
+    };
+    assert_eq!(take(&log), [Observed::Disconnected]);
+    // A disconnected selection change still precedes maintain with a usable ctx.
+    let project = ProjectId::new("disconnected-project").unwrap();
+    screen.project = Some(project.clone());
+    compose(&ctx, &mut screen, input(false));
+    assert_eq!(
+        take(&log),
+        [
+            Observed::Selection(Some(project), None),
+            Observed::Maintain(
+                Visibility {
+                    available: false,
+                    ..expanded
+                },
+                false
+            )
+        ]
+    );
+    let crate::core_client::connection::Action::Data(cancel) = rx.try_recv().unwrap() else {
+        panic!("expected cancellation")
+    };
+    assert!(matches!(cancel.request, DataRequest::Cancel));
+    assert_ne!(cancel.generation, old_action.generation);
+    assert!(shared.lock().unwrap().features.data.current(&cancel));
+    assert!(rx.try_recv().is_err());
+}

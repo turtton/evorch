@@ -77,6 +77,15 @@ impl Shared {
                 .any(|i| i.reference.is_none() || i.uploading)
     }
 
+    /// A control-session transition, not a render-time observation. Call once so
+    /// a collapsed/minimized feature cannot retain core-derived bodies or textures.
+    fn disconnect(&mut self) {
+        if self.connected {
+            self.connected = false;
+            self.features.disconnected();
+        }
+    }
+
     fn attachment_draft(
         &mut self,
         project: ProjectId,
