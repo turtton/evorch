@@ -184,6 +184,9 @@ enum UiRequest {
 pub struct BrowserFeature {
     clock: Clock,
     decoders: Decoders,
+    /// Data tags whose stream ended by itself: the shared slot is kept until
+    /// it is cancelled, which needs a context (the next pass).
+    pending_cancel: Vec<u64>,
     queue: VecDeque<ArtifactRef>,
     ops: Ops<Purpose>,
     session: SessionState,
@@ -226,6 +229,7 @@ impl BrowserFeature {
         Self {
             clock,
             decoders: Decoders::default(),
+            pending_cancel: Vec::new(),
             queue: VecDeque::new(),
             ops: Ops::default(),
             session: SessionState::None,
@@ -364,6 +368,9 @@ impl BrowserFeature {
     fn drive(&mut self, ctx: &mut FeatureContext<'_>) {
         let now = self.clock.now();
         self.wake = None;
+        for tag in mem::take(&mut self.pending_cancel) {
+            ctx.cancel_data(tag);
+        }
         for request in mem::take(&mut self.requests) {
             self.apply_request(request, ctx);
         }
@@ -419,6 +426,7 @@ impl BrowserFeature {
                 if matches!(p.phase, Phase::Lost(_)) {
                     p.forget_connection();
                     p.tab = None;
+                    p.resize_failed = None;
                     p.status = None;
                     p.phase = Phase::Waiting;
                     self.selected = Some(id);
@@ -427,6 +435,7 @@ impl BrowserFeature {
             UiRequest::Retry(id) => {
                 let Some(idx) = self.index(id) else { return };
                 let p = &mut self.previews[idx];
+                p.resize_failed = None;
                 if matches!(p.stream, Stream::Blocked(_)) {
                     p.stream = Stream::Off;
                     p.attempts = 0;
@@ -1306,6 +1315,9 @@ impl BrowserFeature {
             (DataKind::Frames, DataNotice::Ready) => self.previews[idx].frame_ready = true,
             (DataKind::Frames, DataNotice::Completed) => {
                 self.data_tags.remove(&tag);
+                if self.pending_cancel.len() < 16 {
+                    self.pending_cancel.push(tag);
+                }
                 let p = &mut self.previews[idx];
                 p.picture.clear();
                 p.shown = None;
@@ -1379,6 +1391,7 @@ impl Feature for BrowserFeature {
 
     fn reset(&mut self) {
         let now = self.clock.now();
+        self.pending_cancel.clear();
         self.ops.on_reset(now);
         self.data_tags.clear();
         self.probe = Probe::Idle;
@@ -1469,6 +1482,7 @@ impl Feature for BrowserFeature {
         // The data connections are gone with the control session: no texture,
         // decoded image or stream state may outlive it. What was asked of the
         // core is settled by `reset` when a session is back.
+        self.pending_cancel.clear();
         self.data_tags.clear();
         for p in &mut self.previews {
             p.forget_connection();

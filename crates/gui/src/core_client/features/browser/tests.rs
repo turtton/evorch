@@ -1598,23 +1598,10 @@ fn a_cancelled_capture_and_a_reset_drop_the_image() {
     assert!(rig.preview(0).capture_picture.texture().is_none());
 
     // A decode in progress when the connection is replaced is discarded.
-    rig.request(UiRequest::Do(id, Action::Capture));
-    let tag = rig.core.starts.last().unwrap().0;
-    let blob = Blob {
-        start: BlobStart {
-            core_epoch: 7,
-            transfer_id: 3,
-            source: BlobSource::Capture,
-            media_type: MediaType::Png,
-            total_bytes: rig.core.capture.len() as u64,
-            digest: [0; 32],
-        },
-        bytes: rig.core.capture.clone(),
-    };
-    rig.publish(tag, DataPayload::Blob(blob));
-    rig.harness.run_steps(1);
-    assert!(matches!(rig.preview(0).capture, Capture::Decoding(_)));
+    let (job, release) = held_decode(&mut rig);
+    rig.feature().previews[0].capture = Capture::Decoding(job);
     rig.reset();
+    release.send(()).unwrap();
     assert!(matches!(rig.preview(0).capture, Capture::Idle));
     assert!(rig.preview(0).capture_picture.texture().is_none());
     assert!(rig.preview(0).picture.texture().is_none());
@@ -1726,6 +1713,12 @@ fn a_failed_or_unknown_resize_is_not_sent_again_by_itself() {
             rig.pump();
             rig.advance(ops::OP_TIMEOUT + Duration::from_secs(1));
         }
+        assert_eq!(rig.core.count("resize"), 1);
+        // A new sync of the same tab does not make it a new wish.
+        rig.reset();
+        rig.pump();
+        rig.advance(ops::OP_TIMEOUT + Duration::from_secs(1));
+        rig.pump();
         assert_eq!(rig.core.count("resize"), 1);
         // Another size is the next try.
         rig.harness.set_size(vec2(420.0, 480.0));
@@ -2309,4 +2302,50 @@ fn a_capture_that_finds_every_decoder_busy_is_refused_and_gives_its_slot_back() 
         release.send(()).unwrap();
     }
     decoders.wait_at_most(0);
+}
+
+#[test]
+fn a_reserve_is_not_used_up_by_new_presses() {
+    let mut queue = InputQueue::default();
+    for n in 0..128 {
+        if n % 2 == 0 {
+            queue.push(Input::Move {
+                x: f64::from(n),
+                y: 0.0,
+                buttons: 0,
+            });
+        } else {
+            queue.push(Input::Wheel {
+                x: 0.0,
+                y: 0.0,
+                dx: 1.0,
+                dy: 1.0,
+                modifiers: n,
+            });
+        }
+    }
+    for n in 0..33 {
+        queue.push(key_down(&format!("k{n}")));
+        queue.push(key_up(&format!("k{n}")));
+    }
+    let inputs = drain(&mut queue);
+    let downs = inputs
+        .iter()
+        .filter(|i| matches!(i, Input::KeyDown { .. }))
+        .count();
+    let ups = inputs
+        .iter()
+        .filter(|i| matches!(i, Input::KeyUp { .. }))
+        .count();
+    assert_eq!(downs, ups, "{downs} down, {ups} up");
+    assert_eq!(queue.bookkeeping(), 0);
+}
+
+#[test]
+fn a_stream_that_ended_by_itself_gives_its_slot_back() {
+    let mut rig = Rig::new();
+    let tag = rig.open(1);
+    rig.feature().data(tag, DataNotice::Completed);
+    rig.pump();
+    assert!(rig.core.cancels.contains(&tag), "the slot would stay taken");
 }

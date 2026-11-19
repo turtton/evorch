@@ -269,18 +269,17 @@ impl InputQueue {
         self.down_keys.clear();
     }
 
+    /// Room for one more input inside the normal capacity: the reserve is for
+    /// releases only. Pointer motion is given up for it, as many as it takes.
     fn make_room(&mut self) -> bool {
-        if self.items.len() < MAX_QUEUED {
-            return true;
+        while self.items.len() >= MAX_QUEUED {
+            let Some(at) = self.items.iter().position(Input::is_pointer_motion) else {
+                return false;
+            };
+            self.items.remove(at);
+            self.dropped += 1;
         }
-        match self.items.iter().position(Input::is_pointer_motion) {
-            Some(at) => {
-                self.items.remove(at);
-                self.dropped += 1;
-                true
-            }
-            None => false,
-        }
+        true
     }
 
     pub fn push(&mut self, input: Input) {

@@ -200,7 +200,6 @@ impl Preview {
         self.stream = Stream::Off;
         self.attempts = 0;
         self.streaming_asked = false;
-        self.resize_failed = None;
         self.cooldown = None;
         self.input.clear();
         self.translator = Translator::default();
