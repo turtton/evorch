@@ -214,6 +214,9 @@ pub struct RendererOwner {
     frames: FrameSource,
     pub(crate) run_tabs:
         Arc<std::sync::Mutex<std::collections::HashMap<String, super::run_pages::RunTab>>>,
+    /// Test-only: the status reported while the actor has published none.
+    #[cfg(test)]
+    test_status: Arc<std::sync::Mutex<Option<Status>>>,
 }
 impl RendererOwner {
     /// Installs an idle watcher only. No process, IPC reader or directory yet.
@@ -243,10 +246,22 @@ impl RendererOwner {
             plane: data::DataPlane::default(),
             frames,
             run_tabs: Arc::default(),
+            #[cfg(test)]
+            test_status: Arc::default(),
         })
     }
     pub fn status(&self) -> Status {
-        *self.status.borrow()
+        let status = *self.status.borrow();
+        // The override stands in only for a helper that never ran; once the
+        // actor publishes a status of its own, that one is the truth.
+        #[cfg(test)]
+        if status.phase == Phase::Stopped
+            && status.generation == 0
+            && let Some(installed) = *self.test_status.lock().unwrap()
+        {
+            return installed;
+        }
+        status
     }
     /// The data connections of this owner: channels, bindings and leases.
     pub fn data_plane(&self) -> data::DataPlane {
@@ -255,6 +270,18 @@ impl RendererOwner {
     /// The connection the raw frames of `tab` arrive on, for a frame lease.
     pub(crate) fn frame_source(&self, tab: Tab) -> Option<Arc<RendererClient>> {
         self.frames.get(tab.generation)
+    }
+    /// Test-only: stands in for a helper that came up. Only the actor
+    /// publishes a status and a frame connection, and no helper runs in the
+    /// unit tests.
+    #[cfg(test)]
+    pub(crate) fn install_ready_helper(&self, generation: u64, client: Arc<RendererClient>) {
+        self.frames.set(generation, client);
+        *self.test_status.lock().unwrap() = Some(Status {
+            phase: Phase::Ready,
+            generation,
+            tabs: 0,
+        });
     }
     pub fn subscribe(&self) -> watch::Receiver<Status> {
         self.status.clone()
