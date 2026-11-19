@@ -339,7 +339,13 @@ impl ObservationFeature {
             .map(|s| s.scope.clone())
             .chain(self.live.as_ref().map(|l| l.scope.clone()))
             .collect();
-        for scope in &scopes {
+        self.suspect_scopes(&scopes);
+    }
+
+    /// The same entry for scopes a sign names in particular, such as the ones
+    /// a fresh run list does not show as current.
+    fn suspect_scopes(&mut self, scopes: &[ObservationScope]) {
+        for scope in scopes {
             self.queue_verify(scope);
         }
     }
@@ -456,6 +462,17 @@ impl ObservationFeature {
                 .find(|s| s.run == st.scope.run)
                 .is_none_or(|s| s.incarnation == st.scope.incarnation)
         });
+        // The list shows current pages only. What is kept and not shown there as
+        // it is (the run gone, or under another generation) is put to the core,
+        // which answers whether it only stopped or was lost.
+        let unconfirmed: Vec<_> = self
+            .stopped
+            .iter()
+            .map(|s| s.scope.clone())
+            .chain(self.live.as_ref().map(|l| l.scope.clone()))
+            .filter(|scope| !scopes.contains(scope))
+            .collect();
+        self.suspect_scopes(&unconfirmed);
         self.runs = Runs::Loaded(scopes);
     }
 
@@ -508,8 +525,8 @@ impl ObservationFeature {
         let issued = matches!(
             &reply,
             FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
-                ObservationReply::Subscription { token: Some(_), .. }
-            ))))
+                ObservationReply::Subscription { subscription: id, scope: s, token: Some(_), .. }
+            )))) if *id == subscription && *s == scope
         );
         if !issued {
             self.suspect();

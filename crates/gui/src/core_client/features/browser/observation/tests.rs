@@ -1304,3 +1304,81 @@ fn the_queue_holds_nine_scopes_and_what_cannot_be_queued_is_dropped() {
     assert!(feature.stopped.is_empty(), "no picture waits unchecked");
     assert!(feature.live.is_none(), "nor does the live one");
 }
+
+#[test]
+fn a_kept_picture_whose_run_the_list_does_not_show_is_kept_when_the_core_says_it_stopped() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.scopes.clear();
+    rig.core.stopped_scopes = vec![scope("run-1")];
+    let before = rig.core.snapshots();
+    rig.visible(true);
+    assert_eq!(
+        rig.core.snapshots(),
+        before + 1,
+        "the picture was put to the core"
+    );
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    assert!(rig.state().feature.verify.is_empty());
+}
+
+#[test]
+fn a_kept_picture_whose_run_the_list_does_not_show_is_dropped_when_the_core_says_revoked() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.scopes.clear();
+    rig.core.revoked = vec![scope("run-1")];
+    rig.visible(true);
+    assert!(rig.state().feature.stopped.is_empty());
+}
+
+#[test]
+fn a_token_for_another_subscription_is_not_accepted() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    rig.core.revoked = vec![scope("run-1")];
+    let scope = scope("run-1");
+    rig.feature().live = None;
+    let tag = 1 << 63 | 4242;
+    rig.feature().requests.insert(
+        tag,
+        Request::Token {
+            scope: scope.clone(),
+            subscription: oid(1),
+        },
+    );
+    rig.feature().reply(
+        tag,
+        FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+            ObservationReply::Subscription {
+                subscription: oid(2),
+                scope,
+                token: Some(oid(3)),
+                state: ObservationState::Starting,
+            },
+        )))),
+    );
+    rig.pump();
+    assert!(
+        rig.state().feature.stopped.is_empty(),
+        "the mismatch counts as a sign"
+    );
+}
+
+#[test]
+fn a_picture_the_list_shows_as_it_is_is_not_put_to_the_core() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    let before = rig.core.snapshots();
+    rig.visible(true);
+    assert_eq!(
+        rig.core.snapshots(),
+        before + 1,
+        "only the new watch's own snapshot, no check of the current page"
+    );
+}
