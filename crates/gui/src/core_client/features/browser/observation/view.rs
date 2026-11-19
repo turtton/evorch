@@ -90,7 +90,7 @@ impl ObservationFeature {
                 });
             }
         }
-        if ui.small_button("Reload").clicked() {
+        if ui.small_button("Refresh agent pages").clicked() {
             click = Some(Click::Reload);
         }
         let current = self.current();

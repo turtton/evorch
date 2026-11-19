@@ -679,7 +679,7 @@ fn a_new_incarnation_revokes_the_run_and_its_pictures() {
     let mut rig = Rig::new(&["run-1"]);
     rig.watch("run-1", 1);
     rig.core.scopes = vec![scope_in("t", "run-1", "i2")];
-    rig.click("Reload");
+    rig.click("Refresh agent pages");
     let feature = &rig.state().feature;
     assert!(feature.live.is_none() && feature.stopped.is_empty());
     assert_eq!(
@@ -752,7 +752,7 @@ fn a_refused_subscription_is_shown_and_waits_for_the_user() {
     assert!(rig.state().feature.live.is_none());
     assert_eq!(rig.core.subscribes(), 1, "it is not retried by itself");
     rig.harness.get_by_label_contains("denied");
-    rig.click("Reload");
+    rig.click("Refresh agent pages");
     assert_eq!(rig.core.subscribes(), 2);
     assert!(rig.state().feature.live.is_some());
 }
