@@ -28,7 +28,10 @@ use renderer_ipc::{FrameWaitEnd, ReceivedFrame, RendererClient, TabId};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use workbench_protocol::namespaces::browser::{
     RendererId,
-    data::{BlobStart, FrameStart, MAX_BLOB_TRANSFERS, MAX_FRAME_BYTES, MAX_UNBOUND_CONNECTIONS},
+    data::{
+        BlobStart, FrameStart, MAX_BLOB_TRANSFERS, MAX_FRAME_BYTES, MAX_FRAME_SUBSCRIPTIONS,
+        MAX_UNBOUND_CONNECTIONS,
+    },
 };
 
 /// The host's half of a lease: dropping it ends the lease.
@@ -64,6 +67,9 @@ pub enum Lease {
 
 /// Raw frames of one tab, each one the latest at the time it is taken.
 pub struct FrameLease {
+    /// Holds one of the core-wide subscription places until the lease (and the
+    /// socket it feeds) is gone, not just until the subscription is unsubscribed.
+    _slot: Arc<OwnedSemaphorePermit>,
     client: Arc<RendererClient>,
     tab: TabId,
     public: RendererId,
@@ -139,9 +145,6 @@ pub struct BlobLease {
     reader: Box<dyn Read + Send>,
     revoked: Revoked,
     _permit: OwnedSemaphorePermit,
-    /// An artifact is immutable, so nothing revokes its lease: the lease keeps
-    /// its own half and the connection ending is what stops it.
-    _own: Option<Revocation>,
 }
 impl BlobLease {
     pub fn start(&self) -> &BlobStart {
@@ -192,6 +195,7 @@ pub struct Busy;
 struct Inner {
     pending: Mutex<HashMap<String, oneshot::Sender<Lease>>>,
     blobs: Arc<Semaphore>,
+    frames: Arc<Semaphore>,
     next_transfer: AtomicU64,
 }
 
@@ -206,6 +210,7 @@ impl Default for DataPlane {
             inner: Arc::new(Inner {
                 pending: Mutex::default(),
                 blobs: Arc::new(Semaphore::new(MAX_BLOB_TRANSFERS)),
+                frames: Arc::new(Semaphore::new(MAX_FRAME_SUBSCRIPTIONS)),
                 next_transfer: AtomicU64::new(1),
             }),
         }
@@ -251,8 +256,21 @@ impl DataPlane {
         sender.send(lease).is_ok()
     }
 
+    /// One of the core-wide frame subscription places. The subscription holds
+    /// it and so does its lease once bound, so a subscription that ended but
+    /// whose socket is still closing still counts. `None`: all are in use.
+    pub(crate) fn frame_slot(&self) -> Option<Arc<OwnedSemaphorePermit>> {
+        self.inner
+            .frames
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(Arc::new)
+    }
+
     /// A frame lease of `tab`, valid until the returned [`Revocation`] drops.
     pub(crate) fn frame_lease(
+        slot: Arc<OwnedSemaphorePermit>,
         client: Arc<RendererClient>,
         tab: crate::areas::browser::renderer::Tab,
         public: RendererId,
@@ -261,6 +279,7 @@ impl DataPlane {
         let (revocation, revoked) = revocation();
         (
             Lease::Frames(FrameLease {
+                _slot: slot,
                 client,
                 tab: tab.id,
                 public,
@@ -291,26 +310,9 @@ impl DataPlane {
                 reader,
                 revoked,
                 _permit: permit,
-                _own: None,
             }),
             revocation,
         ))
-    }
-
-    /// A blob lease nothing can revoke (an immutable artifact). `None`: all
-    /// transfer slots are in use.
-    pub(crate) fn artifact_lease(
-        &self,
-        start: BlobStart,
-        reader: Box<dyn Read + Send>,
-        epoch: u64,
-    ) -> Option<Lease> {
-        let (lease, revocation) = self.blob_lease(start, reader, epoch)?;
-        let Lease::Blob(mut blob) = lease else {
-            return None;
-        };
-        blob._own = Some(revocation);
-        Some(Lease::Blob(blob))
     }
 }
 

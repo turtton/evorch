@@ -324,13 +324,12 @@ impl RendererService {
                         (scope, Some(tab.physical), Some(RendererOutput::Done), None)
                     }
                     BrowserCommand::SubscribeRendererFrames { .. } => {
-                        if state.subscriptions.len() >= data::MAX_FRAME_SUBSCRIPTIONS {
-                            return Err(busy());
-                        }
                         // A 4K stream at 30fps or more is bounded tighter: eight
-                        // readers of it do not hold the latency bound (docs/renderer-measurement.md §9).
-                        // Only a new subscription is refused; the ones that exist
-                        // when a tab grows to 4K keep their stream.
+                        // readers of it do not hold the latency bound
+                        // (docs/renderer-measurement.md §9). Only a new subscription
+                        // is refused; the ones that exist when a tab grows to 4K
+                        // keep their stream. This is decided first, so the caller
+                        // gets the advice that fits this tab and not the general one.
                         let physical = tab.physical;
                         if is_four_k_stream(tab.public.viewport, tab.public.fps)
                             && state
@@ -342,6 +341,7 @@ impl RendererService {
                         {
                             return Err(four_k_busy());
                         }
+                        let slot = self.owner.data_plane().frame_slot().ok_or_else(busy)?;
                         let subscription = id();
                         let token = id();
                         state.subscriptions.insert(
@@ -354,6 +354,7 @@ impl RendererService {
                                 tab: tab.physical,
                                 expires: Instant::now() + GRACE,
                                 token: token.clone(),
+                                slot: Some(slot),
                                 bound: None,
                             },
                         );
@@ -562,17 +563,17 @@ impl RendererService {
                             if !state.tabs.contains_key(tab.public.reference.id.as_str()) {
                                 return Err(RendererFailure::Closed);
                             }
-                            if state.captures.len() >= MAX_RENDERER_TABS
-                                || bytes.len()
-                                    + state
-                                        .captures
-                                        .values()
-                                        .map(|capture| capture.bytes.len())
-                                        .sum::<usize>()
-                                    > MAX_CAPTURE_BYTES
-                            {
+                            if state.captures.len() >= MAX_RENDERER_TABS {
                                 return Err(RendererFailure::Busy);
                             }
+                            // The share is taken from the budget that also counts
+                            // transfers still reading a revoked Capture.
+                            let share = u32::try_from(bytes.len())
+                                .ok()
+                                .and_then(|len| {
+                                    self.capture_budget.clone().try_acquire_many_owned(len).ok()
+                                })
+                                .ok_or(RendererFailure::Busy)?;
                             let (client, surface) = state
                                 .operations
                                 .get(operation_id.as_str())
@@ -584,7 +585,10 @@ impl RendererService {
                                 capture_id.as_str().to_owned(),
                                 Capture {
                                     tab: tab.physical,
-                                    bytes: Arc::new(bytes),
+                                    bytes: Arc::new(HeldBytes {
+                                        bytes,
+                                        _share: share,
+                                    }),
                                     expires: Instant::now() + GRACE,
                                     operation: operation_id.clone(),
                                     connection_epoch: self.connections.epoch_of(&client),

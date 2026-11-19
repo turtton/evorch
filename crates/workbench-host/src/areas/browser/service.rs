@@ -50,6 +50,14 @@ fn denied() -> WorkbenchError {
 fn busy() -> WorkbenchError {
     error(ErrorCode::Busy, "renderer private resource budget is full")
 }
+/// All image transfer places are in use; the same request can be sent again.
+fn busy_retry() -> WorkbenchError {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        "too many image transfers",
+        RetryAdvice::SameRequest,
+    )
+}
 /// The tab's 4K stream has all the subscriptions it may have. A subscription
 /// ending frees a place, so deciding again after a fresh read is right.
 fn four_k_busy() -> WorkbenchError {
@@ -106,9 +114,29 @@ struct Operation {
     bytes: usize,
     cancel: tokio::sync::watch::Sender<bool>,
 }
+/// The bytes of a Capture and the share of the Capture budget they occupy. The
+/// share returns when the last reference is dropped: the Capture entry, and
+/// every transfer still reading from it after the entry was revoked.
+struct HeldBytes {
+    bytes: Vec<u8>,
+    _share: tokio::sync::OwnedSemaphorePermit,
+}
+impl std::ops::Deref for HeldBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+/// An image artifact transfer: the host's half of its lease, tied to the
+/// control connection that bound it so a disconnect or a drain ends it.
+struct ImageTransfer {
+    client: ClientId,
+    connection_epoch: Option<ConnectionEpoch>,
+    revocation: Revocation,
+}
 struct Capture {
     tab: Tab,
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<HeldBytes>,
     expires: Instant,
     /// The Capture operation that produced it; the binding names it again.
     operation: RendererId,
@@ -127,6 +155,8 @@ struct Subscription {
     tab: Tab,
     expires: Instant,
     token: RendererId,
+    /// A place of the core-wide subscription limit; the lease keeps it too.
+    slot: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     /// Set once a data connection is bound. The token is spent then; dropping
     /// the subscription drops this and ends the lease.
     bound: Option<Revocation>,
@@ -154,6 +184,7 @@ struct State {
     operations: HashMap<String, Operation>,
     captures: HashMap<String, Capture>,
     subscriptions: HashMap<String, Subscription>,
+    images: HashMap<String, ImageTransfer>,
 }
 pub(crate) struct RendererService {
     epoch: u64,
@@ -163,6 +194,8 @@ pub(crate) struct RendererService {
     gate: HostRestartGate,
     connections: Arc<ConnectionHooks>,
     source: ProjectionSource,
+    /// Bytes of Captures that exist, whether in `state` or still being sent.
+    capture_budget: Arc<tokio::sync::Semaphore>,
     state: Mutex<State>,
 }
 impl RendererService {
@@ -180,6 +213,7 @@ impl RendererService {
             source: handles
                 .source("browser")
                 .map_err(|e| BootstrapError::from(e.to_string()))?,
+            capture_budget: Arc::new(tokio::sync::Semaphore::new(MAX_CAPTURE_BYTES)),
             state: Mutex::default(),
         });
         service.start()?;
@@ -205,6 +239,10 @@ impl RendererService {
                 state.captures.retain(|_, capture| {
                     &capture.client != client
                         || capture.connection_epoch.is_some_and(|epoch| epoch > ended)
+                });
+                state.images.retain(|_, image| {
+                    &image.client != client
+                        || image.connection_epoch.is_some_and(|epoch| epoch > ended)
                 });
             }
         }));
@@ -342,6 +380,7 @@ impl RendererService {
         }
         state.captures.clear();
         state.subscriptions.clear();
+        state.images.clear();
     }
     fn prune(&self) {
         if self.gate.phase() != HostRestartPhase::Open {
@@ -387,6 +426,7 @@ impl RendererService {
         state.subscriptions.retain(|_, lease| {
             alive_after(&lease.bound, lease.expires, now) && live.contains(&lease.tab)
         });
+        state.images.retain(|_, image| !image.revocation.finished());
         for operation in state.operations.values_mut() {
             if operation
                 .tab

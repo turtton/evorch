@@ -12,7 +12,7 @@ use runtime::artifacts::{CaptureRequest, store_with_refs};
 use workbench_client::renderer::DataClientError;
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::{
-    errors::ErrorCode,
+    errors::{ErrorCode, RetryAdvice},
     ids::{ProjectId, ThreadId},
     namespaces::{
         artifacts::ArtifactRef,
@@ -155,6 +155,9 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     }
     std::fs::write(project_root.join("page.html"), "<p>one</p>").unwrap();
     std::fs::write(project_root.join("tiny.png"), TINY_PNG).unwrap();
+    let mut large = TINY_PNG.to_vec();
+    large.resize(6 * 1024 * 1024, 0);
+    std::fs::write(project_root.join("large.png"), &large).unwrap();
     let artifacts = store_with_refs(root.join("artifacts"), writer).unwrap();
     let capture = |file: &str| {
         let record = artifacts
@@ -181,6 +184,7 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     };
     let (page, _) = capture("page.html");
     let (image, image_record) = capture("tiny.png");
+    let (large_image, _) = capture("large.png");
     assert_eq!(image_record.media_type, "image/png");
 
     let socket = dir.sockets().join("renderer-data-plane.sock");
@@ -385,12 +389,45 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
     // A 4K stream at 30fps has at most four subscriptions of its own; any
     // other size keeps the general limit of eight.
     let tab4k = a.open(&page, &session_a).await;
+    let other_tab = a.open(&page, &session_a).await;
+    for _ in 0..data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS {
+        subscribe_to(&a, &other_tab).await.unwrap();
+    }
+    // A 4K stream is exclusive: the other tab stops streaming (its subscriptions stay).
+    let stopped_streaming = a
+        .browser(BrowserCommand::SetRendererStreaming {
+            tab: other_tab.reference.clone(),
+            enabled: false,
+        })
+        .await
+        .unwrap();
+    a.output(&stopped_streaming).await;
     resize(&mut a, &tab4k, 3840, 2160).await;
     let mut held = Vec::new();
     for _ in 0..data::MAX_FOUR_K_FRAME_SUBSCRIPTIONS {
         let op = subscribe_to(&a, &tab4k).await.unwrap();
         held.push(a.output(&op).await);
     }
+    let subscribe_cmd = |tab: &RendererTab| BrowserCommand::SubscribeRendererFrames {
+        tab: tab.reference.clone(),
+    };
+    assert_eq!(
+        a.refused(subscribe_cmd(&tab4k)).await,
+        (ErrorCode::Busy, RetryAdvice::AfterResync)
+    );
+    // With the core-wide limit also reached by another tab, the 4K tab still
+    // hears its own advice, and the other tab the general one.
+    assert_eq!(
+        a.refused(subscribe_cmd(&other_tab)).await,
+        (ErrorCode::Busy, RetryAdvice::Never)
+    );
+    let close = a
+        .browser(BrowserCommand::CloseRendererTab {
+            tab: other_tab.reference.clone(),
+        })
+        .await
+        .unwrap();
+    a.output(&close).await;
     assert_eq!(subscribe_to(&a, &tab4k).await.unwrap_err(), ErrorCode::Busy);
     // The refusal leaves the four as they were: the first still binds.
     let RendererOutput::Subscription {
@@ -434,6 +471,27 @@ async fn run(dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
         .await
         .unwrap();
     a.output(&close).await;
+    // An image transfer belongs to the control connection that asked for it:
+    // the image is larger than the socket buffers, so the core is still
+    // sending when that connection ends, and the transfer ends with it.
+    let c = Peer::connect(&socket, "client-c").await;
+    let blob = c
+        .channel()
+        .await
+        .bind_artifact(&c.client, large_image.clone())
+        .await
+        .unwrap();
+    assert_eq!(blob.start().total_bytes, large.len() as u64);
+    drop(c);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(3), blob.read_to_end(8 << 20))
+        .await
+        .expect("the transfer ended");
+    assert!(
+        ended.is_err(),
+        "the image arrived whole after its connection ended"
+    );
+
     drop((a, b));
     let _ = stop.send(true);
     server.abort();

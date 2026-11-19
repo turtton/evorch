@@ -59,6 +59,7 @@ impl Fixture {
             gate: HostRestartGate::default(),
             connections: Arc::default(),
             source: projection.source("browser").unwrap(),
+            capture_budget: Arc::new(tokio::sync::Semaphore::new(MAX_CAPTURE_BYTES)),
             state: Mutex::default(),
         });
         service.start().unwrap();
@@ -260,6 +261,7 @@ async fn disconnect_revokes_frame_leases_and_resume_rotates_token_without_transf
             },
             expires: Instant::now() + GRACE,
             token: id(),
+            slot: None,
             bound: None,
         },
     );
@@ -515,5 +517,47 @@ async fn private_operation_count_bytes_and_ttl_are_bounded_and_late_completion_s
             .reserve(&mut f.service.state.lock().unwrap(), &p, None, None)
             .is_ok()
     );
+    f.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_place_is_held_until_its_lease_lets_go() {
+    let f = Fixture::new();
+    let plane = f.service.owner.data_plane();
+    let mut places = (0..data::MAX_FRAME_SUBSCRIPTIONS)
+        .map(|_| plane.frame_slot().unwrap())
+        .collect::<Vec<_>>();
+    assert!(plane.frame_slot().is_none());
+    // The subscription ends while its lease (and so its socket) is still
+    // closing: that lease keeps the place.
+    let held_by_lease = places.pop().unwrap();
+    let held_by_subscription = held_by_lease.clone();
+    drop(held_by_subscription);
+    assert!(plane.frame_slot().is_none());
+    drop(held_by_lease);
+    assert!(plane.frame_slot().is_some());
+    f.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_revoked_capture_keeps_its_budget_until_the_last_transfer_lets_go() {
+    let f = Fixture::new();
+    let budget = f.service.capture_budget.clone();
+    let share = |len: usize| {
+        budget
+            .clone()
+            .try_acquire_many_owned(u32::try_from(len).unwrap())
+            .ok()
+    };
+    let bytes = Arc::new(HeldBytes {
+        bytes: vec![0; MAX_CAPTURE_BYTES],
+        _share: share(MAX_CAPTURE_BYTES).unwrap(),
+    });
+    // A transfer still reads the bytes after the Capture entry is gone.
+    let transfer = bytes.clone();
+    drop(bytes);
+    assert!(share(1).is_none(), "the transfer's bytes are still counted");
+    drop(transfer);
+    assert!(share(MAX_CAPTURE_BYTES).is_some());
     f.finish().await;
 }

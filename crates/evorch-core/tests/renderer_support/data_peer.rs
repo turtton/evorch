@@ -136,3 +136,15 @@ pub fn refusal<T>(result: Result<T, DataClientError>) -> ErrorCode {
         Ok(_) => panic!("the binding was accepted"),
     }
 }
+impl Peer {
+    /// The refusal of a command, with the advice that comes with it.
+    pub async fn refused(
+        &self,
+        command: BrowserCommand,
+    ) -> (ErrorCode, workbench_protocol::errors::RetryAdvice) {
+        match self.client.command(Command::Browser(command)).await {
+            Err(ClientError::Server(error)) => (error.code, error.retry),
+            other => panic!("not a refusal of the core: {other:?}"),
+        }
+    }
+}

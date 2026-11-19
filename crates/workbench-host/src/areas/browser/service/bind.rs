@@ -6,9 +6,10 @@ use workbench_protocol::namespaces::browser::data::{
     BlobSource, BlobStart, MAX_CAPTURE_BLOB_BYTES, MediaType,
 };
 
-/// The bytes of a Capture, read without copying them.
+/// The bytes of a Capture, read without copying them. Holding them keeps their
+/// share of the Capture budget.
 struct SharedBytes {
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<HeldBytes>,
     at: usize,
 }
 impl Read for SharedBytes {
@@ -56,6 +57,7 @@ impl RendererService {
                 {
                     return Err(denied());
                 }
+                let slot = lease.slot.clone().ok_or_else(denied)?;
                 let tab = state
                     .tabs
                     .values()
@@ -69,6 +71,7 @@ impl RendererService {
                 }
                 let source = self.owner.frame_source(tab.physical).ok_or_else(denied)?;
                 let (lease_out, revocation) = DataPlane::frame_lease(
+                    slot,
                     source,
                     tab.physical,
                     tab.public.reference.id.clone(),
@@ -121,6 +124,38 @@ impl RendererService {
                 Ok(())
             }
         }
+    }
+    /// Binds `channel` to the bytes of an image artifact the caller was allowed
+    /// to read. The transfer is the caller's: it ends when the control
+    /// connection that asked for it ends, or when the core drains.
+    pub(crate) fn bind_image(
+        &self,
+        channel: &RendererId,
+        start: BlobStart,
+        reader: Box<dyn Read + Send>,
+        p: &Provenance,
+    ) -> Result<(), WorkbenchError> {
+        let client = local(p)?.clone();
+        let plane: DataPlane = self.owner.data_plane();
+        let mut state = self.state.lock().unwrap();
+        if !plane.is_pending(channel) || self.gate.phase() != HostRestartPhase::Open {
+            return Err(denied());
+        }
+        let (lease, revocation) = plane
+            .blob_lease(start, reader, self.epoch)
+            .ok_or_else(busy_retry)?;
+        if !plane.bind(channel, lease) {
+            return Err(denied());
+        }
+        state.images.insert(
+            id().as_str().to_owned(),
+            ImageTransfer {
+                connection_epoch: self.connections.epoch_of(&client),
+                client,
+                revocation,
+            },
+        );
+        Ok(())
     }
     fn session_of(
         &self,

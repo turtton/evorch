@@ -62,7 +62,7 @@ impl CommandHost {
             ArtifactsCommand::BindArtifactContent {
                 channel_id,
                 artifact,
-            } => return self.bind_artifact_content(&channel_id, &artifact),
+            } => return self.bind_artifact_content(&channel_id, &artifact, provenance),
         };
         let record = self.renderer_artifact_record(&artifact)?;
         let operation_id = self
@@ -186,8 +186,10 @@ impl CommandHost {
         &self,
         channel: &workbench_protocol::namespaces::browser::RendererId,
         artifact: &ArtifactRef,
+        provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
         let record = self.renderer_artifact_record(artifact)?;
+        let service = self.areas.browser.service().map_err(|_| surface_denied())?;
         let plane = self
             .areas
             .browser
@@ -199,18 +201,7 @@ impl CommandHost {
             return Err(surface_denied());
         }
         let (start, reader) = self.areas.artifacts.image_blob(&record)?;
-        let lease = plane
-            .artifact_lease(start, reader, self.projection.instance_epoch().get())
-            .ok_or_else(|| {
-                WorkbenchError::new(
-                    ErrorCode::Busy,
-                    "too many image transfers",
-                    RetryAdvice::SameRequest,
-                )
-            })?;
-        if !plane.bind(channel, lease) {
-            return Err(surface_denied());
-        }
+        service.bind_image(channel, start, reader, provenance)?;
         Ok(CommandReply::with_result(CommandResult::Artifacts(
             ArtifactsResult::Bound {},
         )))

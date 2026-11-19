@@ -88,6 +88,18 @@ async fn send_chunk(write: &mut OwnedWriteHalf, head: &[u8], body: &[u8]) -> io:
     Ok(())
 }
 
+/// Ends the connection after `error`. A peer that made no progress for
+/// [`NO_PROGRESS`] is not told why: its socket is full, so the record would
+/// wait another full window. The connection is closed at once, which is what
+/// returns its socket, lease, buffers and transfer slot.
+async fn end_after(write: &mut OwnedWriteHalf, error: &io::Error) {
+    if error.kind() == io::ErrorKind::TimedOut {
+        let _ = write.shutdown().await;
+    } else {
+        let _ = finish(write, ErrorCode::Invalid).await;
+    }
+}
+
 /// Says why the connection ends, as far as the peer still listens.
 async fn finish(write: &mut OwnedWriteHalf, code: ErrorCode) -> io::Result<()> {
     let _ = send(write, &ErrorMeta { code }.encode()).await;
@@ -315,13 +327,51 @@ async fn blob(
         Ok(Stop::Revoked) => finish(&mut write, ErrorCode::Closed).await,
         Ok(Stop::Shutdown) => Ok(()),
         Err(error) => {
-            let code = if error.kind() == io::ErrorKind::TimedOut {
-                ErrorCode::TimedOut
-            } else {
-                ErrorCode::Invalid
-            };
-            finish(&mut write, code).await?;
+            end_after(&mut write, &error).await;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixStream;
+
+    /// A peer that never reads: fill the socket until a write would block.
+    async fn full_socket() -> (OwnedWriteHalf, OwnedReadHalf, UnixStream) {
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let (read, mut write) = ours.into_split();
+        let block = vec![0u8; 64 * 1024];
+        while timeout(Duration::from_millis(50), write.write_all(&block))
+            .await
+            .is_ok()
+        {}
+        (write, read, peer)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_peer_is_cut_off_at_the_no_progress_window_and_not_told_why() {
+        let (mut write, _read, peer) = full_socket().await;
+        let started = tokio::time::Instant::now();
+        let error = send(&mut write, &[0u8; 64 * 1024]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        end_after(&mut write, &error).await;
+        // The window is spent once: closing waits for nothing more.
+        assert!(started.elapsed() < NO_PROGRESS + Duration::from_millis(100));
+        assert!(started.elapsed() >= NO_PROGRESS);
+        // The peer sees the connection end, with no record of why behind
+        // the bytes that were already queued.
+        drop(write);
+        let mut peer = peer;
+        let mut sink = vec![0u8; 1 << 20];
+        let mut total = 0;
+        loop {
+            match peer.read(&mut sink).await.unwrap() {
+                0 => break,
+                n => total += n,
+            }
+        }
+        assert!(total > 0);
     }
 }
