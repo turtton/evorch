@@ -122,6 +122,10 @@ struct Core {
     keys: HashMap<u64, DataKey>,
     navigations: Vec<Navigation>,
     refuse_subscribe: Option<FeatureError>,
+    /// The run list is answered with a refusal.
+    fail_list: bool,
+    /// The state a subscription is answered with instead of being registered.
+    subscribe_state: Option<ObservationState>,
     /// Scopes whose incarnation the core no longer accepts.
     revoked: Vec<ObservationScope>,
     /// Scopes the host refuses (it lost them between its snapshot and its own check).
@@ -163,6 +167,13 @@ impl Core {
         self.commands.push(command.clone());
         let result = match command {
             Command::Browser(BrowserCommand::SubscribeAgentFrames { scope }) => {
+                if let Some(state) = self.subscribe_state.take() {
+                    return FeatureReply::Command(Ok(CommandReply::with_result(
+                        CommandResult::Browser(BrowserResult::AgentObservation(
+                            ObservationResult::State(state),
+                        )),
+                    )));
+                }
                 if let Some(error) = self.refuse_subscribe.take() {
                     return FeatureReply::Command(Err(error));
                 }
@@ -187,6 +198,9 @@ impl Core {
     fn query(&mut self, query: &Query) -> FeatureReply {
         self.queries.push(query.clone());
         let reply = match query {
+            Query::Browser(BrowserQuery::ListAgentRuns { .. }) if self.fail_list => {
+                return FeatureReply::Query(Err(FeatureError::new("list refused")));
+            }
             Query::Browser(BrowserQuery::ListAgentRuns { .. }) => ObservationReply::Runs {
                 scopes: self.scopes.clone(),
             },
@@ -1208,4 +1222,85 @@ fn a_pending_check_survives_the_end_of_the_watch_and_leaves_with_its_answer() {
     );
     rig.pump();
     assert!(rig.state().feature.verify.is_empty());
+}
+
+fn picture_waiting_for_a_new_generation(rig: &mut Rig) {
+    rig.watch("run-1", 1);
+    rig.visible(false);
+    rig.core.scopes = vec![scope_gen("run-1", 2)];
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+}
+
+#[test]
+fn a_subscription_answered_revoked_puts_every_kept_picture_to_the_core() {
+    let mut rig = Rig::new(&["run-1"]);
+    picture_waiting_for_a_new_generation(&mut rig);
+    rig.core.subscribe_state = Some(ObservationState::Revoked);
+    rig.core.revoked = vec![scope_gen("run-1", 1)];
+    rig.visible(true);
+    let feature = &rig.state().feature;
+    assert!(feature.live.is_none(), "no notice was ever sent for it");
+    assert!(
+        feature.stopped.is_empty(),
+        "the generation 1 picture was checked and dropped"
+    );
+    assert!(feature.verify.is_empty());
+}
+
+#[test]
+fn a_refused_subscription_puts_every_kept_picture_to_the_core() {
+    let mut rig = Rig::new(&["run-1"]);
+    picture_waiting_for_a_new_generation(&mut rig);
+    rig.core.refuse_subscribe = Some(FeatureError::new("denied"));
+    rig.core.denied = vec![scope_gen("run-1", 1)];
+    rig.visible(true);
+    assert!(
+        rig.state().feature.stopped.is_empty(),
+        "the check was refused, so the picture is lost"
+    );
+}
+
+#[test]
+fn a_failed_or_unexpected_answer_puts_every_kept_picture_to_the_core() {
+    let mut rig = Rig::new(&["run-1"]);
+    picture_waiting_for_a_new_generation(&mut rig);
+    rig.core.fail_list = true;
+    rig.core.revoked = vec![scope_gen("run-1", 1)];
+    rig.visible(true);
+    assert!(rig.state().feature.stopped.is_empty());
+}
+
+#[test]
+fn the_queue_holds_nine_scopes_and_what_cannot_be_queued_is_dropped() {
+    let runs: Vec<String> = (1..=9).map(|n| format!("run-{n}")).collect();
+    let names: Vec<&str> = runs.iter().map(String::as_str).collect();
+    let mut rig = Rig::new(&names);
+    for run in &names {
+        rig.watch(run, 1);
+    }
+    let feature = rig.feature();
+    assert_eq!(feature.stopped.len(), MAX_STOPPED_IMAGES);
+    assert!(feature.live.as_ref().is_some_and(|l| l.shown.is_some()));
+    feature.suspect();
+    assert_eq!(
+        feature.verify.len(),
+        MAX_VERIFY,
+        "the 8 pictures and the live scope fit"
+    );
+    assert_eq!(feature.stopped.len(), MAX_STOPPED_IMAGES);
+    assert!(feature.live.is_some());
+
+    let mut full = Rig::new(&names);
+    for run in &names {
+        full.watch(run, 1);
+    }
+    let feature = full.feature();
+    for n in 0..MAX_VERIFY {
+        feature.queue_verify(&scope(&format!("elsewhere-{n}")));
+    }
+    assert_eq!(feature.verify.len(), MAX_VERIFY);
+    feature.suspect();
+    assert_eq!(feature.verify.len(), MAX_VERIFY, "nothing more is queued");
+    assert!(feature.stopped.is_empty(), "no picture waits unchecked");
+    assert!(feature.live.is_none(), "nor does the live one");
 }

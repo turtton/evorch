@@ -279,7 +279,7 @@ impl ObservationFeature {
         if self.verify.len() < MAX_VERIFY {
             self.verify.push_back(scope.clone());
         } else {
-            self.revoke_scope(scope);
+            self.drop_scope(scope);
         }
     }
 
@@ -328,12 +328,27 @@ impl ObservationFeature {
         }
     }
 
-    /// `scope` is no longer valid, whichever state its watch is in: its
-    /// pictures go, those of any other scope (a newer page generation or
-    /// incarnation of the run) stay.
-    fn revoke_scope(&mut self, scope: &ObservationScope) {
+    /// Something suggests a revocation (a notice, a refusal, a failed or
+    /// unexpected answer): everything on screen is put to the core, the pictures
+    /// kept and the live scope, whichever scope the sign came from. This is the
+    /// one entry to the queue; every place that sees such a sign calls it.
+    fn suspect(&mut self) {
+        let scopes: Vec<_> = self
+            .stopped
+            .iter()
+            .map(|s| s.scope.clone())
+            .chain(self.live.as_ref().map(|l| l.scope.clone()))
+            .collect();
+        for scope in &scopes {
+            self.queue_verify(scope);
+        }
+    }
+
+    /// `scope` cannot be queued or was refused: its pictures go, those of any
+    /// other scope (a newer page generation or incarnation of the run) stay.
+    fn drop_scope(&mut self, scope: &ObservationScope) {
         if self.live.as_ref().is_some_and(|l| l.scope == *scope) {
-            self.revoke();
+            self.revoke_live();
         }
         self.stopped.retain(|s| s.scope != *scope);
         let superseded = matches!(&self.runs, Runs::Loaded(scopes)
@@ -344,6 +359,12 @@ impl ObservationFeature {
         {
             self.hold_for(scope, NOTE_REVOKED.to_owned());
         }
+    }
+
+    /// `scope` is no longer valid, whichever state its watch is in.
+    fn revoke_scope(&mut self, scope: &ObservationScope) {
+        self.drop_scope(scope);
+        self.suspect();
     }
 
     fn push_stopped(&mut self, stopped: Stopped) {
@@ -390,6 +411,11 @@ impl ObservationFeature {
 
     /// The incarnation is no longer valid: nothing of the run stays on screen.
     fn revoke(&mut self) {
+        self.revoke_live();
+        self.suspect();
+    }
+
+    fn revoke_live(&mut self) {
         let Some(scope) = self.live.as_ref().map(|l| l.scope.clone()) else {
             return;
         };
@@ -451,6 +477,9 @@ impl ObservationFeature {
             }
             FeatureReply::Query(Ok(_)) => Err(NOTE_UNEXPECTED.to_owned()),
         };
+        if !matches!(result, Ok(ObservationResult::Subscribed { .. })) {
+            self.suspect();
+        }
         match result {
             Ok(ObservationResult::Subscribed { subscription, .. }) => {
                 if waiting && let Some(live) = &mut self.live {
@@ -476,6 +505,15 @@ impl ObservationFeature {
         subscription: ObservationId,
         reply: FeatureReply,
     ) {
+        let issued = matches!(
+            &reply,
+            FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+                ObservationReply::Subscription { token: Some(_), .. }
+            ))))
+        );
+        if !issued {
+            self.suspect();
+        }
         let waiting = self.live.as_ref().is_some_and(|l| {
             l.scope == scope && matches!(&l.stage, Stage::Token(s) if *s == subscription)
         });
@@ -538,6 +576,9 @@ impl ObservationFeature {
     }
 
     fn on_snapshot_reply(&mut self, scope: ObservationScope, reply: FeatureReply) {
+        if !Self::confirms(&reply, &scope) {
+            self.suspect();
+        }
         if self.settle(&scope, &reply) {
             return;
         }
@@ -792,23 +833,13 @@ impl Feature for ObservationFeature {
         };
         // The revision is not compared: a state change may come with the same one.
         if changed.state == ObservationState::Revoked {
-            // Whichever subscription it was, the same is put to the core: every
-            // picture kept and the live scope.
-            let scopes: Vec<_> = self
-                .stopped
-                .iter()
-                .map(|s| s.scope.clone())
-                .chain(self.live.as_ref().map(|l| l.scope.clone()))
-                .collect();
-            if self
+            let ends_live = self
                 .live
                 .as_ref()
-                .is_some_and(|l| l.stage.subscription() == Some(&changed.subscription))
-            {
+                .is_some_and(|l| l.stage.subscription() == Some(&changed.subscription));
+            self.suspect();
+            if ends_live {
                 self.finish(NOTE_ENDED);
-            }
-            for scope in &scopes {
-                self.queue_verify(scope);
             }
             return;
         }
@@ -837,11 +868,18 @@ impl Feature for ObservationFeature {
                     ))) => self.on_runs(&project, &thread, scopes),
                     FeatureReply::Query(Ok(QueryReply::Browser(
                         BrowserReply::AgentObservation(ObservationReply::State(state)),
-                    ))) => self.runs = Runs::Failed(state_note(state).to_owned()),
+                    ))) => {
+                        self.suspect();
+                        self.runs = Runs::Failed(state_note(state).to_owned())
+                    }
                     FeatureReply::Query(Err(e)) | FeatureReply::Command(Err(e)) => {
+                        self.suspect();
                         self.runs = Runs::Failed(e.message)
                     }
-                    _ => self.runs = Runs::Failed(NOTE_UNEXPECTED.to_owned()),
+                    _ => {
+                        self.suspect();
+                        self.runs = Runs::Failed(NOTE_UNEXPECTED.to_owned())
+                    }
                 }
             }
             Request::Snapshot(scope) => self.on_snapshot_reply(scope, reply),
@@ -875,7 +913,10 @@ impl Feature for ObservationFeature {
             }
             DataNotice::Ready => {}
             DataNotice::Completed => self.finish(NOTE_ENDED),
-            DataNotice::Failed(error) => self.finish(&error.message),
+            DataNotice::Failed(error) => {
+                self.suspect();
+                self.finish(&error.message)
+            }
             DataNotice::Cancelled => self.finish(NOTE_ENDED),
         }
     }
