@@ -648,37 +648,43 @@ frame は欠落していない。4 tab（720p）は、baseline の 4 tab 合計 
   ものか実装によるものかは切り分けられていない。
 - macOS / Windows。この data plane は Linux の UDS だけ（既存の方針）。
 
-### 9.1 PSS・allocation・保持 memory（fake helper、2026-11、修正後の harness）
+### 9.1 PSS・allocation・heap（fake helper、2026-11、窓を揃えた harness）
 
-同じ harness（8 秒窓、30fps、24 論理 CPU の共有 workstation）に、counting global allocator と
-`/proc/<pid>/smaps_rollup` の PSS を足した。allocator の数は core・全 client・harness が同じ
-process にいる合計（helper は別 process なので含まない）。PSS は core の process と helper の
-子 process を別々に読む。stalled の scenario は上限 4 を守る `k4_1tab_3reader_1stalled`。
+§9 の表を測った harness から、集計の窓を直して測り直した。**すべての reader は、同じ
+`[start, end)` の窓（start は streaming を有効にしてから warm-up の 12 frame 分の時間が
+過ぎた時刻、end は経過時間を確定した時刻）に受け取った frame だけを、latency・frame 数・
+allocation の分母に数える**。経過時間・CPU・allocation の差分も、同じ start から取る。
+8 秒窓、30fps、24 論理 CPU の共有 workstation（実行中の loadavg は 11 前後）。counting global
+allocator の数は core・全 client・harness が同じ process にいる合計で、helper は別 process なので
+含まない。PSS は `/proc/<pid>/smaps_rollup` を core の process と helper の子 process で別々に読む。
+stalled の scenario は上限 4 を守る `k4_1tab_3reader_1stalled`。
 
-| scenario | p50 ms | p95 ms | p99 ms | fps/reader | CPU | RSS MiB | PSS core / helper MiB | allocs/frame | alloc B/frame | 大きい確保（窓内） | live heap peak MiB | client 終了後の保持 KiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| p720_1tab_1reader | 1.76 | 2.80 | 5.15 | 30.08 | 0.09 | 64 | 61 / 8 | 465 | 75,822 | 3 | 10 | 7,141 |
-| p720_4tab_1reader | 3.25 | 5.31 | 8.45 | 30.10 | 0.30 | 87 | 83 / 36 | 178 | 43,905 | 9 | 31 | 6,954 |
-| p720_1tab_8reader | 3.57 | 4.32 | 8.18 | 29.99 | 0.93 | 89 | 86 / 8 | 119 | 24,118 | 10 | 35 | 7,102 |
-| p720_4tab_2reader | 3.56 | 4.90 | 5.90 | 29.99 | 0.55 | 101 | 98 / 29 | 124 | 30,387 | 13 | 45 | 6,935 |
-| p1080_4tab_2reader | 7.68 | 9.82 | 10.41 | 30.06 | 1.04 | 158 | 155 / 65 | 193 | 61,678 | 13 | 102 | 15,935 |
-| k4_1tab_1reader | 15.11 | 25.71 | 31.61 | 30.05 | 0.44 | 148 | 145 / 65 | 914 | 441,149 | 3 | 94 | 64,733 |
-| k4_1tab_4reader | 17.16 | 19.64 | 20.48 | 29.94 | 2.12 | 244 | 240 / 64 | 619 | 218,540 | 6 | 189 | 64,725 |
-| k4_1tab_3reader_1stalled | 14.77 | 17.14 | 17.82 | 30.00 | 1.25 | 244 | 240 / 64 | 650 | 288,372 | 6 | 189 | 64,725 |
+| scenario | frame 数 | p50 ms | p95 ms | p99 ms | max ms | fps/reader | CPU | RSS MiB | PSS core / helper MiB | allocs/frame | alloc B/frame | 窓内の 1MiB 以上の確保 | window 開始時の heap MiB | close 要求の 2 秒後の heap MiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p720_1tab_1reader | 247 | 1.69 | 2.59 | 3.51 | 4.7 | 30.10 | 0.08 | 65 | 61 / 8 | 467 | 30921 | 0 | 13 | 9 |
+| p720_4tab_1reader | 992 | 3.27 | 6.23 | 8.73 | 10.6 | 30.11 | 0.35 | 86 | 82 / 40 | 170 | 9172 | 0 | 34 | 9 |
+| p720_1tab_8reader | 1976 | 3.63 | 5.76 | 8.24 | 17.7 | 30.02 | 0.70 | 90 | 86 / 8 | 119 | 5353 | 0 | 37 | 9 |
+| p720_4tab_2reader | 1970 | 3.57 | 5.01 | 6.02 | 8.1 | 30.02 | 0.53 | 100 | 97 / 33 | 120 | 5458 | 0 | 48 | 9 |
+| p1080_4tab_2reader | 1984 | 10.11 | 13.93 | 15.69 | 20.0 | 30.07 | 1.40 | 158 | 155 / 88 | 190 | 6588 | 0 | 105 | 18 |
+| k4_1tab_1reader | 247 | 12.61 | 17.27 | 18.71 | 19.1 | 30.04 | 0.41 | 149 | 145 / 64 | 926 | 38798 | 0 | 97 | 65 |
+| k4_1tab_4reader | 992 | 21.45 | 26.32 | 27.99 | 31.2 | 29.99 | 2.61 | 244 | 241 / 64 | 618 | 16208 | 0 | 192 | 65 |
+| k4_1tab_3reader_1stalled | 738 | 15.01 | 17.20 | 18.48 | 18.9 | 29.94 | 1.27 | 244 | 241 / 64 | 656 | 18882 | 0 | 192 | 65 |
 
-- **frame あたりの大きい確保は 1 reader あたり 0〜1 回未満**: 窓内の 1 MiB 以上の確保は 3〜13 回
-  （frame 247〜1,976 を配った間）。frame ごとに全体を copy していない。allocs/frame の多くは
-  header・chunk の小さい確保で、reader が増えるほど 1 frame あたりは減る（共有）。
-- **p95 25.71ms（`k4_1tab_1reader`）は外れ値**。同じ構成を 5 回繰り返した（loadavg 7.0〜9.8）ところ
-  p95 は 14.15、14.3、14.3、15.2、17.76ms で、基準の 33ms 以下。`k4_1tab_3reader_1stalled` の 5 回は
-  15.3〜18.57ms（max 46ms の 1 回あり。この回も p95 は基準内）。元データは PR に載せた。
-- **client 終了後の保持**: 全 client を閉じて 2 秒待った後の live heap の増分。720p で約 7MiB、
-  1080p で約 16MiB、4K で約 63MiB（4K の frame 約 33MB の約 2 枚、1080p は frame 8.3MB の約 2 枚、
-  720p は 3.7MB の約 2 枚）。**この時点では tab と helper の link はまだ開いていて**、tab が最新の
-  frame を 1 枚、helper の受信側が次の frame の buffer を 1 枚持つ、という推定と大きさが合う。
-  ただし、tab を閉じた後に 0 へ戻ることまでは確かめていない（未検証の推定）。subscription と転送が
-  持つ frame は client の終了で外れており、reader 数（1〜8）を変えても保持量は変わらない
-  （4K: 1 reader と 4 reader で同じ 64.7MB）ので、reader ごとの保持はない。
-- PSS は core の process が RSS とほぼ同じ（client も同じ process）。helper は 4K で約 65MiB
-  （frame 2 枚分の buffer）で、tab 数に比例する。
-- 実 CEF の helper の PSS と、tab を閉じた後の保持は測っていない。
+- **p95 はすべて 33ms 以下**（最大は `k4_1tab_4reader` の 26.32ms。この run は loadavg 約 11 で、§9 の 12 回
+  の p95 18.8〜25.7ms より高い側に出た）。§9 の表は窓の数え方が違う（先頭 10 frame を数で外し、接続が
+  終わるまで数えた）ので、二つの値は同じ測定の再現ではなく、同じ基準に対する別の証跡として読む。
+  `k4_1tab_1reader` の p95 は run ごとに 14〜25.7ms の幅があった（§9.1 の前の 5 回: 14.15〜17.76ms）。
+- **steady state で frame ごとの大きい確保はない**: 窓内の 1MiB 以上の確保は全 scenario で 0 回、
+  live heap の窓内の増分（peak）も 0 だった。frame の buffer は warm-up の間に pool が持ち終わり、
+  窓の間は再利用されている。window 開始時の heap（4K の 4 reader で 192MiB）は、その pool と
+  各 reader が持つ frame の合計。allocs/frame の多くは header・chunk の小さい確保で、reader が
+  増えるほど 1 frame あたりは減る（frame の共有）。
+- **close 後の heap**: 全 client の接続を閉じ、`CloseRendererSession` を**要求**して 2 秒待った後の heap は、
+  720p で約 9MiB、1080p で約 18MiB、4K で約 65MiB（4K の frame 約 33MB の 2 枚ぶんに近い）。
+  close は要求しただけで、**完了したかどうかも、何がこの heap を保持しているかも確かめていない**。
+  観測した事実は、reader の数（1〜4）を変えても 4K では同じ約 65MiB で、reader ごとの保持は
+  見えないこと、だけ。原因の特定と、close の完了後に 0 近くへ戻るかの確認は未実施。
+- PSS は core の process が RSS とほぼ同じ（client も同じ process）。helper の PSS は fake helper の合成
+  producer の値で、4K で約 64MiB、tab 数にほぼ比例する。
+- 元の JSONL（この表と §9 の追加の繰り返しの run）は PR #693 のコメントに添付した。
+- 実 CEF の helper の PSS と、close の完了後の heap は測っていない。

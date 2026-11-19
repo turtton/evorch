@@ -83,6 +83,16 @@ static ALLOCATOR: counting::Counting = counting::Counting;
 /// Frames the readers have received so far.
 static FRAMES_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The measurement window, in `now_nanos` time. Frames count only inside
+/// `[start, end)`; both are unset until the window is open and closed.
+static WINDOW_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static WINDOW_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn window_contains(at: u64) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    at >= WINDOW_START.load(Relaxed) && at < WINDOW_END.load(Relaxed)
+}
+
 /// Proportional set size in KiB of `pid` (`self` for this process).
 fn pss_kib(pid: &str) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
@@ -195,7 +205,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 #[derive(Default)]
 struct Reader {
     latencies_ms: Vec<f64>,
+    /// Frames received inside the window.
     frames: u64,
+    /// Every frame received, window or not.
+    received: u64,
 }
 
 fn run_scenario(scenario: Scenario) {
@@ -219,6 +232,7 @@ fn run_scenario(scenario: Scenario) {
 }
 
 async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::path::PathBuf) {
+    let heap_at_test_start = counting::LIVE.load(std::sync::atomic::Ordering::Relaxed);
     let project_root = root.join("one");
     std::fs::create_dir_all(&project_root).unwrap();
     let store = SidebarStore::new(root.join("sidebar.json"));
@@ -355,11 +369,12 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
                     loop {
                         match stream.next_frame_into(&mut bytes).await {
                             Ok(Some(_)) => {
-                                FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let received = now_nanos();
                                 let stamp = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                                stats.frames += 1;
-                                if stats.frames as usize > WARMUP_FRAMES {
+                                stats.received += 1;
+                                if window_contains(received) {
+                                    FRAMES_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    stats.frames += 1;
                                     stats
                                         .latencies_ms
                                         .push(received.saturating_sub(stamp) as f64 / 1e6);
@@ -369,7 +384,7 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
                                 eprintln!(
                                     "reader ended: {:?} after {} frames",
                                     other.map(|_| ()),
-                                    stats.frames
+                                    stats.received
                                 );
                                 return stats;
                             }
@@ -384,15 +399,6 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
     }
 
     use std::sync::atomic::Ordering::Relaxed;
-    let cpu_before = cpu_seconds();
-    let (calls_before, bytes_before, large_before) = (
-        counting::CALLS.load(Relaxed),
-        counting::BYTES.load(Relaxed),
-        counting::LARGE.load(Relaxed),
-    );
-    let live_before = counting::LIVE.load(Relaxed);
-    counting::PEAK.store(live_before, Relaxed);
-    let started = std::time::Instant::now();
     for (peer, _, tab) in &peers {
         peer.browser(BrowserCommand::SetRendererStreaming {
             tab: tab.reference.clone(),
@@ -401,6 +407,24 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         .await
         .unwrap();
     }
+    // The warm-up before the window: a load duration, not a synchronization.
+    tokio::time::sleep(Duration::from_secs_f64(
+        (WARMUP_FRAMES as f64 + 2.0) / f64::from(FPS),
+    ))
+    .await;
+    let cpu_before = cpu_seconds();
+    let (calls_before, bytes_before, large_before) = (
+        counting::CALLS.load(Relaxed),
+        counting::BYTES.load(Relaxed),
+        counting::LARGE.load(Relaxed),
+    );
+    let live_before = counting::LIVE.load(Relaxed);
+    let heap_at_window_start = live_before.saturating_sub(heap_at_test_start);
+    counting::PEAK.store(live_before, Relaxed);
+    // Every reader counts a frame only when it was received inside
+    // [start, end), the interval the elapsed time below describes.
+    let started = std::time::Instant::now();
+    WINDOW_START.store(now_nanos(), Relaxed);
     // The measurement window itself: a load duration, not a synchronization.
     let (mut pss_core, mut pss_helper) = (0, 0);
     while started.elapsed() < WINDOW {
@@ -408,6 +432,7 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
         pss_core = pss_core.max(pss_kib("self"));
         pss_helper = pss_helper.max(children_pss_kib());
     }
+    WINDOW_END.store(now_nanos(), Relaxed);
     let cpu = cpu_seconds() - cpu_before;
     let elapsed = started.elapsed().as_secs_f64();
     let seen = FRAMES_SEEN.load(Relaxed).max(1);
@@ -462,7 +487,9 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
     // synchronization with the transfers (readers have all ended above).
     drop((peers, held));
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let retained = counting::LIVE.load(Relaxed).saturating_sub(live_before);
+    let heap_after_close = counting::LIVE
+        .load(Relaxed)
+        .saturating_sub(heap_at_test_start);
     let mut line = line;
     line["frames_received_in_window"] = seen.into();
     line["pss_core_process_mib"] = (pss_core / 1024).into();
@@ -472,7 +499,8 @@ async fn measure(scenario: Scenario, dir: test_socket_dir::SplitDir, root: std::
     line["large_allocs_in_window"] = large.into();
     line["large_allocs_per_received_frame"] = (large as f64 / seen as f64).into();
     line["peak_live_heap_mib"] = (peak_live / (1 << 20)).into();
-    line["retained_heap_after_close_kib"] = (retained / 1024).into();
+    line["heap_in_use_at_window_start_kib"] = (heap_at_window_start / 1024).into();
+    line["heap_in_use_after_close_requested_kib"] = (heap_after_close / 1024).into();
     println!("MEASURE {line}");
     if let Some(path) = std::env::var_os("EVORCH_MEASURE_OUT") {
         use std::io::Write;
