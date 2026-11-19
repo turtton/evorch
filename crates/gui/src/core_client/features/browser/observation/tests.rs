@@ -403,19 +403,28 @@ impl Rig {
         self.pump();
     }
 
-    fn event(&mut self, state: ObservationState) {
-        let subscription = self
-            .state()
+    fn subscription(&self) -> ObservationId {
+        self.state()
             .feature
             .live
             .as_ref()
             .and_then(|l| l.stage.subscription().cloned())
-            .expect("subscribed");
+            .expect("subscribed")
+    }
+
+    /// A notice of the live subscription, with the revision of the snapshot
+    /// the core already served (a state may change without a new revision).
+    fn event(&mut self, state: ObservationState) {
+        let subscription = self.subscription();
+        self.notify(subscription, state, 1);
+    }
+
+    fn notify(&mut self, subscription: ObservationId, state: ObservationState, revision: u64) {
         self.feature()
             .event(&UiEvent::Browser(BrowserEvent::AgentObservationChanged(
                 ObservationEvent {
                     subscription,
-                    revision: 2,
+                    revision,
                     state,
                 },
             )));
@@ -783,5 +792,130 @@ fn a_subscription_answered_after_the_release_is_released_too() {
     assert!(
         rig.core.subscriptions.is_empty(),
         "the late subscription was unsubscribed"
+    );
+}
+
+#[test]
+fn a_stream_that_ends_before_its_revocation_still_loses_its_picture() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let subscription = rig.subscription();
+    let tag = rig.live_tag();
+    rig.feature().data(tag, DataNotice::Completed);
+    rig.pump();
+    assert!(rig.state().feature.live.is_none());
+    assert_eq!(
+        rig.state().feature.stopped.len(),
+        1,
+        "kept as a still picture for now"
+    );
+    rig.notify(subscription, ObservationState::Revoked, 1);
+    assert!(rig.state().feature.stopped.is_empty());
+    rig.harness.get_by_label_contains(NOTE_REVOKED);
+}
+
+#[test]
+fn a_late_revocation_of_an_old_run_leaves_the_new_watch_alone() {
+    let mut rig = Rig::new(&["run-1", "run-2"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.watch("run-2", 1);
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    rig.notify(old, ObservationState::Revoked, 1);
+    let feature = &rig.state().feature;
+    assert!(feature.stopped.is_empty(), "the old run's picture is gone");
+    let live = feature.live.as_ref().expect("the new watch stays");
+    assert_eq!(live.scope.run.as_str(), "run-2");
+    assert!(live.shown.is_some());
+    assert!(feature.hold.is_none());
+}
+
+#[test]
+fn a_late_revocation_names_only_its_own_incarnation() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let old = rig.subscription();
+    rig.visible(false);
+    rig.core.scopes = vec![scope_in("t", "run-1", "i2")];
+    rig.visible(true);
+    let tag = rig.live_tag();
+    let fresh = rig.live_scope();
+    assert_eq!(fresh.incarnation.as_str(), "i2");
+    rig.publish(tag, frame(&fresh, 1, 1));
+    rig.pump();
+    rig.notify(old, ObservationState::Revoked, 1);
+    let live = rig
+        .state()
+        .feature
+        .live
+        .as_ref()
+        .expect("the new incarnation stays");
+    assert_eq!(live.scope.incarnation.as_str(), "i2");
+    assert!(live.shown.is_some());
+}
+
+#[test]
+fn a_revoked_answer_to_a_snapshot_after_the_stream_ended_drops_the_pictures() {
+    let mut rig = Rig::new(&["run-1"]);
+    rig.watch("run-1", 1);
+    let tag = rig.live_tag();
+    let scope = rig.live_scope();
+    rig.publish(tag, frame(&scope, 2, 2));
+    rig.harness.run_steps(2);
+    let action = {
+        let frame = &mut rig.harness.state_mut().frame;
+        let at = frame
+            .actions
+            .iter()
+            .position(|a| {
+                matches!(
+                    &a.request,
+                    FeatureRequest::Query(Query::Browser(BrowserQuery::GetAgentObservation { .. }))
+                )
+            })
+            .expect("the snapshot query of the tab change");
+        let action = frame.actions.remove(at);
+        frame.actions.clear();
+        action
+    };
+    rig.feature().data(tag, DataNotice::Completed);
+    rig.pump();
+    assert_eq!(rig.state().feature.stopped.len(), 1);
+    rig.feature().reply(
+        action.tag,
+        FeatureReply::Query(Ok(QueryReply::Browser(BrowserReply::AgentObservation(
+            ObservationReply::State(ObservationState::Revoked),
+        )))),
+    );
+    assert!(rig.state().feature.stopped.is_empty());
+}
+
+#[test]
+fn a_state_change_with_an_unchanged_revision_is_applied() {
+    let mut stopped = Rig::new(&["run-1"]);
+    stopped.watch("run-1", 1);
+    let subscription = stopped.subscription();
+    stopped.notify(subscription, ObservationState::Live, 1);
+    assert!(
+        stopped.state().feature.live.is_some(),
+        "Live changes nothing but asks again"
+    );
+    let subscription = stopped.subscription();
+    stopped.notify(subscription, ObservationState::Stopped, 1);
+    assert!(stopped.state().feature.live.is_none());
+    assert_eq!(
+        stopped.state().feature.stopped.len(),
+        1,
+        "a stopped run keeps its picture"
+    );
+
+    let mut revoked = Rig::new(&["run-1"]);
+    revoked.watch("run-1", 1);
+    let subscription = revoked.subscription();
+    revoked.notify(subscription, ObservationState::Revoked, 1);
+    assert!(revoked.state().feature.live.is_none());
+    assert!(
+        revoked.state().feature.stopped.is_empty(),
+        "a revoked run does not"
     );
 }
