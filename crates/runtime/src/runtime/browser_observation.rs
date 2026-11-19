@@ -10,7 +10,12 @@ pub struct BrowserExecutionObservation {
     interrupt: watch::Receiver<RunInterrupt>,
 }
 impl BrowserExecutionObservation {
-    /// Source adapters select this against their producer; it grants no control.
+    /// Waits for invalidation of the registered execution incarnation only.
+    ///
+    /// This is not a run-completion or Stop notification: Done and Stopped
+    /// leave [`Self::current`] true while the same incarnation stays registered.
+    /// O-H must determine run termination/Stop and authorize live observation;
+    /// `current() == true` is never permission to observe.
     pub async fn invalidated(&mut self) {
         while self.current() {
             if self.interrupt.changed().await.is_err() {
@@ -18,6 +23,12 @@ impl BrowserExecutionObservation {
             }
         }
     }
+    /// Checks only whether the registered execution incarnation is still current.
+    ///
+    /// Done and Stopped do not by themselves make this false; it remains true
+    /// while that incarnation stays valid and registered. O-H owns run
+    /// termination/Stop checks and live-observation authorization. Callers must
+    /// not interpret `true` as permission to observe.
     pub fn current(&self) -> bool {
         (self.current)()
     }
