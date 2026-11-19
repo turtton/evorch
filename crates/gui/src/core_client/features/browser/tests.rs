@@ -1654,6 +1654,49 @@ fn closing_a_preview_closes_its_tab_and_frees_its_slots() {
 }
 
 #[test]
+fn leaving_names_only_the_tabs_this_client_opened_for_its_previews() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    rig.open(2);
+    // A tab that is lost (no tab any more) names nothing.
+    let lost = rig.preview(1).id;
+    let index = rig.feature().index(lost).unwrap();
+    rig.feature().previews[index].tab = None;
+    let own = rig.tab(0);
+    let commands = rig.feature().release();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(matches!(
+        &commands[0],
+        Command::Browser(BrowserCommand::CloseRendererTab { tab }) if *tab == own.reference
+    ));
+    // Asking does not change anything by itself: a kill sends nothing, a clean exit
+    // sends exactly these.
+    assert_eq!(rig.feature().previews.len(), 2);
+    assert_eq!(rig.core.count("close"), 0);
+}
+
+#[test]
+fn a_failed_resize_has_an_explicit_retry_that_sends_the_same_size_again() {
+    let mut rig = Rig::new();
+    rig.open(1);
+    rig.core
+        .script("resize", Script::Refuse(busy(RetryAdvice::Never)));
+    rig.harness.set_size(vec2(600.0, 480.0));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 1);
+    assert!(rig.preview(0).resize_failed.is_some());
+    rig.advance(Duration::from_secs(5));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 1, "not sent again by itself");
+    rig.harness.get_by_label("サイズ変更を再試行").click();
+    rig.harness.run_steps(2);
+    rig.advance(Duration::from_millis(200));
+    rig.pump();
+    assert_eq!(rig.core.count("resize"), 2, "the button sends it again");
+    assert!(rig.preview(0).resize_failed.is_none());
+}
+
+#[test]
 fn queued_artifacts_are_bounded_and_open_preview_does_no_io() {
     let mut rig = Rig::new();
     for n in 0..100 {
@@ -2001,6 +2044,7 @@ impl Comp {
                 data: DataInbox::default(),
                 selection: None,
                 expanded: Default::default(),
+                pins: Default::default(),
             },
             selection: Selection {
                 project: Some(ProjectId::new("p").unwrap()),

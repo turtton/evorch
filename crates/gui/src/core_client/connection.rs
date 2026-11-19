@@ -274,9 +274,9 @@ pub async fn serve(
                         if !valid { resync = true; break; }
                     }
                     action = actions.recv() => {
-                        let Some(action) = action else { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; return };
+                        let Some(action) = action else { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; release_own(&client, &shared).await; return };
                         if matches!(action, Action::Reconnect) { reconnect_requested = true; break 'session; }
-                        if matches!(action, Action::Shutdown) { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; return; }
+                        if matches!(action, Action::Shutdown) { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; release_own(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
                                 send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command(draft)).await;
@@ -467,6 +467,21 @@ async fn send_command(
             pending.rejected_with(s, feature_error(&e));
             s.status = e.to_string();
         }),
+    }
+}
+
+/// A clean exit lets go of what only this client holds in the core (its preview tabs, and
+/// with them its frame subscriptions). Nothing else is stopped: the runs, their tabs and the
+/// core keep running, and a kill, which sends nothing, ends the same way after the core's own
+/// grace. Best effort: an unanswered command is not retried.
+async fn release_own(client: &WorkbenchClient, shared: &Arc<Mutex<Shared>>) {
+    let commands = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .features
+        .release_commands();
+    for command in commands {
+        let _ = client.command(command).await;
     }
 }
 

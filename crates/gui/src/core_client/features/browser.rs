@@ -73,7 +73,8 @@ use workbench_protocol::{
         artifacts::{ArtifactRef, ArtifactsCommand},
         browser::{
             BrowserCommand, BrowserEvent, BrowserQuery, BrowserReply, MAX_RENDERER_TABS,
-            RendererId, RendererOutput, RendererSessionRef, RendererTab, RendererViewport,
+            RendererId, RendererOutput, RendererOwnerKind, RendererSessionRef, RendererTab,
+            RendererViewport,
             data::{BlobSource, MAX_CAPTURE_BLOB_BYTES, MediaType},
         },
     },
@@ -1493,6 +1494,22 @@ impl Feature for BrowserFeature {
             self.queue.pop_front();
         }
         self.queue.push_back(artifact);
+    }
+
+    /// A clean exit lets go of this client's own preview tabs, which also ends their
+    /// frame subscriptions. A tab of a run (never in `previews`) and every tab of
+    /// another client stay as they are.
+    fn release(&mut self) -> Vec<Command> {
+        self.previews
+            .iter()
+            .filter_map(|p| p.tab.as_ref())
+            .filter(|tab| tab.owner == RendererOwnerKind::ClientPreview)
+            .map(|tab| {
+                Command::Browser(BrowserCommand::CloseRendererTab {
+                    tab: tab.reference.clone(),
+                })
+            })
+            .collect()
     }
 
     fn disconnected(&mut self) {

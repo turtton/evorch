@@ -218,6 +218,13 @@ pub(super) struct Picture {
 impl Picture {
     pub fn show(&mut self, ctx: &Context, name: &str, image: ColorImage, sequence: Option<u64>) {
         self.sequence = sequence;
+        // egui panics on a texture larger than the device's limit: such a picture (a frame
+        // sized before the limit was known) is not shown.
+        let side = ctx.input(|i| i.max_texture_side);
+        if image.size[0] > side || image.size[1] > side {
+            self.texture = None;
+            return;
+        }
         match &mut self.texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture(name, image, TextureOptions::LINEAR)),

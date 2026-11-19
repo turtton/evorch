@@ -422,3 +422,142 @@ fn a_host_file_cannot_be_given_to_the_page_through_devtools() {
         .unwrap();
     assert_eq!(count["result"]["value"], 0);
 }
+
+/// Inodes of the sockets that listen (TCP) or are bound without a peer (UDP), from /proc/net.
+fn listening_socket_inodes() -> std::collections::HashSet<u64> {
+    let mut found = std::collections::HashSet::new();
+    for (file, state) in [("tcp", "0A"), ("tcp6", "0A"), ("udp", "07"), ("udp6", "07")] {
+        let Ok(text) = std::fs::read_to_string(format!("/proc/net/{file}")) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.get(3) == Some(&state)
+                && let Some(inode) = fields.get(9).and_then(|i| i.parse().ok())
+            {
+                found.insert(inode);
+            }
+        }
+    }
+    found
+}
+
+/// Pids of this process and of every descendant, whatever group it is in.
+fn this_process_tree() -> Vec<i32> {
+    let mut parents = std::collections::HashMap::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            continue;
+        };
+        if let Some(parent) = rest
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<i32>().ok())
+        {
+            parents.insert(pid, parent);
+        }
+    }
+    let me = std::process::id() as i32;
+    parents
+        .keys()
+        .copied()
+        .filter(|&pid| {
+            let mut at = pid;
+            while let Some(&parent) = parents.get(&at) {
+                if parent == me || at == me {
+                    return true;
+                }
+                if parent <= 1 {
+                    return false;
+                }
+                at = parent;
+            }
+            at == me
+        })
+        .chain(std::iter::once(me))
+        .collect()
+}
+
+/// The legacy GUI's in-process CEF (`browser_cef::CefRuntime`, started by `html_preview`) and
+/// the core's renderer helper run side by side, as they do while the old GUI and the core
+/// coexist (until stages 19 and 20 remove the old owners). They must share no profile
+/// directory, no listening port and no lock: the legacy runtime keeps its cache under
+/// `temp_dir/evorch-cef-<pid>`, the helper under the core's private
+/// `renderer-profiles/<uuid>` (here `--cache-dir`), both use pipes and headless
+/// off-screen rendering, and neither opens a TCP or UDP socket.
+#[test]
+#[ignore = "needs the CEF distribution and evorch-cef-helper"]
+fn the_helper_and_the_in_process_cef_of_the_legacy_gui_share_no_profile_port_or_lock() {
+    let exe = renderer_exe();
+    let legacy_config = browser_cef::RuntimeConfig {
+        helper_path: exe.with_file_name("evorch-cef-helper"),
+        ..browser_cef::RuntimeConfig::offline()
+    };
+    let legacy_cache = legacy_config.root_cache_path.clone();
+    let legacy = browser_cef::CefRuntime::initialize(legacy_config).expect("legacy CEF runtime");
+    assert!(legacy_cache.is_dir(), "the legacy runtime owns its cache");
+
+    let mut spawned = spawn_helper();
+    let helper_cache = spawned.dir.path().join("profile");
+    assert!(
+        !helper_cache.starts_with(&legacy_cache) && !legacy_cache.starts_with(&helper_cache),
+        "profiles: {legacy_cache:?} and {helper_cache:?}"
+    );
+    open(&spawned.client, 320, 240);
+    let tab = TabId(1);
+    spawned.client.set_streaming(tab, true).unwrap();
+    let frame = spawned
+        .client
+        .wait_frame(None)
+        .expect("the helper streams while the legacy CEF runs");
+    assert_eq!((frame.width, frame.height), (320, 240));
+    spawned.client.recycle_frame(frame);
+
+    // No process of either side listens on a TCP or UDP port.
+    let listening = listening_socket_inodes();
+    for pid in this_process_tree() {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy().into_owned();
+            if let Some(inode) = target
+                .strip_prefix("socket:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|inode| inode.parse::<u64>().ok())
+            {
+                assert!(
+                    !listening.contains(&inode),
+                    "process {pid} listens on a port ({target})"
+                );
+            }
+        }
+    }
+
+    spawned.client.close_tab(tab).unwrap();
+    assert_eq!(
+        spawned.client.shutdown(std::time::Duration::from_secs(60)),
+        CloseReason::ShutdownAcknowledged
+    );
+    assert!(spawned.process.wait().success());
+    spawned.process.reap_descendants();
+    assert_eq!(spawned.process.live_members(), Vec::<i32>::new());
+    assert!(
+        legacy_cache.is_dir(),
+        "the helper's end left the legacy cache alone"
+    );
+    drop(legacy);
+}

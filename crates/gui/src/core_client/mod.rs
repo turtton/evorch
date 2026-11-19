@@ -194,8 +194,15 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// The height of the column in which the features are stacked.
-const FEATURES_MAX_HEIGHT: f32 = 420.0;
+/// The height of the column in which the features are stacked: most of a tall window, so
+/// an artifact's body or a preview fits, but never so little that a section is cramped, and
+/// never so much that the conversation controls below it are pushed away.
+const FEATURES_MIN_HEIGHT: f32 = 420.0;
+const FEATURES_MAX_HEIGHT: f32 = 1100.0;
+
+fn features_height(available: f32) -> f32 {
+    (available * 0.6).clamp(FEATURES_MIN_HEIGHT, FEATURES_MAX_HEIGHT)
+}
 
 pub struct CoreClientApp {
     screen: CoreClientScreen,
@@ -311,7 +318,15 @@ fn apply_frame(
         shared.features.observe_run(target);
     }
     for artifact in frame.previews {
-        shared.features.open_preview(artifact);
+        if shared.features.is_shown(
+            features::FeatureId::Browser,
+            shared.connected,
+            &shared.capabilities,
+        ) {
+            shared.features.open_preview(artifact);
+        } else {
+            shared.status = "このコアはプレビューを提供していないため、開けません".into();
+        }
     }
     for action in frame.actions {
         enqueue(tx, shared, Action::Feature(action));
@@ -502,7 +517,7 @@ impl CoreClientScreen {
             // The column is given a bounded height: what is below it, the controls of the
             // conversation, stays on the page.
             ui.allocate_ui(
-                egui::vec2(ui.available_width(), FEATURES_MAX_HEIGHT),
+                egui::vec2(ui.available_width(), features_height(ui.available_height())),
                 |ui| s.features.render(ui, view),
             )
             .inner
@@ -573,6 +588,14 @@ impl CoreClientScreen {
                 if shared.cache.older.get(thread.as_str()).is_some_and(Option::is_some) && ui.button("以前の履歴").clicked() { enqueue(&self.actions, &mut shared, Action::History(thread.clone(), true)); }
                 if ui.button("停止済み legacy 会話の引継ぎ").clicked() {
                     enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::PrepareExistingThread { project: project.clone(), thread: thread.clone() }), draft: None });
+                }
+                // The way from the conversation to what it produced: the section is opened, pinned first and
+                // scrolled to, and follows this thread's selection by itself.
+                if ui.button("成果物").clicked() {
+                    shared.features.reveal(features::FeatureId::Artifacts);
+                }
+                if ui.button("プレビュー / 検査").clicked() {
+                    shared.features.reveal(features::FeatureId::Browser);
                 }
                 if ui.button("続行").clicked() {
                     enqueue(&self.actions, &mut shared, Action::Command { command: Command::Conversation(ConversationCommand::ContinueChat(ContinueChat { project: project.clone(), thread: thread.clone(), composer_role: self.composer_role, model_preference: None })), draft: None });

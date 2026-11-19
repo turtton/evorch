@@ -38,11 +38,12 @@ storage = { path = "../storage" }
 recorder = { path = "../recorder" }
 sandbox = { path = "../sandbox" }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "io-util", "time"] }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 egui = { workspace = true }
+egui-wgpu = "0.36"
 base64 = { workspace = true }
 image = { workspace = true }

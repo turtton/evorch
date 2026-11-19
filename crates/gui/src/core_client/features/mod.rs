@@ -444,6 +444,15 @@ pub trait Feature: Send {
     ) {
     }
 
+    /// The client is leaving for good (a clean exit, not a lost connection). Names
+    /// what only this client holds in the core and no longer needs, as commands the
+    /// actor sends once on a best-effort basis. Never name anything a run, another
+    /// client or the core's own execution holds: a kill sends nothing at all, so the
+    /// core must keep everything else running either way.
+    fn release(&mut self) -> Vec<Command> {
+        Vec::new()
+    }
+
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
 
@@ -469,12 +478,23 @@ pub trait Feature: Send {
     }
 }
 
+/// Sections the composition was asked to open, and the ones moved to the top of the column.
+#[derive(Default)]
+struct Pins {
+    /// Opened at the next pass.
+    reveal: Option<FeatureId>,
+    /// The latest first: what the user was taken to (an artifact's preview, the artifacts of
+    /// the conversation) is where they look, not somewhere far down a long column.
+    pinned: Vec<FeatureId>,
+}
+
 /// The registration of every feature. A PR implementing a feature changes the
 /// feature's own file, not this.
 pub struct Features {
     features: Vec<Box<dyn Feature>>,
     selection: Option<Selection>,
     expanded: std::collections::HashMap<FeatureId, bool>,
+    pins: Pins,
     pub(crate) data: DataInbox,
 }
 
@@ -484,6 +504,7 @@ impl Default for Features {
             data: DataInbox::default(),
             selection: None,
             expanded: Default::default(),
+            pins: Pins::default(),
             features: vec![
                 Box::<workspace::WorkspaceFeature>::default(),
                 Box::<mcp::McpFeature>::default(),
@@ -571,7 +592,9 @@ impl Features {
             f.observe_run(target);
         }
     }
-    /// Local artifact-to-browser routing. Only references cross the boundary.
+    /// Local artifact-to-browser routing. Only references cross the boundary. The
+    /// browser section opens and is pinned near the top: a preview queued while it is
+    /// collapsed would otherwise never start.
     pub fn open_preview(&mut self, artifact: ArtifactRef) {
         if let Some(f) = self
             .features
@@ -579,7 +602,42 @@ impl Features {
             .find(|f| f.id() == FeatureId::Browser)
         {
             f.open_preview(artifact);
+            self.reveal(FeatureId::Browser);
         }
+    }
+
+    /// Open the section of `feature` and move it to the top of the column at the next pass.
+    /// The two latest stay there, so the artifact list stays above its preview.
+    pub fn reveal(&mut self, feature: FeatureId) {
+        self.pins.reveal = Some(feature);
+        self.pins.pinned.retain(|f| *f != feature);
+        self.pins.pinned.insert(0, feature);
+        self.pins.pinned.truncate(2);
+    }
+
+    /// Whether the section of `feature` is shown for this connection.
+    pub fn is_shown(
+        &self,
+        feature: FeatureId,
+        connected: bool,
+        capabilities: &[Capability],
+    ) -> bool {
+        self.features
+            .iter()
+            .any(|f| f.id() == feature && is_available(f.as_ref(), connected, capabilities))
+    }
+
+    /// Counters of the binary slots, for measurements and diagnostics.
+    pub fn data_stats(&self) -> data::DataStats {
+        self.data.stats()
+    }
+
+    /// What the client alone holds in the core, to let go of when it exits cleanly.
+    pub fn release_commands(&mut self) -> Vec<Command> {
+        self.features
+            .iter_mut()
+            .flat_map(|feature| feature.release())
+            .collect()
     }
 
     /// The features shown for a connection with `capabilities`.
@@ -633,6 +691,7 @@ impl Features {
             &mut self.features,
             &mut self.data,
             &mut self.expanded,
+            &mut self.pins,
             ui,
             view,
             selection_changed,
@@ -724,23 +783,39 @@ fn render_all(
     features: &mut [Box<dyn Feature>],
     data: &mut DataInbox,
     expanded: &mut std::collections::HashMap<FeatureId, bool>,
+    pins: &mut Pins,
     ui: &mut egui::Ui,
     view: FeatureView<'_>,
     selection_changed: bool,
 ) -> FeatureFrame {
     let mut frame = FeatureFrame::default();
-    // The features are stacked in one scrolling column, as tall as the space given to it.
+    // The features are stacked in one scrolling column, as tall as the space given to it,
+    // the pinned sections first.
+    let mut order: Vec<usize> = pins
+        .pinned
+        .iter()
+        .filter_map(|id| features.iter().position(|f| f.id() == *id))
+        .collect();
+    let rest: Vec<usize> = (0..features.len()).filter(|i| !order.contains(i)).collect();
+    order.extend(rest);
+    let opening = pins.reveal.take();
     egui::ScrollArea::vertical()
         .id_salt("features")
         .auto_shrink([false, true])
         .max_height(ui.available_height())
         .show(ui, |ui| {
-            for feature in features.iter_mut() {
-                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            for index in order {
+                let feature = &mut features[index];
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     feature_header_id(ui, feature.id()),
                     true,
                 );
+                if opening == Some(feature.id())
+                    && is_available(feature.as_ref(), view.connected, view.capabilities)
+                {
+                    state.set_open(true);
+                }
                 let mut visibility = Visibility {
                     available: is_available(feature.as_ref(), view.connected, view.capabilities),
                     expanded: state.is_open(),
@@ -758,6 +833,20 @@ fn render_all(
                     continue;
                 }
                 let mut clicked = false;
+                if opening == Some(feature.id()) {
+                    // The revealed section is the first of the column. Once, at the request,
+                    // every scroll area around it jumps to its header: an animation would
+                    // chase the layout while the section opens.
+                    let bar = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    );
+                    ui.scroll_to_rect_animation(
+                        bar,
+                        Some(egui::Align::Min),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
                 let mut header = state.show_header(ui, |ui| {
                     clicked = ui.selectable_label(false, feature.title()).clicked();
                 });
