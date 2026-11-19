@@ -86,6 +86,10 @@ mismatch. Revisit this policy before cutting a v1 release.
 - The sandbox does not inherit `RUSTC_WRAPPER` or sccache settings. When
   needed, run `RUSTC_WRAPPER= cargo ...` explicitly; sccache configuration and
   server access are not implicitly shared either.
+- To reproduce a flaky failure or hang under CPU/memory pressure, use
+  `scripts/reproduce-under-limits.sh` (see the `test-policy` skill, "flaky や hang の再現");
+  never generate load outside a limited scope. It needs host `systemd-run`, so inside
+  the sandbox ask for approval to run it unsandboxed.
 - `gui` enables CEF by default, so cargo builds of it need the CEF distribution.
   The default Nix dev shell sets `CEF_PATH` and `LD_LIBRARY_PATH` for it, but a
   sandbox does not inherit them: pass both explicitly (docs/browser.md,
