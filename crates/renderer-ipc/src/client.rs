@@ -323,15 +323,17 @@ impl Inner {
         };
         // A frame is acknowledged even when it is discarded, so the helper
         // does not stall behind a message this side will not use. The ack never
-        // waits for a data-plane client.
-        let ack = encode_meta(&Ack { seq: meta.seq })?;
-        write_message(stream, Kind::Ack, &ack, &[], ACK_LIMITS)?;
+        // waits for a data-plane client. A discarded frame is counted before its
+        // acknowledgment, so a helper that has the ack sees the count.
+        let discarded = meta.generation != self.generation || reserved.is_none();
         if meta.generation != self.generation {
             lock(&self.state).stats.stale_frames += 1;
-            return Ok(());
-        }
-        let Some(reserved) = reserved else {
+        } else if reserved.is_none() {
             lock(&self.state).stats.over_budget_frames += 1;
+        }
+        let ack = encode_meta(&Ack { seq: meta.seq })?;
+        write_message(stream, Kind::Ack, &ack, &[], ACK_LIMITS)?;
+        let Some(reserved) = reserved.filter(|_| !discarded) else {
             return Ok(());
         };
         let frame = pool.finish(

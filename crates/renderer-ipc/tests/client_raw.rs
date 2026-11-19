@@ -138,7 +138,9 @@ fn damaged_frames_end_the_connection_and_fail_what_is_pending() {
             max_meta: usize::MAX,
             max_body: usize::MAX,
         };
-        write_message(&peer.frames, Kind::Frame, &meta, &body, wide).unwrap();
+        // The client refuses a bad frame as soon as it has read the meta, so it may
+        // close before the body is written: a failed write is the refusal itself.
+        let _ = write_message(&peer.frames, Kind::Frame, &meta, &body, wide);
         let result = waiting.join().unwrap();
         assert!(
             matches!(
