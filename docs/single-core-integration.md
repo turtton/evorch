@@ -460,9 +460,11 @@ Both call `Features::reveal`, which opens the section and pins it: `Pins.reveal`
 open request, `Pins.pinned` holds at most two sections that are drawn first in the
 column, so a section the user asked for is on screen even when the column is long.
 `open_preview` (called by the artifact list) opens and pins the Browser section. The
-feature column is 60 % of the window high (420..1100 points). Scrolling to the section
-was tried and dropped: animated `scroll_to_cursor` and exact offsets both moved with the
-layout. A page whose core has no browser capability refuses a preview with a status
+feature column is 60 % of the window high (420..1100 points). A reveal also jumps every
+scroll area around the section to its header once (`scroll_to_rect_animation` without
+animation, at the pass that spends the request; an animated scroll or a fixed offset chased the
+layout while the section opened). A test scrolls the column away first and checks that the
+header is in view after the request. A page whose core has no browser capability refuses a preview with a status
 message instead of waiting.
 
 **Exit and kill contract.** The GUI releases only what it owns: its own subscriptions
@@ -490,7 +492,10 @@ failed resize is retried only by an explicit `サイズ変更を再試行` butto
 counters `DataStats`). Real helper (CI cef-e2e, new step "Core-client page through real
 CEF", `#[ignore]`): `core-client-e2e/tests/preview_cef.rs` runs conversation →
 `成果物` → artifact list → body → `プレビューを開く` → frames as a texture → `検査` →
-DOM result, and the exit / kill scenarios with a run-owned tab and a bystander window.
+DOM result (the widgets are activated by keyboard, focus and Enter: the page lays out
+again while the core's answers arrive, and a pointer click that meets a widget which moved in the
+frame that handles it is not counted by egui, which made this test hang about once in four runs
+under a CPU limit; the cause was found with `scripts/reproduce-under-limits.sh`), and the exit / kill scenarios with a run-owned tab and a bystander window.
 `display_measure.rs` is a manual measurement (`#[ignore]`, asserts only that frames
 arrive; see `docs/renderer-measurement.md` §10). No fixed sleep, timeout or wall-clock
 threshold runs in shared CI.

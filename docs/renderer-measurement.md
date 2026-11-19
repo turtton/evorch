@@ -797,7 +797,7 @@ swapchain の取得、次の vblank（60Hz なら最大 16.7ms）、compositor �
 - core、client、GUI は同じ process なので、`pss_self` は 3 つの合計。helper tree は
   helper の子孫全部（CEF の process 群、10〜13 個）。
 - stamp → upload には、helper の frame pacing の位相が入る。同じ構成 720p・1 tab でも、
-  p50 が 13.6ms の run と 45.4ms の run があった（4 窓の run は 11〜13ms）。
+  p50 が 45.4ms の run と 13.6ms、12.2ms の run があった（3 回目は soak の修正後に測り直したもの。4 窓の run は 11〜14ms）。
   **基準は 1 回の run ではなく、複数回の run の p95 で決める。**
 - 最初に測った debug build（最適化なし）は、GUI の CPU が 5〜10 倍で、4 窓で 64% の
   skip が出た（harness 側が律速）。release の値だけを採る。debug の生データは
@@ -810,12 +810,14 @@ swapchain の取得、次の vblank（60Hz なら最大 16.7ms）、compositor �
 | 構成 | upload fps | recv fps | skip | stamp→upload p50 / p95 / p99 (ms) | GUI thread | helper tree | PSS self | PSS helper tree | GPU texture | CPU 保持 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 720p・1 窓・1 tab | 29.9 | 30.0 | 0.3% | 45.4 / 53.1 / 56.4（別 run: 13.6 / 20.7 / 23.0） | 0.06 core | 0.09 core | 139 MB | 370 MB | 4.7 MB | 3.7 MB |
-| 720p・4 窓（4 client、各 1 tab） | 各 29.8 | 各 30.0 | ≤ 1% | 各 約 11〜13 / 18〜20 / 20〜22 | 0.21 core（4 窓の合計） | 0.35 core | 226 MB | 473 MB | 18.9 MB | 14.7 MB |
+| 720p・4 窓（4 client、各 1 tab） | 各 29.8 | 各 30.0 | ≤ 1% | 窓ごとの p50 は 10.7〜13.8、p95 は 18.1〜21.8、p99 は 20.1〜24.1 | 0.21 core（4 窓の合計） | 0.35 core | 226 MB | 473 MB | 18.9 MB | 14.7 MB |
 | 720p・1 窓・4 tab（3 秒ごとに切替） | 29.6 | 30.4 | 2.1% | 13.3 / 39.1 / 50.3 | 0.07 core | 0.16 core | 176 MB | 464 MB | 4.7 MB | 3.7 MB |
 | 4K（3840×2160 の texture）・1 窓・1 tab | 29.6 | 30.1 | 1.5% | 76.0 / 91.8 / 95.9 | 0.27 core | 0.94 core | 468 MB | 577 MB | 34.2 MB | 33 MB |
 | 720p + 背景の subscriber（速い 2、遅い 1：250ms/frame） | 29.7 | 30.1 | 1.0% | 12.9 / 20.1 / 26.7 | 0.08 core | 0.32 core | 192 MB | 475 MB | 4.7 MB | 3.7 MB |
 | 720p・GUI を 10fps で回す（遅い consumer） | 10.0 | 30.1 | 66.6%（slot で置換、設計どおり） | 49.0 / 49.4 / 49.6 | 0.03 core | 0.09 core | 147 MB | 374 MB | 4.7 MB | 3.7 MB |
 
+- 表の「CPU 保持」は、GUI が取り出す前の frame を置く inbox の slot の byte 数（窓ごとに 1 tab あたり 1 枚。4 窓で 4 枚）で、
+  cache や Rust heap 全体ではない。heap 全体は `summary-release.jsonl` の `end.heap_bytes`。
 - 窓の数と tab の数は、GPU texture と CPU 保持量に比例する（4 窓で 4 倍、4K で約 7 倍）。
   1 窓あたりの texture は 1 枚で、tab を切り替えても増えない。
 - 隠れた tab の stream は止まる（隠してから 1 秒間に受けた frame は 0）。
@@ -841,26 +843,35 @@ swapchain の取得、次の vblank（60Hz なら最大 16.7ms）、compositor �
 
 構成: 1 窓、1 tab、遅い background subscriber 1 つ、60 秒ごとに 1 round の操作
 （window を狭めて戻す resize、section を畳んで開く）、5 round ごとに preview を閉じて開き直す。
-30 秒ごとに 57 回測った（`EVORCH_SOAK_SECS=1800`、`cargo nextest ... -P measure`。
+30 秒ごとに 57 回測った（`EVORCH_SOAK_SECS=1800`、`cargo nextest run -P measure ...`。
 test 1 本が 30 分続くので、既定の 180 秒の runner timeout を、`.config/nextest.toml` の
-`measure` profile で 1800 秒 × 3 に延ばした）。操作は 28 round、upload した画は
-50 887 枚。run が持つ tab は、どの round でも触られなかった。
+`measure` profile で 1800 秒 × 3 に延ばした。環境変数ではなく `-P measure` で選ぶ）。
+操作は 28 round、upload した画は 50 972 枚。run が持つ tab は、どの round でも触られなかった。
 
-| 項目 | 結果 |
-|---|---|
-| fd、thread | 66 と 69 で一定 |
-| GPU texture | 4.73 MB で一定 |
-| helper tree の PSS | 最初の 1/3 の最大 456 MB → 376 → 272 MB、最後 149 MB（OS が返した。増えていない） |
-| PSS self（core + client + GUI） | 3 区間の最大 171 → 125 → 107 MB、最後 91 MB。増えていない |
-| Rust heap | 25 MB → 約 30 MB（t≈125s）→ 約 33 MB（t≈630s）→ 約 34 MB（t≈1140s）→ 最後まで 34〜35 MB |
+**1 回目の soak の heap の増加は、計測 harness 自身の記録だった。** 1 回目は、upload と paint の
+記録（1 枚ごとに約 48 byte）を全部 `Vec` に持ち、その分の増加と、`Vec` の容量の倍増による段階的な
+増加（25 → 30 → 33 → 34 MB）が、heap の figure に入っていた。heap の傾きは +0.41 MB/min だった。
+soak の間は記録を最新 4096 件だけにし（回数は別の counter で数える）、同じ構成で測り直した（2 回目）。
 
-- **heap は段階的に約 10 MB 増え、最後の約 10 分は平ら。ただし、3 区間の最大
-  （31.3 / 35.9 / 39.9 MB）は「最後の 1/3 の最大 ≤ 中の 1/3 の最大 × 1.05」を
-  満たさず（spike がある）、t ≥ 900 s の最小二乗の傾きも +0.41 MB/min だった。**
-  このため、「頭打ちになった」とは書かない。「fd・thread・texture・helper の
-  メモリは増えていない。heap は最後の約 10 分平らだが、30 分では頭打ちと確定できない」
-  が言える範囲。確定には、60 分以上の soak か、遅い subscriber の経路の heap profile が要る。
-- soak は **30 分**。数時間の soak は未実施。
+2 回目（記録を有界にした後）の結果:
+
+| 項目 | 3 区間（最初・中・最後）の最大 | 最初 → 最後 |
+|---|---|---|
+| Rust heap | 29.3 / 32.8 / 31.6 MB | 26.2 → 31.6 MB。t ≥ 600 s の範囲は 29.1〜32.8 MB で、傾向なし |
+| PSS self（core + client + GUI） | 191.2 / 192.6 / 194.2 MB | 168 → 187 MB |
+| PSS helper tree | 443.2 / 445.6 / 452.2 MB | 408 → 441 MB |
+| fd、thread、process 数 | 67、69〜70、12 | 一定 |
+| GPU texture | 4.73 MB | 一定 |
+
+- heap の t ≥ 900 s の最小二乗の傾きは **+0.015 MB/min**（1 回目は +0.41 MB/min）。
+  「最後の 1/3 の最大 ≤ 中の 1/3 の最大 × 1.05」の規則を、heap、PSS self、PSS helper tree の
+  すべてが満たした（PSS は 1 区間あたり +1% 台でゆるやかに増える）。
+- したがって、**この構成の 30 分では、製品側の heap の leak は見えず、頭打ちになった**。
+  1 回目の heap の増加は、製品ではなく計測側の記録の増加だった。
+- 1 回目と 2 回目で PSS の絶対値が違う（1 回目の PSS self は 171 → 91 MB、2 回目は 168 → 187 MB）。
+  PSS は OS が page を返すかどうかに左右される。どちらも、規則（3 区間の最大の比）の範囲に収まる。
+  確かめられるのは「30 分の間に、頭打ちを超える増加は無い」までで、数時間の soak は未実施。
+- 元データ: PR の comment（1 回目の `soak_720p_with_periodic_operations.jsonl` と、記録を有界にした後の 2 回目）。
 
 ### 10.5 目標の提案（native の表示の区間、手で測る）
 
@@ -871,10 +882,10 @@ test 1 本が 30 分続くので、既定の 180 秒の runner timeout を、`.c
 |---|---|---|
 | upload fps（720p・1 窓） | source の 90% 以上（27fps 以上） | 29.9 |
 | skip（GUI が 30fps 以上で回るとき） | 5% 以下 | 0.3〜2.1%（4K も 1.5%） |
-| stamp → upload の p95（720p） | 66ms 以下（30fps の 2 frame）。**3 回以上の run の最大** | 20.7 / 53.1（2 run）、4 窓 18〜20 |
+| stamp → upload の p95（720p） | 66ms 以下（30fps の 2 frame）。**3 回以上の run の最大** | 53.1 / 20.7 / 19.3（3 run）、4 窓 18.1〜21.8 |
 | stamp → upload の p95（4K） | 100ms 以下（3 frame）。暫定。3 回以上の run で確かめる | 91.8（1 run のみ。余裕は小さい） |
 | soak（30 分以上）の fd・thread・texture・helper PSS | 増えない（最後の 1/3 の最大 ≤ 中の 1/3 の最大 × 1.05） | 満たした |
-| soak の Rust heap | 同じ規則 | **満たさない**（§10.4） |
+| soak の Rust heap（計測の記録を有界にした後） | 同じ規則 | 満たした（29.3 / 32.8 / 31.6 MB、§10.4） |
 
 - p95 の目標は、helper の frame pacing の位相（最大 1 frame 周期の約 33ms）を許す形に
   してある。位相を除いた「処理の遅延」だけの目標にしたい場合は、page 側の stamp と
@@ -896,8 +907,7 @@ test 1 本が 30 分続くので、既定の 180 秒の runner timeout を、`.c
 
 # 実行は、/dev/dri と Vulkan driver が要るので sandbox の外で、1 test 1 process、同時に 2 つ流さない
 EVORCH_RENDERER_EXE=$PWD/target/release/evorch-renderer EVORCH_MEASURE_OUT=out.jsonl \
-NEXTEST_PROFILE_NAME=measure \
-  cargo nextest run --release --offline -p core-client-e2e --features gui/cef \
+  cargo nextest run -P measure --release --offline -p core-client-e2e --features gui/cef \
   --test display_measure --run-ignored only --no-capture -E 'test(s720_one_tab)'
 ```
 
@@ -907,6 +917,8 @@ test: `s720_one_tab`、`s720_four_windows`、`s720_four_tabs_switching`、`s4k_o
 `operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl`、
 `soak_720p_with_periodic_operations`（`EVORCH_SOAK_SECS`、既定 1800）。
 `EVORCH_MEASURE_SECS`（既定 20）、`EVORCH_MEASURE_TABS` も使える。計測中は build しない。
+待ちには壁時計の期限を持たせていない（frame は計測の pacing）。止まった run は、runner の timeout
+（`measure` profile）が切る。
 
 ### 10.7 未実施・未確認
 
@@ -915,8 +927,9 @@ test: `s720_one_tab`、`s720_four_windows`、`s720_four_tabs_switching`、`s4k_o
   （Metal、D3D12）での upload の時間は不明。
 - 実 window（eframe）に出るまでの時間、vblank、compositor は測っていない（§10.1 の注記）。
 - GPU は 1 種類（RX 7900 XTX、RADV）だけ。内蔵 GPU や software rendering は測っていない。
-- 同じ構成の run の繰り返しは、720p・1 tab の 2 回だけ。他は 1 回。p95 の spread は未確認。
-- soak は 30 分。heap の頭打ちは確定していない（§10.4）。
+- 同じ構成の run の繰り返しは、720p・1 tab の 3 回だけ。他は 1 回。p95 の spread は未確認。
+- soak は 30 分（1 構成、1 GPU）。数時間の soak は未実施。PSS はゆるやかに増える傾向（1 区間あたり +1% 台）があり、
+  より長い run で頭打ちかを確かめる必要がある（§10.4）。
 - **原因不明の Busy**: lifecycle の round を 2 秒間隔で続けると、5 round 目の「閉じてから
   開き直す」の後の stream の開始が `Busy: renderer private resource budget is full` で
   断られる。25 秒間隔では起きない。候補は、操作の結果の保持（最大 64 件、60 秒）、
