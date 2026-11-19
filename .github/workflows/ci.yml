@@ -111,6 +111,11 @@ jobs:
           scripts/verify-test-inventory.sh --check-config
       - name: Harness runner and doctest coverage
         run: python3 scripts/tests/test_check_harness.py
+      # The flaky/hang reproduction wrapper, against mock systemd-run/systemctl
+      # (no load, no systemd needed): argument passthrough, --repeat, start
+      # failures, name collisions, timeout and interruption.
+      - name: Reproduction wrapper regression tests
+        run: scripts/tests/test_reproduce_under_limits.sh
       # The cached .debs of apt-install are only installed after they verify against
       # the runner's Ubuntu archive keyring, and its failure paths (dpkg, apt-get,
       # an unverified cache, what may be saved) behave as documented.
