@@ -480,6 +480,7 @@ impl<'a> StartupCoordinator<'a> {
         self.inputs
             .runtime
             .prepare_planned_component_tool_evidence(&paused, &authority, &models)
+            .inspect_err(|error| tracing::warn!(%error, "planned startup tool evidence rejected"))
             .map_err(|_| StartupBlocked::NeedsAttention)?;
         Ok(PreparedStartupComponent {
             paused,

@@ -33,6 +33,52 @@ pub struct CurrentAuthorityProvider<'a> {
     pub config_dir: &'a std::path::Path,
 }
 
+/// Ownership exclusion is distinct from execution/binding authority. Transfer
+/// every exact same-TX hold, including parked and non-resumable graphs, without activating
+/// any run, changing the saved checkpoint, or granting a command binding.
+pub fn claim_planned_owner_threads(
+    runtime: &AgentRuntime,
+    owner: &OwnerHost,
+) -> Result<(), CurrentAuthorityProblem> {
+    if !runtime.has_planned_restart_handoff() {
+        return Ok(());
+    }
+    let tx = runtime
+        .adopted_restart_transaction()
+        .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
+    // Physical bootstrap claims its complete inventory before Ready. With no
+    // runnable components, Ready can already complete the transaction. Never
+    // mint fresh ownership evidence from that terminal transaction: a blocked
+    // foreign owner must remain foreign, and earlier successful claims already
+    // participate in normal shutdown.
+    if tx.phase == storage::recovery::restart::RestartPhase::Completed {
+        return Ok(());
+    }
+    let evidence = runtime
+        .adopted_restart_ownership_evidence()
+        .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
+    for progress in &tx.owner_progress {
+        let current = owner
+            .attach(&progress.thread_id)
+            .map_err(|_| CurrentAuthorityProblem::OwnerBlocked)?;
+        let hold = current
+            .handoff_hold
+            .as_deref()
+            .or(current.planned_claim.as_deref())
+            .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?;
+        if hold.transaction_id != tx.metadata.restart_id
+            || hold.capture_id != tx.metadata.capture_id
+        {
+            tracing::warn!(thread = %progress.thread_id, "planned owner hold transaction/capture mismatch");
+            return Err(CurrentAuthorityProblem::CurrentBindingRequired);
+        }
+        owner
+            .claim_planned(hold, &evidence)
+            .inspect_err(|error| tracing::warn!(thread = %progress.thread_id, %error, "planned owner hold proof/claim rejected"))
+            .map_err(|_| CurrentAuthorityProblem::OwnerBlocked)?;
+    }
+    Ok(())
+}
 impl CurrentAuthorityProvider<'_> {
     pub fn resolve(
         &self,
@@ -143,6 +189,16 @@ impl CurrentAuthorityProvider<'_> {
                 match self.owner.attach(thread) {
                     Ok(owner) if owner.lease.owner_id == self.owner.owner_id() => {
                         self.owner.owned_permit(thread)
+                    }
+                    Ok(owner) if owner.handoff_hold.is_some() => {
+                        // A retained planned hold is deliberately not normal-claimable.
+                        // Only the inherited physical adoption proof grants this CAS.
+                        let evidence = self
+                            .runtime
+                            .adopted_restart_ownership_evidence()
+                            .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
+                        self.owner
+                            .claim_planned(owner.handoff_hold.as_deref().unwrap(), &evidence)
                     }
                     Ok(owner) => self.owner.claim(&owner),
                     Err(RegistryError::Absent) => self.owner.start(thread),

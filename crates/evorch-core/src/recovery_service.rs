@@ -100,6 +100,10 @@ impl CoreStartupHook for CoreGraphRecovery {
                         return Ok(());
                     }
                 };
+                if let Err(reason) = workbench_host::bootstrap::recovery::authority::claim_planned_owner_threads(&inputs.runtime, &inputs.owner) {
+                    let _ = ready.send(Err(format!("planned owner adoption: {reason:?}")));
+                    return Ok(());
+                }
                 let scan = match coordinator.scan() {
                     Ok(scan) => scan,
                     Err(reason) => {
