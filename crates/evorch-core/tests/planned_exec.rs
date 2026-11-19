@@ -9,7 +9,7 @@ use core_instance::{ConfigIdentity, Instance, LaunchGuard};
 use evorch_core::{
     backend::HostBackend,
     lifecycle::{LifecycleDriver, OperatorSignals},
-    restart::{FinalizationEnvironment, FinalizationTarget, RestartCoordinator},
+    restart::{FinalizationEnvironment, FinalizationTarget},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -79,12 +79,7 @@ fn product_handoff(bad_fd: bool) {
         ));
     };
     excludes();
-    input
-        .write_all(
-            b"exec
-",
-        )
-        .unwrap();
+    input.write_all(b"exec\n").unwrap();
     input.flush().unwrap();
     loop {
         line.clear();
@@ -266,8 +261,7 @@ fn m2_product_worker() {
             old_builtin_tool_names: BTreeSet::new(), old_compiled_catalog_fingerprint: None, new_compiled_catalog_fingerprint: None, old_effective_tools_fingerprint: None, new_effective_tools_fingerprint: None };
         let tx = host.composition.storage_writer.mutate_restart("d3b".into(), None, RestartMutation::Create(Box::new(metadata))).unwrap();
         println!("D3B-BEFORE {}", serde_json::json!({"pid":std::process::id(), "runs":runs.iter().map(ToString::to_string).collect::<Vec<_>>()})); std::io::stdout().flush().unwrap();
-        tokio::task::spawn_blocking(|| { let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap(); assert_eq!(line, "exec
-"); }).await.unwrap();
+        tokio::task::spawn_blocking(|| { let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap(); assert_eq!(line, "exec\n"); }).await.unwrap();
         core.start_finalization(id, &mut host, tx, target).unwrap();
         // The lifecycle services the real listener/control drain until exec replaces
         // all threads. A returned finalization is a failure, never resumed business.
