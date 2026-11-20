@@ -507,3 +507,30 @@ fn write_manifest_for_built_artifact() {
     .unwrap();
     eprintln!("wrote {}", out.join("manifest.json").display());
 }
+
+// ------------------------------------------- harness -> product (exec)
+
+/// Entered by `exec_cycle` in a child of this binary: the OLD core stand-in.
+#[test]
+#[ignore = "worker of the harness->product exec tests; needs EVORCH_MASKED_TEST_CHILD"]
+fn f4p_old_core_worker() {
+    product_exec::old_core::run_worker();
+}
+
+/// EVIDENCE CLASS: harness -> product. The old side is this test binary, not a
+/// product. It shows that the fixture can observe a real `execve` (same PID,
+/// image replaced by the artifact) and the successor's Ready and owner claim,
+/// synchronized by the exec pipe EOF and the readiness line.
+#[test]
+fn harness_exec_into_the_product_is_observed_without_a_clock_guess() {
+    let artifact = ProductArtifact::require();
+    let cycle = product_exec::old_core::exec_cycle(&artifact, &std::env::current_exe().unwrap())
+        .unwrap_or_else(|e| panic!("exec cycle failed: {e}"));
+    assert!(
+        cycle.exe_replaced,
+        "the same PID now runs the artifact image"
+    );
+    assert!(cycle.exec_to_ready > Duration::ZERO);
+    assert!(cycle.old_epoch >= 1);
+    eprintln!("F4P cycle: {cycle:?}");
+}

@@ -22,6 +22,8 @@ pub mod launch;
 pub mod measure;
 #[path = "product_exec/observe.rs"]
 pub mod observe;
+#[path = "product_exec/old_core.rs"]
+pub mod old_core;
 #[path = "product_exec/process.rs"]
 pub mod process;
 #[path = "product_exec/provisional.rs"]
