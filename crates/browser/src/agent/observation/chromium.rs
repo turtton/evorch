@@ -168,6 +168,8 @@ impl Shared {
         let mut revision = 0;
         let mut sequence = 0;
         let mut last_frame = None;
+        // The tab whose screencast start was refused and the retries spent.
+        let mut refused: (Option<String>, usize) = (None, 0);
         loop {
             let Some((_, tab)) = self.active(key) else {
                 break;
@@ -196,10 +198,32 @@ impl Shared {
             let mut incoming = tab.connection.frames(&tab.session);
             let _ = incoming.borrow_and_update();
             let started = tab.call("Page.startScreencast", json!({"format": "jpeg", "quality": 60, "maxWidth": WINDOW[0], "maxHeight": WINDOW[1]})).await;
-            if started.is_err() {
+            if let Err(error) = started {
+                // No stream is live: pixels held from before are not paired
+                // with the metadata published from here on.
+                last_frame = None;
                 drop(gate);
-                break;
+                if !start_refusal_is_transient(&error) {
+                    tracing::debug!(%error, "agent observation cannot start a screencast");
+                    break;
+                }
+                if refused.0.as_deref() != Some(tab.id.as_str()) {
+                    refused = (Some(tab.id.clone()), 0);
+                }
+                let Some(delay) = START_RETRY_DELAYS.get(refused.1) else {
+                    tracing::warn!(%error, "agent observation gave up starting a screencast");
+                    break;
+                };
+                refused.1 += 1;
+                if !self
+                    .wait_to_retry(key, &tab, *delay, &mut changes, updates)
+                    .await
+                {
+                    break;
+                }
+                continue;
             }
+            refused = (None, 0);
             let mut activity = tab.agent.activity_changes();
             let mut finished = false;
             loop {
@@ -244,6 +268,57 @@ impl Shared {
         }
     }
 }
+/// Pause before each retry of a refused `Page.startScreencast` of one tab;
+/// the schedule is also the bound (about 5 s), after which the producer ends.
+const START_RETRY_DELAYS: [Duration; 8] = [
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+    Duration::from_millis(640),
+    Duration::from_millis(1280),
+    Duration::from_millis(2560),
+];
+
+/// A page that navigates can refuse the start ("Not attached to an active
+/// page") for a moment. Only a lost connection or a page that is gone cannot
+/// recover; the latter shows as no active tab on the next pass.
+fn start_refusal_is_transient(error: &AgentError) -> bool {
+    matches!(error, AgentError::Cdp { detail, .. } if detail != crate::agent::connection::CONNECTION_CLOSED)
+}
+
+impl Shared {
+    /// Waits `delay` before the next attempt without holding the streaming
+    /// lease. `false` when every consumer is gone; `true` when the delay is
+    /// over or the run's active tab is no longer `tab`.
+    async fn wait_to_retry(
+        &self,
+        key: &str,
+        tab: &Arc<TabPage>,
+        delay: Duration,
+        changes: &mut watch::Receiver<u64>,
+        updates: &watch::Sender<Option<Arc<Publication>>>,
+    ) -> bool {
+        let timer = tokio::time::sleep(delay);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! { biased;
+                _ = updates.closed() => return false,
+                _ = &mut timer => return true,
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                    if !self.active(key).is_some_and(|(_, now)| Arc::ptr_eq(&now, tab)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn same_creation(a: &Option<Arc<Creation>>, b: &Option<Arc<Creation>>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
