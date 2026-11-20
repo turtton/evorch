@@ -5356,6 +5356,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-guard"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6963,6 +6975,7 @@ version = "0.1.0"
 dependencies = [
  "catalog",
  "libc",
+ "process-guard",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
