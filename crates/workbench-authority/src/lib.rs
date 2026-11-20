@@ -55,6 +55,7 @@ struct Proof {
     principal: PrincipalRecord,
     live: watch::Receiver<bool>,
     deadline: Option<tokio::time::Instant>,
+    connection_epoch: workbench_protocol::wire::InstanceEpoch,
 }
 impl Proof {
     fn is_live(&self) -> bool {
@@ -74,6 +75,13 @@ impl fmt::Debug for TransportAuthority {
     }
 }
 impl TransportAuthority {
+    /// Issued only from a currently live transport proof, never from request data.
+    pub fn connection(&self) -> Option<VerifiedConnection> {
+        self.0
+            .as_ref()
+            .filter(|p| p.is_live())
+            .map(|p| VerifiedConnection(p.clone()))
+    }
     pub fn from_web_context(principal: Option<&VerifiedWebPrincipal>) -> Self {
         principal.map_or_else(Self::default, |p| Self(Some(p.0.clone())))
     }
@@ -111,6 +119,46 @@ impl TransportAuthority {
             }
         }
     }
+}
+/// Opaque live transport binding. No payload/receipt/deserialization issuer.
+/// Epochs are process-local; the core epoch separately scopes process replacement.
+///
+/// ```no_run
+/// fn live(authority: &workbench_authority::TransportAuthority) {
+///     if let Some(connection) = authority.connection() {
+///         assert!(connection.matches(connection.epoch()));
+///     }
+/// }
+/// ```
+/// ```compile_fail
+/// let _: workbench_authority::VerifiedConnection = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Clone)]
+pub struct VerifiedConnection(Arc<Proof>);
+impl VerifiedConnection {
+    /// Diagnostic value for confirmation DTOs; possession of this integer is not authority.
+    pub fn epoch(&self) -> workbench_protocol::wire::InstanceEpoch {
+        self.0.connection_epoch
+    }
+    /// Recheck immediately before an effect, including after an audit await.
+    pub fn matches(&self, expected: workbench_protocol::wire::InstanceEpoch) -> bool {
+        self.0.is_live() && self.epoch() == expected
+    }
+}
+impl fmt::Debug for VerifiedConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedConnection")
+            .field("epoch", &self.epoch())
+            .finish_non_exhaustive()
+    }
+}
+fn next_connection_epoch() -> workbench_protocol::wire::InstanceEpoch {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    workbench_protocol::wire::InstanceEpoch(
+        NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .expect("connection epochs exhausted"),
+    )
 }
 /// Only a verifier-owned request extension can provide this. No current issuer.
 #[derive(Clone)]
@@ -219,6 +267,7 @@ pub fn verify_unix_peer(stream: &tokio::net::UnixStream) -> std::io::Result<Loca
         },
         live,
         deadline: None,
+        connection_epoch: next_connection_epoch(),
     };
     Ok(LocalConnection {
         authority: TransportAuthority(Some(Arc::new(proof))),
@@ -254,6 +303,7 @@ pub mod test_support {
                 },
                 live,
                 deadline,
+                connection_epoch: next_connection_epoch(),
             }),
             Lease(sender),
         )

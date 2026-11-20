@@ -87,6 +87,7 @@ struct Facade {
     effects: Arc<AtomicUsize>,
     after_register: AtomicUsize,
     inspections: AtomicUsize,
+    connections: Mutex<Vec<(&'static str, InstanceEpoch)>>,
     await_recovery: AtomicBool,
     bind_recovery: AtomicBool,
 }
@@ -98,18 +99,35 @@ impl Facade {
             effects: Arc::new(AtomicUsize::new(0)),
             after_register: AtomicUsize::new(0),
             inspections: AtomicUsize::new(0),
+            connections: Mutex::new(vec![]),
             await_recovery: AtomicBool::new(false),
             bind_recovery: AtomicBool::new(false),
         })
     }
 }
 impl AdminFacade for Facade {
-    fn inspect<'a>(&'a self, _: &'a AdminIntent) -> AdminIo<'a, AdminInspection> {
+    fn inspect<'a>(
+        &'a self,
+        _: &'a AdminIntent,
+        connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminInspection> {
+        self.connections
+            .lock()
+            .unwrap()
+            .push(("inspect", connection.epoch()));
         self.inspections.fetch_add(1, Ordering::SeqCst);
         let snapshot = self.live.lock().unwrap().clone();
         Box::pin(async move { Ok(snapshot) })
     }
-    fn query<'a>(&'a self, q: &'a AdminQuery) -> AdminIo<'a, AdminView> {
+    fn query<'a>(
+        &'a self,
+        q: &'a AdminQuery,
+        connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminView> {
+        self.connections
+            .lock()
+            .unwrap()
+            .push(("query", connection.epoch()));
         Box::pin(async move {
             if matches!(q, LifecycleQuery::OwnedGraphs(_)) {
                 Ok(LifecycleReply::OwnedGraphs(
@@ -127,7 +145,11 @@ impl AdminFacade for Facade {
             }
         })
     }
-    fn status(&self) -> Result<AdminView, AdminFailure> {
+    fn status(&self, connection: &VerifiedConnection) -> Result<AdminView, AdminFailure> {
+        self.connections
+            .lock()
+            .unwrap()
+            .push(("status", connection.epoch()));
         Ok(status())
     }
     fn cancel(&self, _: &AdminIntent) -> Result<AdminOutcome, AdminFailure> {
@@ -139,7 +161,14 @@ impl AdminFacade for Facade {
         intent: AdminIntent,
         expected: AdminInspection,
         admission: CommitAdmission,
+        connection: &VerifiedConnection,
     ) -> Result<AdminAccepted, AdminFailure> {
+        self.connections
+            .lock()
+            .unwrap()
+            .push(("commit", connection.epoch()));
+        assert_eq!(connection.epoch(), admission.connection().epoch());
+        assert!(admission.connection().matches(connection.epoch()));
         let live = self.live.lock().unwrap();
         if *live != expected || !expected.matches(&intent) || self.cancelled.load(Ordering::SeqCst)
         {
@@ -960,4 +989,34 @@ async fn only_a_bound_request_can_defer_finalization_to_recovery_and_all_release
         assert_eq!(h.service.available_admission_slots(), (64, 32));
         assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn service_passes_actual_connection_to_inspect_commit_query_and_fast_status() {
+    let intent = request("transport-context");
+    let h = Harness::new(&intent);
+    let epoch = h.context.authority().connection().unwrap().epoch();
+    h.submit(intent).unwrap().await.unwrap().unwrap();
+    for query in [RestartQuery::Targets, RestartQuery::Status] {
+        h.service
+            .query(
+                h.service
+                    .authorize_query(h.context.clone(), LifecycleQuery::Restart(query))
+                    .unwrap(),
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    h.service.wait_for_request_slots().await;
+    let observed = h.facade.connections.lock().unwrap().clone();
+    for stage in ["inspect", "commit", "query", "status"] {
+        assert!(
+            observed.contains(&(stage, epoch)),
+            "missing verified context at {stage}"
+        );
+    }
+    assert!(observed.iter().all(|(_, got)| *got == epoch));
+    h.shutdown().await;
 }
