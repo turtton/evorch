@@ -245,9 +245,17 @@ pub fn run_worker() {
 
 #[derive(Debug, Clone)]
 pub struct Cycle {
+    /// From the observed exec (pipe EOF read by the watcher thread, not the
+    /// kernel's instant) to the readiness line received by the reader thread.
+    /// Both ends are observation instants, each later than the event by a
+    /// wake-up latency that is not measured here.
     pub exec_to_ready: Duration,
-    /// Wall-clock milliseconds from the exec instant to the owner claim the
-    /// successor wrote. An UPPER bound of the claim time (see `claim_stable`).
+    /// Wall-clock milliseconds from the OBSERVED exec (the instant the watcher
+    /// thread had read the pipe EOF, which is later than the kernel's close by
+    /// the watcher's wake-up latency) to the claim time derived from the
+    /// successor's lease. The first makes the value an under-measure by that
+    /// latency; the second is an upper bound of the claim instant only while
+    /// `claim_stable` holds. No bound of the true interval is claimed.
     pub exec_to_claim_ms: i64,
     /// The lease expiry did not move between the first readback and the last:
     /// no heartbeat has shifted the claim time derived from it.
@@ -265,6 +273,8 @@ pub enum CycleError {
     Exec(String),
     Ready(String),
     Cleanup(String),
+    /// Two observations disagree about their order.
+    Invalid(String),
 }
 impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -279,7 +289,17 @@ fn wall_ms(t: SystemTime) -> i64 {
 /// One full old-core -> exec -> product Ready cycle in a fresh isolated
 /// environment. Every wait is an event: the worker's line, the pipe EOF, the
 /// product's readiness line, the exit notification.
+/// A failed cycle carries the time from its start to the failure, so that a
+/// failure is recorded as a failure with its own duration, never as a zero.
 pub fn exec_cycle(
+    artifact: &ProductArtifact,
+    harness: &std::path::Path,
+) -> Result<Cycle, (CycleError, Duration)> {
+    let started = Instant::now();
+    exec_cycle_inner(artifact, harness).map_err(|e| (e, started.elapsed()))
+}
+
+fn exec_cycle_inner(
     artifact: &ProductArtifact,
     harness: &std::path::Path,
 ) -> Result<Cycle, CycleError> {
@@ -295,8 +315,8 @@ pub fn exec_cycle(
             ("F4P_CONFIG_DIR", env.config_dir().into_os_string()),
         ],
     );
-    let mut worker =
-        ManagedProcess::spawn(command).map_err(|e| CycleError::Worker(e.to_string()))?;
+    let mut worker = ManagedProcess::spawn_with(command, env.ownership_markers())
+        .map_err(|e| CycleError::Worker(e.to_string()))?;
     let (before, _) = worker
         .wait_for(READY_WATCHDOG, |line| {
             serde_json::from_str::<serde_json::Value>(line.strip_prefix(BEFORE)?).ok()
@@ -348,16 +368,28 @@ pub fn exec_cycle(
         status,
         stderr,
         orphans,
+        unjoined_readers,
     } = worker.join();
     watcher.join().unwrap();
-    if !status.success() || !orphans.is_empty() {
+    if !status.success() || !orphans.is_empty() || unjoined_readers != 0 {
         return Err(CycleError::Cleanup(format!(
-            "{status:?} {orphans:?} {stderr}"
+            "{status:?} {orphans:?} unjoined_readers={unjoined_readers} {stderr}"
+        )));
+    }
+    // An interval that comes out negative is not a sample of zero: the two
+    // observations disagree about the order, so the sample is invalid.
+    let exec_to_ready = ready_at.checked_duration_since(exec_at).ok_or_else(|| {
+        CycleError::Invalid("the readiness line was received before the exec EOF".into())
+    })?;
+    let exec_to_claim_ms = (claim_a - lease_ms as i64) - wall_ms(exec_wall);
+    if exec_to_claim_ms < 0 {
+        return Err(CycleError::Invalid(format!(
+            "the claim time is before the observed exec ({exec_to_claim_ms} ms)"
         )));
     }
     Ok(Cycle {
-        exec_to_ready: ready_at.saturating_duration_since(exec_at),
-        exec_to_claim_ms: (claim_a - lease_ms as i64) - wall_ms(exec_wall),
+        exec_to_ready,
+        exec_to_claim_ms,
         claim_stable: claim_a == claim_b,
         lease_ms,
         grace_ms,

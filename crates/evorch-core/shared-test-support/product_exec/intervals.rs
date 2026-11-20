@@ -201,13 +201,29 @@ pub fn exec_cycle(rec: &mut Recorder, n: usize, artifact: &ProductArtifact, harn
                 format!("{note} raw_ms={}", c.exec_to_claim_ms),
             );
         }
-        Err(e) => {
+        Err((error, elapsed)) => {
+            // A failure keeps its own duration and the interval that was not
+            // reached stays visible as a failure, never as a missing row.
+            let note = format!("after_ms={:.3}", ms(elapsed));
+            let invalid = matches!(error, old_core::CycleError::Invalid(_));
+            let why = if invalid {
+                format!("invalid: {error}")
+            } else {
+                error.to_string()
+            };
             rec.push(
                 n,
                 "exec_to_ready",
-                Duration::ZERO,
-                Outcome::Failed(e.to_string()),
-                String::new(),
+                elapsed,
+                Outcome::Failed(why),
+                note.clone(),
+            );
+            rec.push(
+                n,
+                "exec_to_claim",
+                elapsed,
+                Outcome::Failed("not reached: the exec cycle failed".into()),
+                note,
             );
         }
     }

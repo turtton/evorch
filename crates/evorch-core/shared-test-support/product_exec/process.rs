@@ -4,12 +4,28 @@
 //! deadline is ever the way two things are ordered.
 //!
 //! Cleanup does not depend on the test reaching its end: dropping the value
-//! kills the child and every descendant that is still alive, reaps it and joins
-//! the reader threads.
+//! kills the child and everything it owns, reaps it and joins the readers.
+//!
+//! Safety of signals and of ownership
+//! ----------------------------------
+//! * Every signal to the child goes through a pidfd opened right after the
+//!   spawn, while the child could not yet have been reaped. A pidfd names that
+//!   one process, so a reused PID is never signalled.
+//! * The exit is observed with `waitid(P_PIDFD, WEXITED | WNOWAIT)`: the child
+//!   stays a zombie, and its PID (which is also its process-group id) stays
+//!   reserved, until the cleanup has killed the group. Only then is it reaped.
+//! * Descendants that left the group (a helper calls `setsid`) or were
+//!   orphaned before anyone looked at them (they became children of this
+//!   process, a subreaper) are still found: a process is owned when it carries
+//!   one of this family's unique markers, in its environment, its command line
+//!   or its working directory. A process without a marker is never touched.
 use super::observe;
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::process::CommandExt,
+    os::{
+        fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd},
+        unix::process::{CommandExt, ExitStatusExt},
+    },
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
@@ -37,88 +53,153 @@ pub enum WaitError {
 pub struct Report {
     pub status: ExitStatus,
     pub stderr: String,
-    /// Descendants that were still alive when the child had exited. They were
-    /// killed and reaped by the cleanup; a non-empty list is a defect of the
-    /// child, not of the fixture.
+    /// Owned processes that were still running when the cleanup began. They
+    /// were killed (and reaped when they had become our children); a
+    /// non-empty list is a defect of the child, not of the fixture.
     pub orphans: Vec<observe::ProcInfo>,
+    /// Reader threads that did not end within the bound because a process
+    /// outside this family still holds the pipe. They are detached.
+    pub unjoined_readers: usize,
 }
+
+/// Name of the environment variable that carries a family's unique token.
+pub const OWNER_ENV: &str = "EVORCH_F4P_FAMILY";
+/// Default bound for each reader thread's end after everything owned is dead.
+const READER_JOIN_BOUND: Duration = Duration::from_secs(10);
+const STDERR_LIMIT: usize = 256 * 1024;
 
 pub struct ManagedProcess {
     pid: i32,
+    pidfd: OwnedFd,
     lines: mpsc::Receiver<Line>,
+    /// Exit notification of the (not yet reaped) child.
     exit: mpsc::Receiver<ExitStatus>,
-    exited: Arc<Mutex<Option<ExitStatus>>>,
+    reap: Option<mpsc::Sender<()>>,
+    reaped: mpsc::Receiver<ExitStatus>,
     status: Option<ExitStatus>,
     stdin: Option<ChildStdin>,
     stderr: Arc<Mutex<Vec<u8>>>,
-    threads: Vec<JoinHandle<()>>,
-    /// Descendants seen at the last observation, for cleanup after an exit.
+    readers: Vec<(JoinHandle<()>, mpsc::Receiver<()>)>,
+    reader_bound: Duration,
+    waiter: Option<JoinHandle<()>>,
+    /// Descendants seen at an observation.
     seen: Vec<observe::ProcInfo>,
+    markers: Vec<String>,
+    token: String,
 }
 
-const STDERR_LIMIT: usize = 256 * 1024;
+fn raw_status(status: &rustix::process::WaitIdStatus) -> ExitStatus {
+    let raw = if let Some(code) = status.exit_status() {
+        (code & 0xff) << 8
+    } else {
+        let signal = status.terminating_signal().unwrap_or(0) & 0x7f;
+        if status.dumped() {
+            signal | 0x80
+        } else {
+            signal
+        }
+    };
+    ExitStatus::from_raw(raw)
+}
+
+/// Closes, in the child between fork and exec, the descriptors the test process
+/// held without close-on-exec when the list was made (CI runners leave some).
+/// The list may be stale by now, so each entry is re-checked here: a number
+/// that is closed now, or that was reused for a close-on-exec descriptor, is
+/// left alone. No allocation, only syscalls.
+fn close_inherited(list: &[i32]) {
+    for &fd in list {
+        // SAFETY: only inspects the descriptor; `fd` is not used after.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        match rustix::io::fcntl_getfd(borrowed) {
+            Ok(flags) if !flags.contains(rustix::io::FdFlags::CLOEXEC) => {
+                // SAFETY: this forked copy holds `fd` without close-on-exec,
+                // so it is exactly the inheritance being removed.
+                drop(unsafe { OwnedFd::from_raw_fd(fd) });
+            }
+            _ => (),
+        }
+    }
+}
 
 impl ManagedProcess {
-    /// The command's stdin/stdout/stderr are replaced by pipes. The child leads
-    /// its own process group.
-    pub fn spawn(mut command: Command) -> std::io::Result<Self> {
+    /// `markers` are strings that are unique to this family (for example its
+    /// isolated directory) and that a descendant carries on its command line
+    /// or in its working directory even when its environment was cleared.
+    /// The command's stdin/stdout/stderr are replaced by pipes; the child
+    /// leads its own process group and carries a unique token in its
+    /// environment.
+    pub fn spawn_with(mut command: Command, markers: Vec<String>) -> std::io::Result<Self> {
         static SUBREAPER: std::sync::Once = std::sync::Once::new();
         SUBREAPER.call_once(|| {
             rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
                 .expect("become a child subreaper");
         });
-        // The test runner may leave descriptors without close-on-exec in this
-        // process (CI runners do: jobserver or result pipes). They would be
-        // inherited by the child. Close exactly those, in the child, before exec;
-        // the list is made here, so the closure allocates nothing.
         let inherited: Vec<i32> = observe::open_fds(std::process::id() as i32)
             .unwrap_or_default()
             .into_iter()
             .filter(|f| f.fd > 2 && !f.cloexec)
             .map(|f| f.fd)
             .collect();
-        // SAFETY: runs between fork and exec; it only closes descriptors that
-        // this process holds, which is async-signal-safe and allocation-free.
+        // SAFETY: `close_inherited` is allocation-free and only issues syscalls.
         unsafe {
             command.pre_exec(move || {
-                for fd in &inherited {
-                    drop(<std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(*fd));
-                }
+                close_inherited(&inherited);
                 Ok(())
             });
         }
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let token = format!(
+            "{}-{}-{:x}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
         command
+            .env(OWNER_ENV, &token)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
         let mut child: Child = command.spawn()?;
         let pid = child.id() as i32;
+        // The child has not been waited for, so this pid is still its own.
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(pid).expect("a child pid"),
+            rustix::process::PidfdFlags::empty(),
+        )?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_pipe = child.stderr.take().expect("piped stderr");
         let stdin = child.stdin.take();
         let (line_tx, lines) = mpsc::channel();
         let (exit_tx, exit) = mpsc::channel();
-        let exited = Arc::new(Mutex::new(None));
+        let (reap_tx, reap_rx) = mpsc::channel::<()>();
+        let (reaped_tx, reaped) = mpsc::channel();
         let stderr = Arc::new(Mutex::new(Vec::new()));
-        let mut threads = Vec::new();
-        threads.push(std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(text) = line else { break };
-                if line_tx
-                    .send(Line {
+        let mut readers = Vec::new();
+        {
+            let (done_tx, done_rx) = mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(text) = line else { break };
+                    let line = Line {
                         at: Instant::now(),
                         text,
-                    })
-                    .is_err()
-                {
-                    break;
+                    };
+                    if line_tx.send(line).is_err() {
+                        break;
+                    }
                 }
-            }
-        }));
+                let _ = done_tx.send(());
+            });
+            readers.push((handle, done_rx));
+        }
         {
             let stderr = stderr.clone();
-            threads.push(std::thread::spawn(move || {
+            let (done_tx, done_rx) = mpsc::channel();
+            let handle = std::thread::spawn(move || {
                 let mut reader = BufReader::new(stderr_pipe);
                 let mut chunk = Vec::new();
                 loop {
@@ -133,29 +214,58 @@ impl ManagedProcess {
                         }
                     }
                 }
-            }));
+                let _ = done_tx.send(());
+            });
+            readers.push((handle, done_rx));
         }
-        {
-            let exited = exited.clone();
-            threads.push(std::thread::spawn(move || {
-                let status = child.wait().expect("wait for supervised child");
-                // The slot is set before the notification, under the lock the
-                // signalling side takes, so a signal never meets a reaped pid.
-                *exited.lock().unwrap() = Some(status);
+        let waiter = {
+            let wait_fd = pidfd.try_clone()?;
+            std::thread::spawn(move || {
+                // Exit without reaping: the zombie keeps pid and group reserved.
+                let status = loop {
+                    match rustix::process::waitid(
+                        rustix::process::WaitId::PidFd(wait_fd.as_fd()),
+                        rustix::process::WaitIdOptions::EXITED
+                            | rustix::process::WaitIdOptions::NOWAIT,
+                    ) {
+                        Err(rustix::io::Errno::INTR) => continue,
+                        Ok(Some(info)) => break raw_status(&info),
+                        other => panic!("waitid on the supervised child: {other:?}"),
+                    }
+                };
                 let _ = exit_tx.send(status);
-            }));
-        }
+                // Reaped only when the cleanup says so (or the owner is gone).
+                let _ = reap_rx.recv();
+                let status = child.wait().expect("reap the supervised child");
+                let _ = reaped_tx.send(status);
+            })
+        };
         Ok(Self {
             pid,
+            pidfd,
             lines,
             exit,
-            exited,
+            reap: Some(reap_tx),
+            reaped,
             status: None,
             stdin,
             stderr,
-            threads,
+            readers,
+            reader_bound: READER_JOIN_BOUND,
+            waiter: Some(waiter),
             seen: Vec::new(),
+            markers,
+            token,
         })
+    }
+
+    pub fn spawn(command: Command) -> std::io::Result<Self> {
+        Self::spawn_with(command, Vec::new())
+    }
+
+    /// Changes the bound of the reader join (a failure bound, not a wait).
+    pub fn set_reader_bound(&mut self, bound: Duration) {
+        self.reader_bound = bound;
     }
 
     pub fn pid(&self) -> i32 {
@@ -227,7 +337,8 @@ impl ManagedProcess {
         self.stdin = None;
     }
 
-    /// Exit notification, if it arrives within the watchdog.
+    /// Exit notification, if it arrives within the watchdog. The child is not
+    /// reaped by this: it stays a zombie until `join` or the drop.
     pub fn wait_exit(&mut self, watchdog: Duration) -> Option<ExitStatus> {
         if let Some(status) = self.note_exit() {
             return Some(status);
@@ -239,8 +350,7 @@ impl ManagedProcess {
     /// Records the current descendants so that cleanup after the child's own
     /// exit still knows what it must not leave behind.
     pub fn remember_descendants(&mut self) -> &[observe::ProcInfo] {
-        let now = observe::descendants(self.pid);
-        for p in now {
+        for p in observe::descendants(self.pid) {
             if !self
                 .seen
                 .iter()
@@ -252,17 +362,13 @@ impl ManagedProcess {
         &self.seen
     }
 
+    /// Signals the child through its pidfd. False when it is gone.
     pub fn signal(&self, signal: rustix::process::Signal) -> bool {
-        let slot = self.exited.lock().unwrap();
-        if slot.is_some() {
-            return false;
-        }
-        rustix::process::Pid::from_raw(self.pid)
-            .is_some_and(|pid| rustix::process::kill_process(pid, signal).is_ok())
+        rustix::process::pidfd_send_signal(&self.pidfd, signal).is_ok()
     }
 
-    /// SIGTERM, then the exit notification. Past the watchdog the group is
-    /// killed (the test then reports that the child ignored SIGTERM).
+    /// SIGTERM, then the exit notification. Past the watchdog everything owned
+    /// is killed (the caller then reports that the child ignored SIGTERM).
     pub fn terminate(&mut self, watchdog: Duration) -> Result<ExitStatus, WaitError> {
         self.remember_descendants();
         self.signal(rustix::process::Signal::TERM);
@@ -275,47 +381,172 @@ impl ManagedProcess {
         }
     }
 
-    /// Kills the child, its group and every descendant seen or alive now, then
-    /// joins them. The test process is a child subreaper, so a descendant that
-    /// outlives its parent becomes this process's own child and can be waited
-    /// for: the join is the kernel's exit notification, not a poll of `/proc`.
-    pub fn kill_all(&mut self) {
-        self.remember_descendants();
-        let victims = self.seen.clone();
+    /// True when `pid` is a process this family owns: it carries the token in
+    /// its environment, or a marker on its command line or in its working
+    /// directory. Never true for the supervising process itself.
+    fn carries_marker(&self, pid: i32) -> bool {
+        if pid == std::process::id() as i32 {
+            return false;
+        }
+        let needle = format!("{OWNER_ENV}={}", self.token).into_bytes();
+        if std::fs::read(format!("/proc/{pid}/environ"))
+            .is_ok_and(|env| env.split(|b| *b == 0).any(|entry| entry == needle))
         {
-            let slot = self.exited.lock().unwrap();
-            if slot.is_none()
-                && let Some(pid) = rustix::process::Pid::from_raw(self.pid)
-            {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            return true;
+        }
+        if self.markers.is_empty() {
+            return false;
+        }
+        let cmdline = observe::cmdline(pid).join(" ");
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.markers
+            .iter()
+            .any(|m| cmdline.contains(m.as_str()) || cwd.starts_with(m.as_str()))
+    }
+
+    /// Everything this family owns right now, except the leader: processes
+    /// seen earlier (same incarnation), processes carrying a marker, and the
+    /// descendants of both.
+    fn owned_now(&self) -> Vec<observe::ProcInfo> {
+        let all = observe::all_processes();
+        let mut found: std::collections::BTreeSet<i32> = self
+            .seen
+            .iter()
+            .filter(|s| {
+                all.iter()
+                    .any(|p| p.pid == s.pid && p.start_ticks == s.start_ticks)
+            })
+            .map(|s| s.pid)
+            .collect();
+        found.extend(
+            all.iter()
+                .filter(|p| p.pid != self.pid && self.carries_marker(p.pid))
+                .map(|p| p.pid),
+        );
+        // Members of the leader's process group: the group id is the leader's
+        // pid, reserved until the leader is reaped, so membership proves
+        // ownership even for a zombie (whose environment can no longer be read).
+        found.extend(all.iter().filter(|p| p.pgid == self.pid).map(|p| p.pid));
+        loop {
+            let before = found.len();
+            for p in &all {
+                if found.contains(&p.ppid) && p.pid != self.pid {
+                    found.insert(p.pid);
+                }
+            }
+            if found.len() == before {
+                break;
             }
         }
-        // The leader's exit is reported after the kernel has handed its
-        // children to the subreaper, so the waits below can find them.
+        all.into_iter()
+            .filter(|p| p.pid != self.pid && found.contains(&p.pid))
+            .collect()
+    }
+
+    /// Kills one process by pidfd, after checking that the pid still names the
+    /// incarnation that was found, and reaps it when it is our child (a
+    /// subreaper adoption). A process that is not ours is left to its reaper.
+    fn kill_one(victim: &observe::ProcInfo) {
+        let Some(pid) = rustix::process::Pid::from_raw(victim.pid) else {
+            return;
+        };
+        let Ok(fd) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) else {
+            return;
+        };
+        // The pidfd pins the process now; check it is the one that was found.
+        if !observe::process(victim.pid).is_some_and(|p| p.start_ticks == victim.start_ticks) {
+            return;
+        }
+        let _ = rustix::process::pidfd_send_signal(&fd, rustix::process::Signal::KILL);
+        // Waits for the exit by pidfd; only a child of ours can also be reaped.
+        // Reaped (ours), or ECHILD (not ours): the kill was delivered. Only
+        // EINTR is retried.
+        while let Err(rustix::io::Errno::INTR) = rustix::process::waitid(
+            rustix::process::WaitId::PidFd(fd.as_fd()),
+            rustix::process::WaitIdOptions::EXITED,
+        ) {}
+    }
+
+    /// Kill phase: the group and everything owned. The leader stays a zombie
+    /// (its pid and group id reserved) and the readers keep running. Returns
+    /// the owned processes that were still running.
+    fn kill_phase(&mut self) -> Vec<observe::ProcInfo> {
+        self.remember_descendants();
+        // What is running before anything is killed: the group kill below
+        // would otherwise hide it from the report.
+        let mut killed: Vec<observe::ProcInfo> = self
+            .owned_now()
+            .into_iter()
+            .filter(|p| p.state != 'Z')
+            .collect();
+        let group = rustix::process::Pid::from_raw(self.pid).expect("a child pid");
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        let _ = rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::KILL);
+        // The exit notification comes after the kernel has handed the leader's
+        // children to the subreaper, so the discovery below sees them.
         if self.status.is_none() {
             self.status = self.exit.recv_timeout(Duration::from_secs(30)).ok();
         }
-        for victim in victims {
-            // Only the incarnation that was seen, never a reused pid.
-            if !observe::process(victim.pid).is_some_and(|p| p.start_ticks == victim.start_ticks) {
-                continue;
+        let me = std::process::id() as i32;
+        for _ in 0..20 {
+            // Running ones are killed; exited ones that are our own children
+            // (subreaper adoptions) are reaped. An exited process that is not
+            // ours has nothing left to do.
+            let pending: Vec<_> = self
+                .owned_now()
+                .into_iter()
+                .filter(|p| p.state != 'Z' || p.ppid == me)
+                .collect();
+            if pending.is_empty() {
+                break;
             }
-            let Some(pid) = rustix::process::Pid::from_raw(victim.pid) else {
-                continue;
-            };
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-            // Retried on EINTR only. Any other result: reaped, or not our child
-            // (then init reaps it).
-            while let Err(rustix::io::Errno::INTR) = rustix::process::waitid(
-                rustix::process::WaitId::Pid(pid),
-                rustix::process::WaitIdOptions::EXITED,
-            ) {}
+            for p in pending {
+                Self::kill_one(&p);
+                if p.state != 'Z'
+                    && !killed
+                        .iter()
+                        .any(|k| k.pid == p.pid && k.start_ticks == p.start_ticks)
+                {
+                    killed.push(p);
+                }
+            }
         }
+        killed
     }
 
-    /// The child must already have exited (or be terminated first). Joins the
-    /// reader threads and reports what was left behind.
+    /// Kills the child, its group and everything owned (the leader is reaped
+    /// later, by `join` or the drop).
+    pub fn kill_all(&mut self) {
+        let _ = self.kill_phase();
+    }
+
+    /// Kill phase, then the leader's reap and the readers' join.
+    fn reclaim(&mut self) -> (Vec<observe::ProcInfo>, usize) {
+        let orphans = self.kill_phase();
+        if let Some(reap) = self.reap.take() {
+            let _ = reap.send(());
+        }
+        if let Some(waiter) = self.waiter.take() {
+            let _ = self.reaped.recv_timeout(Duration::from_secs(30));
+            let _ = waiter.join();
+        }
+        self.stdin = None;
+        let mut unjoined = 0;
+        for (handle, done) in self.readers.drain(..) {
+            match done.recv_timeout(self.reader_bound) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = handle.join();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => unjoined += 1,
+            }
+        }
+        (orphans, unjoined)
+    }
+
+    /// The child must already have exited (or be terminated first). Reclaims
+    /// everything and reports what was left behind.
     pub fn join(mut self) -> Report {
         let status = match self.status.or_else(|| self.note_exit()) {
             Some(status) => status,
@@ -325,37 +556,20 @@ impl ManagedProcess {
                 .expect("a child that was asked to finish did not exit"),
         };
         self.status = Some(status);
-        let orphans: Vec<_> = self
-            .seen
-            .iter()
-            .filter(|p| !observe::is_gone(p))
-            .cloned()
-            .collect();
-        // Kills and reaps; the threads end when the pipes close.
-        self.kill_all();
-        let stderr = self.finish_threads();
+        let (orphans, unjoined_readers) = self.reclaim();
         Report {
             status,
-            stderr,
+            stderr: self.stderr(),
             orphans,
+            unjoined_readers,
         }
-    }
-
-    fn finish_threads(&mut self) -> String {
-        self.stdin = None;
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
-        self.stderr()
     }
 }
 
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
-        if self.threads.is_empty() {
-            return;
+        if self.waiter.is_some() {
+            let _ = self.reclaim();
         }
-        self.kill_all();
-        self.finish_threads();
     }
 }

@@ -21,7 +21,11 @@ use product_exec::{
     wire::{self, MockProvider},
 };
 use std::{
-    ffi::OsString, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration,
+    ffi::OsString,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
+    path::Path,
+    process::Command,
+    time::Duration,
 };
 
 const FAKE_ROLE_ENV: &str = "F4P_FAKE_ROLE";
@@ -235,6 +239,18 @@ fn compile_time_environment_macros_are_not_used_by_the_fixture() {
 
 // ---------------------------------------------- supervision and cleanup
 
+/// Reads the child's stdout up to its `up` line. libtest prints its own lines
+/// first, so the first line is not the signal.
+fn await_up(out: std::process::ChildStdout) {
+    use std::io::BufRead;
+    for line in std::io::BufReader::new(out).lines() {
+        if line.unwrap().trim() == "up" {
+            return;
+        }
+    }
+    panic!("the child ended before saying up");
+}
+
 fn fake_command(role: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -246,25 +262,77 @@ fn fake_command(role: &str) -> Command {
 #[test]
 #[ignore = "child process of the supervision tests; selected by F4P_FAKE_ROLE"]
 fn fake_role_process() {
-    use std::io::{BufRead, Write};
+    use std::io::Write;
     match std::env::var(FAKE_ROLE_ENV).unwrap().as_str() {
         // A parent that starts a grandchild, reports both and waits for stdin EOF.
         "family" => {
-            let mut grandchild = fake_command("sleeper")
+            let child = std::env::var("F4P_FAMILY_CHILD").unwrap_or_else(|_| "sleeper".into());
+            // A parker never ends by itself: it is left behind on purpose.
+            #[allow(clippy::zombie_processes)]
+            let mut grandchild = fake_command(&child)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            let mut ready = String::new();
-            std::io::BufReader::new(grandchild.stdout.take().unwrap())
-                .read_line(&mut ready)
-                .unwrap();
+            await_up(grandchild.stdout.take().unwrap());
             println!("{FAKE_PID_PREFIX}{}", grandchild.id());
             println!("{{\"status\":\"ready\"}}");
             std::io::stdout().flush().unwrap();
             let mut sink = String::new();
             let _ = std::io::stdin().read_line(&mut sink);
-            let _ = grandchild.wait();
+            // A parker never ends by itself: it is left behind on purpose.
+            if child == "sleeper" {
+                let _ = grandchild.wait();
+            }
+        }
+        // Runs until it is killed. No stdin, no timer: only a signal ends it.
+        "parker" => {
+            println!("up");
+            std::io::stdout().flush().unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        // Starts a parker, reports its pid and exits at once, so that the
+        // parker is orphaned before anything has observed it.
+        // F4P_ORPHAN_MODE=env: the parker inherits the family's environment.
+        // F4P_ORPHAN_MODE=cmdline: it clears the environment, leaves the
+        // session and process group (as the renderer helper does) and carries
+        // only the marker named by F4P_MARKER on its command line.
+        // F4P_ORPHAN_MODE=leak: like cmdline, without any marker, and it keeps
+        // this role's stdout pipe open.
+        "orphan_maker" => {
+            let mode = std::env::var("F4P_ORPHAN_MODE").unwrap();
+            let mut command = fake_command("parker");
+            command.stdin(std::process::Stdio::null());
+            if mode != "env" {
+                command.env_clear().env(FAKE_ROLE_ENV, "parker");
+                // SAFETY: setsid is async-signal-safe.
+                unsafe {
+                    command.pre_exec(|| {
+                        rustix::process::setsid()
+                            .map(|_| ())
+                            .map_err(std::io::Error::from)
+                    });
+                }
+            }
+            if mode == "cmdline" {
+                command.arg(std::env::var("F4P_MARKER").unwrap());
+            }
+            if mode == "leak" {
+                command.stdout(std::process::Stdio::inherit());
+            } else {
+                command.stdout(std::process::Stdio::piped());
+            }
+            // Deliberately never waited for: the orphan is the point.
+            #[allow(clippy::zombie_processes)]
+            let mut grandchild = command.spawn().unwrap();
+            if let Some(out) = grandchild.stdout.take() {
+                await_up(out);
+            }
+            println!("{FAKE_PID_PREFIX}{}", grandchild.id());
+            std::io::stdout().flush().unwrap();
+            // The Child handle is dropped without a wait: an orphan.
         }
         "sleeper" => {
             println!("up");
@@ -301,7 +369,13 @@ fn fake_role_process() {
 }
 
 fn spawn_family() -> (ManagedProcess, i32) {
-    let mut family = ManagedProcess::spawn(fake_command("family")).unwrap();
+    spawn_family_of("sleeper")
+}
+
+fn spawn_family_of(child: &str) -> (ManagedProcess, i32) {
+    let mut command = fake_command("family");
+    command.env("F4P_FAMILY_CHILD", child);
+    let mut family = ManagedProcess::spawn(command).unwrap();
     let (grandchild, _) = family
         .wait_for(Duration::from_secs(60), |line| {
             line.strip_prefix(FAKE_PID_PREFIX)?
@@ -316,6 +390,135 @@ fn spawn_family() -> (ManagedProcess, i32) {
         })
         .unwrap();
     (family, grandchild)
+}
+
+fn orphan_maker(mode: &str, marker: Option<&str>) -> (ManagedProcess, i32) {
+    let mut command = fake_command("orphan_maker");
+    command.env("F4P_ORPHAN_MODE", mode);
+    if let Some(marker) = marker {
+        command.env("F4P_MARKER", marker);
+    }
+    let markers = marker.map(str::to_owned).into_iter().collect();
+    let mut maker = ManagedProcess::spawn_with(command, markers).unwrap();
+    let (grandchild, _) = maker
+        .wait_for(Duration::from_secs(60), |line| {
+            line.strip_prefix(FAKE_PID_PREFIX)?
+                .trim()
+                .parse::<i32>()
+                .ok()
+        })
+        .unwrap();
+    // The parent's exit notification comes after the kernel reparented the
+    // grandchild to this process; nothing has been observed before it.
+    let status = maker
+        .wait_exit(Duration::from_secs(60))
+        .expect("exit event");
+    assert!(status.success());
+    (maker, grandchild)
+}
+
+#[test]
+fn a_descendant_orphaned_before_any_observation_is_reclaimed_by_the_family_token() {
+    let (maker, grandchild) = orphan_maker("env", None);
+    let adopted = product_exec::observe::process(grandchild).expect("the orphan runs");
+    assert_eq!(
+        adopted.ppid,
+        std::process::id() as i32,
+        "adopted by the subreaper"
+    );
+    let report = maker.join();
+    assert!(
+        report.orphans.iter().any(|p| p.pid == grandchild),
+        "{:?}",
+        report.orphans
+    );
+    assert!(
+        product_exec::observe::process(grandchild).is_none(),
+        "reaped"
+    );
+}
+
+#[test]
+fn a_session_leaving_orphan_with_a_cleared_environment_is_reclaimed_by_its_marker() {
+    let marker = format!(
+        "f4p-marker-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let (maker, grandchild) = orphan_maker("cmdline", Some(&marker));
+    let orphan = product_exec::observe::process(grandchild).expect("the orphan runs");
+    assert_eq!(
+        orphan.pgid, grandchild,
+        "it leads a group of its own, like a helper"
+    );
+    let leader_group = maker.pid();
+    assert_ne!(
+        orphan.pgid, leader_group,
+        "a group kill of the leader cannot reach it"
+    );
+    let report = maker.join();
+    assert!(report.orphans.iter().any(|p| p.pid == grandchild));
+    assert!(
+        product_exec::observe::process(grandchild).is_none(),
+        "reaped"
+    );
+}
+
+#[test]
+fn a_reader_held_open_by_a_stranger_is_bounded_not_awaited() {
+    let (mut maker, stranger) = {
+        let mut command = fake_command("orphan_maker");
+        command.env("F4P_ORPHAN_MODE", "leak");
+        let mut maker = ManagedProcess::spawn(command).unwrap();
+        maker.set_reader_bound(Duration::from_millis(200));
+        let (pid, _) = maker
+            .wait_for(Duration::from_secs(60), |line| {
+                line.strip_prefix(FAKE_PID_PREFIX)?
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+            })
+            .unwrap();
+        (maker, pid)
+    };
+    assert!(maker.wait_exit(Duration::from_secs(60)).unwrap().success());
+    let report = maker.join();
+    // No marker, no seen parent: the fixture must not touch it. It holds the
+    // stdout pipe, so the reader cannot end; the join is bounded.
+    assert!(report.unjoined_readers >= 1, "{report:?}");
+    assert!(
+        product_exec::observe::process(stranger).is_some_and(|p| p.state != 'Z'),
+        "an unowned process is never killed by the fixture"
+    );
+    // The test's own cleanup of what it deliberately leaked.
+    let pid = rustix::process::Pid::from_raw(stranger).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    while let Err(rustix::io::Errno::INTR) = rustix::process::waitid(
+        rustix::process::WaitId::Pid(pid),
+        rustix::process::WaitIdOptions::EXITED,
+    ) {}
+    assert!(product_exec::observe::process(stranger).is_none());
+}
+
+#[test]
+fn the_exited_leader_keeps_its_pid_reserved_until_the_cleanup() {
+    let (mut family, _) = spawn_family();
+    family.close_stdin();
+    assert!(family.wait_exit(Duration::from_secs(60)).unwrap().success());
+    // Exit was observed without reaping: the pid (and the group id) cannot be
+    // reused, so a signal or a group kill can only reach this process.
+    let zombie = product_exec::observe::process(family.pid()).expect("not reaped yet");
+    assert_eq!(zombie.state, 'Z');
+    let leader = family.pid();
+    let report = family.join();
+    assert!(report.status.success());
+    assert!(
+        product_exec::observe::process(leader).is_none(),
+        "reaped by the cleanup"
+    );
 }
 
 #[test]
@@ -349,9 +552,7 @@ fn terminate_and_join_report_clean_exit_and_no_orphans() {
 
 #[test]
 fn an_orphan_left_by_the_child_is_reported_then_killed() {
-    let (mut family, grandchild) = spawn_family();
-    family.remember_descendants();
-    // SIGKILL of the parent alone leaves the grandchild behind.
+    let (mut family, grandchild) = spawn_family_of("parker");
     let pid = rustix::process::Pid::from_raw(family.pid()).unwrap();
     rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
     assert!(family.wait_exit(Duration::from_secs(60)).is_some());
@@ -550,7 +751,7 @@ fn f4p_old_core_worker() {
 fn harness_exec_into_the_product_is_observed_without_a_clock_guess() {
     let artifact = ProductArtifact::require();
     let cycle = product_exec::old_core::exec_cycle(&artifact, &std::env::current_exe().unwrap())
-        .unwrap_or_else(|e| panic!("exec cycle failed: {e}"));
+        .unwrap_or_else(|(e, after)| panic!("exec cycle failed after {after:?}: {e}"));
     assert!(
         cycle.exe_replaced,
         "the same PID now runs the artifact image"
@@ -586,6 +787,8 @@ fn measure_f4_product_intervals() {
         .unwrap();
     let current = intervals::current_elf();
     let mut rec = intervals::Recorder::new(&profile, "first");
+    // Saved after every round: a failure or hang keeps what was measured so far.
+    let csv = out.join(format!("samples-{profile}-{label}.csv"));
     for n in 1..=5 {
         let dir = tempfile::Builder::new()
             .prefix("f4p-copy-")
@@ -594,6 +797,7 @@ fn measure_f4_product_intervals() {
         let copy = intervals::fresh_copy(&artifact, dir.path());
         runtime.block_on(intervals::one_round(&mut rec, n, &copy, &current, &harness));
         eprintln!("first {n}/5 done");
+        measure::write_csv(&csv, &rec.samples).unwrap();
     }
     // The warm series runs on the already verified and probed artifact.
     artifact.describe().expect("probe before the warm series");
@@ -603,12 +807,9 @@ fn measure_f4_product_intervals() {
             &mut rec, n, &artifact, &current, &harness,
         ));
         eprintln!("warm {n}/20 done");
+        measure::write_csv(&csv, &rec.samples).unwrap();
     }
-    measure::write_csv(
-        &out.join(format!("samples-{profile}-{label}.csv")),
-        &rec.samples,
-    )
-    .unwrap();
+    measure::write_csv(&csv, &rec.samples).unwrap();
     let mut summary =
         String::from("profile,condition,interval,n,failures,min_ms,p50_ms,p95_ms,max_ms\n");
     for condition in ["first", "warm"] {

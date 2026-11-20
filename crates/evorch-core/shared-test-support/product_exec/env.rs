@@ -97,6 +97,15 @@ impl IsolatedEnv {
     pub fn ownership_db(&self) -> PathBuf {
         self.state_dir().join("evorch/threads/owners.db")
     }
+    /// Strings that are unique to this environment: a process whose command line
+    /// or working directory contains one belongs to the product started here,
+    /// even when it cleared its environment.
+    pub fn ownership_markers(&self) -> Vec<String> {
+        vec![
+            self.root().to_string_lossy().into_owned(),
+            self.sockets.path().to_string_lossy().into_owned(),
+        ]
+    }
     pub fn footprint(&self) -> Footprint {
         Footprint {
             root: self.root().to_owned(),

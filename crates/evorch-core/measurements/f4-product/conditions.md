@@ -105,3 +105,22 @@ resource conditions and the page-cache policy above are unchanged. What changed:
   It stays a byte-identical copy with a measurement-only manifest
   (`EVORCH_F4P_MEASURE_MANIFEST`), built with `cargo build -p evorch-core --bin
   evorch-core`. No product test reads that variable.
+
+## Addendum 2 after review of #715 (base `8ec04796`, includes #716), before the second rerun
+
+The numbers of the first rerun are superseded; counts, intervals and
+resource conditions are unchanged. What changed:
+
+- **Base** `8ec04796` (adds the planned-shutdown watchdog, #716), so both artifacts
+  are rebuilt.
+- **Fixture**: process supervision now signals through a pidfd, observes the
+  exit without reaping, and reclaims by group, token and marker; descriptors
+  without close-on-exec are closed in the child. These run around, not inside,
+  the timed regions, and the tables are re-taken with them.
+- **Meaning of the exec intervals**: the start is the instant the watcher
+  thread had read the pipe EOF (an observation instant, later than the
+  kernel's close by an unmeasured wake-up latency), so `exec_to_ready` and
+  `exec_to_claim` are under-measured by that latency; neither is claimed to be
+  a bound of the true interval. A negative interval is recorded as an invalid
+  (failed) sample, not as 0, a failed cycle records both rows with its own
+  duration, and the CSV is saved after every round.

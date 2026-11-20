@@ -91,7 +91,7 @@ impl<'a> ProductLaunch<'a> {
             extra.push((name.as_str(), value.clone()));
         }
         self.env.apply(&mut command, &extra);
-        let process = ManagedProcess::spawn(command)?;
+        let process = ManagedProcess::spawn_with(command, self.env.ownership_markers())?;
         Ok(ProductProcess {
             artifact: self.artifact,
             env: self.env,
