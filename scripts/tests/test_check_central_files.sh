@@ -235,6 +235,94 @@ expect ok "the gate accepts a pr17e branch for the same files" bash -c "cd '$rep
 expect ok "the gate leaves an unscoped branch alone" bash -c "cd '$repo' && scripts/ci-scope-gate.sh --head-ref fix/other --base main"
 expect fail "the gate fails when the base is missing" bash -c "cd '$repo' && scripts/ci-scope-gate.sh --head-ref feat/pr17e-offline --base origin/main"
 
+# I0: the next-wave scopes. Each owner passes on its leaves (`foo.rs` and `foo/*`
+# are separate registrations), and refuses the central files, the shared contract
+# and every other owner's files; no scope has a central-file exception.
+C=crates/evorch-core
+T=crates/test-support
+H=crates/workbench-host
+X=crates/core-client-e2e
+G=crates/gui
+next_wave_scopes=(pr16a2f4p pr16a2f4e pr16bov1 pr16bov2 pr16bov3)
+owned_samples=(
+  "$T/src/product_exec.rs $T/src/product_exec/fixture.rs $C/shared-test-support/product_exec.rs $C/shared-test-support/product_exec/launch.rs $C/tests/renderer_support/product_exec.rs $C/tests/renderer_support/product_exec/launch.rs $C/tests/f4_product_fixture.rs $C/measurements/f4-product/manifest.json $C/measurements/f4-product/report/summary.md"
+  "$C/tests/f4_product_exec.rs $C/tests/f4_product_exec/handoff.rs $C/tests/f4_product_cef.rs $C/tests/f4_product_cache.rs"
+  "$C/tests/agent_observation_transport.rs $C/tests/agent_observation_transport/auth.rs $H/tests/agent_observation_lifecycle.rs $H/src/areas/browser/observation/source.rs $H/src/areas/browser/observation/source/lifecycle.rs"
+  "$C/tests/agent_observation_chromium.rs $X/tests/agent_observation_gui.rs $X/tests/agent_observation_gui/frames.rs $G/src/core_client/features/browser/observation.rs $G/src/core_client/features/browser/observation/view.rs"
+  "$C/tests/agent_observation_restart.rs $C/tests/agent_observation_restart/reconnect.rs $C/tests/agent_observation_cache.rs"
+)
+for i in "${!next_wave_scopes[@]}"; do
+  read -ra owned <<< "${owned_samples[$i]}"
+  files "${owned[@]}"
+  expect ok "${next_wave_scopes[$i]} owns its registered leaves" "$central" --scope "${next_wave_scopes[$i]}" --files-from "$work/files"
+  for j in "${!next_wave_scopes[@]}"; do
+    [[ "$i" != "$j" ]] || continue
+    for one in "${owned[@]}"; do
+      files "$one"
+      expect fail "${next_wave_scopes[$j]} does not own $one" "$central" --scope "${next_wave_scopes[$j]}" --files-from "$work/files"
+    done
+  done
+  for refused in Cargo.lock Cargo.toml crates/evorch-core/Cargo.toml crates/test-support/Cargo.toml crates/core-client-e2e/Cargo.toml \
+    .github/workflows/ci.yml scripts/feature-scopes.txt scripts/contract-test-filters.sh scripts/check-central-files.sh \
+    scripts/tests/test_check_central_files.sh scripts/ci-test-groups.json scripts/product-artifact.sh \
+    crates/test-support/src/lib.rs crates/test-support/src/product_artifact.rs \
+    crates/evorch-core/tests/core_cache.rs crates/evorch-core/src/main.rs crates/workbench-host/src/ingress.rs; do
+    files "${owned[0]}" "$refused"
+    expect fail "${next_wave_scopes[$i]} may not change $refused" "$central" --scope "${next_wave_scopes[$i]}" --files-from "$work/files"
+  done
+done
+# A neighbour of a registered leaf is not part of it.
+files $C/tests/agent_observation_transport_extra.rs
+expect fail "O-V1 does not own a sibling of its transport leaf" "$central" --scope pr16bov1 --files-from "$work/files"
+files $C/tests/f4_product_cache/other.rs
+expect fail "F4-E owns the cache binary file only, not a directory of it" "$central" --scope pr16a2f4e --files-from "$work/files"
+# The I0 integration PR itself is an integration PR and may change them all.
+files scripts/feature-scopes.txt .github/workflows/ci.yml scripts/contract-test-filters.sh crates/test-support/src/lib.rs crates/test-support/Cargo.toml
+expect ok "an integration PR may register the next wave" "$central" --scope integration --files-from "$work/files"
+# Branch names classify into the intended scopes.
+expect ok "test/pr16a2f4p-product-fixture is pr16a2f4p" scope_is test/pr16a2f4p-product-fixture pr16a2f4p
+expect ok "test/pr16a2f4e-product-exec is pr16a2f4e" scope_is test/pr16a2f4e-product-exec pr16a2f4e
+expect ok "test/pr16bov1-observation-transport is pr16bov1" scope_is test/pr16bov1-observation-transport pr16bov1
+expect ok "test/pr16bov2-observation-chromium-gui is pr16bov2" scope_is test/pr16bov2-observation-chromium-gui pr16bov2
+expect ok "test/pr16bov3-observation-restart-cache is pr16bov3" scope_is test/pr16bov3-observation-restart-cache pr16bov3
+expect ok "chore/integration-next-wave-registration is an integration PR" scope_is chore/integration-next-wave-registration integration
+
+# I0: the two independent cache binaries and the ignored tests CI selects. A
+# nextest filter that matches nothing fails, so every target exists, every ignored
+# one is ignored, and ci.yml selects it with `--run-ignored only --no-tests fail`.
+for cache_binary in f4_product_cache agent_observation_cache; do
+  expect ok "the cache gate names $cache_binary" bash -c "grep -q 'binary(=$cache_binary)' scripts/contract-test-filters.sh"
+  expect ok "$cache_binary has its own test target" test -f "$C/tests/$cache_binary.rs"
+  expect ok "$cache_binary is a binary no other cache target shares" bash -c "[[ \$(grep -c 'binary(=$cache_binary)' scripts/contract-test-filters.sh) == 1 ]]"
+done
+ci=.github/workflows/ci.yml
+ci_selects_ignored() { # <test target>: one nextest line selecting it as an ignored test that must exist
+  local line
+  line=$(grep -E 'nextest run .*--test "?'"$1"'"?( |$)' "$ci") || return 1
+  grep -q -e '--run-ignored only' <<< "$line" && grep -q -e '--no-tests fail' <<< "$line"
+}
+is_ignored_target() { grep -q '^#\[ignore' "$1"; }
+for ignored in "$C/tests/f4_product_cef.rs" "$C/tests/agent_observation_restart.rs" "$C/tests/agent_observation_chromium.rs" "$X/tests/agent_observation_gui.rs"; do
+  name=$(basename "$ignored" .rs)
+  expect ok "$name is an ignored placeholder" is_ignored_target "$ignored"
+  expect ok "ci.yml selects $name with --run-ignored only --no-tests fail" ci_selects_ignored "$name"
+done
+host_lifecycle=$(sed -n 's/^ *HOST_LIFECYCLE_TEST: *//p' "$ci")
+expect ok "ci.yml names the host lifecycle test once" test -n "$host_lifecycle" -a "$(printf '%s\n' "$host_lifecycle" | wc -l)" = 1
+expect ok "the host lifecycle test exists and is ignored" is_ignored_target "$H/tests/$host_lifecycle.rs"
+expect ok "ci.yml selects the host lifecycle test with --run-ignored only --no-tests fail" ci_selects_ignored '\$HOST_LIFECYCLE_TEST'
+# Every job that runs a product test depends on the sealed artifact job and
+# installs it; the artifact job builds it.
+ci_job() { awk -v job="$1" '$0 ~ "^  " job ":$" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$ci"; }
+job_has() { ci_job "$1" | grep -q -e "$2"; }
+for product_job in tests browser-e2e cef-e2e; do
+  expect ok "$product_job needs the product artifact" job_has "$product_job" '^    needs: product-artifact$'
+  expect ok "$product_job installs the sealed product artifact" job_has "$product_job" 'scripts/product-artifact.sh install'
+done
+expect ok "the product artifact job builds and seals it" job_has product-artifact 'scripts/product-artifact.sh build'
+expect ok "the aggregate gate requires the product artifact job" bash -c "grep -q 'otel, product-artifact, tests\]' $ci"
+expect fail "a job that runs no product test does not install the artifact" job_has lint 'scripts/product-artifact.sh install'
+
 if (( fails > 0 )); then
   echo "$fails check(s) failed" >&2
   exit 1

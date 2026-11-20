@@ -4,6 +4,9 @@
 //! the production defaults of the models.dev cache and the shell job handle
 //! state stay unchanged.
 
+pub mod product_artifact;
+pub mod product_exec;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};

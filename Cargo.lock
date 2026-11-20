@@ -1501,6 +1501,7 @@ dependencies = [
  "storage",
  "tempfile",
  "test-socket-dir",
+ "test-support",
  "tokio",
  "tools",
  "workbench-client",
@@ -6961,6 +6962,8 @@ version = "0.1.0"
 dependencies = [
  "catalog",
  "libc",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tools",

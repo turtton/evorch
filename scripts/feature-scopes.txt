@@ -55,3 +55,41 @@ pr16a2 crates/workbench-protocol/src/namespaces/artifacts.rs crates/workbench-pr
 pr16bos crates/browser/src/agent/chromium.rs crates/browser/src/agent/observation/* crates/workbench-host/src/areas/browser/observation/source.rs crates/workbench-host/src/areas/browser/observation/source/* crates/workbench-host/tests/agent_observation_source* crates/browser/tests/agent_observation* crates/browser/src/agent/connection.rs crates/runtime/src/agent_loop.rs crates/runtime/src/agent_loop/browser_observation_tests.rs scripts/feature-scopes.txt scripts/check-central-files.sh scripts/tests/test_check_central_files.sh .github/workflows/ci.yml
 pr16boh crates/workbench-host/src/areas/browser/observation/service.rs crates/workbench-host/src/areas/browser/observation/service/* crates/workbench-host/tests/agent_observation_host*
 pr16bog crates/gui/src/core_client/features/browser/observation.rs crates/gui/src/core_client/features/browser/observation/* crates/gui/tests/agent_observation*
+
+# Next wave after the stage 16 integration (registered by the I0 integration PR).
+# Each scope lists one glob per line; `foo.rs` and `foo/*` are separate lines.
+# No scope has a central-file exception: the shared registration (this file, the
+# CI workflow, the cache filter, the Cargo manifests and
+# crates/test-support/src/lib.rs) stays integration-owned, and
+# crates/test-support/src/product_artifact.rs (the sealed product artifact
+# contract) belongs to no leaf scope.
+# F4-P / F4-E: the product (the shipped evorch-core binary) fixture and its tests.
+# O-V1 / O-V2 / O-V3: validation of the agent browser observation (#705). The
+# `source.rs` / `source/*` lines of O-V1 admit test code only (review checks
+# that); O-V1 and O-V2 share those paths and the GUI observation leaf with
+# pr16bos and pr16bog, whose PRs are not open at the same time.
+pr16a2f4p crates/test-support/src/product_exec.rs
+pr16a2f4p crates/test-support/src/product_exec/*
+pr16a2f4p crates/evorch-core/shared-test-support/product_exec.rs
+pr16a2f4p crates/evorch-core/shared-test-support/product_exec/*
+pr16a2f4p crates/evorch-core/tests/renderer_support/product_exec.rs
+pr16a2f4p crates/evorch-core/tests/renderer_support/product_exec/*
+pr16a2f4p crates/evorch-core/tests/f4_product_fixture.rs
+pr16a2f4p crates/evorch-core/measurements/f4-product/*
+pr16a2f4e crates/evorch-core/tests/f4_product_exec.rs
+pr16a2f4e crates/evorch-core/tests/f4_product_exec/*
+pr16a2f4e crates/evorch-core/tests/f4_product_cef.rs
+pr16a2f4e crates/evorch-core/tests/f4_product_cache.rs
+pr16bov1 crates/evorch-core/tests/agent_observation_transport.rs
+pr16bov1 crates/evorch-core/tests/agent_observation_transport/*
+pr16bov1 crates/workbench-host/tests/agent_observation_lifecycle.rs
+pr16bov1 crates/workbench-host/src/areas/browser/observation/source.rs
+pr16bov1 crates/workbench-host/src/areas/browser/observation/source/*
+pr16bov2 crates/evorch-core/tests/agent_observation_chromium.rs
+pr16bov2 crates/core-client-e2e/tests/agent_observation_gui.rs
+pr16bov2 crates/core-client-e2e/tests/agent_observation_gui/*
+pr16bov2 crates/gui/src/core_client/features/browser/observation.rs
+pr16bov2 crates/gui/src/core_client/features/browser/observation/*
+pr16bov3 crates/evorch-core/tests/agent_observation_restart.rs
+pr16bov3 crates/evorch-core/tests/agent_observation_restart/*
+pr16bov3 crates/evorch-core/tests/agent_observation_cache.rs
