@@ -53,6 +53,7 @@
 //! }
 //! ```
 
+pub mod admin_audit;
 pub mod artifact_refs;
 mod body_ref;
 mod body_store;

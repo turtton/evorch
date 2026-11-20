@@ -30,12 +30,15 @@ recovery-test-support = []
 # Only the tests of the historical migrations enable it (through the dev-dependency on
 # this crate below); no product crate does.
 unchecked-open = []
+# `admin_audit::fault`: fails an audit write before or after its commit so a test can
+# prove the readback. Enabled only through the dev-dependency below.
+admin-audit-fault = []
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
-storage = { path = ".", features = ["unchecked-open", "plan-write-gate"] }
+storage = { path = ".", features = ["unchecked-open", "plan-write-gate", "admin-audit-fault"] }
 # Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
 providers = { path = "../providers" }
 rusqlite = { workspace = true, features = ["hooks"] }

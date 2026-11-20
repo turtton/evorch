@@ -386,6 +386,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("agent_runs", Keep, "legacy table"),
     ("retention_identity", Keep, "retention bookkeeping"),
     ("retention_binding", Keep, "retention bookkeeping"),
+    (
+        "accepted_admin_operations",
+        Keep,
+        "the administrative audit is bounded by its own count, size and age limits",
+    ),
+    (
+        "admin_denials",
+        Keep,
+        "aggregated refusals are bounded by their own count, size and age limits",
+    ),
     ("retention_staging_state", Keep, "retention bookkeeping"),
     ("retention_staging", Keep, "retention bookkeeping"),
     ("retention_unresolved", Keep, "retention bookkeeping"),

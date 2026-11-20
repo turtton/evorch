@@ -13,6 +13,7 @@ use crate::{
     ReconcileSummary, StorageConfig, StorageError,
 };
 
+pub(crate) mod admin_audit;
 mod cleanup;
 mod conversation_plan;
 mod index;
@@ -229,6 +230,11 @@ enum Command {
     Lane(lanes::LaneJob),
     /// Work on the pull request tables (ADR 0043), with the same contract as `Lane`.
     PullRequest(lanes::LaneJob),
+    /// One administrative audit command; the callback is called after its transaction.
+    AdminAudit(
+        crate::admin_audit::AuditWrite,
+        crate::admin_audit::AuditReplyCallback,
+    ),
     Shutdown,
 }
 
