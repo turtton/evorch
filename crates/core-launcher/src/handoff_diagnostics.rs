@@ -1,4 +1,14 @@
 //! Bounded facade for local clients: never open the DB to diagnose boot failure.
+//!
+//! * [`connect`]: connect to a running core, never start one.
+//! * [`reconnect`]: wait for the successor of a planned restart (connect-only).
+#[path = "handoff_diagnostics/connect.rs"]
+pub mod connect;
+#[path = "handoff_diagnostics/reconnect.rs"]
+pub mod reconnect;
+#[cfg(test)]
+#[path = "handoff_diagnostics/reconnect_tests.rs"]
+mod reconnect_tests;
 use core_instance::{ConfigIdentity, handoff::receipt::RestartBootReceipt};
 
 #[derive(Debug, PartialEq, Eq)]
