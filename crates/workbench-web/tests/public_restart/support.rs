@@ -19,7 +19,10 @@ use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::events::Subscribe;
 use workbench_protocol::handshake::ServerHello;
 use workbench_protocol::ids::ClientId;
-use workbench_protocol::namespaces::lifecycle::quarantine::{QuarantineItem, QuarantineReply};
+use workbench_protocol::namespaces::lifecycle::quarantine::{
+    QuarantineClaim, QuarantineCompletion, QuarantineEligibility, QuarantineItem, QuarantineReason,
+    QuarantineReply,
+};
 use workbench_protocol::namespaces::lifecycle::restart::{
     AdminAuditDiagnostics, RestartCommand, RestartManagementStatus, RestartQuery, RestartReply,
     RestartTarget, RestartTargets,
@@ -201,12 +204,38 @@ impl WorkbenchBackend for Facade {
                     },
                 )))
             }
+            RequestBody::Query(Query::Lifecycle(LifecycleQuery::OperationStatus {
+                operation_id,
+            })) => {
+                let known = state.restarts.iter().any(|id| id == operation_id.as_str());
+                lifecycle_reply(LifecycleReply::OperationStatus(AdminReceipt {
+                    operation_id,
+                    state: if known {
+                        AdminOperationState::Completed
+                    } else {
+                        AdminOperationState::Unknown
+                    },
+                    outcome: if known {
+                        AdminOutcome::Succeeded
+                    } else {
+                        AdminOutcome::Unknown
+                    },
+                    audit_warning: false,
+                }))
+            }
             RequestBody::Query(Query::Lifecycle(LifecycleQuery::Quarantine(_))) => {
                 lifecycle_reply(LifecycleReply::Quarantine(QuarantineReply::List {
                     items: vec![QuarantineItem {
                         graph_id: id("graph-1"),
                         revision: Revision(3),
                         cold: true,
+                        restart_tx_id: id("tx-1"),
+                        capture_id: id("capture-1"),
+                        reason: QuarantineReason::ColdBoot,
+                        eligibility: QuarantineEligibility::Open,
+                        claim: QuarantineClaim::Absent,
+                        completion: QuarantineCompletion::NotStarted,
+                        members: 1,
                     }],
                     revision: Revision(3),
                     truncated: false,

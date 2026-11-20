@@ -245,13 +245,12 @@ async fn confirmation_conflict_and_epoch_handling_with_a_fake_principal() {
     ui.click(".admin-confirm .danger").await;
     ui.wait(r##"() => document.querySelector('.admin-outcome[data-outcome="conflict"]')"##)
         .await;
-    ui.wait(r##"() => document.querySelector(".admin-void")"##)
-        .await;
     assert!(
         facade.restarts().is_empty(),
         "a conflicting request changes nothing"
     );
-    ui.click(".admin-confirm .decide-row button").await;
+    ui.click(".admin-confirm .decide-row button:last-child")
+        .await;
 
     // A new confirmation binds the current revision and goes through.
     ui.wait(r##"() => document.querySelector('[data-target="current"] .row-sub')?.textContent.includes("リビジョン 2")"##)
@@ -263,7 +262,8 @@ async fn confirmation_conflict_and_epoch_handling_with_a_fake_principal() {
     ui.wait(r##"() => document.querySelector('.admin-outcome[data-outcome="pending"]')"##)
         .await;
     assert_eq!(facade.restarts().len(), 1);
-    ui.click(".admin-confirm .decide-row button").await;
+    ui.click(".admin-confirm .decide-row button:last-child")
+        .await;
 
     // A confirmation open when the core epoch changes is void without any
     // request: the next management notice makes the page read the new epoch.
@@ -307,4 +307,55 @@ async fn page_side_cursor_and_request_rules() {
         .await;
     assert_eq!(result["failures"], json!([]), "{result:#}");
     assert!(result["passed"].as_u64().unwrap() >= 6, "{result:#}");
+}
+
+/// Counts the restart requests the page sends and loses the answer of the
+/// first one after the server has handled it.
+const LOSE_FIRST_ACK: &str = r##"
+window.__restartPosts = 0;
+const realFetch = window.fetch.bind(window);
+window.fetch = async (url, init) => {
+  const body = typeof init?.body === "string" ? init.body : "";
+  const isRestart = body.includes('"type":"request"');
+  if (isRestart) window.__restartPosts += 1;
+  const response = await realFetch(url, init);
+  if (isRestart && window.__restartPosts === 1) throw new TypeError("answer lost");
+  return response;
+};
+"##;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Chrome or Chromium; run with --run-ignored only (CI browser-e2e job)"]
+async fn a_lost_answer_is_read_back_and_the_request_is_never_sent_again() {
+    let facade = Arc::new(Facade::new());
+    let base = serve_with_fake_principal(&facade).await;
+    let profile = tempfile::tempdir().unwrap();
+    let browser = launch_browser(profile.path()).await;
+    let page = browser.new_page("about:blank").await.unwrap();
+    page.evaluate_on_new_document(LOSE_FIRST_ACK).await.unwrap();
+    page.goto(format!("{base}/#/admin")).await.unwrap();
+    let ui = Driver { page };
+
+    ui.wait(r##"() => document.querySelector('.admin[data-access="enabled"] [data-target="current"]')"##)
+        .await;
+    ui.click(r##"[data-target="current"] button"##).await;
+    ui.click(".admin-confirm .danger").await;
+    ui.wait(r##"() => document.querySelector('.admin-outcome[data-outcome="unknown"]')"##)
+        .await;
+
+    // The core handled it once; the page offers no way to send it again.
+    assert_eq!(facade.restarts().len(), 1);
+    assert_eq!(
+        ui.eval(r##"document.querySelectorAll(".admin-confirm .danger").length"##)
+            .await,
+        json!(0)
+    );
+    assert_eq!(ui.eval("window.__restartPosts").await, json!(1));
+
+    // Reading the operation back with the same id settles it.
+    ui.click(".admin-confirm .readback").await;
+    ui.wait(r##"() => document.querySelector('.admin-outcome[data-outcome="accepted"]')"##)
+        .await;
+    assert_eq!(ui.eval("window.__restartPosts").await, json!(1));
+    assert_eq!(facade.restarts().len(), 1);
 }

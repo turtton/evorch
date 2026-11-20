@@ -221,7 +221,7 @@ export function createAdminModel() {
     /** Drop everything held, as after a new core epoch or a fresh snapshot. */
     reset() {
       clearHeld();
-      if (state.confirmation) state.confirmation = { ...state.confirmation, void: "reset" };
+      if (state.confirmation) state.confirmation.void = "reset";
       notify();
     },
 
@@ -274,6 +274,7 @@ export function createAdminModel() {
         fingerprint: fingerprintOf(kind, key),
         operationId: newOperationId(),
         sending: false,
+        sent: false,
         void: null,
         outcome: null,
       };
@@ -289,17 +290,28 @@ export function createAdminModel() {
       const c = state.confirmation;
       if (!c) return "none";
       if (c.void) return "void";
-      if (c.sending) return "sending";
+      if (c.sent) return c.sending ? "sending" : "sent";
       if (c.fingerprint === null || fingerprintOf(c.kind, c.key) !== c.fingerprint) return "stale";
       return null;
     },
-    markSending(sending) {
-      if (state.confirmation) state.confirmation.sending = sending;
+    /**
+     * Record that `c` is being sent. Once sent it can never be sent again: an
+     * answer that was lost leaves the outcome unknown, and only reading the
+     * same operation id back is allowed from then on. Ignored when `c` is no
+     * longer the open confirmation.
+     */
+    markSending(c, sending) {
+      if (state.confirmation !== c) return;
+      c.sending = sending;
+      if (sending) c.sent = true;
       notify();
     },
-    setOutcome(outcome) {
-      if (state.confirmation) state.confirmation.outcome = outcome;
+    /** Show the outcome on `c` only while `c` is still the open confirmation. */
+    setOutcome(c, outcome) {
+      if (state.confirmation !== c) return false;
+      c.outcome = outcome;
       notify();
+      return true;
     },
   };
 }
@@ -462,33 +474,33 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
   async function send() {
     const c = state.confirmation;
     if (!c || model.confirmationProblem() !== null) return;
-    model.markSending(true);
+    model.markSending(c, true);
     const result = await api.adminRequest(c.build(c.operationId));
     if (destroyed) return;
-    model.markSending(false);
+    model.markSending(c, false);
     const receipt = unwrapReceipt(result);
     if (receipt.ok) {
-      model.setOutcome({ type: outcomeType(receipt.value), receipt: receipt.value });
+      model.setOutcome(c, { type: outcomeType(receipt.value), receipt: receipt.value });
       refreshStatus();
       refreshQuarantine();
       refreshUndisposed();
       return;
     }
     if (isConflict(receipt.error)) {
-      model.setOutcome({ type: "conflict", error: receipt.error });
+      model.setOutcome(c, { type: "conflict", error: receipt.error });
       await refreshAll();
       return;
     }
     if (isDenied(receipt.error)) {
-      model.setOutcome({ type: "denied", error: receipt.error });
+      model.setOutcome(c, { type: "denied", error: receipt.error });
       model.setAccess("disabled");
       return;
     }
     if (receipt.error.code === "transport" || receipt.error.code === "internal" || receipt.error.code === "storage_unavailable") {
-      model.setOutcome({ type: "unknown", error: receipt.error });
+      model.setOutcome(c, { type: "unknown", error: receipt.error });
       return;
     }
-    model.setOutcome({ type: "failed", error: receipt.error });
+    model.setOutcome(c, { type: "failed", error: receipt.error });
   }
 
   function outcomeType(receipt) {
@@ -515,10 +527,10 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
       "operation_status",
     );
     if (receipt.ok) {
-      model.setOutcome({ type: outcomeType(receipt.value), receipt: receipt.value });
+      model.setOutcome(c, { type: outcomeType(receipt.value), receipt: receipt.value });
       refreshStatus();
     } else {
-      model.setOutcome({ type: "unknown", error: receipt.error });
+      model.setOutcome(c, { type: "unknown", error: receipt.error });
     }
   }
 
@@ -746,20 +758,23 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
         parts.push(h("p", { class: "list-status admin-audit-warning", text: "監査の記録に失敗しました。操作自体は受け付けられています。" }));
       }
     }
-    const done = outcome && outcome.type !== "unknown";
+    const done = outcome && outcome.type !== "unknown" && outcome.type !== "pending";
+    // A sent operation is never offered again: only its state can be read back.
+    const readBackOnly = c.sent && !done;
     parts.push(
       h(
         "div",
         { class: "decide-row" },
-        done
-          ? button("閉じる", () => model.closeConfirmation())
+        c.sent
+          ? null
           : button("実行する", send, {
               disabled: problem !== null,
               cls: "button small danger",
               reason: "この確認はいま実行できません",
             }),
-        outcome?.type === "unknown" ? button("状態を確認", readBack) : null,
-        done ? null : button("やめる", () => model.closeConfirmation()),
+        c.sending ? h("span", { class: "list-status", text: "送信中…" }) : null,
+        outcome && !done ? button("状態を確認", readBack, { cls: "button small readback" }) : null,
+        c.sending ? null : button(done || readBackOnly ? "閉じる" : "やめる", () => model.closeConfirmation()),
       ),
     );
     return h("div", { class: "card admin-confirm", dataset: { kind: c.kind }, attrs: { role: "group", "aria-label": "確認" } }, parts);

@@ -109,6 +109,31 @@
     check(model.state.coreEpoch === "3", "the new epoch is held");
   });
 
+  await test("a confirmation that was sent can only be read back, never sent again", () => {
+    const model = createAdminModel();
+    model.setAccess("enabled");
+    model.applyTargets(targets("2", "1"));
+    const c = openRestart(model);
+    model.markSending(c, true);
+    model.markSending(c, false);
+    model.setOutcome(c, { type: "unknown", error: { code: "transport" } });
+    check(model.confirmationProblem() === "sent", `problem ${model.confirmationProblem()}`);
+  });
+
+  await test("an answer for a closed confirmation does not touch the one now open", () => {
+    const model = createAdminModel();
+    model.setAccess("enabled");
+    model.applyTargets(targets("2", "1"));
+    const first = openRestart(model);
+    model.markSending(first, true);
+    model.closeConfirmation();
+    const second = openRestart(model);
+    check(model.setOutcome(first, { type: "accepted" }) === false, "the old answer was applied");
+    model.markSending(first, false);
+    check(second.outcome === null && second.sent === false, "the new confirmation changed");
+    check(model.confirmationProblem() === null, "the new confirmation can still be sent");
+  });
+
   await test("losing access drops every held binding", () => {
     const model = createAdminModel();
     model.setAccess("enabled");
