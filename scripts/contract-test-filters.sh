@@ -17,7 +17,12 @@
 # with a placeholder test file. Those two are independent cache binaries: they are
 # never merged into an existing one, and their I0 placeholders only check the sealed
 # product artifact (crates/test-support/src/product_artifact.rs), they prove no cache
-# behaviour. (No comments inside the filter itself: nextest does not parse them.)
+# behaviour. public_restart_cache (5a-R/CW) and cli_continuity_cache (5a-CN) are the
+# independent cache binaries of the public restart management, registered by the 5a-I
+# integration PR (a placeholder file each, with the normal-turn prefix scenario that
+# the integration PR's own foundation can already assert); they are never merged into
+# an existing binary and no leaf renames them.
+# (No comments inside the filter itself: nextest does not parse them.)
 # scripts/tests/test_check_central_files.sh checks that every binary named in
 # CACHE_CONTRACT_FILTER has a test target.
 # shellcheck disable=SC2034 # Consumed by scripts that source this file.
@@ -70,7 +75,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
       | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
-  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache)))
+  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))
