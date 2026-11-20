@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
+use workbench_authority::IngressContext;
 use workbench_host::{CommandHost, projection::Projection};
 use workbench_protocol::namespaces::{LifecycleQuery, LifecycleReply};
 use workbench_protocol::{
@@ -208,17 +209,29 @@ impl HostBackend {
     pub fn mask<T: Serialize + DeserializeOwned>(&self, value: T) -> Result<T, WorkbenchError> {
         protect(&self.redactor, value)
     }
-    pub fn request(&self, request: RequestEnvelope, provenance: Provenance) -> ReplyEnvelope {
-        self.mask(self.raw_request(request, provenance))
+    pub fn request(
+        &self,
+        request: RequestEnvelope,
+        provenance: impl Into<IngressContext>,
+    ) -> ReplyEnvelope {
+        self.mask(self.raw_request(request, provenance.into()))
             .unwrap_or_else(|error| ReplyEnvelope {
                 request_id: RequestId::new("redacted").unwrap(),
                 result: ReplyResult::Error(error),
             })
     }
     // HTTP checks the original correlation id before its final egress hook.
-    fn raw_request(&self, request: RequestEnvelope, provenance: Provenance) -> ReplyEnvelope {
+    fn raw_request(&self, request: RequestEnvelope, context: IngressContext) -> ReplyEnvelope {
         let id = request.request_id.clone();
         let outcome = (|| {
+            if let Some(action) = request.body.admin_action() {
+                self.authorize_management(&context, action)?;
+                return Err(error(
+                    ErrorCode::UnsupportedCapability,
+                    "management facade not registered",
+                ));
+            }
+            let provenance = context.provenance().clone();
             if self.closing.load(Ordering::SeqCst) {
                 return Err(error(ErrorCode::Busy, "core is draining"));
             }
@@ -270,14 +283,40 @@ impl HostBackend {
     pub fn subscription(
         &self,
         subscribe: &Subscribe,
+        context: &IngressContext,
     ) -> Result<workbench_host::subscriptions::Subscription, WorkbenchError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(error(ErrorCode::Busy, "core is draining"));
+        }
+        if subscribe.scope == workbench_protocol::events::SubscriptionScope::Management {
+            self.authorize_management(
+                context,
+                workbench_protocol::namespaces::lifecycle::AdminAction::Status,
+            )?;
+            return Err(error(
+                ErrorCode::UnsupportedCapability,
+                "management subscription not registered",
+            ));
         }
         self.projection.subscribe_with_snapshot(subscribe)
     }
 }
 impl WorkbenchBackend for HostBackend {
+    fn authorize_management(
+        &self,
+        context: &IngressContext,
+        action: workbench_protocol::namespaces::lifecycle::AdminAction,
+    ) -> Result<(), WorkbenchError> {
+        if let Some(admin) = self.host.lock().unwrap().admin() {
+            return admin.authorize(context, action);
+        }
+        context.authorize().map(|_| ()).map_err(|_| {
+            error(
+                ErrorCode::PermissionDenied,
+                "verified human management authority required",
+            )
+        })
+    }
     async fn drain_for_restart(&self) -> Result<(), WorkbenchError> {
         self.web_deliveries
             .drain()
@@ -292,16 +331,47 @@ impl WorkbenchBackend for HostBackend {
         &self,
         _: &WebSession,
         request: RequestEnvelope,
-        provenance: Provenance,
+        provenance: IngressContext,
     ) -> ReplyEnvelope {
-        self.raw_request(request, provenance)
+        if request.body.admin_action().is_none() {
+            return self.raw_request(request, provenance);
+        }
+        let request_id = request.request_id.clone();
+        let result=async {
+            let action=request.body.admin_action().unwrap();
+            self.authorize_management(&provenance,action)?;
+            request.body.validate(&self.hello.limits)?;
+            let admin={self.host.lock().unwrap().admin()}.ok_or_else(||error(ErrorCode::UnsupportedCapability,"management facade not registered"))?;
+            match request.body {
+                RequestBody::Command(workbench_protocol::commands::Command::Lifecycle(intent))=>{
+                    let authorized=admin.authorize_request(provenance,intent)?;
+                    let accepted=admin.submit(authorized)?.await.map_err(|_|error(ErrorCode::Internal,"management result unknown"))??;
+                    Ok(ReplyPayload::Command(workbench_protocol::commands::CommandReply::with_result(workbench_protocol::commands::CommandResult::Lifecycle(workbench_protocol::namespaces::lifecycle::LifecycleResult::Accepted(accepted.into_receipt())))))
+                },
+                RequestBody::Query(workbench_protocol::queries::Query::Lifecycle(query))=>{
+                    let authorized=admin.authorize_query(provenance,query)?;
+                    let view=admin.query(authorized)?.await.map_err(|_|error(ErrorCode::Internal,"management view unavailable"))??;
+                    view.validate(&self.hello.limits)?;
+                    Ok(ReplyPayload::Query(workbench_protocol::queries::QueryReply::Lifecycle(view)))
+                },
+                _=>Err(error(ErrorCode::InvalidRequest,"unknown management request")),
+            }
+        }.await;
+        ReplyEnvelope {
+            request_id,
+            result: match result {
+                Ok(reply) => ReplyResult::Success(reply),
+                Err(error) => ReplyResult::Error(error),
+            },
+        }
     }
     async fn subscribe(
         &self,
         _: ClientId,
         subscribe: Subscribe,
+        context: IngressContext,
     ) -> Result<BackendSubscription, WorkbenchError> {
-        let mut subscription = self.subscription(&subscribe)?;
+        let mut subscription = self.subscription(&subscribe, &context)?;
         let started = self.mask(subscription.started.clone())?;
         let (tx, events) = tokio::sync::mpsc::channel(1);
         let redactor = self.redactor.clone();
@@ -329,8 +399,12 @@ impl WorkbenchBackend for HostBackend {
         }).map_err(|_| error(ErrorCode::Draining, "web delivery admission closed"))?;
         Ok(BackendSubscription { started, events })
     }
-    async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
-        Ok(self.hello())
+    async fn server_hello(&self, context: &IngressContext) -> Result<ServerHello, WorkbenchError> {
+        let mut hello = self.hello();
+        if !context.authority().is_verified_local() {
+            hello.capabilities.retain(|c| c.name() != "safe_restart.v1");
+        }
+        Ok(hello)
     }
 }
 

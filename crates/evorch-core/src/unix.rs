@@ -31,12 +31,7 @@ pub async fn connection(
     backend: Arc<HostBackend>,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "wrong socket peer owner",
-        ));
-    }
+    let verified_peer = workbench_authority::verify_unix_peer(&stream)?;
     let (mut read, write) = stream.into_split();
     let mut hello = backend.hello();
     let first = tokio::select! { r = payload(&mut read, hello.limits.max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
@@ -93,7 +88,15 @@ pub async fn connection(
         }
     });
     let _client_connection = backend.client_connection(client.client_instance_id.clone());
-    let provenance = Provenance::human(Surface::Desktop, client.client_instance_id);
+    let surface = match client.local_surface {
+        Some(LocalSurface::Cli) => Surface::Cli,
+        _ => Surface::Desktop,
+    };
+    let context = workbench_authority::IngressContext::new(
+        Provenance::human(surface, client.client_instance_id),
+        verified_peer.authority(),
+    );
+    let admin_slots = Arc::new(tokio::sync::Semaphore::new(32));
     let mut session = None;
     let mut subscriptions = BTreeMap::new();
     loop {
@@ -145,7 +148,7 @@ pub async fn connection(
                             "too many subscriptions",
                         ))
                     } else {
-                        match backend.subscription(&s) {
+                        match backend.subscription(&s, &context) {
                             Err(e) => ReplyResult::Error(e),
                             Ok(mut sub) => {
                                 let sub_id = sub.started.subscription_id.to_string();
@@ -192,7 +195,54 @@ pub async fn connection(
                 RequestBody::Control(Control::Pong { .. }) => {
                     ReplyResult::Success(ReplyPayload::Ack)
                 }
-                _ => backend.request(request, provenance.clone()).result,
+                _ if request.body.admin_action().is_some() => {
+                    if request.body.is_admin_fast_lane() {
+                        let session = workbench_web::WebSession {
+                            session_id: request.session_id.clone(),
+                            client_id: context.provenance().client_id.clone().unwrap(),
+                        };
+                        // Both are synchronous memory fast lanes in the common service.
+                        let reply = backend
+                            .handle_request(&session, request, context.clone())
+                            .await;
+                        output
+                            .send(ServerFrame::Reply(backend.mask(reply).map_err(invalid)?))
+                            .await
+                            .map_err(invalid)?;
+                        continue;
+                    }
+                    let Ok(slot) = admin_slots.clone().try_acquire_owned() else {
+                        output
+                            .send(ServerFrame::Reply(ReplyEnvelope {
+                                request_id,
+                                result: ReplyResult::Error(error(
+                                    ErrorCode::Busy,
+                                    "too many management requests",
+                                )),
+                            }))
+                            .await
+                            .map_err(invalid)?;
+                        continue;
+                    };
+                    // Pending audit ACKs must not serialize a later cancel on this socket.
+                    let backend = backend.clone();
+                    let context = context.clone();
+                    let tx = output.clone();
+                    tasks.spawn(async move {
+                        let _slot = slot;
+                        let session = workbench_web::WebSession {
+                            session_id: request.session_id.clone(),
+                            client_id: context.provenance().client_id.clone().unwrap(),
+                        };
+                        let reply = backend.handle_request(&session, request, context).await;
+                        tx.send(ServerFrame::Reply(backend.mask(reply).map_err(invalid)?))
+                            .await
+                            .map_err(invalid)?;
+                        Ok(false)
+                    });
+                    continue;
+                }
+                _ => backend.request(request, context.clone()).result,
             }
         };
         let reply = backend

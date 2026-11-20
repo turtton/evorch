@@ -182,6 +182,11 @@ fn area_samples_golden() {
         wires("query", area.queries, &mut actual);
         wires("ui_event", area.ui_events, &mut actual);
         wires("query_reply", area.query_replies, &mut actual);
+        if area.name == "lifecycle" {
+            for (name, wire) in areas::lifecycle::extra_goldens() {
+                assert!(actual.insert(name, wire).is_none());
+            }
+        }
         let actual = Value::Object(actual);
         let path = golden_path(&format!("areas/{}", area.name));
         if std::env::var_os("WORKBENCH_UPDATE_GOLDEN").is_some() {

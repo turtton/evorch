@@ -118,6 +118,8 @@ pub enum StorageError {
     LaneOperation(event_bus::lane::LaneOperationError),
     LaneManagement(crate::lane_management::LaneManagementError),
     StaleMutation,
+    /// An administrative audit command was refused; see [`crate::admin_audit::AuditError`].
+    AdminAudit(crate::admin_audit::AuditError),
     /// SQLite 操作が失敗しました。
     Sqlite(rusqlite::Error),
     /// スキーマ移行が失敗しました。
@@ -255,6 +257,7 @@ impl fmt::Display for StorageError {
                 write!(formatter, "lane delivery conflict: {reason}")
             }
             Self::StaleMutation => write!(formatter, "mutation owner generation is stale"),
+            Self::AdminAudit(error) => write!(formatter, "{error}"),
             Self::Sqlite(error) => write!(formatter, "SQLite error: {error}"),
             Self::Migration { version, message } => {
                 write!(formatter, "migration {version} failed: {message}")
@@ -445,6 +448,8 @@ impl StorageError {
                 FailureClass::SchemaUnsupported
             }
             Self::LimitExceeded { .. } | Self::QuestionCapacity(_) => FailureClass::Limit,
+            Self::AdminAudit(crate::admin_audit::AuditError::Capacity(_)) => FailureClass::Limit,
+            Self::AdminAudit(crate::admin_audit::AuditError::Busy) => FailureClass::Busy,
             Self::Sqlite(error) => match error.sqlite_error_code() {
                 Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => FailureClass::Corrupt,
                 Some(
@@ -471,6 +476,7 @@ impl std::error::Error for StorageError {
             | Self::LaneOperation(_)
             | Self::LaneDeliveryConflict(_)
             | Self::Migration { .. }
+            | Self::AdminAudit(_)
             | Self::StaleMutation
             | Self::SchemaTooNew { .. }
             | Self::ConversionRequired { .. }

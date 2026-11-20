@@ -1,6 +1,8 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
+pub mod owned_graphs;
+pub mod quarantine;
 pub mod restart;
 pub use activation::*;
 mod prepared;

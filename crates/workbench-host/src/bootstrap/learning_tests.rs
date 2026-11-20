@@ -234,6 +234,8 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
     // All shared factories coexist; additional services must not break this
     // learning/drain contract or remove the lane producer shutdown participants.
     for required in [
+        "admin-read-io",
+        "admin-audit",
         "evaluation",
         "self-improvement",
         "mcp",

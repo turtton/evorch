@@ -93,3 +93,89 @@ pr16bov2 crates/gui/src/core_client/features/browser/observation/*
 pr16bov3 crates/evorch-core/tests/agent_observation_restart.rs
 pr16bov3 crates/evorch-core/tests/agent_observation_restart/*
 pr16bov3 crates/evorch-core/tests/agent_observation_cache.rs
+
+# 5a-I (public restart management, common contracts): the leaves that follow the
+# 5a-I integration PR. Each leaf lists its own files only. The shared contracts
+# are in no leaf scope here: crates/workbench-authority, crates/workbench-host/src/admin*,
+# the lifecycle roots (crates/workbench-protocol/src/namespaces/lifecycle.rs and
+# lifecycle/contracts.rs), the storage audit (crates/storage/src/admin_audit*), and
+# crates/workbench-protocol/src/envelope.rs, a central file for which no scope has an
+# exception. R and Q1/Q2 never edit a lifecycle root dispatch: the integration PR
+# declares their leaf modules beforehand.
+# One glob per line; `foo.rs` and `foo/*` are separate lines. No central exception;
+# the Cargo manifests, the cache filter, the test groups and ci.yml stay integration-owned.
+# pr07b5ar: R (restart targets/request/cancel/status over the #710 coordinator).
+# pr07b5aq1: Q1 (quarantine list/detail/discard/release/resume leaf).
+# pr07b5aq2: Q2 (owned graphs and the graph disposition).
+# pr07b5acn: CN (native clients: launcher diagnostics, client helper, CLI, GUI).
+# pr07b5acw: CW (the Web adapter and its front end).
+# public_restart_cache.rs is reserved to 5a-V (integration), not any leaf scope.
+pr07b5ar crates/evorch-core/src/restart.rs
+pr07b5ar crates/evorch-core/src/restart/public.rs
+pr07b5ar crates/evorch-core/src/restart/public/*
+pr07b5ar crates/workbench-host/src/ingress/namespaces/lifecycle/restart.rs
+pr07b5ar crates/workbench-host/src/ingress/namespaces/lifecycle/restart/*
+pr07b5ar crates/workbench-protocol/src/namespaces/lifecycle/restart.rs
+pr07b5ar crates/workbench-protocol/src/namespaces/lifecycle/restart/*
+pr07b5ar crates/evorch-core/tests/public_restart_coordinator.rs
+pr07b5ar crates/evorch-core/tests/public_restart_coordinator/*
+pr07b5aq1 crates/workbench-host/src/ingress/namespaces/lifecycle/quarantine.rs
+pr07b5aq1 crates/workbench-host/src/ingress/namespaces/lifecycle/quarantine/*
+pr07b5aq1 crates/workbench-protocol/src/namespaces/lifecycle/quarantine.rs
+pr07b5aq1 crates/workbench-protocol/src/namespaces/lifecycle/quarantine/*
+pr07b5aq1 crates/storage/src/recovery/quarantine.rs
+pr07b5aq1 crates/storage/src/recovery/quarantine/*
+pr07b5aq1 crates/workbench-host/tests/quarantine_admin.rs
+pr07b5aq1 crates/workbench-host/tests/quarantine_admin/*
+pr07b5aq1 crates/storage/tests/quarantine_admin.rs
+pr07b5aq1 crates/storage/tests/quarantine_admin/*
+pr07b5aq2 crates/workbench-host/src/ingress/namespaces/lifecycle/owned_graphs.rs
+pr07b5aq2 crates/workbench-host/src/ingress/namespaces/lifecycle/owned_graphs/*
+pr07b5aq2 crates/workbench-protocol/src/namespaces/lifecycle/owned_graphs.rs
+pr07b5aq2 crates/workbench-protocol/src/namespaces/lifecycle/owned_graphs/*
+pr07b5aq2 crates/workbench-host/src/bootstrap/recovery_disposal.rs
+pr07b5aq2 crates/workbench-host/src/bootstrap/recovery_disposal/*
+pr07b5aq2 crates/runtime/src/runtime/recovery_disposal.rs
+pr07b5aq2 crates/runtime/src/runtime/recovery_disposal/*
+pr07b5aq2 crates/storage/src/recovery/owned_graphs.rs
+pr07b5aq2 crates/storage/src/recovery/owned_graphs/*
+pr07b5aq2 crates/workbench-host/tests/owned_graphs_admin.rs
+pr07b5aq2 crates/workbench-host/tests/owned_graphs_admin/*
+pr07b5aq2 crates/storage/tests/owned_graphs_admin.rs
+pr07b5aq2 crates/storage/tests/owned_graphs_admin/*
+pr07b5aq2 crates/workbench-host/tests/recovery_disposal.rs
+pr07b5aq2 crates/workbench-host/tests/recovery_disposal/*
+pr07b5aq2 crates/runtime/tests/recovery_disposal.rs
+pr07b5aq2 crates/runtime/tests/recovery_disposal/*
+pr07b5acn crates/core-launcher/src/handoff_diagnostics.rs
+pr07b5acn crates/core-launcher/src/handoff_diagnostics/*
+pr07b5acn crates/workbench-client/src/restart.rs
+pr07b5acn crates/workbench-client/src/restart/*
+pr07b5acn crates/evorch/src/cli/core_admin.rs
+pr07b5acn crates/evorch/src/cli/core_admin/*
+pr07b5acn crates/gui/src/core_client/restart.rs
+pr07b5acn crates/gui/src/core_client/restart/*
+pr07b5acn crates/workbench-client/tests/restart_admin.rs
+pr07b5acn crates/workbench-client/tests/restart_admin/*
+pr07b5acn crates/evorch/tests/restart_admin.rs
+pr07b5acn crates/evorch/tests/restart_admin/*
+pr07b5acn crates/evorch-core/tests/cli_continuity_cache.rs
+pr07b5acw crates/workbench-web/src/server.rs
+pr07b5acw crates/workbench-web/src/server/*
+pr07b5acw crates/workbench-web/src/sse.rs
+pr07b5acw crates/workbench-web/src/sse/*
+pr07b5acw crates/workbench-web/src/backend.rs
+pr07b5acw crates/workbench-web/src/assets.rs
+pr07b5acw crates/workbench-web/src/restart.rs
+pr07b5acw crates/workbench-web/src/restart/*
+pr07b5acw crates/workbench-web/assets/js/app.js
+pr07b5acw crates/workbench-web/assets/js/api.js
+pr07b5acw crates/workbench-web/assets/js/store.js
+pr07b5acw crates/workbench-web/assets/js/sse.js
+pr07b5acw crates/workbench-web/assets/js/views.js
+pr07b5acw crates/workbench-web/assets/js/restart.js
+pr07b5acw crates/workbench-web/assets/js/restart/*
+pr07b5acw crates/workbench-web/tests/public_restart.rs
+pr07b5acw crates/workbench-web/tests/public_restart/*
+pr07b5acw crates/workbench-web/tests/public_restart_chromium.rs
+pr07b5acw crates/workbench-web/tests/public_restart_chromium/*

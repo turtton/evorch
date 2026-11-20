@@ -16,7 +16,7 @@
 
 #[cfg(test)]
 mod attachment_race;
-mod namespaces;
+pub(crate) mod namespaces;
 mod restart;
 
 use workbench_protocol::commands::{
@@ -40,6 +40,7 @@ use crate::receipts::{Receipts, SubmissionRecord};
 /// The command service together with what the host remembers about commands.
 pub struct CommandHost {
     service: CommandService,
+    admin: Option<std::sync::Arc<crate::admin::AdminService>>,
     conversation: namespaces::conversation::ConversationState,
     attachments: Option<crate::attachments::AttachmentService>,
     pub(crate) lane_sidebar_path: Option<std::path::PathBuf>,
@@ -391,6 +392,7 @@ impl CommandHost {
         );
         Self {
             service,
+            admin: None,
             conversation: Default::default(),
             attachments: None,
             lane_sidebar_path: None,
@@ -401,6 +403,13 @@ impl CommandHost {
         }
     }
 
+    pub fn with_admin(mut self, admin: std::sync::Arc<crate::admin::AdminService>) -> Self {
+        self.admin = Some(admin);
+        self
+    }
+    pub fn admin(&self) -> Option<std::sync::Arc<crate::admin::AdminService>> {
+        self.admin.clone()
+    }
     pub fn with_projects(mut self, projects: impl ProjectDirectory + 'static) -> Self {
         self.projection.configure(projects.entries());
         self.projects = Box::new(projects);
@@ -472,6 +481,12 @@ impl CommandHost {
         command: Command,
         provenance: Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        if matches!(&command, Command::Lifecycle(_)) {
+            return Err(crate::queries::error(
+                workbench_protocol::errors::ErrorCode::PermissionDenied,
+                "management command requires verified async ingress",
+            ));
+        }
         provenance.validate()?;
         command.validate()?;
         let permit = self.restart_command_permit(&command)?;
@@ -507,6 +522,12 @@ impl CommandHost {
         command: Command,
         provenance: Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        if matches!(&command, Command::Lifecycle(_)) {
+            return Err(crate::queries::error(
+                workbench_protocol::errors::ErrorCode::PermissionDenied,
+                "management command requires verified async ingress",
+            ));
+        }
         let subject = match &command {
             Command::Questions(QuestionsCommand::AnswerUserQuestion(q)) => self
                 .service

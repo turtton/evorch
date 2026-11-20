@@ -1,7 +1,8 @@
 use super::*;
 use tokio::sync::{Notify, mpsc};
+use workbench_authority::IngressContext;
 use workbench_protocol::{
-    envelope::{Provenance, ReplyEnvelope, RequestEnvelope},
+    envelope::{ReplyEnvelope, RequestEnvelope},
     errors::WorkbenchError,
     events::Subscribe,
     handshake::ServerHello,
@@ -25,7 +26,7 @@ impl WorkbenchBackend for HeldBackend {
         &self,
         session: &WebSession,
         request: RequestEnvelope,
-        provenance: Provenance,
+        provenance: IngressContext,
     ) -> ReplyEnvelope {
         self.entered.send(()).unwrap();
         self.release.notified().await;
@@ -40,11 +41,12 @@ impl WorkbenchBackend for HeldBackend {
         &self,
         client: ClientId,
         subscribe: Subscribe,
+        _context: IngressContext,
     ) -> Result<BackendSubscription, WorkbenchError> {
-        self.inner.subscribe(client, subscribe).await
+        self.inner.subscribe(client, subscribe, _context).await
     }
-    async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
-        self.inner.server_hello().await
+    async fn server_hello(&self, _context: &IngressContext) -> Result<ServerHello, WorkbenchError> {
+        self.inner.server_hello(_context).await
     }
     async fn drain_for_restart(&self) -> Result<(), WorkbenchError> {
         assert!(

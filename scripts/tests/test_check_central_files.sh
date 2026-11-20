@@ -334,6 +334,26 @@ for suite in cache io; do
   : > "$watchdog_inventory/$suite.tsv"
 done
 expect ok "watchdog guard is wired into CI's existing inventory step" bash -c "grep -q 'check_planned_shutdown_watchdog_inventory \"\$EVORCH_TEST_INVENTORY_DIR\"' $ci"
+
+# Package inventory is the existing ci-test-groups registration; the explicit
+# guard must fail if the public UDS binary is absent, ignored or misclassified.
+expect ok "public restart contracts belong to the runtime package inventory" jq -e '.groups.runtime.packages | index("evorch-core") != null' scripts/ci-test-groups.json
+expect ok "public restart contracts have bootstrap support" jq -e '.groups.runtime.features | index("evorch-core/bootstrap-test-support") != null' scripts/ci-test-groups.json
+public_inventory="$work/public-inventory"
+mkdir -p "$public_inventory"
+printf '%s\n' 'evorch-core	evorch-core::public_restart_contracts	contract_0	false' 'evorch-core	evorch-core::public_restart_contracts	contract_1	false' 'evorch-core	evorch-core::public_restart_contracts	contract_2	false' 'evorch-core	evorch-core::public_restart_contracts	contract_3	false' 'evorch-core	evorch-core::public_restart_contracts	contract_4	false' 'evorch-core	evorch-core::public_restart_contracts	contract_5	false' 'evorch-core	evorch-core::public_restart_contracts	contract_6	false' 'evorch-core	evorch-core::public_restart_contracts	contract_7	false' > "$public_inventory/remaining.tsv"
+: > "$public_inventory/cache.tsv"
+: > "$public_inventory/io.tsv"
+expect ok "all eight public restart contracts remain selected" check_public_restart_contracts_inventory "$public_inventory"
+cp "$public_inventory/remaining.tsv" "$public_inventory/cache.tsv"
+expect fail "public authority contracts cannot enter cache" check_public_restart_contracts_inventory "$public_inventory"
+: > "$public_inventory/cache.tsv"
+cp "$public_inventory/remaining.tsv" "$public_inventory/io.tsv"
+expect fail "public authority contracts cannot enter I/O" check_public_restart_contracts_inventory "$public_inventory"
+: > "$public_inventory/io.tsv"
+: > "$public_inventory/remaining.tsv"
+expect fail "a missing public restart contract inventory is rejected" check_public_restart_contracts_inventory "$public_inventory"
+expect ok "public guard is wired into CI inventory" grep -q check_public_restart_contracts_inventory "$ci"
 watchdog_manifest_is_feature_gated() {
   local block
   block=$(grep -A4 '^name = "planned_shutdown_watchdog_composition"$' "$1")
@@ -355,6 +375,129 @@ done
 expect ok "the product artifact job builds and seals it" job_has product-artifact 'scripts/product-artifact.sh build'
 expect ok "the aggregate gate requires the product artifact job" bash -c "grep -q 'otel, product-artifact, tests\]' $ci"
 expect fail "a job that runs no product test does not install the artifact" job_has lint 'scripts/product-artifact.sh install'
+
+# 5a-I: the public restart management leaves (R, Q1, Q2, CN, CW). Each owner passes on
+# its leaves (`foo.rs` and `foo/*` are separate registrations) and refuses every
+# other owner's files, the central files and the shared contracts; no scope has a
+# central-file exception.
+W=crates/workbench-web
+S=crates/storage
+PRO=crates/workbench-protocol/src/namespaces/lifecycle
+HOL=$H/src/ingress/namespaces/lifecycle
+leaf_scopes=(pr07b5ar pr07b5aq1 pr07b5aq2 pr07b5acn pr07b5acw)
+leaf_samples=(
+  "$C/src/restart.rs $C/src/restart/public.rs $C/src/restart/public/coordinator.rs $HOL/restart.rs $HOL/restart/targets.rs $PRO/restart.rs $PRO/restart/request.rs $C/tests/public_restart_coordinator.rs $C/tests/public_restart_coordinator/capture.rs"
+  "$HOL/quarantine.rs $HOL/quarantine/list.rs $PRO/quarantine.rs $PRO/quarantine/detail.rs $S/src/recovery/quarantine.rs $S/src/recovery/quarantine/discard.rs $H/tests/quarantine_admin.rs $H/tests/quarantine_admin/cas.rs $S/tests/quarantine_admin.rs $S/tests/quarantine_admin/cas.rs"
+  "$HOL/owned_graphs.rs $HOL/owned_graphs/list.rs $PRO/owned_graphs.rs $PRO/owned_graphs/view.rs $H/src/bootstrap/recovery_disposal.rs $H/src/bootstrap/recovery_disposal/cas.rs crates/runtime/src/runtime/recovery_disposal.rs crates/runtime/src/runtime/recovery_disposal/phase.rs $S/src/recovery/owned_graphs.rs $S/src/recovery/owned_graphs/cas.rs $H/tests/owned_graphs_admin.rs $H/tests/owned_graphs_admin/predicate.rs $S/tests/owned_graphs_admin.rs $H/tests/recovery_disposal.rs crates/runtime/tests/recovery_disposal.rs"
+  "crates/core-launcher/src/handoff_diagnostics.rs crates/core-launcher/src/handoff_diagnostics/report.rs crates/workbench-client/src/restart.rs crates/workbench-client/src/restart/confirmation.rs crates/evorch/src/cli/core_admin.rs crates/evorch/src/cli/core_admin/restart.rs $G/src/core_client/restart.rs $G/src/core_client/restart/view.rs crates/workbench-client/tests/restart_admin.rs crates/workbench-client/tests/restart_admin/confirm.rs crates/evorch/tests/restart_admin.rs $C/tests/cli_continuity_cache.rs"
+  "$W/src/server.rs $W/src/server/restart.rs $W/src/sse.rs $W/src/sse/admin.rs $W/src/backend.rs $W/src/assets.rs $W/src/restart.rs $W/src/restart/status.rs $W/assets/js/app.js $W/assets/js/api.js $W/assets/js/store.js $W/assets/js/sse.js $W/assets/js/views.js $W/assets/js/restart.js $W/assets/js/restart/view.js $W/tests/public_restart.rs $W/tests/public_restart/flow.rs $W/tests/public_restart_chromium.rs $W/tests/public_restart_chromium/page.rs"
+)
+for i in "${!leaf_scopes[@]}"; do
+  read -ra owned <<< "${leaf_samples[$i]}"
+  for one in "${owned[@]}"; do
+    files "$one"
+    expect ok "${leaf_scopes[$i]} owns $one" "$central" --scope "${leaf_scopes[$i]}" --files-from "$work/files"
+    for j in "${!leaf_scopes[@]}"; do
+      [[ "$i" != "$j" ]] || continue
+      expect fail "${leaf_scopes[$j]} does not own $one" "$central" --scope "${leaf_scopes[$j]}" --files-from "$work/files"
+    done
+  done
+  for refused in Cargo.lock Cargo.toml crates/evorch-core/Cargo.toml crates/workbench-authority/Cargo.toml crates/workbench-web/Cargo.toml \
+    .github/workflows/ci.yml scripts/feature-scopes.txt scripts/contract-test-filters.sh scripts/ci-test-groups.json \
+    scripts/check-central-files.sh scripts/check-workbench-boundaries.sh scripts/workbench-boundary-allowlist.txt scripts/tests/test_check_central_files.sh \
+    crates/workbench-protocol/src/envelope.rs crates/workbench-protocol/src/namespaces/mod.rs crates/workbench-host/src/ingress.rs; do
+    files "${owned[0]}" "$refused"
+    expect fail "${leaf_scopes[$i]} may not change $refused" "$central" --scope "${leaf_scopes[$i]}" --files-from "$work/files"
+  done
+done
+# public_restart_cache.rs is owned by 5a-V (integration), never by a leaf.
+files $C/tests/public_restart_cache.rs
+for sharing in pr07b5ar pr07b5acw; do
+  expect fail "$sharing does not own the integration public restart cache binary" "$central" --scope "$sharing" --files-from "$work/files"
+done
+for other in pr07b5aq1 pr07b5aq2 pr07b5acn pr16a2f4e pr16bov3; do
+  expect fail "$other does not own the public restart cache binary" "$central" --scope "$other" --files-from "$work/files"
+done
+# The shared contracts and the roots belong to no leaf scope (an integration PR changes
+# them): the authority, the host admin service, the lifecycle roots, the audit storage,
+# the ingress and the neighbours of the registered leaves.
+shared_contracts=(
+  crates/workbench-authority/src/lib.rs crates/workbench-authority/src/tests.rs
+  $H/src/admin/mod.rs $H/src/admin/audit.rs $H/src/admin/bindings.rs
+  crates/workbench-protocol/src/namespaces/lifecycle.rs $PRO/contracts.rs
+  crates/storage/src/admin_audit.rs crates/storage/src/admin_audit/writer.rs crates/storage/src/recovery.rs
+  crates/evorch-core/src/unix.rs $C/tests/public_restart_contracts.rs $H/tests/admin_contracts.rs $W/tests/public_restart_contracts.rs
+  $W/src/api.rs $W/src/restart_observer.rs
+  crates/workbench-protocol/tests/golden/areas/lifecycle.json crates/workbench-protocol/tests/common/areas/lifecycle.rs
+)
+for scope in "${leaf_scopes[@]}"; do
+  for shared in "${shared_contracts[@]}"; do
+    files "$shared"
+    expect fail "$scope does not own the shared contract $shared" "$central" --scope "$scope" --files-from "$work/files"
+  done
+done
+expect ok "an integration PR may change the shared contracts" "$central" --scope integration --files-from "$work/files"
+# R and Q never edit a root dispatch: the lifecycle roots are in none of their scopes
+# (pr18a and pr16a2 keep theirs; the roots of the new leaves are not theirs either).
+for root in $H/src/ingress/namespaces/lifecycle.rs crates/workbench-protocol/src/namespaces/lifecycle.rs $C/src/lifecycle.rs; do
+  files "$root"
+  for scope in pr07b5ar pr07b5aq1 pr07b5aq2 pr07b5acn pr07b5acw; do
+    expect fail "$scope does not edit the root dispatch $root" "$central" --scope "$scope" --files-from "$work/files"
+  done
+done
+# envelope.rs is a central file and no scope has an exception for it.
+envelope=crates/workbench-protocol/src/envelope.rs
+expect fail "the scope data names no envelope.rs" bash -c "sed 's/#.*//' scripts/feature-scopes.txt | grep -q envelope"
+expect fail "check-central-files.sh has no exception for envelope.rs" grep -q 'envelope' scripts/check-central-files.sh
+files "$envelope"
+while IFS= read -r every_scope; do
+  expect fail "scope $every_scope has no exception for envelope.rs" "$central" --scope "$every_scope" --files-from "$work/files"
+done < <(sed -e 's/#.*//' scripts/feature-scopes.txt | awk 'NF { print $1 }' | sort -u)
+expect ok "an integration PR may change envelope.rs" "$central" --scope integration --files-from "$work/files"
+# The I0 scopes this PR does not change keep their leaves (F4-E, O-V2, O-V3).
+files $C/tests/f4_product_exec.rs $C/tests/f4_product_exec/handoff.rs $C/tests/f4_product_cef.rs $C/tests/f4_product_cache.rs
+expect ok "F4-E keeps its leaves" "$central" --scope pr16a2f4e --files-from "$work/files"
+files $C/tests/agent_observation_chromium.rs $X/tests/agent_observation_gui.rs $X/tests/agent_observation_gui/frames.rs $G/src/core_client/features/browser/observation.rs $G/src/core_client/features/browser/observation/view.rs
+expect ok "O-V2 keeps its leaves" "$central" --scope pr16bov2 --files-from "$work/files"
+files $C/tests/agent_observation_restart.rs $C/tests/agent_observation_restart/reconnect.rs $C/tests/agent_observation_cache.rs
+expect ok "O-V3 keeps its leaves" "$central" --scope pr16bov3 --files-from "$work/files"
+# Branch names classify into the scopes.
+expect ok "feat/pr07b5ar-restart is pr07b5ar" scope_is feat/pr07b5ar-restart pr07b5ar
+expect ok "feat/pr07b5aq1-quarantine is pr07b5aq1" scope_is feat/pr07b5aq1-quarantine pr07b5aq1
+expect ok "feat/pr07b5aq2-owned-graphs is pr07b5aq2" scope_is feat/pr07b5aq2-owned-graphs pr07b5aq2
+expect ok "feat/pr07b5acn-native is pr07b5acn" scope_is feat/pr07b5acn-native pr07b5acn
+expect ok "feat/pr07b5acw-web is pr07b5acw" scope_is feat/pr07b5acw-web pr07b5acw
+expect ok "test/pr16a2f4e-product-exec is pr16a2f4e" scope_is test/pr16a2f4e-product-exec pr16a2f4e
+expect ok "test/pr16bov2-observation-gui is pr16bov2" scope_is test/pr16bov2-observation-gui pr16bov2
+expect ok "test/pr16bov3-observation-restart is pr16bov3" scope_is test/pr16bov3-observation-restart pr16bov3
+expect ok "feat/integration-07b5a-contracts is an integration PR" scope_is feat/integration-07b5a-contracts integration
+expect ok "feat/integration-07b5a-contracts-registration is an integration PR" scope_is feat/integration-07b5a-contracts-registration integration
+
+# 5a-I: the two independent cache binaries of the public restart management, the web
+# placeholder CI selects as an ignored test, and the contract and test registrations.
+for cache_binary in public_restart_cache cli_continuity_cache; do
+  expect ok "the cache gate names $cache_binary" bash -c "grep -q 'binary(=$cache_binary)' scripts/contract-test-filters.sh"
+  expect ok "$cache_binary has its own test target" test -f "$C/tests/$cache_binary.rs"
+  expect ok "$cache_binary is a binary no other cache target shares" bash -c "[[ \$(grep -c 'binary(=$cache_binary)' scripts/contract-test-filters.sh) == 1 ]]"
+done
+expect ok "the web public restart browser placeholder is an ignored test" is_ignored_target "$W/tests/public_restart_chromium.rs"
+expect ok "ci.yml selects public_restart_chromium with --run-ignored only --no-tests fail" ci_selects_ignored public_restart_chromium
+expect ok "the web public restart placeholder exists" test -f "$W/tests/public_restart.rs"
+expect ok "the web contract binary exists" test -f "$W/tests/public_restart_contracts.rs"
+expect ok "the core contract binary exists" test -f "$C/tests/public_restart_contracts.rs"
+# Every test binary the registration names exists as a target of the crate it belongs to.
+for target in "$H/tests/admin_contracts.rs" "$H/tests/quarantine_admin.rs" "$H/tests/owned_graphs_admin.rs" \
+  "$S/tests/quarantine_admin.rs" crates/workbench-client/tests/restart_admin.rs; do
+  expect ok "$target exists" test -f "$target"
+done
+# The authority is in exactly one test group (the support group), and its compile-fail
+# doctests run alone in CI, apart from the workspace-wide doctest run.
+expect ok "workbench-authority is in the support test group" bash -c "jq -e '.groups.support.packages | index(\"workbench-authority\")' scripts/ci-test-groups.json"
+expect ok "workbench-authority is in no other test group" bash -c "[[ \$(jq '[.groups[].packages[] | select(. == \"workbench-authority\")] | length' scripts/ci-test-groups.json) == 1 ]]"
+expect ok "CI runs the authority doctests alone, offline, without default features" grep -q -e 'cargo test --offline --locked -p workbench-authority --doc --no-default-features' "$ci"
+expect ok "CI sets CARGO_BUILD_GC_ENABLED=false for the authority doctests" bash -c "ci_step() { awk '/- name: Authority compile-fail doctests/ { on = 1; next } on && /^      - / { exit } on' $ci; }; ci_step | grep -q 'CARGO_BUILD_GC_ENABLED: \"false\"'"
+expect ok "the workspace doctests exclude the authority" bash -c "[[ \$(grep -c 'cargo test --workspace --exclude workbench-authority --doc --locked' $ci) == 2 ]]"
+expect fail "no workspace-wide doctest run includes the authority" bash -c "grep -E 'cargo test --workspace --doc' $ci"
 
 if (( fails > 0 )); then
   echo "$fails check(s) failed" >&2

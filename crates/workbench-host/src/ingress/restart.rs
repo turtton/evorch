@@ -97,6 +97,9 @@ pub(super) fn command_access(
         Command::Execution(ExecutionCommand::StopChat(_) | ExecutionCommand::StopRun(_)) => {
             CommandAccess::Stop
         }
+        Command::Lifecycle(workbench_protocol::namespaces::LifecycleCommand::Restart(
+            workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(_),
+        )) => CommandAccess::Stop,
         Command::Settings(c) => CommandHost::settings_command_access(c),
         Command::Auth(c) => CommandHost::auth_command_access(c),
         Command::Diagnostics(c) => CommandHost::diagnostics_command_access(c),

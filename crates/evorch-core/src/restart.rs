@@ -1,6 +1,7 @@
 //! One process-local lifecycle owner. There is deliberately no wire/production request handler.
 //! Lock order: coordinator -> host gate / runtime. Direct runtime Stop enters the
 //! installed boundary before taking any runtime lock; runtime never calls back while locked.
+pub mod public;
 use runtime::{
     AgentRuntime, RunId, RuntimeError, StopScope,
     producer::{ProducerGate, ProducerPause},
@@ -93,6 +94,8 @@ struct Inner {
     changed: watch::Sender<u64>,
     #[cfg(test)]
     preflight_hook: Mutex<Option<PreflightHook>>,
+    #[cfg(test)]
+    after_host_drain: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 /// A revocable observation, NOT the consumable capture capability. Keeping any
 /// number of waiters alive cannot delay the coordinator's capture boundary.
@@ -176,6 +179,8 @@ impl RestartCoordinator {
             changed: watch::channel(0).0,
             #[cfg(test)]
             preflight_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_host_drain: Mutex::new(None),
         }));
         coordinator
             .0
@@ -306,6 +311,10 @@ impl RestartCoordinator {
             self.publish(&mut state, RestartPhase::Sealing);
         }
         self.0.gate.drained().await;
+        #[cfg(test)]
+        if let Some(hook) = self.0.after_host_drain.lock().unwrap().take() {
+            hook();
+        }
         // Accepted inputs may invalidate an ACK: re-evaluate after ingress drained.
         let fence = self
             .0

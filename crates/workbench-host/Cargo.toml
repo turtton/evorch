@@ -11,7 +11,9 @@ description = "Core-side command handling for the evorch workbench protocol (ADR
 # must never reach a GUI or client crate. scripts/check-workbench-boundaries.sh
 # enforces that in CI.
 [dependencies]
+workbench-authority = { path = "../workbench-authority" }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 base64 = { workspace = true }
 rustix = { version = "1", features = ["fs"] }
 image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -53,6 +55,7 @@ test-support = ["runtime/recovery-test-support", "runtime/idle-test-support"]
 # Integration tests of this crate use the test-support entry points (the
 # observation gate), which the crate alone does not enable for its own tests.
 workbench-host = { path = ".", features = ["test-support"] }
+workbench-authority = { path = "../workbench-authority", features = ["test-support"] }
 runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }

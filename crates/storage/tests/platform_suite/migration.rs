@@ -12,9 +12,9 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 69;
+const LATEST_SCHEMA: u32 = 70;
 
-const EXPECTED_TABLES: [&str; 121] = [
+const EXPECTED_TABLES: [&str; 123] = [
     "restart_learning_inventory",
     "restart_learning_members",
     "restart_run_tools",
@@ -47,6 +47,8 @@ const EXPECTED_TABLES: [&str; 121] = [
     "content_blob_refs_message",
     "run_messages",
     "artifact_refs",
+    "accepted_admin_operations",
+    "admin_denials",
     "gc_state",
     "gc_unknown_meta",
     "reclaim_jobs",
@@ -138,7 +140,7 @@ const EXPECTED_TABLES: [&str; 121] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 98] = [
+const EXPECTED_INDICES: [&str; 102] = [
     "learning_jobs_state",
     "idx_conversation_plan_nodes_ord",
     "restart_expected_run",
@@ -164,6 +166,10 @@ const EXPECTED_INDICES: [&str; 98] = [
     "idx_content_blob_refs_header_blob",
     "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",
+    "idx_admin_denials_window",
+    "idx_admin_operations_finished",
+    "idx_admin_operations_pending",
+    "idx_admin_operations_restart",
     "idx_artifact_refs_thread_artifact",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
@@ -1326,6 +1332,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v70.sql"),
                 include_str!("../../undo/undo_v69.sql"),
                 include_str!("../../undo/undo_v68.sql"),
                 include_str!("../../undo/undo_v67.sql"),

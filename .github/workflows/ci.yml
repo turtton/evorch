@@ -200,11 +200,25 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-ci-workspace
           save-if: false
+      # workbench-authority is excluded: other packages' dev-dependencies enable its
+      # `test-support` feature, and the workspace-wide feature union would then compile
+      # its compile-fail doctests against the fake verifier. The authority's doctests
+      # run alone, below, with its default features only.
       - name: Workspace doctests
         env:
           CARGO_TARGET_DIR: target/ci-shared
         timeout-minutes: 15
-        run: cargo test --workspace --doc --locked
+        run: cargo test --workspace --exclude workbench-authority --doc --locked
+      # 5a-I: the compile-fail doctests of the authority (no literal, serde or public
+      # constructor of a verified proof). One invocation of this package alone, so no
+      # dev-dependency feature of another package is unified into it. Every
+      # dependency was fetched by the step above.
+      - name: Authority compile-fail doctests
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+          CARGO_BUILD_GC_ENABLED: "false"
+        timeout-minutes: 15
+        run: cargo test --offline --locked -p workbench-authority --doc --no-default-features
       # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
       - name: Check config schema artifact is up to date
         env:
@@ -379,6 +393,7 @@ jobs:
           if [[ "${{ matrix.group }}" == runtime ]]; then
             source scripts/contract-test-filters.sh
             check_planned_shutdown_watchdog_inventory "$EVORCH_TEST_INVENTORY_DIR"
+            check_public_restart_contracts_inventory "$EVORCH_TEST_INVENTORY_DIR"
           fi
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
@@ -461,7 +476,8 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --locked
           cargo clippy -p event-bus --all-targets --features otel-exporter --locked
-          cargo test --workspace --doc --locked
+          cargo test --workspace --exclude workbench-authority --doc --locked
+          cargo test --locked -p workbench-authority --doc --no-default-features
           cargo build --locked -p config --example dump_schema
           cargo nextest list -p event-bus --features otel-exporter --locked > /dev/null
           for group in $(jq -r '.groups | keys[]' scripts/ci-test-groups.json); do
@@ -794,6 +810,11 @@ jobs:
         env:
           WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
         run: cargo nextest run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
+      # Registered by the 5a-I integration PR for CW: a placeholder target until the
+      # leaf adds the browser test of the public restart management (the contract
+      # tests over real HTTP are public_restart_contracts).
+      - name: Run the public restart web browser test
+        run: cargo nextest run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

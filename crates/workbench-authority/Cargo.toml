@@ -1,0 +1,22 @@
+[package]
+name = "workbench-authority"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[features]
+default = []
+# Contract fixtures only: no product feature may forward this.
+test-support = []
+
+[dependencies]
+workbench-protocol = { path = "../workbench-protocol" }
+tokio = { workspace = true, features = ["sync", "net", "time"] }
+uuid = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

@@ -2,6 +2,7 @@
 //! construct a runtime, read a sidebar, or own an agent lifecycle.
 pub mod attachments;
 pub mod cache;
+pub mod restart;
 use crate::attachments::{AttachmentFile, AttachmentIo, Intake};
 pub use attachments::ClientAttachmentDraft;
 pub mod connection;

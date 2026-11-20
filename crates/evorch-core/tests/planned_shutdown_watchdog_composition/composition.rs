@@ -418,6 +418,10 @@ async fn operate(
             result?;
             if case == "cold_cleanup_returns" {
                 _keep_worker_blocked.send(())?;
+                // This cell exercises shutdown with an existing finalizer error.
+                // Publish that error before shutdown closes the runtime fence;
+                // the opposite ordering may legitimately finish cleanup cleanly.
+                assert!(core.wait_finalization(id).await.is_err());
             }
             host.shutdown().await?;
         }

@@ -13,9 +13,13 @@
 #      workbench-client, browser-cef, evorch) or a rendering stack
 #      (egui, eframe, wgpu, winit, CEF) through any dependency path.
 #   6. workbench-web (the HTTP + SSE adapter) reaches any workspace crate other
-#      than workbench-protocol, reaches a GUI or rendering crate, or declares a
-#      third-party dependency outside its small allowlist. It is a protocol
-#      adapter: the core binary connects it to workbench-host.
+#      than workbench-protocol and workbench-authority, reaches a GUI or
+#      rendering crate, or declares a third-party dependency outside its small
+#      allowlist. It is a protocol adapter: the core binary connects it to
+#      workbench-host. The authority is the only addition (5a-I): it carries the
+#      request authority the adapter reads from its request context, and it is
+#      itself host-free (rule 9). There is no allowlist exception for the web
+#      crate to reach workbench-host, the client or any core crate.
 #   7. gui or evorch (the CLI) declares a direct dependency on a workspace
 #      crate that is not in scripts/workbench-boundary-allowlist.txt. That list
 #      is a ratchet: it freezes the dependencies the two crates have today
@@ -33,6 +37,25 @@
 #      Under that rule workbench-client and core-launcher may list it as a
 #      dev-dependency, which rule 2 and the core-launcher check below would
 #      otherwise reject for any workspace crate.
+#   9. workbench-authority (the non-wire transport authority, 5a-I) reaches no
+#      workspace crate other than workbench-protocol (so never the host, the
+#      web adapter, the runtime or the storage), declares only the third-party
+#      dependencies and features of its explicit list (tokio sync/net/time,
+#      rustix process, uuid v4), and only workbench-host, workbench-web and
+#      evorch-core depend on it. The dependency direction is host, web and the
+#      core binary -> authority -> protocol.
+#  10. The authority's fake verifier is the feature `test-support`. It may be
+#      enabled only by a dev-dependency declaration: not by a normal or build
+#      dependency, not in [workspace.dependencies], and not through any
+#      [features] entry that forwards to it (`authority/test-support`,
+#      `authority?/test-support`, also through a renamed dependency key),
+#      and the authority's default features must not reach it. When the
+#      product dependency tree is available (a real run), the normal and build
+#      graph of workbench-host, workbench-web and evorch-core must not enable it.
+#  11. verify_unix_peer, the one function that mints a local transport proof from
+#      a kernel peer check, is called in production code only in
+#      crates/evorch-core/src/unix.rs, once. The authority defines it; tests
+#      (tests/ directories, tests.rs, *_tests.rs) and comments are not counted.
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -49,6 +72,19 @@ PROTOCOL_EXTERNAL_ALLOW="serde serde_json thiserror"
 CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
 # TaskTracker (rt) proves detached work has exited even after handle/waiter drop.
 WEB_EXTERNAL_ALLOW="axum futures-core http http-body-util hyper hyper-util serde serde_json thiserror tokio tokio-util"
+# The transport authority (rule 9, 10 and 11). It may use the protocol only.
+AUTH=workbench-authority
+AUTH_EXTERNAL_ALLOW="tokio rustix uuid"
+# Features of those third-party dependencies, as a JSON object (explicit, no wildcard).
+AUTH_EXTERNAL_FEATURES='{"tokio":["sync","net","time"],"rustix":["process"],"uuid":["v4"]}'
+AUTH_DEPENDENTS="workbench-host workbench-web evorch-core"
+AUTH_FAKE_FEATURE=test-support
+AUTH_PEER_FN=verify_unix_peer
+AUTH_PEER_CALLSITE=crates/evorch-core/src/unix.rs
+# Where the sources are scanned for rule 11 and the root manifest for rule 10. The
+# environment overrides exist only for the fixture tests.
+SOURCE_ROOT="${WORKBENCH_BOUNDARY_SOURCE_ROOT:-.}"
+ROOT_MANIFEST="${WORKBENCH_BOUNDARY_ROOT_MANIFEST:-${WORKBENCH_BOUNDARY_MANIFEST_PATH:-Cargo.toml}}"
 # workbench-host is the core side of the protocol. It may use core crates and
 # the protocol, but nothing that draws or that speaks as a client.
 HOST_FORBIDDEN_WORKSPACE="gui workspace-ui workbench-client browser-cef evorch"
@@ -82,6 +118,7 @@ command -v jq >/dev/null || { echo "check-workbench-boundaries: jq is required" 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+metadata_arg=$#
 if [[ $# -ge 1 ]]; then
   cp "$1" "$work/metadata.json"
 else
@@ -126,7 +163,7 @@ jq -r -f "$work/edges.jq" "$work/metadata.json" > "$work/edges.tsv"
 violations="$work/violations.txt"
 : > "$violations"
 
-for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB" evorch-core $RATCHET_CRATES; do
+for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB" "$AUTH" evorch-core $RATCHET_CRATES; do
   if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
     echo "boundary check: workspace member '$crate' not found; the check would pass vacuously" >> "$violations"
   fi
@@ -339,9 +376,95 @@ gui_free_violations "evorch-core" "gui workspace-ui browser-cef evorch" >> "$vio
 gui_free_violations "$WEB" "$WEB_FORBIDDEN_WORKSPACE" >> "$violations"
 external_violations "$PROTOCOL" "$PROTOCOL_EXTERNAL_ALLOW" >> "$violations"
 external_violations "$CLIENT" "$CLIENT_EXTERNAL_ALLOW" >> "$violations"
-closure_violations "$WEB" "$PROTOCOL" >> "$violations"
+closure_violations "$WEB" "$PROTOCOL $AUTH" >> "$violations"
 external_violations "$WEB" "$WEB_EXTERNAL_ALLOW" >> "$violations"
+closure_violations "$AUTH" "$PROTOCOL" >> "$violations"
+external_violations "$AUTH" "$AUTH_EXTERNAL_ALLOW" >> "$violations"
 core_reach_violations >> "$violations"
+
+# Rule 9: only the host, the web adapter and the core binary depend on the
+# authority, with any kind of edge (their tests use the fake verifier).
+authority_dependent_violations() {
+  awk -F'\t' -v auth="$AUTH" -v allowed=" $AUTH_DEPENDENTS " '
+    $1 == "E" && $3 == auth && !index(allowed, " " $2 " ") {
+      print "VIOLATION: " $2 " must not depend on " auth " (only" allowed "may): " $2 " -> " auth " [" $4 "; " $5 "]"
+    }' "$work/edges.tsv"
+}
+authority_dependent_violations >> "$violations"
+
+# Rule 9 (third-party features) and rule 10 (the fake verifier feature), from the
+# metadata of every workspace member: its declared dependencies (with the
+# features, kind and rename each declaration carries) and its [features] table.
+cat > "$work/authority.jq" <<'JQ'
+. as $m
+| ($m.packages | map({key: .id, value: .}) | from_entries) as $byid
+| ($m.workspace_members | map($byid[.])) as $ws
+| def closure($f; $start):
+    {seen: [], queue: $start}
+    | until(.queue | length == 0;
+        .queue[0] as $n
+        | .queue |= .[1:]
+        | if (.seen | index($n)) then .
+          else .seen += [$n]
+               | .queue += (($f[$n] // []) | map(select(contains("/") | not) | sub("^dep:"; "")))
+          end)
+    | .seen;
+  $ws[] | . as $p
+  | (
+      ( .dependencies[] | select(.name == $auth and ((.kind // "normal") != "dev") and ((.features // []) | index($fake)))
+        | "VIOLATION: \($p.name) enables \($auth)/\($fake) through a \(.kind // "normal") dependency; only a dev-dependency may"),
+      ( ([.dependencies[] | select(.name == $auth) | (.rename // .name)] + [$auth] | unique) as $aliases
+        | (.features // {}) | to_entries[] | . as $e | $e.value[]
+        | select(. as $v | $aliases | any(. as $a | $v == "\($a)/\($fake)" or $v == "\($a)?/\($fake)"))
+        | "VIOLATION: feature \($e.key) of \($p.name) forwards to \(.); the fake verifier is enabled by a dev-dependency declaration only"),
+      ( select(.name == $auth)
+        | (.features // {}) as $f
+        | select(closure($f; ["default"]) | index($fake))
+        | "VIOLATION: the default features of \($auth) reach \($fake)"),
+      ( select(.name == $auth)
+        | .dependencies[] | select((.kind // "normal") != "dev") | . as $d
+        | ($allowed[$d.name] // null) as $ok | select($ok != null)
+        | (($d.features // []) - $ok) | select(length > 0)
+        | "VIOLATION: \($auth) enables feature(s) \(join(", ")) of \($d.name) outside its list (\($ok | join(", ")))")
+    )
+JQ
+jq -r --arg auth "$AUTH" --arg fake "$AUTH_FAKE_FEATURE" --argjson allowed "$AUTH_EXTERNAL_FEATURES" \
+  -f "$work/authority.jq" "$work/metadata.json" >> "$violations"
+
+# Rule 10, root manifest: [workspace.dependencies] must not enable the fake verifier
+# (an inherited declaration would carry it into a normal dependency of a member).
+workspace_dependency_violations() {
+  [[ -f $ROOT_MANIFEST ]] || return 0
+  awk -v auth="$AUTH" '
+    function evaluate(text, name) {
+      if (text !~ /"test-support"/) return
+      if (name == auth || text ~ ("package[[:space:]]*=[[:space:]]*\"" auth "\"") || text ~ ("^[[:space:]]*" auth "[[:space:]]*[.=]"))
+        print "VIOLATION: [workspace.dependencies] of " FILENAME " enables the fake verifier of " auth " (" name "); only dev-dependency declarations may"
+    }
+    function close_entry() { if (stmt != "") evaluate(stmt, entry); stmt = ""; bal = 0 }
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    line ~ /^\[/ {
+      close_entry(); in_table = 0; in_deps = 0
+      if (line ~ /^\[workspace\.dependencies\][[:space:]]*(#.*)?$/) { in_deps = 1; next }
+      if (match(line, /^\[workspace\.dependencies\.[^]]+\]/)) {
+        in_table = 1; entry = substr(line, 1, RLENGTH); sub(/^\[workspace\.dependencies\./, "", entry); sub(/\]$/, "", entry)
+        gsub(/"/, "", entry); stmt = ""; next
+      }
+      next
+    }
+    in_table { sub(/#.*/, "", line); stmt = stmt "\n" line; next }
+    in_deps {
+      sub(/#.*/, "", line)
+      if (line == "" && stmt == "") next
+      if (stmt == "") { entry = line; sub(/[[:space:]]*[.=].*/, "", entry); gsub(/"/, "", entry) }
+      stmt = stmt "\n" line
+      t = line; opens = gsub(/[[{]/, "", t); closes = gsub(/[]}]/, "", t)
+      bal += opens - closes
+      if (bal <= 0) { evaluate(stmt, entry); stmt = ""; bal = 0 }
+    }
+    END { close_entry() }' "$ROOT_MANIFEST"
+}
+workspace_dependency_violations >> "$violations"
 
 # core-instance and core-launcher are exempt from the ratchet (rule 7), so what
 # they reach is checked here. They are new crates: the checks apply once a crate
@@ -364,6 +487,65 @@ test_leaf_violations() {
 if has_member "$TEST_LEAF"; then
   closure_violations "$TEST_LEAF" "" >> "$violations"
   test_leaf_violations >> "$violations"
+fi
+
+# Rule 11. The only production call of the local-proof minting function is the
+# one in the core's UDS accept path. Imports count as uses outside that file, so a
+# use statement elsewhere fails too.
+peer_callsite_violations() {
+  [[ -d $SOURCE_ROOT/crates ]] || return 0
+  (cd "$SOURCE_ROOT" && grep -rn --include='*.rs' "$AUTH_PEER_FN" crates 2>/dev/null || true) \
+    | awk -v auth_dir="crates/$AUTH/" -v allowed="$AUTH_PEER_CALLSITE" -v fn="$AUTH_PEER_FN" '
+      {
+        file = $0; sub(/:.*/, "", file)
+        text = $0; sub(/^[^:]*:[0-9]+:/, "", text)
+        sub(/^[[:space:]]+/, "", text)
+        if (index(file, auth_dir) == 1) next
+        if (file ~ /(^|\/)tests\// || file ~ /(^|\/)tests\.rs$/ || file ~ /_tests\.rs$/) next
+        if (text ~ /^\/\//) next
+        if (file != allowed) {
+          print "VIOLATION: " file " uses " fn "; its only production call site is " allowed ": " file ": " text
+          next
+        }
+        if (text ~ /^(pub(\([a-z]+\))? )?use /) next
+        calls++
+      }
+      END {
+        if (calls != 1) print "VIOLATION: " allowed " must call " fn " exactly once in production code, found " calls + 0
+      }'
+}
+if has_member "$AUTH"; then
+  peer_callsite_violations >> "$violations"
+fi
+
+# Rule 10, product build: in the normal and build graph (no dev-dependency, as a
+# product binary is built) of the crates that depend on the authority, the fake
+# verifier feature is not enabled. A real run asks cargo tree; the fixture tests
+# supply the listing in WORKBENCH_BOUNDARY_PRODUCT_TREE.
+product_feature_violations() {
+  local crate listing="$work/product-tree.txt"
+  : > "$listing"
+  if [[ -n ${WORKBENCH_BOUNDARY_PRODUCT_TREE:-} ]]; then
+    cp "$WORKBENCH_BOUNDARY_PRODUCT_TREE" "$listing"
+  elif [[ $metadata_arg -eq 0 && -z ${WORKBENCH_BOUNDARY_SKIP_PRODUCT_TREE:-} ]]; then
+    for crate in $AUTH_DEPENDENTS; do
+      if ! cargo tree --locked --manifest-path "${WORKBENCH_BOUNDARY_MANIFEST_PATH:-Cargo.toml}" \
+          -p "$crate" -e normal,build --prefix none -f '{p} {f}' >> "$listing" 2> "$work/product-tree.err"; then
+        echo "VIOLATION: cargo tree of $crate failed, so the product feature set of $AUTH cannot be checked: $(head -c 300 "$work/product-tree.err")"
+      fi
+    done
+  fi
+  awk -v auth="$AUTH" -v fake="$AUTH_FAKE_FEATURE" '
+    { sub(/[[:space:]]+\(\*\)$/, "") }
+    $1 == auth {
+      n = split($NF, feats, ",")
+      for (i = 1; i <= n; i++) if (feats[i] == fake) {
+        print "VIOLATION: the product (normal and build) dependency graph enables " auth "/" fake ": " $0; break
+      }
+    }' "$listing"
+}
+if has_member "$AUTH"; then
+  product_feature_violations >> "$violations"
 fi
 
 if [[ -s "$work/stale.txt" ]]; then
