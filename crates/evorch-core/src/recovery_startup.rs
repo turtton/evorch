@@ -84,6 +84,50 @@ pub struct StartupCoordinator<'a> {
     startup: storage::RecoveryStartupComplete,
     catalog: RecoveryCatalog,
 }
+/// Owned, single-job inputs issued only after the startup coordinator installed
+/// the lane exclusion fence. They do not grant any new recovery authority.
+pub struct StartupJobContext {
+    pub runtime: AgentRuntime,
+    pub owner: Arc<OwnerHost>,
+    pub storage: storage::StorageConfig,
+    pub writer: storage::StorageHandle,
+    pub options: BootstrapOptions,
+    pub projects: workbench_host::projects::StaticProjects,
+    startup: storage::RecoveryStartupComplete,
+    catalog: RecoveryCatalog,
+}
+impl StartupJobContext {
+    pub fn coordinator(&self) -> Result<StartupCoordinator<'_>, StartupBlocked> {
+        let startup = self
+            .startup
+            .try_clone()
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        self.writer
+            .validate_recovery_startup(
+                &startup,
+                &self.storage.db_path,
+                &self.options.ownership_root,
+            )
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        self.runtime
+            .validate_recovery_startup(&startup, &self.options.ownership_root)
+            .map_err(|_| StartupBlocked::NeedsAttention)?;
+        // The issuing coordinator already installed the immutable lane fence.
+        // Reinstalling it here would reject every later manual job.
+        Ok(StartupCoordinator {
+            inputs: StartupInputs {
+                runtime: &self.runtime,
+                owner: &self.owner,
+                storage: &self.storage,
+                writer: &self.writer,
+                options: &self.options,
+                projects: &self.projects,
+            },
+            startup,
+            catalog: self.catalog.clone(),
+        })
+    }
+}
 impl<'a> StartupCoordinator<'a> {
     pub fn new(
         inputs: StartupInputs<'a>,
@@ -110,6 +154,27 @@ impl<'a> StartupCoordinator<'a> {
             inputs,
             startup,
             catalog,
+        })
+    }
+    /// The actor creates a fresh context for each admitted job. This factory is
+    /// not available to host callers and cannot bypass initial fence installation.
+    pub(crate) fn job_context(&self) -> Result<StartupJobContext, StartupBlocked> {
+        let mut projects = workbench_host::projects::StaticProjects::default();
+        for (id, root) in self.inputs.projects.entries() {
+            projects.insert(&id, root);
+        }
+        Ok(StartupJobContext {
+            runtime: self.inputs.runtime.clone(),
+            owner: self.inputs.owner.clone(),
+            storage: self.inputs.storage.clone(),
+            writer: self.inputs.writer.clone(),
+            options: self.inputs.options.clone(),
+            projects,
+            startup: self
+                .startup
+                .try_clone()
+                .map_err(|_| StartupBlocked::StorageUnavailable)?,
+            catalog: self.catalog.clone(),
         })
     }
     /// Payload-free observation. Activated is never treated as retryable and a
@@ -522,9 +587,13 @@ impl PreparedStartupComponent {
             .map_err(|_| StartupBlocked::NeedsAttention)
     }
     /// Activate only after current authority and full-component preparation.
-    pub fn activate(self, runtime: &AgentRuntime) -> Result<Vec<RunId>, StartupBlocked> {
+    pub fn activate(
+        self,
+        runtime: &AgentRuntime,
+        reservation: impl Into<runtime::ActivationReservation>,
+    ) -> Result<Vec<RunId>, StartupBlocked> {
         runtime
-            .activate_component_with_models(self.paused, self.authority, self.models)
+            .activate_component_with_models(self.paused, self.authority, self.models, reservation)
             .map_err(|_| StartupBlocked::NeedsAttention)
     }
 }

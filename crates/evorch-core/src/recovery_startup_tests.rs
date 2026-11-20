@@ -236,6 +236,39 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             reopened.prepare(&manifests[0]).err().unwrap(),
             StartupBlocked::OwnerBlocked
         );
+        let host = Arc::new(std::sync::Mutex::new(workbench_host::CommandHost::new(
+            workbench_host::commands::CommandService::new(
+                second.clone(),
+                tokio::runtime::Handle::current(),
+            ),
+        )));
+        let status = ComponentStatus {
+            manifest_id: manifests[0].clone(),
+            runs: vec![run],
+            disposition: Disposition::Prepared,
+        };
+        assert!(matches!(
+            crate::recovery_service::attempt(&reopened, &second, &host, &status),
+            crate::recovery_service::AutomaticAttempt::Finished(
+                crate::recovery_service::RecoveryDiagnostic {
+                    state: crate::recovery_service::RecoveryState::Blocked,
+                    reason: Some(StartupBlocked::OwnerBlocked),
+                    ..
+                }
+            )
+        ));
+        // Blocked returned its automatic reservation without releasing Prepared.
+        let manual = second
+            .reserve_manual_activation(
+                &manifests[0],
+                storage::recovery::graph_control::GraphEffectKey {
+                    operation_id: "after-blocked".into(),
+                    attempt_nonce: "attempt".into(),
+                },
+                0,
+            )
+            .unwrap();
+        drop(manual);
         assert_eq!(
             storage::Database::open(&config)
                 .unwrap()
@@ -261,7 +294,8 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         );
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         if activate {
-            assert_eq!(adopted.activate(&second).unwrap(), [run]);
+            let reservation = second.reserve_automatic_activation(&manifests[0]).unwrap();
+            assert_eq!(adopted.activate(&second, reservation).unwrap(), [run]);
             model.entered.notified().await;
             assert_eq!(model.admissions.load(Ordering::SeqCst), before + 1);
             let after_ack = leases
