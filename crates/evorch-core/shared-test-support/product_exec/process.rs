@@ -25,7 +25,7 @@ use super::{observe, reaper};
 use std::{
     io::{BufRead, BufReader, Write},
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::process::{CommandExt, ExitStatusExt},
     },
     process::{Child, Command, ExitStatus, Stdio},
@@ -84,6 +84,8 @@ pub enum SpawnFault {
     Pidfd,
     /// Duplicating that pidfd fails.
     PidfdClone,
+    /// Opening the reaper's own pidfd fails, before the leader is known.
+    ReaperPidfd,
 }
 
 thread_local! {
@@ -97,6 +99,9 @@ struct Events {
     exit: mpsc::Receiver<ExitStatus>,
     replies: mpsc::Receiver<(String, serde_json::Value)>,
 }
+
+/// Test hook of the cleanup, given the reaper's pidfd.
+type SnapshotHook = Box<dyn FnOnce(std::os::fd::BorrowedFd<'_>) + Send>;
 
 pub struct ManagedProcess {
     pid: i32,
@@ -117,6 +122,8 @@ pub struct ManagedProcess {
     reaper_bound: Duration,
     /// Replies that arrived while another one was awaited.
     stash: Vec<(String, serde_json::Value)>,
+    /// Test hook run between the snapshot and the kill of a cleanup.
+    after_snapshot: Option<SnapshotHook>,
     finished: bool,
 }
 
@@ -245,18 +252,6 @@ impl ManagedProcess {
         sandbox::process::close_inherited_fds_on_exec(&mut starter);
         let mut reaper = starter.spawn()?;
         let reaper_pid = reaper.id() as i32;
-        // The reaper is our own unreaped child, so this pidfd names it.
-        let reaper_fd = match rustix::process::pidfd_open(
-            rustix::process::Pid::from_raw(reaper_pid).expect("a child pid"),
-            rustix::process::PidfdFlags::empty(),
-        ) {
-            Ok(fd) => fd,
-            Err(error) => {
-                let _ = reaper.kill();
-                let _ = reaper.wait();
-                return Err(error.into());
-            }
-        };
         let control = reaper.stdin.take().expect("piped stdin");
         let events_out = reaper.stdout.take().expect("piped stdout");
         let reaper_err = reaper.stderr.take().expect("piped stderr");
@@ -320,6 +315,43 @@ impl ManagedProcess {
             });
             readers.push((handle, done_rx));
         }
+
+        // The reaper is our own unreaped child, so this pidfd names it.
+        let reaper_fd = match fault {
+            SpawnFault::ReaperPidfd => Err(std::io::Error::other(
+                "injected: the reaper's pidfd_open failed",
+            )),
+            _ => rustix::process::pidfd_open(
+                rustix::process::Pid::from_raw(reaper_pid).expect("a child pid"),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .map_err(std::io::Error::from),
+        };
+        let reaper_fd = match reaper_fd {
+            Ok(fd) => fd,
+            Err(error) => {
+                // The reaper may already have started the leader. Closing its
+                // control pipe is what makes it kill and reap the family, so
+                // that comes first; there is no pidfd to fall back on, and the
+                // wait is bounded without signalling by pid.
+                drop(control);
+                let leader = leader_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|d| d["pid"].as_i64())
+                    .unwrap_or(0) as i32;
+                LAST_ABORTED_SPAWN.with(|last| last.set((reaper_pid, leader)));
+                let (tx, rx) = mpsc::channel();
+                let waiter = std::thread::spawn(move || {
+                    let _ = tx.send(reaper.wait());
+                });
+                if rx.recv_timeout(Duration::from_secs(30)).is_ok() {
+                    let _ = waiter.join();
+                }
+                return Err(error);
+            }
+        };
 
         // The reaper starts the leader and says so.
         let leader = match leader_rx.recv_timeout(REPLY_WATCHDOG) {
@@ -452,6 +484,7 @@ impl ManagedProcess {
             reply_bound: REPLY_WATCHDOG,
             reaper_bound: Duration::from_secs(30),
             stash: Vec::new(),
+            after_snapshot: None,
             finished: false,
         })
     }
@@ -459,6 +492,15 @@ impl ManagedProcess {
     /// Changes the bound of the reader join (a failure bound, not a wait).
     pub fn set_reader_bound(&mut self, bound: Duration) {
         self.reader_bound = bound;
+    }
+
+    /// Runs `hook` (given the reaper's pidfd) during the cleanup, after the
+    /// snapshot and before the kill command is written (tests only).
+    pub fn set_after_snapshot_hook(
+        &mut self,
+        hook: impl FnOnce(std::os::fd::BorrowedFd<'_>) + Send + 'static,
+    ) {
+        self.after_snapshot = Some(Box::new(hook));
     }
 
     /// Changes the bounds of the cleanup: how long the reaper may take to answer
@@ -657,11 +699,23 @@ impl ManagedProcess {
         } else {
             lost = true;
         }
-        if !lost && self.command("KILL") {
-            lost |= self.reply("KILLED", self.reply_bound).is_none();
+        if let Some(hook) = self.after_snapshot.take() {
+            hook(self.reaper_fd.as_fd());
         }
-        if !lost && self.command("REAP") {
-            lost |= self.reply("REAPED", self.reply_bound).is_none();
+        // A command that cannot even be written means the reaper is gone.
+        if !lost {
+            if self.command("KILL") {
+                lost |= self.reply("KILLED", self.reply_bound).is_none();
+            } else {
+                lost = true;
+            }
+        }
+        if !lost {
+            if self.command("REAP") {
+                lost |= self.reply("REAPED", self.reply_bound).is_none();
+            } else {
+                lost = true;
+            }
         }
         self.control = None;
         self.stdin = None;

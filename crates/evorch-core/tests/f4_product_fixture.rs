@@ -487,7 +487,7 @@ fn a_reader_held_open_by_a_stranger_is_bounded_and_the_stranger_is_left_alone() 
         .stdin(std::process::Stdio::null())
         .stdout(held)
         .stderr(std::process::Stdio::null());
-    let mut stranger = stranger.spawn().unwrap();
+    let stranger = Parker(stranger.spawn().unwrap());
     family.close_stdin();
     assert!(family.wait_exit(Duration::from_secs(60)).unwrap().success());
     let report = family.join();
@@ -497,8 +497,6 @@ fn a_reader_held_open_by_a_stranger_is_bounded_and_the_stranger_is_left_alone() 
         running(stranger.id()),
         "a process outside the family is never touched"
     );
-    stranger.kill().unwrap();
-    stranger.wait().unwrap();
 }
 
 #[test]
@@ -990,7 +988,22 @@ fn f4p_family_reaper() {
     product_exec::reaper::run();
 }
 
-fn plain_parker(args: &[&str], cwd: Option<&Path>) -> std::process::Child {
+/// A process of the harness that is killed and reaped when it goes out of
+/// scope, so that a failing assertion cannot leave it behind.
+struct Parker(std::process::Child);
+impl Parker {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+impl Drop for Parker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn plain_parker(args: &[&str], cwd: Option<&Path>) -> Parker {
     let mut command = fake_command("parker");
     command
         .args(args)
@@ -1000,7 +1013,7 @@ fn plain_parker(args: &[&str], cwd: Option<&Path>) -> std::process::Child {
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    command.spawn().unwrap()
+    Parker(command.spawn().unwrap())
 }
 
 fn running(pid: u32) -> bool {
@@ -1024,21 +1037,17 @@ fn processes_outside_the_family_are_never_touched_whatever_they_reference() {
     }
     let log = format!("{}/output.log", dir.display());
     // One started before the family, as a user's `tail -f <root>/output.log`.
-    let mut before = plain_parker(&[&log], None);
+    let before = plain_parker(&[&log], None);
     let (family, _) = spawn_family();
     // Three more start after the family is up: one names the log, one works in
     // a directory below the family's root, one in a sibling with the same
     // prefix. None is in the family's tree.
-    let mut named = plain_parker(&[&log], None);
-    let mut inside = plain_parker(&[], Some(&below));
-    let mut sibling = plain_parker(&[], Some(&other));
+    let named = plain_parker(&[&log], None);
+    let inside = plain_parker(&[], Some(&below));
+    let sibling = plain_parker(&[], Some(&other));
     finish_family(family);
     for stray in [&before, &named, &inside, &sibling] {
         assert!(running(stray.id()), "pid {} was touched", stray.id());
-    }
-    for stray in [&mut before, &mut named, &mut inside, &mut sibling] {
-        stray.kill().unwrap();
-        stray.wait().unwrap();
     }
 }
 
@@ -1079,17 +1088,23 @@ fn another_live_family_that_names_this_familys_path_is_not_touched() {
 #[test]
 fn a_failed_spawn_step_takes_the_started_family_back() {
     use product_exec::process::{LAST_ABORTED_SPAWN, SpawnFault};
-    for fault in [SpawnFault::Pidfd, SpawnFault::PidfdClone] {
+    for fault in [
+        SpawnFault::ReaperPidfd,
+        SpawnFault::Pidfd,
+        SpawnFault::PidfdClone,
+    ] {
         let result = ManagedProcess::spawn_faulty(fake_spec("parker"), fault);
         assert!(result.is_err(), "{fault:?} must fail the spawn");
         let (reaper, leader) = LAST_ABORTED_SPAWN.with(std::cell::Cell::get);
-        assert!(reaper > 0 && leader > 0);
+        // With a failing reaper pidfd the leader's pid is whatever the reaper had
+        // reported by then; it is 0 when it had not.
+        assert!(reaper > 0 && (leader > 0 || fault == SpawnFault::ReaperPidfd));
         assert!(
             product_exec::observe::process(reaper).is_none(),
             "{fault:?}: the reaper {reaper} was not reaped"
         );
         assert!(
-            product_exec::observe::process(leader).is_none(),
+            leader == 0 || product_exec::observe::process(leader).is_none(),
             "{fault:?}: the leader {leader} was not killed and reaped"
         );
     }
@@ -1099,37 +1114,70 @@ fn a_failed_spawn_step_takes_the_started_family_back() {
 fn a_join_in_flight_while_the_family_is_killed_leaves_every_child_accounted_for() {
     // The reaper's JOIN thread and a KILL both reap children. Pinning a child by
     // pidfd and reaping it happen under one lock, so a pid that was listed is
-    // still the same child when it is signalled. A reused pid cannot be forced
-    // from a test; what is checked is the order the lock makes possible: the
-    // JOIN is pending (an adopted orphan that never exits) when the KILL arrives,
-    // and the KILL wakes it.
-    let (mut family, orphan) = orphan_maker("env");
-    let bystander = plain_parker(&[], None);
-    assert!(family.request_join(), "the JOIN is requested first");
-    family.kill_all();
-    let joined = family
-        .await_join(Duration::from_secs(60))
-        .expect("the pending JOIN ends once the KILL took the orphan");
-    assert!(
-        joined
-            .iter()
-            .any(|(pid, status)| *pid == orphan && !status.success()),
-        "the orphan is accounted for as killed: {joined:?}"
-    );
-    assert!(
-        joined.iter().all(|(pid, _)| *pid != bystander.id() as i32),
-        "{joined:?}"
-    );
-    assert!(product_exec::observe::process(orphan).is_none(), "reaped");
+    // still the same child when it is signalled; and whichever of the two reaps
+    // a child, the other still learns how it ended (the reaper records the wait
+    // status of every child it reaps). A reused pid cannot be forced from a test;
+    // what is checked is the order the lock makes possible: the JOIN is pending
+    // (an adopted orphan that never exits) when the KILL arrives, and the KILL
+    // wakes it. Both kinds of orphan are covered: one that kept the family's
+    // session, and one that left it with a cleared environment.
+    for mode in ["env", "setsid"] {
+        let (mut family, orphan) = orphan_maker(mode);
+        let bystander = plain_parker(&[], None);
+        assert!(family.request_join(), "{mode}: the JOIN is requested first");
+        family.kill_all();
+        let joined = family
+            .await_join(Duration::from_secs(60))
+            .unwrap_or_else(|| {
+                panic!("{mode}: the pending JOIN must end once the KILL took the orphan")
+            });
+        assert!(
+            joined
+                .iter()
+                .any(|(pid, status)| *pid == orphan && !status.success()),
+            "{mode}: the orphan is accounted for as killed: {joined:?}"
+        );
+        assert!(
+            joined.iter().all(|(pid, _)| *pid != bystander.id() as i32),
+            "{mode}: {joined:?}"
+        );
+        assert!(
+            product_exec::observe::process(orphan).is_none(),
+            "{mode}: reaped"
+        );
+        let report = family.join();
+        assert!(!report.reaper_lost, "{mode}: {}", report.reaper_stderr);
+        assert!(
+            running(bystander.id()),
+            "{mode}: a process outside the family is untouched"
+        );
+    }
+}
+
+#[test]
+fn a_reaper_that_dies_between_the_snapshot_and_the_kill_is_reported_lost() {
+    let (mut family, grandchild) = spawn_family_of("parker");
+    family.set_cleanup_bounds(Duration::from_millis(300), Duration::from_millis(300));
+    family.set_reader_bound(Duration::from_millis(300));
+    family.set_after_snapshot_hook(|reaper| {
+        // Kill the reaper and wait until it is really dead, so that the next
+        // control write meets a closed pipe instead of a slow reply.
+        rustix::process::pidfd_send_signal(reaper, rustix::process::Signal::KILL).unwrap();
+        let _ = rustix::process::waitid(
+            rustix::process::WaitId::PidFd(reaper),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        );
+    });
+    assert!(family.signal(rustix::process::Signal::KILL));
     let report = family.join();
-    assert!(!report.reaper_lost, "{}", report.reaper_stderr);
     assert!(
-        running(bystander.id()),
-        "a process outside the family is untouched"
+        report.reaper_lost,
+        "a failed control write is a lost reaper: {report:?}"
     );
-    let mut bystander = bystander;
-    bystander.kill().unwrap();
-    bystander.wait().unwrap();
+    assert!(!report.success());
+    // What the lost reaper could not take back is the test's to clean up.
+    let orphan = rustix::process::Pid::from_raw(grandchild).unwrap();
+    let _ = rustix::process::kill_process(orphan, rustix::process::Signal::KILL);
 }
 
 #[test]

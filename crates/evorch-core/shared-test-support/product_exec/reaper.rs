@@ -121,10 +121,25 @@ fn pin_child(pid: i32) -> Option<std::os::fd::OwnedFd> {
     }
 }
 
+/// The wait status of every child that was reaped, by pid, so that whoever
+/// waits for a child can still learn how it ended when someone else reaped it
+/// first. Touched only with `CHILDREN` held.
+static REAPED: std::sync::Mutex<std::collections::BTreeMap<i32, i32>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Reaps a pinned child (the caller holds `CHILDREN`) and records its status.
+fn reap_pinned(pid: i32, fd: &std::os::fd::OwnedFd) -> Option<i32> {
+    let status = wait_pidfd(fd, rustix::process::WaitIdOptions::EXITED).map(|s| raw_status(&s));
+    if let Some(status) = status {
+        REAPED.lock().unwrap().insert(pid, status);
+    }
+    status
+}
+
 /// Kills and reaps one pinned direct child.
-fn kill_pinned(fd: &std::os::fd::OwnedFd) {
+fn kill_pinned(pid: i32, fd: &std::os::fd::OwnedFd) {
     let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
-    let _ = wait_pidfd(fd, rustix::process::WaitIdOptions::EXITED);
+    reap_pinned(pid, fd);
 }
 
 /// Kills the leader's group and the leader, waits for the leader's exit (which
@@ -151,7 +166,7 @@ fn kill_phase(leader: i32, pidfd: &impl AsFd) -> Vec<observe::ProcInfo> {
         }
         for child in children {
             if let Some(fd) = pin_child(child.pid) {
-                kill_pinned(&fd);
+                kill_pinned(child.pid, &fd);
             }
             killed.push(child);
         }
@@ -285,10 +300,14 @@ pub fn run() -> ! {
                                         | rustix::process::WaitIdOptions::NOWAIT,
                                 );
                                 let _guard = CHILDREN.lock().unwrap();
-                                let _ = wait_pidfd(&fd, rustix::process::WaitIdOptions::EXITED);
-                                if let Some(status) = exit {
-                                    joined.push((pid, raw_status(&status)));
-                                }
+                                // The status is the one seen while waiting, the one
+                                // of this reap, or the one a KILL recorded when it
+                                // reaped the child first. A child with none of the
+                                // three is reported with the status unknown (-1).
+                                let reaped = reap_pinned(pid, &fd);
+                                let recorded = REAPED.lock().unwrap().remove(&pid);
+                                let status = exit.as_ref().map(raw_status).or(reaped).or(recorded);
+                                joined.push((pid, status.unwrap_or(-1)));
                             }
                         }
                         emit("JOINED", serde_json::json!(joined));
