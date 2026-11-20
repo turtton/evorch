@@ -186,7 +186,7 @@ impl AdminService {
                 ),
             )
         })?;
-        let epoch=match &intent{LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Request(r))=>r.binding.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(r))=>r.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Interrupt(r))=>r.binding.core_epoch,LifecycleCommand::Quarantine(workbench_protocol::namespaces::lifecycle::quarantine::QuarantineCommand::Discard(r))|LifecycleCommand::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Release(r)|workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Resume(r))=>r.binding.expected_core_epoch};
+        let epoch=match &intent{LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Request(r))=>r.binding.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(r))=>r.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Interrupt(r))=>r.binding.core_epoch,LifecycleCommand::Quarantine(workbench_protocol::namespaces::lifecycle::quarantine::QuarantineCommand::Discard(r))=>r.binding.expected_core_epoch,LifecycleCommand::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Release(r)|workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Resume(r))=>r.binding.graph.expected_core_epoch};
         if epoch != self.epoch {
             return Err(self.refusal(&context, intent.action(), conflict()));
         }
@@ -290,6 +290,31 @@ impl AdminService {
             let _ = reply.send(Err(error));
             return;
         }
+        let entry = match self.entry(&request.intent, &request.context) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = reply.send(Err(self.refusal(&request.context, action, e)));
+                return;
+            }
+        };
+        // Readback precedes current-state collection/inspection. A prior
+        // effect may already have advanced state; that is not a new admission.
+        match self.audit.record(&entry.key).await {
+            Ok(Some(row)) => {
+                let result = if audit::same_intent(&entry, &row.accepted) {
+                    Ok(self.readback_receipt(&request.intent, &row))
+                } else {
+                    Err(conflict())
+                };
+                let _ = reply.send(result);
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        }
         let _effect_admission = if action == AdminAction::Request {
             None
         } else {
@@ -342,13 +367,6 @@ impl AdminService {
                     return;
                 }
             };
-        let entry = match self.entry(&request.intent, &request.context) {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = reply.send(Err(self.refusal(&request.context, action, e)));
-                return;
-            }
-        };
         let key = entry.key.clone();
         let digest = entry.intent_digest.clone();
         match self.audit.accept(entry).await {
@@ -357,24 +375,7 @@ impl AdminService {
                 let result = if r.accepted.intent_digest != digest {
                     Err(conflict())
                 } else {
-                    Ok(AdminAccepted {
-                        receipt: AdminReceipt {
-                            operation_id: request.intent.operation_id().clone(),
-                            state: record_state(
-                                &r,
-                                self.active
-                                    .lock()
-                                    .unwrap()
-                                    .contains(&r.accepted.key.operation_id),
-                            ),
-                            outcome: if r.state == AuditState::Finished {
-                                record_outcome(&r)
-                            } else {
-                                AdminOutcome::Unknown
-                            },
-                            audit_warning: r.state != AuditState::Finished,
-                        },
-                    })
+                    Ok(self.readback_receipt(&request.intent, &r))
                 };
                 let _ = reply.send(result);
                 return;
@@ -453,6 +454,27 @@ impl AdminService {
             _ => AuditOutcome::Unknown,
         };
         let _ = self.audit.finalize(&key, outcome).await;
+    }
+    fn readback_receipt(&self, intent: &AdminIntent, row: &AuditRecord) -> AdminAccepted {
+        let active = self
+            .active
+            .lock()
+            .unwrap()
+            .contains(&row.accepted.key.operation_id)
+            || (row.restart_id.is_some() && row.accepted.accepted_core_epoch == self.epoch.get());
+        let state = record_state(row, active);
+        AdminAccepted {
+            receipt: AdminReceipt {
+                operation_id: intent.operation_id().clone(),
+                state,
+                outcome: if state == AdminOperationState::Unknown {
+                    AdminOutcome::Unknown
+                } else {
+                    record_outcome(row)
+                },
+                audit_warning: row.state != AuditState::Finished,
+            },
+        }
     }
     pub fn query(
         self: &Arc<Self>,

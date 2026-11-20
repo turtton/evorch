@@ -65,18 +65,18 @@ impl LifecycleCommand {
     pub fn operation_id(&self) -> &AdminId {
         match self {
             Self::Restart(c) => c.operation_id(),
-            Self::Quarantine(quarantine::QuarantineCommand::Discard(c))
-            | Self::OwnedGraphs(
+            Self::Quarantine(quarantine::QuarantineCommand::Discard(c)) => &c.binding.operation_id,
+            Self::OwnedGraphs(
                 owned_graphs::OwnedGraphsCommand::Release(c)
                 | owned_graphs::OwnedGraphsCommand::Resume(c),
-            ) => &c.binding.operation_id,
+            ) => &c.binding.graph.operation_id,
         }
     }
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Restart(c) => c.validate(),
-            Self::Quarantine(quarantine::QuarantineCommand::Discard(c))
-            | Self::OwnedGraphs(
+            Self::Quarantine(quarantine::QuarantineCommand::Discard(c)) => c.validate(),
+            Self::OwnedGraphs(
                 owned_graphs::OwnedGraphsCommand::Release(c)
                 | owned_graphs::OwnedGraphsCommand::Resume(c),
             ) => c.validate(),
