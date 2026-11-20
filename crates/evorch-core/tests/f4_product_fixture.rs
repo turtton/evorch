@@ -1,17 +1,509 @@
-//! REGISTRATION-ONLY PLACEHOLDER (integration PR I0). Not a feature test.
+#![cfg(target_os = "linux")]
+//! F4-P: the product fixture itself.
 //!
-//! This file exists so that the scope gate, the CI selection and, where it
-//! applies, the cache gate name a target that exists. It checks the sealed
-//! `evorch-core` artifact and manifest that CI hands to every product job
-//! (crates/test-support/src/product_artifact.rs). Its success proves only that
-//! the target is registered; it is NOT evidence that the feature works. F4-P
-//! replaces it with the real test (the product launch fixture tests); a real
-//! test must fail, never skip, when its product or browser is missing.
+//! Evidence class of every test here: `fixture`. They show that the fixture
+//! starts a separately built, feature-free `evorch-core` through its ordinary
+//! entry, observes it from outside, fails when the artifact is missing, and
+//! takes everything back. They are NOT product-to-product evidence: nothing
+//! here asks a product to restart into another product (that is F4-E, after 5a).
+//!
+//! Tests that need the product artifact fail when it is not provided; they are
+//! never skipped and never run against `CARGO_BIN_EXE_*`.
+#[path = "../shared-test-support/product_exec.rs"]
+mod product_exec;
 
-use test_support::product_artifact;
+use product_exec::{
+    artifact::{ArtifactError, ProductArtifact, ProductManifest},
+    env::IsolatedEnv,
+    launch::{LaunchError, ProductLaunch},
+    process::{ManagedProcess, WaitError},
+    provisional::{CARGO_HARNESS_BIN_ENV, ENV_MANIFEST, MANIFEST_SCHEMA},
+    wire::{self, MockProvider},
+};
+use std::{
+    ffi::OsString, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration,
+};
+
+const FAKE_ROLE_ENV: &str = "F4P_FAKE_ROLE";
+const FAKE_PID_PREFIX: &str = "F4P-GRANDCHILD ";
+
+// ---------------------------------------------------------------- artifact
+
+fn sample_manifest(elf: &Path) -> ProductManifest {
+    ProductManifest {
+        schema: MANIFEST_SCHEMA,
+        package: "evorch-core".into(),
+        bin: "evorch-core".into(),
+        profile: "release".into(),
+        cargo_args: [
+            "build",
+            "--release",
+            "-p",
+            "evorch-core",
+            "--bin",
+            "evorch-core",
+        ]
+        .map(String::from)
+        .to_vec(),
+        features: vec![],
+        rustc: "rustc test".into(),
+        cargo: "cargo test".into(),
+        target: "x86_64-unknown-linux-gnu".into(),
+        source_revision: "test".into(),
+        artifact: elf.file_name().unwrap().to_string_lossy().into_owned(),
+        elf_size: std::fs::metadata(elf).unwrap().len(),
+        elf_sha256: core_instance::handoff::elf_identity(elf).unwrap(),
+        stripped: false,
+    }
+}
+fn fake_elf(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("fake-core");
+    std::fs::write(&path, b"\x7fELF fixture-only bytes, never executed").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+fn write_manifest(dir: &Path, manifest: &ProductManifest) -> std::path::PathBuf {
+    let path = dir.join("manifest.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
+    path
+}
 
 #[test]
-fn registration_only_placeholder_f4_product_fixture_checks_the_sealed_product_artifact() {
-    let artifact = product_artifact::require_from_env();
-    assert!(artifact.manifest.features.is_empty());
+fn artifact_absent_is_a_failure_and_never_falls_back_to_cargo_bin_exe() {
+    // Even when Cargo's own build of the binary is advertised, no manifest
+    // means no product.
+    let lookup = |name: &str| (name == CARGO_HARNESS_BIN_ENV).then(|| OsString::from("/bin/sh"));
+    assert!(matches!(
+        ProductArtifact::open_from(&lookup),
+        Err(ArtifactError::NotProvided(ENV_MANIFEST))
+    ));
+    let empty = |_: &str| None;
+    assert!(matches!(
+        ProductArtifact::open_from(&empty),
+        Err(ArtifactError::NotProvided(_))
+    ));
+    let blank = |name: &str| (name == ENV_MANIFEST).then(OsString::new);
+    assert!(matches!(
+        ProductArtifact::open_from(&blank),
+        Err(ArtifactError::NotProvided(_))
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("manifest.json");
+    assert!(matches!(
+        ProductArtifact::open(&missing, &empty),
+        Err(ArtifactError::Io(_))
+    ));
+}
+
+#[test]
+fn require_panics_in_a_process_that_has_cargo_bin_exe_but_no_manifest() {
+    // The fixture's own entry point, in a child with the harness variable set
+    // and the manifest variable absent: it must fail, not choose the harness.
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--ignored", "--exact", "fake_role_require", "--nocapture"])
+        .env_clear()
+        .env(FAKE_ROLE_ENV, "require")
+        .env(
+            CARGO_HARNESS_BIN_ENV,
+            std::env::var_os(CARGO_HARNESS_BIN_ENV).unwrap_or_else(|| "/bin/sh".into()),
+        );
+    let output = child.output().unwrap();
+    assert!(!output.status.success(), "the fixture must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("product artifact not provided"), "{stderr}");
+}
+#[test]
+#[ignore = "child role of require_panics_in_a_process_that_has_cargo_bin_exe_but_no_manifest"]
+fn fake_role_require() {
+    assert_eq!(std::env::var(FAKE_ROLE_ENV).unwrap(), "require");
+    let _ = ProductArtifact::require();
+}
+
+#[test]
+fn manifest_rules_reject_what_is_not_a_product() {
+    let dir = tempfile::tempdir().unwrap();
+    let elf = fake_elf(dir.path());
+    let good = sample_manifest(&elf);
+    ProductArtifact::check_manifest(&good).unwrap();
+    let mut debug = good.clone();
+    debug.profile = "debug".into();
+    debug.cargo_args = ["build", "-p", "evorch-core", "--bin", "evorch-core"]
+        .map(String::from)
+        .to_vec();
+    ProductArtifact::check_manifest(&debug).unwrap();
+    let mutate = |f: &dyn Fn(&mut ProductManifest)| {
+        let mut m = good.clone();
+        f(&mut m);
+        assert!(ProductArtifact::check_manifest(&m).is_err());
+    };
+    mutate(&|m| m.features = vec!["bootstrap-test-support".into()]);
+    mutate(&|m| m.cargo_args.push("--features=renderer-test-helper".into()));
+    mutate(&|m| m.cargo_args.push("--all-features".into()));
+    mutate(&|m| m.stripped = true);
+    mutate(&|m| m.profile = "debug".into());
+    mutate(&|m| m.bin = "core-bootstrap-harness".into());
+    mutate(&|m| m.cargo_args = vec!["build".into(), "--release".into()]);
+    mutate(&|m| m.schema += 1);
+    mutate(&|m| m.elf_sha256 = "md5:0".into());
+}
+
+#[test]
+fn artifact_must_match_its_manifest_and_must_not_be_the_harness_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let elf = fake_elf(dir.path());
+    let manifest = sample_manifest(&elf);
+    let path = write_manifest(dir.path(), &manifest);
+    let none = |_: &str| None;
+    let artifact = ProductArtifact::open(&path, &none).expect("a consistent artifact opens");
+    assert_eq!(artifact.build_identity(), manifest.elf_sha256);
+    artifact.verify_hash().unwrap();
+    // Cargo's own build of the harness, handed over as the product by mistake.
+    let harness =
+        |name: &str| (name == CARGO_HARNESS_BIN_ENV).then(|| elf.clone().into_os_string());
+    assert!(matches!(
+        ProductArtifact::open(&path, &harness),
+        Err(ArtifactError::Mismatch(m)) if m.contains(CARGO_HARNESS_BIN_ENV)
+    ));
+    // Wrong size, then wrong content of the same size.
+    let mut wrong = manifest.clone();
+    wrong.elf_size += 1;
+    let bad = write_manifest(dir.path(), &wrong);
+    assert!(matches!(
+        ProductArtifact::open(&bad, &none),
+        Err(ArtifactError::Mismatch(_))
+    ));
+    write_manifest(dir.path(), &manifest); // the consistent manifest again
+    std::fs::write(&elf, b"\x7fELF fixture-only bytes, never executeD").unwrap();
+    assert!(matches!(
+        ProductArtifact::open(&path, &none),
+        Err(ArtifactError::Mismatch(m)) if m.contains("hash")
+    ));
+    // A modification after opening is caught at launch.
+    std::fs::write(&elf, b"\x7fELF fixture-only bytes, never executed").unwrap();
+    let again = ProductArtifact::open(&path, &none).unwrap();
+    std::fs::write(&elf, b"\x7fELF fixture-only bytes, never executeD").unwrap();
+    let caught = std::panic::catch_unwind(|| again.assert_unchanged());
+    assert!(caught.is_err(), "a changed artifact must not be launched");
+}
+
+#[test]
+fn compile_time_environment_macros_are_not_used_by_the_fixture() {
+    // F-10: read the sources at run time. The patterns are assembled so that
+    // this test does not match itself.
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let banned = [
+        format!("{}!(\"CARGO_MANIFEST_DIR", "env"),
+        format!("{}!(\"CARGO_BIN_EXE", "env"),
+        format!("{}!(\"CARGO_BIN_EXE", "option_env"),
+        format!("{}!(\"CARGO_MANIFEST_DIR", "option_env"),
+    ];
+    let mut files = vec![
+        root.join("tests/f4_product_fixture.rs"),
+        root.join("shared-test-support/product_exec.rs"),
+    ];
+    for dir in [
+        "shared-test-support/product_exec",
+        "tests/renderer_support/product_exec",
+    ] {
+        if let Ok(entries) = std::fs::read_dir(root.join(dir)) {
+            files.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    files.push(root.join("tests/renderer_support/product_exec.rs"));
+    let mut scanned = 0;
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        scanned += 1;
+        for pattern in &banned {
+            assert!(
+                !text.contains(pattern.as_str()),
+                "{} uses {pattern}",
+                file.display()
+            );
+        }
+    }
+    assert!(scanned >= 8, "the fixture sources were not found");
+}
+
+// ---------------------------------------------- supervision and cleanup
+
+fn fake_command(role: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--ignored", "--exact", "fake_role_process", "--nocapture"])
+        .env(FAKE_ROLE_ENV, role);
+    command
+}
+
+#[test]
+#[ignore = "child process of the supervision tests; selected by F4P_FAKE_ROLE"]
+fn fake_role_process() {
+    use std::io::{BufRead, Write};
+    match std::env::var(FAKE_ROLE_ENV).unwrap().as_str() {
+        // A parent that starts a grandchild, reports both and waits for stdin EOF.
+        "family" => {
+            let mut grandchild = fake_command("sleeper")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            std::io::BufReader::new(grandchild.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            println!("{FAKE_PID_PREFIX}{}", grandchild.id());
+            println!("{{\"status\":\"ready\"}}");
+            std::io::stdout().flush().unwrap();
+            let mut sink = String::new();
+            let _ = std::io::stdin().read_line(&mut sink);
+            let _ = grandchild.wait();
+        }
+        "sleeper" => {
+            println!("up");
+            std::io::stdout().flush().unwrap();
+            let mut sink = String::new();
+            let _ = std::io::stdin().read_line(&mut sink);
+        }
+        // Exits at once with a message.
+        "fail" => {
+            eprintln!("fixture-fake: failing before ready");
+            std::process::exit(7);
+        }
+        other => panic!("unknown role {other}"),
+    }
+}
+
+fn spawn_family() -> (ManagedProcess, i32) {
+    let mut family = ManagedProcess::spawn(fake_command("family")).unwrap();
+    let (grandchild, _) = family
+        .wait_for(Duration::from_secs(60), |line| {
+            line.strip_prefix(FAKE_PID_PREFIX)?
+                .trim()
+                .parse::<i32>()
+                .ok()
+        })
+        .unwrap();
+    family
+        .wait_for(Duration::from_secs(60), |line| {
+            line.contains("ready").then_some(())
+        })
+        .unwrap();
+    (family, grandchild)
+}
+
+#[test]
+fn descendants_are_found_and_taken_back_when_the_owner_is_dropped() {
+    let (mut family, grandchild) = spawn_family();
+    let seen = family.remember_descendants().to_vec();
+    assert!(seen.iter().any(|p| p.pid == grandchild), "{seen:?}");
+    assert!(
+        product_exec::observe::process(grandchild).is_some(),
+        "the grandchild runs"
+    );
+    drop(family); // the failure path: no explicit stop
+    for p in &seen {
+        assert!(product_exec::observe::is_gone(p), "{p:?} survived the drop");
+    }
+}
+
+#[test]
+fn terminate_and_join_report_clean_exit_and_no_orphans() {
+    let (mut family, _) = spawn_family();
+    family.remember_descendants();
+    family.close_stdin(); // EOF is the child's own shutdown request
+    let status = family
+        .wait_exit(Duration::from_secs(60))
+        .expect("exit event");
+    assert!(status.success());
+    let report = family.join();
+    assert!(report.status.success());
+    assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+}
+
+#[test]
+fn an_orphan_left_by_the_child_is_reported_then_killed() {
+    let (mut family, grandchild) = spawn_family();
+    family.remember_descendants();
+    // SIGKILL of the parent alone leaves the grandchild behind.
+    let pid = rustix::process::Pid::from_raw(family.pid()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    assert!(family.wait_exit(Duration::from_secs(60)).is_some());
+    let report = family.join();
+    assert!(
+        report.orphans.iter().any(|p| p.pid == grandchild),
+        "the leftover must be reported: {:?}",
+        report.orphans
+    );
+    assert!(
+        product_exec::observe::process(grandchild).is_none_or(|p| p.state != 'S' && p.state != 'R'),
+        "and then taken back"
+    );
+}
+
+#[test]
+fn exit_before_ready_is_an_event_with_the_childs_stderr() {
+    let mut process = ManagedProcess::spawn(fake_command("fail")).unwrap();
+    match process.wait_for(Duration::from_secs(60), |l| {
+        l.contains("ready").then_some(())
+    }) {
+        Err(WaitError::Exited(status, stderr)) => {
+            assert_eq!(status.code(), Some(7));
+            assert!(stderr.contains("failing before ready"), "{stderr}");
+        }
+        other => panic!("expected the exit event, got {other:?}"),
+    }
+    let report = process.join();
+    assert!(report.orphans.is_empty());
+}
+
+#[test]
+fn isolated_environment_removes_every_directory() {
+    let env = IsolatedEnv::new();
+    let footprint = env.footprint();
+    std::fs::write(env.config_dir().join("marker"), b"x").unwrap();
+    assert!(footprint.remains().len() == 2);
+    drop(env);
+    assert!(footprint.remains().is_empty(), "{:?}", footprint.remains());
+}
+
+// ----------------------------------------------------------- the product
+
+#[test]
+fn product_starts_isolated_is_observed_serves_the_wire_and_is_taken_back() {
+    let artifact = ProductArtifact::require();
+    let env = IsolatedEnv::new();
+    let provider = MockProvider::scripted(vec![mock_openai::ScriptedResponse::text_stream(
+        "f4p-1",
+        "mock-model",
+        ["observed"],
+    )]);
+    env.write_product_config(&provider.base_url(), product_exec::launch::KEY_ENV);
+    let mut product = ProductLaunch::new(&artifact, &env).start().unwrap();
+    let ready = product.wait_ready().expect("the product reports Ready");
+    let observed = product.observe();
+
+    // PID and image: the very binary of the manifest, by device and inode.
+    assert_eq!(observed.pid, product.pid());
+    assert!(observed.exe_is_artifact, "{:?}", observed.exe);
+    // Build identity: the manifest's hash is the hash the product describes.
+    let described = artifact.describe().expect("--describe-handoff");
+    assert_eq!(described.build_identity, observed.artifact_identity);
+    // The product runs in the isolated directories only.
+    assert!(
+        ready.socket.starts_with(env.runtime_dir()),
+        "{:?}",
+        ready.socket
+    );
+    assert!(env.ownership_db().exists() || env.state_dir().join("evorch").exists());
+    // Descriptors: a listener socket exists, and nothing of the test's own
+    // (other than stdio) was inherited.
+    let inherited: Vec<_> = observed
+        .fds
+        .iter()
+        .filter(|f| !f.cloexec && f.fd > 2)
+        .collect();
+    assert!(
+        inherited.is_empty(),
+        "descriptors leaked into the product: {inherited:?}"
+    );
+    assert!(observed.fds.iter().any(|f| f.kind() == "socket"));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let hello_epoch = runtime.block_on(async {
+        let client = wire::connect(&ready.socket, "f4p-observer").await;
+        let hello = wire::HelloSummary::from(client.server_hello());
+        let mut events = wire::subscribe_all(&client).await;
+        let reply = client
+            .command(wire::send_chat("f4p-thread", "f4p-submission", "hello"))
+            .await
+            .expect("the product accepts a chat on its public wire");
+        let run = reply.run_id.expect("a run").as_str().to_owned();
+        wire::until_waiting(&mut events, &run).await.unwrap();
+        hello.epoch
+    });
+    assert!(hello_epoch >= 1, "epoch {hello_epoch}");
+    // Provider wire: exactly the request the product sent for that chat.
+    let sent = provider.chat_requests();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].body["model"], "mock-model");
+    assert_eq!(provider.remaining_scripts(), 0);
+
+    let (report, footprint) = product.stop();
+    assert!(
+        report.status.success(),
+        "{:?} {}",
+        report.status,
+        report.stderr
+    );
+    assert!(report.orphans.is_empty());
+    drop(env);
+    assert!(footprint.remains().is_empty());
+    // The core's lifetime lock is free again: nothing of it survived.
+    let _ = LaunchError::BadReadyLine(String::new());
+}
+
+#[test]
+fn product_that_cannot_start_fails_with_its_exit_and_leaves_nothing() {
+    let artifact = ProductArtifact::require();
+    let env = IsolatedEnv::new();
+    let footprint = env.footprint();
+    let mut product = ProductLaunch::new(&artifact, &env)
+        .args(["--no-such-option"])
+        .start()
+        .unwrap();
+    match product.wait_ready() {
+        Err(LaunchError::Wait(WaitError::Exited(status, stderr))) => {
+            assert_eq!(status.code(), Some(1));
+            assert!(stderr.contains("usage: evorch-core"), "{stderr}");
+        }
+        other => panic!("expected an exit before Ready, got {other:?}"),
+    }
+    let (report, _) = product.finish();
+    assert!(report.orphans.is_empty());
+    drop(env);
+    assert!(footprint.remains().is_empty());
+}
+
+// ------------------------------------------------------ artifact tooling
+
+/// Stand-in for the artifact-building CI step: copies a binary that was built
+/// with the shipped arguments to an immutable copy and writes its manifest.
+/// The copy is not stripped or modified.
+#[test]
+#[ignore = "tooling: writes an artifact copy and manifest from an already built binary"]
+fn write_manifest_for_built_artifact() {
+    use product_exec::provisional::*;
+    let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"));
+    let elf = std::path::PathBuf::from(var(ENV_BUILD_ELF));
+    let out = std::path::PathBuf::from(var(ENV_ARTIFACT_DIR));
+    std::fs::create_dir_all(&out).unwrap();
+    let copy = out.join("evorch-core");
+    std::fs::copy(&elf, &copy).unwrap();
+    let args = var(ENV_BUILD_ARGS);
+    let args: Vec<&str> = args.split_whitespace().collect();
+    let manifest = product_exec::artifact::describe_build(
+        &copy,
+        &var(ENV_BUILD_PROFILE),
+        &args,
+        "evorch-core",
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.elf_sha256,
+        core_instance::handoff::elf_identity(&elf).unwrap(),
+        "the copy is byte-identical to the build"
+    );
+    ProductArtifact::check_manifest(&manifest).unwrap();
+    std::fs::write(
+        out.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    eprintln!("wrote {}", out.join("manifest.json").display());
 }
