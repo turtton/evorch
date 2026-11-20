@@ -1,4 +1,11 @@
-//! Q1 registration-only seam, not a quarantine mutation implementation.
+//! Q1 storage contracts: inspection, revision CAS, idempotent discard and durability.
+#[path = "quarantine_admin/discard.rs"]
+mod discard;
+#[path = "quarantine_admin/fixture.rs"]
+mod fixture;
+#[path = "quarantine_admin/inspection.rs"]
+mod inspection;
+
 #[test]
 fn denial_and_operation_budgets_are_separate() {
     use storage::admin_audit::*;
