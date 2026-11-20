@@ -83,6 +83,15 @@ mismatch. Revisit this policy before cutting a v1 release.
   siblings and external paths never mirror. Explicit permissions still apply
   when automatic cache sharing is disabled. Allow only targets for build
   sharing: allowing all of `~/.cargo` also exposes config and credentials.
+- Every Cargo sharing the pool must be turtton.5 or newer: older GC can
+  mistake an active host/sandbox symlink for a dangling link and delete it
+  (fixed in [turtton/cargo v0.103.0-9-turtton.5](https://github.com/turtton/cargo/tree/v0.103.0-9-turtton.5)).
+  After updating the flake, re-enter the host dev shell and restart evorch
+  from that shell. Check `cargo -V` on the host and in the sandbox for
+  `turtton/cargo 0.103.0-9-turtton.5` or newer.
+  Once all pool users are updated, this GC race no longer requires
+  `CARGO_BUILD_GC_ENABLED=false`, serialized builds, or a fallback to
+  `nix develop .#upstream-cargo`. Adjust job counts for CPU/memory separately.
 - The sandbox does not inherit `RUSTC_WRAPPER` or sccache settings. When
   needed, run `RUSTC_WRAPPER= cargo ...` explicitly; sccache configuration and
   server access are not implicitly shared either.
@@ -119,7 +128,9 @@ mismatch. Revisit this policy before cutting a v1 release.
     invalidates its crate and every dependent.
 - Those directories live outside the repository and are not removed with a
   worktree; delete them by hand (`rm -rf ~/.cargo/targets/<dir>`) when they
-  grow large.
+  grow large, but never while in use. Unqualified `cargo clean` deletes the
+  shared build directory without locking; do not run it during concurrent
+  builds. Use `cargo clean -p <pkg>` when package-scoped cleanup is needed.
 - The fork shell does not use sccache: an unset `RUSTC_WRAPPER` becomes the
   empty string, which also overrides a `build.rustc-wrapper` in Cargo config
   (the user's `~/.cargo/config.toml` may set one). A non-empty `RUSTC_WRAPPER`
