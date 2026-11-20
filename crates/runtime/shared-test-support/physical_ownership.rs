@@ -183,11 +183,41 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         permit.run_id = Some(run_id(thread).to_string());
         permit.begin_turn().unwrap();
         let run = run_id(thread).to_string();
-        handle.save_resume_intent(storage::resume_intent::ResumeIntentRecord {
-            run_id: run.clone(), incarnation: "old".into(),
-            payload: serde_json::json!({"run_id":run,"incarnation":"old","active":true,"stop_reason":null,
-                "tool_intent":[],"initial_input":{"id":"initial"},"wait":{"kind":"admission_queued"}}).to_string(),
-        }, None).unwrap();
+        let intent = ResumeIntent {
+            version: 1,
+            run_id: run_id(thread),
+            incarnation: "old".into(),
+            parent_run_id: None,
+            role: "Worker".into(),
+            wait: ResumeWait::AdmissionQueued,
+            initial_input: Some(DurableInput {
+                id: "initial".into(),
+                text: "physical fixture".into(),
+                trusted_user: false,
+            }),
+            inputs: vec![],
+            active: true,
+            resume_requested: false,
+            stop_reason: None,
+            checkpoint: None,
+            snapshot: None,
+            tool_intent: vec![],
+            provider_input: None,
+            boundary_pending: false,
+            responses_replay: Default::default(),
+            compactions: vec![],
+            route_pins: vec![],
+        };
+        handle
+            .save_resume_intent(
+                storage::resume_intent::ResumeIntentRecord {
+                    run_id: run.clone(),
+                    incarnation: "old".into(),
+                    payload: serde_json::to_string(&intent).unwrap(),
+                },
+                None,
+            )
+            .unwrap();
         expected.push(RestartExpectedMember {
             run_id: run.clone(),
             incarnation: "old".into(),
