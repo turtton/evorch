@@ -61,6 +61,15 @@
     },
     "type": "lifecycle"
   },
+  "query/lifecycle/operation_status": {
+    "payload": {
+      "payload": {
+        "operation_id": "op1"
+      },
+      "type": "operation_status"
+    },
+    "type": "lifecycle"
+  },
   "query/lifecycle/owned_graphs": {
     "payload": {
       "payload": {
@@ -85,6 +94,18 @@
         "type": "targets"
       },
       "type": "restart"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/operation_status": {
+    "payload": {
+      "payload": {
+        "audit_warning": true,
+        "operation_id": "op1",
+        "outcome": "unknown",
+        "state": "unknown"
+      },
+      "type": "operation_status"
     },
     "type": "lifecycle"
   },

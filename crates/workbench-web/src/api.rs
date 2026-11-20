@@ -135,11 +135,7 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     {
         return error_response(error, Some(&request_id));
     }
-    use workbench_protocol::namespaces::lifecycle::AdminAction;
-    let fast_lane = matches!(
-        envelope.body.admin_action(),
-        Some(AdminAction::Cancel | AdminAction::Status)
-    );
+    let fast_lane = envelope.body.is_admin_fast_lane();
     let slot = if fast_lane {
         None
     } else {

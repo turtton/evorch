@@ -45,15 +45,16 @@ impl AdminAudit {
             .map_err(|_| busy())
     }
     pub(crate) async fn write(&self, write: AuditWrite) -> Result<AuditReply, AdminFailure> {
-        let _permit = self.gate.enter_admin_audit().map_err(|_| busy())?;
-        self.raw_write(write).await
-    }
-    async fn raw_write(&self, write: AuditWrite) -> Result<AuditReply, AdminFailure> {
+        let permit = self.gate.enter_admin_audit().map_err(|_| busy())?;
         let (tx, rx) = oneshot::channel();
         self.port
             .submit(
                 write,
                 Box::new(move |reply| {
+                    // The response budget does not cancel a writer command. Keep
+                    // sealing fenced until its callback (or command drop), even
+                    // when the caller has already received ACK-unknown.
+                    let _permit = permit;
                     let _ = tx.send(reply);
                 }),
             )
@@ -69,7 +70,7 @@ impl AdminAudit {
         write: AuditWrite,
         _permit: &runtime::producer::ProducerPermit,
     ) -> Result<AuditReply, AdminFailure> {
-        self.raw_write(write).await
+        self.write(write).await
     }
     pub(crate) async fn background_cancel(
         &self,
@@ -253,4 +254,45 @@ fn same_intent(a: &AuditAccepted, b: &AuditAccepted) -> bool {
         && a.principal == b.principal
         && a.accepted_core_epoch == b.accepted_core_epoch
         && a.intent_digest == b.intent_digest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    struct Port(AtomicUsize);
+    impl AuditPort for Port {
+        fn submit(
+            &self,
+            _: AuditWrite,
+            reply: AuditReplyCallback,
+        ) -> Result<(), storage::StorageError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            reply(Err(storage::StorageError::Io("injected".into())));
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn background_write_cannot_cross_capture_even_with_an_old_producer_permit() {
+        let gate = crate::bootstrap::restart::HostRestartGate::default();
+        let port = Arc::new(Port(AtomicUsize::new(0)));
+        let audit = AdminAudit::new(port.clone(), gate.clone());
+        let producer = runtime::producer::ProducerGate::default();
+        let permit = producer.try_enter().unwrap();
+        assert!(
+            audit
+                .background_write(AuditWrite::Stats, &permit)
+                .await
+                .is_err()
+        );
+        assert_eq!(port.0.load(Ordering::SeqCst), 1);
+        gate.transition(1, crate::bootstrap::restart::HostRestartPhase::Capturing);
+        assert!(
+            audit
+                .background_write(AuditWrite::Stats, &permit)
+                .await
+                .is_err()
+        );
+        assert_eq!(port.0.load(Ordering::SeqCst), 1);
+    }
 }

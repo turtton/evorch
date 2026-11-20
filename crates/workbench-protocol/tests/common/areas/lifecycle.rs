@@ -24,6 +24,9 @@ pub fn samples() -> AreaSamples {
         ],
         queries: vec![
             de(
+                json!({"type":"lifecycle","payload":{"type":"operation_status","payload":{"operation_id":"op1"}}}),
+            ),
+            de(
                 json!({"type":"lifecycle","payload":{"type":"restart","payload":{"type":"targets"}}}),
             ),
             de(
@@ -37,6 +40,9 @@ pub fn samples() -> AreaSamples {
             json!({"type":"lifecycle","payload":{"type":"admin_changed","payload":{"revision":"1","restarting":true}}}),
         )],
         query_replies: vec![
+            de(
+                json!({"type":"lifecycle","payload":{"type":"operation_status","payload":{"operation_id":"op1","state":"unknown","outcome":"unknown","audit_warning":true}}}),
+            ),
             de(
                 json!({"type":"lifecycle","payload":{"type":"restart","payload":{"type":"targets","payload":{"revision":"1","targets":[{"id":"current","revision":"1"}],"truncated":false}}}}),
             ),

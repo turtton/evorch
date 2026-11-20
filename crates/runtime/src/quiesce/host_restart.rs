@@ -103,8 +103,9 @@ impl HostRestartGate {
     /// producers this remains available during Preparing. No admission after a
     /// sealed proof is minted: capture can never overtake an accepted write.
     ///
-    /// The common audit runner holds this only for ACK + one readback (10s each,
-    /// at most 20s), never for the restart driver. Cancel/status do not use it.
+    /// The writer callback owns this until completion or command drop. A 10s
+    /// caller ACK budget must not release an in-flight write across capture.
+    /// The restart driver itself never holds it; cancel/status never wait for it.
     pub fn enter_admin_audit(&self) -> Result<HostCommandPermit, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if !matches!(

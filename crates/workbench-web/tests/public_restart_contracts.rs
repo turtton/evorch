@@ -89,7 +89,7 @@ async fn anonymous_http_denies_all_nine_before_backend_even_with_identity_header
         assert!(response.starts_with("HTTP/1.1 403"), "{i}: {response}");
         assert!(response.contains("permission_denied"));
     }
-    let operation_status = json!({"request_id":"op-status","kind":"query","payload":{"type":"lifecycle","payload":{"type":"operation_status","payload":{"operation_id":"known-or-unknown"}}}});
+    let operation_status = json!({"request_id":"op-status","session_id":"claimed-admin","kind":"query","payload":{"type":"lifecycle","payload":{"type":"operation_status","payload":{"operation_id":"known-or-unknown"}}}});
     let response = exchange(
         server.local_addr(),
         "POST",

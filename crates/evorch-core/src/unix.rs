@@ -196,11 +196,7 @@ pub async fn connection(
                     ReplyResult::Success(ReplyPayload::Ack)
                 }
                 _ if request.body.admin_action().is_some() => {
-                    use workbench_protocol::namespaces::lifecycle::AdminAction;
-                    if matches!(
-                        request.body.admin_action(),
-                        Some(AdminAction::Cancel | AdminAction::Status)
-                    ) {
+                    if request.body.is_admin_fast_lane() {
                         let session = workbench_web::WebSession {
                             session_id: request.session_id.clone(),
                             client_id: context.provenance().client_id.clone().unwrap(),
