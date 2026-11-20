@@ -1,0 +1,201 @@
+profile,condition,interval,n,milliseconds,outcome,note
+debug,first,preflight,1,1536.693,ok,seq=1
+debug,first,reprobe_before_capture,1,1534.043,ok,seq=2
+debug,first,before_exec_check,1,514.651,ok,seq=3
+debug,first,describe_probe_run,1,263.357,ok,seq=4
+debug,first,hash_pass,1,257.014,ok,seq=5
+debug,first,cold_spawn_to_ready,1,385.938,ok,seq=6
+debug,first,exec_to_ready,1,358.794,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,first,exec_to_claim,1,297.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=297
+debug,first,preflight,2,1548.937,ok,seq=1
+debug,first,reprobe_before_capture,2,1548.201,ok,seq=2
+debug,first,before_exec_check,2,512.890,ok,seq=3
+debug,first,describe_probe_run,2,264.659,ok,seq=4
+debug,first,hash_pass,2,258.157,ok,seq=5
+debug,first,cold_spawn_to_ready,2,399.239,ok,seq=6
+debug,first,exec_to_ready,2,362.701,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,first,exec_to_claim,2,298.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=298
+debug,first,preflight,3,1542.197,ok,seq=1
+debug,first,reprobe_before_capture,3,1537.615,ok,seq=2
+debug,first,before_exec_check,3,512.580,ok,seq=3
+debug,first,describe_probe_run,3,262.734,ok,seq=4
+debug,first,hash_pass,3,254.794,ok,seq=5
+debug,first,cold_spawn_to_ready,3,385.501,ok,seq=6
+debug,first,exec_to_ready,3,360.239,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,first,exec_to_claim,3,297.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=297
+debug,first,preflight,4,1556.551,ok,seq=1
+debug,first,reprobe_before_capture,4,1550.932,ok,seq=2
+debug,first,before_exec_check,4,519.076,ok,seq=3
+debug,first,describe_probe_run,4,264.575,ok,seq=4
+debug,first,hash_pass,4,255.575,ok,seq=5
+debug,first,cold_spawn_to_ready,4,391.206,ok,seq=6
+debug,first,exec_to_ready,4,374.564,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,first,exec_to_claim,4,306.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=306
+debug,first,preflight,5,1576.353,ok,seq=1
+debug,first,reprobe_before_capture,5,1571.236,ok,seq=2
+debug,first,before_exec_check,5,516.030,ok,seq=3
+debug,first,describe_probe_run,5,265.964,ok,seq=4
+debug,first,hash_pass,5,259.753,ok,seq=5
+debug,first,cold_spawn_to_ready,5,390.530,ok,seq=6
+debug,first,exec_to_ready,5,379.000,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,first,exec_to_claim,5,310.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=310
+debug,warm,preflight,1,1555.626,ok,seq=1
+debug,warm,reprobe_before_capture,1,1570.082,ok,seq=2
+debug,warm,before_exec_check,1,519.107,ok,seq=3
+debug,warm,describe_probe_run,1,266.593,ok,seq=4
+debug,warm,hash_pass,1,259.603,ok,seq=5
+debug,warm,cold_spawn_to_ready,1,406.724,ok,seq=6
+debug,warm,exec_to_ready,1,372.110,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,1,302.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=302
+debug,warm,preflight,2,1571.309,ok,seq=1
+debug,warm,reprobe_before_capture,2,1574.575,ok,seq=2
+debug,warm,before_exec_check,2,521.526,ok,seq=3
+debug,warm,describe_probe_run,2,266.457,ok,seq=4
+debug,warm,hash_pass,2,258.986,ok,seq=5
+debug,warm,cold_spawn_to_ready,2,385.082,ok,seq=6
+debug,warm,exec_to_ready,2,357.638,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,2,296.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=296
+debug,warm,preflight,3,1526.552,ok,seq=1
+debug,warm,reprobe_before_capture,3,1526.661,ok,seq=2
+debug,warm,before_exec_check,3,508.566,ok,seq=3
+debug,warm,describe_probe_run,3,259.056,ok,seq=4
+debug,warm,hash_pass,3,253.681,ok,seq=5
+debug,warm,cold_spawn_to_ready,3,384.723,ok,seq=6
+debug,warm,exec_to_ready,3,354.808,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,3,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,4,1524.124,ok,seq=1
+debug,warm,reprobe_before_capture,4,1524.767,ok,seq=2
+debug,warm,before_exec_check,4,506.809,ok,seq=3
+debug,warm,describe_probe_run,4,261.119,ok,seq=4
+debug,warm,hash_pass,4,253.577,ok,seq=5
+debug,warm,cold_spawn_to_ready,4,385.620,ok,seq=6
+debug,warm,exec_to_ready,4,355.056,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,4,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,5,1507.364,ok,seq=1
+debug,warm,reprobe_before_capture,5,1500.556,ok,seq=2
+debug,warm,before_exec_check,5,497.591,ok,seq=3
+debug,warm,describe_probe_run,5,258.874,ok,seq=4
+debug,warm,hash_pass,5,252.037,ok,seq=5
+debug,warm,cold_spawn_to_ready,5,385.751,ok,seq=6
+debug,warm,exec_to_ready,5,358.688,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,5,291.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=291
+debug,warm,preflight,6,1518.896,ok,seq=1
+debug,warm,reprobe_before_capture,6,1523.441,ok,seq=2
+debug,warm,before_exec_check,6,503.976,ok,seq=3
+debug,warm,describe_probe_run,6,259.355,ok,seq=4
+debug,warm,hash_pass,6,251.349,ok,seq=5
+debug,warm,cold_spawn_to_ready,6,385.923,ok,seq=6
+debug,warm,exec_to_ready,6,352.396,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,6,292.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=292
+debug,warm,preflight,7,1511.804,ok,seq=1
+debug,warm,reprobe_before_capture,7,1517.422,ok,seq=2
+debug,warm,before_exec_check,7,503.972,ok,seq=3
+debug,warm,describe_probe_run,7,258.657,ok,seq=4
+debug,warm,hash_pass,7,251.110,ok,seq=5
+debug,warm,cold_spawn_to_ready,7,388.051,ok,seq=6
+debug,warm,exec_to_ready,7,352.841,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,7,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,8,1526.846,ok,seq=1
+debug,warm,reprobe_before_capture,8,1522.220,ok,seq=2
+debug,warm,before_exec_check,8,503.618,ok,seq=3
+debug,warm,describe_probe_run,8,258.363,ok,seq=4
+debug,warm,hash_pass,8,251.378,ok,seq=5
+debug,warm,cold_spawn_to_ready,8,390.539,ok,seq=6
+debug,warm,exec_to_ready,8,354.383,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,8,294.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=294
+debug,warm,preflight,9,1520.666,ok,seq=1
+debug,warm,reprobe_before_capture,9,1517.174,ok,seq=2
+debug,warm,before_exec_check,9,505.725,ok,seq=3
+debug,warm,describe_probe_run,9,260.918,ok,seq=4
+debug,warm,hash_pass,9,250.127,ok,seq=5
+debug,warm,cold_spawn_to_ready,9,390.564,ok,seq=6
+debug,warm,exec_to_ready,9,353.687,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,9,294.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=294
+debug,warm,preflight,10,1535.149,ok,seq=1
+debug,warm,reprobe_before_capture,10,1536.379,ok,seq=2
+debug,warm,before_exec_check,10,517.727,ok,seq=3
+debug,warm,describe_probe_run,10,270.249,ok,seq=4
+debug,warm,hash_pass,10,260.965,ok,seq=5
+debug,warm,cold_spawn_to_ready,10,429.452,ok,seq=6
+debug,warm,exec_to_ready,10,362.445,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,10,299.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=299
+debug,warm,preflight,11,1536.922,ok,seq=1
+debug,warm,reprobe_before_capture,11,1519.071,ok,seq=2
+debug,warm,before_exec_check,11,502.828,ok,seq=3
+debug,warm,describe_probe_run,11,259.732,ok,seq=4
+debug,warm,hash_pass,11,250.321,ok,seq=5
+debug,warm,cold_spawn_to_ready,11,385.096,ok,seq=6
+debug,warm,exec_to_ready,11,357.148,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,11,297.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=297
+debug,warm,preflight,12,1530.703,ok,seq=1
+debug,warm,reprobe_before_capture,12,1514.950,ok,seq=2
+debug,warm,before_exec_check,12,506.593,ok,seq=3
+debug,warm,describe_probe_run,12,259.591,ok,seq=4
+debug,warm,hash_pass,12,252.013,ok,seq=5
+debug,warm,cold_spawn_to_ready,12,397.702,ok,seq=6
+debug,warm,exec_to_ready,12,353.886,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,12,295.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=295
+debug,warm,preflight,13,1515.791,ok,seq=1
+debug,warm,reprobe_before_capture,13,1538.030,ok,seq=2
+debug,warm,before_exec_check,13,506.211,ok,seq=3
+debug,warm,describe_probe_run,13,269.100,ok,seq=4
+debug,warm,hash_pass,13,253.681,ok,seq=5
+debug,warm,cold_spawn_to_ready,13,380.700,ok,seq=6
+debug,warm,exec_to_ready,13,357.545,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,13,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,14,1537.670,ok,seq=1
+debug,warm,reprobe_before_capture,14,1540.242,ok,seq=2
+debug,warm,before_exec_check,14,513.049,ok,seq=3
+debug,warm,describe_probe_run,14,263.755,ok,seq=4
+debug,warm,hash_pass,14,254.196,ok,seq=5
+debug,warm,cold_spawn_to_ready,14,390.672,ok,seq=6
+debug,warm,exec_to_ready,14,353.148,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,14,291.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=291
+debug,warm,preflight,15,1532.277,ok,seq=1
+debug,warm,reprobe_before_capture,15,1529.798,ok,seq=2
+debug,warm,before_exec_check,15,507.288,ok,seq=3
+debug,warm,describe_probe_run,15,258.701,ok,seq=4
+debug,warm,hash_pass,15,252.169,ok,seq=5
+debug,warm,cold_spawn_to_ready,15,381.180,ok,seq=6
+debug,warm,exec_to_ready,15,359.063,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,15,294.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=294
+debug,warm,preflight,16,1529.701,ok,seq=1
+debug,warm,reprobe_before_capture,16,1524.880,ok,seq=2
+debug,warm,before_exec_check,16,506.060,ok,seq=3
+debug,warm,describe_probe_run,16,259.070,ok,seq=4
+debug,warm,hash_pass,16,253.593,ok,seq=5
+debug,warm,cold_spawn_to_ready,16,386.586,ok,seq=6
+debug,warm,exec_to_ready,16,353.543,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,16,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,17,1532.472,ok,seq=1
+debug,warm,reprobe_before_capture,17,1529.980,ok,seq=2
+debug,warm,before_exec_check,17,510.310,ok,seq=3
+debug,warm,describe_probe_run,17,260.103,ok,seq=4
+debug,warm,hash_pass,17,253.018,ok,seq=5
+debug,warm,cold_spawn_to_ready,17,392.762,ok,seq=6
+debug,warm,exec_to_ready,17,351.370,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,17,291.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=291
+debug,warm,preflight,18,1522.828,ok,seq=1
+debug,warm,reprobe_before_capture,18,1518.448,ok,seq=2
+debug,warm,before_exec_check,18,504.828,ok,seq=3
+debug,warm,describe_probe_run,18,265.050,ok,seq=4
+debug,warm,hash_pass,18,253.969,ok,seq=5
+debug,warm,cold_spawn_to_ready,18,382.767,ok,seq=6
+debug,warm,exec_to_ready,18,362.677,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,18,293.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=293
+debug,warm,preflight,19,1519.708,ok,seq=1
+debug,warm,reprobe_before_capture,19,1513.614,ok,seq=2
+debug,warm,before_exec_check,19,503.648,ok,seq=3
+debug,warm,describe_probe_run,19,257.134,ok,seq=4
+debug,warm,hash_pass,19,250.111,ok,seq=5
+debug,warm,cold_spawn_to_ready,19,386.644,ok,seq=6
+debug,warm,exec_to_ready,19,351.269,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,19,290.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=290
+debug,warm,preflight,20,1516.866,ok,seq=1
+debug,warm,reprobe_before_capture,20,1523.792,ok,seq=2
+debug,warm,before_exec_check,20,503.321,ok,seq=3
+debug,warm,describe_probe_run,20,259.741,ok,seq=4
+debug,warm,hash_pass,20,251.282,ok,seq=5
+debug,warm,cold_spawn_to_ready,20,383.015,ok,seq=6
+debug,warm,exec_to_ready,20,356.356,ok,seq=7 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true
+debug,warm,exec_to_claim,20,294.000,ok,seq=8 claim_stable=true lease_ms=5000 grace_ms=10000 exe_replaced=true raw_ms=294

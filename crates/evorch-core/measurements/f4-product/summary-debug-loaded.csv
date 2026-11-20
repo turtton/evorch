@@ -1,0 +1,17 @@
+profile,condition,interval,n,failures,min_ms,p50_ms,p95_ms,max_ms
+debug,first,preflight,5,0,1536.693,1548.937,1576.353,1576.353
+debug,first,reprobe_before_capture,5,0,1534.043,1548.201,1571.236,1571.236
+debug,first,before_exec_check,5,0,512.580,514.651,519.076,519.076
+debug,first,describe_probe_run,5,0,262.734,264.575,265.964,265.964
+debug,first,hash_pass,5,0,254.794,257.014,259.753,259.753
+debug,first,cold_spawn_to_ready,5,0,385.501,390.530,399.239,399.239
+debug,first,exec_to_ready,5,0,358.794,362.701,379.000,379.000
+debug,first,exec_to_claim,5,0,297.000,298.000,310.000,310.000
+debug,warm,preflight,20,0,1507.364,1526.552,1555.626,1571.309
+debug,warm,reprobe_before_capture,20,0,1500.556,1523.792,1570.082,1574.575
+debug,warm,before_exec_check,20,0,497.591,506.060,519.107,521.526
+debug,warm,describe_probe_run,20,0,257.134,259.732,269.100,270.249
+debug,warm,hash_pass,20,0,250.111,252.169,259.603,260.965
+debug,warm,cold_spawn_to_ready,20,0,380.700,385.923,406.724,429.452
+debug,warm,exec_to_ready,20,0,351.269,354.808,362.677,372.110
+debug,warm,exec_to_claim,20,0,290.000,293.000,299.000,302.000
