@@ -150,6 +150,7 @@ pub(crate) struct Shared {
     /// Frozen request context per run for `/btw` side questions.
     pub(crate) btw: crate::btw::BtwRegistry,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
+    pub(crate) restart_shell_executors: Mutex<HashMap<RunId, Weak<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) turn_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
@@ -824,6 +825,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 btw: crate::btw::BtwRegistry::default(),
                 benchmark_executors: Mutex::new(HashMap::new()),
+                restart_shell_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
@@ -1233,6 +1235,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 btw: crate::btw::BtwRegistry::default(),
                 benchmark_executors: Mutex::new(HashMap::new()),
+                restart_shell_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 turn_version: watch::channel(0).0,
                 quiesce: Default::default(),
