@@ -74,7 +74,7 @@ impl AgentRuntime {
         paused: PausedRecoveryComponent,
         authority: CurrentRecoveryAuthority,
         reservation: impl Into<ActivationReservation>,
-    ) -> Result<(Vec<RunId>, ActivatedReservation), RuntimeError> {
+    ) -> Result<(Vec<RunId>, ActivatedReservation), crate::ActivationFailure> {
         let models = self.pin_recovery_models(&authority);
         self.activate_component_with_models(paused, authority, models, reservation)
     }
@@ -83,14 +83,28 @@ impl AgentRuntime {
     /// context is rejected before ACK; after ACK execution keeps the pinned model.
     pub fn activate_component_with_models(
         &self,
+        paused: PausedRecoveryComponent,
+        authority: CurrentRecoveryAuthority,
+        models: RecoveryModels,
+        reservation: impl Into<ActivationReservation>,
+    ) -> Result<(Vec<RunId>, ActivatedReservation), crate::ActivationFailure> {
+        let mut reservation = Some(reservation.into());
+        self.activate_component_reserved(paused, authority, models, &mut reservation)
+            .map_err(|error| crate::ActivationFailure { error, reservation })
+    }
+
+    fn activate_component_reserved(
+        &self,
         mut paused: PausedRecoveryComponent,
         mut authority: CurrentRecoveryAuthority,
         models: RecoveryModels,
-        reservation: impl Into<ActivationReservation>,
+        reservation_slot: &mut Option<ActivationReservation>,
     ) -> Result<(Vec<RunId>, ActivatedReservation), RuntimeError> {
         #[cfg(test)]
         self.record_graph_effect(0);
-        let reservation = reservation.into();
+        let reservation = reservation_slot
+            .as_ref()
+            .expect("activation owns its reservation");
         reservation.validate(self, &paused.claim.manifest_id)?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.require_planned_manifest(&paused.claim.manifest_id)?;
@@ -332,7 +346,12 @@ impl AgentRuntime {
         #[cfg(feature = "recovery-test-support")]
         self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck)?;
         if let Err(write_error) = store.handle.activate_recovery_claim(request) {
-            self.supervise_activation(reservation, paused.claim.clone());
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
             let observation =
                 store.with_database(|db| db.observe_recovery_activation(&paused.claim));
             return Err(error(format!(
@@ -342,12 +361,22 @@ impl AgentRuntime {
         #[cfg(feature = "recovery-test-support")]
         if let Err(error) = self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)
         {
-            self.supervise_activation(reservation, paused.claim.clone());
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
             return Err(error);
         }
         #[cfg(test)]
         if paused.lose_activation_ack {
-            self.supervise_activation(reservation, paused.claim.clone());
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
             return Err(error(
                 "activation ACK lost after committed FULL transaction",
             ));
@@ -404,7 +433,11 @@ impl AgentRuntime {
         );
         Ok((
             resume.into_iter().collect(),
-            ActivatedReservation::new(reservation),
+            ActivatedReservation::new(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+            ),
         ))
     }
 

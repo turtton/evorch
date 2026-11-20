@@ -156,6 +156,45 @@ async fn activation_ack_keeps_manual_reservation_contended_until_binding_publica
 }
 
 #[tokio::test]
+async fn known_activation_failure_retains_reservation_until_caller_cleanup_finishes() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let (_owner, authority) = prepared_adoption::authority(&f, run);
+    let manifest = paused.claim().manifest_id.clone();
+    let reservation = runtime.reserve_automatic_activation(&manifest).unwrap();
+    // Missing relations is a definite pre-writer failure, not an uncertain ACK.
+    let mut failure = runtime
+        .activate_component(paused, authority, reservation)
+        .unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("relations have not been prepared")
+    );
+    assert!(failure.reservation.is_some());
+    let effect = storage::recovery::graph_control::GraphEffectKey {
+        operation_id: "manual-after-failure".into(),
+        attempt_nonce: "attempt".into(),
+    };
+    assert!(matches!(
+        runtime.reserve_manual_activation(&manifest, effect.clone(), 0),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Contended
+        })
+    ));
+    // The caller, not the error return boundary, chooses the end of cleanup.
+    drop(failure.reservation.take());
+    drop(
+        runtime
+            .reserve_manual_activation(&manifest, effect, 0)
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
 async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effects() {
     use storage::recovery::RecoveryActivationObservation as Observation;
     for (committed, corrupt_readback, expected) in [
@@ -183,10 +222,12 @@ async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effe
             .handle()
             .inject_restart_write_fault(committed)
             .unwrap();
+        let failure = runtime
+            .activate_component(paused, authority, reservation)
+            .unwrap_err();
         assert!(
-            runtime
-                .activate_component(paused, authority, reservation)
-                .is_err()
+            failure.reservation.is_none(),
+            "uncertain ACK is owned only by the supervisor"
         );
         if corrupt_readback {
             rusqlite::Connection::open(&f.config.db_path)

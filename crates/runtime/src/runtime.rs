@@ -26,7 +26,7 @@ mod recovery_activation;
 mod recovery_control;
 pub use physical_owners::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
 pub use recovery_control::{
-    ActivatedReservation, ActivationReservation, ActivationReservationProblem,
+    ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,
 };
 pub mod recovery_disposal;

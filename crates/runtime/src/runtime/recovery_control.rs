@@ -85,6 +85,28 @@ impl std::fmt::Debug for ActivatedReservation {
     }
 }
 
+/// A failed activation returns its original reservation for caller-side cleanup.
+/// When the ACK is uncertain, the runtime supervisor owns it instead.
+/// No conversion to RuntimeError is provided: callers must decide the lifetime.
+pub struct ActivationFailure {
+    pub error: RuntimeError,
+    pub reservation: Option<ActivationReservation>,
+}
+impl std::fmt::Debug for ActivationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivationFailure")
+            .field("error", &self.error)
+            .field("reservation_retained", &self.reservation.is_some())
+            .finish()
+    }
+}
+impl std::fmt::Display for ActivationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+impl std::error::Error for ActivationFailure {}
+
 /// Manual execution still requires independently resolved execution authority.
 pub struct ManualActivationReservation {
     reservation: Reservation,
@@ -95,7 +117,7 @@ pub struct ManualActivationReservation {
 ///
 /// ```no_run
 /// # fn run(rt: &runtime::AgentRuntime, paused: runtime::PausedRecoveryComponent,
-/// # authority: runtime::CurrentRecoveryAuthority) -> Result<(), runtime::RuntimeError> {
+/// # authority: runtime::CurrentRecoveryAuthority) -> Result<(), Box<dyn std::error::Error>> {
 /// let reservation = rt.reserve_automatic_activation(&paused.claim().manifest_id)?;
 /// let (_runs, publication) = rt.activate_component(paused, authority, reservation)?;
 /// publication.release();

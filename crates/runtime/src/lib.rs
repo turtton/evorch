@@ -48,7 +48,7 @@ pub mod learning_jobs;
 pub mod learning_suspend;
 pub use memory_lifecycle::ResumedLearning;
 pub use runtime::{
-    ActivatedReservation, ActivationReservation, ActivationReservationProblem,
+    ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,
 };
 pub use runtime::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
