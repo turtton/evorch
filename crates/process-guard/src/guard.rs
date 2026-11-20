@@ -262,8 +262,8 @@ pub fn entry() -> io::Result<()> {
     if args.len() == 3 && ["--verify-bundle", "--smoke-bundle"].contains(&args[1].as_str()) {
         let runtime = crate::GuardRuntime::from_bundle(std::path::Path::new(&args[2]))?;
         if args[1] == "--smoke-bundle" {
-            let mut spec = LaunchSpec::new("/bin/sh")?;
-            spec.argv.extend([b"-c".to_vec(), b":".to_vec()]);
+            let mut spec = LaunchSpec::new("/proc/self/exe")?;
+            spec.argv.push(b"--describe".to_vec());
             let status = runtime
                 .spawn(
                     &spec,
@@ -492,18 +492,25 @@ fn reactor(
     let mut error_bytes = Vec::new();
     let mut exec_sent = false;
     let mut root_status = None;
+    let mut reported_root = false;
     let mut waiting = false;
     let mut forced = false;
     let mut connected = true;
+    let mut input_closed = false;
     let mut final_sent = false;
     let mut out = Vec::new();
     loop {
         let mut fds = [
             wire::fd(death.as_raw_fd(), libc::POLLIN),
             wire::fd(
-                stream.as_raw_fd(),
+                if input_closed && out.is_empty() {
+                    -1
+                } else {
+                    stream.as_raw_fd()
+                },
                 if connected {
-                    libc::POLLIN | if out.is_empty() { 0 } else { libc::POLLOUT }
+                    (if input_closed { 0 } else { libc::POLLIN })
+                        | if out.is_empty() { 0 } else { libc::POLLOUT }
                 } else {
                     0
                 },
@@ -525,14 +532,17 @@ fn reactor(
             connected = false;
             out.clear();
         }
-        if connected && fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+        if connected
+            && !input_closed
+            && fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+        {
             // Detect EOF even under a full status queue; bounded work per turn.
             let mut consumed = 0;
             while consumed < wire::FRAME_LIMIT {
                 match decoder.read(stream) {
                     Ok(0) => {
                         forced = true;
-                        connected = false;
+                        input_closed = true;
                         break;
                     }
                     Ok(n) => consumed += n,
@@ -564,9 +574,6 @@ fn reactor(
                         Kind::TryReap if p.is_empty() => {
                             if root_status.is_none() {
                                 root_status = lease.observe(true)?;
-                                if let Some(s) = root_status {
-                                    enqueue(&mut out, Kind::RootExited, &s.to_le_bytes())?;
-                                }
                             }
                             if root_status.is_some() {
                                 waiting = true;
@@ -614,25 +621,25 @@ fn reactor(
         if forced {
             lease.force()?;
         }
-        if fds[4].revents != 0 {
-            if let Some(pipe) = error.as_mut() {
-                let mut b = [0; 4];
-                loop {
-                    match pipe.read(&mut b) {
-                        Ok(0) => {
-                            error = None;
-                            break;
-                        }
-                        Ok(n) => {
-                            error_bytes.extend_from_slice(&b[..n]);
-                            if error_bytes.len() > 4 {
-                                return Err(invalid("exec errno pipe length"));
-                            }
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
+        if fds[4].revents != 0
+            && let Some(pipe) = error.as_mut()
+        {
+            let mut b = [0; 4];
+            loop {
+                match pipe.read(&mut b) {
+                    Ok(0) => {
+                        error = None;
+                        break;
                     }
+                    Ok(n) => {
+                        error_bytes.extend_from_slice(&b[..n]);
+                        if error_bytes.len() > 4 {
+                            return Err(invalid("exec errno pipe length"));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -649,11 +656,14 @@ fn reactor(
         }
         if root_status.is_none() {
             root_status = lease.observe(true)?;
-            if let Some(s) = root_status {
-                if connected {
-                    enqueue(&mut out, Kind::RootExited, &s.to_le_bytes())?;
-                }
-            }
+        }
+        if let Some(s) = root_status
+            && connected
+            && exec_sent
+            && !reported_root
+        {
+            enqueue(&mut out, Kind::RootExited, &s.to_le_bytes())?;
+            reported_root = true;
         }
         if root_status.is_some() && (waiting || forced) && !final_sent && exec_sent {
             let status = lease.finish()?;

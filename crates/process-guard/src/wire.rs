@@ -145,13 +145,13 @@ pub fn send(s: &mut UnixStream, kind: Kind, p: &[u8], deadline: Option<Instant>)
     let bytes = frame(kind, p)?;
     let mut at = 0;
     while at < bytes.len() {
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "guard handshake deadline",
-                ));
-            }
+        if let Some(d) = deadline
+            && Instant::now() >= d
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "guard handshake deadline",
+            ));
         }
         match s.write(&bytes[at..]) {
             Ok(0) => return Err(invalid("guard write zero")),
@@ -172,13 +172,13 @@ pub fn receive(
     deadline: Option<Instant>,
 ) -> io::Result<(Kind, Vec<u8>)> {
     loop {
-        if let Some(limit) = deadline {
-            if Instant::now() >= limit {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "guard handshake deadline",
-                ));
-            }
+        if let Some(limit) = deadline
+            && Instant::now() >= limit
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "guard handshake deadline",
+            ));
         }
         if let Some(f) = d.next_frame()? {
             return Ok(f);

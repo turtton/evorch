@@ -43,6 +43,7 @@ case "$mode" in
     command -v jq > /dev/null || { echo "run-test-group: jq is required" >&2; exit 2; }
     rm -rf "$out"
     mkdir -p "$out"
+    export EVORCH_CI_METADATA_DIR="$(cd "$out" && pwd -P)/build-metadata"
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     # Identity lines of the tests nextest would run (filter-match "matches"),
@@ -111,6 +112,7 @@ case "$mode" in
       echo "shard $shard of group $group has none of the $(count "$out/$suite.tsv") $suite tests; skipping"
       exit 0
     fi
+    export EVORCH_CI_METADATA_DIR="$(cd "$out" && pwd -P)/build-metadata"
     echo "running $(count "$out/$suite.part.tsv") of $(count "$out/$suite.tsv") $suite tests (group $group, shard $shard)"
     # The cache and io suites go through the gates AGENTS.md names.
     case "$suite" in
