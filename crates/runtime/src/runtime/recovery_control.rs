@@ -11,6 +11,8 @@ pub enum ActivationReservationProblem {
 #[derive(Default)]
 pub(super) struct GraphReservations {
     next: u64,
+    #[cfg(test)]
+    effect_counts: [usize; 3],
     graphs: HashMap<String, (u64, bool)>,
     supervised: HashMap<String, (ActivationReservation, storage::recovery::RecoveryClaim)>,
 }
@@ -146,6 +148,14 @@ impl ActivationReservation {
     }
 }
 impl AgentRuntime {
+    #[cfg(test)]
+    pub(crate) fn record_graph_effect(&self, index: usize) {
+        self.shared.graph_reservations.lock().unwrap().effect_counts[index] += 1;
+    }
+    #[cfg(test)]
+    pub(crate) fn graph_effect_counts(&self) -> [usize; 3] {
+        self.shared.graph_reservations.lock().unwrap().effect_counts
+    }
     /// Original supervisor readback only. A known result releases the automatic
     /// slot; an unknown result stays owned. This never starts another effect.
     pub fn reconcile_automatic_activation_reservations(&self) -> Result<usize, RuntimeError> {

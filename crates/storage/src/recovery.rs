@@ -107,7 +107,7 @@ pub(crate) enum Write {
         expected_revision: Option<u64>,
         mutation: restart::RestartMutation,
     },
-    GraphControl(graph_control::GraphControlWrite),
+    GraphControl(Box<graph_control::GraphControlWrite>),
     Prepare(RecoveryManifestRecord),
     Commit(String),
     Claim(RecoveryClaimRequest),

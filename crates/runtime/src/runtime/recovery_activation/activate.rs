@@ -88,6 +88,8 @@ impl AgentRuntime {
         models: RecoveryModels,
         reservation: impl Into<ActivationReservation>,
     ) -> Result<Vec<RunId>, RuntimeError> {
+        #[cfg(test)]
+        self.record_graph_effect(0);
         let reservation = reservation.into();
         reservation.validate(self, &paused.claim.manifest_id)?;
         let _dispatch = self.dispatch_registration_guard()?;
@@ -338,9 +340,14 @@ impl AgentRuntime {
             )));
         }
         #[cfg(feature = "recovery-test-support")]
-        self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)?;
+        if let Err(error) = self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)
+        {
+            self.supervise_activation(reservation, paused.claim.clone());
+            return Err(error);
+        }
         #[cfg(test)]
         if paused.lose_activation_ack {
+            self.supervise_activation(reservation, paused.claim.clone());
             return Err(error(
                 "activation ACK lost after committed FULL transaction",
             ));

@@ -106,6 +106,112 @@ fn graph_reservations_are_exclusive_bounded_and_released_on_drop() {
 }
 
 #[tokio::test]
+async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effects() {
+    use storage::recovery::RecoveryActivationObservation as Observation;
+    for (committed, corrupt_readback, expected) in [
+        (true, false, Observation::Activated),
+        (false, false, Observation::NotActivated),
+        (false, true, Observation::Indeterminate),
+    ] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let paused = prepare(&f, &runtime);
+        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let (proof, startup, root) = prepared_adoption::evidence(&f, &paused.claim().claim_id);
+        let mut paused = runtime
+            .adopt_prepared_claim(proof, startup, &root, &authority)
+            .unwrap();
+        runtime
+            .restore_relations_and_continuations(&mut paused)
+            .unwrap();
+        let claim = paused.claim().clone();
+        let reservation = runtime
+            .reserve_automatic_activation(&claim.manifest_id)
+            .unwrap();
+        f._storage
+            .handle()
+            .inject_restart_write_fault(committed)
+            .unwrap();
+        assert!(
+            runtime
+                .activate_component(paused, authority, reservation)
+                .is_err()
+        );
+        if corrupt_readback {
+            rusqlite::Connection::open(&f.config.db_path)
+                .unwrap()
+                .execute(
+                    "UPDATE resume_intents SET revision=revision+7 WHERE run_id=?1",
+                    [run.to_string()],
+                )
+                .unwrap();
+        }
+        let db = storage::Database::open(&f.config).unwrap();
+        assert_eq!(db.observe_recovery_activation(&claim).unwrap(), expected);
+        assert!(matches!(
+            runtime.reserve_automatic_activation(&claim.manifest_id),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Contended
+            })
+        ));
+        // An uncertain graph occupies ONE slot, not the entire retry service.
+        let other_graphs = (0..63)
+            .map(|n| {
+                runtime
+                    .reserve_automatic_activation(&format!("independent-{n}"))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            runtime.reserve_automatic_activation("overflow"),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Capacity
+            })
+        ));
+        let effects = runtime.graph_effect_counts();
+        assert_eq!(effects, [1, 0, 0]);
+        let claims_before = db.recovery_claims().unwrap();
+        let intent_before = db.resume_intent(&run.to_string()).unwrap();
+        let calls_before = f.model.calls.load(Ordering::SeqCst);
+        assert_eq!(
+            runtime
+                .reconcile_automatic_activation_reservations()
+                .unwrap(),
+            usize::from(!corrupt_readback)
+        );
+        assert_eq!(
+            runtime
+                .reconcile_automatic_activation_reservations()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            runtime.graph_effect_counts(),
+            effects,
+            "readback must not call activation, release or cleanup"
+        );
+        assert_eq!(db.recovery_claims().unwrap(), claims_before);
+        assert_eq!(db.resume_intent(&run.to_string()).unwrap(), intent_before);
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), calls_before);
+        if corrupt_readback {
+            assert!(matches!(
+                runtime.reserve_automatic_activation(&claim.manifest_id),
+                Err(crate::RuntimeError::ActivationReservationUnavailable {
+                    reason: crate::ActivationReservationProblem::Contended
+                })
+            ));
+            assert!(runtime.reserve_automatic_activation("overflow").is_err());
+        } else {
+            runtime
+                .reserve_automatic_activation(&claim.manifest_id)
+                .unwrap();
+        }
+        drop(other_graphs);
+    }
+}
+
+#[tokio::test]
 async fn recovery_rejects_store_attached_after_a_message_was_issued() {
     let f = Fixture::new(0);
     let run = saved(&f).await;

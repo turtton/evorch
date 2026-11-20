@@ -13,6 +13,8 @@ impl AgentRuntime {
         authority: &DisposalAuthority,
         effect: GraphEffectKey,
     ) -> Result<GraphControlRecord, RuntimeError> {
+        #[cfg(test)]
+        self.record_graph_effect(1);
         self.validate_disposal_runtime(authority)?;
         let ids = authority
             .expected
@@ -125,6 +127,8 @@ impl AgentRuntime {
         effect: GraphEffectKey,
         shared_threads: &BTreeSet<String>,
     ) -> Result<crate::ownership::DisposalOwnerReceipt, RuntimeError> {
+        #[cfg(test)]
+        self.record_graph_effect(2);
         self.validate_disposal_runtime(authority)?;
         let store = self
             .shared

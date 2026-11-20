@@ -6,7 +6,7 @@ impl StorageHandle {
         &self,
         request: graph_control::GraphControlWrite,
     ) -> Result<graph_control::GraphControlRecord, StorageError> {
-        match self.recovery_write(Write::GraphControl(request))? {
+        match self.recovery_write(Write::GraphControl(Box::new(request)))? {
             Written::GraphControl(record) => Ok(record),
             _ => unreachable!("graph control reply"),
         }

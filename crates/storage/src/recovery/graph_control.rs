@@ -189,10 +189,7 @@ fn check_cas(conn: &Connection, expected: &GraphControlCas) -> Result<(), Storag
         Some(c)
             if expected.control_revision == c.revision
                 && expected.control_effect.as_ref() == Some(&c.effect)
-                && matches!(c.mode.as_str(), "manual_idle" | "revoked_idle") =>
-        {
-            ()
-        }
+                && matches!(c.mode.as_str(), "manual_idle" | "revoked_idle") => {}
         _ => return Err(invalid("graph control CAS conflict")),
     }
     Ok(())
