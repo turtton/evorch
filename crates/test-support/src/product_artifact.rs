@@ -1270,11 +1270,30 @@ mod tests {
 
         #[test]
         fn a_bundle_that_disagrees_with_the_manifest_is_refused() {
-            let bundle_cases: [Case; 6] = [
+            let bundle_cases: [Case; 7] = [
                 (
                     "purpose",
                     |b| b["purpose"] = serde_json::json!("development"),
-                    "purpose",
+                    "guard build recipe mismatch",
+                ),
+                // A development bundle with its own, valid development
+                // recipe passes the image checks, so only the comparison
+                // with the manifest can refuse it.
+                (
+                    "purpose with a recipe of its own",
+                    |b| {
+                        b["purpose"] = serde_json::json!("development");
+                        b["helper"]["build_args"] = serde_json::json!([
+                            "build",
+                            "--locked",
+                            "--release",
+                            "-p",
+                            "process-guard",
+                            "--bin",
+                            "evorch-process-guard"
+                        ]);
+                    },
+                    "disagrees with the manifest on purpose",
                 ),
                 (
                     "source",
@@ -1294,7 +1313,7 @@ mod tests {
                             "evorch-process-guard"
                         ]);
                     },
-                    "helper",
+                    "guard build recipe mismatch",
                 ),
                 (
                     "caller hash",
@@ -1304,7 +1323,7 @@ mod tests {
                 (
                     "caller role",
                     |b| b["callers"][0]["role"] = serde_json::json!("cli"),
-                    "callers",
+                    "guard build recipe mismatch",
                 ),
                 (
                     "second caller",
@@ -1312,7 +1331,7 @@ mod tests {
                         let caller = b["callers"][0].clone();
                         b["callers"].as_array_mut().unwrap().push(caller);
                     },
-                    "callers",
+                    "guard build recipe mismatch",
                 ),
             ];
             for (name, edit, expected) in bundle_cases {
