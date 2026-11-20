@@ -75,6 +75,66 @@
         ];
         # CEF is hashed for x86_64-linux only (see cefDist below).
         isCefSystem = system == "x86_64-linux";
+        isLinux = pkgs.stdenv.hostPlatform.isLinux;
+        # The exec-type process guard (D-7, crates/process-guard): Linux only. It
+        # is built by the same cargo invocation as the programs that start it
+        # (so the same release profile, toolchain and source), installed beside
+        # their real ELFs and sealed there with a guard-bundle.json that binds
+        # the callers (scripts/guard-artifact.sh seal). `cargo` does not build
+        # the helper because a package depends on its library, so every
+        # selection below names the package and the bin explicitly.
+        guardPackageArgs = pkgs.lib.optionalString isLinux " -p process-guard";
+        guardBinArgs = pkgs.lib.optionalString isLinux " --bin evorch-process-guard";
+        # `source_sha` of a bundle must be a 40-digit hex commit. A build from
+        # a tree without a git revision (dirty, or a plain path) records the
+        # all-zero value, which is how the bundle says the commit is unknown.
+        guardSourceSha = self.rev or "0000000000000000000000000000000000000000";
+        # The recipe a bundle records is the cargo invocation the package
+        # really ran: crane runs `cargo build --profile release` with these
+        # arguments, which is `--release`, and `--locked` is in each
+        # cargoExtraArgs below.
+        guardBuildRecipe = args: builtins.toJSON (
+          [ "build" "--locked" "--release" ]
+          ++ builtins.filter (a: a != "") (pkgs.lib.splitString " " args)
+        );
+        # Seals the helper cargo installed beside its callers: `dir` holds the
+        # real ELFs (no PATH wrapper), `callers` are `role:path`. Run it after
+        # autoPatchelf and the wrappers, because the bundle pins the SHA-256 of
+        # every caller as shipped. autoPatchelf runs as a postFixupHook, which
+        # follows the `postFixup` string, so this is registered as a hook from
+        # `preFixup` (see guardSealHook).
+        guardSealCommand = { dir, args, callers }: ''
+          PATH=${pkgs.lib.makeBinPath [ pkgs.jq pkgs.coreutils pkgs.bash ]}:$PATH \
+            GITHUB_SHA=${guardSourceSha} \
+            bash ${./scripts/guard-artifact.sh} seal \
+              "${dir}/evorch-process-guard" "${dir}" distribution release \
+              '${guardBuildRecipe args}' ${pkgs.lib.concatStringsSep " " callers} > /dev/null
+        '';
+        guardSealHook = seal: pkgs.lib.optionalString isLinux ''
+          evorchSealGuardBundle() {
+            ${seal}
+          }
+          postFixupHooks+=(evorchSealGuardBundle)
+        '';
+        # install check of a sealed bundle: manifest, helper and caller hashes,
+        # the helper's own check, and a child started through the pinned image
+        # (the helper executes itself with --describe, no shell is involved).
+        guardInstallCheck = manifest: pkgs.lib.optionalString isLinux ''
+          bash ${./scripts/guard-artifact.sh} verify "${manifest}"
+          bash ${./scripts/guard-artifact.sh} smoke "${manifest}"
+        '';
+        # scripts/product-artifact.sh seals through scripts/guard-artifact.sh in
+        # the same scripts/ directory, and runs it directly, so the two sit in
+        # one tree with their shebangs resolved (the Nix sandbox has no
+        # /usr/bin/env).
+        productArtifactTools = pkgs.runCommand "evorch-product-artifact-tools" { } ''
+          mkdir -p $out/scripts
+          cp ${./scripts/product-artifact.sh} $out/scripts/product-artifact.sh
+          cp ${./scripts/guard-artifact.sh} $out/scripts/guard-artifact.sh
+          chmod 0755 $out/scripts/*.sh
+          patchShebangs $out/scripts
+          chmod 0555 $out/scripts/*.sh
+        '';
         commonArgs = {
           pname = "evorch";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
@@ -137,7 +197,11 @@
         # a second time next to evorch-gui-cef (about five minutes of the CI
         # nix-build job). The only GUI package is the CEF build below, on
         # x86_64-linux; other systems get the CLI and evorch-core.
-        shippedCargoArgs = "-p evorch -p evorch-core --bin evorch --bin evorch-core";
+        shippedPackageArgs = "-p evorch -p evorch-core${guardPackageArgs} --bin evorch --bin evorch-core${guardBinArgs}";
+        # The recipe of the I0 sealed product (scripts/product-artifact.sh), which
+        # seals this package's core and helper: it must stay these exact words.
+        coreCargoArgs = "-p evorch-core${guardPackageArgs} --bin evorch-core${guardBinArgs}";
+        shippedCargoArgs = "--locked ${shippedPackageArgs}";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
@@ -171,36 +235,74 @@
         evorch-core-product = pkgs.runCommand "evorch-core-product"
           {
             nativeBuildInputs = [ pkgs.jq rustToolchain ];
-            GITHUB_SHA = self.rev or self.dirtyRev or "unknown";
+            GITHUB_SHA = guardSourceSha;
           }
           ''
-            bash ${./scripts/product-artifact.sh} seal ${evorch-core}/bin/.evorch-core-wrapped "$out" > /dev/null
+            bash ${productArtifactTools}/scripts/product-artifact.sh seal \
+              ${evorch-core}/bin/.evorch-core-wrapped \
+              ${pkgs.lib.optionalString isLinux "${evorch-core}/bin/evorch-process-guard"} \
+              "$out" > /dev/null
           '';
+        # These tests hard-code /bin/sh or need what the Nix sandbox lacks (see each
+        # reason). The guarded Linux run below skips them with a nextest filter;
+        # `test(~name)` is a substring match, as libtest's `--skip=name` was.
+        linuxTestSkips = [
+          "pty::tests::pty_echo_roundtrip"
+          "pty::tests::pty_resize_succeeds"
+          # Async refresh can outlast the UI harness's four-frame limit in the sandbox.
+          "refresh_button_triggers_force_refresh"
+          # Passes cargo test in the devShell; the UI pin harness fails in the Nix sandbox.
+          "create_switch_pin_thread_via_ui_clicks"
+          # Local capability_enforcement passes; sandbox DNS initialization fails.
+          "explorer_web_fetch_is_denied_without_tool_started"
+          # Local capability_enforcement passes; sandbox DNS initialization fails.
+          "web_researcher_web_search_reaches_executor"
+          # Local capability_enforcement passes; sandbox DNS initialization fails.
+          "orchestrator_web_search_is_denied_without_tool_started"
+        ];
         tests = craneLib.cargoTest (commonArgs // workspaceCefArgs // {
           cargoArtifacts = testCargoArtifacts;
-          nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
+          nativeCheckInputs = [ pkgs.git pkgs.ripgrep ]
+            # strace: process-guard lifecycle cells; cargo-nextest and jq: the
+            # guarded run below (scripts/guard-cargo.sh).
+            ++ pkgs.lib.optionals isLinux [ pkgs.strace pkgs.cargo-nextest pkgs.jq ];
           preCheck = ''
             export EVORCH_PRODUCT_CORE_EXE=${evorch-core-product}/evorch-core
             export EVORCH_PRODUCT_MANIFEST=${evorch-core-product}/product-manifest.json
-          '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+          '' + pkgs.lib.optionalString isLinux ''
+            # The helper bundle of the same sealed product, for library and test
+            # code that starts guarded children (the test binaries themselves
+            # are bound to the helper by scripts/guard-cargo.sh below).
+            export EVORCH_PROCESS_GUARD_BUNDLE=${evorch-core-product}/guard-bundle.json
+            # The Nix sandbox has no /bin/sh; fixtures start this shell instead.
+            export EVORCH_TEST_SHELL=${pkgs.runtimeShell}
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (runtimeLibraries ++ pkgs.lib.optionals isCefSystem [ cefLibcefOnly ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
-          # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
-          cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            "--skip=pty::tests::pty_echo_roundtrip"
-            "--skip=pty::tests::pty_resize_succeeds"
-            # Async refresh can outlast the UI harness's four-frame limit in the sandbox.
-            "--skip=refresh_button_triggers_force_refresh"
-            # Passes cargo test in the devShell; the UI pin harness fails in the Nix sandbox.
-            "--skip=create_switch_pin_thread_via_ui_clicks"
-            # Local capability_enforcement passes; sandbox DNS initialization fails.
-            "--skip=explorer_web_fetch_is_denied_without_tool_started"
-            # Local capability_enforcement passes; sandbox DNS initialization fails.
-            "--skip=web_researcher_web_search_reaches_executor"
-            # Local capability_enforcement passes; sandbox DNS initialization fails.
-            "--skip=orchestrator_web_search_is_denied_without_tool_started"
-          ]);
-        });
+        } // (if isLinux then {
+          # Linux: build the test and application binaries once and list them,
+          # bind every application ELF to the helper (guard-artifact.sh
+          # bind-callers, development bundle beside the ELF), then run the same
+          # nextest metadata, so nothing is rebuilt after binding. nextest does
+          # not run doctests: they follow as a separate `cargo test --doc` run,
+          # which keeps the coverage of the former single `cargo test`. Other
+          # systems keep `cargo test` as it was.
+          checkPhase = ''
+            runHook preCheck
+            # The Nix sandbox has no /usr/bin/env for the scripts' shebangs.
+            patchShebangs scripts
+            # The helper's dependency graph must still be the receipt its compat
+            # identity hashes (scripts/guard-artifact.sh check-dependencies).
+            bash scripts/guard-artifact.sh check-dependencies
+            bash scripts/guard-cargo.sh run ${workspaceCefArgs.cargoExtraArgs} \
+              ''${CARGO_PROFILE:+--cargo-profile $CARGO_PROFILE} \
+              --no-tests fail \
+              -E '${"not (" + pkgs.lib.concatMapStringsSep " | " (name: "test(~${name})") linuxTestSkips + ")"}'
+            cargoWithProfile test --doc ${workspaceCefArgs.cargoExtraArgs}
+            runHook postCheck
+          '';
+        } else {
+          cargoTestExtraArgs = "--";
+        }));
         evorch = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           # Only the shipped programs; the QA fixtures (headless_capture,
@@ -213,6 +315,13 @@
             wrapProgram "$out/bin/evorch-core" \
               --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
+          # evorch (the CLI) and the real core ELF behind the evorch-core wrapper
+          # are the callers of the helper installed beside them.
+          preFixup = guardSealHook (guardSealCommand {
+            dir = "$out/bin";
+            args = shippedPackageArgs;
+            callers = [ ''cli:"$out/bin/evorch"'' ''core:"$out/bin/.evorch-core-wrapped"'' ];
+          });
           doInstallCheck = true;
           installCheckPhase = ''
             runHook preInstallCheck
@@ -227,22 +336,31 @@
               env -u LD_LIBRARY_PATH -u LIBSQLITE3_FLAGS \
                 ${pkgs.stdenv.cc.bintools.dynamicLinker} --list "$out/bin/evorch"
             ''}
+            ${guardInstallCheck "$out/bin/guard-bundle.json"}
             runHook postInstallCheck
           '';
+          nativeInstallCheckInputs = pkgs.lib.optionals isLinux [ pkgs.jq ];
           meta.mainProgram = "evorch";
         });
         evorch-core = craneLib.buildPackage (commonArgs // {
           pname = "evorch-core";
           inherit cargoArtifacts;
-          cargoExtraArgs = "-p evorch-core --bin evorch-core";
+          cargoExtraArgs = "--locked ${coreCargoArgs}";
           doCheck = false;
           postFixup = ''
             wrapProgram "$out/bin/evorch-core" \
               --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
+          preFixup = guardSealHook (guardSealCommand {
+            dir = "$out/bin";
+            args = coreCargoArgs;
+            callers = [ ''core:"$out/bin/.evorch-core-wrapped"'' ];
+          });
           doInstallCheck = true;
+          nativeInstallCheckInputs = pkgs.lib.optionals isLinux [ pkgs.jq ];
           installCheckPhase = ''
             "$out/bin/evorch-core" --help | grep '^usage: evorch-core '
+            ${guardInstallCheck "$out/bin/guard-bundle.json"}
           '';
           meta.mainProgram = "evorch-core";
         });
@@ -305,9 +423,12 @@
           '';
           meta.platforms = [ "x86_64-linux" ];
         };
+        # CEF systems are x86_64 Linux, so the helper is always part of this build.
+        guiPackageArgs = "-p gui -p browser-cef -p evorch-renderer -p process-guard --features gui/cef,browser-cef/cef";
+        guiBinArgs = "--bin evorch-gui --bin evorch-cef-helper --bin evorch-renderer --bin evorch-process-guard";
         cefArgs = commonArgs // {
           pname = "evorch-gui-cef";
-          cargoExtraArgs = "-p gui -p browser-cef -p evorch-renderer --features gui/cef,browser-cef/cef";
+          cargoExtraArgs = "--locked ${guiPackageArgs}";
           CEF_PATH = cefDist;
           # Shared with the deps build so build-script fingerprints (pkg-config
           # for x11-dl/winit, bindgen) match and the cached deps are reused.
@@ -329,7 +450,7 @@
         });
         evorch-gui-cef = craneLib.buildPackage (cefArgs // {
           cargoArtifacts = cefCargoArtifacts;
-          cargoExtraArgs = "${cefArgs.cargoExtraArgs} --bin evorch-gui --bin evorch-cef-helper --bin evorch-renderer";
+          cargoExtraArgs = "${cefArgs.cargoExtraArgs} ${guiBinArgs}";
           doCheck = false;
           EVORCH_BUILD_REV = self.shortRev or self.dirtyShortRev or "unknown revision";
           # The GUI starts the helper beside its executable and CEF reads its
@@ -342,7 +463,7 @@
           postInstall = ''
             app=$out/libexec/evorch-gui-cef
             mkdir -p $app
-            mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $out/bin/evorch-renderer $app/
+            mv $out/bin/evorch-gui $out/bin/evorch-cef-helper $out/bin/evorch-renderer $out/bin/evorch-process-guard $app/
             rm -rf $out/bin
             for entry in ${cefDist}/*; do
               case "''${entry##*/}" in
@@ -360,7 +481,16 @@
               --set-default EVORCH_RENDERER_EXEC "$app/evorch-renderer" \
               --suffix PATH : "${evorch}/bin"
           '';
+          # The GUI's helper and bundle sit beside the real evorch-gui ELF (not
+          # the wrapper in bin/). The browser-cef feature belongs to the caller
+          # and is in the recorded recipe; the helper itself has no feature.
+          preFixup = guardSealHook (guardSealCommand {
+            dir = "$out/libexec/evorch-gui-cef";
+            args = "${guiPackageArgs} ${guiBinArgs}";
+            callers = [ ''gui:"$out/libexec/evorch-gui-cef/evorch-gui"'' ];
+          });
           doInstallCheck = true;
+          nativeInstallCheckInputs = [ pkgs.jq ];
           installCheckPhase = ''
             runHook preInstallCheck
             # Every CEF symlink must resolve into cefDist.
@@ -384,6 +514,9 @@
               env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
                 "$out/libexec/evorch-gui-cef/$binary" > /dev/null
             done
+            # The helper and bundle sealed beside evorch-gui: hashes, the helper's own
+            # check and a child started through the pinned image.
+            ${guardInstallCheck "$out/libexec/evorch-gui-cef/guard-bundle.json"}
             runHook postInstallCheck
           '';
           meta.mainProgram = "evorch-gui-cef";
@@ -474,6 +607,8 @@
           ] ++ devShellGuiLibraries ++ runtimeLibraries ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)
             pkgs.mold
+            # process-guard の lifecycle 試験が system call の順序を観測する(Linux のみ)
+            pkgs.strace
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (devShellGuiLibraries ++ runtimeLibraries)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
