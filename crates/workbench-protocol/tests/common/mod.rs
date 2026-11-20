@@ -88,6 +88,7 @@ pub fn client_hello() -> ClientHello {
         client_build: build(),
         client_instance_id: client(),
         desired_core: Some(CoreIdentity::new("core-abc").unwrap()),
+        local_surface: None,
     }
 }
 

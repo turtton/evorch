@@ -19,6 +19,7 @@ pub mod evaluation;
 pub mod execution;
 pub mod improvement;
 pub mod lanes;
+pub mod lifecycle;
 pub mod maintenance;
 pub mod mcp;
 pub mod memory;
@@ -65,6 +66,7 @@ pub fn all() -> Vec<AreaSamples> {
         maintenance::samples(),
         artifacts::samples(),
         browser::samples(),
+        lifecycle::samples(),
     ]
 }
 

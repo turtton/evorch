@@ -300,6 +300,7 @@ async fn cell_loaded(
                 },
                 client_instance_id: ClientId::new("m2-drain").unwrap(),
                 desired_core: None,
+                local_surface: None,
             };
             stream
                 .write_all(&workbench_protocol::framing::encode_frame(&hello, 16 * 1024).unwrap())

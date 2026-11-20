@@ -1,6 +1,7 @@
 //! One process-local lifecycle owner. There is deliberately no wire/production request handler.
 //! Lock order: coordinator -> host gate / runtime. Direct runtime Stop enters the
 //! installed boundary before taking any runtime lock; runtime never calls back while locked.
+pub mod public;
 use runtime::{
     AgentRuntime, RunId, RuntimeError, StopScope,
     producer::{ProducerGate, ProducerPause},

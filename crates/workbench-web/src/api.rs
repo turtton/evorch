@@ -90,6 +90,11 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     if declared.is_some_and(|length| length > limit) {
         return too_large();
     }
+    let authority = workbench_authority::TransportAuthority::from_web_context(
+        request
+            .extensions()
+            .get::<workbench_authority::VerifiedWebPrincipal>(),
+    );
     let bytes = match read_body(request.into_body(), limit, state.body_read_timeout).await {
         Ok(bytes) => bytes,
         Err(response) => return *response,
@@ -124,15 +129,33 @@ pub(crate) async fn request<B: WorkbenchBackend>(
         Ok(pair) => pair,
         Err(error) => return error_response(error, Some(&request_id)),
     };
-    let Ok(slot) = Arc::clone(&state.shared.backend_slots).try_acquire_owned() else {
-        return error_response(
-            WorkbenchError::new(
-                ErrorCode::Busy,
-                "too many requests in flight",
-                RetryAdvice::SameRequest,
-            ),
-            Some(&request_id),
-        );
+    let context = workbench_authority::IngressContext::new(provenance, authority);
+    if let Some(action) = envelope.body.admin_action()
+        && let Err(error) = state.backend.authorize_management(&context, action)
+    {
+        return error_response(error, Some(&request_id));
+    }
+    use workbench_protocol::namespaces::lifecycle::AdminAction;
+    let fast_lane = matches!(
+        envelope.body.admin_action(),
+        Some(AdminAction::Cancel | AdminAction::Status)
+    );
+    let slot = if fast_lane {
+        None
+    } else {
+        match Arc::clone(&state.shared.backend_slots).try_acquire_owned() {
+            Ok(slot) => Some(slot),
+            Err(_) => {
+                return error_response(
+                    WorkbenchError::new(
+                        ErrorCode::Busy,
+                        "too many requests in flight",
+                        RetryAdvice::SameRequest,
+                    ),
+                    Some(&request_id),
+                );
+            }
+        }
     };
     // A command must finish even if the browser goes away mid-request; the
     // request id lets the browser ask again and get the recorded outcome. The
@@ -141,7 +164,7 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     let observer = state.shared.observer.clone();
     let handle = state.shared.tasks.spawn(async move {
         observer.record("web_api_begin");
-        let answer = backend.handle_request(&session, envelope, provenance).await;
+        let answer = backend.handle_request(&session, envelope, context).await;
         observer.record("web_api_end");
         drop(slot);
         answer
@@ -176,7 +199,13 @@ struct Health<'a> {
 }
 
 pub(crate) async fn health<B: WorkbenchBackend>(State(state): State<Arc<AppState<B>>>) -> Response {
-    match state.backend.server_hello().await {
+    match state
+        .backend
+        .server_hello(&workbench_authority::IngressContext::unverified(
+            Provenance::human(Surface::Web, ClientId::new("health").unwrap()),
+        ))
+        .await
+    {
         Ok(hello) => match serde_json::to_vec(&Health {
             status: "ok",
             adapter: Adapter {

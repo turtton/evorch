@@ -371,6 +371,23 @@ impl StorageError {
 }
 
 impl Database {
+    /// Reads a management operation using a strictly read-only SQLite connection.
+    /// This does not migrate, open a writer, or alter database pragmas on disk.
+    /// # Errors
+    /// Invalid IDs, missing/current-format failures, or SQLite read failures.
+    pub fn read_admin_audit_record(
+        config: &crate::StorageConfig,
+        operation_id: &str,
+    ) -> Result<Option<AuditRecord>, StorageError> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &config.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::migrations::require_current_format(&conn)?;
+        store::read(&conn, operation_id)
+    }
+
     /// Reads one operation from this connection, without the writer. Tests use it as an
     /// independent readback.
     ///

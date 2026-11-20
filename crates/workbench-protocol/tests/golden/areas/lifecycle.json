@@ -1,0 +1,149 @@
+{
+  "command/lifecycle/owned_graphs": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "binding": {
+            "capture_id": "cap1",
+            "expected_core_epoch": "2",
+            "expected_revision": "1",
+            "graph_id": "g1",
+            "operation_id": "op1",
+            "owner_generation": null,
+            "owner_identity": null,
+            "restart_tx_id": "tx1"
+          },
+          "confirmed": true
+        },
+        "type": "release"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "command/lifecycle/quarantine": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "binding": {
+            "capture_id": "cap1",
+            "expected_core_epoch": "2",
+            "expected_revision": "1",
+            "graph_id": "g1",
+            "operation_id": "op1",
+            "owner_generation": null,
+            "owner_identity": null,
+            "restart_tx_id": "tx1"
+          },
+          "confirmed": true
+        },
+        "type": "discard"
+      },
+      "type": "quarantine"
+    },
+    "type": "lifecycle"
+  },
+  "command/lifecycle/restart": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "binding": {
+            "expected_core_epoch": "2",
+            "operation_id": "op1",
+            "target_id": "current",
+            "target_revision": "1"
+          },
+          "confirmed": true
+        },
+        "type": "request"
+      },
+      "type": "restart"
+    },
+    "type": "lifecycle"
+  },
+  "query/lifecycle/owned_graphs": {
+    "payload": {
+      "payload": {
+        "type": "undisposed"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "query/lifecycle/quarantine": {
+    "payload": {
+      "payload": {
+        "type": "list"
+      },
+      "type": "quarantine"
+    },
+    "type": "lifecycle"
+  },
+  "query/lifecycle/restart": {
+    "payload": {
+      "payload": {
+        "type": "targets"
+      },
+      "type": "restart"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/owned_graphs": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "count": "0",
+          "references": [],
+          "snapshot_revision": "1",
+          "truncated": false
+        },
+        "type": "undisposed"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/quarantine": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "items": [],
+          "revision": "1",
+          "truncated": false
+        },
+        "type": "list"
+      },
+      "type": "quarantine"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/restart": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "revision": "1",
+          "targets": [
+            {
+              "id": "current",
+              "revision": "1"
+            }
+          ],
+          "truncated": false
+        },
+        "type": "targets"
+      },
+      "type": "restart"
+    },
+    "type": "lifecycle"
+  },
+  "ui_event/lifecycle/admin_changed": {
+    "payload": {
+      "payload": {
+        "restarting": true,
+        "revision": "1"
+      },
+      "type": "admin_changed"
+    },
+    "type": "lifecycle"
+  }
+}

@@ -31,6 +31,7 @@ test = false
 bench = false
 
 [dependencies]
+workbench-authority = { path = "../workbench-authority" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
 sha2 = { workspace = true }

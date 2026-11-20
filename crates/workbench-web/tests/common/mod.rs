@@ -8,6 +8,7 @@ use http_body_util::BodyExt;
 use std::sync::Mutex;
 use tokio::sync::{Semaphore, mpsc};
 use tower::ServiceExt;
+use workbench_authority::IngressContext;
 use workbench_protocol::commands::{CommandDisposition, CommandReply};
 use workbench_protocol::envelope::{
     Provenance, ReplyEnvelope, ReplyPayload, ReplyResult, RequestBody, RequestEnvelope,
@@ -160,7 +161,7 @@ impl WorkbenchBackend for FakeBackend {
         &self,
         session: &WebSession,
         request: RequestEnvelope,
-        provenance: Provenance,
+        provenance: IngressContext,
     ) -> ReplyEnvelope {
         if let Some(gate) = &self.gate {
             let _ = gate.entered.send(());
@@ -173,7 +174,7 @@ impl WorkbenchBackend for FakeBackend {
             inner.seen.push(Seen {
                 session: session.clone(),
                 request,
-                provenance,
+                provenance: provenance.provenance().clone(),
             });
             (inner.fail_with.clone(), inner.mismatched_reply)
         };
@@ -210,6 +211,7 @@ impl WorkbenchBackend for FakeBackend {
         &self,
         client: ClientId,
         subscribe: Subscribe,
+        _context: IngressContext,
     ) -> Result<BackendSubscription, WorkbenchError> {
         let mut inner = self.inner.lock().unwrap();
         inner.subscribes.push((client, subscribe));
@@ -219,7 +221,7 @@ impl WorkbenchBackend for FakeBackend {
             .expect("test did not script a subscription")
     }
 
-    async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
+    async fn server_hello(&self, _context: &IngressContext) -> Result<ServerHello, WorkbenchError> {
         match self.inner.lock().unwrap().status_error.clone() {
             Some(error) => Err(error),
             None => Ok(server_hello()),

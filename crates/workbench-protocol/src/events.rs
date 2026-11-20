@@ -37,6 +37,8 @@ pub struct EventCursor {
 pub enum SubscriptionScope {
     /// Core status, projects and pending questions and approvals everywhere.
     All,
+    /// Authorized management notices. Details are only available via queries.
+    Management,
     Project {
         project: ProjectId,
     },
