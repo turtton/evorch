@@ -982,3 +982,22 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
     runtime.cancel(run).unwrap();
     runtime.wait(run).await.unwrap();
 }
+
+#[tokio::test]
+async fn prepared_publication_invalidates_unused_scratch_observation() {
+    for configured in [true, false] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let thread = run.to_string();
+        runtime.bind_thread_root(&thread, run).unwrap();
+        let observation = configured
+            .then(|| crate::scratch::publication_tests::Observation::new(&runtime, &thread));
+        let _paused = prepare(&f, &runtime);
+        if let Some(observation) = observation {
+            observation.assert_preserved();
+        } else {
+            assert!(runtime.shared.thread_scratch.lock().unwrap().is_none());
+        }
+    }
+}

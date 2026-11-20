@@ -230,6 +230,7 @@ impl AgentRuntime {
             if let Ok(execution) = self.execution_snapshot(recipient) {
                 self.execution_hook(HookPoint::RestoreMessagePrepared, &execution);
             }
+            let scratch_key = self.restored_scratch_publication_key(recipient, parent);
             let mut intents = self
                 .shared
                 .spawn_intents
@@ -319,6 +320,7 @@ impl AgentRuntime {
             let question_notice = queued.question_notice().cloned();
             self.register_restored(
                 &mut runs,
+                scratch_key,
                 &intents,
                 execution,
                 (recipient, parent, role, config, sender),
