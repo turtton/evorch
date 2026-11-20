@@ -102,7 +102,11 @@ impl AdminFacade for Facade {
         Box::pin(async move { Ok(inspection) })
     }
 
-    fn query<'a>(&'a self, query: &'a AdminQuery) -> AdminIo<'a, AdminView> {
+    fn query<'a>(
+        &'a self,
+        query: &'a AdminQuery,
+        _: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminView> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let view = match query {
             LifecycleQuery::OwnedGraphs(_) => LifecycleReply::OwnedGraphs(
