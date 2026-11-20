@@ -87,6 +87,7 @@ impl AgentRuntime {
             .iter()
             .map(|s| s.record.run_id)
             .collect::<BTreeSet<_>>();
+        let scratch_keys = self.scratch_publication_keys(ids.iter().copied());
         let gates = ids
             .iter()
             .map(|id| self.stop_restore_gate(*id))
@@ -173,6 +174,7 @@ impl AgentRuntime {
             }
         }
         let members = sources.iter().map(|s| s.intent.clone()).collect::<Vec<_>>();
+        self.advance_scratch_epochs(&scratch_keys);
         self.shared.quiesce.adopt(members.clone(), true);
         for source in &sources {
             let index = indexes.entry(source.record.run_id).or_default();

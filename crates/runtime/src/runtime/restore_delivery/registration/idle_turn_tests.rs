@@ -103,6 +103,7 @@ impl Fixture {
             content: "must not become model input".into(),
             reply_to: None,
         };
+        let scratch_key = runtime.scratch_key(child);
         {
             let mut intents = runtime.shared.spawn_intents.lock().unwrap();
             intents.remove(&child);
@@ -119,6 +120,7 @@ impl Fixture {
             runtime
                 .register_restored(
                     &mut lock_runs(&runtime.shared.runs),
+                    scratch_key,
                     &intents,
                     execution,
                     (child, Some(caller), Role::Reviewer, config, caller),

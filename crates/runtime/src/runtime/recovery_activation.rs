@@ -229,6 +229,7 @@ impl AgentRuntime {
             .map(|m| m.run_id.parse::<RunId>().map_err(error))
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort_unstable();
+        let scratch_keys = self.scratch_publication_keys(ids.iter().copied());
         let gates = ids
             .iter()
             .map(|id| self.stop_restore_gate(*id))
@@ -309,6 +310,7 @@ impl AgentRuntime {
         }
         let mut nonce = [0_u8; 16];
         getrandom::fill(&mut nonce).map_err(error)?;
+        self.advance_scratch_epochs(&scratch_keys);
         let claim = store
             .handle
             .claim_recovery_component(

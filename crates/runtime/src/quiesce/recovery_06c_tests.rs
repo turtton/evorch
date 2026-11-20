@@ -627,3 +627,30 @@ async fn storage_prepared_proof_does_not_authorize_a_corrupt_runtime_root() {
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.model.admission_calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn adopt_publication_invalidates_unused_scratch_observation() {
+    for configured in [true, false] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let first = new_process(&f);
+        let paused = prepare(&f, &first);
+        let claim = paused.claim().claim_id.clone();
+        drop(paused);
+        let runtime = new_process(&f);
+        let thread = run.to_string();
+        runtime.bind_thread_root(&thread, run).unwrap();
+        let (_owner, authority) = authority(&f, run);
+        let (proof, startup, root) = evidence(&f, &claim);
+        let observation = configured
+            .then(|| crate::scratch::publication_tests::Observation::new(&runtime, &thread));
+        let _adopted = runtime
+            .adopt_prepared_claim(proof, startup, &root, &authority)
+            .unwrap();
+        if let Some(observation) = observation {
+            observation.assert_preserved();
+        } else {
+            assert!(runtime.shared.thread_scratch.lock().unwrap().is_none());
+        }
+    }
+}

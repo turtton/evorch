@@ -57,6 +57,28 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    // Resolve old/new keys before taking the publication's goals lock. This
+    // helper's goals read is released before the caller reacquires that lock.
+    fn scratch_root_publication_keys(
+        &self,
+        thread: &str,
+        root: RunId,
+        goal_id: Option<&str>,
+    ) -> Vec<crate::scratch::ScratchKey> {
+        use crate::scratch::ScratchKey;
+        let goals = self.goal_lock();
+        let mut threads = std::collections::HashSet::from([thread.to_owned()]);
+        threads.extend(goals.roots.get(&root).cloned());
+        if let Some(goal_id) = goal_id {
+            threads.extend(goals.goals.iter().filter_map(|(thread, entry)| {
+                (entry.snapshot.goal_id == goal_id).then_some(thread.clone())
+            }));
+        }
+        let mut keys: Vec<_> = threads.into_iter().map(ScratchKey::Thread).collect();
+        keys.push(ScratchKey::Run(root));
+        keys
+    }
+
     /// Register trusted host thread ownership before starting the reserved root.
     pub fn bind_thread_root(&self, thread_id: &str, run_id: RunId) -> Result<(), String> {
         let plan_gate = self.shared.plan_authority.get(thread_id);
@@ -92,6 +114,7 @@ impl AgentRuntime {
         {
             inherited.push(previous);
         }
+        let scratch_keys = self.scratch_root_publication_keys(thread_id, run_id, None);
         let mut goals = self.goal_lock();
         if goals
             .roots
@@ -112,6 +135,7 @@ impl AgentRuntime {
                 entry.snapshot.related_root_run_ids.push(previous);
             }
         }
+        self.advance_scratch_epochs(&scratch_keys);
         goals.roots.retain(|_, thread| thread != thread_id);
         goals.roots.insert(run_id, thread_id.into());
         goals.inherited_runs.remove(&run_id);
@@ -355,6 +379,8 @@ impl AgentRuntime {
             snapshot.phase = ThreadGoalPhase::Working;
             snapshot.checks.clear();
         }
+        let scratch_keys =
+            self.scratch_root_publication_keys(&snapshot.thread_id, root, Some(&snapshot.goal_id));
         let mut goals = self.goal_lock();
         // A newer handoff may already have been restored before an older
         // source snapshot. Its recorded lineage makes that source obsolete.
@@ -379,6 +405,7 @@ impl AgentRuntime {
                     .then_some(thread.clone())
             })
             .collect();
+        self.advance_scratch_epochs(&scratch_keys);
         goals
             .roots
             .retain(|_, thread| !replaced_threads.contains(thread));
@@ -572,6 +599,14 @@ impl AgentRuntime {
             return Err("conversation root changed before handoff".into());
         }
         let descendants = self.live_descendants(source);
+        let mut scratch_keys = self.scratch_root_publication_keys(&child_thread, target, None);
+        scratch_keys.extend(
+            expected_source
+                .iter()
+                .cloned()
+                .map(crate::scratch::ScratchKey::Thread),
+        );
+        scratch_keys.push(crate::scratch::ScratchKey::Run(source));
         let prepare = || -> Result<_, String> {
             let goals = self.goal_lock();
             if goals.roots.contains_key(&target)
@@ -620,6 +655,7 @@ impl AgentRuntime {
             None => (None, prepare()?),
         };
         let source_thread = goals.roots.get(&source).cloned();
+        self.advance_scratch_epochs(&scratch_keys);
         if incarnation.is_none()
             && let (Some(store), Some(from)) =
                 (self.shared.run_store.get(), source_thread.as_deref())
@@ -802,7 +838,17 @@ impl AgentRuntime {
         let _plan_authority = plan_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let goal = receipt
+            .goal_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<ThreadGoalSnapshot>(json).ok());
+        let scratch_keys = self.scratch_root_publication_keys(
+            &thread,
+            target,
+            goal.as_ref().map(|goal| goal.goal_id.as_str()),
+        );
         let mut goals = self.goal_lock();
+        self.advance_scratch_epochs(&scratch_keys);
         if !goals.goals.contains_key(&thread)
             && let Some(json) = receipt.goal_json
         {

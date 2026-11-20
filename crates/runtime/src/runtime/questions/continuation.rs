@@ -234,6 +234,7 @@ impl AgentRuntime {
                 &execution,
             );
         }
+        let scratch_key = self.restored_scratch_publication_key(child, Some(caller));
         let mut intents = self
             .shared
             .spawn_intents
@@ -321,6 +322,7 @@ impl AgentRuntime {
         };
         self.register_restored(
             &mut runs,
+            scratch_key,
             &intents,
             execution,
             (child, Some(caller), role, config, caller),

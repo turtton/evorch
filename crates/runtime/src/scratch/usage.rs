@@ -11,8 +11,8 @@ pub(crate) enum ScratchUser {
 }
 #[derive(Debug, Default)]
 pub(super) struct Usage {
-    epoch: u64,
-    users: HashSet<ScratchUser>,
+    pub(super) epoch: u64,
+    pub(super) users: HashSet<ScratchUser>,
     shell_identities: HashMap<ScratchUser, tools::ShellJobIdentity>,
 }
 impl ThreadScratch {
@@ -25,6 +25,18 @@ impl ThreadScratch {
     pub(crate) fn record_scratch_lease(&self, thread: &str, lease: &Lease) {
         self.lock().leases.insert(thread.into(), lease.clone());
     }
+    /// Publication may not fail at epoch exhaustion. Saturation permanently
+    /// makes unused snapshots unavailable instead of wrapping to an old epoch.
+    pub(crate) fn advance_usage_epoch(&self, key: &ScratchKey) {
+        let mut state = self.lock();
+        let usage = state.usage.entry(key.clone()).or_default();
+        usage.epoch = usage.epoch.saturating_add(1);
+        drop(state);
+        // An archive pass may have consumed its hint before observing the old
+        // epoch. Retrying on this wake must not wait for a user release.
+        self.wake_archive();
+    }
+
     pub(crate) fn register_user(&self, key: &ScratchKey, user: ScratchUser) -> io::Result<()> {
         let mut state = self.lock();
         let usage = state.usage.entry(key.clone()).or_default();
