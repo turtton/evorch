@@ -79,6 +79,9 @@ pub struct ProductArtifact {
     pub manifest: ProductManifest,
     pub manifest_path: PathBuf,
     pub path: PathBuf,
+    /// The sealed closure (core, helper, bundle, manifest) this view was taken
+    /// from. `None` for a measurement-only artifact, which is no sealed product.
+    pub sealed: Option<test_support::product_artifact::ProductArtifact>,
     identity: FileIdentity,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +170,7 @@ impl ProductArtifact {
             manifest,
             manifest_path: sealed.manifest_path.clone(),
             path,
+            sealed: Some(sealed.clone()),
             identity,
         })
     }
@@ -244,6 +248,7 @@ impl ProductArtifact {
             manifest,
             manifest_path: manifest_path.to_owned(),
             path,
+            sealed: None,
             identity,
         })
     }
