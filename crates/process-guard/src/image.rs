@@ -21,6 +21,87 @@ pub struct FileReceipt {
     pub size_bytes: u64,
     pub sha256: String,
 }
+fn valid_recipe(b: &Bundle) -> bool {
+    use std::collections::BTreeSet;
+    let mut args = b.helper.build_args.iter().map(String::as_str);
+    if args.next() != Some("build") {
+        return false;
+    }
+    let (mut locked, mut release) = (false, false);
+    let (mut packages, mut bins, mut features) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    while let Some(flag) = args.next() {
+        match flag {
+            "--locked" if !locked => locked = true,
+            "--release" if !release => release = true,
+            "-p" | "--bin" => {
+                let Some(value) = args.next() else {
+                    return false;
+                };
+                if !(if flag == "-p" {
+                    &mut packages
+                } else {
+                    &mut bins
+                })
+                .insert(value)
+                {
+                    return false;
+                }
+            }
+            "--features" if features.is_empty() => {
+                let Some(value) = args.next() else {
+                    return false;
+                };
+                for feature in value.split(',') {
+                    if !matches!(feature, "gui/cef" | "browser-cef/cef")
+                        || !features.insert(feature)
+                    {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    if !locked || release != (b.helper.profile == "release") {
+        return false;
+    }
+    let set = |v: &[&'static str]| v.iter().copied().collect::<BTreeSet<_>>();
+    if b.purpose != "distribution" {
+        return packages == set(&["process-guard"])
+            && bins == set(&["evorch-process-guard"])
+            && features.is_empty();
+    }
+    if !release {
+        return false;
+    }
+    let roles = b
+        .callers
+        .iter()
+        .map(|c| c.role.as_str())
+        .collect::<BTreeSet<_>>();
+    if roles.len() != b.callers.len() {
+        return false;
+    }
+    (packages == set(&["evorch-core", "process-guard"])
+        && bins == set(&["evorch-core", "evorch-process-guard"])
+        && features.is_empty()
+        && roles == set(&["core"]))
+        || (packages == set(&["evorch", "evorch-core", "process-guard"])
+            && bins == set(&["evorch", "evorch-core", "evorch-process-guard"])
+            && features.is_empty()
+            && roles == set(&["cli", "core"]))
+        || (packages == set(&["gui", "browser-cef", "evorch-renderer", "process-guard"])
+            && bins
+                == set(&[
+                    "evorch-gui",
+                    "evorch-cef-helper",
+                    "evorch-renderer",
+                    "evorch-process-guard",
+                ])
+            && features == set(&["gui/cef", "browser-cef/cef"])
+            && roles == set(&["gui"]))
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HelperReceipt {
     pub package: String,
@@ -150,15 +231,7 @@ impl GuardImage {
         {
             return Err(invalid("guard helper receipt mismatch"));
         }
-        let args = &h.build_args;
-        let has = |a: &str, v: &str| args.windows(2).any(|p| p[0] == a && p[1] == v);
-        if args.first().map(String::as_str) != Some("build")
-            || !args.iter().any(|a| a == "--locked")
-            || !has("-p", "process-guard")
-            || !has("--bin", "evorch-process-guard")
-            || (h.profile == "release" && !args.iter().any(|a| a == "--release"))
-            || (b.purpose == "distribution" && h.profile != "release")
-        {
+        if !valid_recipe(&b) {
             return Err(invalid("guard build recipe mismatch"));
         }
         let expected_dev = format!(".evorch-guard/{}/evorch-process-guard", h.sha256);

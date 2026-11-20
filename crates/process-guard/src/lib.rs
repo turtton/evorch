@@ -217,7 +217,17 @@ mod client {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // A helper has closed stdio after fork. Do not reuse those numbers for
+        // its newly-opened target pidfd and accidentally violate that contract.
+        if fd < 3 {
+            let high = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            if high < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(unsafe { OwnedFd::from_raw_fd(high) });
+        }
+        Ok(owned)
     }
     pub fn peer(s: &UnixStream, pid: i32, uid: u32) -> io::Result<bool> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
@@ -265,7 +275,8 @@ mod client {
                 &mut self.decoder,
                 self.pidfd.as_raw_fd(),
                 None,
-            )?;
+            )
+            .map_err(|e| io::Error::new(e.kind(), format!("GuardLost: {e}")))?;
             match k {
                 Kind::RootExited => self.root = Some(wire::integer(&p)?),
                 Kind::FinalStatus => {
@@ -294,8 +305,7 @@ mod client {
         /// Sticky reservation: cancelling the caller's future does not undo this.
         pub fn request_wait(&mut self) -> io::Result<()> {
             if !self.wait_requested && !self.write_closed && self.final_status.is_none() {
-                wire::send(&mut self.stream, Kind::Wait, &[], None)
-                    .map_err(|e| io::Error::new(e.kind(), format!("GuardLost: {e}")))?;
+                self.request(Kind::Wait, &[])?;
                 self.wait_requested = true;
             }
             Ok(())
@@ -311,7 +321,7 @@ mod client {
             if let Some(s) = self.final_status {
                 return Ok(Some(ExitStatus::from_raw(s)));
             }
-            wire::send(&mut self.stream, Kind::TryReap, &[], None)?;
+            self.request(Kind::TryReap, &[])?;
             loop {
                 match self.receive()? {
                     Kind::Running => return Ok(None),
@@ -320,8 +330,23 @@ mod client {
                 }
             }
         }
+        fn request(&mut self, kind: Kind, payload: &[u8]) -> io::Result<()> {
+            if self.write_closed {
+                return Err(wire::invalid("GuardLost: control already half-closed"));
+            }
+            if let Err(e) = wire::try_send(&mut self.stream, kind, payload) {
+                let _ = self.force_kill();
+                return Err(io::Error::new(e.kind(), format!("GuardLost: {e}")));
+            }
+            Ok(())
+        }
+        /// Successful return means a complete request, not a signal receipt.
+        /// Backpressure is an error and half-closes the invalidated channel.
+        pub fn request_signal(&mut self, signal: i32) -> io::Result<()> {
+            self.request(Kind::Signal, &signal.to_le_bytes())
+        }
         pub fn signal(&mut self, signal: i32) -> io::Result<()> {
-            wire::send(&mut self.stream, Kind::Signal, &signal.to_le_bytes(), None)?;
+            self.request_signal(signal)?;
             while self.receive()? != Kind::Ack {}
             Ok(())
         }

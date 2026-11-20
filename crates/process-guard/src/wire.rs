@@ -165,6 +165,20 @@ pub fn send(s: &mut UnixStream, kind: Kind, p: &[u8], deadline: Option<Instant>)
     }
     Ok(())
 }
+/// No poll/flush on the control-request path. An incomplete frame invalidates
+/// the stream; the owner must half-close rather than retrying another request.
+pub fn try_send(s: &mut UnixStream, kind: Kind, p: &[u8]) -> io::Result<()> {
+    let bytes = frame(kind, p)?;
+    let mut at = 0;
+    while at < bytes.len() {
+        match s.write(&bytes[at..]) {
+            Ok(0) => return Err(invalid("guard write zero")),
+            Ok(n) => at += n,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 pub fn receive(
     s: &mut UnixStream,
     d: &mut Decoder,
@@ -211,4 +225,56 @@ pub fn integer(p: &[u8]) -> io::Result<i32> {
     Ok(i32::from_le_bytes(
         p.try_into().map_err(|_| invalid("guard integer length"))?,
     ))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn split_frames_and_bad_lengths_are_bounded() {
+        let encoded = frame(Kind::LaunchChunk, &[1, 2, 3]).unwrap();
+        let mut d = Decoder::default();
+        for b in &encoded[..encoded.len() - 1] {
+            d.push(&[*b]).unwrap();
+            assert!(d.next_frame().unwrap().is_none());
+        }
+        d.push(&encoded[encoded.len() - 1..]).unwrap();
+        assert_eq!(
+            d.next_frame().unwrap(),
+            Some((Kind::LaunchChunk, vec![1, 2, 3]))
+        );
+        for (at, value) in [(4, 2u32), (8, FRAME_LIMIT as u32 + 1), (12, 1)] {
+            let mut bad = encoded[..16].to_vec();
+            bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            let mut d = Decoder::default();
+            d.push(&bad).unwrap();
+            assert!(d.next_frame().is_err());
+        }
+        assert!(frame(Kind::LaunchChunk, &vec![0; FRAME_LIMIT + 1]).is_err());
+        assert!(
+            Decoder::default()
+                .push(&vec![0; FRAME_LIMIT * 2 + 33])
+                .is_err()
+        );
+    }
+    #[test]
+    fn expired_absolute_deadline_cannot_be_reset_by_buffered_progress() {
+        let (mut s, _) = UnixStream::pair().unwrap();
+        let mut d = Decoder::default();
+        d.push(&frame(Kind::Ready, &[]).unwrap()).unwrap();
+        let expired = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            receive(&mut s, &mut d, -1, Some(expired))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            send(&mut s, Kind::Commit, &[], Some(expired))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
 }

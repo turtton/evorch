@@ -1,5 +1,15 @@
 use sha2::{Digest, Sha256};
 fn main() {
+    let version = std::process::Command::new(std::env::var_os("RUSTC").expect("Cargo rustc"))
+        .arg("-vV")
+        .output()
+        .expect("rustc provenance");
+    assert!(version.status.success(), "rustc provenance");
+    let compiler = String::from_utf8(version.stdout)
+        .expect("rustc version UTF-8")
+        .trim()
+        .replace('\n', " | ");
+    println!("cargo:rustc-env=GUARD_COMPILER={compiler}");
     let mut hash = Sha256::new();
     // No workspace files, lockfile, git state, profile, or feature-dependent inputs.
     for file in [

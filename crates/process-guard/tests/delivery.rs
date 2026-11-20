@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+fn shell() -> std::ffi::OsString {
+    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| "/bin/sh".into())
+}
 use process_guard::{
     COMPAT_ID, GuardRuntime, LaunchSpec,
     image::{GuardImage, digest},
@@ -153,7 +156,7 @@ fn installed_fixture() {
     let runtime = GuardRuntime::bind_installed(&role).unwrap();
     let library = GuardRuntime::for_library(None).unwrap();
     assert_eq!(runtime.image().identity(), library.image().identity());
-    let mut spec = LaunchSpec::new("/bin/sh").unwrap();
+    let mut spec = LaunchSpec::new(shell()).unwrap();
     spec.argv.extend([b"-c".to_vec(), b":".to_vec()]);
     assert!(
         library
@@ -181,11 +184,42 @@ fn three_actual_elf_layouts_ignore_environment_override() {
         replace_json(&path, |j| {
             j["purpose"] = "distribution".into();
             j["helper"]["profile"] = "release".into();
-            let args = j["helper"]["build_args"].as_array_mut().unwrap();
-            if !args.iter().any(|a| a == "--release") {
-                args.push("--release".into());
-            }
             j["callers"] = serde_json::json!([{"role":role,"file":exe.file_name().unwrap().to_str().unwrap(),"size_bytes":size,"sha256":sha}]);
+            let mut args = vec!["build", "--locked", "--release"];
+            let (packages, bins) = match role {
+                "cli" => (
+                    vec!["evorch", "evorch-core", "process-guard"],
+                    vec!["evorch", "evorch-core", "evorch-process-guard"],
+                ),
+                "core" => (
+                    vec!["evorch-core", "process-guard"],
+                    vec!["evorch-core", "evorch-process-guard"],
+                ),
+                _ => (
+                    vec!["gui", "browser-cef", "evorch-renderer", "process-guard"],
+                    vec![
+                        "evorch-gui",
+                        "evorch-cef-helper",
+                        "evorch-renderer",
+                        "evorch-process-guard",
+                    ],
+                ),
+            };
+            for package in packages {
+                args.extend(["-p", package]);
+            }
+            if role == "gui" {
+                args.extend(["--features", "gui/cef,browser-cef/cef"]);
+            }
+            for bin in bins {
+                args.extend(["--bin", bin]);
+            }
+            j["helper"]["build_args"] = serde_json::json!(args);
+            if role == "cli" {
+                let sibling = exe.parent().unwrap().join(".evorch-core-wrapped");
+                fs::copy(&exe, &sibling).unwrap();
+                j["callers"].as_array_mut().unwrap().push(serde_json::json!({"role":"core","file":".evorch-core-wrapped","size_bytes":size,"sha256":sha}));
+            }
         });
         let status = Command::new(&exe)
             .args(["--exact", "installed_fixture", "--nocapture"])

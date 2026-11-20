@@ -248,14 +248,14 @@ pub fn entry() -> io::Result<()> {
         )?;
         println!(
             "{}",
-            serde_json::json!({"guard_abi":wire::ABI,"guard_compat_id":COMPAT_ID,"target":TARGET,"features":[]})
+            serde_json::json!({"guard_abi":wire::ABI,"guard_compat_id":COMPAT_ID,"target":TARGET,"features":[],"compiler":env!("GUARD_COMPILER")})
         );
         return Ok(());
     }
     if args.len() == 2 && args[1] == "--describe" {
         println!(
             "{}",
-            serde_json::json!({"guard_abi":wire::ABI,"guard_compat_id":COMPAT_ID,"target":TARGET,"features":[]})
+            serde_json::json!({"guard_abi":wire::ABI,"guard_compat_id":COMPAT_ID,"target":TARGET,"features":[],"compiler":env!("GUARD_COMPILER")})
         );
         return Ok(());
     }

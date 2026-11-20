@@ -10,6 +10,13 @@ size() { wc -c < "$1" | tr -d ' '; }
 not_target() { case "$(cd "$1" && pwd -P)/" in */target/*) die 'seal outside Cargo target';; esac; }
 regular() { [[ -f "$1" && ! -L "$1" ]] || die "not a regular file: $1"; }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+check_dependencies() {
+  local expected actual
+  expected=$(sed -n 's/^dependency-receipt = "\(.*\)"$/\1/p' "$repo/crates/process-guard/Cargo.toml")
+  actual=$(cd "$repo" && CARGO_BUILD_GC_ENABLED=false cargo tree --locked -p process-guard --edges normal,build --target all --prefix none --format '{p}' |
+    sed -E 's/ \(.*\)$//; s/ v/@/; /^process-guard@/d' | LC_ALL=C sort -u | tr '\n' ' ')
+  [[ -n "$expected" && "$expected" == "${actual% }" ]] || die 'locked helper dependency graph drift: update the package-local compat receipt'
+}
 verify() {
   local manifest=$1 dir helper
   regular "$manifest"; dir=$(cd "$(dirname "$manifest")" && pwd -P)
@@ -23,6 +30,9 @@ verify() {
       (.purpose == "development" and .helper.file == (".evorch-guard/" + .helper.sha256 + "/evorch-process-guard")))
     and (.purpose == "test-helper" or (.callers | length > 0))' "$manifest" >/dev/null || die 'guard manifest contract'
   helper="$dir/$(jq -r .helper.file "$manifest")"; regular "$helper"
+  if [[ "$(jq -r .source_sha "$manifest")" == 0000000000000000000000000000000000000000 ]]; then
+    echo 'guard-artifact: source_sha=0000000000000000000000000000000000000000 (dirty/unknown source)' >&2
+  fi
   [[ "$(mode "$manifest")" == 444 && "$(mode "$helper")" == 555 ]] || die 'manifest/helper must be 0444/0555, including no owner-write bit'
   [[ "$(hash "$helper")" == "$(jq -r .helper.sha256 "$manifest")" && "$(size "$helper")" == "$(jq -r .helper.size_bytes "$manifest")" ]] || die 'helper hash/size mismatch'
   env -i "$helper" --verify-bundle "$manifest" || die 'helper rejected bundle ABI/compat/recipe'
@@ -49,7 +59,7 @@ seal() {
   done
   source=${GITHUB_SHA:-$(git -C "$repo" rev-parse HEAD)}
   tmp=$(mktemp "$out/.guard-bundle.XXXXXX")
-  jq -n --arg purpose "$purpose" --arg profile "$profile" --argjson args "$recipe" --arg source "$source" --argjson desc "$description" --argjson callers "$callers" --argjson bytes "$(size "$out/evorch-process-guard")" --arg sha "$(hash "$out/evorch-process-guard")" '{schema_version:1,kind:"evorch-guard-bundle",purpose:$purpose,target:$desc.target,source_sha:$source,guard_abi:$desc.guard_abi,guard_compat_id:$desc.guard_compat_id,helper:{package:"process-guard",bin:"evorch-process-guard",file:"evorch-process-guard",size_bytes:$bytes,sha256:$sha,profile:$profile,features:[],build_args:$args},callers:$callers}' >"$tmp"
+  jq -n --arg purpose "$purpose" --arg profile "$profile" --argjson args "$recipe" --arg source "$source" --argjson desc "$description" --argjson callers "$callers" --argjson bytes "$(size "$out/evorch-process-guard")" --arg sha "$(hash "$out/evorch-process-guard")" '{schema_version:1,kind:"evorch-guard-bundle",purpose:$purpose,target:$desc.target,source_sha:$source,compiler:$desc.compiler,guard_abi:$desc.guard_abi,guard_compat_id:$desc.guard_compat_id,helper:{package:"process-guard",bin:"evorch-process-guard",file:"evorch-process-guard",size_bytes:$bytes,sha256:$sha,profile:$profile,features:[],build_args:$args},callers:$callers}' >"$tmp"
   chmod 0444 "$tmp"; mv -f "$tmp" "$out/guard-bundle.json"
   verify "$(cd "$out" && pwd -P)/guard-bundle.json"
   echo "EVORCH_PROCESS_GUARD_BUNDLE=$(cd "$out" && pwd -P)/guard-bundle.json"
@@ -60,6 +70,7 @@ prepare() {
     case "$1" in --profile) profile=$2; shift 2;; --out) out=$2;shift 2;; *) die "unknown prepare argument: $1";; esac
   done
   [[ -n "$out" && ( "$profile" == release || "$profile" == dev ) ]] || die 'prepare --profile release|dev --out DIR'
+  check_dependencies
   local listing helper recipe='["build","--locked","-p","process-guard","--bin","evorch-process-guard"]'
   local args=(build --locked -p process-guard --bin evorch-process-guard)
   if [[ "$profile" == release ]]; then
@@ -101,6 +112,7 @@ bind() {
   done < <(jq -rs 'map(.dir)|unique[]' "$grouped")
 }
 case "${1:-}" in
+ check-dependencies) check_dependencies;;
  prepare) shift;prepare "$@";;
  seal) shift;seal "$@";;
  verify) verify "${2:?manifest path}";;

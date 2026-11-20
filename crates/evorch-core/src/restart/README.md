@@ -1,3 +1,126 @@
+# D-3a2 B1: helper and distribution only
+
+**B 未適用、D-7 未完了.** B1 delivers `evorch-process-guard`, its library and
+immutable Linux bundles. No existing owned-child launch path uses this library
+yet. Still unprotected by B: shell pipe/PTY jobs, SandboxSession (including
+js-worker), MCP, LSP, renderer/CEF, eval groups/verify, PR source with or without
+a ledger, probes/other commands, GUI slash commands, and agent Chromium.
+B2 migrates non-PTY owners; B3 migrates PTY/Chromium and supplies release-core
+expiry, real Chromium/CEF and end-to-end evidence. The private preflight
+supervisor and bwrap `--die-with-parent` remain unchanged. A's real 10s watchdog
+and exit 74 tail do not call a ledger or guard and are not extended.
+
+## Standalone contract
+
+The direct guard is outside the target's session/group. Only the guard signals
+the numeric PGID while the leader is reserved. RootExited preserves a WNOWAIT
+anchor/raw status; it neither kills nor reaps. WaitRequested is sticky:
+**cancelling a wait does not undo its reservation to kill the group when the
+root exits**. TryReap does not wait for a live root. ForceKill/half-close/core
+pidfd death kill, observe WNOWAIT, kill the reserved group, retire its lease and
+reap only the root. FinalStatus never waits for descendant drain. The helper is
+not a subreaper. Its OS exit 0 is not a target status: missing FinalStatus is
+GuardLost, with no bare-PGID fallback. B2 must preserve these distinctions and
+audit cancelled waits.
+
+Authentication uses peer PID/UID, not secret addresses/nonces. Ready has one
+absolute 5s handshake deadline; only Commit permits a target fork. Exec gets no
+new startup/grace timer: its errno pipe is polled with control and core death.
+Helper env is cleared; target argv/env/cwd bytes apply only to target exec.
+Manifest 0444/helper 0555 forbid **all** write bits, including owner-write:
+ordinary 0755 is deliberately rejected. Linux <5.11 or denied
+close_range(CLOSE_RANGE_CLOEXEC) fails closed, without fallback. The oldest
+5.11 kernel is not available in CI. Non-Linux keeps existing backends, without
+a new Linux D-7 claim.
+
+Intentional guard attacks (including same-UID SIGSTOP/SIGKILL), guard bugs/crash,
+group escape, D-state/scheduling delays and unreaping PID 1 are outside the
+guarantee. Guard loss is an error, not confirmed cleanup. Only outer fixture
+controllers become subreapers and reclaim all fixture processes.
+
+## Delivery and development
+
+Installed policy uses only the bundle beside the canonical running ELF and
+hashes `/proc/self/exe`, not a reopened application pathname. Environment
+overrides are ignored. Libraries use explicit GuardRuntime, then an installed
+runtime, otherwise inherited EVORCH_PROCESS_GUARD_BUNDLE once. There is no
+PATH/cwd/project/target-env lookup or direct-spawn fallback. Hash/fstat and
+component-wise openat(O_NOFOLLOW|O_CLOEXEC) pin one helper inode across atomic
+pathname replacement. Updates must be atomic version switches, never in-place
+truncation.
+
+Library-only development:
+
+```sh
+export "$(scripts/guard-artifact.sh prepare --profile release --out /absolute/outside-target/guard)"
+CARGO_BUILD_GC_ENABLED=false cargo test --locked -p tools -j 1
+```
+
+Tests executing application binaries use `scripts/guard-cargo.sh run --locked
+-p PACKAGE [nextest arguments]`: build/list metadata, bind actual reported
+non-test executable paths, then run the **same metadata without rebuilding**.
+`bind-callers --bundle MANIFEST --build-metadata FILE` also takes Cargo
+compiler-artifact JSON-lines. It never guesses target/debug, overwrites a
+Cargo-owned helper or rebuilds a missing app. Doctests remain separate
+`cargo test --doc` runs with the inherited bundle. Raw cargo test/run rebuilds
+invalidate application bindings; rebind before execution. B2 makes Installed
+binding mandatory for real entrypoints; B1 provides/checks distribution only.
+
+## DB-26 addendum: approved PTY-only locator
+
+The initial actual portable-pty 0.9.0 probe pinned CLOEXEC fd 100 and atomically
+replaced its pathname with another inode. `/proc/self/fd/100` exec failed
+(exit 1): portable-pty closes fd >2 **before** exec.
+`/proc/<core-pid>/fd/100` executed the old pinned ELF, emitted PINNED_IMAGE_OK,
+exited 23, and was waited; residual PIDs were 0. Probe source/log are retained as
+`d3a2-b1-db26/{src/main.rs,probe.log}` in the B1 evidence. The image/PTY
+regression repeats replacement with the real helper and rejects wrong identity.
+
+Parent decisions question-eb7873a745f315c7bc11f0296bbb5f50 and
+question-eecb6ad6b31784b88021f0637b2450c2 approve this locator **only for PTY**.
+Core retains the CLOEXEC image fd through exec; both processes must share the
+PID namespace and /proc visibility. Missing proc/ptrace-read access fails
+closed, without pathname reopen or fallback. Guard entry first checks expected
+`/proc/self/exe` dev/inode; authenticated Hello separately checks ABI/compat
+before target fork. Direct launches keep inherited `/proc/self/fd/N`. Actual
+PTY adaptation is B3; portable-pty is not patched.
+
+This detects a **guard-compatible** ELF mix-up, not arbitrary non-guard ELF
+execution if core dies and its PID is reused with a different fd N. Cross-UID
+proc access normally fails ptrace read permission; deliberate same-UID PID
+manipulation/guard attack is already out of scope. Accidental reuse needs core
+death plus PID reuse in this short window; low probability is **not a proof of
+exclusion**. If arbitrary-image prevention is required, revisit a different
+PTY launch primitive in B3 or a follow-up. This is an explicitly accepted
+residual boundary, not a safety claim for arbitrary ELF execution.
+
+## B3 performance conditions scaffold (not B1 measurements)
+
+Freeze filled conditions and SHA-256 **before** collecting samples; retain raw
+data including slow samples. This template makes no B1 performance verdict:
+
+```json
+{
+  "baseline": {"source": null, "tree": null, "core_sha256": null},
+  "candidate": {"source": null, "tree": null, "core_sha256": null, "helper_sha256": null},
+  "host": {"kernel": null, "cpu": null, "governor": null, "memory": null, "load": null},
+  "build": {"rustc": null, "cargo": null, "rustflags": null, "profile": "release", "features": []},
+  "limits": {"cpus": 2, "memory": "2G", "tasks": 512, "timeout_seconds": 600, "stress_cpus": 1},
+  "samples": {"rounds": 3, "warmup_per_arm": 20, "paired_per_workload": 200, "order": "ABBA", "seed": null},
+  "workloads": ["grep -F -- D-7 fixture.txt", "git diff --quiet -- tracked.txt", ":"],
+  "gates": {"delta_p50_ms_max": 2, "delta_p95_ms_max": 5, "force_kill_p99_ms_exclusive_max": 1000, "guard_pss_median_mib_max": 4, "guard_pss_p95_mib_max": 8},
+  "raw_data": null
+}
+```
+
+Approved v3 load (20 threads × 50 messages × 8KiB, repository 1000 files ×
+16KiB, two active mock-backed agents), actual loaded release cores, per-round
+nearest-rank quantiles, ≥200 kill samples, and 100 guards held 180s remain B3
+requirements. Build before the limited measurement scope, require stress-ng
+instead of an unbounded fallback, and never make speed a CI correctness
+assertion. Bind/hash startup cost and CI dependency-wait increments are reported
+separately, not implied by this scaffold.
+
 # M2 production composition evidence (4b-D-2c-3)
 
 Restart is still an internal coordinator, not a public capability. M2 stage 12

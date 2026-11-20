@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
-# Exact versions are the package-local dependency receipt hashed by build.rs.
-# Updating any helper dependency requires a new compat identity.
+# build.rs never reads the workspace lock. The build/CI gate compares this
+# package-local normal+build dependency receipt against the locked graph.
+[package.metadata.process-guard]
+dependency-receipt = "block-buffer@0.10.4 cfg-if@1.0.4 cpufeatures@0.2.17 crypto-common@0.1.7 digest@0.10.7 generic-array@0.14.7 itoa@1.0.18 libc@0.2.189 memchr@2.8.3 proc-macro2@1.0.107 quote@1.0.47 serde@1.0.229 serde_core@1.0.229 serde_derive@1.0.229 serde_json@1.0.151 sha2@0.10.9 syn@3.0.4 typenum@1.20.1 unicode-ident@1.0.24 version_check@0.9.5 zmij@1.0.23"
+
 [dependencies]
 libc = "=0.2.189"
 serde = { version = "=1.0.229", features = ["derive"] }
