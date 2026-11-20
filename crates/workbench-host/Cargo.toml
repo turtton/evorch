@@ -50,6 +50,9 @@ thiserror = { workspace = true }
 test-support = ["runtime/recovery-test-support", "runtime/idle-test-support"]
 
 [dev-dependencies]
+# Integration tests of this crate use the test-support entry points (the
+# observation gate), which the crate alone does not enable for its own tests.
+workbench-host = { path = ".", features = ["test-support"] }
 runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }
 storage = { path = "../storage", features = ["test-support"] }
