@@ -60,7 +60,10 @@ pub enum ActivationControl {
 fn encode<T: Serialize>(value: &T) -> Result<String, StorageError> {
     serde_json::to_string(value).map_err(|_| invalid("invalid graph control record"))
 }
-fn control(conn: &Connection, manifest: &str) -> Result<Option<GraphControlRecord>, StorageError> {
+pub(super) fn control(
+    conn: &Connection,
+    manifest: &str,
+) -> Result<Option<GraphControlRecord>, StorageError> {
     Ok(conn.query_row(
         "SELECT mode,revision,operation_id,attempt_nonce,revoked,origin FROM recovery_graph_control WHERE manifest_id=?1",
         [manifest], |r| Ok(GraphControlRecord {
@@ -71,6 +74,58 @@ fn control(conn: &Connection, manifest: &str) -> Result<Option<GraphControlRecor
     ).optional()?)
 }
 impl Database {
+    /// A current-format snapshot only, never a source of runtime authority.
+    pub fn recovery_graph_cas(
+        &self,
+        restart_id: &str,
+        manifest_id: &str,
+    ) -> Result<GraphControlCas, StorageError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let tx = restart::load(&snapshot, restart_id)?
+            .ok_or_else(|| invalid("missing graph transaction"))?;
+        if tx.adopted_epoch != Some(tx.metadata.successor_epoch) {
+            return Err(invalid("graph was not adopted"));
+        }
+        let manifest =
+            load(&snapshot, manifest_id).map_err(|_| invalid("unreadable graph manifest"))?;
+        let component = tx
+            .components
+            .iter()
+            .find(|c| c.manifest_id == manifest_id)
+            .cloned()
+            .ok_or_else(|| invalid("foreign graph"))?;
+        let membership: Vec<_> = tx
+            .expected
+            .iter()
+            .filter(|m| manifest.members.iter().any(|r| r.run_id == m.run_id))
+            .cloned()
+            .collect();
+        if membership.len() != manifest.members.len() {
+            return Err(invalid("incomplete graph membership"));
+        }
+        let ids: Vec<String> = snapshot
+            .prepare("SELECT claim_id FROM recovery_claims WHERE manifest_id=?1 ORDER BY claim_id")?
+            .query_map([manifest_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let claim = match ids.as_slice() {
+            [] => None,
+            [id] => Some(claim(&snapshot, id)?),
+            _ => return Err(invalid("ambiguous graph claim")),
+        };
+        let control = control(&snapshot, manifest_id)?;
+        Ok(GraphControlCas {
+            restart_id: restart_id.into(),
+            capture_id: tx.metadata.capture_id,
+            successor_epoch: tx.metadata.successor_epoch,
+            phase: tx.phase,
+            component,
+            membership,
+            manifest,
+            claim,
+            control_revision: control.as_ref().map_or(0, |c| c.revision),
+            control_effect: control.map(|c| c.effect),
+        })
+    }
     pub fn recovery_graph_control(
         &self,
         manifest: &str,

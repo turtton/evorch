@@ -388,7 +388,9 @@ impl Registry {
         connection.busy_timeout(ATTEMPT_TIMEOUT)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS thread_owners (thread_id TEXT PRIMARY KEY, state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS owner_checkpoints (thread_id TEXT PRIMARY KEY, generation TEXT NOT NULL, payload TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS disposal_cleanup_receipts (operation_id TEXT PRIMARY KEY, receipt_json TEXT NOT NULL)")?;
+            CREATE TABLE IF NOT EXISTS disposal_cleanup_receipts (operation_id TEXT PRIMARY KEY, receipt_json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS disposal_cleanup_receipt_members (operation_id TEXT NOT NULL, thread_id TEXT NOT NULL, restart_id TEXT NOT NULL, capture_id TEXT NOT NULL, owner_id TEXT NOT NULL, owner_generation INTEGER NOT NULL, cleaned INTEGER NOT NULL CHECK(cleaned IN(0,1)), PRIMARY KEY(operation_id,thread_id));
+            CREATE INDEX IF NOT EXISTS disposal_cleanup_members_readback ON disposal_cleanup_receipt_members(restart_id,capture_id,thread_id,owner_id,owner_generation,cleaned)")?;
         Ok(Self::from_connection(connection, 1, false))
     }
 

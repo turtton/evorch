@@ -2,6 +2,7 @@
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
 pub mod graph_control;
+pub mod graph_progress;
 pub mod owned_graphs;
 pub mod quarantine;
 pub mod restart;
@@ -108,6 +109,7 @@ pub(crate) enum Write {
         mutation: restart::RestartMutation,
     },
     GraphControl(Box<graph_control::GraphControlWrite>),
+    GraphProgress(Box<graph_progress::GraphThreadProgressWrite>),
     Prepare(RecoveryManifestRecord),
     Commit(String),
     Claim(RecoveryClaimRequest),
@@ -129,6 +131,7 @@ pub(crate) enum Written {
     Restart(Box<restart::RestartTransaction>),
     Saved,
     GraphControl(graph_control::GraphControlRecord),
+    GraphProgress(graph_progress::GraphThreadProgress),
     Claimed(RecoveryClaim),
     Validated(Box<prepared::PreparedClaimEvidence>),
     Released(RecoveryReleaseOutcome),
@@ -320,6 +323,7 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     let restart_command = matches!(
         &command,
         Write::GraphControl(_)
+            | Write::GraphProgress(_)
             | Write::Activate(_)
             | Write::Restart { .. }
             | Write::RestartInvalidation { .. }
@@ -360,6 +364,9 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 expected_revision,
                 mutation,
             )?)),
+            Write::GraphProgress(request) => {
+                Written::GraphProgress(graph_progress::write(&tx, &request)?)
+            }
             Write::GraphControl(request) => {
                 Written::GraphControl(graph_control::write(&tx, &request)?)
             }

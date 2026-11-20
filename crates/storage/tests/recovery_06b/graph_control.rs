@@ -154,19 +154,132 @@ fn release_atomically_revokes_and_releases_existing_prepared() {
 #[test]
 fn claim_absent_is_quarantined_without_creating_a_claim() {
     let f = Fixture::new();
-    let (request, _) = graph(&f, false);
+    let (request, activation) = graph(&f, false);
     let result = f
         .storage
         .handle()
         .write_recovery_graph_control(request)
         .unwrap();
     assert_eq!(result.origin, "manual_release_without_claim");
+    assert!(
+        f.storage
+            .handle()
+            .claim_recovery_manifest(RecoveryClaimRequest {
+                claim_id: "after-revocation".into(),
+                manifest_id: "component".into(),
+                incarnations: activation
+                    .intents
+                    .iter()
+                    .map(|i| (i.run_id.clone(), i.incarnation.clone()))
+                    .collect(),
+            })
+            .is_err(),
+        "the writer itself must reject prepare after revocation even with no prior claim"
+    );
     assert!(f.db().recovery_claims().unwrap().is_empty());
     let tx = f.db().restart_transaction("restart").unwrap().unwrap();
     assert_eq!(
         tx.components[0].disposition,
         RestartDisposition::Quarantined
     );
+}
+
+#[test]
+fn progress_is_full_durable_monotone_and_independent_of_operation_id() {
+    use storage::recovery::graph_progress::*;
+    for after_commit in [false, true] {
+        let f = Fixture::new();
+        let (request, _) = graph(&f, true);
+        assert_eq!(
+            f.db().recovery_graph_cas("restart", "component").unwrap(),
+            request.expected
+        );
+        let control = f
+            .storage
+            .handle()
+            .write_recovery_graph_control(request)
+            .unwrap();
+        let key = GraphDisposalProgressKey {
+            manifest_id: "component".into(),
+            restart_id: "restart".into(),
+            capture_id: "capture".into(),
+            thread_id: "run".into(),
+            owner_generation: 8,
+        };
+        // Fixture run IDs are canonical strings from the actual membership.
+        let key = GraphDisposalProgressKey {
+            thread_id: f
+                .db()
+                .recovery_graph_cas("restart", "component")
+                .unwrap()
+                .membership[0]
+                .thread_id
+                .clone()
+                .unwrap(),
+            ..key
+        };
+        let write = GraphThreadProgressWrite {
+            key: key.clone(),
+            expected_revision: 0,
+            control: control.clone(),
+            owners: GraphDisposalStep::Applied,
+            scratch: GraphDisposalStep::Applied,
+        };
+        f.storage
+            .handle()
+            .inject_restart_write_fault(after_commit)
+            .unwrap();
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_progress(write.clone())
+                .is_err()
+        );
+        let readback = f.db().recovery_graph_thread_progress(&key).unwrap();
+        assert_eq!(readback.is_some(), after_commit);
+        let applied = if after_commit {
+            readback.unwrap()
+        } else {
+            f.storage
+                .handle()
+                .write_recovery_graph_progress(write.clone())
+                .unwrap()
+        };
+        assert_eq!(applied.revision, 1);
+        let mut foreign = write.clone();
+        foreign.key.capture_id = "foreign".into();
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_progress(foreign)
+                .is_err()
+        );
+        let mut stale = write.clone();
+        stale.expected_revision = 1;
+        stale.scratch = GraphDisposalStep::Unknown;
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_progress(stale)
+                .is_err()
+        );
+        // A new administrative ID cannot make the graph/thread step runnable again.
+        f.sql().execute("UPDATE recovery_graph_control SET operation_id='new-release',attempt_nonce='new-attempt',revision=revision+1",[]).unwrap();
+        let mut fresh = write;
+        fresh.control = f.db().recovery_graph_control("component").unwrap().unwrap();
+        fresh.expected_revision = 1;
+        fresh.scratch = GraphDisposalStep::NotStarted;
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_progress(fresh)
+                .is_err()
+        );
+        assert_eq!(
+            f.db().recovery_graph_thread_progress(&key).unwrap(),
+            Some(applied)
+        );
+    }
 }
 
 #[test]

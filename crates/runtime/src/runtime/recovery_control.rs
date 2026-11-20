@@ -245,16 +245,15 @@ impl AgentRuntime {
         &self,
         manifest_id: &str,
     ) -> Result<AutomaticActivationReservation, RuntimeError> {
-        if let Some(store) = self.shared.run_store.get() {
-            if store
+        if let Some(store) = self.shared.run_store.get()
+            && store
                 .with_database(|db| db.recovery_graph_control(manifest_id))
                 .map_err(error)?
                 .is_some()
-            {
-                return Err(RuntimeError::ActivationReservationUnavailable {
-                    reason: ActivationReservationProblem::Contended,
-                });
-            }
+        {
+            return Err(RuntimeError::ActivationReservationUnavailable {
+                reason: ActivationReservationProblem::Contended,
+            });
         }
         Ok(AutomaticActivationReservation(
             self.reserve_graph(manifest_id)?,

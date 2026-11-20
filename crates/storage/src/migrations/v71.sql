@@ -26,6 +26,9 @@ CREATE TABLE recovery_graph_thread_progress (
  capture_id TEXT NOT NULL,
  thread_id TEXT NOT NULL,
  owner_generation INTEGER NOT NULL,
+ revision INTEGER NOT NULL CHECK(revision > 0),
+ operation_id TEXT NOT NULL,
+ attempt_nonce TEXT NOT NULL,
  owners TEXT NOT NULL CHECK(owners IN ('not_started','applied','not_applicable','unknown')),
  scratch TEXT NOT NULL CHECK(scratch IN ('not_started','applied','not_applicable','unknown')),
  UNIQUE(manifest_id,restart_id,capture_id,thread_id,owner_generation)

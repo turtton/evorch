@@ -1,6 +1,16 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Persist per-thread observations without creating executable authority.
+    pub fn write_recovery_graph_progress(
+        &self,
+        request: graph_progress::GraphThreadProgressWrite,
+    ) -> Result<graph_progress::GraphThreadProgress, StorageError> {
+        match self.recovery_write(Write::GraphProgress(Box::new(request)))? {
+            Written::GraphProgress(result) => Ok(result),
+            _ => unreachable!("graph progress reply"),
+        }
+    }
     /// Caller retains its owner guards until this FULL writer reply or readback.
     pub fn write_recovery_graph_control(
         &self,

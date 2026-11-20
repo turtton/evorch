@@ -127,6 +127,25 @@ impl AgentRuntime {
         {
             return Err(error("invalid disposal owner set"));
         }
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        let canonical = store
+            .with_database(|db| {
+                db.recovery_graph_cas(&expected.restart_id, &expected.manifest.manifest_id)
+            })
+            .map_err(error)?;
+        if canonical != expected
+            || !matches!(
+                expected.phase,
+                storage::recovery::restart::RestartPhase::Adopted
+                    | storage::recovery::restart::RestartPhase::Completed
+            )
+        {
+            return Err(error("disposal graph CAS conflict"));
+        }
         let membership = expected
             .membership
             .iter()
