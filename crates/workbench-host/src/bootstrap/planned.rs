@@ -24,8 +24,14 @@ pub struct ClaimedBootstrap {
     pub(super) storage: PlannedStorage,
     pub(super) owner: Arc<OwnerHost>,
     pub blocked_threads: Vec<String>,
+    successor_epoch: u64,
 }
 impl ClaimedBootstrap {
+    /// The epoch the adopted transaction fixed for this successor; the host
+    /// composed from this claim starts its projection (hello, cursors) at it.
+    pub fn successor_epoch(&self) -> u64 {
+        self.successor_epoch
+    }
     pub fn storage_writer(&self) -> storage::StorageHandle {
         self.storage.writer()
     }
@@ -102,6 +108,13 @@ impl PlannedStorage {
         if tx.metadata.restart_id != restart_id {
             return Err("adopted transaction mismatch".into());
         }
+        let successor_epoch = tx.metadata.successor_epoch;
+        if successor_epoch <= tx.metadata.old_epoch
+            || successor_epoch == u64::MAX
+            || tx.adopted_epoch != Some(successor_epoch)
+        {
+            return Err("adopted transaction epoch mismatch".into());
+        }
         let owner = Arc::new(OwnerHost::open_planned(
             &self.options.ownership_root,
             self.config.ownership.clone(),
@@ -140,6 +153,7 @@ impl PlannedStorage {
             storage: self,
             owner,
             blocked_threads,
+            successor_epoch,
         })
     }
 }

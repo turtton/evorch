@@ -292,6 +292,11 @@ impl PlannedBoot {
             Err(_) => self.fail(BootFailure::AdoptedBeforeReady, Some(&runtime)),
         };
         self.mark(BootStage::OwnersClaimed);
+        // The endpoint publishes the receipt's epoch and the host answers hello
+        // from its projection: both must be the epoch the transaction fixed.
+        if claimed.successor_epoch() != self.receipt.successor_epoch {
+            self.fail(BootFailure::AdoptedBeforeReady, Some(&runtime));
+        }
         let blocked_threads = claimed.blocked_threads.clone();
         let writer = claimed.storage_writer();
         let database = claimed.database().clone();

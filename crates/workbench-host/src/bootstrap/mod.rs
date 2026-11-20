@@ -267,6 +267,7 @@ impl BootstrappedHost {
         claimed: Option<planned::ClaimedBootstrap>,
     ) -> Result<Self, BootstrapError> {
         let planned = claimed.is_some();
+        let successor_epoch = claimed.as_ref().map(|c| c.successor_epoch());
         let spawn_ledger = sandbox::SpawnLedger::new();
         let adapters =
             adapters.unwrap_or_else(|| lane_pr::PullRequestAdapters::owned(spawn_ledger.clone()));
@@ -583,7 +584,7 @@ impl BootstrappedHost {
             access.apply(&runtime, root);
         }
         let recovery_projects = projects.directory.clone();
-        let command_host = CommandHost::new(service)
+        let command_host = CommandHost::new_with_epoch(service, successor_epoch)
             .with_projects(projects.directory)
             .with_legacy_import(
                 options.ownership_root.clone(),
