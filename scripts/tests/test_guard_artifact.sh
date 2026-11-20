@@ -30,7 +30,7 @@ set -euo pipefail
 [[ "${CARGO_BUILD_GC_ENABLED:-}" == false ]]
 printf '%s\n' "$*" >>"$FIXTURE_WORK/cargo-calls"
 case "$1 $2" in
-  "tree --locked") printf '%s\n' "$EXPECTED_TREE" | tr ' ' '\n' | sed 's/@/ v/';;
+  "tree --color") printf '%s\n' "$EXPECTED_TREE" | tr ' ' '\n' | sed 's/@/ v/';;
   "metadata --locked") printf '{}\n';;
   "nextest list") cat "$FIXTURE_WORK/binaries.json";;
   "nextest run")
@@ -61,6 +61,22 @@ jq -e '.purpose=="development" and .callers[0].role=="core"
 jq -cn --arg app "$app" '{reason:"compiler-artifact",target:{name:"evorch-core",kind:["bin"]},profile:{test:false},executable:$app}' >"$work/compiler.json"
 "$repo/scripts/guard-artifact.sh" bind-callers --bundle "$bundle" --build-metadata "$work/compiler.json"
 "$repo/scripts/guard-artifact.sh" verify "$manifest"
+# CI binds against the sealed product's distribution bundle, whose recipe names
+# the application packages. The development bundle is a different purpose with
+# the process-guard-only recipe, so binding must rewrite the recipe too.
+dist="$work/dist"
+mkdir "$dist"
+cp "$helper" "$dist/evorch-process-guard"
+cp "$app" "$dist/evorch-core"
+jq --arg sha "$(sha256sum "$app" | cut -d' ' -f1)" --argjson size "$(wc -c <"$app" | tr -d ' ')" '
+  .purpose = "distribution" | .helper.file = "evorch-process-guard"
+  | .helper.build_args = ["build","--locked","--release","-p","evorch-core","-p","process-guard","--bin","evorch-core","--bin","evorch-process-guard"]
+  | .callers = [{role:"core",file:"evorch-core",size_bytes:$size,sha256:$sha}]' "$bundle" >"$dist/guard-bundle.json"
+chmod 0444 "$dist/guard-bundle.json"
+"$repo/scripts/guard-artifact.sh" verify "$dist/guard-bundle.json"
+"$repo/scripts/guard-artifact.sh" bind-callers --bundle "$dist/guard-bundle.json" --build-metadata "$work/compiler.json"
+"$repo/scripts/guard-artifact.sh" verify "$manifest"
+jq -e '.purpose=="development" and .helper.build_args==["build","--locked","--release","-p","process-guard","--bin","evorch-process-guard"]' "$manifest" >/dev/null
 chmod u+w "$app"
 printf x >>"$app"
 must_reject "$repo/scripts/guard-artifact.sh" verify "$manifest"

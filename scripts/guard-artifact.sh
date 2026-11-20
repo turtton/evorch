@@ -107,7 +107,7 @@ bind() {
   while IFS= read -r dest; do
     callers=$(jq -sc --arg dir "$dest" 'map(select(.dir==$dir)|.caller)' "$grouped")
     tmp=$(mktemp "$dest/.guard-bundle.XXXXXX")
-    jq --arg rel ".evorch-guard/$sha/evorch-process-guard" --argjson callers "$callers" '.purpose="development" | .helper.file=$rel | .callers=$callers' "$bundle" >"$tmp"
+    jq --arg rel ".evorch-guard/$sha/evorch-process-guard" --argjson callers "$callers" '.purpose="development" | .helper.file=$rel | .helper.build_args=(if .helper.profile == "release" then ["build","--locked","--release","-p","process-guard","--bin","evorch-process-guard"] else ["build","--locked","-p","process-guard","--bin","evorch-process-guard"] end) | .callers=$callers' "$bundle" >"$tmp"
     chmod 0444 "$tmp"; mv -f "$tmp" "$dest/guard-bundle.json"; verify "$dest/guard-bundle.json"
   done < <(jq -rs 'map(.dir)|unique[]' "$grouped")
 }

@@ -80,7 +80,10 @@ Tests executing application binaries use `scripts/guard-cargo.sh run --locked
 non-test executable paths, then run the **same metadata without rebuilding**.
 `bind-callers --bundle MANIFEST --build-metadata FILE` also takes Cargo
 compiler-artifact JSON-lines. It never guesses target/debug, overwrites a
-Cargo-owned helper or rebuilds a missing app. Doctests remain separate
+Cargo-owned helper or rebuilds a missing app. Binding turns the bundle into a
+`development` one, so its recipe is rewritten to the process-guard-only recipe
+of the helper's profile (also when the source is a sealed distribution bundle,
+whose recipe names the application packages). Doctests remain separate
 `cargo test --doc` runs with the inherited bundle. Raw cargo test/run rebuilds
 invalidate application bindings; rebind before execution. B2 makes Installed
 binding mandatory for real entrypoints; B1 provides/checks distribution only.
