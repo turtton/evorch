@@ -331,16 +331,18 @@ mod harness;
 
 /// Each case is a fresh process: physical adoption must precede all DB/owner/runtime threads.
 /// Child exit is the completion event; no sleeps, polling, or test-local timeout.
-pub type RuntimeFactory =
-    fn(&str, Arc<EventBus>) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>);
+pub type RuntimeSetup = (
+    Arc<::tools::ToolExecutor>,
+    Arc<dyn runtime::AgentModel>,
+    Option<Arc<dyn runtime::SandboxFactory>>,
+);
+pub type RuntimeFactory = fn(&str, Arc<EventBus>) -> RuntimeSetup;
 
-pub fn default_factory(
-    _: &str,
-    bus: Arc<EventBus>,
-) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>) {
+pub fn default_factory(_: &str, bus: Arc<EventBus>) -> RuntimeSetup {
     (
         Arc::new(::tools::ToolExecutor::new(bus)),
         Arc::new(NeverModel),
+        None,
     )
 }
 
@@ -415,9 +417,12 @@ pub fn run_with(cases: &[&str], check: fn(&Fixture, &str), factory: RuntimeFacto
         let owner = Arc::new(
             OwnerHost::open_planned(&root.join("owners"), Default::default(), bus.clone()).unwrap(),
         );
-        let (tools, model) = factory(&case, bus.clone());
-        let runtime = AgentRuntime::new(bus, tools, model)
-            .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let (tools, model, sandbox) = factory(&case, bus.clone());
+        let runtime = match sandbox {
+            Some(factory) => AgentRuntime::with_sandbox_factory(bus, tools, model, factory),
+            None => AgentRuntime::new(bus, tools, model),
+        }
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         runtime
             .adopt_restart_handoff(proof)
             .unwrap_or_else(|e| panic!("DB Adopt failed: {}", e.error));
