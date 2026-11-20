@@ -24,7 +24,10 @@ mod host_prompt;
 mod physical_owners;
 mod recovery_activation;
 mod recovery_control;
-pub use physical_owners::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
+pub use physical_owners::{
+    DisposalAuthority, OwnedGraphOwnershipDiagnostic, OwnedGraphOwnershipState, OwnedThreadCas,
+    PhysicalClaimReport,
+};
 pub use recovery_control::{
     ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,

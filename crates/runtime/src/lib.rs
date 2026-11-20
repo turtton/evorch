@@ -51,7 +51,10 @@ pub use runtime::{
     ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,
 };
-pub use runtime::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
+pub use runtime::{
+    DisposalAuthority, OwnedGraphOwnershipDiagnostic, OwnedGraphOwnershipState, OwnedThreadCas,
+    PhysicalClaimReport,
+};
 mod conversation_plan;
 pub mod mailbox;
 pub mod mcp;

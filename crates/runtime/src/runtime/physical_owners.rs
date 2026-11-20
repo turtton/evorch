@@ -156,6 +156,9 @@ impl AgentRuntime {
                 expected.phase,
                 storage::recovery::restart::RestartPhase::Adopted
                     | storage::recovery::restart::RestartPhase::Completed
+                    | storage::recovery::restart::RestartPhase::Aborted
+                    | storage::recovery::restart::RestartPhase::Invalidated
+                    | storage::recovery::restart::RestartPhase::Superseded
             )
         {
             return Err(error("disposal graph CAS conflict"));
@@ -219,4 +222,155 @@ impl AgentRuntime {
 }
 fn error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
+}
+
+/// Read-only classification of the entire physical graph, never an operation binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedGraphOwnershipState {
+    LiveSelf,
+    MixedSelfAndAbsent,
+    Absent,
+    Foreign,
+    GenerationChanged,
+    Unavailable,
+    Cold,
+}
+/// Bounded diagnostic output, including graphs too large to operate on.
+/// References are domain-separated hashes, not thread IDs or permits.
+/// There is deliberately no conversion into an operation's complete CAS set.
+///
+/// ```no_run
+/// fn diagnostic(rt: &runtime::AgentRuntime,
+///     cas: &storage::recovery::graph_control::GraphControlCas) {
+///     let view = rt.owned_graph_ownership_diagnostic(cas).unwrap();
+///     assert!(view.references().len() <= 64);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn not_a_binding(rt: &runtime::AgentRuntime,
+///     cas: storage::recovery::graph_control::GraphControlCas,
+///     diagnostic: runtime::OwnedGraphOwnershipDiagnostic) {
+///     rt.disposal_authority(cas, diagnostic);
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedGraphOwnershipDiagnostic {
+    state: OwnedGraphOwnershipState,
+    verified_adoption: bool,
+    retained_owner_count: u64,
+    owner_count: u64,
+    references: Vec<String>,
+}
+impl OwnedGraphOwnershipDiagnostic {
+    pub fn state(&self) -> OwnedGraphOwnershipState {
+        self.state
+    }
+    pub fn verified_adoption(&self) -> bool {
+        self.verified_adoption
+    }
+    pub fn retained_owner_count(&self) -> u64 {
+        self.retained_owner_count
+    }
+    pub fn owner_count(&self) -> u64 {
+        self.owner_count
+    }
+    pub fn references(&self) -> &[String] {
+        &self.references
+    }
+    pub fn truncated(&self) -> bool {
+        self.owner_count > self.references.len() as u64
+    }
+}
+impl AgentRuntime {
+    /// Inspect every member under one read-only owners snapshot. Unlike the
+    /// authority constructor, this does not truncate the ownership check at 64.
+    /// Neither the sealed set nor a graph authority is returned or reconstructed.
+    pub fn owned_graph_ownership_diagnostic(
+        &self,
+        expected: &GraphControlCas,
+    ) -> Result<OwnedGraphOwnershipDiagnostic, RuntimeError> {
+        use sha2::{Digest, Sha256};
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or_else(|| error("no run store"))?;
+        let current = store
+            .with_database(|db| {
+                db.recovery_graph_cas(&expected.restart_id, &expected.manifest.manifest_id)
+            })
+            .map_err(error)?;
+        if current != *expected {
+            return Err(error("diagnostic graph CAS conflict"));
+        }
+        let threads: BTreeSet<_> = expected
+            .membership
+            .iter()
+            .filter_map(|member| member.thread_id.clone())
+            .collect();
+        let references = threads
+            .iter()
+            .take(64)
+            .map(|thread| {
+                let mut hash = Sha256::new();
+                for part in [
+                    "physical-owner-diagnostic",
+                    &expected.restart_id,
+                    &expected.capture_id,
+                    &expected.manifest.manifest_id,
+                    thread,
+                ] {
+                    hash.update((part.len() as u64).to_be_bytes());
+                    hash.update(part.as_bytes());
+                }
+                format!("{:x}", hash.finalize())
+            })
+            .collect();
+        let mut result = OwnedGraphOwnershipDiagnostic {
+            state: OwnedGraphOwnershipState::Cold,
+            verified_adoption: false,
+            retained_owner_count: 0,
+            owner_count: threads.len() as u64,
+            references,
+        };
+        let retained = self
+            .shared
+            .retained_physical_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(set) = &retained.sealed else {
+            return Ok(result);
+        };
+        if set.restart_id != expected.restart_id || set.capture_id != expected.capture_id {
+            return Ok(result);
+        }
+        result.verified_adoption = true;
+        let Some(first) = set.permits.values().next() else {
+            result.state = OwnedGraphOwnershipState::Absent;
+            return Ok(result);
+        };
+        let diagnosis = crate::ownership::disposal_support::diagnose(
+            &first.registry_path,
+            expected,
+            &set.permits,
+            &threads,
+        )
+        .map_err(error)?;
+        result.retained_owner_count = diagnosis.retained as u64;
+        result.state = if diagnosis.foreign {
+            OwnedGraphOwnershipState::Foreign
+        } else if diagnosis.changed {
+            OwnedGraphOwnershipState::GenerationChanged
+        } else if diagnosis.unavailable {
+            OwnedGraphOwnershipState::Unavailable
+        } else if diagnosis.absent == threads.len() {
+            OwnedGraphOwnershipState::Absent
+        } else if diagnosis.absent > 0 {
+            OwnedGraphOwnershipState::MixedSelfAndAbsent
+        } else {
+            OwnedGraphOwnershipState::LiveSelf
+        };
+        Ok(result)
+    }
 }

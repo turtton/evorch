@@ -5,10 +5,16 @@ mod fixture;
 #[cfg(target_os = "linux")]
 mod i9;
 #[cfg(target_os = "linux")]
+mod seams;
+#[cfg(target_os = "linux")]
 fn main() {
     fixture::run(
         &[
             "i9-batch",
+            "diagnostic-oversize",
+            "terminal-aborted",
+            "terminal-invalidated",
+            "terminal-superseded",
             "sealed-positive",
             "forged-evidence",
             "db-hold",
@@ -37,6 +43,10 @@ fn check(f: &fixture::Fixture, case: &str) {
     }
     match case {
         "i9-batch" => i9::check(f),
+        "diagnostic-oversize" => seams::diagnostic(f),
+        "terminal-aborted" | "terminal-invalidated" | "terminal-superseded" => {
+            seams::terminal(f, case)
+        }
         "sealed-positive" => {
             let mut first = 0;
             let evidence = f.runtime.adopted_restart_ownership_evidence().unwrap();

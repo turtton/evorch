@@ -93,7 +93,16 @@ impl AgentRuntime {
         let request = GraphControlWrite {
             expected: authority.expected().clone(),
             effect: effect.clone(),
-            action: GraphControlAction::Release,
+            action: if matches!(
+                authority.expected().phase,
+                storage::recovery::restart::RestartPhase::Aborted
+                    | storage::recovery::restart::RestartPhase::Invalidated
+                    | storage::recovery::restart::RestartPhase::Superseded
+            ) {
+                GraphControlAction::TerminalCleanup
+            } else {
+                GraphControlAction::Release
+            },
         };
         let result = match store.handle.write_recovery_graph_control(request) {
             Ok(result) => result,

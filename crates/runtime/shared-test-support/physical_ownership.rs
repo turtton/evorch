@@ -23,7 +23,11 @@ pub const TX: &str = "i6-restart";
 pub const CAPTURE: &str = "i6-capture";
 pub const THREADS: [&str; 2] = ["a", "b"];
 pub fn run_id(thread: &str) -> runtime::RunId {
-    runtime::RunId::new(if thread == "a" { 1 } else { 2 })
+    runtime::RunId::new(match thread {
+        "a" => 1,
+        "b" => 2,
+        other => 3 + other.strip_prefix('t').unwrap().parse::<u64>().unwrap(),
+    })
 }
 
 struct NeverModel;
@@ -165,7 +169,16 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
     let owner = OwnerHost::open_planned(&root.join("owners"), Default::default(), bus).unwrap();
     let mut permits = BTreeMap::new();
     let mut expected = vec![];
-    for thread in THREADS {
+    let threads: Vec<String> = if case == "diagnostic-oversize" {
+        THREADS
+            .into_iter()
+            .map(str::to_owned)
+            .chain((0..63).map(|n| format!("t{n:03}")))
+            .collect()
+    } else {
+        THREADS.into_iter().map(str::to_owned).collect()
+    };
+    for thread in threads.iter().map(String::as_str) {
         let mut permit = owner.start(thread).unwrap();
         permit.run_id = Some(run_id(thread).to_string());
         permit.begin_turn().unwrap();
@@ -216,7 +229,7 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
             .unwrap();
     };
     step(RestartMutation::BeginCapture(expected.clone()));
-    let groups: Vec<_> = if case == "i9-batch" {
+    let groups: Vec<_> = if matches!(case, "i9-batch" | "diagnostic-oversize") {
         vec![expected.iter().collect::<Vec<_>>()]
     } else {
         expected.iter().map(|m| vec![m]).collect()

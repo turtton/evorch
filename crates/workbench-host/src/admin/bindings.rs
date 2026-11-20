@@ -65,28 +65,93 @@ pub struct GraphOwnership<'a> {
     pub disposal_complete: bool,
     pub revocation: RevocationObservation,
 }
+/// Read-only aggregate of all members, including those beyond the displayed 64.
+/// Fields stay private and cannot be converted into owner CAS or authority.
+///
+/// ```no_run
+/// fn summary(view: &runtime::OwnedGraphOwnershipDiagnostic) {
+///     let summary = workbench_host::admin::GraphOwnershipSummary::try_from(view).unwrap();
+///     let _ = summary.is_undisposed(false, false,
+///         workbench_host::admin::RevocationObservation::NotApplied);
+/// }
+/// ```
+/// ```compile_fail
+/// fn not_authority(summary: workbench_host::admin::GraphOwnershipSummary) {
+///     let _: runtime::DisposalAuthority = summary.into();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphOwnershipSummary {
+    verified_live_adoption: bool,
+    has_owners: bool,
+    all_retained_self: bool,
+    all_current_match: bool,
+}
+impl TryFrom<&runtime::OwnedGraphOwnershipDiagnostic> for GraphOwnershipSummary {
+    type Error = AdminFailure;
+    fn try_from(view: &runtime::OwnedGraphOwnershipDiagnostic) -> Result<Self, Self::Error> {
+        if view.state() == runtime::OwnedGraphOwnershipState::Unavailable {
+            return Err(failure(
+                ErrorCode::StorageUnavailable,
+                "ownership observation unavailable",
+            ));
+        }
+        Ok(Self {
+            verified_live_adoption: view.verified_adoption(),
+            has_owners: view.owner_count() > 0,
+            all_retained_self: view.retained_owner_count() == view.owner_count(),
+            all_current_match: view.state() == runtime::OwnedGraphOwnershipState::LiveSelf,
+        })
+    }
+}
+impl GraphOwnershipSummary {
+    fn from_slice(graph: &GraphOwnership<'_>, live_owner: &str) -> Self {
+        Self {
+            verified_live_adoption: graph.verified_live_adoption,
+            has_owners: !graph.owners.is_empty(),
+            all_retained_self: graph
+                .owners
+                .iter()
+                .all(|o| o.retained_identity == live_owner),
+            all_current_match: graph.owners.iter().all(|o| o.matches(live_owner)),
+        }
+    }
+    pub fn is_undisposed(
+        &self,
+        resume_committed: bool,
+        disposal_complete: bool,
+        revocation: RevocationObservation,
+    ) -> bool {
+        self.verified_live_adoption
+            && self.has_owners
+            && self.all_retained_self
+            && !resume_committed
+            && !disposal_complete
+            && (self.all_current_match || revocation == RevocationObservation::Unknown)
+    }
+    pub fn is_incomplete_disposal(
+        &self,
+        disposal_complete: bool,
+        revocation: RevocationObservation,
+    ) -> bool {
+        self.verified_live_adoption
+            && self.has_owners
+            && self.all_retained_self
+            && revocation == RevocationObservation::Confirmed
+            && !disposal_complete
+            && !self.all_current_match
+    }
+}
 pub fn is_undisposed(graph: &GraphOwnership<'_>, live_owner: &str) -> bool {
-    graph.verified_live_adoption
-        && !graph.owners.is_empty()
-        && graph
-            .owners
-            .iter()
-            .all(|o| o.retained_identity == live_owner)
-        && !graph.resume_committed
-        && !graph.disposal_complete
-        && (graph.owners.iter().all(|o| o.matches(live_owner))
-            || graph.revocation == RevocationObservation::Unknown)
+    GraphOwnershipSummary::from_slice(graph, live_owner).is_undisposed(
+        graph.resume_committed,
+        graph.disposal_complete,
+        graph.revocation,
+    )
 }
 pub fn is_incomplete_disposal(graph: &GraphOwnership<'_>, live_owner: &str) -> bool {
-    graph.verified_live_adoption
-        && !graph.owners.is_empty()
-        && graph
-            .owners
-            .iter()
-            .all(|o| o.retained_identity == live_owner)
-        && graph.revocation == RevocationObservation::Confirmed
-        && !graph.disposal_complete
-        && !graph.owners.iter().all(|o| o.matches(live_owner))
+    GraphOwnershipSummary::from_slice(graph, live_owner)
+        .is_incomplete_disposal(graph.disposal_complete, graph.revocation)
 }
 
 /// Snapshot-local alias collision detector. Raw identities stay server-side;
