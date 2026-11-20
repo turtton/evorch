@@ -124,3 +124,14 @@ resource conditions are unchanged. What changed:
   a bound of the true interval. A negative interval is recorded as an invalid
   (failed) sample, not as 0, a failed cycle records both rows with its own
   duration, and the CSV is saved after every round.
+
+## Addendum 3 after the second review of #715 (base `75de89fa`), before the third rerun
+
+Counts, intervals and resource conditions are unchanged; the tables are
+re-taken on this base with the final fixture. The fixture's ownership rule
+changed: a process is reclaimed only when it descends from the harness, started
+with the family, is not in another live family's tree, and carries the family's
+identity (process group, environment token, or a marker on a path boundary in
+its command line or working directory). Descriptors without close-on-exec are
+now marked close-on-exec in the parent before a spawn instead of being closed in
+the child. Neither runs inside a timed region.

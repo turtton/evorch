@@ -967,3 +967,194 @@ fn descriptors_without_close_on_exec_do_not_reach_a_child() {
     assert!(child.join().orphans.is_empty());
     drop((reader, writer));
 }
+
+// -------------------------------------------- ownership and spawn failure
+
+fn plain_parker(args: &[&str], cwd: Option<&Path>) -> std::process::Child {
+    let mut command = fake_command("parker");
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command.spawn().unwrap()
+}
+
+fn running(pid: u32) -> bool {
+    product_exec::observe::process(pid as i32).is_some_and(|p| p.state != 'Z')
+}
+
+fn family_with_markers(markers: Vec<String>) -> ManagedProcess {
+    let mut family = ManagedProcess::spawn_with(fake_command("family"), markers).unwrap();
+    family
+        .wait_for(Duration::from_secs(60), |line| {
+            line.contains("ready").then_some(())
+        })
+        .unwrap();
+    family
+}
+
+fn finish_family(mut family: ManagedProcess) {
+    family.close_stdin();
+    assert!(family.wait_exit(Duration::from_secs(60)).unwrap().success());
+    drop(family.join());
+}
+
+#[test]
+fn a_string_in_an_argument_is_never_ownership_without_lineage() {
+    use product_exec::process::{Evidence, names_path};
+    let all = Evidence {
+        descendant: true,
+        started_with_the_family: true,
+        other_family: false,
+        same_group: false,
+        token: false,
+        marker: true,
+    };
+    assert!(all.owns());
+    // A process that is not a descendant (a user's `tail -f <root>/log`).
+    assert!(
+        !Evidence {
+            descendant: false,
+            ..all
+        }
+        .owns()
+    );
+    // One that was already running when the family started.
+    assert!(
+        !Evidence {
+            started_with_the_family: false,
+            ..all
+        }
+        .owns()
+    );
+    // One of another live family.
+    assert!(
+        !Evidence {
+            other_family: true,
+            ..all
+        }
+        .owns()
+    );
+    // Lineage without any identity.
+    assert!(
+        !Evidence {
+            marker: false,
+            ..all
+        }
+        .owns()
+    );
+    for identity in [
+        Evidence {
+            same_group: true,
+            marker: false,
+            ..all
+        },
+        Evidence {
+            token: true,
+            marker: false,
+            ..all
+        },
+    ] {
+        assert!(identity.owns());
+        assert!(
+            !Evidence {
+                descendant: false,
+                ..identity
+            }
+            .owns()
+        );
+    }
+    // Path boundaries: a prefix of a longer name is not the directory.
+    assert!(names_path("/r/x", "/r/x"));
+    assert!(names_path("/r/x/output.log", "/r/x"));
+    assert!(names_path("--log=/r/x/output.log", "/r/x"));
+    assert!(!names_path("/r/x-other", "/r/x"));
+    assert!(!names_path("/r/xy/output.log", "/r/x"));
+    assert!(!names_path("tail /r/x/output.log", "/r/x"));
+}
+
+#[test]
+fn a_process_that_was_running_before_the_family_and_names_its_log_is_not_touched() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().to_str().unwrap().to_owned();
+    // Started before the family: its argument names the family's log path, as
+    // `tail -f` of a user would, but it is not the family's.
+    let mut watcher = plain_parker(&[&format!("{marker}/output.log")], None);
+    // A whole process lifecycle passes between the watcher and the family, so
+    // that they cannot share a 10 ms clock tick (the start time of a process is
+    // kept in ticks). This waits for a process to finish, not for a duration.
+    finish_family(family_with_markers(Vec::new()));
+    let family = family_with_markers(vec![marker]);
+    finish_family(family);
+    assert!(
+        running(watcher.id()),
+        "the watcher must survive the cleanup"
+    );
+    watcher.kill().unwrap();
+    watcher.wait().unwrap();
+}
+
+#[test]
+fn a_directory_with_the_same_prefix_is_not_the_familys_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("family");
+    let other = parent.path().join("family-other");
+    let below = dir.join("sub");
+    for d in [&dir, &other, &below] {
+        std::fs::create_dir(d).unwrap();
+    }
+    let family = family_with_markers(vec![dir.to_str().unwrap().to_owned()]);
+    // Both start after the family and are children of this process.
+    let mut elsewhere = plain_parker(&[], Some(&other));
+    let inside = plain_parker(&[], Some(&below));
+    let inside_pid = inside.id();
+    finish_family(family);
+    assert!(
+        running(elsewhere.id()),
+        "the same-prefix directory is not ours"
+    );
+    assert!(
+        product_exec::observe::process(inside_pid as i32).is_none(),
+        "a process working below the family's directory is"
+    );
+    elsewhere.kill().unwrap();
+    elsewhere.wait().unwrap();
+    drop(inside);
+}
+
+#[test]
+fn another_live_family_that_names_this_familys_path_is_not_touched() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().to_str().unwrap().to_owned();
+    let first = family_with_markers(vec![marker.clone()]);
+    let mut command = fake_command("parker");
+    command.arg(format!("{marker}/output.log"));
+    let second = ManagedProcess::spawn(command).unwrap();
+    let second_pid = second.pid();
+    finish_family(first);
+    assert!(
+        running(second_pid as u32),
+        "the other family's tree is not ours"
+    );
+    drop(second);
+    assert!(product_exec::observe::process(second_pid).is_none());
+}
+
+#[test]
+fn a_failed_spawn_step_takes_the_started_child_back() {
+    use product_exec::process::{LAST_ABORTED_SPAWN, SpawnFault};
+    for fault in [SpawnFault::Pidfd, SpawnFault::PidfdClone] {
+        let result = ManagedProcess::spawn_faulty(fake_command("parker"), Vec::new(), fault);
+        assert!(result.is_err(), "{fault:?} must fail the spawn");
+        let pid = LAST_ABORTED_SPAWN.with(std::cell::Cell::get);
+        assert!(pid > 0);
+        assert!(
+            product_exec::observe::process(pid).is_none(),
+            "{fault:?}: the child {pid} was not killed and reaped"
+        );
+    }
+}

@@ -21,9 +21,10 @@
 //!   or its working directory. A process without a marker is never touched.
 use super::observe;
 use std::{
+    collections::{BTreeSet, HashMap},
     io::{BufRead, BufReader, Write},
     os::{
-        fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::process::{CommandExt, ExitStatusExt},
     },
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
@@ -84,6 +85,7 @@ pub struct ManagedProcess {
     waiter: Option<JoinHandle<()>>,
     /// Descendants seen at an observation.
     seen: Vec<observe::ProcInfo>,
+    leader_start: u64,
     markers: Vec<String>,
     token: String,
 }
@@ -102,25 +104,94 @@ fn raw_status(status: &rustix::process::WaitIdStatus) -> ExitStatus {
     ExitStatus::from_raw(raw)
 }
 
-/// Closes, in the child between fork and exec, the descriptors the test process
-/// held without close-on-exec when the list was made (CI runners leave some).
-/// The list may be stale by now, so each entry is re-checked here: a number
-/// that is closed now, or that was reused for a close-on-exec descriptor, is
-/// left alone. No allocation, only syscalls.
-fn close_inherited(list: &[i32]) {
-    for &fd in list {
-        // SAFETY: only inspects the descriptor; `fd` is not used after.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        match rustix::io::fcntl_getfd(borrowed) {
-            Ok(flags) if !flags.contains(rustix::io::FdFlags::CLOEXEC) => {
-                // SAFETY: this forked copy holds `fd` without close-on-exec,
-                // so it is exactly the inheritance being removed.
-                drop(unsafe { OwnedFd::from_raw_fd(fd) });
-            }
-            _ => (),
+/// Marks, in this process, the descriptors that were left without
+/// close-on-exec (CI runners leave some) so that a spawn does not inherit them.
+/// This runs in the parent, where allocation is allowed: each listed number is
+/// first looked up by path (`/proc/self/fd/N`, a syscall that takes no
+/// descriptor), and only a number that is still open is borrowed. A descriptor
+/// that closes after that check makes `fcntl` fail with EBADF, which is ignored;
+/// one whose number was reused only gains the close-on-exec flag, which every
+/// descriptor of std and tokio has anyway.
+fn mark_inherited_cloexec() {
+    for fd in observe::open_fds(std::process::id() as i32)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.fd > 2 && !f.cloexec)
+        .map(|f| f.fd)
+    {
+        if std::fs::read_link(format!("/proc/self/fd/{fd}")).is_err() {
+            continue;
         }
+        // SAFETY: the number was just seen open; a concurrent close can only
+        // make the call below fail, and the borrow does not outlive it.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let _ = rustix::io::fcntl_setfd(borrowed, rustix::io::FdFlags::CLOEXEC);
     }
 }
+
+/// Which step of a spawn fails, to test that a failure takes the child back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpawnFault {
+    None,
+    Pidfd,
+    PidfdClone,
+}
+
+thread_local! {
+    /// Pid of the child the last failed spawn on this thread took back.
+    pub static LAST_ABORTED_SPAWN: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// Kills and reaps a child that was started but cannot be supervised.
+fn abort_spawn(child: &mut Child) {
+    LAST_ABORTED_SPAWN.with(|last| last.set(child.id() as i32));
+    if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The decision of ownership, from the evidence about one process.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Evidence {
+    /// Its parent chain reaches this process (directly or by subreaper adoption).
+    pub descendant: bool,
+    /// It started at or after the family's leader.
+    pub started_with_the_family: bool,
+    /// Its chain passes through the live leader of another family.
+    pub other_family: bool,
+    /// It is in the leader's process group.
+    pub same_group: bool,
+    /// It carries the family's token in its environment.
+    pub token: bool,
+    /// Its command line or working directory names a family marker, on a path
+    /// boundary.
+    pub marker: bool,
+}
+impl Evidence {
+    /// Lineage is required; an identity alone (a string in an argument) never
+    /// is enough.
+    pub fn owns(self) -> bool {
+        self.descendant
+            && self.started_with_the_family
+            && !self.other_family
+            && (self.same_group || self.token || self.marker)
+    }
+}
+
+/// `arg` is `marker` or lies below it; `name=<path>` forms are looked into.
+pub fn names_path(arg: &str, marker: &str) -> bool {
+    let below = |s: &str| {
+        s == marker
+            || s.strip_prefix(marker)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    below(arg) || arg.split_once('=').is_some_and(|(_, value)| below(value))
+}
+
+/// Leaders of the live families of this process.
+static LEADERS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
 impl ManagedProcess {
     /// `markers` are strings that are unique to this family (for example its
@@ -129,25 +200,22 @@ impl ManagedProcess {
     /// The command's stdin/stdout/stderr are replaced by pipes; the child
     /// leads its own process group and carries a unique token in its
     /// environment.
-    pub fn spawn_with(mut command: Command, markers: Vec<String>) -> std::io::Result<Self> {
+    pub fn spawn_with(command: Command, markers: Vec<String>) -> std::io::Result<Self> {
+        Self::spawn_faulty(command, markers, SpawnFault::None)
+    }
+
+    /// `spawn_with`, failing at `fault` when it is not `None` (tests only).
+    pub fn spawn_faulty(
+        mut command: Command,
+        markers: Vec<String>,
+        fault: SpawnFault,
+    ) -> std::io::Result<Self> {
         static SUBREAPER: std::sync::Once = std::sync::Once::new();
         SUBREAPER.call_once(|| {
             rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
                 .expect("become a child subreaper");
         });
-        let inherited: Vec<i32> = observe::open_fds(std::process::id() as i32)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|f| f.fd > 2 && !f.cloexec)
-            .map(|f| f.fd)
-            .collect();
-        // SAFETY: `close_inherited` is allocation-free and only issues syscalls.
-        unsafe {
-            command.pre_exec(move || {
-                close_inherited(&inherited);
-                Ok(())
-            });
-        }
+        mark_inherited_cloexec();
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let token = format!(
             "{}-{}-{:x}",
@@ -165,11 +233,36 @@ impl ManagedProcess {
             .process_group(0);
         let mut child: Child = command.spawn()?;
         let pid = child.id() as i32;
-        // The child has not been waited for, so this pid is still its own.
-        let pidfd = rustix::process::pidfd_open(
-            rustix::process::Pid::from_raw(pid).expect("a child pid"),
-            rustix::process::PidfdFlags::empty(),
-        )?;
+        let leader_start = observe::process(pid).map_or(0, |p| p.start_ticks);
+        // Everything that can fail after the fork is done before any thread
+        // starts, and a failure takes the child back at once.
+        let pidfd = match fault {
+            SpawnFault::Pidfd => Err(std::io::Error::other("injected: pidfd_open failed")),
+            _ => rustix::process::pidfd_open(
+                rustix::process::Pid::from_raw(pid).expect("a child pid"),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .map_err(std::io::Error::from),
+        };
+        let pidfd = match pidfd {
+            Ok(fd) => fd,
+            Err(error) => {
+                abort_spawn(&mut child);
+                return Err(error);
+            }
+        };
+        let wait_fd = match fault {
+            SpawnFault::PidfdClone => Err(std::io::Error::other("injected: pidfd clone failed")),
+            _ => pidfd.try_clone(),
+        };
+        let wait_fd = match wait_fd {
+            Ok(fd) => fd,
+            Err(error) => {
+                abort_spawn(&mut child);
+                return Err(error);
+            }
+        };
+        LEADERS.lock().unwrap().insert(pid);
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr_pipe = child.stderr.take().expect("piped stderr");
         let stdin = child.stdin.take();
@@ -219,7 +312,6 @@ impl ManagedProcess {
             readers.push((handle, done_rx));
         }
         let waiter = {
-            let wait_fd = pidfd.try_clone()?;
             std::thread::spawn(move || {
                 // Exit without reaping: the zombie keeps pid and group reserved.
                 let status = loop {
@@ -254,6 +346,7 @@ impl ManagedProcess {
             reader_bound: READER_JOIN_BOUND,
             waiter: Some(waiter),
             seen: Vec::new(),
+            leader_start,
             markers,
             token,
         })
@@ -381,37 +474,57 @@ impl ManagedProcess {
         }
     }
 
-    /// True when `pid` is a process this family owns: it carries the token in
-    /// its environment, or a marker on its command line or in its working
-    /// directory. Never true for the supervising process itself.
-    fn carries_marker(&self, pid: i32) -> bool {
-        if pid == std::process::id() as i32 {
-            return false;
+    /// The evidence about one process of the table, `parent_of` being the
+    /// parent link of every process. Reads only `/proc`.
+    fn evidence(&self, p: &observe::ProcInfo, parent_of: &HashMap<i32, i32>) -> Evidence {
+        let me = std::process::id() as i32;
+        // Walk up to the process that is a child of this one.
+        let mut top = None;
+        let mut at = p.pid;
+        for _ in 0..4096 {
+            match parent_of.get(&at) {
+                Some(&parent) if parent == me => {
+                    top = Some(at);
+                    break;
+                }
+                Some(&parent) if parent > 1 => at = parent,
+                _ => break,
+            }
         }
-        let needle = format!("{OWNER_ENV}={}", self.token).into_bytes();
-        if std::fs::read(format!("/proc/{pid}/environ"))
-            .is_ok_and(|env| env.split(|b| *b == 0).any(|entry| entry == needle))
-        {
-            return true;
+        let token = {
+            let needle = format!("{OWNER_ENV}={}", self.token).into_bytes();
+            std::fs::read(format!("/proc/{}/environ", p.pid))
+                .is_ok_and(|env| env.split(|b| *b == 0).any(|entry| entry == needle))
+        };
+        let marker = !self.markers.is_empty() && {
+            let cwd = std::fs::read_link(format!("/proc/{}/cwd", p.pid))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.markers.iter().any(|m| {
+                names_path(&cwd, m) || observe::cmdline(p.pid).iter().any(|arg| names_path(arg, m))
+            })
+        };
+        Evidence {
+            descendant: top.is_some(),
+            // The clock has 10 ms ticks: a process that started in the same tick
+            // as the leader cannot be told apart from it by time alone.
+            started_with_the_family: p.start_ticks >= self.leader_start,
+            other_family: top
+                .is_some_and(|t| t != self.pid && LEADERS.lock().unwrap().contains(&t)),
+            same_group: p.pgid == self.pid,
+            token,
+            marker,
         }
-        if self.markers.is_empty() {
-            return false;
-        }
-        let cmdline = observe::cmdline(pid).join(" ");
-        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.markers
-            .iter()
-            .any(|m| cmdline.contains(m.as_str()) || cwd.starts_with(m.as_str()))
     }
 
     /// Everything this family owns right now, except the leader: processes
-    /// seen earlier (same incarnation), processes carrying a marker, and the
-    /// descendants of both.
+    /// seen earlier (same incarnation), processes whose evidence says they are
+    /// ours, and the descendants of both. A process the evidence does not
+    /// clear is never touched, whatever its command line says.
     fn owned_now(&self) -> Vec<observe::ProcInfo> {
         let all = observe::all_processes();
-        let mut found: std::collections::BTreeSet<i32> = self
+        let parent_of: HashMap<i32, i32> = all.iter().map(|p| (p.pid, p.ppid)).collect();
+        let mut found: BTreeSet<i32> = self
             .seen
             .iter()
             .filter(|s| {
@@ -422,13 +535,9 @@ impl ManagedProcess {
             .collect();
         found.extend(
             all.iter()
-                .filter(|p| p.pid != self.pid && self.carries_marker(p.pid))
+                .filter(|p| p.pid != self.pid && self.evidence(p, &parent_of).owns())
                 .map(|p| p.pid),
         );
-        // Members of the leader's process group: the group id is the leader's
-        // pid, reserved until the leader is reaped, so membership proves
-        // ownership even for a zombie (whose environment can no longer be read).
-        found.extend(all.iter().filter(|p| p.pgid == self.pid).map(|p| p.pid));
         loop {
             let before = found.len();
             for p in &all {
@@ -532,6 +641,7 @@ impl ManagedProcess {
             let _ = self.reaped.recv_timeout(Duration::from_secs(30));
             let _ = waiter.join();
         }
+        LEADERS.lock().unwrap().remove(&self.pid);
         self.stdin = None;
         let mut unjoined = 0;
         for (handle, done) in self.readers.drain(..) {
