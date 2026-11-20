@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sealed_core_that_matches_its_manifest_is_accepted_where_no_helper_exists() {
+    fn a_sealed_copy_that_matches_its_manifest_is_accepted() {
         let product = core_only();
         let artifact = product.verify().unwrap();
         assert_eq!(artifact.manifest.package, "evorch-core");
