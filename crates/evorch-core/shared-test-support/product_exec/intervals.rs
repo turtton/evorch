@@ -230,8 +230,17 @@ pub fn exec_cycle(rec: &mut Recorder, n: usize, artifact: &ProductArtifact, harn
 }
 
 /// A byte-identical copy of the artifact at a new path (new inode), verified
-/// like any artifact.
+/// like any artifact. A sealed product is copied as its whole closure (the core
+/// is never copied alone); only a measurement-only artifact, which has no
+/// helper, is copied as a core and a manifest.
 pub fn fresh_copy(artifact: &ProductArtifact, dir: &Path) -> ProductArtifact {
+    if let Some(sealed) = &artifact.sealed {
+        let copied = sealed
+            .copy_closure_into(dir)
+            .unwrap_or_else(|reason| panic!("copy the sealed closure: {reason}"));
+        return ProductArtifact::from_sealed(&copied, &|name| std::env::var_os(name))
+            .expect("the closure copy verifies");
+    }
     let copy = dir.join("evorch-core");
     std::fs::copy(&artifact.path, &copy).expect("copy the artifact");
     let mut manifest = artifact.manifest.clone();

@@ -590,6 +590,44 @@ fn isolated_environment_removes_every_directory() {
 // ----------------------------------------------------------- the product
 
 #[test]
+fn a_fresh_copy_of_the_sealed_product_keeps_its_closure_and_starts() {
+    let artifact = ProductArtifact::require();
+    let dir = tempfile::tempdir().unwrap();
+    let copy = product_exec::intervals::fresh_copy(&artifact, dir.path());
+    let sealed = copy
+        .sealed
+        .as_ref()
+        .expect("a sealed product is copied sealed");
+    let guard = sealed
+        .guard
+        .as_ref()
+        .expect("the helper and its bundle are copied with the core on Linux");
+    assert_ne!(copy.path, artifact.path, "a copy has a path of its own");
+    assert_eq!(
+        copy.path.parent(),
+        Some(dir.path().canonicalize().unwrap().as_path())
+    );
+    assert_eq!(guard.helper.parent(), copy.path.parent());
+    assert_eq!(guard.bundle.parent(), copy.path.parent());
+    assert_eq!(sealed.manifest_path.parent(), copy.path.parent());
+    assert_eq!(copy.manifest.elf_sha256, artifact.manifest.elf_sha256);
+
+    let env = IsolatedEnv::new();
+    let provider = MockProvider::scripted(vec![mock_openai::ScriptedResponse::text_stream(
+        "f4p-copy",
+        "mock-model",
+        ["observed"],
+    )]);
+    env.write_product_config(&provider.base_url(), product_exec::launch::KEY_ENV);
+    let mut product = ProductLaunch::new(&copy, &env).start().unwrap();
+    product.wait_ready().expect("the copy reports Ready");
+    let observed = product.observe();
+    assert!(observed.exe_is_artifact, "{:?}", observed.exe);
+    let described = copy.describe().expect("--describe-handoff of the copy");
+    assert_eq!(described.build_identity, observed.artifact_identity);
+}
+
+#[test]
 fn product_starts_isolated_is_observed_serves_the_wire_and_is_taken_back() {
     let artifact = ProductArtifact::require();
     let env = IsolatedEnv::new();

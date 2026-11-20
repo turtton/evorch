@@ -298,7 +298,7 @@ done
 ci=.github/workflows/ci.yml
 ci_selects_ignored() { # <test target>: one nextest line selecting it as an ignored test that must exist
   local line
-  line=$(grep -E 'nextest run .*--test "?'"$1"'"?( |$)' "$ci") || return 1
+  line=$(grep -E '(nextest|guard-cargo\.sh) run .*--test "?'"$1"'"?( |$)' "$ci") || return 1
   grep -q -e '--run-ignored only' <<< "$line" && grep -q -e '--no-tests fail' <<< "$line"
 }
 is_ignored_target() { grep -q '^#\[ignore' "$1"; }

@@ -109,6 +109,12 @@ jobs:
       # distribution's build and refuses a changed, featured or unsealed copy.
       - name: Product artifact sealing
         run: scripts/tests/test_product_artifact.sh
+      # The helper's dependency graph (cargo tree --locked, normal and build edges,
+      # every target) must equal the receipt in crates/process-guard/Cargo.toml: a
+      # dependency change otherwise leaves the compat identity of the delivered
+      # helper unchanged.
+      - name: Process guard dependency receipt
+        run: scripts/guard-artifact.sh check-dependencies
       # Every workspace member is in exactly one test group, and the merge gate
       # of the group inventories rejects what it should.
       - name: Test group definition and inventory merge gate
@@ -180,6 +186,7 @@ jobs:
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.
   docs-schema:
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -202,6 +209,14 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-ci-workspace
           save-if: false
+      # The doctests start owned children through the library policy: the helper
+      # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # workbench-authority is excluded: other packages' dev-dependencies enable its
       # `test-support` feature, and the workspace-wide feature union would then compile
       # its compile-fail doctests against the fake verifier. The authority's doctests
@@ -264,12 +279,15 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p event-bus --features otel-exporter --doc --locked
 
-  # The shipped evorch-core, built apart from every test build with the arguments
-  # of the distribution (flake.nix `evorch-core`: `-p evorch-core --bin evorch-core`,
-  # release profile, no feature). scripts/product-artifact.sh seals an immutable
-  # copy with a manifest; every job that runs a product test downloads that copy and
-  # reads it through EVORCH_PRODUCT_CORE_EXE / EVORCH_PRODUCT_MANIFEST
-  # (crates/test-support/src/product_artifact.rs). A test build never touches it.
+  # The shipped evorch-core and the process-guard helper, built together apart from
+  # every test build with the arguments of the distribution (flake.nix
+  # `evorch-core`: `-p evorch-core -p process-guard --bin evorch-core --bin
+  # evorch-process-guard`, release profile, no feature). scripts/product-artifact.sh
+  # seals an immutable closure (core, helper, guard-bundle.json, manifest); every
+  # job that runs a test or a product binary downloads that copy and reads it
+  # through EVORCH_PRODUCT_CORE_EXE / EVORCH_PRODUCT_MANIFEST and
+  # EVORCH_PROCESS_GUARD_BUNDLE (crates/test-support/src/product_artifact.rs).
+  # A test build never touches it.
   product-artifact:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -301,6 +319,12 @@ jobs:
             echo '```json'
             cat "$RUNNER_TEMP/evorch-product/product-manifest.json"
             echo '```'
+            if [ -f "$RUNNER_TEMP/evorch-product/guard-bundle.json" ]; then
+              echo
+              echo '```json'
+              cat "$RUNNER_TEMP/evorch-product/guard-bundle.json"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -325,12 +349,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: runtime, shard: 1, shards: 2, cef: false, product: true }
-          - { group: runtime, shard: 2, shards: 2, cef: false, product: true }
-          - { group: gui, shard: 1, shards: 2, cef: true, product: false }
-          - { group: gui, shard: 2, shards: 2, cef: true, product: false }
-          - { group: storage-tools, shard: 1, shards: 1, cef: false, product: false }
-          - { group: support, shard: 1, shards: 1, cef: false, product: false }
+          - { group: runtime, shard: 1, shards: 2, cef: false }
+          - { group: runtime, shard: 2, shards: 2, cef: false }
+          - { group: gui, shard: 1, shards: 2, cef: true }
+          - { group: gui, shard: 2, shards: 2, cef: true }
+          - { group: storage-tools, shard: 1, shards: 1, cef: false }
+          - { group: support, shard: 1, shards: 1, cef: false }
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -360,7 +384,9 @@ jobs:
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
         with:
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
+          # strace: the process-guard lifecycle cells need it, and they run in
+          # the support and runtime groups.
+          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git${{ (matrix.group == 'support' || matrix.group == 'runtime') && ' strace' || '' }}
       # `gui` enables CEF by default, so only the gui group (and lint/docs-schema,
       # which build the whole workspace) links libcef.so. None of the tests starts
       # CEF (the cef-e2e job does), so only a libcef.so link goes on the loader path.
@@ -374,16 +400,17 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      # The groups that run product tests (the evorch-core placeholders and, later,
-      # the real tests, including the f4_product_cache and agent_observation_cache
-      # cache binaries of the gate below) receive the sealed product artifact.
+      # Every group receives the sealed product closure: the helper bundle it carries
+      # is what the test binaries are bound to (scripts/guard-cargo.sh), and the
+      # groups that run product tests (the evorch-core placeholders and, later, the
+      # real tests, including the f4_product_cache and agent_observation_cache cache
+      # binaries of the gate below) read the core from it too. Which tests a group
+      # selects does not depend on it.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: matrix.product
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
       - name: Install the sealed product artifact
-        if: matrix.product
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
       # `ci` job merges these listings. The runs below reuse the binaries.
@@ -414,13 +441,15 @@ jobs:
       # non-ignored test belongs to exactly one of the three suites.
       # Opt-in process harness: Linux only, not part of the default inventory.
       # The targeted second run fails if the fixture tests disappear entirely.
+      # Built, bound to the helper and run from one nextest metadata
+      # (scripts/guard-cargo.sh), like every other run of this job.
       - name: Core exec handoff and recovery proof fixtures
         if: matrix.group == 'support'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
-          cargo nextest run -p core-instance --features recovery-test-support --locked --no-tests fail
-          cargo nextest run -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked --no-tests fail
+          scripts/guard-cargo.sh run -p core-instance --features recovery-test-support --locked --no-tests fail
+          scripts/guard-cargo.sh run -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked --no-tests fail
       - name: Remaining tests
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -447,6 +476,7 @@ jobs:
   # nextest suite (the doctests above do run).
   cache-save:
     if: github.ref == 'refs/heads/main'
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -472,6 +502,14 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      # The doctests run (they start owned children through the library policy), so
+      # they need the same sealed helper bundle as docs-schema.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Build the dependencies of every other job
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -550,7 +588,7 @@ jobs:
         timeout-minutes: 30
         env:
           RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
-        run: cargo check --locked --release -p evorch -p evorch-core --bin evorch --bin evorch-core
+        run: cargo check --locked --release -p evorch -p evorch-core -p process-guard --bin evorch --bin evorch-core --bin evorch-process-guard
       - name: Connect to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
         if: steps.scope.outputs.full != 'false'
@@ -599,18 +637,26 @@ jobs:
       - name: Build and smoke-test flake package in the Nix sandbox
         if: steps.scope.outputs.full != 'false'
         run: nix build -L .#default --out-link ./result-default
+      # evorch-core is not in the default package's closure (that one carries the
+      # core of `evorch`), but it is a distribution of its own with its own helper
+      # bundle; its install check (bundle verify and a child through the pinned
+      # helper image) runs only when it is built.
+      - name: Build and smoke-test the evorch-core package in the Nix sandbox
+        if: steps.scope.outputs.full != 'false'
+        run: nix build -L .#evorch-core --out-link ./result-core
       - name: Push to attic
         if: steps.scope.outputs.full != 'false' && success() && github.ref == 'refs/heads/main'
         timeout-minutes: 60
         run: |
           # How the runner reaches attic (direct or DERP relay) bounds throughput.
           timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          scripts/push-attic.sh ./result-attic ./result-default ./result-deps ./result-cef-deps
+          scripts/push-attic.sh ./result-attic ./result-default ./result-core ./result-deps ./result-cef-deps
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # ignored の GUI テストを実行する（ADR 0009 / issue #9 の受理基準）。
   # 証跡マトリクスと native/Wayland 検査は並列の gui-evidence job が担う。
   offscreen-gate:
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -645,6 +691,14 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      # The ignored GUI tests start owned children: the helper bundle of the sealed
+      # product is bound to the test binaries by scripts/guard-cargo.sh below.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # The ignored html_preview tests start a real CEF; the cef-e2e job runs them.
       - name: Run all ignored GUI tests (required real render)
         # Selects the packages and features of the gui test group, which cache-save
@@ -654,7 +708,7 @@ jobs:
         # `-p gui --tests` run selected.
         run: |
           sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
-          cargo nextest run --locked $sel --test-threads 1 --run-ignored only -E 'package(=gui) & not (kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run --locked $sel --test-threads 1 --run-ignored only -E 'package(=gui) & not (kind(lib) & test(/^html_preview::tests::/))' --success-output immediate --no-tests fail
         env:
           CARGO_TARGET_DIR: target/ci-shared
           EVORCH_REQUIRE_ADAPTER: "1"
@@ -677,6 +731,7 @@ jobs:
   # started directly, so this job needs the gui library but none of the test
   # binaries that offscreen-gate builds.
   gui-evidence:
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
@@ -711,6 +766,15 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence
+      # headless_capture and native_qa_window are started directly and are not
+      # applications that scripts/guard-artifact.sh binds; the library policy
+      # reads the sealed product's helper bundle from EVORCH_PROCESS_GUARD_BUNDLE.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Build the evidence binaries
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -793,10 +857,10 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      - name: Run agent browser test
-        run: cargo nextest run -p browser --test agent_chromium --test agent_observation --run-ignored only --success-output immediate --no-tests fail
-      # Registered by I0 for O-V1 and O-V2; the placeholders only prove the targets
-      # are selected (--no-tests fail), and the second one checks the sealed product
+      # The sealed product closure comes before the first browser test: every run
+      # below is bound to its helper bundle by scripts/guard-cargo.sh. I0 registered
+      # the O-V1 and O-V2 targets; the placeholders only prove the targets are
+      # selected (--no-tests fail), and the second one checks the sealed product
       # artifact the job downloaded.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -804,19 +868,21 @@ jobs:
           path: ${{ runner.temp }}/product-download
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
+      - name: Run agent browser test
+        run: scripts/guard-cargo.sh run -p browser --test agent_chromium --test agent_observation --run-ignored only --success-output immediate --no-tests fail
       - name: Run the host observation source lifecycle against Chromium
-        run: cargo nextest run -p workbench-host --test "$HOST_LIFECYCLE_TEST" --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p workbench-host --test "$HOST_LIFECYCLE_TEST" --run-ignored only --success-output immediate --no-tests fail
       - name: Run the core observation test against Chromium
-        run: cargo nextest run -p evorch-core --test agent_observation_chromium --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p evorch-core --test agent_observation_chromium --run-ignored only --success-output immediate --no-tests fail
       - name: Run web workbench browser test
         env:
           WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
-        run: cargo nextest run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
       # Registered by the 5a-I integration PR for CW: a placeholder target until the
       # leaf adds the browser test of the public restart management (the contract
       # tests over real HTTP are public_restart_contracts).
       - name: Run the public restart web browser test
-        run: cargo nextest run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -874,20 +940,20 @@ jobs:
         with:
           tool: cargo-nextest
       - name: CEF offline isolation and crash recovery
-        run: cargo nextest run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
       # The real renderer binary beside the CEF helper it starts (16a-2). The
       # ignored tests are the only ones that run real CEF in the renderer
       # process; the ordinary matrix runs the fake helper instead.
       - name: Out-of-process renderer helper through real CEF
         run: |
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          cargo nextest run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
       # Production core owner tests replace the installation placeholder in F1.
       - name: Core renderer owner through real CEF
         run: |
           cargo build -p evorch-renderer
           export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
-          cargo nextest run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
       # Stage 16b PR V: the core-client page against a production core and the real
       # helper (conversation -> artifact -> preview -> inspection; exit and kill).
       - name: Core-client page through real CEF
@@ -895,16 +961,16 @@ jobs:
           cargo build -p evorch-renderer
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
-          cargo nextest run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
         run: |
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          cargo nextest run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
       # Registered by I0 for F4-E, O-V3 and O-V2. The placeholders prove only that
       # the targets are selected (--no-tests fail) and that the sealed product
       # artifact reached this job; the real tests replace them.
       - name: Product tests through real CEF
-        run: cargo nextest run -p evorch-core --test f4_product_cef --test agent_observation_restart --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --run-ignored only --success-output immediate --no-tests fail
       - name: GUI observation through real CEF and Chromium
-        run: cargo nextest run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail

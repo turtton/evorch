@@ -78,7 +78,7 @@ class HarnessTests(unittest.TestCase):
             "with open(os.environ['TRACE'], 'a') as trace:\n"
             "    trace.write(json.dumps([name, *sys.argv[1:]]) + '\\n')\n"
             "failure = os.environ.get('FAIL_NEXTEST')\n"
-            "if sys.argv[1:3] == ['nextest', 'run'] and (\n"
+            "if name == 'guard-cargo.sh' and sys.argv[1:2] == ['run'] and (\n"
             "    failure == 'all' or (failure == 'workspace' and '--workspace' in sys.argv)\n"
             "):\n"
             "    print('fixture nextest failure', file=sys.stderr)\n"
@@ -93,6 +93,7 @@ class HarnessTests(unittest.TestCase):
         for name in ["cargo", "mktemp"]:
             (bin_dir / name).symlink_to(dispatch)
         (scripts / "check-cache-contracts.sh").symlink_to(dispatch)
+        (scripts / "guard-cargo.sh").symlink_to(dispatch)
         (scripts / "tests" / "test_gui_requires_cef.sh").symlink_to(dispatch)
         self.trace = self.root / "trace.jsonl"
         self.env = {
@@ -100,6 +101,7 @@ class HarnessTests(unittest.TestCase):
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FIXTURE_ROOT": str(self.root),
             "TRACE": str(self.trace),
+            "EVORCH_PROCESS_GUARD_BUNDLE": "/fixture/guard-bundle.json",
         }
         self.env.pop("FAIL_NEXTEST", None)
         self.env.pop("FAIL_WORKSPACE_DOC", None)
@@ -125,14 +127,14 @@ class HarnessTests(unittest.TestCase):
 
     def assert_runners(self, commands, selections, docs):
         cargo = [command[1:] for command in commands if command[0] == "cargo"]
-        normal = [command for command in cargo if command[:2] == ["nextest", "run"]]
+        normal = [command[1:] for command in commands if command[0] == "guard-cargo.sh"]
         self.assertEqual(len(normal), len(selections))
         for command in normal:
-            self.assertEqual(command[2:4], ["--no-tests", "fail"])
-        self.assertEqual([command[4:] for command in normal], selections)
+            self.assertEqual(command[1:3], ["--no-tests", "fail"])
+        self.assertEqual([command[3:] for command in normal], selections)
         self.assertEqual([command for command in cargo if command[0] == "test"], docs)
         other_count = sum(command[0] in ("fmt", "clippy") for command in cargo)
-        self.assertEqual(len(cargo), len(selections) + len(docs) + other_count)
+        self.assertEqual(len(cargo), len(docs) + other_count)
 
     def test_default_focused_uses_isolated_runner_and_retains_tools_doctests(self):
         result, commands = self.invoke()
@@ -163,8 +165,8 @@ class HarnessTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fixture nextest failure", result.stderr)
         self.assertIn("Full log:", result.stderr)
-        self.assertEqual(commands[-1][1:3], ["nextest", "run"])
-        runner_count = sum(command[1:3] == ["nextest", "run"] for command in commands)
+        self.assertEqual(commands[-1][:2], ["guard-cargo.sh", "run"])
+        runner_count = sum(command[:2] == ["guard-cargo.sh", "run"] for command in commands)
         self.assertEqual(runner_count, 1)
 
     def test_workspace_failure_still_runs_doctests_before_returning_failure(self):

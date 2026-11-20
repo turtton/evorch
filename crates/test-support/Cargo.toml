@@ -19,6 +19,9 @@ tools = { path = "../tools" }
 # Removes the per-process state directory at exit (atexit).
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+process-guard = { path = "../process-guard" }
+
 [dev-dependencies]
 catalog = { path = "../catalog" }
 tokio = { workspace = true, features = ["macros", "rt"] }

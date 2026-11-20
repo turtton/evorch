@@ -68,13 +68,16 @@ if [[ -n "$group" ]]; then
     < <(jq -r --arg g "$group" '.groups[$g].packages[]' "$groups_file")
   while read -r f; do selection+=(-F "$f"); done \
     < <(jq -r --arg g "$group" '.groups[$g].features[]?' "$groups_file")
-elif [[ -n "${EVORCH_CI_METADATA_DIR:-}" ]]; then
-  # Metadata is generated in this checkout immediately before execution. These
-  # flags reuse binaries without invoking Cargo or changing the feature union.
-  selection=(--cargo-metadata "$EVORCH_CI_METADATA_DIR/cargo.json"
-            --binaries-metadata "$EVORCH_CI_METADATA_DIR/default-binaries.json")
+
 else
   selection=(--workspace --locked)
+fi
+if [[ -n "${EVORCH_CI_METADATA_DIR:-}" ]]; then
+  if [[ ! -f "$EVORCH_CI_METADATA_DIR/default-binaries.json" ]]; then
+    scripts/guard-cargo.sh prepare "$EVORCH_CI_METADATA_DIR" "${selection[@]}"
+  fi
+  selection=(--cargo-metadata "$EVORCH_CI_METADATA_DIR/cargo.json"
+            --binaries-metadata "$EVORCH_CI_METADATA_DIR/default-binaries.json")
 fi
 if [[ -n "$shard" ]]; then
   [[ "$shard" =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]] || { echo "--shard must look like K/N: $shard" >&2; exit 2; }
@@ -87,4 +90,4 @@ fi
 if [[ "$mode" == list ]]; then
   exec cargo nextest list "${selection[@]}" "${extra[@]}" --message-format json "$@"
 fi
-exec cargo nextest run "${selection[@]}" "${extra[@]}" --no-tests fail "$@"
+exec scripts/guard-cargo.sh run "${selection[@]}" "${extra[@]}" --no-tests fail "$@"

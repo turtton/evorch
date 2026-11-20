@@ -69,7 +69,8 @@
         "workbench-client",
         "workbench-host",
         "workbench-protocol",
-        "workbench-web"
+        "workbench-web",
+        "process-guard"
       ],
       "features": [
         "storage/unchecked-open",
