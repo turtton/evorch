@@ -45,9 +45,16 @@ pub fn activate(
     runtime: &AgentRuntime,
     mut component: runtime::PausedRecoveryComponent,
     authority: runtime::CurrentRecoveryAuthority,
-) -> Result<Vec<RunId>, BootstrapError> {
-    runtime.restore_relations_and_continuations(&mut component)?;
-    Ok(runtime.activate_component(component, authority)?)
+    reservation: impl Into<runtime::ActivationReservation>,
+) -> Result<(Vec<RunId>, runtime::ActivatedReservation), runtime::ActivationFailure> {
+    let reservation = reservation.into();
+    if let Err(error) = runtime.restore_relations_and_continuations(&mut component) {
+        return Err(runtime::ActivationFailure {
+            error: Box::new(error),
+            reservation: Some(reservation),
+        });
+    }
+    runtime.activate_component(component, authority, reservation)
 }
 
 /// Legacy independent-manifest fixture writer, not the production capture protocol.

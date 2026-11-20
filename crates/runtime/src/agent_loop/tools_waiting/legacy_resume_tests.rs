@@ -486,7 +486,16 @@ async fn resume_legacy_manifests(include_events: bool) {
                 })
                 .collect(),
         };
-        ids.extend(runtime.activate_component(paused, authority).unwrap());
+        ids.extend(
+            ({
+                let reservation = runtime
+                    .reserve_automatic_activation(&(paused).claim().manifest_id)
+                    .unwrap();
+                runtime.activate_component(paused, authority, reservation)
+            })
+            .unwrap()
+            .0,
+        );
     }
     assert_eq!(ids.len(), 12);
     let children: Vec<_> = ids

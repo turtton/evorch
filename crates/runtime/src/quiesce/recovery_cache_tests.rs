@@ -295,7 +295,10 @@ async fn assert_recovery_cache(human_after_c3: bool) {
         );
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runtime.activate_component(paused, authority)
+                let reservation = runtime
+                    .reserve_automatic_activation(&(paused).claim().manifest_id)
+                    .unwrap();
+                runtime.activate_component(paused, authority, reservation)
             }))
             .is_err()
         );
@@ -328,7 +331,15 @@ async fn assert_recovery_cache(human_after_c3: bool) {
         drop(runtime);
         storage.close();
     } else {
-        runtime.activate_component(paused, authority).unwrap();
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
+        })
+        .unwrap()
+        .1
+        .release();
         let evidence = graph_evidence(&config);
         model.parent_resumed.notified().await;
         assert_eq!(graph_evidence(&config), evidence);

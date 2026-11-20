@@ -337,3 +337,31 @@ fn a_new_archive_hint_survives_an_older_unarchived_result() {
     assert!(!f.scratch.dir(&f.key).exists());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn epoch_only_hook_wakes_archive_after_a_competing_observation() {
+    let f = Fixture::new();
+    let (observed, observations) = mpsc::channel();
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let calls = AtomicUsize::new(0);
+    f.host.set_scratch_archive_checker(Arc::new({
+        let resume = resume.clone();
+        move |_| {
+            let pass = calls.fetch_add(1, Ordering::SeqCst);
+            observed.send(pass).unwrap();
+            if pass == 0 {
+                resume.wait();
+            }
+            Ok(true)
+        }
+    }));
+    f.host.hint_scratch_archive("thread");
+    assert_eq!(observations.recv().unwrap(), 0);
+    f.scratch.advance_usage_epoch(&f.key);
+    resume.wait();
+    // The first pass sees an epoch mismatch and retains its consumed hint.
+    // Nothing releases a user or sends another hint: only the hook wakes it.
+    assert_eq!(observations.recv().unwrap(), 1);
+    f.host.scratch_archive_barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+}

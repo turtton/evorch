@@ -23,6 +23,7 @@ async fn restored_delivery_panic_seals_followup_before_error() {
     let store = runtime.shared.run_store.get().unwrap();
     let bundle = store.restore_bundle(fixture.run).unwrap().unwrap();
     let restored = RestoredState::for_conversation_bundle(&bundle).unwrap();
+    let scratch_key = runtime.scratch_key(fixture.run);
     {
         let mut intents = runtime.shared.spawn_intents.lock().unwrap();
         // An explicit restored registration starts a new execution.
@@ -40,6 +41,7 @@ async fn restored_delivery_panic_seals_followup_before_error() {
         runtime
             .register_restored(
                 &mut lock_runs(&runtime.shared.runs),
+                scratch_key,
                 &intents,
                 execution,
                 (

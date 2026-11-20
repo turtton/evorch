@@ -69,7 +69,8 @@ pub enum RestartDisposition {
     Released,
     Quarantined,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RestartComponent {
     pub manifest_id: String,
     pub disposition: RestartDisposition,

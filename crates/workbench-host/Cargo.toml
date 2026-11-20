@@ -51,10 +51,16 @@ thiserror = { workspace = true }
 # Test-only entry points for the in-process adapter's tests.
 test-support = ["runtime/recovery-test-support", "runtime/idle-test-support"]
 
+[[test]]
+name = "q2_disposal_retention"
+path = "tests/q2_disposal_retention.rs"
+harness = false
+
 [dev-dependencies]
 # Integration tests of this crate use the test-support entry points (the
 # observation gate), which the crate alone does not enable for its own tests.
 workbench-host = { path = ".", features = ["test-support"] }
+core-instance = { path = "../core-instance" }
 workbench-authority = { path = "../workbench-authority", features = ["test-support"] }
 runtime = { path = "../runtime", features = ["recovery-test-support", "idle-test-support"] }
 test-socket-dir = { path = "../test-socket-dir" }

@@ -1,6 +1,36 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Explicit manual supervisor completion; queries and automatic recovery never call this.
+    pub fn finish_recovery_graph_control(
+        &self,
+        expected: graph_control::GraphControlRecord,
+    ) -> Result<graph_control::GraphControlRecord, StorageError> {
+        match self.recovery_write(Write::GraphFinish(expected))? {
+            Written::GraphControl(record) => Ok(record),
+            _ => unreachable!("graph finish reply"),
+        }
+    }
+    /// Persist per-thread observations without creating executable authority.
+    pub fn write_recovery_graph_progress(
+        &self,
+        request: graph_progress::GraphThreadProgressWrite,
+    ) -> Result<graph_progress::GraphThreadProgress, StorageError> {
+        match self.recovery_write(Write::GraphProgress(Box::new(request)))? {
+            Written::GraphProgress(result) => Ok(result),
+            _ => unreachable!("graph progress reply"),
+        }
+    }
+    /// Caller retains its owner guards until this FULL writer reply or readback.
+    pub fn write_recovery_graph_control(
+        &self,
+        request: graph_control::GraphControlWrite,
+    ) -> Result<graph_control::GraphControlRecord, StorageError> {
+        match self.recovery_write(Write::GraphControl(Box::new(request)))? {
+            Written::GraphControl(record) => Ok(record),
+            _ => unreachable!("graph control reply"),
+        }
+    }
     /// Per-writer deterministic fault for the next restart mutation only.
     #[cfg(any(test, feature = "recovery-test-support"))]
     pub fn inject_restart_write_fault(&self, after_commit: bool) -> Result<(), StorageError> {
@@ -159,6 +189,20 @@ impl StorageHandle {
             stopped,
         })
         .map(|_| ())
+    }
+    /// Pause the next graph-control commit at an explicit test-only rendezvous.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn pause_next_graph_write(
+        &self,
+        reached: std::sync::mpsc::Sender<bool>,
+        released: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), StorageError> {
+        self.lane_job(false, move |_| {
+            crate::recovery::install_graph_write_pause(crate::recovery::GraphWritePause {
+                reached,
+                released,
+            })
+        })
     }
     fn recovery_write(&self, write: Write) -> Result<Written, StorageError> {
         self.request(|reply| Command::Recovery(write, reply))

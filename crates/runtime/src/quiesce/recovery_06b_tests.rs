@@ -72,6 +72,236 @@ fn adopt_for_stop(
     (owner, adopted)
 }
 
+#[test]
+fn graph_reservations_are_exclusive_bounded_and_released_on_drop() {
+    let f = Fixture::new(0);
+    let runtime = &f.runtime;
+    let first = runtime.reserve_automatic_activation("graph").unwrap();
+    assert!(matches!(
+        runtime.reserve_automatic_activation("graph"),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Contended
+        })
+    ));
+    let mut held = (0..63)
+        .map(|n| {
+            runtime
+                .reserve_automatic_activation(&format!("graph-{n}"))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        runtime.reserve_automatic_activation("overflow"),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Capacity
+        })
+    ));
+    drop(first);
+    held.push(runtime.reserve_automatic_activation("graph").unwrap());
+    runtime
+        .check_automatic_activation(held.last().unwrap())
+        .unwrap();
+    drop(held);
+    runtime.reserve_automatic_activation("overflow").unwrap();
+}
+
+#[tokio::test]
+async fn activation_ack_keeps_manual_reservation_contended_until_binding_publication_finishes() {
+    for explicit_release in [false, true] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let prepared = prepare(&f, &runtime);
+        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let (proof, startup, root) = prepared_adoption::evidence(&f, &prepared.claim().claim_id);
+        let mut paused = runtime
+            .adopt_prepared_claim(proof, startup, &root, &authority)
+            .unwrap();
+        runtime
+            .restore_relations_and_continuations(&mut paused)
+            .unwrap();
+        let manifest = paused.claim().manifest_id.clone();
+        let reservation = runtime.reserve_automatic_activation(&manifest).unwrap();
+        let (runs, published) = runtime
+            .activate_component(paused, authority, reservation)
+            .unwrap();
+        assert_eq!(runs, vec![run]);
+        let effect = storage::recovery::graph_control::GraphEffectKey {
+            operation_id: "manual-after-ack".into(),
+            attempt_nonce: "attempt".into(),
+        };
+        // The caller has the FULL ACK but deliberately has not yet called
+        // complete_root_recovery. No timing or provider scheduling is involved.
+        assert!(matches!(
+            runtime.reserve_manual_activation(&manifest, effect.clone(), 0),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Contended
+            })
+        ));
+        // Both normal publication completion and early-return/failure drop
+        // return precisely this slot; the guard does not mint authority.
+        if explicit_release {
+            published.release();
+        } else {
+            drop(published);
+        }
+        drop(
+            runtime
+                .reserve_manual_activation(&manifest, effect, 0)
+                .unwrap(),
+        );
+        runtime.cancel(run).unwrap();
+        let _ = runtime.wait(run).await;
+    }
+}
+
+#[tokio::test]
+async fn known_activation_failure_retains_reservation_until_caller_cleanup_finishes() {
+    let f = Fixture::new(0);
+    let run = saved(&f).await;
+    let runtime = new_process(&f);
+    let paused = prepare(&f, &runtime);
+    let (_owner, authority) = prepared_adoption::authority(&f, run);
+    let manifest = paused.claim().manifest_id.clone();
+    let reservation = runtime.reserve_automatic_activation(&manifest).unwrap();
+    // Missing relations is a definite pre-writer failure, not an uncertain ACK.
+    let mut failure = runtime
+        .activate_component(paused, authority, reservation)
+        .unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("relations have not been prepared")
+    );
+    assert!(failure.reservation.is_some());
+    let effect = storage::recovery::graph_control::GraphEffectKey {
+        operation_id: "manual-after-failure".into(),
+        attempt_nonce: "attempt".into(),
+    };
+    assert!(matches!(
+        runtime.reserve_manual_activation(&manifest, effect.clone(), 0),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Contended
+        })
+    ));
+    // The caller, not the error return boundary, chooses the end of cleanup.
+    drop(failure.reservation.take());
+    drop(
+        runtime
+            .reserve_manual_activation(&manifest, effect, 0)
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effects() {
+    use storage::recovery::RecoveryActivationObservation as Observation;
+    for (committed, corrupt_readback, expected) in [
+        (true, false, Observation::Activated),
+        (false, false, Observation::NotActivated),
+        (false, true, Observation::Indeterminate),
+    ] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let paused = prepare(&f, &runtime);
+        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let (proof, startup, root) = prepared_adoption::evidence(&f, &paused.claim().claim_id);
+        let mut paused = runtime
+            .adopt_prepared_claim(proof, startup, &root, &authority)
+            .unwrap();
+        runtime
+            .restore_relations_and_continuations(&mut paused)
+            .unwrap();
+        let claim = paused.claim().clone();
+        let reservation = runtime
+            .reserve_automatic_activation(&claim.manifest_id)
+            .unwrap();
+        f._storage
+            .handle()
+            .inject_restart_write_fault(committed)
+            .unwrap();
+        let failure = runtime
+            .activate_component(paused, authority, reservation)
+            .unwrap_err();
+        assert!(
+            failure.reservation.is_none(),
+            "uncertain ACK is owned only by the supervisor"
+        );
+        if corrupt_readback {
+            rusqlite::Connection::open(&f.config.db_path)
+                .unwrap()
+                .execute(
+                    "UPDATE resume_intents SET revision=revision+7 WHERE run_id=?1",
+                    [run.to_string()],
+                )
+                .unwrap();
+        }
+        let db = storage::Database::open(&f.config).unwrap();
+        assert_eq!(db.observe_recovery_activation(&claim).unwrap(), expected);
+        assert!(matches!(
+            runtime.reserve_automatic_activation(&claim.manifest_id),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Contended
+            })
+        ));
+        // An uncertain graph occupies ONE slot, not the entire retry service.
+        let other_graphs = (0..63)
+            .map(|n| {
+                runtime
+                    .reserve_automatic_activation(&format!("independent-{n}"))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            runtime.reserve_automatic_activation("overflow"),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Capacity
+            })
+        ));
+        let effects = runtime.graph_effect_counts();
+        assert_eq!(effects, [1, 0, 0]);
+        let claims_before = db.recovery_claims().unwrap();
+        let intent_before = db.resume_intent(&run.to_string()).unwrap();
+        let calls_before = f.model.calls.load(Ordering::SeqCst);
+        assert_eq!(
+            runtime
+                .reconcile_automatic_activation_reservations()
+                .unwrap(),
+            usize::from(!corrupt_readback)
+        );
+        assert_eq!(
+            runtime
+                .reconcile_automatic_activation_reservations()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            runtime.graph_effect_counts(),
+            effects,
+            "readback must not call activation, release or cleanup"
+        );
+        assert_eq!(db.recovery_claims().unwrap(), claims_before);
+        assert_eq!(db.resume_intent(&run.to_string()).unwrap(), intent_before);
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), calls_before);
+        if corrupt_readback {
+            assert!(matches!(
+                runtime.reserve_automatic_activation(&claim.manifest_id),
+                Err(crate::RuntimeError::ActivationReservationUnavailable {
+                    reason: crate::ActivationReservationProblem::Contended
+                })
+            ));
+            assert!(runtime.reserve_automatic_activation("overflow").is_err());
+        } else {
+            runtime
+                .reserve_automatic_activation(&claim.manifest_id)
+                .unwrap();
+        }
+        drop(other_graphs);
+    }
+}
+
 #[tokio::test]
 async fn recovery_rejects_store_attached_after_a_message_was_issued() {
     let f = Fixture::new(0);
@@ -238,8 +468,11 @@ async fn startup_message_ids(retain_correlations: bool) {
         runtime
             .restore_relations_and_continuations(&mut paused)
             .unwrap();
-        runtime
-            .activate_component(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(
                 paused,
                 crate::CurrentRecoveryAuthority {
                     members: component
@@ -258,8 +491,12 @@ async fn startup_message_ids(retain_correlations: bool) {
                         })
                         .collect(),
                 },
+                reservation,
             )
-            .unwrap();
+        })
+        .unwrap()
+        .1
+        .release();
         let between = runtime
             .send_agent_message(
                 fresh,
@@ -480,6 +717,7 @@ async fn activation_history_is_skipped_and_adopt_does_not_write_the_new_intent_t
     f._storage
         .handle()
         .activate_recovery_claim(storage::recovery::RecoveryActivationRequest {
+            reservation: storage::recovery::graph_control::ActivationControl::Automatic,
             claim_id: claim.claim_id.clone(),
             intents: vec![storage::resume_intent::ResumeIntentRecord {
                 run_id: run.to_string(),
@@ -720,7 +958,15 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         },
     );
     assert_eq!(
-        runtime.activate_component(paused, authority).unwrap().len(),
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
+        })
+        .unwrap()
+        .0
+        .len(),
         2
     );
     assert!(!runtime.has_paused_recovery());
@@ -843,7 +1089,10 @@ async fn post_activation_fault(point: crate::runtime::HookPoint, published: bool
     });
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.activate_component(paused, authority)
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
         }))
         .is_err()
     );
@@ -959,8 +1208,11 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
             assert_eq!(model.calls.load(Ordering::SeqCst), 0);
         },
     );
-    runtime
-        .activate_component(
+    ({
+        let reservation = runtime
+            .reserve_automatic_activation(&(paused).claim().manifest_id)
+            .unwrap();
+        runtime.activate_component(
             paused,
             crate::CurrentRecoveryAuthority {
                 members: BTreeMap::from([(
@@ -973,12 +1225,35 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
                     },
                 )]),
             },
+            reservation,
         )
-        .unwrap();
+    })
+    .unwrap()
+    .1
+    .release();
     while f.model.admission_calls.load(Ordering::SeqCst) == calls_before {
         f.model.admission_entered.notified().await;
     }
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
     runtime.cancel(run).unwrap();
     runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_publication_invalidates_unused_scratch_observation() {
+    for configured in [true, false] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let thread = run.to_string();
+        runtime.bind_thread_root(&thread, run).unwrap();
+        let observation = configured
+            .then(|| crate::scratch::publication_tests::Observation::new(&runtime, &thread));
+        let _paused = prepare(&f, &runtime);
+        if let Some(observation) = observation {
+            observation.assert_preserved();
+        } else {
+            assert!(runtime.shared.thread_scratch.lock().unwrap().is_none());
+        }
+    }
 }

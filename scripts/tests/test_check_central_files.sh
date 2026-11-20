@@ -388,7 +388,7 @@ leaf_scopes=(pr07b5ar pr07b5aq1 pr07b5aq2 pr07b5acn pr07b5acw)
 leaf_samples=(
   "$C/src/restart.rs $C/src/restart/public.rs $C/src/restart/public/coordinator.rs $HOL/restart.rs $HOL/restart/targets.rs $PRO/restart.rs $PRO/restart/request.rs $C/tests/public_restart_coordinator.rs $C/tests/public_restart_coordinator/capture.rs"
   "$HOL/quarantine.rs $HOL/quarantine/list.rs $PRO/quarantine.rs $PRO/quarantine/detail.rs $S/src/recovery/quarantine.rs $S/src/recovery/quarantine/discard.rs $H/tests/quarantine_admin.rs $H/tests/quarantine_admin/cas.rs $S/tests/quarantine_admin.rs $S/tests/quarantine_admin/cas.rs"
-  "$HOL/owned_graphs.rs $HOL/owned_graphs/list.rs $PRO/owned_graphs.rs $PRO/owned_graphs/view.rs $H/src/bootstrap/recovery_disposal.rs $H/src/bootstrap/recovery_disposal/cas.rs crates/runtime/src/runtime/recovery_disposal.rs crates/runtime/src/runtime/recovery_disposal/phase.rs $S/src/recovery/owned_graphs.rs $S/src/recovery/owned_graphs/cas.rs $H/tests/owned_graphs_admin.rs $H/tests/owned_graphs_admin/predicate.rs $S/tests/owned_graphs_admin.rs $H/tests/recovery_disposal.rs crates/runtime/tests/recovery_disposal.rs"
+  "$HOL/owned_graphs.rs $HOL/owned_graphs/list.rs $H/src/bootstrap/recovery_disposal.rs $H/src/bootstrap/recovery_disposal/cas.rs crates/runtime/src/runtime/recovery_disposal.rs crates/runtime/src/runtime/recovery_disposal/phase.rs crates/runtime/src/ownership/disposal.rs crates/runtime/src/ownership/disposal/scratch.rs $C/src/recovery_admin.rs $C/src/recovery_admin/resume.rs $C/tests/recovery_disposal.rs $S/src/recovery/owned_graphs.rs $S/src/recovery/owned_graphs/cas.rs $H/tests/owned_graphs_admin.rs $H/tests/owned_graphs_admin/predicate.rs $S/tests/owned_graphs_admin.rs $H/tests/recovery_disposal.rs crates/runtime/tests/recovery_disposal.rs"
   "crates/core-launcher/src/handoff_diagnostics.rs crates/core-launcher/src/handoff_diagnostics/report.rs crates/workbench-client/src/restart.rs crates/workbench-client/src/restart/confirmation.rs crates/evorch/src/cli/core_admin.rs crates/evorch/src/cli/core_admin/restart.rs $G/src/core_client/restart.rs $G/src/core_client/restart/view.rs crates/workbench-client/tests/restart_admin.rs crates/workbench-client/tests/restart_admin/confirm.rs crates/evorch/tests/restart_admin.rs $C/tests/cli_continuity_cache.rs"
   "$W/src/server.rs $W/src/server/restart.rs $W/src/sse.rs $W/src/sse/admin.rs $W/src/backend.rs $W/src/assets.rs $W/src/restart.rs $W/src/restart/status.rs $W/assets/js/app.js $W/assets/js/api.js $W/assets/js/store.js $W/assets/js/sse.js $W/assets/js/views.js $W/assets/js/restart.js $W/assets/js/restart/view.js $W/tests/public_restart.rs $W/tests/public_restart/flow.rs $W/tests/public_restart_chromium.rs $W/tests/public_restart_chromium/page.rs"
 )
@@ -445,6 +445,8 @@ for root in $H/src/ingress/namespaces/lifecycle.rs crates/workbench-protocol/src
     expect fail "$scope does not edit the root dispatch $root" "$central" --scope "$scope" --files-from "$work/files"
   done
 done
+files "$PRO/owned_graphs.rs" "$PRO/owned_graphs/view.rs"
+expect fail "Q2 leaf cannot re-edit the protocol contract" "$central" --scope pr07b5aq2 --files-from "$work/files"
 # envelope.rs is a central file and no scope has an exception for it.
 envelope=crates/workbench-protocol/src/envelope.rs
 expect fail "the scope data names no envelope.rs" bash -c "sed 's/#.*//' scripts/feature-scopes.txt | grep -q envelope"
@@ -498,6 +500,18 @@ expect ok "CI runs the authority doctests alone, offline, without default featur
 expect ok "CI sets CARGO_BUILD_GC_ENABLED=false for the authority doctests" bash -c "ci_step() { awk '/- name: Authority compile-fail doctests/ { on = 1; next } on && /^      - / { exit } on' $ci; }; ci_step | grep -q 'CARGO_BUILD_GC_ENABLED: \"false\"'"
 expect ok "the workspace doctests exclude the authority" bash -c "[[ \$(grep -c 'cargo test --workspace --exclude workbench-authority --doc --locked' $ci) == 2 ]]"
 expect fail "no workspace-wide doctest run includes the authority" bash -c "grep -E 'cargo test --workspace --doc' $ci"
+
+# Q2 integration: the independent disposal targets join their existing crate groups.
+for target in crates/runtime/tests/recovery_disposal.rs crates/runtime/tests/owned_graphs_admin.rs crates/storage/tests/owned_graphs_admin.rs "$H/tests/recovery_disposal.rs" "$C/tests/recovery_disposal.rs"; do
+  expect ok "Q2 target $target exists" test -f "$target"
+done
+expect ok "Q2 runtime is in exactly one CI group" bash -c "[[ \$(jq '[.groups[].packages[] | select(. == \"runtime\")] | length' scripts/ci-test-groups.json) == 1 ]]"
+expect ok "Q2 host is in the support group" bash -c "jq -e '.groups.support.packages | index(\"workbench-host\")' scripts/ci-test-groups.json"
+expect ok "Q2 core is in the runtime group" bash -c "jq -e '.groups.runtime.packages | index(\"evorch-core\")' scripts/ci-test-groups.json"
+expect ok "Q2 cache targets are separately registered for runtime and core" bash -c "[[ \$(grep -c 'binary(=recovery_disposal)' scripts/contract-test-filters.sh) == 2 ]]"
+expect ok "physical retention targets use custom harnesses" bash -c 'grep -A2 "name = \"physical_ownership_retention\"" crates/runtime/Cargo.toml | grep -q "harness = false" && grep -A2 "name = \"q2_disposal_retention\"" crates/workbench-host/Cargo.toml | grep -q "harness = false"'
+expect ok "physical fixtures remain integration-owned" bash -c 'grep -qx "crates/runtime/shared-test-support/physical_ownership.rs" scripts/central-files.txt && grep -qx "crates/runtime/shared-test-support/physical_test_harness.rs" scripts/central-files.txt'
+expect ok "CI runs the physical retention callsite gate" grep -q 'bash scripts/check-q2-boundaries.sh' "$ci"
 
 if (( fails > 0 )); then
   echo "$fails check(s) failed" >&2

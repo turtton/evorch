@@ -2,11 +2,17 @@
 use crate::recovery_startup::*;
 use std::{
     collections::BTreeSet,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use workbench_host::bootstrap::{
-    core_startup::{CoreStartupDiagnostics, CoreStartupFuture, CoreStartupHook, CoreStartupInputs},
+    core_startup::{
+        CoreStartupDiagnostics, CoreStartupFuture, CoreStartupHook, CoreStartupInputs,
+        RecoveryAdminPort,
+    },
     recovery::catalog::RecoveryCatalog,
     services::BackgroundServices,
 };
@@ -33,21 +39,30 @@ pub struct RecoveryStartupReport {
     pub scan: StartupScan,
     pub components: Vec<RecoveryDiagnostic>,
 }
-#[derive(Clone, Default)]
-pub struct RecoveryDiagnostics(Arc<RwLock<RecoveryStartupReport>>);
+pub mod admin;
+use admin::{
+    RecoveryAdminActor, RecoveryAdminContext, RecoveryAdminHandler, RecoveryRequest,
+    UnsupportedRecoveryAdmin,
+};
+
+#[derive(Clone)]
+pub struct RecoveryDiagnostics {
+    report: Arc<RwLock<RecoveryStartupReport>>,
+    retry_count: Arc<AtomicUsize>,
+    jobs: Arc<AtomicUsize>,
+    admin: Arc<RecoveryAdminActor>,
+}
 impl CoreStartupDiagnostics for RecoveryDiagnostics {
     fn has_pending_work(&self) -> bool {
-        self.0
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .components
-            .iter()
-            .any(|component| component.state == RecoveryState::Blocked)
+        self.retry_count.load(Ordering::Acquire) != 0 || self.jobs.load(Ordering::Acquire) != 0
+    }
+    fn recovery_admin(&self) -> &dyn RecoveryAdminPort {
+        self.admin.as_ref()
     }
     fn snapshot(&self) -> serde_json::Value {
         serde_json::to_value(
             &*self
-                .0
+                .report
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
@@ -62,39 +77,71 @@ impl CoreStartupHook for CoreGraphRecovery {
         inputs: CoreStartupInputs,
         services: &'a mut BackgroundServices,
     ) -> CoreStartupFuture<'a> {
-        Box::pin(async move {
-            match inputs.mode {
-                workbench_host::bootstrap::core_startup::CoreBootMode::Cold => {
-                    if inputs.runtime.has_planned_restart_handoff() {
-                        return Err("planned proof in cold bootstrap".into());
-                    }
-                    inputs.runtime.quarantine_cold_restarts()?;
-                    inputs.runtime.quarantine_cold_learning_from_proc()?;
+        start_recovery(inputs, services, Arc::new(UnsupportedRecoveryAdmin))
+    }
+}
+/// Installs the leaf implementation without introducing a host-to-core dependency.
+pub struct CoreGraphRecoveryWithAdmin(Arc<dyn RecoveryAdminHandler>);
+impl CoreGraphRecovery {
+    pub fn with_admin_handler(
+        handler: Arc<dyn RecoveryAdminHandler>,
+    ) -> CoreGraphRecoveryWithAdmin {
+        CoreGraphRecoveryWithAdmin(handler)
+    }
+}
+impl CoreStartupHook for CoreGraphRecoveryWithAdmin {
+    fn start<'a>(
+        &'a self,
+        inputs: CoreStartupInputs,
+        services: &'a mut BackgroundServices,
+    ) -> CoreStartupFuture<'a> {
+        start_recovery(inputs, services, self.0.clone())
+    }
+}
+fn start_recovery<'a>(
+    inputs: CoreStartupInputs,
+    services: &'a mut BackgroundServices,
+    handler: Arc<dyn RecoveryAdminHandler>,
+) -> CoreStartupFuture<'a> {
+    Box::pin(async move {
+        match inputs.mode {
+            workbench_host::bootstrap::core_startup::CoreBootMode::Cold => {
+                if inputs.runtime.has_planned_restart_handoff() {
+                    return Err("planned proof in cold bootstrap".into());
                 }
-                workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff => {
-                    if !inputs.runtime.has_planned_restart_handoff() {
-                        return Err("planned bootstrap requires inherited proof".into());
-                    }
+                inputs.runtime.quarantine_cold_restarts()?;
+                inputs.runtime.quarantine_cold_learning_from_proc()?;
+            }
+            workbench_host::bootstrap::core_startup::CoreBootMode::PlannedHandoff => {
+                if !inputs.runtime.has_planned_restart_handoff() {
+                    return Err("planned bootstrap requires inherited proof".into());
                 }
             }
-            let config = config::Config::load_strict(&config::LoadOptions {
-                user_config_dir: Some(inputs.options.config_dir.clone()),
-                project_dir: Some(inputs.options.project_root.clone()),
-                read_env: false,
-                ..Default::default()
-            })?;
-            let catalog = RecoveryCatalog::preload_for_projects(
-                &inputs.options,
-                &config,
-                &inputs.projects,
-                services,
-            )
-            .await?;
-            catalog.publish_projects(&inputs.runtime, &inputs.projects);
-            let diagnostics = RecoveryDiagnostics::default();
-            let output = diagnostics.clone();
-            let (ready, started) = tokio::sync::oneshot::channel();
-            services.start("graph-recovery", |mut stop| async move {
+        }
+        let config = config::Config::load_strict(&config::LoadOptions {
+            user_config_dir: Some(inputs.options.config_dir.clone()),
+            project_dir: Some(inputs.options.project_root.clone()),
+            read_env: false,
+            ..Default::default()
+        })?;
+        let catalog = RecoveryCatalog::preload_for_projects(
+            &inputs.options,
+            &config,
+            &inputs.projects,
+            services,
+        )
+        .await?;
+        catalog.publish_projects(&inputs.runtime, &inputs.projects);
+        let (admin, mut requests) = RecoveryAdminActor::channel();
+        let diagnostics = RecoveryDiagnostics {
+            report: Default::default(),
+            retry_count: Default::default(),
+            jobs: Default::default(),
+            admin: Arc::new(admin),
+        };
+        let output = diagnostics.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        services.start("graph-recovery", |mut stop| async move {
                 let coordinator = match StartupCoordinator::new(StartupInputs {
                     runtime: &inputs.runtime, owner: &inputs.owner,
                     storage: &inputs.storage, writer: &inputs.writer,
@@ -120,11 +167,22 @@ impl CoreStartupHook for CoreGraphRecovery {
                 let mut report = RecoveryStartupReport { scan, components: vec![] };
                 let mut retry = BTreeSet::new();
                 for component in &report.scan.components {
+                    admin::reconcile(&inputs.runtime).await;
+                    let job = admin::JobGuard::start(&output.jobs, &inputs.work_changed);
                     let outcome = attempt(&coordinator, &inputs.runtime, &inputs.host, component);
-                    if outcome.state == RecoveryState::Blocked { retry.insert(component.manifest_id.clone()); }
-                    report.components.push(outcome);
+                    admin::reconcile(&inputs.runtime).await;
+                    drop(job);
+                    match outcome {
+                        AutomaticAttempt::Finished(outcome) => {
+                            if outcome.state == RecoveryState::Blocked { retry.insert(component.manifest_id.clone()); }
+                            report.components.push(outcome);
+                        }
+                        AutomaticAttempt::Capacity => { retry.insert(component.manifest_id.clone()); }
+                        AutomaticAttempt::Contended => {}
+                    }
                 }
-                *output.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
+                output.retry_count.store(retry.len(), Ordering::Release);
+                *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
                 inputs.work_changed.notify_one();
                 tracing::info!(report = %serde_json::to_string(&report)?, "core graph startup recovery");
                 let _ = ready.send(Ok(()));
@@ -132,10 +190,38 @@ impl CoreStartupHook for CoreGraphRecovery {
                 // Only owner-blocked components enter this owned retry loop.
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 tick.tick().await;
-                while !retry.is_empty() {
+                loop {
                     tokio::select! { biased;
                         _ = &mut stop => break,
-                        _ = tick.tick() => {
+                        request = requests.recv() => {
+                            let Some(request) = request else { break; };
+                            match request {
+                                RecoveryRequest::Retry { manifest_id, reply } => {
+                                    retry.insert(manifest_id);
+                                    output.retry_count.store(retry.len(), Ordering::Release);
+                                    let _ = reply.send(Ok(vec![]));
+                                }
+                                RecoveryRequest::Resume { request, reply } => {
+                                    // Admission already owns the graph reservation. It is
+                                    // not an automatic retry even if the old display is Blocked.
+                                    let was_retry = retry.remove(&request.manifest_id);
+                                    output.retry_count.store(retry.len(), Ordering::Release);
+                                    let id = request.manifest_id.clone();
+                                    let context = RecoveryAdminContext::for_job(&coordinator, &inputs.host);
+                                    let result = admin::run_job(context, handler.clone(), request, &output.jobs, &inputs.work_changed).await;
+                                    // Unsupported performs no write; preserve the old automatic
+                                    // retry when the unregistered leaf returns its reservation.
+                                    if was_retry && result == Err(workbench_host::bootstrap::core_startup::RecoveryAdminError::Unsupported) {
+                                        retry.insert(id);
+                                    }
+                                    admin::reconcile(&inputs.runtime).await;
+                                    let _ = reply.send(result);
+                                }
+                            }
+                            output.retry_count.store(retry.len(), Ordering::Release);
+                            inputs.work_changed.notify_one();
+                        }
+                        _ = tick.tick(), if !retry.is_empty() => {
                             let Some(_producer) = inputs.runtime.producer_gate().try_enter() else { continue; };
                             let scan = match coordinator.scan() {
                                 Ok(scan) => scan,
@@ -145,7 +231,8 @@ impl CoreStartupHook for CoreGraphRecovery {
                                         current.reason = Some(reason);
                                         current.manual_continue = false;
                                     }
-                                    *output.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report;
+                                    *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report;
+                                    output.retry_count.store(0, Ordering::Release);
                                     inputs.work_changed.notify_one();
                                     return Err(format!("graph retry scan: {reason:?}").into());
                                 }
@@ -162,32 +249,106 @@ impl CoreStartupHook for CoreGraphRecovery {
                                 }
                             }
                             for component in scan.components.iter().filter(|c| retry.contains(&c.manifest_id)).cloned().collect::<Vec<_>>() {
+                                admin::reconcile(&inputs.runtime).await;
+                                let job = admin::JobGuard::start(&output.jobs, &inputs.work_changed);
                                 let outcome = attempt(&coordinator, &inputs.runtime, &inputs.host, &component);
-                                if outcome.state != RecoveryState::Blocked { retry.remove(&component.manifest_id); }
-                                if let Some(current) = report.components.iter_mut().find(|c| c.manifest_id == component.manifest_id) { *current = outcome; }
+                                admin::reconcile(&inputs.runtime).await;
+                                drop(job);
+                                match outcome {
+                                    AutomaticAttempt::Finished(outcome) => {
+                                        if outcome.state != RecoveryState::Blocked { retry.remove(&component.manifest_id); }
+                                        if let Some(current) = report.components.iter_mut().find(|c| c.manifest_id == component.manifest_id) { *current = outcome; }
+                                        else { report.components.push(outcome); }
+                                    }
+                                    AutomaticAttempt::Contended => { retry.remove(&component.manifest_id); }
+                                    AutomaticAttempt::Capacity => {}
+                                }
                             }
+                            output.retry_count.store(retry.len(), Ordering::Release);
                             report.scan = scan;
-                            *output.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
+                            *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
                             inputs.work_changed.notify_one();
                             tracing::info!(report = %serde_json::to_string(&report)?, "core graph recovery retry");
                         }
                     }
                 }
+                output.retry_count.store(0, Ordering::Release);
+                inputs.work_changed.notify_one();
                 Ok(())
             });
-            started
-                .await?
-                .map_err(|reason| -> workbench_host::bootstrap::BootstrapError { reason.into() })?;
-            Ok(Arc::new(diagnostics) as Arc<dyn CoreStartupDiagnostics>)
-        })
-    }
+        started
+            .await?
+            .map_err(|reason| -> workbench_host::bootstrap::BootstrapError { reason.into() })?;
+        Ok(Arc::new(diagnostics) as Arc<dyn CoreStartupDiagnostics>)
+    })
 }
-fn attempt(
+
+pub(crate) enum AutomaticAttempt {
+    Finished(RecoveryDiagnostic),
+    Contended,
+    Capacity,
+}
+
+/// Keep the original graph slot until command binding publication has settled.
+/// Unwinding drops the slot only after the publication closure has unwound.
+pub(crate) fn publish_activation(
+    (runs, reservation): (Vec<runtime::RunId>, runtime::ActivatedReservation),
+    publish: impl FnOnce(),
+) -> Vec<runtime::RunId> {
+    publish();
+    reservation.release();
+    runs
+}
+
+pub(crate) fn attempt(
     coordinator: &StartupCoordinator<'_>,
     runtime: &runtime::AgentRuntime,
     host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
     component: &ComponentStatus,
-) -> RecoveryDiagnostic {
+) -> AutomaticAttempt {
+    attempt_observed(coordinator, runtime, host, component, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticAttemptEvent {
+    BeforeActivation,
+    BeforeDecline(StartupBlocked),
+}
+
+// The observer is a no-op in production. Tests park the real path at these
+// boundaries to arrange an activation failure and exercise manual admission.
+pub(crate) fn attempt_observed(
+    coordinator: &StartupCoordinator<'_>,
+    runtime: &runtime::AgentRuntime,
+    host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
+    component: &ComponentStatus,
+    mut observe: impl FnMut(AutomaticAttemptEvent),
+) -> AutomaticAttempt {
+    // Keep ownership outside the fallible preparation closure: dropping that
+    // closure must not admit a manual attempt before decline/cleanup finishes.
+    let mut reservation = if matches!(
+        component.disposition,
+        Disposition::Prepared | Disposition::AwaitingAuthority
+    ) {
+        match runtime.reserve_automatic_activation(&component.manifest_id) {
+            Ok(reservation) => Some(reservation),
+            Err(runtime::RuntimeError::ActivationReservationUnavailable { reason }) => {
+                return match reason {
+                    runtime::ActivationReservationProblem::Contended => AutomaticAttempt::Contended,
+                    runtime::ActivationReservationProblem::Capacity => AutomaticAttempt::Capacity,
+                };
+            }
+            Err(error) => {
+                tracing::warn!(%error, manifest_id = %component.manifest_id, "automatic recovery reservation unavailable");
+                return AutomaticAttempt::Capacity;
+            }
+        }
+    } else {
+        None
+    };
+    // A definite activation failure returns this same original reservation.
+    // Unknown returns None: its original supervisor keeps ownership instead.
+    let mut failed_activation_reservation = None;
     let (state, reason) = match component.disposition {
         Disposition::Released => (RecoveryState::Released, Some(StartupBlocked::Released)),
         Disposition::AlreadyActivated => (
@@ -203,6 +364,12 @@ fn attempt(
             match coordinator
                 .prepare(&component.manifest_id)
                 .and_then(|prepared| {
+                    let held_reservation = reservation
+                        .as_ref()
+                        .expect("executable disposition reserved at attempt start");
+                    runtime
+                        .check_automatic_activation(held_reservation)
+                        .map_err(|_| StartupBlocked::NeedsAttention)?;
                     let bindings = prepared.command_bindings();
                     let guard = host
                         .lock()
@@ -212,12 +379,24 @@ fn attempt(
                         .map_err(|_| StartupBlocked::CurrentBindingRequired)?;
                     // No host lock spans activation/DB/runtime work. The guard
                     // also removes the admission fence on error or unwind.
-                    let runs = prepared.activate(runtime)?;
-                    host.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .service_mut()
-                        .complete_root_recovery(guard);
-                    Ok(runs)
+                    observe(AutomaticAttemptEvent::BeforeActivation);
+                    let activated = prepared
+                        .activate(
+                            runtime,
+                            reservation
+                                .take()
+                                .expect("reservation held until activation"),
+                        )
+                        .map_err(|failure| {
+                            failed_activation_reservation = failure.reservation;
+                            StartupBlocked::NeedsAttention
+                        })?;
+                    Ok(publish_activation(activated, || {
+                        host.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .service_mut()
+                            .complete_root_recovery(guard);
+                    }))
                 }) {
                 Ok(_) => (RecoveryState::Activated, None),
                 Err(StartupBlocked::OwnerBlocked) => {
@@ -229,32 +408,42 @@ fn attempt(
                     RecoveryState::Quarantined,
                     Some(StartupBlocked::NeedsAttention),
                 ),
-                Err(reason) => match coordinator.decline(&component.manifest_id) {
-                    Ok(()) => (RecoveryState::Released, Some(reason)),
-                    Err(StartupBlocked::OwnerBlocked) => {
-                        (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
+                Err(reason) => {
+                    observe(AutomaticAttemptEvent::BeforeDecline(reason));
+                    match coordinator.decline(&component.manifest_id) {
+                        Ok(()) => (RecoveryState::Released, Some(reason)),
+                        Err(StartupBlocked::OwnerBlocked) => {
+                            (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
+                        }
+                        Err(_) => {
+                            let reason = if coordinator
+                                .cleanup_activated(&component.manifest_id)
+                                .is_ok()
+                            {
+                                StartupBlocked::AlreadyActivated
+                            } else {
+                                reason
+                            };
+                            (RecoveryState::Quarantined, Some(reason))
+                        }
                     }
-                    Err(_) => {
-                        let reason = if coordinator
-                            .cleanup_activated(&component.manifest_id)
-                            .is_ok()
-                        {
-                            StartupBlocked::AlreadyActivated
-                        } else {
-                            reason
-                        };
-                        (RecoveryState::Quarantined, Some(reason))
-                    }
-                },
+                }
             }
         }
     };
-    RecoveryDiagnostic {
+    // Failure disposition includes conditional release and paused-state cleanup.
+    // Only now may a competing manual attempt acquire this original graph slot.
+    drop(failed_activation_reservation);
+    drop(reservation);
+    AutomaticAttempt::Finished(RecoveryDiagnostic {
         manifest_id: component.manifest_id.clone(),
         runs: component.runs.clone(),
         state,
         reason,
         manual_continue: state == RecoveryState::Released
             || reason == Some(StartupBlocked::AlreadyActivated),
-    }
+    })
 }
+
+#[cfg(test)]
+mod tests;

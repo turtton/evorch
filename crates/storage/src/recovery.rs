@@ -1,6 +1,8 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
+pub mod graph_control;
+pub mod graph_progress;
 pub mod owned_graphs;
 pub mod quarantine;
 pub mod restart;
@@ -22,7 +24,8 @@ pub struct RecoveryEdge {
     pub to: String,
     pub kind: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryMemberRecord {
     pub run_id: String,
     pub incarnation: String,
@@ -31,7 +34,8 @@ pub struct RecoveryMemberRecord {
     pub resume: bool,
     pub record_json: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryManifestRecord {
     pub manifest_id: String,
     pub schema_version: u32,
@@ -61,14 +65,16 @@ pub enum RecoveryClaimState {
     Activated,
     Released { reason: String },
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryClaimMember {
     pub run_id: String,
     pub old_incarnation: String,
     pub reserved_revision: u64,
     pub new_incarnation: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryClaim {
     pub claim_id: String,
     pub manifest_id: String,
@@ -102,6 +108,9 @@ pub(crate) enum Write {
         expected_revision: Option<u64>,
         mutation: restart::RestartMutation,
     },
+    GraphControl(Box<graph_control::GraphControlWrite>),
+    GraphFinish(graph_control::GraphControlRecord),
+    GraphProgress(Box<graph_progress::GraphThreadProgressWrite>),
     Prepare(RecoveryManifestRecord),
     Commit(String),
     Claim(RecoveryClaimRequest),
@@ -122,6 +131,8 @@ pub(crate) enum Write {
 pub(crate) enum Written {
     Restart(Box<restart::RestartTransaction>),
     Saved,
+    GraphControl(graph_control::GraphControlRecord),
+    GraphProgress(graph_progress::GraphThreadProgress),
     Claimed(RecoveryClaim),
     Validated(Box<prepared::PreparedClaimEvidence>),
     Released(RecoveryReleaseOutcome),
@@ -307,15 +318,52 @@ fn restart_write_fault(after_commit: bool) -> Result<(), StorageError> {
     }
     Ok(())
 }
+// Explicit one-shot, per-writer rendezvous. Test builds only; no authority or
+// alternative write path, and an uninstalled hook never waits.
+#[cfg(any(test, feature = "recovery-test-support"))]
+pub(crate) struct GraphWritePause {
+    pub reached: std::sync::mpsc::Sender<bool>,
+    pub released: std::sync::mpsc::Receiver<()>,
+}
+#[cfg(any(test, feature = "recovery-test-support"))]
+thread_local! {static GRAPH_WRITE_PAUSE: std::cell::RefCell<Option<GraphWritePause>> = const {std::cell::RefCell::new(None)};}
+#[cfg(any(test, feature = "recovery-test-support"))]
+pub(crate) fn install_graph_write_pause(pause: GraphWritePause) -> Result<(), StorageError> {
+    GRAPH_WRITE_PAUSE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return Err(invalid("graph write pause already installed"));
+        }
+        *slot = Some(pause);
+        Ok(())
+    })
+}
+#[cfg(any(test, feature = "recovery-test-support"))]
+fn graph_write_pause(after_commit: bool) {
+    let pause = GRAPH_WRITE_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(pause) = pause
+        && pause.reached.send(after_commit).is_ok()
+        && pause.released.recv().is_ok()
+        && !after_commit
+    {
+        GRAPH_WRITE_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause));
+    }
+}
 /// Every graph write is FULL-durable and atomic; no partial claim or consumption.
 pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, StorageError> {
     #[cfg(any(test, feature = "recovery-test-support"))]
     let restart_command = matches!(
         &command,
-        Write::Restart { .. }
+        Write::GraphControl(_)
+            | Write::GraphFinish(_)
+            | Write::GraphProgress(_)
+            | Write::Activate(_)
+            | Write::Restart { .. }
             | Write::RestartInvalidation { .. }
             | Write::RestartColdQuarantine { .. }
     );
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    let graph_command = matches!(&command, Write::GraphControl(_));
     let previous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     let result = (|| {
@@ -351,6 +399,15 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 expected_revision,
                 mutation,
             )?)),
+            Write::GraphProgress(request) => {
+                Written::GraphProgress(graph_progress::write(&tx, &request)?)
+            }
+            Write::GraphFinish(expected) => {
+                Written::GraphControl(graph_control::finish(&tx, &expected)?)
+            }
+            Write::GraphControl(request) => {
+                Written::GraphControl(graph_control::write(&tx, &request)?)
+            }
             Write::Prepare(record) => {
                 prepare(&tx, &record)?;
                 Written::Saved
@@ -384,7 +441,15 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
         if restart_command {
             restart_write_fault(false)?;
         }
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if graph_command {
+            graph_write_pause(false);
+        }
         tx.commit()?;
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if graph_command {
+            graph_write_pause(true);
+        }
         #[cfg(any(test, feature = "recovery-test-support"))]
         if restart_command {
             restart_write_fault(true)?;
@@ -525,6 +590,7 @@ fn prepare_claim(
     conn: &Connection,
     request: &RecoveryClaimRequest,
 ) -> Result<RecoveryClaim, StorageError> {
+    graph_control::check_prepare(conn, &request.manifest_id)?;
     let record =
         load(conn, &request.manifest_id).map_err(|_| invalid("corrupt recovery manifest"))?;
     if !record.committed || record.superseded {

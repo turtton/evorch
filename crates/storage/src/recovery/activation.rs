@@ -11,6 +11,7 @@ pub struct RecoverySnapshotExpectation {
 }
 #[derive(Debug, Clone)]
 pub struct RecoveryActivationRequest {
+    pub reservation: graph_control::ActivationControl,
     pub claim_id: String,
     /// Exactly the resume members, never terminal observation-only endpoints.
     pub intents: Vec<ResumeIntentRecord>,
@@ -78,6 +79,7 @@ pub(super) fn activate(
 ) -> Result<RecoveryClaim, StorageError> {
     validate_claim(conn, &request.claim_id)?;
     let claim = claim(conn, &request.claim_id)?;
+    graph_control::check_activation(conn, &claim.manifest_id, &request.reservation)?;
     let manifest =
         load(conn, &claim.manifest_id).map_err(|_| invalid("corrupt recovery manifest"))?;
     let resume: BTreeSet<_> = manifest
@@ -207,6 +209,7 @@ pub(super) fn activate(
     if changed != 1 {
         return Err(invalid("activation manifest CAS conflict"));
     }
+    graph_control::resolve_activation(conn, &claim.manifest_id, &request.reservation)?;
     super::claim(conn, &claim.claim_id)
 }
 

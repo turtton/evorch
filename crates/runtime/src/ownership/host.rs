@@ -48,6 +48,13 @@ struct WorkerControl {
 }
 
 impl OwnerHost {
+    /// Diagnostic only: no owner claim, generation mutation, or authority minting.
+    pub fn disposal_cleanup_receipt(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<super::DisposalOwnerReceipt>, RegistryError> {
+        super::disposal_support::read(&self.root.join("owners.db"), operation_id)
+    }
     pub fn open(
         root: &Path,
         settings: config::OwnershipConfig,

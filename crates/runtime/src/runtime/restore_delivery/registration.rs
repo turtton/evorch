@@ -2,12 +2,15 @@ use super::*;
 
 #[cfg(test)]
 mod idle_turn_tests;
+#[cfg(test)]
+mod scratch_publication_tests;
 
 impl AgentRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime) fn register_restored(
         &self,
         runs: &mut HashMap<RunId, RunEntry>,
+        scratch_key: crate::scratch::ScratchKey,
         intents: &HashMap<RunId, cancellation::SpawnIntent>,
         execution: Arc<ExecutionControl>,
         identity: (RunId, Option<RunId>, Role, RunConfig, RunId),
@@ -148,6 +151,7 @@ impl AgentRuntime {
             restored: None,
             initial_prompt_id: None,
         });
+        self.advance_scratch_epochs(&[scratch_key]);
         runs.insert(
             run_id,
             RunEntry {
@@ -250,6 +254,7 @@ mod review_tests {
                 content: "internal".into(),
                 reply_to: None,
             };
+            let scratch_key = runtime.scratch_key(run);
             let mut intents = runtime.shared.spawn_intents.lock().unwrap();
             let mut admissions = runtime.shared.admissions.lock().unwrap();
             let execution = AgentRuntime::prepare_restored_execution(run, None, &intents).unwrap();
@@ -263,6 +268,7 @@ mod review_tests {
             runtime
                 .register_restored(
                     &mut lock_runs(&runtime.shared.runs),
+                    scratch_key,
                     &intents,
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),

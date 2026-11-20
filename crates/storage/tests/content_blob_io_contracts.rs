@@ -134,8 +134,31 @@ const C_GC: u64 = 24;
 // (empty here). The same probe measured 407/633 frames for 10/100,000 rows (395/609 at
 // v69) with identical VM steps for both sizes (218,149), so the cost does not scale with
 // rows; reserve exactly the 24 fixed schema frames seen with 100,000 rows.
-const MIGRATION_FRAMES: u64 =
-    24 + 280 + 40 + 32 + 24 + 4 + 14 + 4 + 8 + 22 + 4 + 32 + 4 + 32 + 24 + 32 + 16 + 12 + 5 + 24;
+// v71 adds the Q2 control/effect/progress tables and permanent-revocation trigger.
+// The same probe measured 421/657 frames (407/633 at v70), with identical
+// 218,304 VM steps for both sizes (+155 fixed steps). Reserve the measured 24
+// fixed schema frames at 100,000 rows; collection and VM scaling budgets stay.
+const MIGRATION_FRAMES: u64 = 24
+    + 280
+    + 40
+    + 32
+    + 24
+    + 4
+    + 14
+    + 4
+    + 8
+    + 22
+    + 4
+    + 32
+    + 4
+    + 32
+    + 24
+    + 32
+    + 16
+    + 12
+    + 5
+    + 24
+    + 24;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -372,6 +395,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v71.sql"),
                     include_str!("../undo/undo_v70.sql"),
                     include_str!("../undo/undo_v69.sql"),
                     include_str!("../undo/undo_v68.sql"),

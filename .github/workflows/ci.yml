@@ -102,6 +102,8 @@ jobs:
         run: |
           scripts/tests/test_check_central_files.sh
           scripts/check-central-files.sh --check-data
+          bash scripts/tests/test_check_q2_boundaries.sh
+          bash scripts/check-q2-boundaries.sh
           scripts/check-core-client-refs.sh
       # The sealed product artifact (scripts/product-artifact.sh) accepts only the
       # distribution's build and refuses a changed, featured or unsealed copy.

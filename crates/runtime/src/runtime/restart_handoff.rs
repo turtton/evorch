@@ -6,7 +6,7 @@ use storage::recovery::restart::{handoff::*, tools::*, *};
 
 /// Holds the runtime's physical proof; a DB row or serialized hold cannot construct it.
 pub struct RestartOwnershipEvidence {
-    runtime: AgentRuntime,
+    pub(super) runtime: AgentRuntime,
 }
 impl AdoptedOwnershipEvidence for RestartOwnershipEvidence {
     fn validate_hold(&self, hold: &PlannedHold) -> Result<(), OwnershipError> {

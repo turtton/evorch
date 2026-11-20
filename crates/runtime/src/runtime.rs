@@ -18,9 +18,17 @@ mod chat_restore;
 pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
 mod completion_relay;
+mod disposal_support;
 mod held_messages;
 mod host_prompt;
+mod physical_owners;
 mod recovery_activation;
+mod recovery_control;
+pub use physical_owners::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
+pub use recovery_control::{
+    ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
+    AutomaticActivationReservation, ManualActivationReservation,
+};
 pub mod recovery_disposal;
 #[cfg(any(test, feature = "recovery-test-support"))]
 mod recovery_fixture;
@@ -237,6 +245,8 @@ pub(crate) struct Shared {
     next_message_id: AtomicU64,
     active_restart_capture: OnceLock<String>,
     planned_adoption: OnceLock<core_instance::InheritedHandoffProof>,
+    graph_reservations: Mutex<recovery_control::GraphReservations>,
+    retained_physical_owners: Mutex<physical_owners::RetainedPhysicalOwners>,
     #[cfg(any(test, feature = "recovery-test-support"))]
     restart_builtin_catalog_fixture: OnceLock<Vec<providers::ToolSpec>>,
     recovery_message_ids_safe: AtomicBool,
@@ -890,6 +900,8 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                graph_reservations: Mutex::new(Default::default()),
+                retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]
                 restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
@@ -1297,6 +1309,8 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                graph_reservations: Mutex::new(Default::default()),
+                retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]
                 restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),

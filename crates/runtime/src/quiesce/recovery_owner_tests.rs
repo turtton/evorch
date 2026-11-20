@@ -62,7 +62,15 @@ async fn prepared_owner_handoff_rejects_old_stop_and_shutdown_but_successor_can_
     successor
         .restore_relations_and_continuations(&mut adopted)
         .unwrap();
-    successor.activate_component(adopted, authority).unwrap();
+    ({
+        let reservation = successor
+            .reserve_automatic_activation(&(adopted).claim().manifest_id)
+            .unwrap();
+        successor.activate_component(adopted, authority, reservation)
+    })
+    .unwrap()
+    .1
+    .release();
     f.model.entered.notified().await;
     successor.cancel(run).unwrap();
     let _ = successor.wait(run).await;

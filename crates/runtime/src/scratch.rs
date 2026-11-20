@@ -19,7 +19,12 @@ use sha2::{Digest, Sha256};
 use crate::agent_loop::LoopState;
 use crate::{AgentContext, AgentRuntime, RunId};
 
+mod conditional_reset;
 pub(crate) mod usage;
+pub(crate) use conditional_reset::GraphDisposalKey;
+#[cfg(test)]
+#[path = "scratch/publication_tests.rs"]
+pub(crate) mod publication_tests;
 
 const NOTE_PREFIX: &str = "Temporary files (evorch): ";
 
@@ -155,6 +160,11 @@ struct State {
     archived: HashMap<String, u64>,
     archive_seen: HashMap<RunId, (String, u64)>,
     execution_keys: HashMap<(RunId, String), ScratchKey>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
+    )]
+    reset_effects: HashMap<GraphDisposalKey, bool>,
 }
 
 impl ThreadScratch {
@@ -518,6 +528,46 @@ impl Drop for RunScratch {
     }
 }
 impl AgentRuntime {
+    /// Resolve keys before taking registration/index locks: scratch_key reads
+    /// goals and runs. The hook itself must never perform those lookups.
+    pub(crate) fn scratch_publication_keys(
+        &self,
+        runs: impl IntoIterator<Item = RunId>,
+    ) -> Vec<ScratchKey> {
+        runs.into_iter().map(|run| self.scratch_key(run)).collect()
+    }
+
+    /// A cold restored child has no RunEntry yet, so its known parent must
+    /// supply the delegation root when the child itself has no thread binding.
+    /// Resolve this before registration locks, just like scratch_publication_keys.
+    pub(crate) fn restored_scratch_publication_key(
+        &self,
+        run: RunId,
+        parent: Option<RunId>,
+    ) -> ScratchKey {
+        self.thread_of_run(run).map_or_else(
+            || self.scratch_key(parent.unwrap_or(run)),
+            ScratchKey::Thread,
+        )
+    }
+
+    /// In the existing publication critical section, invalidate earlier unused
+    /// observations without registering a user or producing a model notice.
+    /// Deliberately do not call thread_scratch(): an unset runtime stays unset.
+    pub(crate) fn advance_scratch_epochs(&self, keys: &[ScratchKey]) {
+        let scratch = self
+            .shared
+            .thread_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(scratch) = scratch {
+            for key in keys {
+                scratch.advance_usage_epoch(key);
+            }
+        }
+    }
+
     pub(crate) fn release_scratch_execution(&self, run: RunId, incarnation: &str) {
         let scratch = self
             .shared

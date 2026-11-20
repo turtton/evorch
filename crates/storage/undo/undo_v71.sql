@@ -1,0 +1,4 @@
+DROP TABLE recovery_graph_thread_progress;
+DROP TABLE recovery_graph_effects;
+DROP TRIGGER recovery_graph_revocation_permanent;
+DROP TABLE recovery_graph_control;

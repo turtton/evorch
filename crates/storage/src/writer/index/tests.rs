@@ -256,6 +256,33 @@ impl Fixture {
     fn sizes(&self) -> FileSizes {
         file_sizes(&self.config.db_path).unwrap()
     }
+
+    fn pinned_wal_reader(&self) -> Connection {
+        // Migrations can cross SQLite's autocheckpoint threshold and leave a
+        // fully checkpointed, preallocated WAL. A reader of that snapshot need
+        // not pin WAL frames, so first start a fresh WAL with committed data.
+        assert!(
+            capacity::checkpoint_truncate(self.conn())
+                .unwrap()
+                .complete()
+        );
+        self.conn()
+            .execute_batch(
+                "CREATE TABLE test_wal_pin(value INTEGER); INSERT INTO test_wal_pin VALUES(1);",
+            )
+            .unwrap();
+        let reader = Connection::open(&self.config.db_path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
+            .unwrap();
+        assert!(
+            !capacity::checkpoint_truncate(self.conn())
+                .unwrap()
+                .complete(),
+            "the active reader must prevent WAL truncation"
+        );
+        reader
+    }
 }
 
 fn idle() -> IndexStepResult {
@@ -445,10 +472,7 @@ fn settings_shrink_preserves_old_blocks_when_db_or_pinned_wal_cannot_admit_delet
         fx.save(&verified("run-old", &"retained ".repeat(400), 10 * S));
         let lease = fx.lease(&gui(), S);
         assert_eq!(fx.drive(&lease, 2 * S), idle());
-        let reader = Connection::open(&fx.config.db_path).unwrap();
-        reader
-            .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
-            .unwrap();
+        let reader = fx.pinned_wal_reader();
         let sizes = fx.sizes();
         if wal_limited {
             fx.config.hard_limits.max_wal_bytes = sizes.wal + 1;
@@ -527,10 +551,7 @@ fn reaccounting_is_deferred_and_cannot_delete_through_pinned_wal_limit() {
     let lease = fx.lease(&gui(), S);
     assert_eq!(fx.drive(&lease, 2 * S), idle());
     let old_charge = fx.row("run-old").charged;
-    let reader = Connection::open(&fx.config.db_path).unwrap();
-    reader
-        .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
-        .unwrap();
+    let reader = fx.pinned_wal_reader();
     fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
     fx.rt.accounting.version += 1;
     fx.rt.accounting.per_run_bytes += old_charge;
@@ -603,6 +624,7 @@ fn admitted_settings_delete_grows_pinned_wal_within_the_planned_bound() {
     fx.save(&verified("run-old", &"deletion WAL ".repeat(400), 10 * S));
     let lease = fx.lease(&gui(), S);
     assert_eq!(fx.drive(&lease, 2 * S), idle());
+    let reader = fx.pinned_wal_reader();
     let page_size = capacity::page_size(fx.conn()).unwrap();
     let growth = MEASURED_POLICY.planned_growth(
         fx.row("run-old").charged,
@@ -613,10 +635,6 @@ fn admitted_settings_delete_grows_pinned_wal_within_the_planned_bound() {
     let PlannedGrowth::Bounded { db, wal, shm } = growth else {
         panic!("bounded deletion");
     };
-    let reader = Connection::open(&fx.config.db_path).unwrap();
-    reader
-        .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
-        .unwrap();
     fx.control(3 * S).apply_index_settings(enabled(0)).unwrap();
     let before = fx.sizes();
     fx.config.hard_limits.max_db_bytes =

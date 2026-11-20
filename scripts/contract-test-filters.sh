@@ -22,6 +22,9 @@
 # integration PR (a placeholder file each, with the normal-turn prefix scenario that
 # the integration PR's own foundation can already assert); they are never merged into
 # an existing binary and no leaf renames them.
+# Q2 recovery_disposal is an independent registration-only runtime/core leaf target.
+# Existing quiesce recovery_cache_tests and startup_recovery stay the input-derived
+# wire-prefix proof until the leaf adds its own scenarios.
 # (No comments inside the filter itself: nextest does not parse them.)
 # scripts/tests/test_check_central_files.sh checks that every binary named in
 # CACHE_CONTRACT_FILTER has a test target.
@@ -56,6 +59,7 @@ CACHE_CONTRACT_FILTER='
       | (kind(lib) & test(agent_loop::tools_waiting))
       | (kind(lib) & test(quiesce::recovery_cache_tests))
       | (kind(lib) & test(quiesce::recovery_06b_tests::prepared_adoption::models))
+      | binary(=recovery_disposal)
       | binary(=claude_cache_e2e)
       | binary(=mcp_cache_e2e)
       | binary(=claude_compaction_cache)
@@ -75,7 +79,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
       | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
-  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache)))
+  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache) | binary(=recovery_disposal)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))

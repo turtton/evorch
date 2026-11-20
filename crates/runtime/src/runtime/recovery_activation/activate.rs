@@ -73,19 +73,42 @@ impl AgentRuntime {
         &self,
         paused: PausedRecoveryComponent,
         authority: CurrentRecoveryAuthority,
-    ) -> Result<Vec<RunId>, RuntimeError> {
+        reservation: impl Into<ActivationReservation>,
+    ) -> Result<(Vec<RunId>, ActivatedReservation), crate::ActivationFailure> {
         let models = self.pin_recovery_models(&authority);
-        self.activate_component_with_models(paused, authority, models)
+        self.activate_component_with_models(paused, authority, models, reservation)
     }
 
     /// Core startup retains these same pins while publishing catalogs. A stale
     /// context is rejected before ACK; after ACK execution keeps the pinned model.
     pub fn activate_component_with_models(
         &self,
+        paused: PausedRecoveryComponent,
+        authority: CurrentRecoveryAuthority,
+        models: RecoveryModels,
+        reservation: impl Into<ActivationReservation>,
+    ) -> Result<(Vec<RunId>, ActivatedReservation), crate::ActivationFailure> {
+        let mut reservation = Some(reservation.into());
+        self.activate_component_reserved(paused, authority, models, &mut reservation)
+            .map_err(|error| crate::ActivationFailure {
+                error: Box::new(error),
+                reservation,
+            })
+    }
+
+    fn activate_component_reserved(
+        &self,
         mut paused: PausedRecoveryComponent,
         mut authority: CurrentRecoveryAuthority,
         models: RecoveryModels,
-    ) -> Result<Vec<RunId>, RuntimeError> {
+        reservation_slot: &mut Option<ActivationReservation>,
+    ) -> Result<(Vec<RunId>, ActivatedReservation), RuntimeError> {
+        #[cfg(test)]
+        self.record_graph_effect(0);
+        let reservation = reservation_slot
+            .as_ref()
+            .expect("activation owns its reservation");
+        reservation.validate(self, &paused.claim.manifest_id)?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.require_planned_manifest(&paused.claim.manifest_id)?;
         if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
@@ -295,7 +318,9 @@ impl AgentRuntime {
         // Hold generation guards across the writer transaction and publication.
         // Never hold the global runs lock while waiting for the writer.
         let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
+        reservation.validate(self, &paused.claim.manifest_id)?;
         let request = RecoveryActivationRequest {
+            reservation: reservation.control(),
             claim_id: paused.claim.claim_id.clone(),
             intents: intents
                 .iter()
@@ -324,6 +349,12 @@ impl AgentRuntime {
         #[cfg(feature = "recovery-test-support")]
         self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck)?;
         if let Err(write_error) = store.handle.activate_recovery_claim(request) {
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
             let observation =
                 store.with_database(|db| db.observe_recovery_activation(&paused.claim));
             return Err(error(format!(
@@ -331,9 +362,24 @@ impl AgentRuntime {
             )));
         }
         #[cfg(feature = "recovery-test-support")]
-        self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)?;
+        if let Err(error) = self.recovery_activation_probe(RecoveryActivationBoundary::AfterFullAck)
+        {
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
+            return Err(error);
+        }
         #[cfg(test)]
         if paused.lose_activation_ack {
+            self.supervise_activation(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+                paused.claim.clone(),
+            );
             return Err(error(
                 "activation ACK lost after committed FULL transaction",
             ));
@@ -388,7 +434,14 @@ impl AgentRuntime {
             cancellation::HookPoint::RecoveryGateOpened,
             &paused.controls[0].1,
         );
-        Ok(resume.into_iter().collect())
+        Ok((
+            resume.into_iter().collect(),
+            ActivatedReservation::new(
+                reservation_slot
+                    .take()
+                    .expect("activation owns its reservation"),
+            ),
+        ))
     }
 
     pub(super) fn validate_recovery_authority(

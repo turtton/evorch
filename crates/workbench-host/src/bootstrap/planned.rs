@@ -3,9 +3,7 @@
 use super::{BootstrapError, BootstrapOptions, components};
 use event_bus::EventBus;
 use runtime::{
-    AgentRuntime, RunStore, WorkspaceSeam,
-    compose::StartupRuntime,
-    ownership::{OwnerHost, OwnershipError, PlannedHold, RegistryError},
+    AgentRuntime, RunStore, WorkspaceSeam, compose::StartupRuntime, ownership::OwnerHost,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -101,7 +99,6 @@ impl PlannedStorage {
         restart_id: &str,
         first_claim: impl FnOnce(),
     ) -> Result<ClaimedBootstrap, BootstrapError> {
-        let mut first_claim = Some(first_claim);
         // Mint evidence before even opening an owner worker.
         let evidence = self.runtime().adopted_restart_ownership_evidence()?;
         let tx = self.runtime().adopted_restart_transaction()?;
@@ -124,30 +121,10 @@ impl PlannedStorage {
         owner
             .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
             .map_err(|_| "owner guard already set")?;
-        let mut blocked_threads = Vec::new();
-        for progress in &tx.owner_progress {
-            let hold = PlannedHold {
-                transaction_id: tx.metadata.restart_id.clone(),
-                capture_id: tx.metadata.capture_id.clone(),
-                thread_id: progress.thread_id.clone(),
-                owner_id: progress.old_owner_id.clone(),
-                generation: progress.old_generation,
-                active_runs: progress.active_runs.clone(),
-                parked_runs: progress.parked_runs.clone(),
-                orphaned: false,
-            };
-            match owner.claim_planned(&hold, &evidence) {
-                Ok(_) => {
-                    if let Some(first) = first_claim.take() {
-                        first();
-                    }
-                }
-                Err(RegistryError::Ownership(OwnershipError::PlannedOwnerBlocked)) => {
-                    blocked_threads.push(hold.thread_id)
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
+        let report =
+            self.runtime()
+                .claim_physical_bootstrap_owners(&owner, evidence, first_claim)?;
+        let blocked_threads = report.blocked_threads;
         self.runtime().set_thread_scratch(owner.thread_scratch());
         Ok(ClaimedBootstrap {
             storage: self,

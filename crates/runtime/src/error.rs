@@ -7,6 +7,10 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("activation reservation unavailable: {reason:?}")]
+    ActivationReservationUnavailable {
+        reason: crate::ActivationReservationProblem,
+    },
     #[error("runtime is busy preparing restart; retry the manual continuation after cancellation")]
     RestartBusy,
     #[error("cannot withdraw follow-up: {0}")]
