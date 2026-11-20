@@ -852,3 +852,151 @@ fn terminal_cleanup_rejects_prepared_activated_and_nonterminal_state() {
         }
     }
 }
+
+fn ended_cleanup(f: &Fixture, phase: &str, claimed: bool, released: bool) -> GraphControlWrite {
+    let (mut request, _) = graph(f, claimed);
+    if released {
+        f.storage
+            .handle()
+            .release_prepared_claim_if_unexecuted(
+                request.expected.claim.as_ref().unwrap().claim_id.clone(),
+                "already ended".into(),
+            )
+            .unwrap();
+    }
+    f.sql()
+        .execute(
+            "UPDATE restart_transactions SET phase=?1 WHERE restart_id='restart'",
+            [phase],
+        )
+        .unwrap();
+    request.expected = f.db().recovery_graph_cas("restart", "component").unwrap();
+    request.action = GraphControlAction::TerminalCleanup;
+    assert!(
+        f.db()
+            .recovery_graph_control("component")
+            .unwrap()
+            .is_none()
+    );
+    request
+}
+fn assert_cleanup_rejected(f: &Fixture, request: GraphControlWrite) {
+    let before = request.expected.clone();
+    assert!(
+        f.storage
+            .handle()
+            .write_recovery_graph_control(request)
+            .is_err()
+    );
+    assert_eq!(
+        f.db().recovery_graph_cas("restart", "component").unwrap(),
+        before
+    );
+    assert!(f.db().recovery_graph_effect("release").unwrap().is_none());
+}
+#[test]
+fn completed_cleanup_without_control_accepts_absent_and_released_only() {
+    for claimed in [false, true] {
+        let f = Fixture::new();
+        let request = ended_cleanup(&f, "completed", claimed, claimed);
+        let before = request.expected.clone();
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_control(request)
+                .unwrap()
+                .revoked
+        );
+        let after = f.db().recovery_graph_cas("restart", "component").unwrap();
+        assert_eq!(after.phase, before.phase);
+        assert_eq!(after.claim, before.claim);
+        assert_eq!(after.component, before.component);
+        assert_eq!(after.manifest, before.manifest);
+    }
+}
+#[test]
+fn adopted_released_cleanup_without_control_preserves_ended_eligibility() {
+    let f = Fixture::new();
+    let request = ended_cleanup(&f, "adopted", true, true);
+    let before = request.expected.clone();
+    assert!(
+        f.storage
+            .handle()
+            .write_recovery_graph_control(request)
+            .unwrap()
+            .revoked
+    );
+    let after = f.db().recovery_graph_cas("restart", "component").unwrap();
+    assert_eq!(after.phase, before.phase);
+    assert_eq!(after.claim, before.claim);
+    assert_eq!(after.component, before.component);
+}
+#[test]
+fn completed_cleanup_phase_guard_rejects_armed_without_claim() {
+    let f = Fixture::new();
+    let request = ended_cleanup(&f, "armed", false, false);
+    assert_cleanup_rejected(&f, request);
+}
+#[test]
+fn released_cleanup_phase_guard_rejects_armed_with_released_claim() {
+    let f = Fixture::new();
+    let request = ended_cleanup(&f, "armed", true, true);
+    assert_cleanup_rejected(&f, request);
+}
+#[test]
+fn completed_cleanup_claim_guard_rejects_prepared_and_activated() {
+    cleanup_live_claim_rejected("completed");
+}
+#[test]
+fn adopted_cleanup_claim_guard_rejects_prepared_and_activated() {
+    cleanup_live_claim_rejected("adopted");
+}
+fn cleanup_live_claim_rejected(phase: &str) {
+    for activated in [false, true] {
+        let f = Fixture::new();
+        let (mut request, activation) = graph(&f, true);
+        if activated {
+            f.storage
+                .handle()
+                .activate_recovery_claim(activation)
+                .unwrap();
+        }
+        f.sql()
+            .execute(
+                "UPDATE restart_transactions SET phase=?1 WHERE restart_id='restart'",
+                [phase],
+            )
+            .unwrap();
+        request.expected = f.db().recovery_graph_cas("restart", "component").unwrap();
+        request.action = GraphControlAction::TerminalCleanup;
+        assert_cleanup_rejected(&f, request);
+    }
+}
+#[test]
+fn ended_cleanup_disposition_guard_rejects_activated_even_if_claim_is_released() {
+    for phase in ["completed", "adopted"] {
+        let f = Fixture::new();
+        let mut request = ended_cleanup(&f, phase, true, true);
+        f.sql().execute("UPDATE restart_components SET disposition='activated' WHERE manifest_id='component'", []).unwrap();
+        request.expected = f.db().recovery_graph_cas("restart", "component").unwrap();
+        assert_cleanup_rejected(&f, request);
+    }
+}
+#[test]
+fn graph_cas_refusal_has_typed_conflict_and_no_effect() {
+    let f = Fixture::new();
+    let (mut request, _) = graph(&f, false);
+    request.expected.component.revision += 1;
+    assert!(matches!(
+        f.storage.handle().write_recovery_graph_control(request),
+        Err(storage::StorageError::RecoveryGraphConflict(_))
+    ));
+    assert!(f.db().recovery_graph_effect("release").unwrap().is_none());
+}
+
+#[test]
+fn adopted_cleanup_requires_an_existing_released_claim_not_absence() {
+    let f = Fixture::new();
+    let request = ended_cleanup(&f, "adopted", false, false);
+    assert_cleanup_rejected(&f, request);
+}

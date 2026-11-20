@@ -7,6 +7,12 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("graph control CAS conflict before application")]
+    GraphControlConflict,
+    #[error("graph control confirmed not applied")]
+    GraphControlNotApplied,
+    #[error("graph control acknowledgement unknown")]
+    GraphControlUnknown,
     #[error("activation reservation unavailable: {reason:?}")]
     ActivationReservationUnavailable {
         reason: crate::ActivationReservationProblem,
