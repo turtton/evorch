@@ -1,7 +1,16 @@
 #![cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 fn shell() -> std::ffi::OsString {
-    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| "/bin/sh".into())
+    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| {
+        // The background-list fixtures were written for bash; under dash (the CI /bin/sh) the wnowait fixture fails.
+        let bash = std::path::Path::new("/bin/bash");
+        if bash.exists() {
+            bash
+        } else {
+            std::path::Path::new("/bin/sh")
+        }
+        .into()
+    })
 }
 use process_guard::{GuardChild, GuardRuntime, LaunchSpec, pidfd_open, wire};
 use std::{

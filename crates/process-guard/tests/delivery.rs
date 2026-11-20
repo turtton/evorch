@@ -1,6 +1,15 @@
 #![cfg(target_os = "linux")]
 fn shell() -> std::ffi::OsString {
-    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| "/bin/sh".into())
+    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| {
+        // The background-list fixtures were written for bash; under dash (the CI /bin/sh) the wnowait fixture fails.
+        let bash = std::path::Path::new("/bin/bash");
+        if bash.exists() {
+            bash
+        } else {
+            std::path::Path::new("/bin/sh")
+        }
+        .into()
+    })
 }
 use process_guard::{
     COMPAT_ID, GuardRuntime, LaunchSpec,
@@ -36,6 +45,13 @@ fn copy_bundle(dir: &Path) -> PathBuf {
     )
     .unwrap();
     json["purpose"] = "test-helper".into();
+    let release = json["helper"]["profile"] == "release";
+    let mut recipe = vec!["build", "--locked"];
+    if release {
+        recipe.push("--release");
+    }
+    recipe.extend(["-p", "process-guard", "--bin", "evorch-process-guard"]);
+    json["helper"]["build_args"] = serde_json::json!(recipe);
     json["helper"]["file"] = "evorch-process-guard".into();
     json["callers"] = serde_json::json!([]);
     let path = dir.join("guard-bundle.json");
