@@ -138,6 +138,10 @@ const C_GC: u64 = 24;
 // The same probe measured 421/657 frames (407/633 at v70), with identical
 // 218,304 VM steps for both sizes (+155 fixed steps). Reserve the measured 24
 // fixed schema frames at 100,000 rows; collection and VM scaling budgets stay.
+// v72 adds the CLI continuity tables (grants, clock) with two indexes, six triggers and
+// the clock seed row. The same probe measured 434/681 frames for 10/100,000 rows (421/657
+// at v71); reserve exactly the 24 fixed schema frames seen with 100,000 rows. The VM-step
+// scaling assertion is unchanged and still passes: the migration reads no existing row.
 const MIGRATION_FRAMES: u64 = 24
     + 280
     + 40
@@ -157,6 +161,7 @@ const MIGRATION_FRAMES: u64 = 24
     + 16
     + 12
     + 5
+    + 24
     + 24
     + 24;
 
@@ -395,6 +400,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v72.sql"),
                     include_str!("../undo/undo_v71.sql"),
                     include_str!("../undo/undo_v70.sql"),
                     include_str!("../undo/undo_v69.sql"),

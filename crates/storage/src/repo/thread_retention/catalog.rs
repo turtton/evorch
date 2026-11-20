@@ -118,6 +118,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "claim metadata; cascades with its erased recovery component",
     ),
     (
+        "cli_continuity_grants",
+        Keep,
+        "durable CLI continuity evidence: token digests and fixed deadlines of a planned restart",
+    ),
+    (
+        "cli_continuity_clock",
+        Keep,
+        "high-water mark of the time CLI continuity has observed",
+    ),
+    (
         "recovery_graph_control",
         Keep,
         "durable graph eligibility and revocation fences owned by restart recovery",
