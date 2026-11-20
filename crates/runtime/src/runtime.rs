@@ -21,6 +21,7 @@ mod completion_relay;
 mod held_messages;
 mod host_prompt;
 mod recovery_activation;
+pub mod recovery_disposal;
 #[cfg(any(test, feature = "recovery-test-support"))]
 mod recovery_fixture;
 mod recovery_graph;

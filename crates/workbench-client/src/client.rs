@@ -39,6 +39,7 @@ pub struct ClientConfig {
     pub optional_capabilities: Vec<Capability>,
     /// Refuse any core but this one.
     pub desired_core: Option<CoreIdentity>,
+    pub local_surface: Option<workbench_protocol::handshake::LocalSurface>,
     /// Numbers request ids. Reuse one config (or clone it) across reconnects so
     /// request ids never repeat for the same client instance.
     pub request_counter: Arc<AtomicU64>,
@@ -64,6 +65,7 @@ impl ClientConfig {
                 Capability::CommittedBodies,
             ],
             desired_core: None,
+            local_surface: None,
             request_counter: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -541,6 +543,7 @@ impl WorkbenchClient {
             client_build: config.client_build.clone(),
             client_instance_id: config.client_instance_id.clone(),
             desired_core: config.desired_core.clone(),
+            local_surface: config.local_surface,
         };
         hello.validate()?;
 

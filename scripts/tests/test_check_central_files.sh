@@ -390,10 +390,10 @@ for i in "${!leaf_scopes[@]}"; do
     expect fail "${leaf_scopes[$i]} may not change $refused" "$central" --scope "${leaf_scopes[$i]}" --files-from "$work/files"
   done
 done
-# public_restart_cache.rs is the one file two leaves share (R and CW, never open together).
+# public_restart_cache.rs is owned by 5a-V (integration), never by a leaf.
 files $C/tests/public_restart_cache.rs
 for sharing in pr07b5ar pr07b5acw; do
-  expect ok "$sharing owns the public restart cache binary" "$central" --scope "$sharing" --files-from "$work/files"
+  expect fail "$sharing does not own the integration public restart cache binary" "$central" --scope "$sharing" --files-from "$work/files"
 done
 for other in pr07b5aq1 pr07b5aq2 pr07b5acn pr16a2f4e pr16bov3; do
   expect fail "$other does not own the public restart cache binary" "$central" --scope "$other" --files-from "$work/files"

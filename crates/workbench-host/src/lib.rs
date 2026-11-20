@@ -16,6 +16,7 @@
 // adapters) need no manifest or lockfile change. Nothing uses it yet.
 use renderer_ipc as _;
 
+pub mod admin;
 pub mod areas;
 pub mod attachments;
 pub mod bootstrap;

@@ -2516,6 +2516,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "workbench-authority",
  "workbench-client",
  "workbench-host",
  "workbench-protocol",
@@ -8511,6 +8512,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "workbench-authority"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "workbench-protocol",
+]
+
+[[package]]
 name = "workbench-client"
 version = "0.1.0"
 dependencies = [
@@ -8534,6 +8546,7 @@ dependencies = [
  "config",
  "eval",
  "event-bus",
+ "futures-util",
  "image",
  "model",
  "providers",
@@ -8556,6 +8569,7 @@ dependencies = [
  "tools",
  "tracing",
  "uuid",
+ "workbench-authority",
  "workbench-host",
  "workbench-protocol",
  "workspace-state",
@@ -8589,6 +8603,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+ "workbench-authority",
  "workbench-protocol",
 ]
 

@@ -39,6 +39,7 @@ async fn rejects_input_reflection(
             client_build: build,
             client_instance_id: ClientId::new("raw-client").unwrap(),
             desired_core: None,
+            local_surface: None,
         },
     )
     .await;

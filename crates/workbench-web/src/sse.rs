@@ -48,6 +48,9 @@ pub(crate) struct EventsQuery {
 /// `all`, `project:<id>` or `thread:<id>`.
 pub fn parse_scope(text: &str) -> Result<SubscriptionScope, WorkbenchError> {
     let bad = || WorkbenchError::invalid_request("scope must be all, project:<id> or thread:<id>");
+    if text == "management" {
+        return Ok(SubscriptionScope::Management);
+    }
     if text == "all" {
         return Ok(SubscriptionScope::All);
     }
@@ -149,11 +152,13 @@ async fn pump<B: WorkbenchBackend>(
     mut tracker: CursorTracker,
     subscription_id: SubscriptionId,
     shutdown: crate::shutdown::ShutdownSignal,
+    authority: workbench_authority::TransportAuthority,
 ) {
     loop {
         let envelope = tokio::select! {
             biased;
             () = shutdown.triggered() => return,
+            () = authority.expired() => return,
             () = queue.tx.closed() => return,
             next = events.recv() => match next {
                 Some(envelope) => envelope,
@@ -198,6 +203,7 @@ async fn pump<B: WorkbenchBackend>(
 
 /// The body of the response: queued items, then end of stream.
 struct SseStream {
+    expiry: Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     rx: mpsc::Receiver<Item>,
     bytes: Arc<AtomicUsize>,
     /// Released with the stream, which frees the SSE slot.
@@ -208,6 +214,10 @@ impl Stream for SseStream {
     type Item = Result<Event, Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.expiry.as_mut().poll(cx).is_ready() {
+            self.rx.close();
+            return Poll::Ready(None);
+        }
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(item)) => {
                 let _ = self
@@ -243,14 +253,32 @@ pub(crate) async fn events<B: WorkbenchBackend>(
     State(state): State<Arc<AppState<B>>>,
     query: Result<Query<EventsQuery>, QueryRejection>,
     headers: HeaderMap,
+    principal: Option<axum::extract::Extension<workbench_authority::VerifiedWebPrincipal>>,
 ) -> Response {
     let Ok(Query(query)) = query else {
         return error_response(WorkbenchError::invalid_request("malformed query"), None);
     };
+    let authority =
+        workbench_authority::TransportAuthority::from_web_context(principal.as_ref().map(|p| &p.0));
+    let context = workbench_authority::IngressContext::new(
+        workbench_protocol::envelope::Provenance::human(
+            workbench_protocol::envelope::Surface::Web,
+            ClientId::new("web-sse").unwrap(),
+        ),
+        authority.clone(),
+    );
     let scope = match query.scope.as_deref().map(parse_scope).transpose() {
         Ok(scope) => scope.unwrap_or(SubscriptionScope::All),
         Err(error) => return error_response(error, None),
     };
+    if scope == SubscriptionScope::Management
+        && let Err(error) = state.backend.authorize_management(
+            &context,
+            workbench_protocol::namespaces::lifecycle::AdminAction::Status,
+        )
+    {
+        return error_response(error, None);
+    }
     // A reconnecting browser sends the id of the last message it saw, which is
     // newer than the `after` the page was opened with, so the header wins.
     let after = match last_event_id(&headers) {
@@ -284,7 +312,7 @@ pub(crate) async fn events<B: WorkbenchBackend>(
     };
     let subscription = match state
         .backend
-        .subscribe(client, Subscribe { scope, after })
+        .subscribe(client, Subscribe { scope, after }, context)
         .await
     {
         Ok(subscription) => subscription,
@@ -328,6 +356,7 @@ pub(crate) async fn events<B: WorkbenchBackend>(
                 CursorTracker::new(started.high_water),
                 started.subscription_id.clone(),
                 state.shared.shutdown.clone(),
+                authority.clone(),
             );
             let observer = state.shared.observer.clone();
             async move {
@@ -348,7 +377,9 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         );
     }
 
+    let expiry = Box::pin(async move { authority.expired().await });
     let stream = SseStream {
+        expiry,
         rx,
         bytes,
         _slot: slot,
@@ -390,5 +421,51 @@ mod tests {
         for bad in ["", "thread", "thread:", "other:x", "ALL"] {
             assert!(parse_scope(bad).is_err(), "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod authority_contract_tests {
+    use super::*;
+    use futures_util::StreamExt;
+    #[tokio::test]
+    async fn revoked_authority_discards_already_queued_snapshot_replay_and_live() {
+        let (principal, lease) = workbench_authority::test_support::web(
+            "contract-admin",
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let authority = workbench_authority::TransportAuthority::from_web_context(Some(&principal));
+        let (tx, rx) = mpsc::channel(3);
+        for name in ["snapshot", "replay", "live"] {
+            assert!(
+                tx.try_send(Item {
+                    name,
+                    id: None,
+                    data: "management detail".to_owned()
+                })
+                .is_ok()
+            );
+        }
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = semaphore.clone().acquire_owned().await.unwrap();
+        let mut stream = SseStream {
+            expiry: Box::pin(async move { authority.expired().await }),
+            rx,
+            bytes: Arc::new(AtomicUsize::new(51)),
+            _slot: slot,
+        };
+        lease.revoke();
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert_eq!(semaphore.available_permits(), 1);
+        let expired = workbench_authority::TransportAuthority::from_web_context(Some(&principal));
+        let context = workbench_authority::IngressContext::new(
+            workbench_protocol::envelope::Provenance::human(
+                workbench_protocol::envelope::Surface::Web,
+                ClientId::new("reconnect").unwrap(),
+            ),
+            expired,
+        );
+        assert!(context.authorize().is_err());
     }
 }
