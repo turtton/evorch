@@ -82,3 +82,39 @@ fn the_reconnect_line_names_the_stage_and_the_time_left() {
     assert!(describe_expiry(Stage::RestartingToReady).contains("120 seconds"));
     assert!(describe_expiry(Stage::ReadyToReconnect).contains("30 seconds"));
 }
+
+#[test]
+fn a_blocker_is_listed_with_what_is_known_about_its_teardown() {
+    use workbench_protocol::{
+        ids::RunId,
+        namespaces::lifecycle::{
+            RestartPhase,
+            restart::{InterruptBinding, ShellBlocker, ShellBlockers},
+        },
+        wire::{InstanceEpoch, Revision},
+    };
+    let id = |t: &str| AdminId::new(t).unwrap();
+    let blocker = |run: &str, teardown_confirmed, observed| ShellBlocker {
+        run: RunId::new(run).unwrap(),
+        teardown_confirmed,
+        observed,
+        binding: InterruptBinding {
+            restart_id: id("r1"),
+            core_epoch: InstanceEpoch(7),
+            connection_epoch: InstanceEpoch(1),
+            run_incarnation: id("inc"),
+            blocker_identity: id("blk"),
+            revision: Revision(2),
+            phase: RestartPhase::WaitingSafePoint,
+        },
+    };
+    let lines = describe_blockers(&ShellBlockers {
+        blockers: vec![blocker("run-a", false, false), blocker("run-b", true, true)],
+        total: Revision(3),
+        omitted: Revision(1),
+    });
+    assert!(lines[0].contains("[0] run run-a"));
+    assert!(lines[0].contains("teardown not confirmed, result not observed"));
+    assert!(lines[1].contains("teardown confirmed, result observed"));
+    assert!(lines[2].contains("1 more not listed"));
+}

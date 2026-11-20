@@ -381,6 +381,8 @@ fn blocker(revision: u64) -> ShellBlockers {
     ShellBlockers {
         blockers: vec![ShellBlocker {
             run: RunId::new("run-a").unwrap(),
+            teardown_confirmed: false,
+            observed: false,
             binding: InterruptBinding {
                 restart_id: id("restart-1"),
                 core_epoch: InstanceEpoch(7),

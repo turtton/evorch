@@ -169,10 +169,14 @@ fn a_blocker_is_picked_from_the_shown_list_and_the_binding_is_not_edited() {
         blockers: vec![
             ShellBlocker {
                 run: RunId::new("run-a").unwrap(),
+                teardown_confirmed: false,
+                observed: false,
                 binding: binding(RestartPhase::WaitingSafePoint, 9),
             },
             ShellBlocker {
                 run: RunId::new("run-b").unwrap(),
+                teardown_confirmed: false,
+                observed: false,
                 binding: InterruptBinding {
                     blocker_identity: id("blk-2"),
                     ..binding(RestartPhase::WaitingSafePoint, 9)

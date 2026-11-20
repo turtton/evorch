@@ -145,10 +145,20 @@ pub fn describe_blockers(blockers: &ShellBlockers) -> Vec<String> {
     let mut lines = Vec::new();
     for (i, b) in blockers.blockers.iter().enumerate() {
         lines.push(format!(
-            "  [{i}] run {} (blocker {}, phase {})",
+            "  [{i}] run {} (blocker {}, phase {}, teardown {}, result {})",
             b.run,
             b.binding.blocker_identity.as_str(),
-            phase_name(b.binding.phase)
+            phase_name(b.binding.phase),
+            if b.teardown_confirmed {
+                "confirmed"
+            } else {
+                "not confirmed"
+            },
+            if b.observed {
+                "observed"
+            } else {
+                "not observed"
+            }
         ));
     }
     if blockers.omitted.get() > 0 {

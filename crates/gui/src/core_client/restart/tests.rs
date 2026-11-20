@@ -62,6 +62,8 @@ fn blockers(revision: u64) -> QueryReply {
         ShellBlockers {
             blockers: vec![ShellBlocker {
                 run: RunId::new("run-a").unwrap(),
+                teardown_confirmed: false,
+                observed: false,
                 binding: InterruptBinding {
                     restart_id: id("r1"),
                     core_epoch: InstanceEpoch(7),
