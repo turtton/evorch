@@ -47,6 +47,15 @@ pub struct RestartId {
     generation: u64,
 }
 impl RestartId {
+    // Public management IDs use the 5a-I AdminId alphabet (no colon). This is
+    // projection only; generation/attempt ownership remain in the #710 owner.
+    fn public_id(self) -> workbench_protocol::namespaces::lifecycle::AdminId {
+        workbench_protocol::namespaces::lifecycle::AdminId::new(format!(
+            "{}.{}",
+            self.owner, self.generation
+        ))
+        .expect("bounded internal restart ID")
+    }
     pub fn generation(self) -> u64 {
         self.generation
     }
@@ -229,7 +238,7 @@ impl RestartCoordinator {
     }
     /// Joining or dropping a waiter never owns cancellation. The detached worker does.
     pub fn request(&self) -> Result<RestartId, RuntimeError> {
-        self.request_inner(None)
+        self.request_inner(None, PREPARATION_LIMIT)
     }
     /// Internal planned path only: no wire handler/capability advertises restart.
     pub fn request_planned(
@@ -237,11 +246,12 @@ impl RestartCoordinator {
         recipes: std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>,
     ) -> Result<RestartId, RuntimeError> {
         self.0.runtime.preflight_restart_capture(&recipes)?;
-        self.request_inner(Some(recipes))
+        self.request_inner(Some(recipes), PREPARATION_LIMIT)
     }
     fn request_inner(
         &self,
         recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
+        preparation_limit: std::time::Duration,
     ) -> Result<RestartId, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if matches!(
@@ -275,7 +285,7 @@ impl RestartCoordinator {
         state.recipes = recipes;
         state.learning_pause = Some(self.0.runtime.pause_learning());
         state.evaluation_pause = Some(self.0.preparing.evaluations.producers.pause());
-        state.preparation_deadline = Some(tokio::time::Instant::now() + PREPARATION_LIMIT);
+        state.preparation_deadline = Some(tokio::time::Instant::now() + preparation_limit);
         self.publish(&mut state, RestartPhase::PreparingDrains);
         let worker = self.clone();
         state.worker = Some(
@@ -537,8 +547,12 @@ impl RestartCoordinator {
         self.publish(state, RestartPhase::Running);
     }
     pub fn cancel(&self, id: RestartId) -> Result<(), RuntimeError> {
+        self.cancel_checked(id, None)
+    }
+    fn cancel_checked(&self, id: RestartId, revision: Option<u64>) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if state.id != Some(id)
+            || revision.is_some_and(|revision| revision != state.revision)
             || state.capture_started
             || matches!(
                 state.phase,
@@ -637,7 +651,7 @@ impl RestartSnapshot {
             .collect();
         dto::RestartStatus {
             restart_id: self.id.map(|id| {
-                workbench_protocol::ids::RestartId::new(format!("{}:{}", id.owner, id.generation))
+                workbench_protocol::ids::RestartId::new(id.public_id().as_str())
                     .expect("restart id")
             }),
             phase,
