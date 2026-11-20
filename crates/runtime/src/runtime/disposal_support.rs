@@ -73,7 +73,7 @@ impl AgentRuntime {
                     .members
                     .iter()
                     .find(|m| m.run_id == id.to_string())
-                    .ok_or_else(|| RuntimeError::GraphControlConflict)?;
+                    .ok_or(RuntimeError::GraphControlConflict)?;
                 if index.paused_recovery.as_ref().is_none_or(|p| {
                     Some(p.claim_id.as_str()) != claim_id
                         || p.old_incarnation != captured.incarnation
@@ -95,7 +95,7 @@ impl AgentRuntime {
             .shared
             .run_store
             .get()
-            .ok_or_else(|| RuntimeError::GraphControlNotApplied)?;
+            .ok_or(RuntimeError::GraphControlNotApplied)?;
         let request = GraphControlWrite {
             expected: authority.expected().clone(),
             effect: effect.clone(),
