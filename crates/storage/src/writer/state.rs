@@ -890,6 +890,9 @@ pub(super) fn run_writer_with_index(
                 let _ = reply.send(diagnostic::reclaim_step(&mut state, pages));
                 notify_index_capacity(&mut state);
             }
+            Ok(Command::AdminAudit(write, reply)) => {
+                super::admin_audit::run(&state.conn, state.writes_suspended, write, reply);
+            }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                 super::index::shutdown(&mut state.index, &state.conn);
                 if let Err(error) = flush_usage(&mut state) {

@@ -58,8 +58,11 @@ fn upgrading_v68_preserves_references_and_adds_a_thread_cursor_seek() {
     let expected = before.artifact_refs_after(None, 10).unwrap();
     drop(before);
     // Reconstruct v68, as the other historical migration fixtures do.
-    sql.execute_batch(include_str!("../undo/undo_v69.sql"))
-        .unwrap();
+    sql.execute_batch(concat!(
+        include_str!("../undo/undo_v70.sql"),
+        include_str!("../undo/undo_v69.sql")
+    ))
+    .unwrap();
     sql.pragma_update(None, "user_version", 68).unwrap();
     drop(sql);
     let upgraded = Database::open(&config).unwrap();
