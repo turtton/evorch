@@ -9,6 +9,8 @@ async fn verified_connection_epoch_is_socket_scoped_and_dies_with_its_lease() {
     let first = a.authority().connection().unwrap();
     let same = a.authority().connection().unwrap();
     let other = b.authority().connection().unwrap();
+    assert_eq!(first.principal(), a.authority().principal().unwrap());
+    assert_eq!(same.principal(), first.principal());
     assert!(first.matches(same.epoch()));
     assert!(
         !other.matches(first.epoch()),
@@ -21,6 +23,11 @@ async fn verified_connection_epoch_is_socket_scoped_and_dies_with_its_lease() {
         "saved context cannot revive a disconnected connection"
     );
     assert!(!same.matches(epoch));
+    assert_eq!(
+        same.principal(),
+        first.principal(),
+        "identity readback does not renew liveness"
+    );
     assert!(
         !other.matches(epoch),
         "reconnecting never restores the old epoch"

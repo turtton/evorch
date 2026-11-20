@@ -213,6 +213,14 @@ impl AgentRuntime {
     /// Original supervisor readback only. A known result releases the automatic
     /// slot; an unknown result stays owned. This never starts another effect.
     pub fn reconcile_automatic_activation_reservations(&self) -> Result<usize, RuntimeError> {
+        self.reconcile_activation_reservations(false)
+    }
+    /// Original manual supervisor readback only; never starts activation/claim.
+    /// Automatic tokens are outside this entry point's authority.
+    pub fn reconcile_manual_activation_reservations(&self) -> Result<usize, RuntimeError> {
+        self.reconcile_activation_reservations(true)
+    }
+    fn reconcile_activation_reservations(&self, manual: bool) -> Result<usize, RuntimeError> {
         let claims = {
             let state = self
                 .shared
@@ -223,7 +231,8 @@ impl AgentRuntime {
                 .supervised
                 .values()
                 .filter_map(|(token, claim)| {
-                    matches!(token, ActivationReservation::Automatic(_)).then_some(claim.clone())
+                    (matches!(token, ActivationReservation::Manual(_)) == manual)
+                        .then_some((claim.clone(), token.inner().nonce))
                 })
                 .collect::<Vec<_>>()
         };
@@ -231,7 +240,7 @@ impl AgentRuntime {
             return Ok(0);
         };
         let mut resolved = 0;
-        for claim in claims {
+        for (claim, nonce) in claims {
             let observed = store
                 .with_database(|db| db.observe_recovery_activation(&claim))
                 .map_err(error)?;
@@ -243,6 +252,19 @@ impl AgentRuntime {
                 .graph_reservations
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Manual readback cannot release a replacement token admitted
+            // after this read began, including an automatic attempt.
+            if manual
+                && !state
+                    .supervised
+                    .get(&claim.manifest_id)
+                    .is_some_and(|(token, _)| {
+                        matches!(token, ActivationReservation::Manual(_))
+                            && token.inner().nonce == nonce
+                    })
+            {
+                continue;
+            }
             if state.supervised.remove(&claim.manifest_id).is_some() {
                 state.graphs.remove(&claim.manifest_id);
                 resolved += 1;
@@ -353,3 +375,6 @@ impl AgentRuntime {
 fn error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
 }
+
+#[cfg(test)]
+mod tests;

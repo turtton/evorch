@@ -301,7 +301,26 @@ mod harness;
 
 /// Each case is a fresh process: physical adoption must precede all DB/owner/runtime threads.
 /// Child exit is the completion event; no sleeps, polling, or test-local timeout.
+pub type RuntimeFactory =
+    fn(&str, Arc<EventBus>) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>);
+
+pub fn default_factory(
+    _: &str,
+    bus: Arc<EventBus>,
+) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>) {
+    (
+        Arc::new(::tools::ToolExecutor::new(bus)),
+        Arc::new(NeverModel),
+    )
+}
+
 pub fn run(cases: &[&str], check: fn(&Fixture, &str)) {
+    run_with(cases, check, default_factory);
+}
+
+/// Test-only dependency composition, after real sealed adoption. No authority
+/// constructor or access to runtime internals is introduced.
+pub fn run_with(cases: &[&str], check: fn(&Fixture, &str), factory: RuntimeFactory) {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let value = |flag: &str| args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
     let Some(root) = value("--fixture-root").map(PathBuf::from) else {
@@ -366,12 +385,9 @@ pub fn run(cases: &[&str], check: fn(&Fixture, &str)) {
         let owner = Arc::new(
             OwnerHost::open_planned(&root.join("owners"), Default::default(), bus.clone()).unwrap(),
         );
-        let runtime = AgentRuntime::new(
-            bus.clone(),
-            Arc::new(::tools::ToolExecutor::new(bus)),
-            Arc::new(NeverModel),
-        )
-        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let (tools, model) = factory(&case, bus.clone());
+        let runtime = AgentRuntime::new(bus, tools, model)
+            .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         runtime
             .adopt_restart_handoff(proof)
             .unwrap_or_else(|e| panic!("DB Adopt failed: {}", e.error));

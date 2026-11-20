@@ -23,6 +23,54 @@ impl AgentModel for NoProvider {
     }
 }
 
+#[derive(Default)]
+struct DefaultReadbackRetainsUnknown {
+    original: std::sync::Mutex<Option<runtime::ManualActivationReservation>>,
+}
+impl RecoveryAdminHandler for DefaultReadbackRetainsUnknown {
+    fn resume(
+        &self,
+        _: &RecoveryAdminContext,
+        request: RecoveryResumeRequest,
+    ) -> RecoveryAdminResult {
+        *self.original.lock().unwrap() = Some(request.reservation);
+        Err(RecoveryAdminError::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn default_manual_readback_hook_retains_unknown_without_claim_or_activation() {
+    let fixture = Fixture::new();
+    let handler = Arc::new(DefaultReadbackRetainsUnknown::default());
+    let mut services = BackgroundServices::default();
+    let diagnostics = CoreGraphRecovery::with_admin_handler(handler.clone())
+        .start(fixture.startup_inputs(), &mut services)
+        .await
+        .unwrap();
+    assert_eq!(
+        diagnostics
+            .recovery_admin()
+            .resume(fixture.request("unknown"))
+            .unwrap()
+            .await,
+        Err(RecoveryAdminError::Unavailable)
+    );
+    // The reply follows the original supervisor's readback hook, not a timer.
+    assert!(handler.original.lock().unwrap().is_some());
+    assert!(
+        fixture
+            .inputs
+            .runtime
+            .reserve_automatic_activation("unknown")
+            .is_err()
+    );
+    let db = storage::Database::open(&fixture.inputs.storage).unwrap();
+    assert!(db.restart_transactions().unwrap().is_empty());
+    assert!(db.resume_intents().unwrap().is_empty());
+    assert!(fixture.inputs.runtime.list_agents().is_empty());
+    services.shutdown().await.unwrap();
+}
+
 struct Fixture {
     inputs: CoreStartupInputs,
     _storage: storage::Storage,
@@ -439,13 +487,20 @@ fn pending_work_counts_retry_and_running_jobs_not_historical_manual_display() {
             }],
         })),
         retry_count: Default::default(),
+        retry_ids: Default::default(),
         jobs: Default::default(),
         admin: Arc::new(actor),
     };
     assert!(!diagnostics.has_pending_work());
-    diagnostics.retry_count.store(1, Ordering::Release);
+    let historical = diagnostics.snapshot();
+    assert!(!diagnostics.automatic_retry_pending("manual-idle"));
+    diagnostics.publish_retry(&BTreeSet::from(["actual-retry".to_owned()]));
     assert!(diagnostics.has_pending_work());
-    diagnostics.retry_count.store(0, Ordering::Release);
+    assert!(diagnostics.automatic_retry_pending("actual-retry"));
+    assert!(!diagnostics.automatic_retry_pending("manual-idle"));
+    assert_eq!(diagnostics.snapshot(), historical);
+    diagnostics.publish_retry(&BTreeSet::new());
+    assert!(!diagnostics.automatic_retry_pending("actual-retry"));
     let job = admin::JobGuard::start(&diagnostics.jobs, &Default::default());
     assert!(diagnostics.has_pending_work());
     drop(job);

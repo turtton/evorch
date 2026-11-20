@@ -15,7 +15,54 @@ pub(super) struct Usage {
     pub(super) users: HashSet<ScratchUser>,
     shell_identities: HashMap<ScratchUser, tools::ShellJobIdentity>,
 }
+/// Read-only disposal observation. Unknown must not become a sharing proof.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Q2 leaf wires disposal observation")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DisposalScratchUse {
+    Unused { epoch: u64, lease: Lease },
+    InUse,
+    Unknown,
+}
 impl ThreadScratch {
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Q2 leaf wires disposal observation")
+    )]
+    pub(crate) fn disposal_usage(&self, thread: &str) -> DisposalScratchUse {
+        let state = self.lock();
+        let key = ScratchKey::Thread(thread.into());
+        let epoch = state.usage.get(&key).map_or(0, |usage| usage.epoch);
+        // Exhaustion and a lost shell observer are unknown, even if another
+        // known user exists. No proof may be reconstructed from a lease alone.
+        if epoch == u64::MAX
+            || state.usage.get(&key).is_some_and(|usage| {
+                usage
+                    .users
+                    .iter()
+                    .any(|user| matches!(user, ScratchUser::ObserverLost { .. }))
+            })
+        {
+            return DisposalScratchUse::Unknown;
+        }
+        let Some(lease) = state.leases.get(thread) else {
+            return DisposalScratchUse::Unknown;
+        };
+        if state
+            .usage
+            .get(&key)
+            .is_some_and(|usage| !usage.users.is_empty())
+        {
+            DisposalScratchUse::InUse
+        } else {
+            DisposalScratchUse::Unused {
+                epoch,
+                lease: lease.clone(),
+            }
+        }
+    }
     pub(crate) fn set_archive_wake(&self, wake: std::sync::mpsc::SyncSender<()>) {
         *self
             .archive_wake

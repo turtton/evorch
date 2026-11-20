@@ -40,7 +40,7 @@ impl GraphDisposalKey {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
+    allow(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
 )]
 impl ThreadScratch {
     /// Recheck an unused snapshot after runtime/main DB observations, while the

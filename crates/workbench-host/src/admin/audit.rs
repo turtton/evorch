@@ -396,6 +396,11 @@ pub struct RestartAuditBinding {
     bound: Arc<AtomicBool>,
 }
 impl RestartAuditBinding {
+    /// The exact accepted audit identity; callers must not mint an effect nonce.
+    pub fn operation_key(&self) -> &storage::admin_audit::AuditOperationKey {
+        &self.key
+    }
+
     pub async fn bind(
         &self,
         restart_id: &workbench_protocol::namespaces::lifecycle::AdminId,
@@ -456,6 +461,23 @@ mod tests {
             reply(Err(storage::StorageError::Io("injected".into())));
             Ok(())
         }
+    }
+    #[test]
+    fn restart_binding_exposes_only_the_exact_accepted_key_without_io() {
+        let port = Arc::new(Port(AtomicUsize::new(0)));
+        let audit = AdminAudit::new(
+            port.clone(),
+            crate::bootstrap::restart::HostRestartGate::default(),
+        );
+        let key = AuditOperationKey {
+            operation_id: "accepted-operation".into(),
+            attempt_nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let binding = Arc::new(audit).binding(key.clone());
+        assert_eq!(binding.operation_key(), &key);
+        assert_eq!(binding.clone().operation_key(), &key);
+        assert!(!binding.is_bound());
+        assert_eq!(port.0.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn background_write_cannot_cross_capture_even_with_an_old_producer_permit() {

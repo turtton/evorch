@@ -16,6 +16,11 @@ name = "physical_ownership_retention"
 path = "tests/physical_ownership_retention/main.rs"
 harness = false
 
+[[test]]
+name = "owned_graphs_admin"
+path = "tests/owned_graphs_admin.rs"
+harness = false
+
 [dependencies]
 core-instance = { path = "../core-instance" }
 agents = { path = "../agents" }

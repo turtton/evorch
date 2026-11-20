@@ -136,6 +136,11 @@ impl TransportAuthority {
 #[derive(Clone)]
 pub struct VerifiedConnection(Arc<Proof>);
 impl VerifiedConnection {
+    /// Observation only, for principal-scoped management operation lookup.
+    /// This neither renews liveness nor creates another connection proof.
+    pub fn principal(&self) -> &PrincipalRecord {
+        &self.0.principal
+    }
     /// Diagnostic value for confirmation DTOs; possession of this integer is not authority.
     pub fn epoch(&self) -> workbench_protocol::wire::InstanceEpoch {
         self.0.connection_epoch
