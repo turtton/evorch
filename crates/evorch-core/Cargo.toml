@@ -30,6 +30,12 @@ required-features = ["bootstrap-test-support"]
 test = false
 bench = false
 
+[[test]]
+name = "planned_shutdown_watchdog_composition"
+path = "tests/planned_shutdown_watchdog_composition/main.rs"
+harness = false
+required-features = ["bootstrap-test-support"]
+
 [dependencies]
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }

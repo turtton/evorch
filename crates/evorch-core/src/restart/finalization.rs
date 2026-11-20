@@ -87,6 +87,10 @@ impl RestartCoordinator {
         // begin_capture AND publication. A waiter never owns the Sealed value.
         let session = sealed.begin_capture(&self.0.runtime, tx, recipes);
         state.capture_started = true;
+        #[cfg(target_os = "linux")]
+        if let Some(observer) = &state.shutdown_watchdog {
+            observer.capture_started();
+        }
         state.finalization_id = Some(id);
         if let Some(worker) = state.worker.take() {
             worker.abort();

@@ -59,6 +59,8 @@ pub struct RestartSnapshot {
     pub active_producers: usize,
 }
 struct State {
+    #[cfg(target_os = "linux")]
+    shutdown_watchdog: Option<crate::lifecycle::shutdown_watchdog::Observer>,
     id: Option<RestartId>,
     phase: RestartPhase,
     revision: u64,
@@ -150,6 +152,8 @@ impl RestartCoordinator {
             producers,
             preparing,
             state: Mutex::new(State {
+                #[cfg(target_os = "linux")]
+                shutdown_watchdog: None,
                 id: None,
                 phase: RestartPhase::Running,
                 revision: 0,
@@ -181,6 +185,21 @@ impl RestartCoordinator {
             ))))
             .expect("runtime already has another lifecycle owner");
         coordinator
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_shutdown_watchdog(
+        &self,
+        observer: crate::lifecycle::shutdown_watchdog::Observer,
+    ) -> std::io::Result<()> {
+        let mut state = self.0.state.lock().unwrap();
+        if state.shutdown_watchdog.is_some() || state.capture_started {
+            return Err(std::io::Error::other(
+                "watchdog must be installed once, before capture",
+            ));
+        }
+        observer.installed_publisher();
+        state.shutdown_watchdog = Some(observer);
+        Ok(())
     }
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
@@ -635,5 +654,7 @@ async fn producer_change(receivers: &mut [watch::Receiver<u64>]) {
     })
     .await
 }
+#[cfg(all(test, target_os = "linux"))]
+mod shutdown_watchdog_tests;
 #[cfg(test)]
 mod tests;

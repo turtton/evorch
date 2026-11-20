@@ -26,14 +26,11 @@ pub fn run(
         Ok(inbox) => inbox,
         Err(_) => boot.fail(BootFailure::BeforeAdopt, None),
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => boot.fail(BootFailure::BeforeAdopt, None),
-    };
-    runtime.block_on(async move {
+    let result = evorch_core::lifecycle::shutdown_watchdog::run_with_runtime(
+        (boot, proof),
+        inbox,
+        |(boot, proof), runtime, inbox, observer| {
+            runtime.block_on(async move {
         let mut pending = boot
             .bootstrap(
                 BootstrapOptions {
@@ -77,6 +74,7 @@ pub fn run(
             "web":server.as_ref().map(|s|s.local_addr().to_string())})
         );
         let mut lifecycle = LifecycleDriver::new(&host);
+        lifecycle.set_shutdown_watchdog(observer)?;
         let outcome = lifecycle
             .run_with_web(&host, backend.clone(), listener, server, signals)
             .await;
@@ -87,4 +85,13 @@ pub fn run(
         outcome?;
         Ok(())
     })
+        },
+    );
+    match result {
+        Ok(result) => result,
+        Err(failure) => {
+            let (mut boot, _proof) = failure.context;
+            boot.fail(BootFailure::BeforeAdopt, None)
+        }
+    }
 }

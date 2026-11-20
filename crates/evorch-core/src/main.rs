@@ -91,22 +91,30 @@ fn run() -> Result<(), BootstrapError> {
         Some(fd) => unsafe { LaunchGuard::adopt(&identity, fd)? },
         None => LaunchGuard::acquire(&identity)?,
     };
+    #[cfg(target_os = "linux")]
+    {
+        let inbox = mask.inbox()?;
+        evorch_core::lifecycle::shutdown_watchdog::run_with_runtime(
+            (identity.config_dir().to_path_buf(), args.web, launch),
+            inbox,
+            |(config_dir, web, launch), runtime, inbox, observer| {
+                runtime.block_on(serve(config_dir, web, launch, inbox, observer))
+            },
+        )
+        .map_err(|failure| -> BootstrapError { failure.error.into() })?
+    }
+    #[cfg(not(target_os = "linux"))]
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(
-            identity.config_dir().to_path_buf(),
-            args.web,
-            launch,
-            #[cfg(target_os = "linux")]
-            mask,
-        ))
+        .block_on(serve(identity.config_dir().to_path_buf(), args.web, launch))
 }
 async fn serve(
     config_dir: PathBuf,
     web: bool,
     launch: LaunchGuard,
-    #[cfg(target_os = "linux")] mask: core_instance::handoff::BlockedShutdownSignals,
+    #[cfg(target_os = "linux")] inbox: core_instance::handoff::ShutdownInbox,
+    #[cfg(target_os = "linux")] observer: evorch_core::lifecycle::shutdown_watchdog::Observer,
 ) -> Result<(), BootstrapError> {
     let instance = Instance::acquire_default(&launch)?;
     let state_dir = std::env::var_os("XDG_STATE_HOME")
@@ -129,10 +137,12 @@ async fn serve(
         instance.identity.clone(),
     ));
     #[cfg(target_os = "linux")]
-    let signals = OperatorSignals::new(&mask)?;
+    let signals = OperatorSignals::from_inbox(inbox)?;
     #[cfg(not(target_os = "linux"))]
     let signals = OperatorSignals::new()?;
     let mut lifecycle = LifecycleDriver::new(&host);
+    #[cfg(target_os = "linux")]
+    lifecycle.set_shutdown_watchdog(observer)?;
     let web_config = WebServerConfig {
         enabled: web || host.config.web.enabled,
         bind: ([127, 0, 0, 1], host.config.web.port).into(),

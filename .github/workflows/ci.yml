@@ -374,7 +374,12 @@ jobs:
       - name: Build and list the test inventory
         env:
           CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/run-test-group.sh inventory "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" "$EVORCH_TEST_INVENTORY_DIR"
+        run: |
+          scripts/run-test-group.sh inventory "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" "$EVORCH_TEST_INVENTORY_DIR"
+          if [[ "${{ matrix.group }}" == runtime ]]; then
+            source scripts/contract-test-filters.sh
+            check_planned_shutdown_watchdog_inventory "$EVORCH_TEST_INVENTORY_DIR"
+          fi
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
       # group and shard). The mock computes cache usage from received input;

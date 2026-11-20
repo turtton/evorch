@@ -311,6 +311,39 @@ host_lifecycle=$(sed -n 's/^ *HOST_LIFECYCLE_TEST: *//p' "$ci")
 expect ok "ci.yml names the host lifecycle test once" test -n "$host_lifecycle" -a "$(printf '%s\n' "$host_lifecycle" | wc -l)" = 1
 expect ok "the host lifecycle test exists and is ignored" is_ignored_target "$H/tests/$host_lifecycle.rs"
 expect ok "ci.yml selects the host lifecycle test with --run-ignored only --no-tests fail" ci_selects_ignored '\$HOST_LIFECYCLE_TEST'
+# D-3a2-A: explicitly register both new binaries and lib-unit cells in the
+# runtime remainder. Exercise the same no-cargo inventory guard CI calls.
+source scripts/contract-test-filters.sh
+watchdog_inventory="$work/watchdog-inventory"
+mkdir "$watchdog_inventory"
+printf 'evorch-core\tevorch-core\trestart::shutdown_watchdog_tests::cell\tfalse\nevorch-core\tevorch-core::planned_shutdown_watchdog\tcold_negative\tfalse\nevorch-core\tevorch-core::planned_shutdown_watchdog_composition\tcold_flush\tfalse\n' > "$work/watchdog-rows"
+cp "$work/watchdog-rows" "$watchdog_inventory/remaining.tsv"
+: > "$watchdog_inventory/cache.tsv"
+: > "$watchdog_inventory/io.tsv"
+expect ok "watchdog cells remain in the existing remaining suite" check_planned_shutdown_watchdog_inventory "$watchdog_inventory"
+for required in 'restart::shutdown_watchdog_tests::' $'::planned_shutdown_watchdog\t' $'::planned_shutdown_watchdog_composition\t'; do
+  grep -v -F "$required" "$work/watchdog-rows" > "$watchdog_inventory/remaining.tsv"
+  expect fail "missing watchdog inventory selection: $required" check_planned_shutdown_watchdog_inventory "$watchdog_inventory"
+done
+sed 's/false/true/g' "$work/watchdog-rows" > "$watchdog_inventory/remaining.tsv"
+expect fail "ignored watchdog cells cannot satisfy default selection" check_planned_shutdown_watchdog_inventory "$watchdog_inventory"
+cp "$work/watchdog-rows" "$watchdog_inventory/remaining.tsv"
+for suite in cache io; do
+  cp "$work/watchdog-rows" "$watchdog_inventory/$suite.tsv"
+  expect fail "watchdog cells cannot enter $suite" check_planned_shutdown_watchdog_inventory "$watchdog_inventory"
+  : > "$watchdog_inventory/$suite.tsv"
+done
+expect ok "watchdog guard is wired into CI's existing inventory step" bash -c "grep -q 'check_planned_shutdown_watchdog_inventory \"\$EVORCH_TEST_INVENTORY_DIR\"' $ci"
+watchdog_manifest_is_feature_gated() {
+  local block
+  block=$(grep -A4 '^name = "planned_shutdown_watchdog_composition"$' "$1")
+  grep -qx 'harness = false' <<< "$block" &&
+    grep -Fxq 'required-features = ["bootstrap-test-support"]' <<< "$block"
+}
+expect ok "dedicated watchdog target stays feature-gated and harness-free" watchdog_manifest_is_feature_gated crates/evorch-core/Cargo.toml
+printf 'name = "planned_shutdown_watchdog_composition"\nharness = false\nrequired-features = ["wrong-feature"]\n' > "$work/wrong-watchdog-manifest"
+expect fail "another feature cannot enable the watchdog target" watchdog_manifest_is_feature_gated "$work/wrong-watchdog-manifest"
+
 # Every job that runs a product test depends on the sealed artifact job and
 # installs it; the artifact job builds it.
 ci_job() { awk -v job="$1" '$0 ~ "^  " job ":$" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$ci"; }
