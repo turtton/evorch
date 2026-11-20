@@ -179,8 +179,17 @@ pub fn check(f: &Fixture, case: &str) {
                 live.finish();
             }
         }
-        "release-unused" | "release-prepared" => {
-            let _prepared = if case == "release-prepared" {
+        "release-unused"
+        | "release-prepared"
+        | "release-completed-absent"
+        | "release-completed-released"
+        | "release-adopted-released" => {
+            let released = matches!(
+                case,
+                "release-completed-released" | "release-adopted-released"
+            );
+            let cleanup_only = released || case == "release-completed-absent";
+            let _prepared = if case == "release-prepared" || released {
                 let root = f.root.join("owners");
                 let leases =
                     storage::shared_with_wait(&f.config.db_path, &root, std::time::Duration::ZERO)
@@ -209,8 +218,33 @@ pub fn check(f: &Fixture, case: &str) {
                     storage::recovery::RecoveryClaimState::Prepared
                 ));
             }
+            if released {
+                f.storage
+                    .handle()
+                    .release_prepared_claim_if_unexecuted(
+                        f.cas("a").claim.unwrap().claim_id,
+                        "ended before cleanup".into(),
+                    )
+                    .unwrap();
+            }
+            if case.starts_with("release-completed-") {
+                Connection::open(&f.config.db_path)
+                    .unwrap()
+                    .execute("UPDATE restart_transactions SET phase='completed'", [])
+                    .unwrap();
+            }
+            let ended_before = f.cas("a");
+            if cleanup_only {
+                assert!(f.db().recovery_graph_control("graph-a").unwrap().is_none());
+            }
             let result = dispose(f, case);
             assert!(result.complete(), "{result:?}");
+            if cleanup_only {
+                let after = f.cas("a");
+                assert_eq!(after.phase, ended_before.phase);
+                assert_eq!(after.claim, ended_before.claim);
+                assert_eq!(after.component, ended_before.component);
+            }
             if case == "release-prepared" {
                 assert!(matches!(
                     f.cas("a").claim.unwrap().state,
@@ -244,8 +278,13 @@ pub fn check(f: &Fixture, case: &str) {
             let result = f
                 .runtime
                 .dispose_owned_graph(&authority, effect(case), &reservation)
-                .unwrap();
-            assert!(!result.complete());
+                .unwrap_err();
+            assert_eq!(result, runtime::RuntimeError::GraphControlConflict);
+            drop(reservation);
+            let _retry = f
+                .runtime
+                .reserve_owned_graph_disposal("graph-a", effect("after-conflict"), 0)
+                .expect("a confirmed refusal does not strand admission");
             assert_eq!(f.tx(), before);
             assert!(f.db().recovery_graph_control("graph-a").unwrap().is_none());
             assert!(f.owner.disposal_cleanup_receipt(case).unwrap().is_none());

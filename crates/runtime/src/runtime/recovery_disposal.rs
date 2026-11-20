@@ -60,48 +60,50 @@ impl AgentRuntime {
         permits: &[crate::ownership::OwnerPermit],
         reservation: &ActivationReservation,
     ) -> Result<GraphControlRecord, RuntimeError> {
-        reservation.validate(self, &expected.manifest.manifest_id)?;
+        reservation
+            .validate(self, &expected.manifest.manifest_id)
+            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let storage::recovery::graph_control::ActivationControl::Manual {
             effect,
             control_revision,
         } = reservation.control()
         else {
-            return Err(error("manual resume reservation required"));
+            return Err(RuntimeError::GraphControlConflict);
         };
         if expected.control_revision.checked_add(1) != Some(control_revision)
             || !matches!(
-                self.owned_graph_ownership_diagnostic(expected)?.state(),
+                self.owned_graph_ownership_diagnostic(expected)
+                    .map_err(|_| RuntimeError::GraphControlNotApplied)?
+                    .state(),
                 OwnedGraphOwnershipState::LiveSelf
             )
         {
-            return Err(error("resume graph or physical ownership changed"));
+            return Err(RuntimeError::GraphControlConflict);
         }
-        let _owners = crate::ownership::disposal::guard_resume(expected, permits).map_err(error)?;
+        let _owners = crate::ownership::disposal::guard_resume(expected, permits)
+            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let store = self
             .shared
             .run_store
             .get()
-            .ok_or_else(|| error("no run store"))?;
-        store
-            .handle
-            .write_recovery_graph_control(storage::recovery::graph_control::GraphControlWrite {
-                expected: expected.clone(),
-                effect: effect.clone(),
-                action: storage::recovery::graph_control::GraphControlAction::Resume,
-            })
-            .or_else(|write_error| {
-                store
-                    .with_database(|db| db.recovery_graph_effect(&effect.operation_id))?
-                    .filter(|c| {
-                        c.effect == effect
-                            && c.manifest_id == expected.manifest.manifest_id
-                            && c.revision == control_revision
-                            && !c.revoked
-                            && c.mode == "manual_running"
-                    })
-                    .ok_or(write_error)
-            })
-            .map_err(error)
+            .ok_or(RuntimeError::GraphControlNotApplied)?;
+        super::disposal_support::graph_control_write_result(
+            store.handle.write_recovery_graph_control(
+                storage::recovery::graph_control::GraphControlWrite {
+                    expected: expected.clone(),
+                    effect: effect.clone(),
+                    action: storage::recovery::graph_control::GraphControlAction::Resume,
+                },
+            ),
+            || store.with_database(|db| db.recovery_graph_effect(&effect.operation_id)),
+            |c| {
+                c.effect == effect
+                    && c.manifest_id == expected.manifest.manifest_id
+                    && c.revision == control_revision
+                    && !c.revoked
+                    && c.mode == "manual_running"
+            },
+        )
     }
 
     /// No database, owner registry, provider, binding, or filesystem access.
@@ -189,6 +191,9 @@ impl AgentRuntime {
         }
         let control = match self.release_owned_graph_eligibility(authority, effect.clone()) {
             Ok(control) => control,
+            Err(
+                error @ (RuntimeError::GraphControlConflict | RuntimeError::GraphControlNotApplied),
+            ) => return Err(error),
             Err(_) => {
                 return Ok(DisposalResult {
                     control: None,

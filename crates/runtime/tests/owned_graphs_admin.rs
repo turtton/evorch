@@ -16,6 +16,9 @@ fn main() {
         &[
             "release-unused",
             "release-prepared",
+            "release-completed-absent",
+            "release-completed-released",
+            "release-adopted-released",
             "release-bound-root",
             "release-unknown",
             "release-owner-conflict",

@@ -75,6 +75,22 @@ impl ExistingPreparedResume {
             },
         );
     }
+    fn policy_write_failed(
+        &self,
+        manifest: String,
+        effect: GraphEffectKey,
+        reservation: ActivationReservation,
+        error: runtime::RuntimeError,
+    ) -> RecoveryAdminError {
+        match error {
+            runtime::RuntimeError::GraphControlConflict => RecoveryAdminError::Conflict,
+            runtime::RuntimeError::GraphControlNotApplied => RecoveryAdminError::Stopped,
+            _ => {
+                self.retain(manifest, effect, reservation);
+                RecoveryAdminError::Unavailable
+            }
+        }
+    }
     fn failed(
         &self,
         context: &RecoveryAdminContext,
@@ -173,9 +189,13 @@ impl RecoveryAdminHandler for ExistingPreparedResume {
         let reservation: ActivationReservation = request.reservation.into();
         let control = match runtime.begin_owned_graph_resume(&graph.cas, &permits, &reservation) {
             Ok(control) => control,
-            Err(_) => {
-                self.retain(request.manifest_id, request.effect, reservation);
-                return Err(RecoveryAdminError::Unavailable);
+            Err(error) => {
+                return Err(self.policy_write_failed(
+                    request.manifest_id,
+                    request.effect,
+                    reservation,
+                    error,
+                ));
             }
         };
         let coordinator = match context.coordinator() {
@@ -267,4 +287,85 @@ pub fn map_startup_blocked(reason: StartupBlocked) -> RecoveryAdminError {
         StartupBlocked::NeedsAttention => (P::CurrentBindingRequired, D::NeedsAttention),
     };
     RecoveryAdminError::Blocked { problem, detail }
+}
+
+#[cfg(test)]
+mod policy_reservation_tests {
+    use super::*;
+    use std::sync::Arc;
+    struct Never;
+    #[async_trait::async_trait]
+    impl runtime::AgentModel for Never {
+        fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
+            "never".into()
+        }
+        async fn complete(
+            &self,
+            _: &runtime::AgentInvocationContext,
+            _: runtime::Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+            panic!("policy refusal cannot request provider")
+        }
+    }
+    fn check(error: runtime::RuntimeError, expected: RecoveryAdminError, retained: bool) {
+        let bus = Arc::new(event_bus::EventBus::new(16));
+        let runtime = runtime::AgentRuntime::new(
+            bus.clone(),
+            Arc::new(::tools::ToolExecutor::new(bus)),
+            Arc::new(Never),
+        );
+        let handler = ExistingPreparedResume::default();
+        let effect = GraphEffectKey {
+            operation_id: "first".into(),
+            attempt_nonce: "nonce".into(),
+        };
+        let reservation = runtime
+            .reserve_manual_activation("graph", effect.clone(), 0)
+            .unwrap()
+            .into();
+        assert_eq!(
+            handler.policy_write_failed("graph".into(), effect, reservation, error),
+            expected
+        );
+        assert_eq!(
+            handler.uncertain.lock().unwrap().len(),
+            usize::from(retained)
+        );
+        let next = runtime.reserve_manual_activation(
+            "graph",
+            GraphEffectKey {
+                operation_id: "next".into(),
+                attempt_nonce: "next".into(),
+            },
+            0,
+        );
+        assert_eq!(next.is_ok(), !retained);
+        assert!(runtime.list_agents().is_empty());
+    }
+    #[test]
+    fn resume_conflict_releases_original_reservation() {
+        check(
+            runtime::RuntimeError::GraphControlConflict,
+            RecoveryAdminError::Conflict,
+            false,
+        );
+    }
+    #[test]
+    fn resume_confirmed_not_applied_releases_original_reservation() {
+        check(
+            runtime::RuntimeError::GraphControlNotApplied,
+            RecoveryAdminError::Stopped,
+            false,
+        );
+    }
+    #[test]
+    fn resume_unknown_keeps_original_reservation() {
+        check(
+            runtime::RuntimeError::GraphControlUnknown,
+            RecoveryAdminError::Unavailable,
+            true,
+        );
+    }
 }

@@ -386,6 +386,9 @@ pub(super) fn next_action(
         return NextAction::RefreshAndConfirmResume;
     }
     if view.claim == ClaimView::Absent {
+        if !matches!(view.release, ActionAvailability::Available) {
+            return NextAction::NormalStopRequired;
+        }
         return if view.control == GraphControlView::Open
             && view.disposition == RestartDispositionView::RetryPending
             && automatic_retry_pending

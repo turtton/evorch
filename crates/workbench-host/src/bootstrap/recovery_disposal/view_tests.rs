@@ -125,6 +125,14 @@ fn no_claim_guidance_requires_current_automatic_retry_membership() {
     )
     .unwrap();
     let mut view = detail(&runtime(), &owner, &graph(1)).unwrap();
+    for automatic in [false, true] {
+        assert_eq!(
+            next_action(&view, false, automatic),
+            NextAction::NormalStopRequired
+        );
+    }
+    // Automatic membership only changes guidance when Release is authorized.
+    view.release = ActionAvailability::Available;
     assert_eq!(next_action(&view, false, false), NextAction::ReleaseOnly);
     assert_eq!(
         next_action(&view, false, true),
@@ -134,6 +142,31 @@ fn no_claim_guidance_requires_current_automatic_retry_membership() {
     assert_eq!(next_action(&view, false, true), NextAction::ReleaseOnly);
     assert_eq!(
         next_action(&view, true, true),
+        NextAction::ObserveSameOperation
+    );
+    owner.stop_worker_for_exec().unwrap();
+}
+
+#[test]
+fn activated_resume_query_ignores_the_old_running_effect_journal() {
+    let dir = test_socket_dir::SocketDir::new();
+    let owner = OwnerHost::open_planned(
+        dir.path(),
+        Default::default(),
+        Arc::new(event_bus::EventBus::new(16)),
+    )
+    .unwrap();
+    let mut graph = detail(&runtime(), &owner, &graph(1)).unwrap();
+    graph.claim = ClaimView::Activated;
+    graph.disposition = RestartDispositionView::Activated;
+    assert_eq!(
+        super::super::facade::operation_next_action(&graph, "manual_running", true, false),
+        NextAction::NormalStopRequired
+    );
+    graph.claim = ClaimView::Prepared;
+    graph.disposition = RestartDispositionView::RetryPending;
+    assert_eq!(
+        super::super::facade::operation_next_action(&graph, "manual_running", false, false),
         NextAction::ObserveSameOperation
     );
     owner.stop_worker_for_exec().unwrap();

@@ -294,12 +294,10 @@ impl AdminFacade for OwnedGraphsFacade {
                                     && graph.cas.claim.as_ref().is_some_and(|c| {
                                         c.state == storage::recovery::RecoveryClaimState::Activated
                                     }));
-                            let next_action = view::next_action(
+                            let next_action = operation_next_action(
                                 &view::detail(&runtime, &owner, graph)?,
-                                matches!(
-                                    effect.mode.as_str(),
-                                    "manual_running" | "revoked_running"
-                                ),
+                                effect.mode.as_str(),
+                                succeeded,
                                 diagnostics.automatic_retry_pending(&effect.manifest_id),
                             );
                             let outcome = match row.outcome {
@@ -410,34 +408,23 @@ impl AdminFacade for OwnedGraphsFacade {
                         .unwrap()
                         .insert(effect.operation_id.clone(), job.clone());
                     let worker_job = job.clone();
-                    let outcome = tokio::task::spawn_blocking(move || {
+                    let result = tokio::task::spawn_blocking(move || {
                         let _finished = FinishedDisposal(worker_job.clone());
                         let authority = match runtime
                             .disposal_authority(inspection.graph.cas, inspection.owners)
                         {
                             Ok(authority) => authority,
-                            Err(_) => return AdminOutcome::Conflict,
+                            Err(_) => return Err(runtime::RuntimeError::GraphControlConflict),
                         };
-                        match runtime.dispose_owned_graph(
+                        runtime.dispose_owned_graph(
                             &authority,
                             worker_job.effect.clone(),
                             &worker_job.reservation,
-                        ) {
-                            Ok(result) if !result.unknown => disposal_outcome(&result),
-                            _ => AdminOutcome::Unknown,
-                        }
+                        )
                     })
                     .await
-                    .unwrap_or(AdminOutcome::Unknown);
-                    if outcome != AdminOutcome::Unknown {
-                        let mut state = uncertain.lock().unwrap();
-                        if state
-                            .get(&effect.operation_id)
-                            .is_some_and(|current| Arc::ptr_eq(current, &job))
-                        {
-                            state.remove(&effect.operation_id);
-                        }
-                    }
+                    .unwrap_or(Err(runtime::RuntimeError::GraphControlUnknown));
+                    let outcome = finish_disposal(&uncertain, job, result);
                     Ok(AdminExecutionOutcome::Complete(outcome))
                 })))
             }
@@ -464,6 +451,7 @@ impl AdminFacade for OwnedGraphsFacade {
                     let outcome = match result {
                         Ok(_) => AdminOutcome::Succeeded,
                         Err(RecoveryAdminError::Unavailable) => AdminOutcome::Unknown,
+                        Err(RecoveryAdminError::Conflict) => AdminOutcome::Conflict,
                         Err(_) => AdminOutcome::Failed,
                     };
                     Ok(AdminExecutionOutcome::Complete(outcome))
@@ -473,12 +461,33 @@ impl AdminFacade for OwnedGraphsFacade {
         }
     }
 }
-fn disposal_outcome(result: &DisposalResult) -> AdminOutcome {
-    if result.complete() {
-        AdminOutcome::Succeeded
-    } else {
-        AdminOutcome::Failed
+fn finish_disposal(
+    uncertain: &Mutex<BTreeMap<String, Arc<UncertainDisposal>>>,
+    job: Arc<UncertainDisposal>,
+    result: Result<DisposalResult, runtime::RuntimeError>,
+) -> AdminOutcome {
+    let outcome = match result {
+        Ok(result) if !result.unknown => {
+            if result.complete() {
+                AdminOutcome::Succeeded
+            } else {
+                AdminOutcome::Failed
+            }
+        }
+        Err(runtime::RuntimeError::GraphControlConflict) => AdminOutcome::Conflict,
+        Err(runtime::RuntimeError::GraphControlNotApplied) => AdminOutcome::Failed,
+        _ => AdminOutcome::Unknown,
+    };
+    if outcome != AdminOutcome::Unknown {
+        let mut state = uncertain.lock().unwrap();
+        if state
+            .get(&job.effect.operation_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &job))
+        {
+            state.remove(&job.effect.operation_id);
+        }
     }
+    outcome
 }
 fn id(value: &str) -> Result<AdminId, AdminFailure> {
     AdminId::new(value).map_err(|_| unavailable())
@@ -492,3 +501,22 @@ fn unavailable() -> AdminFailure {
 fn not_found() -> AdminFailure {
     admin::failure(ErrorCode::NotFound, "owned graph or operation not found")
 }
+
+/// Journal manual_running may outlive activation. A positive durable result is
+/// not an unknown ACK and must not direct the user to observe forever.
+pub(super) fn operation_next_action(
+    graph: &workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphView,
+    mode: &str,
+    succeeded: bool,
+    automatic: bool,
+) -> workbench_protocol::namespaces::lifecycle::owned_graphs::NextAction {
+    view::next_action(
+        graph,
+        !succeeded && matches!(mode, "manual_running" | "revoked_running"),
+        automatic,
+    )
+}
+
+#[cfg(test)]
+#[path = "facade_tests.rs"]
+mod tests;
