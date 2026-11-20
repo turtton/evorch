@@ -16,10 +16,11 @@
 //! the runtime to check again with their own gates, not a permission.
 //!
 //! Time comes from the caller in milliseconds and must come from one clock for every
-//! call. The writer keeps the highest time it was ever given: a smaller time is refused
-//! as [`ContinuityRefusal::ClockRegressed`] without any change, so a clock that moved
-//! back neither revives nor extends a grant. An overdue grant is ended as `expired` the
-//! next time any call observes it, and an ended grant never changes again.
+//! call. The writer keeps the highest time it was ever given. A smaller time is refused
+//! as [`ContinuityRefusal::ClockRegressed`], and because a clock that moved back would
+//! otherwise let a grant outlive its fixed deadline once it caught up again, the refusal
+//! also ends every live grant as `expired`, for good. An overdue grant is ended as
+//! `expired` the next time any call observes it, and an ended grant never changes again.
 use super::*;
 use crate::writer::StorageHandle;
 use rusqlite::{Transaction, TransactionBehavior};
@@ -159,7 +160,8 @@ pub struct RevokeReport {
 pub enum ContinuityRefusal {
     /// An identifier, token or time is outside its bounds.
     Invalid(&'static str),
-    /// The time is below one the writer has already seen.
+    /// The time is below one the writer has already seen. Every live grant was ended as
+    /// expired by this refusal; nothing else changed.
     ClockRegressed,
     /// No such restart transaction.
     HandoffNotFound,

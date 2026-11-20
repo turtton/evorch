@@ -484,17 +484,22 @@ fn a_raw_write_cannot_reset_extend_or_revive() {
 }
 
 #[test]
-fn a_clock_that_moves_back_is_refused_and_changes_nothing() {
+fn a_clock_that_moves_back_is_refused_and_ends_live_grants_once() {
     let f = Fixture::new();
     let clock = Clock(T0);
     f.issue("inv-a", "r1", 1, clock.at(10_000)).unwrap();
-    let before = f.grant("inv-a", "r1").unwrap();
-    // Before the time the writer has seen: refused, whatever the call.
+    let high_water = clock.at(10_000);
+    // Before the time the writer has seen: refused, whatever the call, and nothing new is
+    // created.
     assert_eq!(
         f.issue("inv-b", "r1", 2, clock.at(9_999)),
         Err(ContinuityRefusal::ClockRegressed)
     );
     assert!(f.grant("inv-b", "r1").is_none());
+    // The refusal ended the live grant for good, stamped with the time already observed.
+    let ended = f.grant("inv-a", "r1").unwrap();
+    assert_eq!(ended.state, GrantState::Expired);
+    assert_eq!(ended.ended_at_ms, Some(high_water));
     assert_eq!(
         f.ready("r1", clock.at(9_999)),
         Err(ContinuityRefusal::ClockRegressed)
@@ -518,7 +523,7 @@ fn a_clock_that_moves_back_is_refused_and_changes_nothing() {
             .unwrap(),
         Err(ContinuityRefusal::ClockRegressed)
     );
-    assert_eq!(f.grant("inv-a", "r1").unwrap(), before);
+    assert_eq!(f.grant("inv-a", "r1").unwrap(), ended);
 }
 
 #[test]
@@ -551,22 +556,36 @@ fn an_expired_grant_stays_expired_when_the_clock_goes_back() {
 }
 
 #[test]
-fn a_clock_back_before_expiry_is_observed_cannot_extend_the_window() {
-    let f = Fixture::new();
+fn catching_up_after_a_regression_cannot_redeem_past_the_deadline() {
+    let mut f = Fixture::new();
     f.issue("inv-a", "r1", 1, T0).unwrap();
+    f.issue("inv-b", "r1", 2, T0).unwrap();
     f.ready("r1", T0 + 1_000).unwrap();
-    // Time was seen up to the deadline minus one, then the clock jumps back.
+    // Time was seen up to the deadline minus one.
     let seen = T0 + 1_000 + READY_TO_RECONNECT_MS - 1;
     f.handle().expire_due_cli_continuity(seen).unwrap().unwrap();
+    assert_eq!(f.state("inv-a", "r1"), GrantState::Ready);
+    // The clock is set back by a minute and the regression is observed ...
     assert_eq!(
-        f.redeem("inv-a", "r1", 1, T0 + 1_001),
+        f.redeem("inv-a", "r1", 1, seen - 60_000),
         Err(ContinuityRefusal::ClockRegressed)
     );
-    // Only a time that moved forward is taken, and it is judged against the fixed deadline.
-    assert_eq!(
-        f.redeem("inv-a", "r1", 1, T0 + 1_000 + READY_TO_RECONNECT_MS),
-        Err(ContinuityRefusal::Expired)
-    );
+    // ... which ended every live grant, so a reload and a clock that catches up to the
+    // old high-water mark (real time elapsed: far past the window) redeem nothing.
+    f.reload();
+    for (name, seed) in [("inv-a", 1), ("inv-b", 2)] {
+        assert_eq!(f.state(name, "r1"), GrantState::Expired);
+        assert_eq!(
+            f.redeem(name, "r1", seed, seen),
+            Err(ContinuityRefusal::Expired)
+        );
+    }
+    for (name, seed) in [("inv-a", 1), ("inv-b", 2)] {
+        assert_eq!(
+            f.redeem(name, "r1", seed, seen + 60_000),
+            Err(ContinuityRefusal::Expired)
+        );
+    }
 }
 
 #[test]

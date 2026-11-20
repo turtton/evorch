@@ -81,6 +81,14 @@ fn observe(tx: &Connection, now_ms: u64) -> Result<ContinuityReport<()>, Storage
         .optional()?
         .ok_or_else(|| corrupt("continuity clock is missing"))?;
     if now_ms < high_water {
+        // A clock that moved back cannot be told apart from one that stood still, so no live
+        // grant may stay open: it could be redeemed after the clock catches up, long after
+        // its fixed deadline. Ending them is permanent; catching up revives nothing.
+        tx.execute(
+            "UPDATE cli_continuity_grants SET state='expired',ended_at_ms=?1 \
+             WHERE state IN ('issued','ready')",
+            [high_water],
+        )?;
         return Ok(Err(ContinuityRefusal::ClockRegressed));
     }
     if now_ms > high_water {
