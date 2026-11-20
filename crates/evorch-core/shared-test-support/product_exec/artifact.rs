@@ -1,9 +1,14 @@
 //! The product artifact: a feature-free `evorch-core` built separately with
-//! the shipped arguments, handed over as an immutable copy plus a manifest.
+//! the shipped arguments, handed over as a sealed immutable copy plus a manifest
+//! by I0's contract (`test_support::product_artifact`).
+//!
+//! `ProductManifest` is this fixture's own view of an artifact. A sealed release
+//! artifact is converted into one; a *measurement-only* manifest of the same
+//! shape describes the debug build, which the sealed contract does not cover.
 //!
 //! A missing or inconsistent artifact is a failure of the fixture. It is never
 //! skipped and never replaced by a binary Cargo happened to build for the test.
-use super::provisional::{CARGO_HARNESS_BIN_ENV, ENV_MANIFEST, MANIFEST_SCHEMA};
+use super::names::{CARGO_HARNESS_BIN_ENV, ENV_MEASURE_MANIFEST, MANIFEST_SCHEMA};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -98,9 +103,12 @@ impl FileIdentity {
 }
 
 impl ProductArtifact {
-    /// Reads the manifest named by the process environment and verifies the
-    /// artifact, including its full hash. Panics on any failure. The first
-    /// successful verification of a process is reused.
+    /// The sealed release artifact named by `EVORCH_PRODUCT_CORE_EXE` and
+    /// `EVORCH_PRODUCT_MANIFEST`, verified by I0's reader (existence, sealed
+    /// copy outside any `target` directory, manifest contract, features, size,
+    /// SHA-256) and by this fixture (never the `CARGO_BIN_EXE_*` build).
+    /// Panics on any failure; there is no skip. The first verification of a
+    /// process is reused.
     #[track_caller]
     pub fn require() -> Self {
         static VERIFIED: OnceLock<ProductArtifact> = OnceLock::new();
@@ -108,16 +116,84 @@ impl ProductArtifact {
             artifact.assert_unchanged();
             return artifact.clone();
         }
-        let artifact = Self::open_from(&|name| std::env::var_os(name))
+        let sealed = test_support::product_artifact::require_from_env();
+        let artifact = Self::from_sealed(&sealed, &|name| std::env::var_os(name))
             .unwrap_or_else(|error| panic!("F4-P product fixture: {error}"));
         VERIFIED.get_or_init(|| artifact).clone()
     }
 
-    pub fn open_from(lookup: Lookup<'_>) -> Result<Self, ArtifactError> {
-        let manifest_path = lookup(ENV_MANIFEST)
+    /// MEASUREMENT ONLY: the artifact of `EVORCH_F4P_MEASURE_MANIFEST` (any
+    /// profile, in this fixture's manifest format) when it is set, else the
+    /// sealed release artifact.
+    #[track_caller]
+    pub fn require_for_measurement() -> Self {
+        match std::env::var_os(ENV_MEASURE_MANIFEST).filter(|v| !v.is_empty()) {
+            Some(path) => Self::open(Path::new(&path), &|name| std::env::var_os(name))
+                .unwrap_or_else(|error| panic!("F4-P measurement artifact: {error}")),
+            None => Self::require(),
+        }
+    }
+
+    /// Converts the sealed artifact into this fixture's view of it.
+    pub fn from_sealed(
+        sealed: &test_support::product_artifact::ProductArtifact,
+        lookup: Lookup<'_>,
+    ) -> Result<Self, ArtifactError> {
+        let path = sealed
+            .exe
+            .canonicalize()
+            .map_err(|e| ArtifactError::Io(e.to_string()))?;
+        Self::reject_harness_build(&path, lookup)?;
+        let m = &sealed.manifest;
+        let manifest = ProductManifest {
+            schema: MANIFEST_SCHEMA,
+            package: m.package.clone(),
+            bin: m.bin.clone(),
+            profile: m.profile.clone(),
+            cargo_args: m.build_args.clone(),
+            features: m.features.clone(),
+            rustc: m.rustc.clone(),
+            cargo: String::new(),
+            target: m.target.clone(),
+            source_revision: m.source_sha.clone(),
+            artifact: m.file.clone(),
+            elf_size: m.size_bytes,
+            elf_sha256: format!("sha256:{}", m.sha256),
+            stripped: false,
+        };
+        Self::check_manifest(&manifest)?;
+        let identity = FileIdentity::of(&path).map_err(|e| ArtifactError::Io(e.to_string()))?;
+        Ok(Self {
+            manifest,
+            manifest_path: sealed.manifest_path.clone(),
+            path,
+            identity,
+        })
+    }
+
+    /// The harness build is never the product, even when handed over by
+    /// mistake: refuse a file that is the `CARGO_BIN_EXE_*` build.
+    fn reject_harness_build(path: &Path, lookup: Lookup<'_>) -> Result<(), ArtifactError> {
+        let metadata = std::fs::metadata(path).map_err(|e| ArtifactError::Io(e.to_string()))?;
+        if let Some(harness) = lookup(CARGO_HARNESS_BIN_ENV)
+            && let Ok(harness) = Path::new(&harness).canonicalize()
+            && let Ok(harness) = std::fs::metadata(harness)
+            && harness.dev() == metadata.dev()
+            && harness.ino() == metadata.ino()
+        {
+            return Err(ArtifactError::Mismatch(format!(
+                "the artifact is the {CARGO_HARNESS_BIN_ENV} build, not a separately built sealed copy"
+            )));
+        }
+        Ok(())
+    }
+
+    /// MEASUREMENT ONLY manifest, named by `EVORCH_F4P_MEASURE_MANIFEST`.
+    pub fn open_measurement_from(lookup: Lookup<'_>) -> Result<Self, ArtifactError> {
+        let manifest_path = lookup(ENV_MEASURE_MANIFEST)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .ok_or(ArtifactError::NotProvided(ENV_MANIFEST))?;
+            .ok_or(ArtifactError::NotProvided(ENV_MEASURE_MANIFEST))?;
         Self::open(&manifest_path, lookup)
     }
 
@@ -154,18 +230,7 @@ impl ProductArtifact {
                 manifest.elf_size
             )));
         }
-        // The harness build is never the product, even when handed over by
-        // mistake: refuse a manifest that resolves to the same file.
-        if let Some(harness) = lookup(CARGO_HARNESS_BIN_ENV)
-            && let Ok(harness) = Path::new(&harness).canonicalize()
-            && let Ok(harness) = std::fs::metadata(harness)
-            && harness.dev() == metadata.dev()
-            && harness.ino() == metadata.ino()
-        {
-            return Err(ArtifactError::Mismatch(format!(
-                "the artifact is the {CARGO_HARNESS_BIN_ENV} build, not a separately built immutable copy"
-            )));
-        }
+        Self::reject_harness_build(&path, lookup)?;
         let identity = FileIdentity::of(&path).map_err(|e| ArtifactError::Io(e.to_string()))?;
         let actual = core_instance::handoff::elf_identity(&path)
             .map_err(|e| ArtifactError::Io(e.to_string()))?;

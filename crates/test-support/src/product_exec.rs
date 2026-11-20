@@ -1,6 +1,9 @@
-//! Registration-only module of the F4-P product launch fixture.
+//! Registration of the F4-P product launch fixture (module declared by the
+//! integration PR I0).
 //!
-//! The integration PR I0 registers this module so that F4-P can fill it in
-//! without touching `lib.rs` or the manifest. It deliberately holds no
-//! fixture yet: the sealed artifact contract it will build on is
-//! [`crate::product_artifact`].
+//! The fixture lives in `crates/evorch-core/shared-test-support/product_exec*`
+//! and `tests/renderer_support/product_exec*`, not here: it needs
+//! `core-instance`, `core-launcher`, the workbench client and the ownership
+//! registry, which this crate must not depend on. What this crate owns is the
+//! sealed artifact contract the fixture builds on: [`crate::product_artifact`]
+//! (`EVORCH_PRODUCT_CORE_EXE`, `EVORCH_PRODUCT_MANIFEST`).

@@ -16,8 +16,8 @@ use product_exec::{
     artifact::{ArtifactError, ProductArtifact, ProductManifest},
     env::IsolatedEnv,
     launch::{LaunchError, ProductLaunch},
+    names::{CARGO_HARNESS_BIN_ENV, ENV_MEASURE_MANIFEST, MANIFEST_SCHEMA},
     process::{ManagedProcess, WaitError},
-    provisional::{CARGO_HARNESS_BIN_ENV, ENV_MANIFEST, MANIFEST_SCHEMA},
     wire::{self, MockProvider},
 };
 use std::{
@@ -74,17 +74,17 @@ fn artifact_absent_is_a_failure_and_never_falls_back_to_cargo_bin_exe() {
     // means no product.
     let lookup = |name: &str| (name == CARGO_HARNESS_BIN_ENV).then(|| OsString::from("/bin/sh"));
     assert!(matches!(
-        ProductArtifact::open_from(&lookup),
-        Err(ArtifactError::NotProvided(ENV_MANIFEST))
+        ProductArtifact::open_measurement_from(&lookup),
+        Err(ArtifactError::NotProvided(ENV_MEASURE_MANIFEST))
     ));
     let empty = |_: &str| None;
     assert!(matches!(
-        ProductArtifact::open_from(&empty),
+        ProductArtifact::open_measurement_from(&empty),
         Err(ArtifactError::NotProvided(_))
     ));
-    let blank = |name: &str| (name == ENV_MANIFEST).then(OsString::new);
+    let blank = |name: &str| (name == ENV_MEASURE_MANIFEST).then(OsString::new);
     assert!(matches!(
-        ProductArtifact::open_from(&blank),
+        ProductArtifact::open_measurement_from(&blank),
         Err(ArtifactError::NotProvided(_))
     ));
     let dir = tempfile::tempdir().unwrap();
@@ -96,9 +96,10 @@ fn artifact_absent_is_a_failure_and_never_falls_back_to_cargo_bin_exe() {
 }
 
 #[test]
-fn require_panics_in_a_process_that_has_cargo_bin_exe_but_no_manifest() {
+fn require_panics_in_a_process_that_has_cargo_bin_exe_but_no_sealed_artifact() {
     // The fixture's own entry point, in a child with the harness variable set
-    // and the manifest variable absent: it must fail, not choose the harness.
+    // and the sealed-artifact variables absent: it must fail, not choose the
+    // harness build.
     let mut child = Command::new(std::env::current_exe().unwrap());
     child
         .args(["--ignored", "--exact", "fake_role_require", "--nocapture"])
@@ -111,10 +112,13 @@ fn require_panics_in_a_process_that_has_cargo_bin_exe_but_no_manifest() {
     let output = child.output().unwrap();
     assert!(!output.status.success(), "the fixture must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("product artifact not provided"), "{stderr}");
+    assert!(
+        stderr.contains("EVORCH_PRODUCT_CORE_EXE is not set"),
+        "{stderr}"
+    );
 }
 #[test]
-#[ignore = "child role of require_panics_in_a_process_that_has_cargo_bin_exe_but_no_manifest"]
+#[ignore = "child role of require_panics_in_a_process_that_has_cargo_bin_exe_but_no_sealed_artifact"]
 fn fake_role_require() {
     assert_eq!(std::env::var(FAKE_ROLE_ENV).unwrap(), "require");
     let _ = ProductArtifact::require();
@@ -472,13 +476,14 @@ fn product_that_cannot_start_fails_with_its_exit_and_leaves_nothing() {
 
 // ------------------------------------------------------ artifact tooling
 
-/// Stand-in for the artifact-building CI step: copies a binary that was built
-/// with the shipped arguments to an immutable copy and writes its manifest.
+/// MEASUREMENT ONLY. The sealed contract (scripts/product-artifact.sh) covers
+/// the release build; this writes a copy and a measurement-only manifest for
+/// the DEBUG build built with `cargo build -p evorch-core --bin evorch-core`.
 /// The copy is not stripped or modified.
 #[test]
 #[ignore = "tooling: writes an artifact copy and manifest from an already built binary"]
-fn write_manifest_for_built_artifact() {
-    use product_exec::provisional::*;
+fn write_measurement_manifest_for_built_artifact() {
+    use product_exec::names::*;
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"));
     let elf = std::path::PathBuf::from(var(ENV_BUILD_ELF));
     let out = std::path::PathBuf::from(var(ENV_ARTIFACT_DIR));
@@ -543,7 +548,7 @@ fn harness_exec_into_the_product_is_observed_without_a_clock_guess() {
 #[test]
 #[ignore = "measurement: run through scripts/reproduce-under-limits.sh, see measurements/f4-product/conditions.md"]
 fn measure_f4_product_intervals() {
-    use product_exec::{intervals, measure, provisional::*};
+    use product_exec::{intervals, measure, names::*};
     let out = std::path::PathBuf::from(
         std::env::var_os(ENV_MEASURE_OUT)
             .unwrap_or_else(|| panic!("{ENV_MEASURE_OUT} is required")),
@@ -551,7 +556,7 @@ fn measure_f4_product_intervals() {
     let label = std::env::var(ENV_MEASURE_LABEL)
         .unwrap_or_else(|_| panic!("{ENV_MEASURE_LABEL} is required"));
     let label: &'static str = Box::leak(label.into_boxed_str());
-    let artifact = ProductArtifact::require();
+    let artifact = ProductArtifact::require_for_measurement();
     let profile = artifact.manifest.profile.clone();
     std::fs::create_dir_all(&out).unwrap();
     let harness = std::env::current_exe().unwrap();
@@ -694,6 +699,9 @@ fn renderer_scenario() {
     assert_eq!(provider.remaining_scripts(), 0);
 }
 
+// The fake helper exists only with the `renderer-test-helper` feature, like the
+// other renderer process tests; the runtime CI group enables it.
+#[cfg(feature = "renderer-test-helper")]
 #[test]
 fn product_starts_and_takes_back_a_renderer_helper() {
     renderer_scenario();
@@ -705,7 +713,7 @@ fn product_starts_and_takes_back_a_renderer_helper() {
 #[test]
 #[ignore = "needs the real evorch-renderer (CEF); run with the cef-e2e job's environment"]
 fn product_starts_and_takes_back_the_real_renderer_helper() {
-    use product_exec::provisional::ENV_RENDERER_HELPER;
+    use product_exec::names::ENV_RENDERER_HELPER;
     let helper = std::env::var_os(ENV_RENDERER_HELPER)
         .unwrap_or_else(|| panic!("{ENV_RENDERER_HELPER} must name the real evorch-renderer"));
     assert!(

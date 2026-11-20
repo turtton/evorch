@@ -88,3 +88,20 @@ production old core, and the product -> product Ready inside the 120 s boot
 deadline (which starts at `Restarting`, before exec preparation). The
 harness-based `exec_to_ready` is the successor's side only: it is neither a
 bound nor a substitute for those intervals.
+
+## Addendum after rebasing onto I0 (#711, `219e3bfd`), before the rerun
+
+The first runs (base `1ed6c863`) are superseded: every number in `README.md`
+and the CSV files comes from the rerun described here. Counts, intervals,
+resource conditions and the page-cache policy above are unchanged. What changed:
+
+- **Base** `219e3bfd` (includes #713, #714).
+- **Release artifact** is now the sealed copy of I0's contract: built and sealed
+  by `scripts/product-artifact.sh build` (`cargo build --locked --release -p
+  evorch-core --bin evorch-core`, read-only copy, manifest read through
+  `EVORCH_PRODUCT_CORE_EXE` / `EVORCH_PRODUCT_MANIFEST`). This adds `--locked` and,
+  in this environment, `RUSTFLAGS=-C link-args=-fuse-ld=mold` from the dev shell.
+- **Debug artifact** is outside the sealed contract (which only covers release).
+  It stays a byte-identical copy with a measurement-only manifest
+  (`EVORCH_F4P_MEASURE_MANIFEST`), built with `cargo build -p evorch-core --bin
+  evorch-core`. No product test reads that variable.

@@ -11,8 +11,8 @@
 #![allow(dead_code)]
 use crate::product_exec::{
     launch::ProductProcess,
+    names::ENV_RENDERER_HELPER,
     observe::{self, ProcInfo},
-    provisional::ENV_RENDERER_HELPER,
     wire::{self, MockProvider},
 };
 use mock_openai::ScriptedResponse;

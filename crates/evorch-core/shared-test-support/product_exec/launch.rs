@@ -3,9 +3,9 @@
 use super::{
     artifact::ProductArtifact,
     env::{Footprint, IsolatedEnv},
+    names::ENV_RENDERER_HELPER,
     observe::{self, FdInfo, ProcInfo},
     process::{ManagedProcess, Report, WaitError},
-    provisional::ENV_RENDERER_HELPER,
 };
 use std::{
     ffi::OsString,
