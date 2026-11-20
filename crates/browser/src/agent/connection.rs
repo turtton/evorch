@@ -227,11 +227,11 @@ impl Connection {
                 detail,
             };
             if !sent {
-                return Err(failed("the browser connection closed".into()));
+                return Err(failed(CONNECTION_CLOSED.into()));
             }
             response
                 .await
-                .map_err(|_| failed("the browser connection closed".into()))?
+                .map_err(|_| failed(CONNECTION_CLOSED.into()))?
                 .map_err(failed)
         }
     }
@@ -255,6 +255,9 @@ impl Connection {
         lock(&self.sessions).remove(session);
     }
 }
+
+/// The detail of the error of a call that can never be answered.
+pub(super) const CONNECTION_CLOSED: &str = "the browser connection closed";
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex

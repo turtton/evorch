@@ -204,3 +204,169 @@ async fn browser_restart_rejects_aba_and_late_old_connection_events() {
     );
     tokio::join!(old_feed.close(), new_feed.close());
 }
+
+const NOT_ATTACHED: &str = "Not attached to an active page";
+
+fn refuse(connection: &Arc<Connection>, start: &Value, message: &str) {
+    connection.deliver(json!({"id":start["id"],"error":{"code":-32000,"message":message}}));
+}
+
+fn jpeg_frame() -> Value {
+    let mut jpeg = Vec::new();
+    image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, jpeg);
+    json!({"sessionId":"s1","method":"Page.screencastFrame","params":{"data":data,"sessionId":1}})
+}
+
+fn drained(commands: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+    let mut methods = Vec::new();
+    while let Ok(message) = commands.try_recv() {
+        let value: Value = serde_json::from_str(&message).unwrap();
+        methods.push(value["method"].as_str().unwrap_or_default().to_owned());
+    }
+    methods
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_refused_while_the_page_navigates_is_retried_with_coherent_metadata() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let mut updates = feed.updates.clone();
+    let refused = command(&connection, &mut commands, "Page.startScreencast").await;
+    refuse(&connection, &refused, NOT_ATTACHED);
+    // The navigation finishes while the producer waits to retry.
+    connection.deliver(json!({"sessionId":"s1","method":"Page.loadEventFired","params":{}}));
+    let info = command(&connection, &mut commands, "Target.getTargetInfo").await;
+    connection.deliver(json!({"id":info["id"],"result":{"targetInfo":{"targetId":"target1","title":"navigated","url":"https://native.invalid/"}}}));
+    let retry = command(&connection, &mut commands, "Page.startScreencast").await;
+    assert_ne!(retry["id"], refused["id"]);
+    {
+        let page = updates.borrow_and_update();
+        let page = page.as_ref().expect("the observation did not end");
+        assert_eq!(page.tabs[0].title, "navigated");
+        assert!(page.frame.is_none(), "no pixels without a live screencast");
+    }
+    connection.deliver(json!({"id":retry["id"],"result":{}}));
+    connection.deliver(jpeg_frame());
+    let page = updates
+        .wait_for(|page| page.as_ref().is_some_and(|page| page.frame.is_some()))
+        .await
+        .unwrap()
+        .clone()
+        .unwrap();
+    assert_eq!(
+        page.frame.as_ref().unwrap().tab,
+        *page.active_tab.as_ref().unwrap()
+    );
+    assert_eq!(page.tabs[0].title, "navigated");
+    drop(updates);
+    tokio::join!(feed.close(), async {
+        let stop = command(&connection, &mut commands, "Page.stopScreencast").await;
+        connection.deliver(json!({"id":stop["id"],"result":{}}));
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_start_that_is_always_refused_is_retried_a_bounded_number_of_times_then_ends() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let mut updates = feed.updates.clone();
+    let mut attempts = 0;
+    loop {
+        tokio::select! {
+            ended = updates.wait_for(Option::is_none) => {
+                ended.unwrap();
+                break;
+            }
+            start = command(&connection, &mut commands, "Page.startScreencast") => {
+                attempts += 1;
+                refuse(&connection, &start, NOT_ATTACHED);
+            }
+        }
+    }
+    assert_eq!(attempts, START_RETRY_DELAYS.len() + 1);
+    let sent = drained(&mut commands);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| m == "Page.startScreencast" || m == "Page.stopScreencast"),
+        "{sent:?}"
+    );
+    feed.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lost_connection_is_not_retried() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let mut updates = feed.updates.clone();
+    let start = command(&connection, &mut commands, "Page.startScreencast").await;
+    refuse(
+        &connection,
+        &start,
+        crate::agent::connection::CONNECTION_CLOSED,
+    );
+    updates.wait_for(Option::is_none).await.unwrap();
+    assert!(
+        !drained(&mut commands)
+            .iter()
+            .any(|m| m == "Page.startScreencast")
+    );
+    feed.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_while_waiting_to_retry_does_not_start_again() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let start = command(&connection, &mut commands, "Page.startScreencast").await;
+    refuse(&connection, &start, NOT_ATTACHED);
+    feed.close().await;
+    assert!(
+        !drained(&mut commands)
+            .iter()
+            .any(|m| m == "Page.startScreencast")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_page_that_closes_while_waiting_to_retry_ends_the_observation() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let mut updates = feed.updates.clone();
+    let start = command(&connection, &mut commands, "Page.startScreencast").await;
+    refuse(&connection, &start, NOT_ATTACHED);
+    browser.release("run");
+    updates.wait_for(Option::is_none).await.unwrap();
+    assert!(
+        !drained(&mut commands)
+            .iter()
+            .any(|m| m == "Page.startScreencast")
+    );
+    feed.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn switching_tabs_while_waiting_to_retry_starts_the_new_tab_at_once() {
+    let (browser, connection, mut commands) = fixture();
+    let execution = browser.observation_pages().pop().unwrap();
+    let feed = browser.observe(&execution).unwrap();
+    let start = command(&connection, &mut commands, "Page.startScreencast").await;
+    assert_eq!(start["sessionId"], "s1");
+    refuse(&connection, &start, NOT_ATTACHED);
+    browser.shared.attached(&connection, &json!({"sessionId":"s2","targetInfo":{"targetId":"popup","openerId":"target1","url":"about:blank"}}));
+    browser.switch_tab("run", "t2").await.unwrap();
+    let next = command(&connection, &mut commands, "Page.startScreencast").await;
+    assert_eq!(next["sessionId"], "s2");
+    drop(feed);
+}
