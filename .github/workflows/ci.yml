@@ -635,13 +635,20 @@ jobs:
       - name: Build and smoke-test flake package in the Nix sandbox
         if: steps.scope.outputs.full != 'false'
         run: nix build -L .#default --out-link ./result-default
+      # evorch-core is not in the default package's closure (that one carries the
+      # core of `evorch`), but it is a distribution of its own with its own helper
+      # bundle; its install check (bundle verify and a child through the pinned
+      # helper image) runs only when it is built.
+      - name: Build and smoke-test the evorch-core package in the Nix sandbox
+        if: steps.scope.outputs.full != 'false'
+        run: nix build -L .#evorch-core --out-link ./result-core
       - name: Push to attic
         if: steps.scope.outputs.full != 'false' && success() && github.ref == 'refs/heads/main'
         timeout-minutes: 60
         run: |
           # How the runner reaches attic (direct or DERP relay) bounds throughput.
           timeout 60 sudo tailscale ping -c 3 attic.taile2777.ts.net || true
-          scripts/push-attic.sh ./result-attic ./result-default ./result-deps ./result-cef-deps
+          scripts/push-attic.sh ./result-attic ./result-default ./result-core ./result-deps ./result-cef-deps
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # ignored の GUI テストを実行する（ADR 0009 / issue #9 の受理基準）。
