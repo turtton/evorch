@@ -242,6 +242,13 @@ fn product_handoff(bad_fd: bool, metadata_mismatch: bool, owner_mismatch: bool) 
             .all(|claim| claim.state != storage::recovery::RecoveryClaimState::Activated),
         "the missing current thread directory must block graph execution despite owner adoption"
     );
+    assert_successor_epochs(
+        &identity,
+        sockets.path(),
+        &product,
+        tx.metadata.old_epoch,
+        tx.metadata.successor_epoch,
+    );
     assert_unpublished_root(
         &identity.socket(sockets.path()).unwrap(),
         before["runs"][0].as_str().unwrap(),
@@ -415,6 +422,100 @@ fn mismatch_owner_worker() {
             Ok(())
         })
         .unwrap();
+}
+
+// The endpoint record, hello and the epoch a launcher expects are one value: the
+// transaction's successor epoch. Subscription cursors use it as well, so the
+// predecessor's cursor is refused. The launcher itself compares the record with
+// hello (a mismatch makes it wait out its diagnostic deadline, never attach).
+fn assert_successor_epochs(
+    identity: &ConfigIdentity,
+    sockets: &Path,
+    product: &Path,
+    old_epoch: u64,
+    successor_epoch: u64,
+) {
+    use workbench_protocol::{
+        events::{EventCursor, ResyncReason, Subscribe, SubscriptionScope, UiEvent},
+        handshake::BuildInfo,
+        ids::ClientId,
+        namespaces::ProjectionEvent,
+        wire::{InstanceEpoch, Sequence},
+    };
+    assert!(successor_epoch > old_epoch);
+    let record = identity.read_record().unwrap().expect("published endpoint");
+    assert_eq!(record.epoch, successor_epoch, "endpoint record");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let launcher = core_launcher::Launcher::with_socket(
+                identity.clone(),
+                core_launcher::CoreBinary::explicit(product).unwrap(),
+                workbench_client::ClientConfig::new(
+                    ClientId::new("d3b-epoch").unwrap(),
+                    BuildInfo {
+                        name: "d3b-epoch".into(),
+                        version: "1".into(),
+                        revision: None,
+                    },
+                ),
+                identity.socket(sockets).unwrap(),
+            )
+            .unwrap()
+            .diagnostic_after(std::time::Duration::from_secs(20));
+            let connected = launcher
+                .connect_or_start_with_endpoint()
+                .await
+                .expect("launcher attaches with the record's epoch");
+            let client = connected.client;
+            assert_eq!(
+                client.server_hello().instance_epoch,
+                InstanceEpoch(record.epoch),
+                "hello"
+            );
+            let fresh = client
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: None,
+                })
+                .await
+                .unwrap();
+            let high_water = fresh.started().high_water;
+            assert_eq!(high_water.core_epoch, InstanceEpoch(successor_epoch));
+            let resumed = client
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: Some(high_water),
+                })
+                .await
+                .unwrap();
+            assert!(
+                resumed.started().snapshot_id.is_none(),
+                "a cursor of the successor epoch replays"
+            );
+            let mut refused = client
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: Some(EventCursor {
+                        core_epoch: InstanceEpoch(old_epoch),
+                        sequence: Sequence(0),
+                    }),
+                })
+                .await
+                .unwrap();
+            assert!(
+                refused.started().snapshot_id.is_some(),
+                "the predecessor's cursor gets a snapshot, not a replay"
+            );
+            assert_eq!(
+                refused.next().await.unwrap().event,
+                UiEvent::Projection(ProjectionEvent::ResyncRequired {
+                    reason: ResyncReason::EpochChanged
+                })
+            );
+        });
 }
 
 // A read of history can still show a quarantined run. Probe command routing

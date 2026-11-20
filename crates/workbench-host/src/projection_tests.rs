@@ -132,6 +132,48 @@ async fn replay_eviction_epoch_mismatch_and_future_cursor_require_resync() {
     }
 }
 #[tokio::test]
+async fn a_fixed_epoch_is_the_hello_epoch_and_the_cursor_epoch_and_rejects_the_previous_one() {
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(NoModel),
+    );
+    let predecessor = 0x1234_5678_9abc_u64;
+    let successor = predecessor + 1;
+    let p = Projection::with_epoch(
+        runtime,
+        &tokio::runtime::Handle::current(),
+        Default::default(),
+        Some(successor),
+    );
+    assert_eq!(p.instance_epoch(), InstanceEpoch(successor));
+    let first = p.subscribe_with_snapshot(&all(None)).unwrap();
+    assert_eq!(
+        first.started.high_water.core_epoch,
+        InstanceEpoch(successor)
+    );
+    // A cursor of the same epoch resumes; the predecessor's cursor, even at a
+    // sequence the successor has, is refused with a fresh snapshot.
+    let resumed = p
+        .subscribe_with_snapshot(&all(Some(first.started.high_water)))
+        .unwrap();
+    assert!(resumed.started.snapshot_id.is_none());
+    let mut refused = p
+        .subscribe_with_snapshot(&all(Some(EventCursor {
+            core_epoch: InstanceEpoch(predecessor),
+            sequence: first.started.high_water.sequence,
+        })))
+        .unwrap();
+    assert!(refused.started.snapshot_id.is_some());
+    assert_eq!(
+        refused.recv().await.unwrap().event,
+        UiEvent::Projection(ProjectionEvent::ResyncRequired {
+            reason: ResyncReason::EpochChanged
+        })
+    );
+}
+#[tokio::test]
 async fn slow_consumer_receives_terminal_resync_for_both_count_and_byte_budgets() {
     for limits in [
         SubscriptionLimits {

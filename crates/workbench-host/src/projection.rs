@@ -206,6 +206,25 @@ impl Projection {
         handle: &tokio::runtime::Handle,
         limits: SubscriptionLimits,
     ) -> Arc<Self> {
+        Self::with_epoch(runtime, handle, limits, None)
+    }
+    /// Like [`Self::new`], with the initial epoch fixed by the caller instead
+    /// of drawn at random. A planned successor passes the `successor_epoch`
+    /// its restart transaction fixed, so that the epoch in hello and in
+    /// subscription cursors is the one its endpoint record publishes.
+    ///
+    /// `epoch` must be nonzero, and below `u64::MAX` because an invalidation
+    /// advances it; a cold start passes `None`.
+    pub fn with_epoch(
+        runtime: AgentRuntime,
+        handle: &tokio::runtime::Handle,
+        limits: SubscriptionLimits,
+        epoch: Option<u64>,
+    ) -> Arc<Self> {
+        assert!(
+            epoch.is_none_or(|e| e != 0 && e != u64::MAX),
+            "a fixed projection epoch must be nonzero and advanceable"
+        );
         let bus = runtime.event_bus();
         let mut events = bus.subscribe();
         let registry = ApprovalRegistry::for_bus(&bus);
@@ -226,8 +245,10 @@ impl Projection {
                 snapshot_hook: None,
                 #[cfg(test)]
                 refresh_hook: None,
-                epoch: u64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap())
-                    >> 1,
+                epoch: epoch.unwrap_or_else(|| {
+                    u64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap())
+                        >> 1
+                }),
                 sequence: 0,
                 next_subscription: 0,
                 scanner: queries::CommitScanner::default(),

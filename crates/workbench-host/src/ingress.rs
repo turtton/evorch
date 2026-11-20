@@ -377,10 +377,17 @@ impl CommandHost {
     }
 
     pub fn new(service: CommandService) -> Self {
-        let projection = crate::projection::Projection::new(
+        Self::new_with_epoch(service, None)
+    }
+
+    /// `epoch` fixes the projection's initial epoch (see
+    /// [`crate::projection::Projection::with_epoch`]); `None` draws one.
+    pub fn new_with_epoch(service: CommandService, epoch: Option<u64>) -> Self {
+        let projection = crate::projection::Projection::with_epoch(
             service.runtime().clone(),
             service.handle(),
             Default::default(),
+            epoch,
         );
         Self {
             service,
