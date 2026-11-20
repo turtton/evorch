@@ -306,7 +306,21 @@ pub(crate) fn attempt(
     host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
     component: &ComponentStatus,
 ) -> AutomaticAttempt {
-    let reservation = if matches!(
+    attempt_before_decline(coordinator, runtime, host, component, |_| {})
+}
+
+// The observer is a no-op in production. Tests park the real failure path at
+// this boundary to exercise manual admission before decline starts.
+pub(crate) fn attempt_before_decline(
+    coordinator: &StartupCoordinator<'_>,
+    runtime: &runtime::AgentRuntime,
+    host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
+    component: &ComponentStatus,
+    before_decline: impl FnOnce(StartupBlocked),
+) -> AutomaticAttempt {
+    // Keep ownership outside the fallible preparation closure: dropping that
+    // closure must not admit a manual attempt before decline/cleanup finishes.
+    let mut reservation = if matches!(
         component.disposition,
         Disposition::Prepared | Disposition::AwaitingAuthority
     ) {
@@ -341,10 +355,11 @@ pub(crate) fn attempt(
             match coordinator
                 .prepare(&component.manifest_id)
                 .and_then(|prepared| {
-                    let reservation =
-                        reservation.expect("executable disposition reserved at attempt start");
+                    let held_reservation = reservation
+                        .as_ref()
+                        .expect("executable disposition reserved at attempt start");
                     runtime
-                        .check_automatic_activation(&reservation)
+                        .check_automatic_activation(held_reservation)
                         .map_err(|_| StartupBlocked::NeedsAttention)?;
                     let bindings = prepared.command_bindings();
                     let guard = host
@@ -355,7 +370,12 @@ pub(crate) fn attempt(
                         .map_err(|_| StartupBlocked::CurrentBindingRequired)?;
                     // No host lock spans activation/DB/runtime work. The guard
                     // also removes the admission fence on error or unwind.
-                    let activated = prepared.activate(runtime, reservation)?;
+                    let activated = prepared.activate(
+                        runtime,
+                        reservation
+                            .take()
+                            .expect("reservation held until activation"),
+                    )?;
                     Ok(publish_activation(activated, || {
                         host.lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -373,26 +393,32 @@ pub(crate) fn attempt(
                     RecoveryState::Quarantined,
                     Some(StartupBlocked::NeedsAttention),
                 ),
-                Err(reason) => match coordinator.decline(&component.manifest_id) {
-                    Ok(()) => (RecoveryState::Released, Some(reason)),
-                    Err(StartupBlocked::OwnerBlocked) => {
-                        (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
+                Err(reason) => {
+                    before_decline(reason);
+                    match coordinator.decline(&component.manifest_id) {
+                        Ok(()) => (RecoveryState::Released, Some(reason)),
+                        Err(StartupBlocked::OwnerBlocked) => {
+                            (RecoveryState::Blocked, Some(StartupBlocked::OwnerBlocked))
+                        }
+                        Err(_) => {
+                            let reason = if coordinator
+                                .cleanup_activated(&component.manifest_id)
+                                .is_ok()
+                            {
+                                StartupBlocked::AlreadyActivated
+                            } else {
+                                reason
+                            };
+                            (RecoveryState::Quarantined, Some(reason))
+                        }
                     }
-                    Err(_) => {
-                        let reason = if coordinator
-                            .cleanup_activated(&component.manifest_id)
-                            .is_ok()
-                        {
-                            StartupBlocked::AlreadyActivated
-                        } else {
-                            reason
-                        };
-                        (RecoveryState::Quarantined, Some(reason))
-                    }
-                },
+                }
             }
         }
     };
+    // Failure disposition includes conditional release and paused-state cleanup.
+    // Only now may a competing manual attempt acquire this original graph slot.
+    drop(reservation);
     AutomaticAttempt::Finished(RecoveryDiagnostic {
         manifest_id: component.manifest_id.clone(),
         runs: component.runs.clone(),

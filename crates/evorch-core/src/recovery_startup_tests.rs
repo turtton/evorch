@@ -88,9 +88,131 @@ async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
     services.shutdown().await.unwrap();
     catalog
 }
+
+#[derive(Clone, Copy, Debug)]
+enum AutomaticFailure {
+    Prepare,
+    BeginBinding,
+}
+
+async fn assert_automatic_failure_keeps_reservation(
+    coordinator: &StartupCoordinator<'_>,
+    host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
+    component: &ComponentStatus,
+    failure: AutomaticFailure,
+) {
+    let invalid_config = coordinator.inputs.options.config_dir.join("config.toml");
+    let (expected_reason, binding_fence) = match failure {
+        AutomaticFailure::Prepare => {
+            // Real preparation fails strict current-settings validation. Restore
+            // the settings at the event so the subsequent decline can release.
+            assert!(!invalid_config.exists());
+            std::fs::write(&invalid_config, "invalid toml = [").unwrap();
+            (StartupBlocked::CurrentSettingsRequired, None)
+        }
+        AutomaticFailure::BeginBinding => {
+            let bindings =
+                bindings::load(coordinator.inputs.storage, coordinator.inputs.projects).unwrap();
+            let binding = bindings.get("thread").unwrap().clone();
+            let guard = host
+                .lock()
+                .unwrap()
+                .service()
+                .begin_root_recovery(vec![("thread".into(), binding)])
+                .unwrap();
+            (StartupBlocked::CurrentBindingRequired, Some(guard))
+        }
+    };
+    let manifest = component.manifest_id.clone();
+    let runtime = coordinator.inputs.runtime.clone();
+    let context = coordinator.job_context().unwrap();
+    let host = host.clone();
+    let component = component.clone();
+    let (entered, failed) = tokio::sync::oneshot::channel();
+    let (resume, wait) = std::sync::mpsc::channel();
+    let attempt = tokio::task::spawn_blocking(move || {
+        let coordinator = context.coordinator().unwrap();
+        crate::recovery_service::attempt_before_decline(
+            &coordinator,
+            &context.runtime,
+            &host,
+            &component,
+            |reason| {
+                entered.send(reason).unwrap();
+                wait.recv().unwrap();
+            },
+        )
+    });
+    let reason = failed.await.expect("attempt must reach decline boundary");
+    let manual = runtime.reserve_manual_activation(
+        &manifest,
+        storage::recovery::graph_control::GraphEffectKey {
+            operation_id: "during-automatic-decline".into(),
+            attempt_nonce: "attempt".into(),
+        },
+        0,
+    );
+    let contended = matches!(
+        &manual,
+        Err(runtime::RuntimeError::ActivationReservationUnavailable {
+            reason: runtime::ActivationReservationProblem::Contended
+        })
+    );
+    drop(manual);
+    if matches!(failure, AutomaticFailure::Prepare) {
+        std::fs::remove_file(invalid_config).unwrap();
+    }
+    resume.send(()).unwrap();
+    let crate::recovery_service::AutomaticAttempt::Finished(diagnostic) = attempt.await.unwrap()
+    else {
+        panic!("failure must finish its automatic attempt");
+    };
+    drop(binding_fence);
+    assert_eq!(reason, expected_reason, "{failure:?}");
+    assert_eq!(diagnostic.reason, Some(expected_reason), "{failure:?}");
+    assert_eq!(
+        diagnostic.state,
+        crate::recovery_service::RecoveryState::Released
+    );
+    assert!(matches!(
+        coordinator
+            .claim(&diagnostic.manifest_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        RecoveryClaimState::Released { .. }
+    ));
+    assert!(
+        !runtime.has_paused_recovery(),
+        "decline must clean paused state"
+    );
+    assert!(
+        runtime
+            .reserve_manual_activation(
+                &diagnostic.manifest_id,
+                storage::recovery::graph_control::GraphEffectKey {
+                    operation_id: "after-automatic-decline".into(),
+                    attempt_nonce: "attempt".into(),
+                },
+                0
+            )
+            .is_ok(),
+        "completed failure must return its original slot"
+    );
+    assert!(
+        contended,
+        "{failure:?}: reservation released before decline/cleanup"
+    );
+}
+
 #[tokio::test]
 async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay() {
-    for activate in [false, true] {
+    for (activate, failure) in [
+        (false, None),
+        (true, None),
+        (false, Some(AutomaticFailure::Prepare)),
+        (false, Some(AutomaticFailure::BeginBinding)),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let owners = test_socket_dir::SocketDir::new();
@@ -279,6 +401,11 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         );
         assert!(!owner.begin_quiesce().unwrap());
         assert!(!owner.release_ready().unwrap());
+        if let Some(failure) = failure {
+            assert_automatic_failure_keeps_reservation(&reopened, &host, &status, failure).await;
+            assert_eq!(model.admissions.load(Ordering::SeqCst), before);
+            continue;
+        }
         let adopted = reopened.prepare(&manifests[0]).unwrap();
         assert_eq!(adopted.claim_id(), prepared.claim_id());
         assert_eq!(
