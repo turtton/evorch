@@ -1,3 +1,5 @@
+mod ownership_contention;
+
 use super::*;
 #[path = "recovery_tests.rs"]
 mod recovery;

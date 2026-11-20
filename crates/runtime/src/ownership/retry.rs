@@ -4,7 +4,9 @@
 //! state read inside the same transaction use this: every attempt opens a new
 //! connection, re-reads and re-validates the owner, and drops the connection
 //! (rolling back) before waiting. Callbacks with external effects
-//! (`Registry::update`, `prepare_child`) are never retried here.
+//! (`Registry::update`, handoff `prepare_child`) are never retried here. Lane
+//! owner creation passes no external callback to `prepare_child`, so it can
+//! retry the whole transaction, including its parent-generation validation.
 //!
 //! Waiting is bounded by absolute deadlines, not per-statement timeouts. An
 //! attempt's connection waits for SQLite locks through [`wait_within_budget`],

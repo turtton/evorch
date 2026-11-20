@@ -722,7 +722,7 @@ impl Registry {
     /// Create an independent child owner only while the source generation still
     /// accepts work. Checking the source and reserving the target share one write
     /// transaction; a target collision never adopts an unrelated thread's lease.
-    /// `prepare` may have external effects, so this is never retried.
+    /// Callers must not retry this with an externally effectful `prepare`.
     pub(super) fn prepare_child<T>(
         &mut self,
         source: &super::OwnerPermit,

@@ -954,6 +954,111 @@ fn update_callbacks_are_never_retried() {
 }
 
 #[test]
+fn lane_owner_contention_expires_without_reserving_a_child() {
+    let fixture = fixture();
+    let before = owner_of(&fixture.path);
+    let lock = exclusive_lock(&fixture.path);
+    let clock = VirtualClock::new();
+    let result =
+        fixture
+            .permit
+            .prepare_lane_owner_on("child", &RetryPolicy::default(), &clock.shared());
+    lock.execute_batch("ROLLBACK").unwrap();
+    let error = result.expect_err("an ownership lock outlasted the budget");
+    assert!(
+        matches!(
+            error,
+            RegistryError::Database {
+                operation: DbOperation::Child,
+                phase: DbPhase::Begin,
+                attempt: 5..,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(clock.elapsed(), ms(10_000));
+    assert_eq!(owner_of(&fixture.path), before);
+    assert!(matches!(
+        Registry::open_readonly(&fixture.path)
+            .unwrap()
+            .attach("child"),
+        Err(RegistryError::Absent)
+    ));
+}
+
+#[test]
+fn lane_owner_retry_rechecks_the_parent_generation() {
+    let fixture = fixture();
+    let lock = exclusive_lock(&fixture.path);
+    let next = claimed(&owner_of_locked(&lock));
+    let committed = next.clone();
+    let clock = VirtualClock::new();
+    at(&clock, ms(2400), move |_| {
+        lock.execute(
+            "UPDATE thread_owners SET state = ?1 WHERE thread_id = 'thread-1'",
+            [serde_json::to_string(&committed).unwrap()],
+        )
+        .unwrap();
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    let result =
+        fixture
+            .permit
+            .prepare_lane_owner_on("child", &RetryPolicy::default(), &clock.shared());
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::Ownership(OwnershipError::Fenced))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(owner_of(&fixture.path), next);
+    assert!(matches!(
+        Registry::open_readonly(&fixture.path)
+            .unwrap()
+            .attach("child"),
+        Err(RegistryError::Absent)
+    ));
+}
+
+#[test]
+fn lane_owner_retry_does_not_adopt_a_colliding_child() {
+    let fixture = fixture();
+    let lock = exclusive_lock(&fixture.path);
+    let other = ThreadOwner::new(
+        "child".into(),
+        Lease {
+            owner_id: "other-host".into(),
+            generation: 9,
+            expires_at: u64::MAX,
+        },
+    );
+    let committed = other.clone();
+    let clock = VirtualClock::new();
+    at(&clock, ms(2400), move |_| {
+        lock.execute(
+            "INSERT INTO thread_owners(thread_id,state) VALUES ('child',?1)",
+            [serde_json::to_string(&committed).unwrap()],
+        )
+        .unwrap();
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    let result =
+        fixture
+            .permit
+            .prepare_lane_owner_on("child", &RetryPolicy::default(), &clock.shared());
+    assert!(matches!(result, Err(RegistryError::Exists)), "{result:?}");
+    assert_eq!(
+        Registry::open_readonly(&fixture.path)
+            .unwrap()
+            .attach("child")
+            .unwrap(),
+        other
+    );
+}
+
+#[test]
 fn child_preparation_is_never_retried() {
     let fixture = fixture();
     let lock = exclusive_lock(&fixture.path);
