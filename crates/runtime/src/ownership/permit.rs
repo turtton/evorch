@@ -62,11 +62,50 @@ impl OwnerPermit {
                     run_id: None,
                 })
             }
-            Err(RegistryError::Absent) => {
-                self.prepare_child(thread_id, || Ok(())).map(|pair| pair.0)
-            }
+            Err(RegistryError::Absent) => self
+                .prepare_lane_owner_on(thread_id, &RetryPolicy::default(), &system_clock())
+                .map_err(|error| error.to_string()),
             Err(error) => Err(error.to_string()),
         }
+    }
+
+    /// Unlike handoff preparation, creating a lane owner has no external
+    /// callback effects. Its entire transaction can safely retry contention;
+    /// each fresh attempt revalidates the parent before reserving the child.
+    pub(super) fn prepare_lane_owner_on(
+        &self,
+        thread_id: &str,
+        policy: &RetryPolicy,
+        clock: &std::sync::Arc<dyn Clock>,
+    ) -> Result<Self, RegistryError> {
+        let (child, ()) = authority::observe(
+            self,
+            retry_contention(
+                &self.registry_path,
+                DbOperation::Child,
+                &self.thread_id,
+                policy,
+                clock,
+                &|| false,
+                |attempt| {
+                    Registry::open_attempt(
+                        &self.registry_path,
+                        Access::ReadWrite,
+                        Wait::Budget,
+                        DbOperation::Child,
+                        &self.thread_id,
+                        attempt,
+                    )?
+                    .prepare_child(self, thread_id, now_ms(), || Ok(()))
+                },
+            ),
+        )?;
+        Ok(Self {
+            registry_path: self.registry_path.clone(),
+            thread_id: child.thread_id,
+            lease: child.lease,
+            run_id: None,
+        })
     }
 
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
