@@ -17,7 +17,7 @@ use product_exec::{
     env::IsolatedEnv,
     launch::{LaunchError, ProductLaunch},
     names::{CARGO_HARNESS_BIN_ENV, ENV_MEASURE_MANIFEST, MANIFEST_SCHEMA},
-    process::{ManagedProcess, WaitError},
+    process::{LaunchSpec, ManagedProcess, WaitError},
     wire::{self, MockProvider},
 };
 use std::{
@@ -251,6 +251,13 @@ fn await_up(out: std::process::ChildStdout) {
     panic!("the child ended before saying up");
 }
 
+fn fake_spec(role: &str) -> LaunchSpec {
+    let mut spec = LaunchSpec::new(std::env::current_exe().unwrap());
+    spec.args(["--ignored", "--exact", "fake_role_process", "--nocapture"])
+        .env(FAKE_ROLE_ENV, role);
+    spec
+}
+
 fn fake_command(role: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -369,7 +376,7 @@ fn spawn_family() -> (ManagedProcess, i32) {
 }
 
 fn spawn_family_of(child: &str) -> (ManagedProcess, i32) {
-    let mut command = fake_command("family");
+    let mut command = fake_spec("family");
     command.env("F4P_FAMILY_CHILD", child);
     let mut family = ManagedProcess::spawn(command).unwrap();
     let (grandchild, _) = family
@@ -393,7 +400,7 @@ fn spawn_family_of(child: &str) -> (ManagedProcess, i32) {
 /// notification arrived, which the reaper sends after the kernel reparented
 /// the parker to it.
 fn orphan_maker(mode: &str) -> (ManagedProcess, i32) {
-    let mut command = fake_command("orphan_maker");
+    let mut command = fake_spec("orphan_maker");
     command.env("F4P_ORPHAN_MODE", mode);
     let mut maker = ManagedProcess::spawn(command).unwrap();
     let (grandchild, _) = maker
@@ -505,7 +512,7 @@ fn the_exited_leader_keeps_its_pid_reserved_until_the_cleanup() {
     assert_eq!(zombie.state, 'Z');
     let leader = family.pid();
     let report = family.join();
-    assert!(report.status.success());
+    assert!(report.success());
     assert!(
         product_exec::observe::process(leader).is_none(),
         "reaped by the cleanup"
@@ -533,7 +540,7 @@ fn terminate_and_join_report_clean_exit_and_no_orphans() {
         .expect("exit event");
     assert!(status.success());
     let report = family.join();
-    assert!(report.status.success());
+    assert!(report.success());
     assert!(report.orphans.is_empty(), "{:?}", report.orphans);
     assert!(!report.reaper_lost, "{}", report.reaper_stderr);
 }
@@ -558,7 +565,7 @@ fn an_orphan_left_by_the_child_is_reported_then_killed() {
 
 #[test]
 fn exit_before_ready_is_an_event_with_the_childs_stderr() {
-    let mut process = ManagedProcess::spawn(fake_command("fail")).unwrap();
+    let mut process = ManagedProcess::spawn(fake_spec("fail")).unwrap();
     match process.wait_for(Duration::from_secs(60), |l| {
         l.contains("ready").then_some(())
     }) {
@@ -648,12 +655,7 @@ fn product_starts_isolated_is_observed_serves_the_wire_and_is_taken_back() {
     assert_eq!(provider.remaining_scripts(), 0);
 
     let (report, footprint) = product.stop();
-    assert!(
-        report.status.success(),
-        "{:?} {}",
-        report.status,
-        report.stderr
-    );
+    assert!(report.success(), "{:?} {}", report.status, report.stderr);
     assert!(report.orphans.is_empty());
     drop(env);
     assert!(footprint.remains().is_empty());
@@ -948,7 +950,7 @@ fn descriptors_without_close_on_exec_stay_this_processes_own_business() {
             .0
     };
     // The supervised child does not get it.
-    let mut child = ManagedProcess::spawn(fake_command("fds")).unwrap();
+    let mut child = ManagedProcess::spawn(fake_spec("fds")).unwrap();
     let listed = listed_by(&mut child);
     assert!(
         !listed.iter().any(|t| Path::new(t) == leaked),
@@ -1061,7 +1063,7 @@ fn another_live_family_that_names_this_familys_path_is_not_touched() {
     let root = tempfile::tempdir().unwrap();
     let log = format!("{}/output.log", root.path().display());
     let (first, _) = spawn_family();
-    let mut command = fake_command("parker");
+    let mut command = fake_spec("parker");
     command.arg(&log);
     let second = ManagedProcess::spawn(command).unwrap();
     let second_pid = second.pid();
@@ -1078,7 +1080,7 @@ fn another_live_family_that_names_this_familys_path_is_not_touched() {
 fn a_failed_spawn_step_takes_the_started_family_back() {
     use product_exec::process::{LAST_ABORTED_SPAWN, SpawnFault};
     for fault in [SpawnFault::Pidfd, SpawnFault::PidfdClone] {
-        let result = ManagedProcess::spawn_faulty(fake_command("parker"), fault);
+        let result = ManagedProcess::spawn_faulty(fake_spec("parker"), fault);
         assert!(result.is_err(), "{fault:?} must fail the spawn");
         let (reaper, leader) = LAST_ABORTED_SPAWN.with(std::cell::Cell::get);
         assert!(reaper > 0 && leader > 0);
@@ -1091,4 +1093,72 @@ fn a_failed_spawn_step_takes_the_started_family_back() {
             "{fault:?}: the leader {leader} was not killed and reaped"
         );
     }
+}
+
+#[test]
+fn a_join_in_flight_while_the_family_is_killed_leaves_every_child_accounted_for() {
+    // The reaper's JOIN thread and a KILL both reap children. Pinning a child by
+    // pidfd and reaping it happen under one lock, so a pid that was listed is
+    // still the same child when it is signalled. A reused pid cannot be forced
+    // from a test; what is checked is the order the lock makes possible: the
+    // JOIN is pending (an adopted orphan that never exits) when the KILL arrives,
+    // and the KILL wakes it.
+    let (mut family, orphan) = orphan_maker("env");
+    let bystander = plain_parker(&[], None);
+    assert!(family.request_join(), "the JOIN is requested first");
+    family.kill_all();
+    let joined = family
+        .await_join(Duration::from_secs(60))
+        .expect("the pending JOIN ends once the KILL took the orphan");
+    assert!(
+        joined
+            .iter()
+            .any(|(pid, status)| *pid == orphan && !status.success()),
+        "the orphan is accounted for as killed: {joined:?}"
+    );
+    assert!(
+        joined.iter().all(|(pid, _)| *pid != bystander.id() as i32),
+        "{joined:?}"
+    );
+    assert!(product_exec::observe::process(orphan).is_none(), "reaped");
+    let report = family.join();
+    assert!(!report.reaper_lost, "{}", report.reaper_stderr);
+    assert!(
+        running(bystander.id()),
+        "a process outside the family is untouched"
+    );
+    let mut bystander = bystander;
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+}
+
+#[test]
+fn a_reaper_that_stops_answering_is_bounded_and_reported_lost() {
+    let (mut family, _) = spawn_family();
+    family.set_cleanup_bounds(Duration::from_millis(300), Duration::from_millis(300));
+    let reaper = rustix::process::Pid::from_raw(family.reaper_pid()).unwrap();
+    // The reaper is this process's own child, still unreaped: the pid is its own.
+    rustix::process::kill_process(reaper, rustix::process::Signal::STOP).unwrap();
+    family.close_stdin();
+    let report = family.join();
+    assert!(report.reaper_lost, "{report:?}");
+    assert!(!report.success());
+}
+
+#[test]
+fn a_reaper_that_dies_before_the_exit_is_reported_lost_and_not_a_panic() {
+    let (mut family, grandchild) = spawn_family_of("parker");
+    // The orphaned parker keeps the leader's stderr open until the test kills it.
+    family.set_reader_bound(Duration::from_millis(300));
+    family.set_cleanup_bounds(Duration::from_millis(300), Duration::from_millis(300));
+    let reaper = rustix::process::Pid::from_raw(family.reaper_pid()).unwrap();
+    rustix::process::kill_process(reaper, rustix::process::Signal::KILL).unwrap();
+    // The leader is killed through its own pidfd; nobody is left to report it.
+    assert!(family.signal(rustix::process::Signal::KILL));
+    let report = family.join();
+    assert!(report.reaper_lost, "{report:?}");
+    assert!(report.status.is_none());
+    // What the lost reaper could not take back is the test's to clean up.
+    let orphan = rustix::process::Pid::from_raw(grandchild).unwrap();
+    let _ = rustix::process::kill_process(orphan, rustix::process::Signal::KILL);
 }

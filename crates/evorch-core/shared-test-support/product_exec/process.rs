@@ -53,7 +53,9 @@ pub enum WaitError {
 
 #[derive(Debug)]
 pub struct Report {
-    pub status: ExitStatus,
+    /// The leader's exit status; `None` when it was not reported (the reaper
+    /// was lost, or the leader did not exit within the bound).
+    pub status: Option<ExitStatus>,
     pub stderr: String,
     /// Processes of the family that were still running when the cleanup began
     /// (the leader excluded). They were killed and reaped by the reaper; a
@@ -69,10 +71,6 @@ pub struct Report {
     pub reaper_stderr: String,
 }
 
-/// Marker the environment helper puts on a command that must start with an
-/// empty environment (std cannot be asked whether `env_clear` was called). It
-/// is removed before the leader starts.
-pub const CLEAR_ENV_MARKER: &str = "EVORCH_F4P_CLEAR_ENV";
 /// Default bound for each reader thread's end after the family is dead.
 const READER_JOIN_BOUND: Duration = Duration::from_secs(10);
 const REPLY_WATCHDOG: Duration = Duration::from_secs(60);
@@ -103,6 +101,7 @@ struct Events {
 pub struct ManagedProcess {
     pid: i32,
     reaper: Option<Child>,
+    reaper_fd: OwnedFd,
     control: Option<std::process::ChildStdin>,
     pidfd: OwnedFd,
     spawned_at: Instant,
@@ -114,60 +113,100 @@ pub struct ManagedProcess {
     reaper_stderr: Arc<Mutex<Vec<u8>>>,
     readers: Vec<(JoinHandle<()>, mpsc::Receiver<()>)>,
     reader_bound: Duration,
+    reply_bound: Duration,
+    reaper_bound: Duration,
+    /// Replies that arrived while another one was awaited.
+    stash: Vec<(String, serde_json::Value)>,
     finished: bool,
 }
 
-fn spec_of(command: &Command) -> std::io::Result<reaper::Spec> {
-    let utf8 = |s: &std::ffi::OsStr| {
-        s.to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| std::io::Error::other("a non-UTF-8 command is not supported"))
-    };
-    let mut cleared = false;
-    let mut env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let overrides: Vec<_> = command.get_envs().collect();
-    for (name, value) in &overrides {
-        if name.to_str() == Some(CLEAR_ENV_MARKER) {
-            cleared = value.is_some();
+/// What the reaper starts as the leader. Only these settings exist: a program,
+/// arguments, an environment, a working directory. There is deliberately no
+/// `Command` here, so that a setting (`pre_exec`, stdio, a user id) that the
+/// reaper would silently drop cannot be written down at all. The reaper adds
+/// the pipes and the process group itself.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchSpec {
+    program: String,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+    clear_env: bool,
+    cwd: Option<String>,
+}
+
+impl LaunchSpec {
+    pub fn new(program: impl AsRef<std::ffi::OsStr>) -> Self {
+        Self {
+            program: program.as_ref().to_string_lossy().into_owned(),
+            ..Self::default()
         }
     }
-    if !cleared {
-        for (name, value) in std::env::vars_os() {
-            if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
-                env.insert(name.to_owned(), value.to_owned());
+    pub fn arg(&mut self, arg: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.args.push(arg.as_ref().to_string_lossy().into_owned());
+        self
+    }
+    pub fn args(
+        &mut self,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    ) -> &mut Self {
+        for arg in args {
+            self.arg(arg);
+        }
+        self
+    }
+    pub fn env(
+        &mut self,
+        name: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> &mut Self {
+        self.env.insert(
+            name.as_ref().to_string_lossy().into_owned(),
+            value.as_ref().to_string_lossy().into_owned(),
+        );
+        self
+    }
+    /// The leader starts with nothing but what `env` adds afterwards.
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.clear_env = true;
+        self.env.clear();
+        self
+    }
+    pub fn current_dir(&mut self, dir: impl AsRef<std::path::Path>) -> &mut Self {
+        self.cwd = Some(dir.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    fn into_reaper_spec(self) -> reaper::Spec {
+        let mut env = std::collections::BTreeMap::new();
+        if !self.clear_env {
+            for (name, value) in std::env::vars_os() {
+                if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+                    env.insert(name.to_owned(), value.to_owned());
+                }
             }
+        }
+        env.extend(self.env);
+        reaper::Spec {
+            program: self.program,
+            args: self.args,
+            env: env.into_iter().collect(),
+            cwd: self.cwd,
         }
     }
-    for (name, value) in overrides {
-        if name.to_str() == Some(CLEAR_ENV_MARKER) {
-            continue;
-        }
-        match value {
-            Some(value) => {
-                env.insert(utf8(name)?, utf8(value)?);
-            }
-            None => {
-                env.remove(&utf8(name)?);
-            }
-        }
-    }
-    Ok(reaper::Spec {
-        program: utf8(command.get_program())?,
-        args: command
-            .get_args()
-            .map(utf8)
-            .collect::<std::io::Result<Vec<_>>>()?,
-        env: env.into_iter().collect(),
-        cwd: command
-            .get_current_dir()
-            .map(|d| utf8(d.as_os_str()))
-            .transpose()?,
-    })
 }
 
 /// Takes a family back after a failed spawn: the reaper's control pipe is closed
-/// (the reaper kills and reaps the family), and the reaper process is reaped.
-fn abort_spawn(mut reaper: Child, control: std::process::ChildStdin, leader: i32) {
+/// (the reaper kills and reaps the family) and the reaper process is reaped.
+/// The last resort for a reaper that does not finish is a SIGKILL through the
+/// pidfd that was opened while the reaper was still unreaped; no pid is used
+/// after the wait may have reaped it, and the wait is not joined after the
+/// bound.
+fn abort_spawn(
+    mut reaper: Child,
+    reaper_fd: OwnedFd,
+    control: std::process::ChildStdin,
+    leader: i32,
+) {
     let reaper_pid = reaper.id() as i32;
     LAST_ABORTED_SPAWN.with(|last| last.set((reaper_pid, leader)));
     drop(control);
@@ -175,24 +214,24 @@ fn abort_spawn(mut reaper: Child, control: std::process::ChildStdin, leader: i32
     let waiter = std::thread::spawn(move || {
         let _ = tx.send(reaper.wait());
     });
-    if rx.recv_timeout(Duration::from_secs(30)).is_err() {
-        // The reaper did not finish on its own: its group is killed as a last
-        // resort. This is the only path that signals by group.
-        if let Some(group) = rustix::process::Pid::from_raw(reaper_pid) {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(_) => {
+            let _ = waiter.join();
+        }
+        Err(_) => {
+            let _ = rustix::process::pidfd_send_signal(&reaper_fd, rustix::process::Signal::KILL);
         }
     }
-    let _ = waiter.join();
 }
 
 impl ManagedProcess {
-    pub fn spawn(command: Command) -> std::io::Result<Self> {
-        Self::spawn_faulty(command, SpawnFault::None)
+    pub fn spawn(spec: LaunchSpec) -> std::io::Result<Self> {
+        Self::spawn_faulty(spec, SpawnFault::None)
     }
 
     /// `spawn`, failing at `fault` when it is not `None` (tests only).
-    pub fn spawn_faulty(command: Command, fault: SpawnFault) -> std::io::Result<Self> {
-        let spec = spec_of(&command)?;
+    pub fn spawn_faulty(spec: LaunchSpec, fault: SpawnFault) -> std::io::Result<Self> {
+        let spec = spec.into_reaper_spec();
         let mut starter = Command::new(std::env::current_exe()?);
         starter
             .args(["--ignored", "--exact", reaper::ROLE_TEST, "--nocapture"])
@@ -206,6 +245,18 @@ impl ManagedProcess {
         sandbox::process::close_inherited_fds_on_exec(&mut starter);
         let mut reaper = starter.spawn()?;
         let reaper_pid = reaper.id() as i32;
+        // The reaper is our own unreaped child, so this pidfd names it.
+        let reaper_fd = match rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(reaper_pid).expect("a child pid"),
+            rustix::process::PidfdFlags::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = reaper.kill();
+                let _ = reaper.wait();
+                return Err(error.into());
+            }
+        };
         let control = reaper.stdin.take().expect("piped stdin");
         let events_out = reaper.stdout.take().expect("piped stdout");
         let reaper_err = reaper.stderr.take().expect("piped stderr");
@@ -274,13 +325,13 @@ impl ManagedProcess {
         let leader = match leader_rx.recv_timeout(REPLY_WATCHDOG) {
             Ok(Ok(data)) => data,
             Ok(Err(why)) => {
-                abort_spawn(reaper, control, 0);
+                abort_spawn(reaper, reaper_fd, control, 0);
                 return Err(std::io::Error::other(format!(
                     "the reaper could not start the leader: {why}"
                 )));
             }
             Err(_) => {
-                abort_spawn(reaper, control, 0);
+                abort_spawn(reaper, reaper_fd, control, 0);
                 return Err(std::io::Error::other(
                     "the reaper did not report a leader (is the f4p_family_reaper role declared in this test binary?)",
                 ));
@@ -325,7 +376,7 @@ impl ManagedProcess {
         let (pidfd, leader_in, leader_out, leader_err) = match opened {
             Ok(opened) => opened,
             Err(error) => {
-                abort_spawn(reaper, control, pid);
+                abort_spawn(reaper, reaper_fd, control, pid);
                 return Err(error);
             }
         };
@@ -334,7 +385,7 @@ impl ManagedProcess {
             .and_then(|()| control.flush())
             .is_err()
         {
-            abort_spawn(reaper, control, pid);
+            abort_spawn(reaper, reaper_fd, control, pid);
             return Err(std::io::Error::other("the reaper's control pipe is closed"));
         }
 
@@ -382,6 +433,7 @@ impl ManagedProcess {
         Ok(Self {
             pid,
             reaper: Some(reaper),
+            reaper_fd,
             control: Some(control),
             pidfd,
             spawned_at,
@@ -397,6 +449,9 @@ impl ManagedProcess {
             reaper_stderr,
             readers,
             reader_bound: READER_JOIN_BOUND,
+            reply_bound: REPLY_WATCHDOG,
+            reaper_bound: Duration::from_secs(30),
+            stash: Vec::new(),
             finished: false,
         })
     }
@@ -404,6 +459,14 @@ impl ManagedProcess {
     /// Changes the bound of the reader join (a failure bound, not a wait).
     pub fn set_reader_bound(&mut self, bound: Duration) {
         self.reader_bound = bound;
+    }
+
+    /// Changes the bounds of the cleanup: how long the reaper may take to answer
+    /// a command, and how long its process may take to end. They are failure
+    /// bounds: past one, the reaper is killed and reported lost.
+    pub fn set_cleanup_bounds(&mut self, reply: Duration, reaper_exit: Duration) {
+        self.reply_bound = reply;
+        self.reaper_bound = reaper_exit;
     }
 
     /// The leader's pid.
@@ -518,12 +581,15 @@ impl ManagedProcess {
     }
 
     fn reply(&mut self, kind: &str, watchdog: Duration) -> Option<serde_json::Value> {
+        if let Some(at) = self.stash.iter().position(|(got, _)| got == kind) {
+            return Some(self.stash.remove(at).1);
+        }
         let deadline = Instant::now() + watchdog;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match self.events.replies.recv_timeout(left) {
                 Ok((got, data)) if got == kind => return Some(data),
-                Ok(_) => continue,
+                Ok(other) => self.stash.push(other),
                 Err(_) => return None,
             }
         }
@@ -534,9 +600,19 @@ impl ManagedProcess {
     /// their exit statuses, or `None` past the watchdog or when the reaper is
     /// gone.
     pub fn join_family(&mut self, watchdog: Duration) -> Option<Vec<(i32, ExitStatus)>> {
-        if !self.command("JOIN") {
+        if !self.request_join() {
             return None;
         }
+        self.await_join(watchdog)
+    }
+
+    /// Asks the reaper to start waiting for the family's other processes.
+    pub fn request_join(&mut self) -> bool {
+        self.command("JOIN") && self.reply("JOINING", self.reply_bound).is_some()
+    }
+
+    /// The answer to `request_join`.
+    pub fn await_join(&mut self, watchdog: Duration) -> Option<Vec<(i32, ExitStatus)>> {
         let data = self.reply("JOINED", watchdog)?;
         let joined: Vec<(i32, i32)> = serde_json::from_value(data).ok()?;
         Some(
@@ -563,7 +639,7 @@ impl ManagedProcess {
     /// Kills the family; the leader is reaped later, by `join` or the drop.
     pub fn kill_all(&mut self) {
         if self.command("KILL") {
-            let _ = self.reply("KILLED", REPLY_WATCHDOG);
+            let _ = self.reply("KILLED", self.reply_bound);
         }
     }
 
@@ -574,7 +650,7 @@ impl ManagedProcess {
         let mut lost = false;
         let mut orphans = Vec::new();
         if self.command("SNAPSHOT") {
-            match self.reply("SNAPSHOT", REPLY_WATCHDOG) {
+            match self.reply("SNAPSHOT", self.reply_bound) {
                 Some(data) => orphans = serde_json::from_value(data).unwrap_or_default(),
                 None => lost = true,
             }
@@ -582,24 +658,35 @@ impl ManagedProcess {
             lost = true;
         }
         if !lost && self.command("KILL") {
-            lost |= self.reply("KILLED", REPLY_WATCHDOG).is_none();
+            lost |= self.reply("KILLED", self.reply_bound).is_none();
         }
         if !lost && self.command("REAP") {
-            lost |= self.reply("REAPED", REPLY_WATCHDOG).is_none();
+            lost |= self.reply("REAPED", self.reply_bound).is_none();
         }
         self.control = None;
         self.stdin = None;
         if let Some(mut reaper) = self.reaper.take() {
             // After REAPED (or when the reaper was lost) its exit is imminent
-            // or already happened; a bound keeps a failure a failure.
+            // or already happened. The wait runs in a thread so that a reaper
+            // that never finishes stays a failure: past the bound it is killed
+            // through its pidfd, the thread is detached, and the report says
+            // the reaper was lost.
             let (tx, rx) = mpsc::channel();
             let waiter = std::thread::spawn(move || {
                 let _ = tx.send(reaper.wait());
             });
-            if rx.recv_timeout(Duration::from_secs(30)).is_err() {
-                lost = true;
+            match rx.recv_timeout(self.reaper_bound) {
+                Ok(_) => {
+                    let _ = waiter.join();
+                }
+                Err(_) => {
+                    lost = true;
+                    let _ = rustix::process::pidfd_send_signal(
+                        &self.reaper_fd,
+                        rustix::process::Signal::KILL,
+                    );
+                }
             }
-            let _ = waiter.join();
         }
         let mut unjoined = 0;
         for (handle, done) in self.readers.drain(..) {
@@ -617,15 +704,13 @@ impl ManagedProcess {
     /// The child must already have exited (or be terminated first). Reclaims
     /// the family and reports what was left behind.
     pub fn join(mut self) -> Report {
-        let status = match self.status.or_else(|| self.note_exit()) {
-            Some(status) => status,
-            None => self
-                .events
-                .exit
-                .recv_timeout(Duration::from_secs(30))
-                .expect("a child that was asked to finish did not exit"),
-        };
-        self.status = Some(status);
+        // A missing exit notification is a result, not a panic: the channel
+        // ends when the reaper's output ends, which is reported as lost.
+        let status = self
+            .status
+            .or_else(|| self.note_exit())
+            .or_else(|| self.events.exit.recv_timeout(self.reply_bound).ok());
+        self.status = status;
         let (orphans, reaper_lost, unjoined_readers) = self.reclaim();
         Report {
             status,
@@ -636,6 +721,13 @@ impl ManagedProcess {
             reaper_stderr: String::from_utf8_lossy(&self.reaper_stderr.lock().unwrap())
                 .into_owned(),
         }
+    }
+}
+
+impl Report {
+    /// The leader exited successfully and the reaper was not lost.
+    pub fn success(&self) -> bool {
+        !self.reaper_lost && self.status.is_some_and(|s| s.success())
     }
 }
 

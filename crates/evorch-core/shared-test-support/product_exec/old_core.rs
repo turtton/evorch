@@ -19,7 +19,7 @@ use super::{
     env::IsolatedEnv,
     launch::EXIT_WATCHDOG,
     observe,
-    process::{ManagedProcess, Report, WaitError},
+    process::{LaunchSpec, ManagedProcess, Report, WaitError},
 };
 use core_instance::{ConfigIdentity, Instance, LaunchGuard};
 use evorch_core::{
@@ -305,7 +305,7 @@ fn exec_cycle_inner(
 ) -> Result<Cycle, CycleError> {
     artifact.assert_unchanged();
     let env = IsolatedEnv::new();
-    let mut command = Command::new(harness);
+    let mut command = LaunchSpec::new(harness);
     command.args(["--ignored", "--exact", WORKER_TEST, "--nocapture"]);
     env.apply(
         &mut command,
@@ -373,7 +373,11 @@ fn exec_cycle_inner(
         reaper_stderr,
     } = worker.join();
     watcher.join().unwrap();
-    if !status.success() || !orphans.is_empty() || unjoined_readers != 0 || reaper_lost {
+    if !status.is_some_and(|s| s.success())
+        || !orphans.is_empty()
+        || unjoined_readers != 0
+        || reaper_lost
+    {
         return Err(CycleError::Cleanup(format!(
             "{status:?} {orphans:?} unjoined_readers={unjoined_readers} reaper_lost={reaper_lost} {stderr} {reaper_stderr}"
         )));

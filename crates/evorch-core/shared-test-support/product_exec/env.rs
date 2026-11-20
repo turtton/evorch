@@ -3,6 +3,7 @@
 //! when the value is dropped. The environment of the product is built from
 //! nothing; only what the product needs to find its libraries and tools is
 //! passed through.
+use super::process::LaunchSpec;
 use std::{
     ffi::OsString,
     os::unix::fs::PermissionsExt,
@@ -17,9 +18,6 @@ const PASSTHROUGH: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
 
 pub fn passthrough(command: &mut Command) -> &mut Command {
     command.env_clear();
-    // Tells a supervisor that std cannot be asked whether the environment was
-    // cleared; the marker is removed before the child starts.
-    command.env(super::process::CLEAR_ENV_MARKER, "1");
     for name in PASSTHROUGH {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -107,8 +105,13 @@ impl IsolatedEnv {
         }
     }
     /// The complete environment of a product started here.
-    pub fn apply(&self, command: &mut Command, extra: &[(&str, OsString)]) {
-        passthrough(command);
+    pub fn apply(&self, command: &mut LaunchSpec, extra: &[(&str, OsString)]) {
+        command.env_clear();
+        for name in PASSTHROUGH {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
             .env("HOME", self.home_dir())
             .env("XDG_RUNTIME_DIR", self.runtime_dir())

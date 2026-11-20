@@ -21,7 +21,8 @@
 //! * stdout `EXITED <raw wait status>`: the leader exited. It stays a zombie
 //!   (its pid and group id reserved) until `REAP`.
 //! * stdin `SIGNAL <n>`, `SNAPSHOT`, `JOIN`, `KILL`, `REAP`; replies `SNAPSHOT`,
-//!   `JOINED`, `KILLED`, `REAPED`.
+//!   `JOINING` (the JOIN has pinned its first round of children), `JOINED`,
+//!   `KILLED`, `REAPED`.
 //! * End of stdin (the harness died or dropped the family) does `KILL`, `REAP`
 //!   and exits.
 use super::observe;
@@ -95,17 +96,35 @@ fn other_children(leader: i32) -> Vec<observe::ProcInfo> {
         .collect()
 }
 
-/// Kills and reaps one direct child. The child is unreaped, so its pid cannot
-/// have been reused; the pidfd makes that explicit.
-fn kill_child(pid: i32) {
-    let Some(raw) = rustix::process::Pid::from_raw(pid) else {
-        return;
-    };
-    let Ok(fd) = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty()) else {
-        return;
-    };
-    let _ = rustix::process::pidfd_send_signal(&fd, rustix::process::Signal::KILL);
-    let _ = wait_pidfd(&fd, rustix::process::WaitIdOptions::EXITED);
+/// Every reap of a child other than the leader, and every conversion of such a
+/// child's pid into a pidfd that is then signalled, happens with this lock
+/// held. A pid is read from the table and pinned by a pidfd inside one critical
+/// section, and nothing else can reap (and so free the pid) inside it: a pid
+/// that is listed and then opened is still the same, unreaped child.
+static CHILDREN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Pins a direct child by pidfd. The caller holds `CHILDREN`. The kernel
+/// confirms that the pidfd names a child of this process before it is used.
+fn pin_child(pid: i32) -> Option<std::os::fd::OwnedFd> {
+    let raw = rustix::process::Pid::from_raw(pid)?;
+    let fd = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty()).ok()?;
+    match rustix::process::waitid(
+        rustix::process::WaitId::PidFd(fd.as_fd()),
+        rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOWAIT
+            | rustix::process::WaitIdOptions::NOHANG,
+    ) {
+        // A child (running: `None`, or exited: a status). ECHILD means it is
+        // not ours, and then nothing may be signalled.
+        Ok(_) => Some(fd),
+        Err(_) => None,
+    }
+}
+
+/// Kills and reaps one pinned direct child.
+fn kill_pinned(fd: &std::os::fd::OwnedFd) {
+    let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
+    let _ = wait_pidfd(fd, rustix::process::WaitIdOptions::EXITED);
 }
 
 /// Kills the leader's group and the leader, waits for the leader's exit (which
@@ -124,14 +143,19 @@ fn kill_phase(leader: i32, pidfd: &impl AsFd) -> Vec<observe::ProcInfo> {
     );
     let mut killed = Vec::new();
     loop {
+        // One critical section per round: list, pin, signal, reap.
+        let guard = CHILDREN.lock().unwrap();
         let children = other_children(leader);
         if children.is_empty() {
             return killed;
         }
         for child in children {
-            kill_child(child.pid);
+            if let Some(fd) = pin_child(child.pid) {
+                kill_pinned(&fd);
+            }
             killed.push(child);
         }
+        drop(guard);
     }
 }
 
@@ -230,28 +254,40 @@ pub fn run() -> ! {
                 }
                 "JOIN" => {
                     // In a thread: a KILL must be able to interrupt a wait on a
-                    // process that never exits.
+                    // process that never exits. The thread pins each child under
+                    // the lock, waits for its exit WITHOUT reaping, and reaps
+                    // under the lock again; a child that a KILL reaped in
+                    // between is simply gone.
                     std::thread::spawn(move || {
                         let mut joined = Vec::new();
+                        let mut announced = false;
                         loop {
-                            let children = other_children(leader);
-                            if children.is_empty() {
+                            let pinned: Vec<(i32, std::os::fd::OwnedFd)> = {
+                                let _guard = CHILDREN.lock().unwrap();
+                                other_children(leader)
+                                    .into_iter()
+                                    .filter_map(|c| pin_child(c.pid).map(|fd| (c.pid, fd)))
+                                    .collect()
+                            };
+                            if !announced {
+                                // The first round has pinned its children: from
+                                // here a KILL meets a JOIN that is really pending.
+                                emit("JOINING", serde_json::json!(pinned.len()));
+                                announced = true;
+                            }
+                            if pinned.is_empty() {
                                 break;
                             }
-                            for child in children {
-                                let Some(raw) = rustix::process::Pid::from_raw(child.pid) else {
-                                    continue;
-                                };
-                                let Ok(fd) = rustix::process::pidfd_open(
-                                    raw,
-                                    rustix::process::PidfdFlags::empty(),
-                                ) else {
-                                    continue;
-                                };
-                                if let Some(status) =
-                                    wait_pidfd(&fd, rustix::process::WaitIdOptions::EXITED)
-                                {
-                                    joined.push((child.pid, raw_status(&status)));
+                            for (pid, fd) in pinned {
+                                let exit = wait_pidfd(
+                                    &fd,
+                                    rustix::process::WaitIdOptions::EXITED
+                                        | rustix::process::WaitIdOptions::NOWAIT,
+                                );
+                                let _guard = CHILDREN.lock().unwrap();
+                                let _ = wait_pidfd(&fd, rustix::process::WaitIdOptions::EXITED);
+                                if let Some(status) = exit {
+                                    joined.push((pid, raw_status(&status)));
                                 }
                             }
                         }

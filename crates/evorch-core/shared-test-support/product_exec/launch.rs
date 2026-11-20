@@ -5,12 +5,11 @@ use super::{
     env::{Footprint, IsolatedEnv},
     names::ENV_RENDERER_HELPER,
     observe::{self, FdInfo, ProcInfo},
-    process::{ManagedProcess, Report, WaitError},
+    process::{LaunchSpec, ManagedProcess, Report, WaitError},
 };
 use std::{
     ffi::OsString,
     path::PathBuf,
-    process::Command,
     time::{Duration, Instant},
 };
 
@@ -78,7 +77,7 @@ impl<'a> ProductLaunch<'a> {
     /// full hash was verified when it was opened.
     pub fn start(self) -> std::io::Result<ProductProcess<'a>> {
         self.artifact.assert_unchanged();
-        let mut command = Command::new(&self.artifact.path);
+        let mut command = LaunchSpec::new(&self.artifact.path);
         command
             .arg("--config-dir")
             .arg(self.env.config_dir())
