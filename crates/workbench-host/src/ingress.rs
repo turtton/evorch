@@ -559,6 +559,17 @@ impl CommandHost {
         self.areas.browser.renderer.clone()
     }
 
+    /// Replaces the agent observation service with a test-built one (a fake
+    /// port). A fake injection: it proves nothing about the production source
+    /// that bootstrap installs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_agent_observation_for_test(
+        &mut self,
+        service: std::sync::Arc<crate::areas::browser::observation::service::ObservationService>,
+    ) {
+        self.areas.browser.observation = Some(service);
+    }
+
     /// The data connections of the core's renderer owner. A data connection is
     /// not a client and has no provenance: it opens a channel here, and only a
     /// control command that passed its own authorization binds the channel to
