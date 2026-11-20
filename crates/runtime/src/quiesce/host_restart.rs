@@ -139,21 +139,35 @@ impl HostRestartGate {
         fence: DispatchDrainFence,
     ) -> Result<SealedRestart, RuntimeError> {
         runtime.drain_dispatch_tails(&fence).await?;
-        let mut state = self.0.state.lock().unwrap();
-        if state.generation != generation
-            || state.phase != HostRestartPhase::Sealing
-            || state.active != 0
-        {
-            return Err(RuntimeError::RestartBusy);
+        // Request-audit writes can enter Sealing during the awaits after the
+        // coordinator's first host drain. Recheck and seal under the same lock
+        // as admission; only active writes in this exact attempt are retryable.
+        // The coordinator's original preparation deadline bounds this wait.
+        let mut changed = self.subscribe();
+        loop {
+            {
+                let mut state = self.0.state.lock().unwrap();
+                if state.generation != generation || state.phase != HostRestartPhase::Sealing {
+                    return Err(RuntimeError::RestartBusy);
+                }
+                runtime.validate_restart_dispatch_fence(&fence)?;
+                if state.active == 0 {
+                    state.phase = HostRestartPhase::Sealed;
+                    self.changed();
+                    return Ok(SealedRestart {
+                        gate: self.clone(),
+                        generation,
+                        fence,
+                    });
+                }
+            }
+            // Subscribe before checking active to retain a concurrent release.
+            // Do not spin or shorten the writer callback's permit ownership.
+            changed
+                .changed()
+                .await
+                .map_err(|_| RuntimeError::RestartBusy)?;
         }
-        runtime.validate_restart_dispatch_fence(&fence)?;
-        state.phase = HostRestartPhase::Sealed;
-        self.changed();
-        Ok(SealedRestart {
-            gate: self.clone(),
-            generation,
-            fence,
-        })
     }
 }
 impl Drop for HostCommandLease {

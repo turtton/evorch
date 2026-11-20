@@ -1,4 +1,5 @@
 use super::*;
+mod audit_sealing;
 #[cfg(target_os = "linux")]
 mod later;
 mod m2;
