@@ -92,6 +92,7 @@ pub struct AdminService {
     reader: Arc<AdminReader>,
     operation_reader: RwLock<Option<Arc<dyn OperationReader>>>,
     active: Arc<Mutex<BTreeSet<String>>>,
+    active_released: Arc<tokio::sync::Notify>,
     operation_queries: Arc<Semaphore>,
 }
 impl AdminService {
@@ -108,6 +109,7 @@ impl AdminService {
             reader: AdminReader::new(),
             operation_reader: RwLock::default(),
             active: Arc::default(),
+            active_released: Arc::default(),
             operation_queries: Arc::new(Semaphore::new(8)),
         })
     }
@@ -416,6 +418,7 @@ impl AdminService {
         self.active.lock().unwrap().insert(key.operation_id.clone());
         let _active = ActiveOperation {
             active: self.active.clone(),
+            released: self.active_released.clone(),
             operation_id: key.operation_id.clone(),
         };
         if let Err(e) = self.audit.start(&key).await {
@@ -660,6 +663,23 @@ impl AdminService {
             self.continuations.available_permits(),
         )
     }
+    /// Wait until `operation_id` has left the active set, i.e. its task finished
+    /// finalization. Audit port events fire inside the write, before the task
+    /// drops its active entry, so they cannot prove readback is no longer live.
+    /// Event driven: `ActiveOperation::drop` wakes every waiter; no polling.
+    #[cfg(feature = "test-support")]
+    pub async fn wait_operation_inactive(&self, operation_id: &str) {
+        loop {
+            let released = self.active_released.notified();
+            tokio::pin!(released);
+            // Register before checking so a release in between is not missed.
+            released.as_mut().enable();
+            if !self.active.lock().unwrap().contains(operation_id) {
+                return;
+            }
+            released.await;
+        }
+    }
     /// Join admission completion without cancelling the request task.
     #[cfg(feature = "test-support")]
     pub async fn wait_for_request_slots(&self) {
@@ -731,11 +751,13 @@ impl OperationReader for storage::StorageConfig {
 }
 struct ActiveOperation {
     active: Arc<Mutex<BTreeSet<String>>>,
+    released: Arc<tokio::sync::Notify>,
     operation_id: String,
 }
 impl Drop for ActiveOperation {
     fn drop(&mut self) {
         self.active.lock().unwrap().remove(&self.operation_id);
+        self.released.notify_waiters();
     }
 }
 fn record_state(row: &AuditRecord, active: bool) -> AdminOperationState {

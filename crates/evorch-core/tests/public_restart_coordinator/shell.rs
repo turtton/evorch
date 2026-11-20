@@ -263,6 +263,10 @@ async fn interrupt_audit_failures_do_not_signal_and_completion_failure_never_rep
     let original = intent(selected, "result-unknown", true);
     f.submit(original.clone()).unwrap().await.unwrap().unwrap();
     f.event(4, "result-unknown").await;
+    // The injected failure event fires inside the audit write, before the task
+    // finishes finalization and leaves the active set. Readback reports
+    // Started/Pending while the operation is still live, so wait for its end.
+    f.service.wait_operation_inactive("result-unknown").await;
     let row = storage::Database::open(&f.host.composition.storage)
         .unwrap()
         .admin_audit_record("result-unknown")
