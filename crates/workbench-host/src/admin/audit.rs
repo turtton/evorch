@@ -248,7 +248,7 @@ pub(crate) fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-fn same_intent(a: &AuditAccepted, b: &AuditAccepted) -> bool {
+pub(crate) fn same_intent(a: &AuditAccepted, b: &AuditAccepted) -> bool {
     a.operation == b.operation
         && a.surface == b.surface
         && a.principal == b.principal

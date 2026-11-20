@@ -100,6 +100,8 @@ impl AdminFacade for Facade {
                     references: vec![],
                     snapshot_revision: Revision(1),
                     truncated: false,
+                    over_limit_count: Revision(0),
+                    incomplete_disposals: owned_graphs::IncompleteDisposals::empty(),
                 }),
             ),
             LifecycleQuery::Restart(RestartQuery::Targets) => {

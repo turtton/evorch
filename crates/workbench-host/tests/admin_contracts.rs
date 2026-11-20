@@ -46,11 +46,13 @@ fn inspection(intent: &AdminIntent) -> AdminInspection {
         LifecycleCommand::Restart(RestartCommand::Interrupt(r)) => {
             AdminInspection::Interrupt(r.binding.clone())
         }
-        LifecycleCommand::Quarantine(quarantine::QuarantineCommand::Discard(r))
-        | LifecycleCommand::OwnedGraphs(
+        LifecycleCommand::Quarantine(quarantine::QuarantineCommand::Discard(r)) => {
+            AdminInspection::Graph(r.binding.clone())
+        }
+        LifecycleCommand::OwnedGraphs(
             owned_graphs::OwnedGraphsCommand::Release(r)
             | owned_graphs::OwnedGraphsCommand::Resume(r),
-        ) => AdminInspection::Graph(r.binding.clone()),
+        ) => AdminInspection::OwnedGraph(r.binding.clone()),
         _ => panic!("not inspected"),
     }
 }
@@ -65,11 +67,22 @@ fn status() -> AdminView {
         active_producers: 0,
     }))
 }
+fn owned(graph: GraphCas) -> owned_graphs::ConfirmedOwnedGraph {
+    owned_graphs::ConfirmedOwnedGraph {
+        binding: owned_graphs::OwnedGraphBinding {
+            graph,
+            owners: vec![],
+            expected_control_revision: Revision(0),
+        },
+        confirmed: true,
+    }
+}
 struct Facade {
     live: Mutex<AdminInspection>,
     cancelled: AtomicBool,
     effects: Arc<AtomicUsize>,
     after_register: AtomicUsize,
+    inspections: AtomicUsize,
 }
 impl Facade {
     fn new(intent: &AdminIntent) -> Arc<Self> {
@@ -78,11 +91,13 @@ impl Facade {
             cancelled: AtomicBool::new(false),
             effects: Arc::new(AtomicUsize::new(0)),
             after_register: AtomicUsize::new(0),
+            inspections: AtomicUsize::new(0),
         })
     }
 }
 impl AdminFacade for Facade {
     fn inspect<'a>(&'a self, _: &'a AdminIntent) -> AdminIo<'a, AdminInspection> {
+        self.inspections.fetch_add(1, Ordering::SeqCst);
         let snapshot = self.live.lock().unwrap().clone();
         Box::pin(async move { Ok(snapshot) })
     }
@@ -95,6 +110,8 @@ impl AdminFacade for Facade {
                         references: vec![],
                         snapshot_revision: Revision(1),
                         truncated: false,
+                        over_limit_count: Revision(0),
+                        incomplete_disposals: owned_graphs::IncompleteDisposals::empty(),
                     }),
                 ))
             } else {
@@ -396,8 +413,12 @@ async fn audit_accept_and_start_fail_closed_for_all_five_irreversible_effects() 
         request("restart"),
         interrupt,
         LifecycleCommand::Quarantine(quarantine::QuarantineCommand::Discard(graph.clone())),
-        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Release(graph.clone())),
-        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Resume(graph)),
+        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Release(owned(
+            graph.binding.clone(),
+        ))),
+        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Resume(owned(
+            graph.binding.clone(),
+        ))),
     ] {
         for fail_start in [false, true] {
             let h = Harness::new(&intent);
@@ -539,6 +560,7 @@ async fn response_budget_never_releases_a_still_owned_writer_command() {
     let rx = service
         .submit(service.authorize_request(context, intent).unwrap())
         .unwrap();
+    assert_eq!(events.recv().await, Some("read"));
     assert_eq!(events.recv().await, Some("accept"));
     gate.transition(1, HostRestartPhase::Sealing);
     facade.cancelled.store(true, Ordering::SeqCst);
@@ -784,4 +806,89 @@ async fn missing_owned_collection_and_old_epoch_fail_before_audit() {
     assert!(port.memory.lock().unwrap().rows.is_empty());
     tasks.request_stop();
     tasks.shutdown().await.unwrap();
+}
+
+fn owned_request() -> owned_graphs::ConfirmedOwnedGraph {
+    let graph: GraphCas = serde_json::from_value(serde_json::json!({"graph_id":"g","restart_tx_id":"tx","capture_id":"cap","expected_revision":"1","expected_core_epoch":"7","owner_identity":null,"owner_generation":null,"operation_id":"owned-op"})).unwrap();
+    let mut c = owned(graph);
+    c.binding.owners = vec![
+        owned_graphs::OwnerCas {
+            thread_ref: id("thread-a"),
+            owner_identity: None,
+            owner_generation: None,
+        },
+        owned_graphs::OwnerCas {
+            thread_ref: id("thread-b"),
+            owner_identity: Some(id("self")),
+            owner_generation: Some(Revision(7)),
+        },
+    ];
+    c
+}
+#[test]
+fn owned_inspection_compares_every_thread_absence_and_control_expectation() {
+    let c = owned_request();
+    c.validate().unwrap();
+    for resume in [false, true] {
+        let intent = LifecycleCommand::OwnedGraphs(if resume {
+            owned_graphs::OwnedGraphsCommand::Resume(c.clone())
+        } else {
+            owned_graphs::OwnedGraphsCommand::Release(c.clone())
+        });
+        let expected = c.binding.clone();
+        assert!(AdminInspection::OwnedGraph(expected.clone()).matches(&intent));
+        let mut changed = expected.clone();
+        changed.expected_control_revision = Revision(1);
+        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
+        let mut changed = expected.clone();
+        changed.owners.pop();
+        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
+        let mut changed = expected.clone();
+        changed.owners[1].owner_generation = Some(Revision(8));
+        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
+        let mut changed = expected.clone();
+        changed.owners[0].owner_identity = Some(id("self"));
+        changed.owners[0].owner_generation = Some(Revision(7));
+        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
+        let mut changed = expected;
+        changed.graph.capture_id = id("new-cap");
+        assert!(!AdminInspection::OwnedGraph(changed).matches(&intent));
+    }
+}
+#[tokio::test]
+async fn owned_same_id_is_readback_before_inspection_even_after_control_and_owner_advance() {
+    for resume in [false, true] {
+        let c = owned_request();
+        let intent = LifecycleCommand::OwnedGraphs(if resume {
+            owned_graphs::OwnedGraphsCommand::Resume(c.clone())
+        } else {
+            owned_graphs::OwnedGraphsCommand::Release(c.clone())
+        });
+        let mut h = Harness::new(&intent);
+        h.submit(intent.clone()).unwrap().await.unwrap().unwrap();
+        h.event("finalize").await;
+        let mut next = c.binding.clone();
+        next.expected_control_revision = Revision(8);
+        next.owners[1].owner_generation = Some(Revision(8));
+        *h.facade.live.lock().unwrap() = AdminInspection::OwnedGraph(next);
+        let got = h.submit(intent).unwrap().await.unwrap().unwrap();
+        assert_eq!(got.receipt().state, AdminOperationState::Completed);
+        assert_eq!(h.facade.inspections.load(Ordering::SeqCst), 1);
+        let mut changed = c;
+        changed.binding.expected_control_revision = Revision(9);
+        assert_eq!(
+            h.submit(LifecycleCommand::OwnedGraphs(
+                owned_graphs::OwnedGraphsCommand::Release(changed)
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(h.facade.inspections.load(Ordering::SeqCst), 1);
+        assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
+        h.shutdown().await;
+    }
 }

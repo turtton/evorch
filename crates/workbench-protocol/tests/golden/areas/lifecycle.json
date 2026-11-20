@@ -4,14 +4,18 @@
       "payload": {
         "payload": {
           "binding": {
-            "capture_id": "cap1",
-            "expected_core_epoch": "2",
-            "expected_revision": "1",
-            "graph_id": "g1",
-            "operation_id": "op1",
-            "owner_generation": null,
-            "owner_identity": null,
-            "restart_tx_id": "tx1"
+            "expected_control_revision": "0",
+            "graph": {
+              "capture_id": "cap1",
+              "expected_core_epoch": "2",
+              "expected_revision": "1",
+              "graph_id": "g1",
+              "operation_id": "op1",
+              "owner_generation": null,
+              "owner_identity": null,
+              "restart_tx_id": "tx1"
+            },
+            "owners": []
           },
           "confirmed": true
         },
@@ -79,6 +83,30 @@
     },
     "type": "lifecycle"
   },
+  "query/lifecycle/owned_graphs/detail": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "graph_ref": "g1"
+        },
+        "type": "detail"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "query/lifecycle/owned_graphs/operation": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "operation_id": "op1"
+        },
+        "type": "operation"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
   "query/lifecycle/quarantine": {
     "payload": {
       "payload": {
@@ -114,11 +142,99 @@
       "payload": {
         "payload": {
           "count": "0",
+          "incomplete_disposals": {
+            "count": "0",
+            "references": [],
+            "truncated": false
+          },
+          "over_limit_count": "0",
           "references": [],
           "snapshot_revision": "1",
           "truncated": false
         },
         "type": "undisposed"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/owned_graphs/detail": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "binding": {
+            "expected_control_revision": "0",
+            "graph": {
+              "capture_id": "cap1",
+              "expected_core_epoch": "2",
+              "expected_revision": "1",
+              "graph_id": "g1",
+              "operation_id": "unassigned",
+              "owner_generation": null,
+              "owner_identity": null,
+              "restart_tx_id": "tx1"
+            },
+            "owners": []
+          },
+          "claim": "absent",
+          "control": "manual_pending",
+          "disposition": "retry_pending",
+          "eligibility": "adopted_retry_pending",
+          "graph_ref": "g1",
+          "operation_limit": {
+            "type": "within_limit"
+          },
+          "owner_count": "0",
+          "owner_refs": [],
+          "owner_refs_truncated": false,
+          "ownership": "absent",
+          "progress": {
+            "completion": "unknown",
+            "eligibility": "confirmed_applied",
+            "owners": "not_started",
+            "prepared_release": "unknown",
+            "scratch": "not_started"
+          },
+          "release": {
+            "type": "available"
+          },
+          "restart_phase": "adopted",
+          "resume": {
+            "detail": "no_claim",
+            "problem": "current_binding_required",
+            "type": "blocked"
+          },
+          "snapshot_revision": "1"
+        },
+        "type": "detail"
+      },
+      "type": "owned_graphs"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/owned_graphs/operation": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "graph_ref": "g1",
+          "next_action": "observe_same_operation",
+          "observation": "unknown",
+          "progress": {
+            "completion": "unknown",
+            "eligibility": "confirmed_applied",
+            "owners": "not_started",
+            "prepared_release": "unknown",
+            "scratch": "not_started"
+          },
+          "receipt": {
+            "audit_warning": false,
+            "operation_id": "op1",
+            "outcome": "failed",
+            "state": "completed"
+          },
+          "step": "prepared_release"
+        },
+        "type": "operation"
       },
       "type": "owned_graphs"
     },
