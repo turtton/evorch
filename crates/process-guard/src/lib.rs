@@ -135,8 +135,9 @@ mod client {
                     }
                     match listener.accept() {
                         Ok((s, _)) => {
-                            let s = non_stdio(s)?;
-                            if peer(&s, helper.id() as i32, unsafe { libc::getuid() })? {
+                            if let Some(s) =
+                                authenticate(s, helper.id() as i32, unsafe { libc::getuid() })?
+                            {
                                 break s;
                             }
                             wrong += 1;
@@ -233,6 +234,11 @@ mod client {
             return Err(io::Error::last_os_error());
         }
         non_stdio(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    /// Keeps an accepted connection only when its peer is the expected helper.
+    pub fn authenticate(s: UnixStream, pid: i32, uid: u32) -> io::Result<Option<UnixStream>> {
+        let s = non_stdio(s)?;
+        Ok(peer(&s, pid, uid)?.then_some(s))
     }
     pub fn peer(s: &UnixStream, pid: i32, uid: u32) -> io::Result<bool> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };

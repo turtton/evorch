@@ -387,6 +387,21 @@ fn peer_credentials_and_launch_validation_are_fail_closed() {
     assert!(process_guard::peer(&s, pid, uid).unwrap());
     assert!(!process_guard::peer(&s, pid + 1, uid).unwrap());
     assert!(!process_guard::peer(&s, pid, uid.wrapping_add(1)).unwrap());
+    for (wrong_pid, wrong_uid) in [(pid + 1, uid), (pid, uid.wrapping_add(1))] {
+        let (accepted, _) = UnixStream::pair().unwrap();
+        assert!(
+            process_guard::authenticate(accepted, wrong_pid, wrong_uid)
+                .unwrap()
+                .is_none(),
+            "a connection from another PID or UID must not be taken for the helper"
+        );
+    }
+    let (accepted, _) = UnixStream::pair().unwrap();
+    assert!(
+        process_guard::authenticate(accepted, pid, uid)
+            .unwrap()
+            .is_some()
+    );
     let rt = runtime();
     for (bad, errno) in [
         (b"bad\0arg".to_vec(), libc::EINVAL),
@@ -983,6 +998,75 @@ fn wrong_core_uid_is_rejected_before_hello_even_with_known_nonce() {
         );
     }
     assert_eq!(helper.wait().unwrap().code(), Some(125));
+}
+#[test]
+fn a_listener_owned_by_another_process_never_receives_hello() {
+    let mut reaper = FixtureReaper::new();
+    let rt = runtime();
+    let name = format!("guard-foreign-listener-{}", std::process::id()).into_bytes();
+    let (mut ready, mut result) = ([0; 2], [0; 2]);
+    assert_eq!(
+        unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    assert_eq!(
+        unsafe { libc::pipe2(result.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    let foreign = unsafe { libc::fork() };
+    assert!(foreign >= 0);
+    if foreign == 0 {
+        // Only raw system calls after fork: the other test threads may hold
+        // the allocator lock. The listener is created by this process, so the
+        // helper sees a peer whose PID is not the core's.
+        unsafe {
+            let socket = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            for (slot, byte) in addr.sun_path[1..].iter_mut().zip(&name) {
+                *slot = *byte as libc::c_char;
+            }
+            let len = std::mem::size_of::<libc::sa_family_t>() + 1 + name.len();
+            if libc::bind(socket, (&raw const addr).cast(), len as libc::socklen_t) != 0
+                || libc::listen(socket, 1) != 0
+            {
+                libc::_exit(2);
+            }
+            libc::write(ready[1], b"r".as_ptr().cast(), 1);
+            let peer = libc::accept(socket, std::ptr::null_mut(), std::ptr::null_mut());
+            let mut byte = [0u8; 1];
+            let n = libc::read(peer, byte.as_mut_ptr().cast(), 1);
+            let verdict = if n == 0 { b'0' } else { b'1' };
+            libc::write(result[1], (&raw const verdict).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    unsafe {
+        libc::close(ready[1]);
+        libc::close(result[1]);
+    }
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        unsafe { libc::read(ready[0], byte.as_mut_ptr().cast(), 1) },
+        1,
+        "the foreign listener must be bound before the helper starts"
+    );
+    let name = String::from_utf8(name).unwrap();
+    let mut helper = helper_command(&rt, &name, unsafe { libc::getuid() })
+        .spawn()
+        .unwrap();
+    reaper.add(helper.id() as i32);
+    assert_eq!(helper.wait().unwrap().code(), Some(125));
+    let mut verdict = [0u8; 1];
+    assert_eq!(
+        unsafe { libc::read(result[0], verdict.as_mut_ptr().cast(), 1) },
+        1
+    );
+    assert_eq!(
+        verdict[0], b'0',
+        "the helper connected and must have sent nothing"
+    );
+    assert_eq!(wait_pid(foreign), 0);
 }
 #[test]
 fn closed_stdio_fixture() {
