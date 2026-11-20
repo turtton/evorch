@@ -362,7 +362,7 @@ impl Flow<'_> {
         enum Settled {
             Interrupted,
             Unreachable,
-            Session(Result<Rebuilt, String>),
+            Session(Box<Result<Rebuilt, String>>),
         }
         let settled = {
             let target = &self.env.target;
@@ -374,7 +374,7 @@ impl Flow<'_> {
                 settled = async {
                     match attempt(target, config).await {
                         Ok(Attempt::Ready(core)) => {
-                            Settled::Session(rebuild(core, held, op.clone()).await)
+                            Settled::Session(Box::new(rebuild(core, held, op.clone()).await))
                         }
                         _ => Settled::Unreachable,
                     }
@@ -390,22 +390,24 @@ impl Flow<'_> {
                 ));
                 Err(exit::FAILURE)
             }
-            Settled::Session(Ok((client, subscription, Some(receipt)))) => {
-                Ok((client, subscription, Some(receipt)))
-            }
-            Settled::Session(Ok((_, _, None))) => {
-                self.warn(format!(
-                    "the core does not know operation {}: it may not have arrived. Check `evorch core restart status` before asking again",
-                    op.as_str()
-                ));
-                Err(exit::FAILURE)
-            }
-            Settled::Session(Err(error)) => {
-                self.warn(format!(
-                    "the core answered but the session could not be rebuilt: {error}"
-                ));
-                Err(exit::FAILURE)
-            }
+            Settled::Session(session) => match *session {
+                Ok((client, subscription, Some(receipt))) => {
+                    Ok((client, subscription, Some(receipt)))
+                }
+                Ok((_, _, None)) => {
+                    self.warn(format!(
+                        "the core does not know operation {}: it may not have arrived. Check `evorch core restart status` before asking again",
+                        op.as_str()
+                    ));
+                    Err(exit::FAILURE)
+                }
+                Err(error) => {
+                    self.warn(format!(
+                        "the core answered but the session could not be rebuilt: {error}"
+                    ));
+                    Err(exit::FAILURE)
+                }
+            },
         }
     }
 
