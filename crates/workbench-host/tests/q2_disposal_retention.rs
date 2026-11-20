@@ -12,7 +12,8 @@ fn main() {
 }
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    println!("Q2 disposal retention: Linux-only");
+    // No cases on platforms without validated physical bootstrap support.
+    // An empty --list response is a valid custom-harness test listing.
 }
 #[cfg(target_os = "linux")]
 fn check(f: &fixture::Fixture, case: &str) {

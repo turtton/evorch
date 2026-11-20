@@ -23,13 +23,9 @@ pub const TX: &str = "i6-restart";
 pub const CAPTURE: &str = "i6-capture";
 pub const THREADS: [&str; 2] = ["a", "b"];
 pub fn run_id(thread: &str) -> runtime::RunId {
-    format!(
-        "00000000-0000-0000-0000-00000000000{}",
-        if thread == "a" { 1 } else { 2 }
-    )
-    .parse()
-    .unwrap()
+    runtime::RunId::new(if thread == "a" { 1 } else { 2 })
 }
+
 struct NeverModel;
 #[async_trait::async_trait]
 impl runtime::AgentModel for NeverModel {
@@ -302,19 +298,19 @@ fn seed(root: &Path, identity: &ConfigIdentity) {
     drop(handle);
     storage.close();
 }
+#[path = "physical_test_harness.rs"]
+mod harness;
+
 /// Each case is a fresh process: physical adoption must precede all DB/owner/runtime threads.
 /// Child exit is the completion event; no sleeps, polling, or test-local timeout.
 pub fn run(cases: &[&str], check: fn(&Fixture, &str)) {
-    let signals = BlockedShutdownSignals::at_entry().unwrap();
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let options = EntryOptions::parse(args.clone()).unwrap();
-    let entry = match options.mode {
-        BootMode::Cold => None,
-        BootMode::PlannedHandoff(p) => Some(unsafe { p.inspect() }.unwrap()),
-    };
     let value = |flag: &str| args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
     let Some(root) = value("--fixture-root").map(PathBuf::from) else {
-        for case in cases {
+        let Some(selected) = harness::select(cases, &args) else {
+            return;
+        };
+        for case in selected {
             let dir = test_socket_dir::SocketDir::new();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--case", case, "--fixture-root"])
@@ -327,6 +323,16 @@ pub fn run(cases: &[&str], check: fn(&Fixture, &str)) {
         return;
     };
     let case = value("--case").unwrap().into_string().unwrap();
+    assert!(
+        cases.contains(&case.as_str()),
+        "unknown physical fixture case {case}"
+    );
+    let signals = BlockedShutdownSignals::at_entry().unwrap();
+    let options = EntryOptions::parse(args.clone()).unwrap();
+    let entry = match options.mode {
+        BootMode::Cold => None,
+        BootMode::PlannedHandoff(p) => Some(unsafe { p.inspect() }.unwrap()),
+    };
     let identity = ConfigIdentity::new(&root.join("config")).unwrap();
     let (instance, proof) = if let Some(entry) = entry {
         Instance::adopt_handoff(&identity, &root, entry).unwrap()

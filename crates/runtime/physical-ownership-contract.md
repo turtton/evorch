@@ -8,11 +8,12 @@ The positive construction path accepts concrete evidence, and creates limited
 authority only after the complete claim pass succeeds:
 
 ```no_run
-use runtime::{AgentRuntime, DisposalAuthority, OwnedThreadCas, RestartOwnershipEvidence};
+use runtime::{AgentRuntime, DisposalAuthority, OwnedThreadCas};
 use runtime::ownership::OwnerHost;
 use storage::recovery::graph_control::GraphControlCas;
-fn retained(rt: &AgentRuntime, owner: &OwnerHost, evidence: RestartOwnershipEvidence,
-    graph: GraphControlCas, owners: Vec<OwnedThreadCas>) -> Result<DisposalAuthority, Box<dyn std::error::Error>> {
+fn retained(rt: &AgentRuntime, owner: &OwnerHost, graph: GraphControlCas,
+    owners: Vec<OwnedThreadCas>) -> Result<DisposalAuthority, Box<dyn std::error::Error>> {
+    let evidence = rt.adopted_restart_ownership_evidence()?;
     rt.claim_physical_bootstrap_owners(owner, evidence, || {})?;
     Ok(rt.disposal_authority(graph, owners)?)
 }
@@ -34,7 +35,7 @@ fn forged(rt: &runtime::AgentRuntime, owner: &OwnerHost) {
 }
 ```
 
-## DB values and ordinary permits are not capabilities
+## DB values and ordinary permits cannot construct disposal authority
 
 Positive: observations and ordinary permits remain usable as their own types.
 
