@@ -411,3 +411,77 @@ fn exhausted_epoch_or_notice_counter_keeps_the_tree_without_wrapping() {
         assert_eq!(std::fs::read_to_string(path.join("keep")).unwrap(), "keep");
     }
 }
+
+#[test]
+fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let scratch = ThreadScratch::at(temp.path().join("scratch"));
+    let key = ScratchKey::Thread("thread".into());
+    let run = RunId::new(7);
+    let lease = crate::ownership::Lease {
+        owner_id: "owner".into(),
+        generation: 3,
+        expires_at: u64::MAX,
+    };
+    assert_eq!(
+        scratch.disposal_usage("thread"),
+        DisposalScratchUse::Unknown
+    );
+    scratch
+        .register_user(
+            &key,
+            ScratchUser::Run {
+                run,
+                incarnation: "i".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        scratch.disposal_usage("thread"),
+        DisposalScratchUse::Unknown
+    );
+    scratch.record_scratch_lease("thread", &lease);
+    assert_eq!(scratch.disposal_usage("thread"), DisposalScratchUse::InUse);
+    assert!(scratch.archive_snapshot("thread").is_none());
+    scratch.release_user(
+        &key,
+        &ScratchUser::Run {
+            run,
+            incarnation: "i".into(),
+        },
+    );
+    let (epoch, observed) = scratch.archive_snapshot("thread").unwrap();
+    assert_eq!(
+        scratch.disposal_usage("thread"),
+        DisposalScratchUse::Unused {
+            epoch,
+            lease: observed
+        }
+    );
+    scratch
+        .register_user(
+            &key,
+            ScratchUser::ObserverLost {
+                run,
+                incarnation: "lost".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        scratch.disposal_usage("thread"),
+        DisposalScratchUse::Unknown
+    );
+    scratch.release_user(
+        &key,
+        &ScratchUser::ObserverLost {
+            run,
+            incarnation: "lost".into(),
+        },
+    );
+    scratch.lock().usage.get_mut(&key).unwrap().epoch = u64::MAX;
+    assert_eq!(
+        scratch.disposal_usage("thread"),
+        DisposalScratchUse::Unknown
+    );
+    assert!(scratch.archive_snapshot("thread").is_none());
+}
