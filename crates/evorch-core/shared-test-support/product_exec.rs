@@ -30,5 +30,7 @@ pub mod observe;
 pub mod old_core;
 #[path = "product_exec/process.rs"]
 pub mod process;
+#[path = "product_exec/reaper.rs"]
+pub mod reaper;
 #[path = "product_exec/wire.rs"]
 pub mod wire;

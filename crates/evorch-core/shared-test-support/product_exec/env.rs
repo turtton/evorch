@@ -17,6 +17,9 @@ const PASSTHROUGH: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
 
 pub fn passthrough(command: &mut Command) -> &mut Command {
     command.env_clear();
+    // Tells a supervisor that std cannot be asked whether the environment was
+    // cleared; the marker is removed before the child starts.
+    command.env(super::process::CLEAR_ENV_MARKER, "1");
     for name in PASSTHROUGH {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -96,15 +99,6 @@ impl IsolatedEnv {
     /// The ownership registry the product opens (`$XDG_STATE_HOME/evorch/threads`).
     pub fn ownership_db(&self) -> PathBuf {
         self.state_dir().join("evorch/threads/owners.db")
-    }
-    /// Strings that are unique to this environment: a process whose command line
-    /// or working directory contains one belongs to the product started here,
-    /// even when it cleared its environment.
-    pub fn ownership_markers(&self) -> Vec<String> {
-        vec![
-            self.root().to_string_lossy().into_owned(),
-            self.sockets.path().to_string_lossy().into_owned(),
-        ]
     }
     pub fn footprint(&self) -> Footprint {
         Footprint {

@@ -135,3 +135,19 @@ identity (process group, environment token, or a marker on a path boundary in
 its command line or working directory). Descriptors without close-on-exec are
 now marked close-on-exec in the parent before a spawn instead of being closed in
 the child. Neither runs inside a timed region.
+
+## Addendum 4 after the third review of #715, before the fourth rerun
+
+Counts, intervals and resource conditions are unchanged; the tables are
+re-taken with the final fixture. The supervision was redesigned: every family
+now runs under a reaper process of its own (the test binary run again through
+its `f4p_family_reaper` role), which is the subreaper of that family alone, and
+the harness is no longer a subreaper. Two measured points move slightly:
+
+- `cold_spawn_to_ready` starts when the reaper reports that the leader was
+  started (the leader is now a child of the reaper); the reaper's own start-up
+  is not part of it. The interval is otherwise the same.
+- The leader's pipes pass through the reaper's descriptors table once (the
+  harness reopens them through `/proc`), which does not add a copy of the data.
+  `exec_to_ready` and `exec_to_claim` are unaffected by construction: the exec
+  pipe, the readiness line and the registry readback do not involve the reaper.

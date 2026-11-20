@@ -6,8 +6,9 @@
 //!
 //! Synchronization: the run's own events say when the page was captured and
 //! opened; the helper's exit is the kernel's wait notification, obtained by
-//! waiting for the helper as a child of this process (the test process is a
-//! subreaper). No sleep, no polling of `/proc` for an exit.
+//! the family's reaper (`ManagedProcess::join_family`), which is the helper's
+//! adoptive parent once the product has exited. No sleep, no polling of `/proc`
+//! for an exit.
 #![allow(dead_code)]
 use crate::product_exec::{
     launch::ProductProcess,
@@ -17,11 +18,7 @@ use crate::product_exec::{
 };
 use mock_openai::ScriptedResponse;
 use serde_json::json;
-use std::{
-    path::{Path, PathBuf},
-    sync::mpsc,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 use workbench_protocol::commands::ComposerRole;
 
 /// The helper executable: the explicit provisional setting, else the fake
@@ -106,56 +103,6 @@ pub fn helpers_of(product_pid: i32, helper: &Path) -> Vec<ProcInfo> {
                 .is_some_and(|exe| observe::same_file(exe, helper))
         })
         .collect()
-}
-
-/// Waits for each process to exit as a child of this process (the test
-/// process is a subreaper, so orphans of the product are adopted). A process
-/// that is not ours is waited for only through its disappearance, which the
-/// caller must not rely on: it is reported as `NotAdopted`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Joined {
-    Exited(i32),
-    NotAdopted,
-    TimedOut,
-}
-pub fn join_adopted(pids: &[ProcInfo], watchdog: Duration) -> Vec<(i32, Joined)> {
-    let (tx, rx) = mpsc::channel();
-    for p in pids {
-        let (tx, pid) = (tx.clone(), p.pid);
-        std::thread::spawn(move || {
-            let Some(raw) = rustix::process::Pid::from_raw(pid) else {
-                return;
-            };
-            let joined = loop {
-                match rustix::process::waitid(
-                    rustix::process::WaitId::Pid(raw),
-                    rustix::process::WaitIdOptions::EXITED,
-                ) {
-                    Ok(Some(info)) => {
-                        break Joined::Exited(info.exit_status().unwrap_or(-1));
-                    }
-                    Ok(None) => break Joined::Exited(-1),
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(_) => break Joined::NotAdopted,
-                }
-            };
-            let _ = tx.send((pid, joined));
-        });
-    }
-    drop(tx);
-    let mut done = Vec::new();
-    for _ in pids {
-        match rx.recv_timeout(watchdog) {
-            Ok(result) => done.push(result),
-            Err(_) => break,
-        }
-    }
-    for p in pids {
-        if !done.iter().any(|(pid, _)| *pid == p.pid) {
-            done.push((p.pid, Joined::TimedOut));
-        }
-    }
-    done
 }
 
 /// Drives the product through two turns on its public wire: capture a page,

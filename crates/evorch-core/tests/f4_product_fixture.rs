@@ -296,11 +296,10 @@ fn fake_role_process() {
         // Starts a parker, reports its pid and exits at once, so that the
         // parker is orphaned before anything has observed it.
         // F4P_ORPHAN_MODE=env: the parker inherits the family's environment.
-        // F4P_ORPHAN_MODE=cmdline: it clears the environment, leaves the
-        // session and process group (as the renderer helper does) and carries
-        // only the marker named by F4P_MARKER on its command line.
-        // F4P_ORPHAN_MODE=leak: like cmdline, without any marker, and it keeps
-        // this role's stdout pipe open.
+        // F4P_ORPHAN_MODE=setsid: it clears the environment and leaves the
+        // session and process group, as the renderer helper does.
+        // F4P_ORPHAN_MODE=leak: like setsid, and it keeps this role's stdout
+        // pipe open.
         "orphan_maker" => {
             let mode = std::env::var("F4P_ORPHAN_MODE").unwrap();
             let mut command = fake_command("parker");
@@ -315,9 +314,6 @@ fn fake_role_process() {
                             .map_err(std::io::Error::from)
                     });
                 }
-            }
-            if mode == "cmdline" {
-                command.arg(std::env::var("F4P_MARKER").unwrap());
             }
             if mode == "leak" {
                 command.stdout(std::process::Stdio::inherit());
@@ -392,14 +388,14 @@ fn spawn_family_of(child: &str) -> (ManagedProcess, i32) {
     (family, grandchild)
 }
 
-fn orphan_maker(mode: &str, marker: Option<&str>) -> (ManagedProcess, i32) {
+/// A family whose leader starts a parker and exits at once: the parker is an
+/// orphan before anything has looked at it. Returns once the leader's exit
+/// notification arrived, which the reaper sends after the kernel reparented
+/// the parker to it.
+fn orphan_maker(mode: &str) -> (ManagedProcess, i32) {
     let mut command = fake_command("orphan_maker");
     command.env("F4P_ORPHAN_MODE", mode);
-    if let Some(marker) = marker {
-        command.env("F4P_MARKER", marker);
-    }
-    let markers = marker.map(str::to_owned).into_iter().collect();
-    let mut maker = ManagedProcess::spawn_with(command, markers).unwrap();
+    let mut maker = ManagedProcess::spawn(command).unwrap();
     let (grandchild, _) = maker
         .wait_for(Duration::from_secs(60), |line| {
             line.strip_prefix(FAKE_PID_PREFIX)?
@@ -408,8 +404,6 @@ fn orphan_maker(mode: &str, marker: Option<&str>) -> (ManagedProcess, i32) {
                 .ok()
         })
         .unwrap();
-    // The parent's exit notification comes after the kernel reparented the
-    // grandchild to this process; nothing has been observed before it.
     let status = maker
         .wait_exit(Duration::from_secs(60))
         .expect("exit event");
@@ -418,15 +412,17 @@ fn orphan_maker(mode: &str, marker: Option<&str>) -> (ManagedProcess, i32) {
 }
 
 #[test]
-fn a_descendant_orphaned_before_any_observation_is_reclaimed_by_the_family_token() {
-    let (maker, grandchild) = orphan_maker("env", None);
+fn a_descendant_orphaned_before_any_observation_is_reclaimed_through_the_reaper() {
+    let (maker, grandchild) = orphan_maker("env");
     let adopted = product_exec::observe::process(grandchild).expect("the orphan runs");
     assert_eq!(
         adopted.ppid,
-        std::process::id() as i32,
-        "adopted by the subreaper"
+        maker.reaper_pid(),
+        "the family's reaper adopted it, not the harness"
     );
+    assert_ne!(adopted.ppid, std::process::id() as i32);
     let report = maker.join();
+    assert!(!report.reaper_lost, "{}", report.reaper_stderr);
     assert!(
         report.orphans.iter().any(|p| p.pid == grandchild),
         "{:?}",
@@ -439,27 +435,16 @@ fn a_descendant_orphaned_before_any_observation_is_reclaimed_by_the_family_token
 }
 
 #[test]
-fn a_session_leaving_orphan_with_a_cleared_environment_is_reclaimed_by_its_marker() {
-    let marker = format!(
-        "f4p-marker-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let (maker, grandchild) = orphan_maker("cmdline", Some(&marker));
+fn a_session_leaving_orphan_with_a_cleared_environment_is_reclaimed_through_the_reaper() {
+    let (maker, grandchild) = orphan_maker("setsid");
     let orphan = product_exec::observe::process(grandchild).expect("the orphan runs");
     assert_eq!(
         orphan.pgid, grandchild,
         "it leads a group of its own, like a helper"
     );
-    let leader_group = maker.pid();
-    assert_ne!(
-        orphan.pgid, leader_group,
-        "a group kill of the leader cannot reach it"
-    );
+    assert_eq!(orphan.ppid, maker.reaper_pid());
     let report = maker.join();
+    assert!(!report.reaper_lost, "{}", report.reaper_stderr);
     assert!(report.orphans.iter().any(|p| p.pid == grandchild));
     assert!(
         product_exec::observe::process(grandchild).is_none(),
@@ -468,39 +453,45 @@ fn a_session_leaving_orphan_with_a_cleared_environment_is_reclaimed_by_its_marke
 }
 
 #[test]
-fn a_reader_held_open_by_a_stranger_is_bounded_not_awaited() {
-    let (mut maker, stranger) = {
-        let mut command = fake_command("orphan_maker");
-        command.env("F4P_ORPHAN_MODE", "leak");
-        let mut maker = ManagedProcess::spawn(command).unwrap();
-        maker.set_reader_bound(Duration::from_millis(200));
-        let (pid, _) = maker
-            .wait_for(Duration::from_secs(60), |line| {
-                line.strip_prefix(FAKE_PID_PREFIX)?
-                    .trim()
-                    .parse::<i32>()
-                    .ok()
-            })
-            .unwrap();
-        (maker, pid)
-    };
-    assert!(maker.wait_exit(Duration::from_secs(60)).unwrap().success());
+fn a_family_member_that_holds_the_output_pipe_is_killed_so_the_readers_end() {
+    let (maker, grandchild) = orphan_maker("leak");
     let report = maker.join();
-    // No marker, no seen parent: the fixture must not touch it. It holds the
-    // stdout pipe, so the reader cannot end; the join is bounded.
-    assert!(report.unjoined_readers >= 1, "{report:?}");
-    assert!(
-        product_exec::observe::process(stranger).is_some_and(|p| p.state != 'Z'),
-        "an unowned process is never killed by the fixture"
+    assert_eq!(
+        report.unjoined_readers, 0,
+        "the family's own holder is gone"
     );
-    // The test's own cleanup of what it deliberately leaked.
-    let pid = rustix::process::Pid::from_raw(stranger).unwrap();
-    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
-    while let Err(rustix::io::Errno::INTR) = rustix::process::waitid(
-        rustix::process::WaitId::Pid(pid),
-        rustix::process::WaitIdOptions::EXITED,
-    ) {}
-    assert!(product_exec::observe::process(stranger).is_none());
+    assert!(report.orphans.iter().any(|p| p.pid == grandchild));
+    assert!(product_exec::observe::process(grandchild).is_none());
+}
+
+#[test]
+fn a_reader_held_open_by_a_stranger_is_bounded_and_the_stranger_is_left_alone() {
+    let (mut family, _) = spawn_family();
+    family.set_reader_bound(Duration::from_millis(200));
+    // A process of the harness that is not in the family opens the write end of
+    // the leader's stdout pipe through /proc, as a log reader or a debugger
+    // attached to the descriptor could.
+    let held = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/{}/fd/1", family.pid()))
+        .unwrap();
+    let mut stranger = fake_command("parker");
+    stranger
+        .stdin(std::process::Stdio::null())
+        .stdout(held)
+        .stderr(std::process::Stdio::null());
+    let mut stranger = stranger.spawn().unwrap();
+    family.close_stdin();
+    assert!(family.wait_exit(Duration::from_secs(60)).unwrap().success());
+    let report = family.join();
+    assert!(report.unjoined_readers >= 1, "{report:?}");
+    assert!(!report.reaper_lost);
+    assert!(
+        running(stranger.id()),
+        "a process outside the family is never touched"
+    );
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
 }
 
 #[test]
@@ -522,14 +513,11 @@ fn the_exited_leader_keeps_its_pid_reserved_until_the_cleanup() {
 }
 
 #[test]
-fn descendants_are_found_and_taken_back_when_the_owner_is_dropped() {
-    let (mut family, grandchild) = spawn_family();
-    let seen = family.remember_descendants().to_vec();
+fn descendants_are_taken_back_when_the_owner_is_dropped() {
+    let (family, grandchild) = spawn_family();
+    let seen = family.descendants();
     assert!(seen.iter().any(|p| p.pid == grandchild), "{seen:?}");
-    assert!(
-        product_exec::observe::process(grandchild).is_some(),
-        "the grandchild runs"
-    );
+    assert!(product_exec::observe::process(grandchild).is_some());
     drop(family); // the failure path: no explicit stop
     for p in &seen {
         assert!(product_exec::observe::is_gone(p), "{p:?} survived the drop");
@@ -539,7 +527,6 @@ fn descendants_are_found_and_taken_back_when_the_owner_is_dropped() {
 #[test]
 fn terminate_and_join_report_clean_exit_and_no_orphans() {
     let (mut family, _) = spawn_family();
-    family.remember_descendants();
     family.close_stdin(); // EOF is the child's own shutdown request
     let status = family
         .wait_exit(Duration::from_secs(60))
@@ -548,13 +535,14 @@ fn terminate_and_join_report_clean_exit_and_no_orphans() {
     let report = family.join();
     assert!(report.status.success());
     assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+    assert!(!report.reaper_lost, "{}", report.reaper_stderr);
 }
 
 #[test]
 fn an_orphan_left_by_the_child_is_reported_then_killed() {
     let (mut family, grandchild) = spawn_family_of("parker");
-    let pid = rustix::process::Pid::from_raw(family.pid()).unwrap();
-    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    // SIGKILL of the leader alone leaves the grandchild behind.
+    assert!(family.signal(rustix::process::Signal::KILL));
     assert!(family.wait_exit(Duration::from_secs(60)).is_some());
     let report = family.join();
     assert!(
@@ -563,7 +551,7 @@ fn an_orphan_left_by_the_child_is_reported_then_killed() {
         report.orphans
     );
     assert!(
-        product_exec::observe::process(grandchild).is_none_or(|p| p.state != 'S' && p.state != 'R'),
+        product_exec::observe::process(grandchild).is_none(),
         "and then taken back"
     );
 }
@@ -902,14 +890,13 @@ fn renderer_scenario() {
         .terminate(product_exec::launch::EXIT_WATCHDOG)
         .expect("the product exits on SIGTERM");
     assert!(status.success(), "{status:?}");
-    let joined = r::join_adopted(&helpers, Duration::from_secs(60));
+    // The helper tree ends with its product: the family's reaper, which adopted it
+    // when the product exited, waits for each process to end and reports it.
+    let joined = product
+        .process
+        .join_family(Duration::from_secs(60))
+        .expect("the helper must exit with its product");
     eprintln!("F4P helper join: {joined:?}");
-    assert!(
-        joined
-            .iter()
-            .all(|(_, j)| matches!(j, r::Joined::Exited(_) | r::Joined::NotAdopted)),
-        "the helper must exit with its product: {joined:?}"
-    );
     let (report, footprint) = product.finish();
     assert!(report.orphans.is_empty(), "{:?}", report.orphans);
     for helper in &helpers {
@@ -945,30 +932,61 @@ fn product_starts_and_takes_back_the_real_renderer_helper() {
 }
 
 #[test]
-fn descriptors_without_close_on_exec_do_not_reach_a_child() {
+fn descriptors_without_close_on_exec_stay_this_processes_own_business() {
     use std::os::fd::AsRawFd;
     // A runner can leave such a descriptor in the test process. Make one, and
     // name it by its pipe inode.
     let (reader, writer) = std::io::pipe().unwrap();
     rustix::io::fcntl_setfd(&writer, rustix::io::FdFlags::empty()).unwrap();
     let leaked = std::fs::read_link(format!("/proc/self/fd/{}", writer.as_raw_fd())).unwrap();
+    let listed_by = |child: &mut ManagedProcess| {
+        child
+            .wait_for(Duration::from_secs(60), |line| {
+                serde_json::from_str::<Vec<String>>(line.strip_prefix(FAKE_FDS_PREFIX)?).ok()
+            })
+            .unwrap()
+            .0
+    };
+    // The supervised child does not get it.
     let mut child = ManagedProcess::spawn(fake_command("fds")).unwrap();
-    let (listed, _) = child
-        .wait_for(Duration::from_secs(60), |line| {
-            serde_json::from_str::<Vec<String>>(line.strip_prefix(FAKE_FDS_PREFIX)?).ok()
-        })
-        .unwrap();
+    let listed = listed_by(&mut child);
     assert!(
         !listed.iter().any(|t| Path::new(t) == leaked),
-        "{leaked:?} reached the child: {listed:?}"
+        "{leaked:?} reached the supervised child: {listed:?}"
     );
     child.close_stdin();
     assert!(child.wait_exit(Duration::from_secs(60)).unwrap().success());
     assert!(child.join().orphans.is_empty());
+    // This process's descriptor was not changed, so an unrelated child that is
+    // meant to inherit it still does.
+    let flags = rustix::io::fcntl_getfd(&writer).unwrap();
+    assert!(
+        !flags.contains(rustix::io::FdFlags::CLOEXEC),
+        "the supervisor must not change this process's descriptor flags"
+    );
+    let mut unrelated = fake_command("fds");
+    unrelated.stdin(std::process::Stdio::null());
+    let output = unrelated.output().unwrap();
+    let line = String::from_utf8_lossy(&output.stdout);
+    let listed: Vec<String> = line
+        .lines()
+        .find_map(|l| serde_json::from_str(l.strip_prefix(FAKE_FDS_PREFIX)?).ok())
+        .expect("the unrelated child listed its descriptors");
+    assert!(
+        listed.iter().any(|t| Path::new(t) == leaked),
+        "an unrelated Command lost its intended inheritance: {listed:?}"
+    );
     drop((reader, writer));
 }
 
-// -------------------------------------------- ownership and spawn failure
+// ------------------------------------------- ownership and spawn failure
+
+/// The reaper role of every supervised family: this test binary run again.
+#[test]
+#[ignore = "role: the reaper of one supervised family (product_exec::reaper)"]
+fn f4p_family_reaper() {
+    product_exec::reaper::run();
+}
 
 fn plain_parker(args: &[&str], cwd: Option<&Path>) -> std::process::Child {
     let mut command = fake_command("parker");
@@ -987,16 +1005,6 @@ fn running(pid: u32) -> bool {
     product_exec::observe::process(pid as i32).is_some_and(|p| p.state != 'Z')
 }
 
-fn family_with_markers(markers: Vec<String>) -> ManagedProcess {
-    let mut family = ManagedProcess::spawn_with(fake_command("family"), markers).unwrap();
-    family
-        .wait_for(Duration::from_secs(60), |line| {
-            line.contains("ready").then_some(())
-        })
-        .unwrap();
-    family
-}
-
 fn finish_family(mut family: ManagedProcess) {
     family.close_stdin();
     assert!(family.wait_exit(Duration::from_secs(60)).unwrap().success());
@@ -1004,102 +1012,7 @@ fn finish_family(mut family: ManagedProcess) {
 }
 
 #[test]
-fn a_string_in_an_argument_is_never_ownership_without_lineage() {
-    use product_exec::process::{Evidence, names_path};
-    let all = Evidence {
-        descendant: true,
-        started_with_the_family: true,
-        other_family: false,
-        same_group: false,
-        token: false,
-        marker: true,
-    };
-    assert!(all.owns());
-    // A process that is not a descendant (a user's `tail -f <root>/log`).
-    assert!(
-        !Evidence {
-            descendant: false,
-            ..all
-        }
-        .owns()
-    );
-    // One that was already running when the family started.
-    assert!(
-        !Evidence {
-            started_with_the_family: false,
-            ..all
-        }
-        .owns()
-    );
-    // One of another live family.
-    assert!(
-        !Evidence {
-            other_family: true,
-            ..all
-        }
-        .owns()
-    );
-    // Lineage without any identity.
-    assert!(
-        !Evidence {
-            marker: false,
-            ..all
-        }
-        .owns()
-    );
-    for identity in [
-        Evidence {
-            same_group: true,
-            marker: false,
-            ..all
-        },
-        Evidence {
-            token: true,
-            marker: false,
-            ..all
-        },
-    ] {
-        assert!(identity.owns());
-        assert!(
-            !Evidence {
-                descendant: false,
-                ..identity
-            }
-            .owns()
-        );
-    }
-    // Path boundaries: a prefix of a longer name is not the directory.
-    assert!(names_path("/r/x", "/r/x"));
-    assert!(names_path("/r/x/output.log", "/r/x"));
-    assert!(names_path("--log=/r/x/output.log", "/r/x"));
-    assert!(!names_path("/r/x-other", "/r/x"));
-    assert!(!names_path("/r/xy/output.log", "/r/x"));
-    assert!(!names_path("tail /r/x/output.log", "/r/x"));
-}
-
-#[test]
-fn a_process_that_was_running_before_the_family_and_names_its_log_is_not_touched() {
-    let root = tempfile::tempdir().unwrap();
-    let marker = root.path().to_str().unwrap().to_owned();
-    // Started before the family: its argument names the family's log path, as
-    // `tail -f` of a user would, but it is not the family's.
-    let mut watcher = plain_parker(&[&format!("{marker}/output.log")], None);
-    // A whole process lifecycle passes between the watcher and the family, so
-    // that they cannot share a 10 ms clock tick (the start time of a process is
-    // kept in ticks). This waits for a process to finish, not for a duration.
-    finish_family(family_with_markers(Vec::new()));
-    let family = family_with_markers(vec![marker]);
-    finish_family(family);
-    assert!(
-        running(watcher.id()),
-        "the watcher must survive the cleanup"
-    );
-    watcher.kill().unwrap();
-    watcher.wait().unwrap();
-}
-
-#[test]
-fn a_directory_with_the_same_prefix_is_not_the_familys_directory() {
+fn processes_outside_the_family_are_never_touched_whatever_they_reference() {
     let parent = tempfile::tempdir().unwrap();
     let dir = parent.path().join("family");
     let other = parent.path().join("family-other");
@@ -1107,32 +1020,49 @@ fn a_directory_with_the_same_prefix_is_not_the_familys_directory() {
     for d in [&dir, &other, &below] {
         std::fs::create_dir(d).unwrap();
     }
-    let family = family_with_markers(vec![dir.to_str().unwrap().to_owned()]);
-    // Both start after the family and are children of this process.
-    let mut elsewhere = plain_parker(&[], Some(&other));
-    let inside = plain_parker(&[], Some(&below));
-    let inside_pid = inside.id();
+    let log = format!("{}/output.log", dir.display());
+    // One started before the family, as a user's `tail -f <root>/output.log`.
+    let mut before = plain_parker(&[&log], None);
+    let (family, _) = spawn_family();
+    // Three more start after the family is up: one names the log, one works in
+    // a directory below the family's root, one in a sibling with the same
+    // prefix. None is in the family's tree.
+    let mut named = plain_parker(&[&log], None);
+    let mut inside = plain_parker(&[], Some(&below));
+    let mut sibling = plain_parker(&[], Some(&other));
     finish_family(family);
+    for stray in [&before, &named, &inside, &sibling] {
+        assert!(running(stray.id()), "pid {} was touched", stray.id());
+    }
+    for stray in [&mut before, &mut named, &mut inside, &mut sibling] {
+        stray.kill().unwrap();
+        stray.wait().unwrap();
+    }
+}
+
+#[test]
+fn the_orphan_of_another_family_is_not_touched_when_its_leader_has_exited() {
+    // B's leader has exited and left an orphan that nobody else may claim: it
+    // belongs to B's reaper alone, and is gone only when B is cleaned up.
+    let (other, orphan) = orphan_maker("setsid");
+    let (first, _) = spawn_family();
+    finish_family(first);
     assert!(
-        running(elsewhere.id()),
-        "the same-prefix directory is not ours"
+        running(orphan as u32),
+        "another family's orphan was touched"
     );
-    assert!(
-        product_exec::observe::process(inside_pid as i32).is_none(),
-        "a process working below the family's directory is"
-    );
-    elsewhere.kill().unwrap();
-    elsewhere.wait().unwrap();
-    drop(inside);
+    let report = other.join();
+    assert!(report.orphans.iter().any(|p| p.pid == orphan));
+    assert!(product_exec::observe::process(orphan).is_none());
 }
 
 #[test]
 fn another_live_family_that_names_this_familys_path_is_not_touched() {
     let root = tempfile::tempdir().unwrap();
-    let marker = root.path().to_str().unwrap().to_owned();
-    let first = family_with_markers(vec![marker.clone()]);
+    let log = format!("{}/output.log", root.path().display());
+    let (first, _) = spawn_family();
     let mut command = fake_command("parker");
-    command.arg(format!("{marker}/output.log"));
+    command.arg(&log);
     let second = ManagedProcess::spawn(command).unwrap();
     let second_pid = second.pid();
     finish_family(first);
@@ -1145,16 +1075,20 @@ fn another_live_family_that_names_this_familys_path_is_not_touched() {
 }
 
 #[test]
-fn a_failed_spawn_step_takes_the_started_child_back() {
+fn a_failed_spawn_step_takes_the_started_family_back() {
     use product_exec::process::{LAST_ABORTED_SPAWN, SpawnFault};
     for fault in [SpawnFault::Pidfd, SpawnFault::PidfdClone] {
-        let result = ManagedProcess::spawn_faulty(fake_command("parker"), Vec::new(), fault);
+        let result = ManagedProcess::spawn_faulty(fake_command("parker"), fault);
         assert!(result.is_err(), "{fault:?} must fail the spawn");
-        let pid = LAST_ABORTED_SPAWN.with(std::cell::Cell::get);
-        assert!(pid > 0);
+        let (reaper, leader) = LAST_ABORTED_SPAWN.with(std::cell::Cell::get);
+        assert!(reaper > 0 && leader > 0);
         assert!(
-            product_exec::observe::process(pid).is_none(),
-            "{fault:?}: the child {pid} was not killed and reaped"
+            product_exec::observe::process(reaper).is_none(),
+            "{fault:?}: the reaper {reaper} was not reaped"
+        );
+        assert!(
+            product_exec::observe::process(leader).is_none(),
+            "{fault:?}: the leader {leader} was not killed and reaped"
         );
     }
 }

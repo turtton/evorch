@@ -91,12 +91,15 @@ impl<'a> ProductLaunch<'a> {
             extra.push((name.as_str(), value.clone()));
         }
         self.env.apply(&mut command, &extra);
-        let process = ManagedProcess::spawn_with(command, self.env.ownership_markers())?;
+        let process = ManagedProcess::spawn(command)?;
+        // The instant the reaper reported the leader started: the reaper's own
+        // start-up is not part of the product's.
+        let started = process.spawned_at();
         Ok(ProductProcess {
             artifact: self.artifact,
             env: self.env,
             process,
-            started: Instant::now(),
+            started,
             ready: None,
         })
     }
@@ -113,7 +116,7 @@ pub struct ProductProcess<'a> {
     artifact: &'a ProductArtifact,
     env: &'a IsolatedEnv,
     pub process: ManagedProcess,
-    /// Instant just after the spawn call returned.
+    /// Instant the leader was reported started (see `ManagedProcess::spawned_at`).
     pub started: Instant,
     ready: Option<Ready>,
 }
@@ -178,7 +181,6 @@ impl ProductProcess<'_> {
                     &self.artifact.path,
                 )
             });
-        self.process.remember_descendants();
         Observation {
             pid,
             exe,

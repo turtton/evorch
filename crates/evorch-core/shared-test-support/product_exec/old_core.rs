@@ -315,8 +315,8 @@ fn exec_cycle_inner(
             ("F4P_CONFIG_DIR", env.config_dir().into_os_string()),
         ],
     );
-    let mut worker = ManagedProcess::spawn_with(command, env.ownership_markers())
-        .map_err(|e| CycleError::Worker(e.to_string()))?;
+    let mut worker =
+        ManagedProcess::spawn(command).map_err(|e| CycleError::Worker(e.to_string()))?;
     let (before, _) = worker
         .wait_for(READY_WATCHDOG, |line| {
             serde_json::from_str::<serde_json::Value>(line.strip_prefix(BEFORE)?).ok()
@@ -369,11 +369,13 @@ fn exec_cycle_inner(
         stderr,
         orphans,
         unjoined_readers,
+        reaper_lost,
+        reaper_stderr,
     } = worker.join();
     watcher.join().unwrap();
-    if !status.success() || !orphans.is_empty() || unjoined_readers != 0 {
+    if !status.success() || !orphans.is_empty() || unjoined_readers != 0 || reaper_lost {
         return Err(CycleError::Cleanup(format!(
-            "{status:?} {orphans:?} unjoined_readers={unjoined_readers} {stderr}"
+            "{status:?} {orphans:?} unjoined_readers={unjoined_readers} reaper_lost={reaper_lost} {stderr} {reaper_stderr}"
         )));
     }
     // An interval that comes out negative is not a sample of zero: the two

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcInfo {
     pub pid: i32,
     pub ppid: i32,
