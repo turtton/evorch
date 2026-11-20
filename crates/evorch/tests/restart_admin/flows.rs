@@ -189,7 +189,9 @@ async fn a_lost_connection_without_a_restart_in_progress_is_not_waited_for() {
             })
             .await;
             // Still Running: the core says nothing about a restart, then vanishes.
-            a.wait_for(|s| !s.subscribes.is_empty()).await;
+            // Once for the confirmation screen, once after the command: the CLI has
+            // seen the status of the accepted request, and it is still Running.
+            a.wait_for(|s| s.served_status.len() >= 2).await;
             a.stop_by_ref();
         },
     )
