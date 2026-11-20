@@ -348,6 +348,26 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             Disposition::AwaitingAuthority
         );
         let before = model.admissions.load(Ordering::SeqCst);
+        // The manual seam must not use the automatic new-claim path. This is
+        // tested before automatic prepare, with otherwise valid current inputs.
+        assert_eq!(
+            coordinator.prepare_existing(&manifests[0]).err().unwrap(),
+            StartupBlocked::NeedsAttention
+        );
+        assert!(
+            storage::Database::open(&config)
+                .unwrap()
+                .recovery_claims()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            owner.attach("thread"),
+            Err(runtime::ownership::RegistryError::Absent)
+        ));
+        assert!(!first.has_paused_recovery());
+        assert!(first.list_agents().is_empty());
+        assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         let prepared = coordinator.prepare(&manifests[0]).unwrap();
         let claim = storage::Database::open(&config)
             .unwrap()
@@ -358,6 +378,8 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         assert_eq!(claim.state, RecoveryClaimState::Prepared);
         assert!(first.list_agents().is_empty());
         assert!(first.has_paused_recovery());
+        let same_handle = coordinator.prepare_existing(&manifests[0]).unwrap();
+        assert_eq!(same_handle.claim_id(), claim.claim_id);
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         let second = runtime(&config, &writer, model.clone());
         let successor = Arc::new(
@@ -381,6 +403,11 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             catalog,
         )
         .unwrap();
+        assert_eq!(
+            reopened.prepare_existing(&manifests[0]).err().unwrap(),
+            StartupBlocked::OwnerBlocked
+        );
+        assert!(!second.has_paused_recovery());
         assert_eq!(
             reopened.prepare(&manifests[0]).err().unwrap(),
             StartupBlocked::OwnerBlocked
@@ -539,6 +566,10 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
                 StartupBlocked::NeedsAttention,
                 "a completed manifest cannot be prepared or replayed"
             );
+            assert_eq!(
+                observed.prepare_existing(&manifests[0]).err().unwrap(),
+                StartupBlocked::AlreadyActivated
+            );
             assert_eq!(model.admissions.load(Ordering::SeqCst), before + 1);
             second.stop(run, runtime::StopScope::Subtree).unwrap();
             second.wait(run).await.unwrap();
@@ -548,6 +579,10 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             );
         } else {
             adopted.release(&second).unwrap();
+            assert_eq!(
+                reopened.prepare_existing(&manifests[0]).err().unwrap(),
+                StartupBlocked::Released
+            );
             assert!(!second.has_paused_recovery());
             let db = storage::Database::open(&config).unwrap();
             assert_eq!(

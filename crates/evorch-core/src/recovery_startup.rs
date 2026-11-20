@@ -417,6 +417,34 @@ impl<'a> StartupCoordinator<'a> {
     /// published and retained through compatibility validation and later execution.
     /// Prepared claims are adopted with their existing revision/incarnation pair.
     pub fn prepare(&self, id: &str) -> Result<PreparedStartupComponent, StartupBlocked> {
+        self.prepare_current(id, false)
+    }
+
+    /// Stage only an existing Prepared claim for explicit, reserved Resume.
+    /// This never creates a claim, acquires an owner, or creates a thread-root
+    /// binding. Current execution authority and planned gates still apply.
+    /// The startup proof and catalog remain private to this coordinator.
+    pub fn prepare_existing(&self, id: &str) -> Result<PreparedStartupComponent, StartupBlocked> {
+        self.prepare_current(id, true)
+    }
+
+    fn prepare_current(
+        &self,
+        id: &str,
+        existing_only: bool,
+    ) -> Result<PreparedStartupComponent, StartupBlocked> {
+        // Select once before any preparation side effect. A missing or changed
+        // claim must not fall through to the automatic new-Prepared branch.
+        let selected = if existing_only {
+            let claim = self.claim(id)?.ok_or(StartupBlocked::NeedsAttention)?;
+            match claim.state {
+                RecoveryClaimState::Prepared => Some(claim),
+                RecoveryClaimState::Activated => return Err(StartupBlocked::AlreadyActivated),
+                RecoveryClaimState::Released { .. } => return Err(StartupBlocked::Released),
+            }
+        } else {
+            None
+        };
         let scan = self.scan()?;
         let status = scan
             .components
@@ -453,15 +481,19 @@ impl<'a> StartupCoordinator<'a> {
             .collect::<Result<BTreeSet<_>, _>>()?;
         let bindings = bindings::load(self.inputs.storage, self.inputs.projects)
             .map_err(|_| StartupBlocked::StorageUnavailable)?;
-        let authority = CurrentAuthorityProvider {
+        let provider = CurrentAuthorityProvider {
             runtime: self.inputs.runtime,
             owner: self.inputs.owner,
             bindings: &bindings,
             storage: self.inputs.storage,
             writer: self.inputs.writer,
             config_dir: &self.inputs.options.config_dir,
-        }
-        .resolve(&records, &resume)?;
+        };
+        let authority = if existing_only {
+            provider.resolve_owned(&records, &resume)?
+        } else {
+            provider.resolve(&records, &resume)?
+        };
         if authority.members.values().any(|config| {
             !self
                 .catalog
@@ -483,17 +515,23 @@ impl<'a> StartupCoordinator<'a> {
                     .get(&permit.thread_id)
                     .ok_or(StartupBlocked::CurrentBindingRequired)?;
                 command_bindings.push((permit.thread_id.clone(), binding));
-                let _generation = permit
-                    .mutation_guard()
-                    .map_err(|_| StartupBlocked::OwnerBlocked)?;
-                self.inputs
-                    .runtime
-                    .bind_thread_root(&permit.thread_id, record.run_id)
-                    .map_err(|_| StartupBlocked::NeedsAttention)?;
+                if !existing_only {
+                    let _generation = permit
+                        .mutation_guard()
+                        .map_err(|_| StartupBlocked::OwnerBlocked)?;
+                    self.inputs
+                        .runtime
+                        .bind_thread_root(&permit.thread_id, record.run_id)
+                        .map_err(|_| StartupBlocked::NeedsAttention)?;
+                }
             }
         }
         let models = self.catalog.pin(self.inputs.runtime, &authority);
-        let existing = self.claim(id)?;
+        let existing = if existing_only {
+            selected
+        } else {
+            self.claim(id)?
+        };
         let claim = if let Some(claim) = existing {
             match claim.state {
                 RecoveryClaimState::Prepared => claim,
@@ -501,6 +539,9 @@ impl<'a> StartupCoordinator<'a> {
                 RecoveryClaimState::Released { .. } => return Err(StartupBlocked::Released),
             }
         } else {
+            if existing_only {
+                return Err(StartupBlocked::NeedsAttention);
+            }
             let component = self
                 .inputs
                 .runtime

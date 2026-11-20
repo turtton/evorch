@@ -85,7 +85,7 @@ impl CurrentAuthorityProvider<'_> {
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
-        self.resolve_current(records, resume, true)
+        self.resolve_current(records, resume, true, false)
     }
 
     /// Release grants no execution capability. Current binding/team/owner checks
@@ -95,7 +95,19 @@ impl CurrentAuthorityProvider<'_> {
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
-        self.resolve_current(records, resume, false)
+        self.resolve_current(records, resume, false, false)
+    }
+
+    /// Resolve execution authority from an already-owned Running thread only.
+    /// Unlike automatic startup, this never starts or claims an owner, including
+    /// a foreign owner that would otherwise be safely claimable. The caller must
+    /// independently validate the retained physical generation and graph CAS.
+    pub fn resolve_owned(
+        &self,
+        records: &[RunRecoveryRecord],
+        resume: &BTreeSet<RunId>,
+    ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
+        self.resolve_current(records, resume, true, true)
     }
 
     fn resolve_current(
@@ -103,6 +115,7 @@ impl CurrentAuthorityProvider<'_> {
         records: &[RunRecoveryRecord],
         resume: &BTreeSet<RunId>,
         execution: bool,
+        owned_only: bool,
     ) -> Result<CurrentRecoveryAuthority, CurrentAuthorityProblem> {
         let mut roots = BTreeMap::new();
         for record in records
@@ -186,24 +199,28 @@ impl CurrentAuthorityProvider<'_> {
                 })?;
             }
             authority.ownership = Some(
-                match self.owner.attach(thread) {
-                    Ok(owner) if owner.lease.owner_id == self.owner.owner_id() => {
-                        self.owner.owned_permit(thread)
+                (if owned_only {
+                    self.owner.owned_permit(thread)
+                } else {
+                    match self.owner.attach(thread) {
+                        Ok(owner) if owner.lease.owner_id == self.owner.owner_id() => {
+                            self.owner.owned_permit(thread)
+                        }
+                        Ok(owner) if owner.handoff_hold.is_some() => {
+                            // A retained planned hold is deliberately not normal-claimable.
+                            // Only the inherited physical adoption proof grants this CAS.
+                            let evidence = self
+                                .runtime
+                                .adopted_restart_ownership_evidence()
+                                .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
+                            self.owner
+                                .claim_planned(owner.handoff_hold.as_deref().unwrap(), &evidence)
+                        }
+                        Ok(owner) => self.owner.claim(&owner),
+                        Err(RegistryError::Absent) => self.owner.start(thread),
+                        Err(error) => Err(error),
                     }
-                    Ok(owner) if owner.handoff_hold.is_some() => {
-                        // A retained planned hold is deliberately not normal-claimable.
-                        // Only the inherited physical adoption proof grants this CAS.
-                        let evidence = self
-                            .runtime
-                            .adopted_restart_ownership_evidence()
-                            .map_err(|_| CurrentAuthorityProblem::CurrentBindingRequired)?;
-                        self.owner
-                            .claim_planned(owner.handoff_hold.as_deref().unwrap(), &evidence)
-                    }
-                    Ok(owner) => self.owner.claim(&owner),
-                    Err(RegistryError::Absent) => self.owner.start(thread),
-                    Err(error) => Err(error),
-                }
+                })
                 .map_err(|error| match error {
                     RegistryError::Ownership(
                         OwnershipError::NotClaimable
@@ -213,6 +230,7 @@ impl CurrentAuthorityProvider<'_> {
                         | OwnershipError::Quiescing,
                     )
                     | RegistryError::Exists => CurrentAuthorityProblem::OwnerBlocked,
+                    RegistryError::Absent if owned_only => CurrentAuthorityProblem::OwnerBlocked,
                     RegistryError::ThreadDeleted(_) => {
                         CurrentAuthorityProblem::CurrentBindingRequired
                     }
@@ -339,7 +357,17 @@ mod tests {
         );
         assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
         record.recipe.policy = ResumePolicy::CoreOwned;
-        let authority = provider.resolve(&[record], &resume).unwrap();
+        // Explicit Resume must not acquire the absent owner, even though the
+        // current directory/settings are sufficient for automatic startup.
+        assert_eq!(
+            provider
+                .resolve_owned(&[record.clone()], &resume)
+                .err()
+                .unwrap(),
+            CurrentAuthorityProblem::OwnerBlocked
+        );
+        assert!(matches!(owner.attach("thread"), Err(RegistryError::Absent)));
+        let authority = provider.resolve(&[record.clone()], &resume).unwrap();
         assert_eq!(
             authority.members[&run].project_root.as_deref(),
             Some(dir.path())
@@ -353,5 +381,47 @@ mod tests {
             "thread"
         );
         assert!(authority.members[&run].interactive && authority.members[&run].keep_alive);
+        let owned = provider.resolve_owned(&[record.clone()], &resume).unwrap();
+        assert_eq!(
+            owned.members[&run].ownership,
+            authority.members[&run].ownership
+        );
+
+        // A Released foreign owner is deliberately reclaimable by automatic
+        // startup. Checking this case kills a fallback-to-resolve mutant, unlike
+        // a responsive Running foreign owner whose claim would simply fail.
+        assert!(!owner.begin_quiesce().unwrap());
+        assert!(!owner.release_ready().unwrap());
+        let released = owner.attach("thread").unwrap();
+        let successor = Arc::new(
+            OwnerHost::open(
+                &dir.sockets().join("owner"),
+                Default::default(),
+                runtime.event_bus().clone(),
+            )
+            .unwrap(),
+        );
+        let successor_provider = CurrentAuthorityProvider {
+            owner: &successor,
+            ..provider
+        };
+        assert_eq!(
+            successor_provider
+                .resolve_owned(&[record.clone()], &resume)
+                .err()
+                .unwrap(),
+            CurrentAuthorityProblem::OwnerBlocked
+        );
+        assert_eq!(successor.attach("thread").unwrap(), released);
+        let automatic = successor_provider.resolve(&[record], &resume).unwrap();
+        assert_eq!(
+            automatic.members[&run]
+                .ownership
+                .as_ref()
+                .unwrap()
+                .lease
+                .owner_id,
+            successor.owner_id()
+        );
     }
 }

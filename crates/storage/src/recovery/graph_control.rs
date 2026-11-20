@@ -28,6 +28,13 @@ pub struct GraphControlCas {
 pub enum GraphControlAction {
     Resume,
     Release,
+    /// Confirm already-terminal eligibility before retained-owner cleanup.
+    /// Never releases a Prepared claim or changes a component disposition.
+    /// Uses existing manual-release origins without a schema change. The
+    /// Aborted/Invalidated/Superseded phase distinguishes terminal cleanup from
+    /// user manual release; audit and diagnostics must retain that distinction
+    /// rather than classifying an effect solely by its origin.
+    TerminalCleanup,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -289,8 +296,20 @@ pub(super) fn write(
     let residual = prior_control
         .as_ref()
         .is_some_and(|c| c.revoked && c.mode == "revoked_idle")
-        && request.action == GraphControlAction::Release;
-    if !residual
+        && request.action != GraphControlAction::Resume;
+    let terminal_cleanup = request.action == GraphControlAction::TerminalCleanup;
+    if terminal_cleanup {
+        if !matches!(
+            e.phase,
+            RestartPhase::Aborted | RestartPhase::Invalidated | RestartPhase::Superseded
+        ) || e.component.disposition == RestartDisposition::Activated
+            || e.claim
+                .as_ref()
+                .is_some_and(|claim| !matches!(claim.state, RecoveryClaimState::Released { .. }))
+        {
+            return Err(invalid("terminal cleanup conflicts with executable state"));
+        }
+    } else if !residual
         && (e.phase != RestartPhase::Adopted
             || e.component.disposition != RestartDisposition::RetryPending
             || e.claim
@@ -299,7 +318,7 @@ pub(super) fn write(
     {
         return Err(invalid("graph is not eligible"));
     }
-    let release = request.action == GraphControlAction::Release;
+    let release = request.action != GraphControlAction::Resume;
     if !release && e.claim.is_none() {
         return Err(invalid("manual resume requires existing prepared claim"));
     }
@@ -333,7 +352,7 @@ pub(super) fn write(
         params![e.manifest.manifest_id,mode,revision,request.effect.operation_id,request.effect.attempt_nonce,release,origin],
     )?;
     }
-    if release && !residual {
+    if release && !residual && !terminal_cleanup {
         if let Some(c) = &e.claim {
             prepared::release(conn, &c.claim_id, "manual graph release")?;
         } else {

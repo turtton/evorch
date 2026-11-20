@@ -3,20 +3,20 @@ use super::*;
 use crate::DisposalAuthority;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
-use storage::recovery::graph_control::GraphEffectKey;
+use storage::recovery::graph_control::{GraphControlCas, GraphEffectKey};
 
 fn was_cleaned(
     conn: &rusqlite::Connection,
-    authority: &DisposalAuthority,
+    expected: &GraphControlCas,
     thread: &str,
     permit: &OwnerPermit,
 ) -> Result<bool, RegistryError> {
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM disposal_cleanup_receipt_members WHERE restart_id=?1 AND capture_id=?2 AND thread_id=?3 AND owner_id=?4 AND owner_generation=?5 AND cleaned=1)",
-        params![authority.expected().restart_id,authority.expected().capture_id,thread,permit.lease.owner_id,permit.lease.generation], |r|r.get(0))?)
+        params![expected.restart_id,expected.capture_id,thread,permit.lease.owner_id,permit.lease.generation], |r|r.get(0))?)
 }
 fn check_owner(
     conn: &rusqlite::Connection,
-    authority: &DisposalAuthority,
+    expected: &GraphControlCas,
     thread: &str,
     permit: &Option<OwnerPermit>,
 ) -> Result<(), RegistryError> {
@@ -40,8 +40,7 @@ fn check_owner(
             }
             match &owner.planned_claim {
                 Some(hold) => {
-                    let members = authority
-                        .expected()
+                    let members = expected
                         .membership
                         .iter()
                         .filter(|m| m.thread_id.as_deref() == Some(thread))
@@ -50,8 +49,8 @@ fn check_owner(
                         .active_runs
                         .union(&hold.parked_runs)
                         .collect::<BTreeSet<_>>();
-                    if hold.transaction_id != authority.expected().restart_id
-                        || hold.capture_id != authority.expected().capture_id
+                    if hold.transaction_id != expected.restart_id
+                        || hold.capture_id != expected.capture_id
                         || hold.orphaned
                         || members.iter().any(|m| {
                             !runs.contains(&m.run_id)
@@ -63,7 +62,7 @@ fn check_owner(
                     }
                     Ok(())
                 }
-                None if was_cleaned(conn, authority, thread, permit)? => Ok(()),
+                None if was_cleaned(conn, expected, thread, permit)? => Ok(()),
                 None => Err(OwnershipError::PlannedMismatch.into()),
             }
         }
@@ -74,7 +73,7 @@ pub(crate) fn guard(authority: &DisposalAuthority) -> Result<Registry, RegistryE
     let registry = Registry::open_readonly(authority.registry_path())?;
     registry.connection.execute_batch("BEGIN DEFERRED")?;
     for (thread, permit) in authority.permits() {
-        check_owner(&registry.connection, authority, thread, permit)?;
+        check_owner(&registry.connection, authority.expected(), thread, permit)?;
     }
     Ok(registry)
 }
@@ -156,7 +155,7 @@ pub(crate) fn cleanup(
     }
     // Validate every expected owner, including absence, before the first update.
     for (thread, permit) in authority.permits() {
-        check_owner(&tx, authority, thread, permit)?;
+        check_owner(&tx, authority.expected(), thread, permit)?;
     }
     let mut receipt = DisposalOwnerReceipt {
         effect,
@@ -200,4 +199,59 @@ pub(crate) fn cleanup(
     )?;
     tx.commit()?;
     Ok(receipt)
+}
+
+/// Snapshot-only aggregate; no authority, permit or mutable registry escapes.
+#[derive(Default)]
+pub(crate) struct OwnershipDiagnosis {
+    pub retained: usize,
+    pub absent: usize,
+    pub changed: bool,
+    pub foreign: bool,
+    pub unavailable: bool,
+}
+pub(crate) fn diagnose(
+    path: &std::path::Path,
+    expected: &GraphControlCas,
+    retained: &BTreeMap<String, OwnerPermit>,
+    threads: &BTreeSet<String>,
+) -> Result<OwnershipDiagnosis, RegistryError> {
+    let registry = Registry::open_readonly(path)?;
+    registry.connection.execute_batch("BEGIN DEFERRED")?;
+    let mut result = OwnershipDiagnosis::default();
+    for thread in threads {
+        let permit = retained.get(thread);
+        result.retained += usize::from(permit.is_some());
+        let owner = match registry.attach(thread) {
+            Ok(owner) => owner,
+            Err(RegistryError::Absent) => {
+                result.absent += 1;
+                result.changed |= permit.is_some();
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(permit) = permit else {
+            result.foreign = true;
+            continue;
+        };
+        if owner.lease.owner_id != permit.lease.owner_id {
+            result.foreign = true;
+            result.changed = true;
+        } else if owner.lease.generation != permit.lease.generation {
+            result.changed = true;
+        } else {
+            match check_owner(
+                &registry.connection,
+                expected,
+                thread,
+                &Some(permit.clone()),
+            ) {
+                Ok(()) => {}
+                Err(RegistryError::Ownership(_)) => result.unavailable = true,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(result)
 }

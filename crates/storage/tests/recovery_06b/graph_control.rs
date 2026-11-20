@@ -728,3 +728,127 @@ fn relational_membership_is_complete_in_readonly_snapshot_and_full_writer_cas() 
         );
     }
 }
+
+#[test]
+fn terminal_cleanup_confirms_revocation_without_releasing_or_activating() {
+    for phase in ["aborted", "invalidated", "superseded"] {
+        for claimed in [false, true] {
+            let f = Fixture::new();
+            let (mut request, _) = graph(&f, claimed);
+            if let Some(claim) = &request.expected.claim {
+                f.storage
+                    .handle()
+                    .release_prepared_claim_if_unexecuted(
+                        claim.claim_id.clone(),
+                        "terminal before cleanup".into(),
+                    )
+                    .unwrap();
+            }
+            f.sql()
+                .execute(
+                    "UPDATE restart_transactions SET phase=?1 WHERE restart_id='restart'",
+                    [phase],
+                )
+                .unwrap();
+            request.expected = f.db().recovery_graph_cas("restart", "component").unwrap();
+            request.action = GraphControlAction::TerminalCleanup;
+            let before = request.expected.clone();
+            let result = f
+                .storage
+                .handle()
+                .write_recovery_graph_control(request.clone())
+                .unwrap();
+            assert!(result.revoked);
+            assert_eq!(
+                result.origin,
+                if claimed {
+                    "manual_release"
+                } else {
+                    "manual_release_without_claim"
+                }
+            );
+            let after = f.db().recovery_graph_cas("restart", "component").unwrap();
+            assert_eq!(after.claim, before.claim);
+            assert_eq!(after.component, before.component);
+            assert_eq!(after.manifest, before.manifest);
+            assert_eq!(after.phase, before.phase);
+            assert!(matches!(
+                after.phase,
+                RestartPhase::Aborted | RestartPhase::Invalidated | RestartPhase::Superseded
+            ));
+            // Origins are shared, but phase and unchanged disposition distinguish
+            // terminal cleanup from an actual user manual release.
+            let manual = Fixture::new();
+            let (manual_request, _) = graph(&manual, claimed);
+            let manual_result = manual
+                .storage
+                .handle()
+                .write_recovery_graph_control(manual_request)
+                .unwrap();
+            assert_eq!(manual_result.origin, result.origin);
+            let manual_cas = manual
+                .db()
+                .recovery_graph_cas("restart", "component")
+                .unwrap();
+            assert!(!matches!(
+                manual_cas.phase,
+                RestartPhase::Aborted | RestartPhase::Invalidated | RestartPhase::Superseded
+            ));
+            assert_ne!(manual_cas.phase, after.phase);
+            assert_eq!(
+                f.storage
+                    .handle()
+                    .write_recovery_graph_control(request)
+                    .unwrap(),
+                result
+            );
+            f.storage
+                .handle()
+                .finish_recovery_graph_control(result)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn terminal_cleanup_rejects_prepared_activated_and_nonterminal_state() {
+    for phase in [
+        "adopted",
+        "completed",
+        "aborted",
+        "invalidated",
+        "superseded",
+    ] {
+        for state in ["prepared", "activated"] {
+            let f = Fixture::new();
+            let (mut request, activation) = graph(&f, true);
+            if state == "activated" {
+                f.storage
+                    .handle()
+                    .activate_recovery_claim(activation)
+                    .unwrap();
+            }
+            f.sql()
+                .execute(
+                    "UPDATE restart_transactions SET phase=?1 WHERE restart_id='restart'",
+                    [phase],
+                )
+                .unwrap();
+            request.expected = f.db().recovery_graph_cas("restart", "component").unwrap();
+            request.action = GraphControlAction::TerminalCleanup;
+            let before = request.expected.clone();
+            assert!(
+                f.storage
+                    .handle()
+                    .write_recovery_graph_control(request)
+                    .is_err(),
+                "{phase}/{state}"
+            );
+            assert_eq!(
+                f.db().recovery_graph_cas("restart", "component").unwrap(),
+                before
+            );
+            assert!(f.db().recovery_graph_effect("release").unwrap().is_none());
+        }
+    }
+}
