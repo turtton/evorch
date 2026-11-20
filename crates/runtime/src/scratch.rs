@@ -162,7 +162,7 @@ struct State {
     execution_keys: HashMap<(RunId, String), ScratchKey>,
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
+        allow(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
     )]
     reset_effects: HashMap<GraphDisposalKey, bool>,
 }

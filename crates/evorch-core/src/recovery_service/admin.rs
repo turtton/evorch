@@ -33,6 +33,10 @@ impl RecoveryAdminContext {
 /// permission to drop an unknown token or start another effect. Operation
 /// lookup/replay is the facade's responsibility; this is for new admissions.
 pub trait RecoveryAdminHandler: Send + Sync {
+    /// Original supervisor only. The default deliberately retains every
+    /// uncertain marker and never claims, activates, or releases a token.
+    fn reconcile(&self, _context: &RecoveryAdminContext) {}
+
     fn resume(
         &self,
         context: &RecoveryAdminContext,
@@ -155,5 +159,26 @@ pub(super) async fn reconcile(runtime: &runtime::AgentRuntime) {
             tracing::warn!(%error, "automatic activation readback remains unresolved")
         }
         Err(error) => tracing::warn!(%error, "automatic activation readback worker failed"),
+    }
+}
+
+pub(super) async fn reconcile_manual(
+    context: Result<RecoveryAdminContext, RecoveryAdminError>,
+    handler: Arc<dyn RecoveryAdminHandler>,
+) {
+    let Ok(context) = context else { return };
+    match tokio::task::spawn_blocking(move || {
+        context
+            .startup
+            .runtime
+            .reconcile_manual_activation_reservations()?;
+        handler.reconcile(&context);
+        Ok::<_, runtime::RuntimeError>(())
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "manual activation readback remains unresolved"),
+        Err(error) => tracing::warn!(%error, "manual activation readback worker failed"),
     }
 }

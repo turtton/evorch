@@ -28,6 +28,10 @@ pub struct CoreStartupInputs {
 pub trait CoreStartupDiagnostics: Send + Sync {
     fn snapshot(&self) -> serde_json::Value;
     fn has_pending_work(&self) -> bool;
+    /// Current supervisor membership, never inferred from a historical report.
+    fn automatic_retry_pending(&self, _manifest: &str) -> bool {
+        false
+    }
     fn recovery_admin(&self) -> &dyn RecoveryAdminPort {
         &UnsupportedRecoveryAdminPort
     }
@@ -111,5 +115,6 @@ mod tests {
             Err(RecoveryAdminError::Unsupported)
         ));
         assert!(!diagnostics.has_pending_work());
+        assert!(!diagnostics.automatic_retry_pending("graph"));
     }
 }

@@ -49,10 +49,26 @@ use admin::{
 pub struct RecoveryDiagnostics {
     report: Arc<RwLock<RecoveryStartupReport>>,
     retry_count: Arc<AtomicUsize>,
+    retry_ids: Arc<RwLock<BTreeSet<String>>>,
     jobs: Arc<AtomicUsize>,
     admin: Arc<RecoveryAdminActor>,
 }
+impl RecoveryDiagnostics {
+    fn publish_retry(&self, retry: &BTreeSet<String>) {
+        *self
+            .retry_ids
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = retry.clone();
+        self.retry_count.store(retry.len(), Ordering::Release);
+    }
+}
 impl CoreStartupDiagnostics for RecoveryDiagnostics {
+    fn automatic_retry_pending(&self, manifest: &str) -> bool {
+        self.retry_ids
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(manifest)
+    }
     fn has_pending_work(&self) -> bool {
         self.retry_count.load(Ordering::Acquire) != 0 || self.jobs.load(Ordering::Acquire) != 0
     }
@@ -136,6 +152,7 @@ fn start_recovery<'a>(
         let diagnostics = RecoveryDiagnostics {
             report: Default::default(),
             retry_count: Default::default(),
+            retry_ids: Default::default(),
             jobs: Default::default(),
             admin: Arc::new(admin),
         };
@@ -181,7 +198,7 @@ fn start_recovery<'a>(
                         AutomaticAttempt::Contended => {}
                     }
                 }
-                output.retry_count.store(retry.len(), Ordering::Release);
+                output.publish_retry(&retry);
                 *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
                 inputs.work_changed.notify_one();
                 tracing::info!(report = %serde_json::to_string(&report)?, "core graph startup recovery");
@@ -190,6 +207,8 @@ fn start_recovery<'a>(
                 // Only owner-blocked components enter this owned retry loop.
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 tick.tick().await;
+                let mut manual_tick = tokio::time::interval(Duration::from_secs(1));
+                manual_tick.tick().await;
                 loop {
                     tokio::select! { biased;
                         _ = &mut stop => break,
@@ -198,14 +217,14 @@ fn start_recovery<'a>(
                             match request {
                                 RecoveryRequest::Retry { manifest_id, reply } => {
                                     retry.insert(manifest_id);
-                                    output.retry_count.store(retry.len(), Ordering::Release);
+                                    output.publish_retry(&retry);
                                     let _ = reply.send(Ok(vec![]));
                                 }
                                 RecoveryRequest::Resume { request, reply } => {
                                     // Admission already owns the graph reservation. It is
                                     // not an automatic retry even if the old display is Blocked.
                                     let was_retry = retry.remove(&request.manifest_id);
-                                    output.retry_count.store(retry.len(), Ordering::Release);
+                                    output.publish_retry(&retry);
                                     let id = request.manifest_id.clone();
                                     let context = RecoveryAdminContext::for_job(&coordinator, &inputs.host);
                                     let result = admin::run_job(context, handler.clone(), request, &output.jobs, &inputs.work_changed).await;
@@ -215,10 +234,14 @@ fn start_recovery<'a>(
                                         retry.insert(id);
                                     }
                                     admin::reconcile(&inputs.runtime).await;
+                                    admin::reconcile_manual(
+                                        RecoveryAdminContext::for_job(&coordinator, &inputs.host),
+                                        handler.clone(),
+                                    ).await;
                                     let _ = reply.send(result);
                                 }
                             }
-                            output.retry_count.store(retry.len(), Ordering::Release);
+                            output.publish_retry(&retry);
                             inputs.work_changed.notify_one();
                         }
                         _ = tick.tick(), if !retry.is_empty() => {
@@ -232,7 +255,7 @@ fn start_recovery<'a>(
                                         current.manual_continue = false;
                                     }
                                     *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report;
-                                    output.retry_count.store(0, Ordering::Release);
+                                    output.publish_retry(&BTreeSet::new());
                                     inputs.work_changed.notify_one();
                                     return Err(format!("graph retry scan: {reason:?}").into());
                                 }
@@ -264,15 +287,21 @@ fn start_recovery<'a>(
                                     AutomaticAttempt::Capacity => {}
                                 }
                             }
-                            output.retry_count.store(retry.len(), Ordering::Release);
+                            output.publish_retry(&retry);
                             report.scan = scan;
                             *output.report.write().unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
                             inputs.work_changed.notify_one();
                             tracing::info!(report = %serde_json::to_string(&report)?, "core graph recovery retry");
                         }
+                        _ = manual_tick.tick() => {
+                            admin::reconcile_manual(
+                                RecoveryAdminContext::for_job(&coordinator, &inputs.host),
+                                handler.clone(),
+                            ).await;
+                        }
                     }
                 }
-                output.retry_count.store(0, Ordering::Release);
+                output.publish_retry(&BTreeSet::new());
                 inputs.work_changed.notify_one();
                 Ok(())
             });
