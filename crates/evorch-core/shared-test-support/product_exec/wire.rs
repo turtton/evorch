@@ -82,11 +82,15 @@ pub async fn subscribe_all(client: &WorkbenchClient) -> workbench_client::Subscr
 }
 
 pub fn send_chat(thread: &str, submission: &str, text: &str) -> Command {
+    send_chat_as(ComposerRole::Orchestrator, thread, submission, text)
+}
+
+pub fn send_chat_as(role: ComposerRole, thread: &str, submission: &str, text: &str) -> Command {
     Command::Conversation(ConversationCommand::SendChat(SendChat {
         project: ProjectId::new("p").unwrap(),
         thread: ThreadId::new(thread).unwrap(),
         submission_id: SubmissionId::new(submission).unwrap(),
-        composer_role: ComposerRole::Orchestrator,
+        composer_role: role,
         text: text.into(),
         skills: vec![],
         attachments: vec![],

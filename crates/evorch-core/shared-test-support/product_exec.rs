@@ -16,6 +16,8 @@
 pub mod artifact;
 #[path = "product_exec/env.rs"]
 pub mod env;
+#[path = "product_exec/intervals.rs"]
+pub mod intervals;
 #[path = "product_exec/launch.rs"]
 pub mod launch;
 #[path = "product_exec/measure.rs"]

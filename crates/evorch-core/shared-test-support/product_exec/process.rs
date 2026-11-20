@@ -285,16 +285,12 @@ impl ManagedProcess {
                 continue;
             };
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-            loop {
-                match rustix::process::waitid(
-                    rustix::process::WaitId::Pid(pid),
-                    rustix::process::WaitIdOptions::EXITED,
-                ) {
-                    Err(rustix::io::Errno::INTR) => continue,
-                    // Reaped, or not our child (then init reaps it).
-                    _ => break,
-                }
-            }
+            // Retried on EINTR only. Any other result: reaped, or not our child
+            // (then init reaps it).
+            while let Err(rustix::io::Errno::INTR) = rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED,
+            ) {}
         }
     }
 

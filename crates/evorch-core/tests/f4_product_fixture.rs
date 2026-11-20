@@ -534,3 +534,183 @@ fn harness_exec_into_the_product_is_observed_without_a_clock_guess() {
     assert!(cycle.old_epoch >= 1);
     eprintln!("F4P cycle: {cycle:?}");
 }
+
+// ------------------------------------------------------------ measurement
+
+/// The measurement of `measurements/f4-product/conditions.md`: 5 first samples
+/// on fresh copies, then 20 warm samples. Writes raw samples and a summary to
+/// `$EVORCH_F4P_MEASURE_OUT`. It asserts nothing about latency.
+#[test]
+#[ignore = "measurement: run through scripts/reproduce-under-limits.sh, see measurements/f4-product/conditions.md"]
+fn measure_f4_product_intervals() {
+    use product_exec::{intervals, measure, provisional::*};
+    let out = std::path::PathBuf::from(
+        std::env::var_os(ENV_MEASURE_OUT)
+            .unwrap_or_else(|| panic!("{ENV_MEASURE_OUT} is required")),
+    );
+    let label = std::env::var(ENV_MEASURE_LABEL)
+        .unwrap_or_else(|_| panic!("{ENV_MEASURE_LABEL} is required"));
+    let label: &'static str = Box::leak(label.into_boxed_str());
+    let artifact = ProductArtifact::require();
+    let profile = artifact.manifest.profile.clone();
+    std::fs::create_dir_all(&out).unwrap();
+    let harness = std::env::current_exe().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let current = intervals::current_elf();
+    let mut rec = intervals::Recorder::new(&profile, "first");
+    for n in 1..=5 {
+        let dir = tempfile::Builder::new()
+            .prefix("f4p-copy-")
+            .tempdir()
+            .unwrap();
+        let copy = intervals::fresh_copy(&artifact, dir.path());
+        runtime.block_on(intervals::one_round(&mut rec, n, &copy, &current, &harness));
+        eprintln!("first {n}/5 done");
+    }
+    // The warm series runs on the already verified and probed artifact.
+    artifact.describe().expect("probe before the warm series");
+    rec.condition = "warm";
+    for n in 1..=20 {
+        runtime.block_on(intervals::one_round(
+            &mut rec, n, &artifact, &current, &harness,
+        ));
+        eprintln!("warm {n}/20 done");
+    }
+    measure::write_csv(
+        &out.join(format!("samples-{profile}-{label}.csv")),
+        &rec.samples,
+    )
+    .unwrap();
+    let mut summary =
+        String::from("profile,condition,interval,n,failures,min_ms,p50_ms,p95_ms,max_ms\n");
+    for condition in ["first", "warm"] {
+        let mut intervals: Vec<&str> = rec.samples.iter().map(|s| s.interval).collect();
+        intervals.dedup();
+        let mut seen = Vec::new();
+        for interval in intervals {
+            if seen.contains(&interval) {
+                continue;
+            }
+            seen.push(interval);
+            let group: Vec<_> = rec
+                .samples
+                .iter()
+                .filter(|s| s.condition == condition && s.interval == interval)
+                .collect();
+            match measure::summarize(&group) {
+                Some(s) => summary.push_str(&format!(
+                    "{profile},{condition},{interval},{},{},{:.3},{:.3},{:.3},{:.3}\n",
+                    s.n, s.failures, s.min, s.p50, s.p95, s.max
+                )),
+                None => summary.push_str(&format!(
+                    "{profile},{condition},{interval},{},{},,,,\n",
+                    group.len(),
+                    group.len()
+                )),
+            }
+        }
+    }
+    std::fs::write(out.join(format!("summary-{profile}-{label}.csv")), &summary).unwrap();
+    println!("{summary}");
+}
+
+// -------------------------------------------- renderer helper (product)
+
+#[path = "renderer_support/product_exec.rs"]
+mod renderer_product;
+
+/// The product starts a renderer helper on a public command path and takes it
+/// back when it stops. Evidence class: `fixture` for the product side; the
+/// helper is the fake of the `renderer-test-helper` feature (a harness binary)
+/// unless `EVORCH_F4P_RENDERER_HELPER` names another executable.
+fn renderer_scenario() {
+    use renderer_product as r;
+    let artifact = ProductArtifact::require();
+    let helper = r::helper_binary();
+    let env = IsolatedEnv::new();
+    let provider = MockProvider::scripted(vec![]);
+    env.write_product_config(&provider.base_url(), product_exec::launch::KEY_ENV);
+    let mut product = ProductLaunch::new(&artifact, &env)
+        .renderer_helper(helper.clone())
+        .start()
+        .unwrap();
+    product.wait_ready().expect("ready");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (helpers, client) =
+        runtime.block_on(r::open_page(&mut product, &provider, &env.project_dir()));
+    // One helper is the product's own child; any further process of the same
+    // image is that helper's descendant (it is a process tree, not a thread).
+    let own: Vec<_> = helpers.iter().filter(|h| h.ppid == product.pid()).collect();
+    assert_eq!(own.len(), 1, "one helper child of the product: {helpers:?}");
+    let helper_proc = own[0].clone();
+    let observed = product.observe();
+    assert!(observed.children.iter().any(|c| c.pid == helper_proc.pid));
+    // The client connection is observable too: a second wire client sees the
+    // renderer as Ready.
+    runtime.block_on(async {
+        use workbench_protocol::{
+            namespaces::browser::{BrowserQuery, BrowserReply, RendererPhase},
+            queries::{Query, QueryReply},
+        };
+        match client
+            .query(Query::Browser(BrowserQuery::GetRendererStatus {}))
+            .await
+            .unwrap()
+        {
+            QueryReply::Browser(BrowserReply::Status(s)) => {
+                assert_eq!(s.phase, RendererPhase::Ready)
+            }
+            other => panic!("{other:?}"),
+        }
+    });
+    drop(client);
+    // The product stops: SIGTERM, its exit notification, then the helper's.
+    let status = product
+        .process
+        .terminate(product_exec::launch::EXIT_WATCHDOG)
+        .expect("the product exits on SIGTERM");
+    assert!(status.success(), "{status:?}");
+    let joined = r::join_adopted(&helpers, Duration::from_secs(60));
+    eprintln!("F4P helper join: {joined:?}");
+    assert!(
+        joined
+            .iter()
+            .all(|(_, j)| matches!(j, r::Joined::Exited(_) | r::Joined::NotAdopted)),
+        "the helper must exit with its product: {joined:?}"
+    );
+    let (report, footprint) = product.finish();
+    assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+    for helper in &helpers {
+        assert!(product_exec::observe::is_gone(helper), "{helper:?}");
+    }
+    drop(env);
+    assert!(footprint.remains().is_empty());
+    assert_eq!(provider.remaining_scripts(), 0);
+}
+
+#[test]
+fn product_starts_and_takes_back_a_renderer_helper() {
+    renderer_scenario();
+}
+
+/// The same scenario with the real `evorch-renderer` (CEF). Needs the helper
+/// named by `EVORCH_F4P_RENDERER_HELPER` and a host where CEF can run
+/// (docs/browser.md); it fails, not skips, when the helper is not provided.
+#[test]
+#[ignore = "needs the real evorch-renderer (CEF); run with the cef-e2e job's environment"]
+fn product_starts_and_takes_back_the_real_renderer_helper() {
+    use product_exec::provisional::ENV_RENDERER_HELPER;
+    let helper = std::env::var_os(ENV_RENDERER_HELPER)
+        .unwrap_or_else(|| panic!("{ENV_RENDERER_HELPER} must name the real evorch-renderer"));
+    assert!(
+        Path::new(&helper).is_file() && !helper.to_string_lossy().contains("test-helper"),
+        "{helper:?} is not a real renderer"
+    );
+    renderer_scenario();
+}
