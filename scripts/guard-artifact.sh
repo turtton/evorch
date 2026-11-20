@@ -13,7 +13,7 @@ mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 check_dependencies() {
   local expected actual
   expected=$(sed -n 's/^dependency-receipt = "\(.*\)"$/\1/p' "$repo/crates/process-guard/Cargo.toml")
-  actual=$(cd "$repo" && CARGO_BUILD_GC_ENABLED=false cargo tree --locked -p process-guard --edges normal,build --target all --prefix none --format '{p}' |
+  actual=$(cd "$repo" && CARGO_BUILD_GC_ENABLED=false cargo tree --color never --locked -p process-guard --edges normal,build --target all --prefix none --format '{p}' |
     sed -E 's/ \(.*\)$//; s/ v/@/; /^process-guard@/d' | LC_ALL=C sort -u | tr '\n' ' ')
   [[ -n "$expected" && "$expected" == "${actual% }" ]] || die "locked helper dependency graph drift: update the package-local compat receipt (expected: $expected; actual: ${actual% })"
 }
