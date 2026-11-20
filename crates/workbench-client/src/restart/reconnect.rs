@@ -35,11 +35,12 @@ impl EvidenceObserver {
         self.evidence.as_ref()
     }
 
-    /// The restart has passed the point where only the exec is left.
+    /// The restart is past capture: the old work is never revived, so only the
+    /// exec (or a failed-closed stop, which clears this again) can follow.
     pub fn observe_status(&mut self, status: &RestartManagementStatus, now: Instant) {
         let committed = matches!(
             status.status.phase,
-            RestartPhase::Finalizing | RestartPhase::ShuttingDown
+            RestartPhase::Capturing | RestartPhase::Finalizing | RestartPhase::ShuttingDown
         );
         match (&self.evidence, committed, &status.status.restart_id) {
             (None, true, Some(id)) => {

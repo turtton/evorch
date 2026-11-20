@@ -70,7 +70,6 @@ fn only_a_restart_past_the_point_of_no_return_is_evidence() {
         RestartPhase::WaitingSafePoint,
         RestartPhase::Sealing,
         RestartPhase::Sealed,
-        RestartPhase::Capturing,
         RestartPhase::Cancelling,
         RestartPhase::FailedClosed,
     ] {
@@ -78,7 +77,11 @@ fn only_a_restart_past_the_point_of_no_return_is_evidence() {
         observer.observe_status(&status(phase, 7), now);
         assert!(observer.evidence().is_none(), "{phase:?}");
     }
-    for phase in [RestartPhase::Finalizing, RestartPhase::ShuttingDown] {
+    for phase in [
+        RestartPhase::Capturing,
+        RestartPhase::Finalizing,
+        RestartPhase::ShuttingDown,
+    ] {
         let mut observer = EvidenceObserver::default();
         observer.observe_status(&status(phase, 7), now);
         assert_eq!(
