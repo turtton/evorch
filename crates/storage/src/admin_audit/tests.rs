@@ -1242,7 +1242,6 @@ fn the_audit_tables_are_part_of_the_v70_schema_and_the_undo_removes_them() {
             .unwrap(),
         70
     );
-    assert_eq!(crate::migrations::MIGRATIONS.len(), 70);
     assert!(has("accepted_admin_operations") && has("admin_denials"));
     assert!(has("admin_operations_one_way") && has("admin_operations_keep_unfinished"));
     conn.execute_batch(include_str!("../../undo/undo_v70.sql"))

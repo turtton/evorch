@@ -117,6 +117,21 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         Keep,
         "claim metadata; cascades with its erased recovery component",
     ),
+    (
+        "recovery_graph_control",
+        Keep,
+        "durable graph eligibility and revocation fences owned by restart recovery",
+    ),
+    (
+        "recovery_graph_effects",
+        Keep,
+        "durable graph operation idempotence and readback receipts",
+    ),
+    (
+        "recovery_graph_thread_progress",
+        Keep,
+        "cross-database graph owner and scratch cleanup readback progress",
+    ),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
     (
         "resume_intents",
