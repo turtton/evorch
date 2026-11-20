@@ -289,6 +289,7 @@ fn every_main_cas_mismatch_leaves_all_effects_unapplied() {
         let f = Fixture::new();
         let (mut request, _) = graph(&f, true);
         let claim = request.expected.claim.clone().unwrap();
+        let before = request.expected.clone();
         mutate(&mut request.expected);
         assert!(
             f.storage
@@ -297,6 +298,10 @@ fn every_main_cas_mismatch_leaves_all_effects_unapplied() {
                 .is_err()
         );
         f.assert_prepared(&claim);
+        assert_eq!(
+            f.db().recovery_graph_cas("restart", "component").unwrap(),
+            before
+        );
         assert!(
             f.db()
                 .recovery_graph_control("component")
@@ -424,14 +429,19 @@ fn activation_checks_reservation_and_resolves_manual_marker_in_same_transaction(
     );
 }
 
-fn graph_cas_mutations() -> [fn(&mut GraphControlCas); 12] {
-    [
+// One-field changes across every scalar and nested CAS record. Each is exercised
+// both on first Release and on the remaining Release after revoked_idle.
+fn graph_cas_mutations() -> Vec<fn(&mut GraphControlCas)> {
+    vec![
         |c| c.restart_id.push('x'),
         |c| c.capture_id.push('x'),
         |c| c.successor_epoch += 1,
         |c| c.phase = RestartPhase::Completed,
+        |c| c.component.manifest_id.push('x'),
         |c| c.component.revision += 1,
         |c| c.component.disposition = RestartDisposition::Activated,
+        |c| c.component.claim_id = Some("other".into()),
+        |c| c.component.reason = Some("other".into()),
         |c| c.control_revision += 1,
         |c| {
             c.control_effect = Some(GraphEffectKey {
@@ -442,9 +452,66 @@ fn graph_cas_mutations() -> [fn(&mut GraphControlCas); 12] {
         |c| {
             c.membership.pop();
         },
+        |c| c.membership[0].run_id.push('x'),
+        |c| c.membership[0].incarnation.push('x'),
+        |c| c.membership[0].root_run_id.push('x'),
+        |c| c.membership[0].thread_id = Some("other".into()),
+        |c| c.membership[0].intent_revision += 1,
+        |c| {
+            c.membership[0].snapshot = Some(storage::RunContextReceipt {
+                updated_at_ns: 1,
+                messages_end: 1,
+                sha256: "other".into(),
+            })
+        },
+        |c| c.membership[0].owner_id = Some("other".into()),
         |c| c.membership[0].owner_generation = Some(8),
+        |c| c.membership[0].lane_id = Some("other".into()),
+        |c| c.manifest.manifest_id.push('x'),
+        |c| c.manifest.schema_version += 1,
+        |c| c.manifest.committed = !c.manifest.committed,
+        |c| c.manifest.superseded = !c.manifest.superseded,
+        |c| {
+            c.manifest.edges.push(storage::recovery::RecoveryEdge {
+                from: "other".into(),
+                to: "other".into(),
+                kind: "other".into(),
+            })
+        },
+        |c| {
+            c.manifest.members.pop();
+        },
+        |c| c.manifest.members[0].run_id.push('x'),
         |c| c.manifest.members[0].incarnation.push('x'),
+        |c| c.manifest.members[0].intent_revision += 1,
+        |c| {
+            c.manifest.members[0].snapshot = Some(storage::RunContextReceipt {
+                updated_at_ns: 1,
+                messages_end: 1,
+                sha256: "other".into(),
+            })
+        },
+        |c| c.manifest.members[0].resume = !c.manifest.members[0].resume,
+        |c| c.manifest.members[0].record_json.push(' '),
+        |c| c.claim = None,
+        |c| c.claim.as_mut().unwrap().claim_id.push('x'),
+        |c| c.claim.as_mut().unwrap().manifest_id.push('x'),
+        |c| c.claim.as_mut().unwrap().state = RecoveryClaimState::Activated,
+        |c| {
+            c.claim.as_mut().unwrap().members.pop();
+        },
+        |c| c.claim.as_mut().unwrap().members[0].run_id.push('x'),
+        |c| {
+            c.claim.as_mut().unwrap().members[0]
+                .old_incarnation
+                .push('x')
+        },
         |c| c.claim.as_mut().unwrap().members[0].reserved_revision += 1,
+        |c| {
+            c.claim.as_mut().unwrap().members[0]
+                .new_incarnation
+                .push('x')
+        },
     ]
 }
 

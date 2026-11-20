@@ -113,15 +113,61 @@ pub(super) fn check(f: &Fixture) {
     }
     assert_receipts_empty(&conn);
     save(&conn, &original[1]);
-    let revoked = f
-        .runtime
-        .release_owned_graph_eligibility(&authority, effect("release"))
+    // Hold the owners read guard before and after the same FULL commit.
+    // A reserved competing writer excludes heartbeat writes from this probe.
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    f.storage
+        .handle()
+        .pause_next_graph_write(reached_tx, release_rx)
         .unwrap();
+    let busy_timeout: i64 = conn
+        .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+        .unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let runtime = &f.runtime;
+    let (commits, revoked) = std::thread::scope(|scope| {
+        // Own this sender inside the scope, so panic also unblocks the writer.
+        let release_tx = release_tx;
+        let worker =
+            scope.spawn(|| runtime.release_owned_graph_eligibility(&authority, effect("release")));
+        let mut commits = Vec::new();
+        for after_commit in [false, true] {
+            let reached = reached_rx.recv().unwrap();
+            assert_eq!(reached, after_commit);
+            conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+            conn.execute_batch("UPDATE thread_owners SET state=state WHERE thread_id='a';")
+                .unwrap();
+            let commit = conn.execute_batch("COMMIT");
+            if commit.is_err() {
+                conn.execute_batch("ROLLBACK").unwrap();
+            }
+            commits.push(commit);
+            conn.pragma_update(None, "busy_timeout", busy_timeout)
+                .unwrap();
+            if !after_commit {
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            }
+            release_tx.send(()).unwrap();
+        }
+        (commits, worker.join().unwrap().unwrap())
+    });
+    for (after_commit, commit) in [false, true].into_iter().zip(commits) {
+        assert_eq!(
+            commit.unwrap_err().sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "owners guard must survive until main writer FULL ACK (after_commit={after_commit})"
+        );
+    }
     assert!(revoked.revoked);
     assert_eq!(
         f.db().recovery_graph_effect("release").unwrap(),
         Some(revoked)
     );
+    conn.execute_batch(
+        "BEGIN IMMEDIATE; UPDATE thread_owners SET state=state WHERE thread_id='a'; COMMIT;",
+    )
+    .unwrap();
 
     // A late mismatch in member b must not clear member a's planned receipt.
     save(&conn, &changed);

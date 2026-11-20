@@ -318,6 +318,37 @@ fn restart_write_fault(after_commit: bool) -> Result<(), StorageError> {
     }
     Ok(())
 }
+// Explicit one-shot, per-writer rendezvous. Test builds only; no authority or
+// alternative write path, and an uninstalled hook never waits.
+#[cfg(any(test, feature = "recovery-test-support"))]
+pub(crate) struct GraphWritePause {
+    pub reached: std::sync::mpsc::Sender<bool>,
+    pub released: std::sync::mpsc::Receiver<()>,
+}
+#[cfg(any(test, feature = "recovery-test-support"))]
+thread_local! {static GRAPH_WRITE_PAUSE: std::cell::RefCell<Option<GraphWritePause>> = const {std::cell::RefCell::new(None)};}
+#[cfg(any(test, feature = "recovery-test-support"))]
+pub(crate) fn install_graph_write_pause(pause: GraphWritePause) -> Result<(), StorageError> {
+    GRAPH_WRITE_PAUSE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return Err(invalid("graph write pause already installed"));
+        }
+        *slot = Some(pause);
+        Ok(())
+    })
+}
+#[cfg(any(test, feature = "recovery-test-support"))]
+fn graph_write_pause(after_commit: bool) {
+    let pause = GRAPH_WRITE_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(pause) = pause
+        && pause.reached.send(after_commit).is_ok()
+        && pause.released.recv().is_ok()
+        && !after_commit
+    {
+        GRAPH_WRITE_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause));
+    }
+}
 /// Every graph write is FULL-durable and atomic; no partial claim or consumption.
 pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, StorageError> {
     #[cfg(any(test, feature = "recovery-test-support"))]
@@ -331,6 +362,8 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
             | Write::RestartInvalidation { .. }
             | Write::RestartColdQuarantine { .. }
     );
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    let graph_command = matches!(&command, Write::GraphControl(_));
     let previous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     let result = (|| {
@@ -408,7 +441,15 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
         if restart_command {
             restart_write_fault(false)?;
         }
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if graph_command {
+            graph_write_pause(false);
+        }
         tx.commit()?;
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        if graph_command {
+            graph_write_pause(true);
+        }
         #[cfg(any(test, feature = "recovery-test-support"))]
         if restart_command {
             restart_write_fault(true)?;

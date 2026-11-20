@@ -190,6 +190,20 @@ impl StorageHandle {
         })
         .map(|_| ())
     }
+    /// Pause the next graph-control commit at an explicit test-only rendezvous.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn pause_next_graph_write(
+        &self,
+        reached: std::sync::mpsc::Sender<bool>,
+        released: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), StorageError> {
+        self.lane_job(false, move |_| {
+            crate::recovery::install_graph_write_pause(crate::recovery::GraphWritePause {
+                reached,
+                released,
+            })
+        })
+    }
     fn recovery_write(&self, write: Write) -> Result<Written, StorageError> {
         self.request(|reply| Command::Recovery(write, reply))
     }

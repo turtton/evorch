@@ -9,6 +9,13 @@ printf 'pub fn claim_physical_bootstrap_owners($evidence: RestartOwnershipEviden
 printf 'runtime.claim_physical_bootstrap_owners(owner, evidence, callback);\n' > "$work/crates/workbench-host/src/bootstrap/planned.rs"
 printf 'runtime.claim_physical_bootstrap_owners(owner, evidence, callback);\nretained_physical_owners;\n' > "$work/crates/runtime/tests/negative.rs"
 bash "$gate" "$work" >/dev/null
+# Only this real sealed-bootstrap fixture is exempt; its directory is not.
+mkdir -p "$work/crates/runtime/shared-test-support"
+printf 'runtime.claim_physical_bootstrap_owners(owner, evidence, callback);\n' > "$work/crates/runtime/shared-test-support/physical_ownership.rs"
+bash "$gate" "$work" >/dev/null
+cp "$work/crates/runtime/shared-test-support/physical_ownership.rs" "$work/crates/runtime/shared-test-support/product.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'non-allowlisted shared support call accepted'; exit 1; fi
+rm "$work/crates/runtime/shared-test-support/product.rs"
 printf 'runtime.claim_physical_bootstrap_owners(owner, evidence, callback);\n' > "$work/crates/runtime/src/extra.rs"
 if bash "$gate" "$work" >/dev/null; then echo 'extra product call accepted'; exit 1; fi
 printf 'retained_physical_owners.sealed = Some(fake);\n' > "$work/crates/runtime/src/extra.rs"
