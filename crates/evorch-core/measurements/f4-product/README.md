@@ -1,9 +1,9 @@
 # F4-P: product fixture and first measurements
 
-Base: `origin/main` 8ec04796 (includes I0 #711, #713, #714 and the planned-shutdown
-watchdog #716). Conditions were fixed and committed before the first run and
-extended by two addenda before the reruns: [conditions.md](conditions.md). Raw
-samples: `samples-<profile>-<limited|loaded>.csv`; summaries: `summary-*.csv`.
+Base: `origin/main` 75de89fa (includes I0 #711, #713, #714, the planned-shutdown
+watchdog #716 and #717). Conditions were fixed and committed before the first
+run and extended by three addenda before the reruns: [conditions.md](conditions.md).
+Raw samples: `samples-<profile>-<limited|loaded>.csv`; summaries: `summary-*.csv`.
 All numbers here come from the latest rerun, on this base and with the final fixture.
 
 **F4-P is not F4.** Nothing here is product -> product evidence. Every
@@ -18,8 +18,8 @@ Built separately from every test build, without features, serially with
 
 | profile | how | ELF size (bytes) | build identity (SHA-256) |
 |---|---|---:|---|
-| release | sealed by I0's `scripts/product-artifact.sh build` (`cargo build --locked --release -p evorch-core --bin evorch-core`), read through `EVORCH_PRODUCT_CORE_EXE` / `EVORCH_PRODUCT_MANIFEST` | 122,896,728 | `ce0b0eb08cc8441cadaf4074706b09bc5fb0033d8745f20c662cd8d2ae7cca8b` |
-| debug (measurement only) | `cargo build -p evorch-core --bin evorch-core`, byte-identical copy + measurement-only manifest (`EVORCH_F4P_MEASURE_MANIFEST`); the sealed contract covers release only | 569,083,112 | `4fe28f0945aedcde8653a65076df39ade528ecc17415d5950e8cd2d29971e726` |
+| release | sealed by I0's `scripts/product-artifact.sh build` (`cargo build --locked --release -p evorch-core --bin evorch-core`), read through `EVORCH_PRODUCT_CORE_EXE` / `EVORCH_PRODUCT_MANIFEST` | 122,903,928 | `24a09549fdb916df1dfafb4df6d7d22dd5c53341d093e4852a2b7443e4e6ce27` |
+| debug (measurement only) | `cargo build -p evorch-core --bin evorch-core`, byte-identical copy + measurement-only manifest (`EVORCH_F4P_MEASURE_MANIFEST`); the sealed contract covers release only | 569,099,160 | `51ccf465a4fdd811dc246b8cc88bca95ec3a35bbbeda3259c8d92f15fd2e9427` |
 
 rustc 1.99.0, turtton/cargo 0.102.0-9-turtton.4, `x86_64-unknown-linux-gnu`,
 features: none. The release build here ran with the dev shell's
@@ -43,59 +43,62 @@ niced CPU stressors in the same scope (both through
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 1554.9 / 1615.8 | 20 | 1543.3 / 1691.9 / 1707.1 | 0 |
-| `reprobe_before_capture` | 5 | 1582.5 / 1598.0 | 20 | 1551.0 / 1652.7 / 1748.0 | 0 |
-| `before_exec_check` | 5 | 516.5 / 532.6 | 20 | 507.0 / 550.6 / 565.1 | 0 |
-| `describe_probe_run` | 5 | 266.5 / 268.4 | 20 | 265.3 / 288.5 / 291.6 | 0 |
-| `hash_pass` | 5 | 258.3 / 259.9 | 20 | 258.1 / 283.2 / 299.9 | 0 |
-| `cold_spawn_to_ready` | 5 | 397.3 / 397.7 | 20 | 392.7 / 417.2 / 419.8 | 0 |
-| `exec_to_ready` | 5 | 362.4 / 373.7 | 20 | 361.6 / 391.8 / 397.5 | 0 |
-| `exec_to_claim` | 5 | 301.0 / 311.0 | 20 | 298.0 / 329.0 / 330.0 | 0 |
+| `preflight` | 5 | 1780.3 / 2318.1 | 20 | 1751.9 / 1963.2 / 2900.5 | 0 |
+| `reprobe_before_capture` | 5 | 1678.8 / 2023.5 | 20 | 1674.7 / 2089.8 / 2272.3 | 0 |
+| `before_exec_check` | 5 | 540.3 / 711.8 | 20 | 577.4 / 748.3 / 818.8 | 0 |
+| `describe_probe_run` | 5 | 273.3 / 444.0 | 20 | 298.6 / 358.9 / 365.6 | 0 |
+| `hash_pass` | 5 | 277.8 / 417.2 | 20 | 294.3 / 334.0 / 356.7 | 0 |
+| `cold_spawn_to_ready` | 5 | 793.7 / 864.5 | 20 | 583.0 / 1108.7 / 3253.4 | 0 |
+| `exec_to_ready` | 5 | 388.5 / 677.8 | 20 | 401.8 / 745.0 / 851.4 | 0 |
+| `exec_to_claim` | 5 | 316.0 / 448.0 | 20 | 328.0 / 489.0 / 596.0 | 0 |
 
 ### debug / loaded
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 1568.7 / 1583.3 | 20 | 1574.7 / 1667.9 / 1676.0 | 0 |
-| `reprobe_before_capture` | 5 | 1567.8 / 1575.6 | 20 | 1561.8 / 1586.2 / 1647.9 | 0 |
-| `before_exec_check` | 5 | 518.5 / 523.0 | 20 | 518.9 / 532.6 / 533.5 | 0 |
-| `describe_probe_run` | 5 | 267.8 / 271.1 | 20 | 266.4 / 277.9 / 367.4 | 0 |
-| `hash_pass` | 5 | 258.1 / 262.7 | 20 | 258.3 / 264.1 / 265.2 | 0 |
-| `cold_spawn_to_ready` | 5 | 407.3 / 423.8 | 20 | 407.0 / 435.7 / 486.2 | 0 |
-| `exec_to_ready` | 5 | 370.0 / 466.3 | 20 | 368.0 / 399.7 / 405.5 | 0 |
-| `exec_to_claim` | 5 | 305.0 / 388.0 | 20 | 300.0 / 321.0 / 323.0 | 0 |
+| `preflight` | 5 | 1782.3 / 1991.7 | 20 | 1878.9 / 2067.1 / 2095.1 | 0 |
+| `reprobe_before_capture` | 5 | 1701.7 / 1873.4 | 20 | 1936.5 / 2122.1 / 2139.6 | 0 |
+| `before_exec_check` | 5 | 569.2 / 580.9 | 20 | 612.0 / 685.0 / 710.2 | 0 |
+| `describe_probe_run` | 5 | 303.0 / 338.0 | 20 | 313.8 / 356.2 / 371.1 | 0 |
+| `hash_pass` | 5 | 284.2 / 339.1 | 20 | 313.4 / 358.2 / 383.6 | 0 |
+| `cold_spawn_to_ready` | 5 | 714.8 / 3922.1 | 20 | 667.8 / 1331.7 / 4170.8 | 0 |
+| `exec_to_ready` | 5 | 647.4 / 1740.6 | 20 | 550.6 / 1106.6 / 3179.1 | 0 |
+| `exec_to_claim` | 5 | 447.0 / 659.0 | 20 | 426.0 / 584.0 / 2351.0 | 0 |
 
 ### release / limited
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 365.7 / 403.1 | 20 | 378.7 / 476.8 / 559.8 | 0 |
-| `reprobe_before_capture` | 5 | 374.6 / 395.2 | 20 | 378.8 / 485.9 / 494.2 | 0 |
-| `before_exec_check` | 5 | 122.4 / 129.0 | 20 | 123.4 / 141.2 / 144.2 | 0 |
-| `describe_probe_run` | 5 | 66.5 / 73.9 | 20 | 65.8 / 82.4 / 120.5 | 0 |
-| `hash_pass` | 5 | 60.8 / 69.4 | 20 | 61.1 / 69.2 / 95.2 | 0 |
-| `cold_spawn_to_ready` | 5 | 163.4 / 186.4 | 20 | 164.4 / 360.9 / 445.0 | 0 |
-| `exec_to_ready` | 5 | 108.7 / 200.3 | 20 | 106.1 / 143.7 / 209.4 | 0 |
-| `exec_to_claim` | 5 | 85.0 / 102.0 | 20 | 80.0 / 107.0 / 159.0 | 0 |
+| `preflight` | 5 | 341.0 / 345.2 | 20 | 343.8 / 347.3 / 349.3 | 0 |
+| `reprobe_before_capture` | 5 | 342.1 / 345.2 | 20 | 343.0 / 348.7 / 349.3 | 0 |
+| `before_exec_check` | 5 | 112.0 / 113.3 | 20 | 112.9 / 115.2 / 115.4 | 0 |
+| `describe_probe_run` | 5 | 59.4 / 59.7 | 20 | 59.9 / 60.8 / 60.9 | 0 |
+| `hash_pass` | 5 | 55.7 / 56.2 | 20 | 56.3 / 57.2 / 57.4 | 0 |
+| `cold_spawn_to_ready` | 5 | 171.3 / 301.1 | 20 | 165.4 / 175.4 / 178.4 | 0 |
+| `exec_to_ready` | 5 | 95.7 / 96.5 | 20 | 97.7 / 102.0 / 102.7 | 0 |
+| `exec_to_claim` | 5 | 72.0 / 74.0 | 20 | 73.0 / 75.0 / 78.0 | 0 |
 
 ### release / loaded
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 381.9 / 390.3 | 20 | 380.0 / 403.9 / 404.2 | 0 |
-| `reprobe_before_capture` | 5 | 377.8 / 383.9 | 20 | 378.3 / 399.5 / 403.5 | 0 |
-| `before_exec_check` | 5 | 121.3 / 128.3 | 20 | 124.0 / 132.8 / 135.2 | 0 |
-| `describe_probe_run` | 5 | 64.7 / 66.5 | 20 | 65.9 / 71.8 / 74.4 | 0 |
-| `hash_pass` | 5 | 60.7 / 61.8 | 20 | 61.6 / 66.3 / 67.4 | 0 |
-| `cold_spawn_to_ready` | 5 | 172.8 / 219.5 | 20 | 175.2 / 227.2 / 236.2 | 0 |
-| `exec_to_ready` | 5 | 104.0 / 110.9 | 20 | 105.4 / 126.4 / 127.9 | 0 |
-| `exec_to_claim` | 5 | 78.0 / 83.0 | 20 | 80.0 / 94.0 / 95.0 | 0 |
+| `preflight` | 5 | 348.3 / 352.0 | 20 | 345.5 / 354.9 / 354.9 | 0 |
+| `reprobe_before_capture` | 5 | 346.3 / 423.3 | 20 | 344.4 / 353.0 / 354.4 | 0 |
+| `before_exec_check` | 5 | 113.8 / 121.1 | 20 | 112.8 / 116.6 / 117.0 | 0 |
+| `describe_probe_run` | 5 | 60.5 / 61.0 | 20 | 59.8 / 61.8 / 65.9 | 0 |
+| `hash_pass` | 5 | 57.3 / 57.7 | 20 | 56.1 / 58.6 / 58.6 | 0 |
+| `cold_spawn_to_ready` | 5 | 173.4 / 331.2 | 20 | 168.7 / 190.5 / 612.6 | 0 |
+| `exec_to_ready` | 5 | 99.0 / 128.8 | 20 | 96.3 / 100.4 / 102.4 | 0 |
+| `exec_to_claim` | 5 | 75.0 / 104.0 | 20 | 73.0 / 76.0 / 77.0 | 0 |
 
-No sample stands far above its neighbours in this run. The previous run (older
-base, superseded) had single samples up to 2.97 s (`exec_to_ready`) in the debug
-limited condition; they did not recur and their cause was never found, so
-this table is a sample, not a proof that they cannot happen. The `loaded`
-condition did **not** slow the intervals measurably, and whether the stressors
+**Run-to-run variation is large on this shared host.** The previous run (base
+8ec04796, otherwise the same method) had debug maxima of 486 ms for
+`cold_spawn_to_ready` and 466 ms for `exec_to_ready`; this run has
+4170.8 ms and 3179.1 ms in the debug rows, and the debug runs took 400-450 s
+instead of about 310 s. The host is shared with other work; this was neither
+controlled nor investigated. The release rows moved much less. The maxima below
+are the largest of this run and are a sample, not a bound. The `loaded`
+condition is not consistently slower than `limited`, and whether the stressors
 really competed for the 4-CPU quota was not verified beyond the script's own
 setup: do not read the loaded rows as a contention bound.
 
@@ -118,14 +121,14 @@ Maximum over all four runs of each profile, and the margin to the unchanged limi
 
 | interval / limit | debug max | release max | margin (debug / release) |
 |---|---:|---:|---|
-| `describe_probe_run` vs probe deadline **5 s** | 367.4 | 120.5 | 4.63 s / 4.88 s |
-| `preflight` (no limit of its own; target timeout 300 s) | 1707.1 | 559.8 | - |
-| `reprobe_before_capture` | 1748.0 | 494.2 | - |
-| `before_exec_check` | 565.1 | 144.2 | - |
-| `exec_to_ready` vs boot deadline **120 s** | 466.3 | 209.4 | 119.53 s / 119.79 s, successor side only (see below) |
-| `exec_to_claim` vs lease + grace **15 s** | 388.0 | 159.0 | 14.61 s / 14.84 s; 13.61 s / 13.84 s if the last old heartbeat was one `heartbeat_ms` earlier |
-| one hash pass `H` | 299.9 | 95.2 | - |
-| `cold_spawn_to_ready` (reference) | 486.2 | 445.0 | - |
+| `describe_probe_run` vs probe deadline **5 s** | 444.0 | 65.9 | 4.56 s / 4.93 s |
+| `preflight` (no limit of its own; target timeout 300 s) | 2900.5 | 354.9 | - |
+| `reprobe_before_capture` | 2272.3 | 423.3 | - |
+| `before_exec_check` | 818.8 | 121.1 | - |
+| `exec_to_ready` vs boot deadline **120 s** | 3179.1 | 128.8 | 116.82 s / 119.87 s, successor side only (see below) |
+| `exec_to_claim` vs lease + grace **15 s** | 2351.0 | 104.0 | 12.65 s / 14.90 s; 11.65 s / 13.90 s if the last old heartbeat was one `heartbeat_ms` earlier |
+| one hash pass `H` | 417.2 | 58.6 | - |
+| `cold_spawn_to_ready` (reference) | 4170.8 | 612.6 | - |
 
 Reading the margins:
 
@@ -146,8 +149,8 @@ Reading the margins:
   own ELF, which the harness cannot do at product size. Derived (not
   measured), from the launcher code: `preflight` +2H, `reprobe_before_capture`
   +1H, `before_exec_check` +1H. With the maximum H this gives for debug:
-  preflight ~2.31 s, re-probe ~2.05 s, before_exec ~0.86 s; for release:
-  ~0.75 s, ~0.59 s, ~0.24 s. None of the derived values reaches 5 s, but
+  preflight ~3.73 s, re-probe ~2.69 s, before_exec ~1.24 s; for release:
+  ~0.47 s, ~0.48 s, ~0.18 s. None of the derived values reaches 5 s, but
   the 5 s limit applies to the describe run only, not to these spans.
 
 No number was used to extend a deadline, and no latency is asserted in any test.
@@ -162,14 +165,24 @@ Executed here (`fixture` unless noted):
   harness build, and, for the measurement-only manifest, size/hash mismatch,
   feature/stripped/profile/argument rules, modification after open.
 - Supervision: signals only through a pidfd; the exit is observed without
-  reaping, so the leader's pid and group stay reserved until the cleanup; a
-  descendant that was orphaned before anything observed it is reclaimed by
-  group, family token or marker (also one that left the session with a
-  cleared environment); an unowned process is never touched and a reader held
-  open by a stranger is bounded; exit before Ready is an event carrying
-  stderr; descriptors without close-on-exec do not reach the child; the
-  isolated directories (config, state, cache, home, tmp, project, runtime
-  sockets) are removed.
+  reaping, so the leader's pid and group stay reserved until the cleanup. A
+  process is reclaimed only if it descends from the harness (directly or by
+  subreaper adoption), started with the family, is not in another live
+  family's tree, and carries the family's identity: the leader's process group,
+  a per-family environment token, or a family marker on a path boundary in its
+  command line or working directory. A string in an argument is never enough:
+  a process that was already running (a user's `tail -f <root>/log`), one in a
+  sibling directory with the same prefix, and another family's tree are left
+  alone (tests). A descendant orphaned before anything observed it is
+  reclaimed, also one that left the session with a cleared environment. A
+  reader held open by a stranger is bounded. A spawn whose pidfd setup fails
+  takes the started child back (tests inject both failing steps). Exit before
+  Ready is an event carrying stderr; descriptors without close-on-exec do not
+  reach the child; the isolated directories are removed. Not covered: a process
+  that is not a descendant cannot be created from inside a subreaper, so that
+  case is a table test of the decision, and descendants of the harness that
+  merely share a tick of the 10 ms process clock with the leader cannot be told
+  apart by time.
 - Product: starts through `--config-dir` in the isolated environment; PID and
   image (same device/inode as the sealed artifact); build identity (manifest
   hash = `--describe-handoff` identity); epoch and core identity from the
