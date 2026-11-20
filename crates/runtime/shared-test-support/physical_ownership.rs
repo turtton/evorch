@@ -58,36 +58,9 @@ impl Fixture {
         self.db().restart_transaction(TX).unwrap().unwrap()
     }
     pub fn cas(&self, thread: &str) -> GraphControlCas {
-        let tx = self.tx();
-        let manifest_id = format!("graph-{thread}");
-        GraphControlCas {
-            restart_id: TX.into(),
-            capture_id: CAPTURE.into(),
-            successor_epoch: 2,
-            phase: tx.phase,
-            component: tx
-                .components
-                .iter()
-                .find(|c| c.manifest_id == manifest_id)
-                .unwrap()
-                .clone(),
-            membership: tx
-                .expected
-                .into_iter()
-                .filter(|m| m.thread_id.as_deref() == Some(thread))
-                .collect(),
-            manifest: self
-                .db()
-                .recovery_manifests()
-                .unwrap()
-                .into_iter()
-                .filter_map(|m| m.record.ok())
-                .find(|m| m.manifest_id == manifest_id)
-                .unwrap(),
-            claim: None,
-            control_revision: 0,
-            control_effect: None,
-        }
+        self.db()
+            .recovery_graph_cas(TX, &format!("graph-{thread}"))
+            .unwrap()
     }
     pub fn owners(&self, thread: &str) -> Vec<OwnedThreadCas> {
         let owner = self.owner.attach(thread).unwrap();
@@ -184,7 +157,7 @@ fn storage_config(root: &Path) -> StorageConfig {
         ..Default::default()
     }
 }
-fn seed(root: &Path, identity: &ConfigIdentity) {
+fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
     std::fs::create_dir_all(root.join("project")).unwrap();
     let storage = Storage::open(storage_config(root)).unwrap();
     let handle = storage.handle();
@@ -243,22 +216,34 @@ fn seed(root: &Path, identity: &ConfigIdentity) {
             .unwrap();
     };
     step(RestartMutation::BeginCapture(expected.clone()));
-    for m in &expected {
-        let thread = m.thread_id.as_deref().unwrap();
+    let groups: Vec<_> = if case == "i9-batch" {
+        vec![expected.iter().collect::<Vec<_>>()]
+    } else {
+        expected.iter().map(|m| vec![m]).collect()
+    };
+    for members in groups {
+        let thread = members[0].thread_id.as_deref().unwrap();
         step(RestartMutation::SaveComponent(RecoveryManifestRecord {
             manifest_id: format!("graph-{thread}"),
             schema_version: 1,
             committed: false,
             superseded: false,
             edges: vec![],
-            members: vec![RecoveryMemberRecord {
-                run_id: m.run_id.clone(),
-                incarnation: m.incarnation.clone(),
-                intent_revision: 0,
-                snapshot: None,
-                resume: true,
-                record_json: serde_json::to_string(&recovery_record(root, thread)).unwrap(),
-            }],
+            members: members
+                .into_iter()
+                .map(|m| RecoveryMemberRecord {
+                    run_id: m.run_id.clone(),
+                    incarnation: m.incarnation.clone(),
+                    intent_revision: 0,
+                    snapshot: None,
+                    resume: true,
+                    record_json: serde_json::to_string(&recovery_record(
+                        root,
+                        m.thread_id.as_deref().unwrap(),
+                    ))
+                    .unwrap(),
+                })
+                .collect(),
         }));
     }
     step(RestartMutation::Commit);
@@ -340,7 +325,7 @@ pub fn run(cases: &[&str], check: fn(&Fixture, &str)) {
         let launch = LaunchGuard::acquire(&identity).unwrap();
         let instance = Instance::acquire(&launch, &root).unwrap();
         drop(launch);
-        seed(&root, &identity);
+        seed(&root, &identity, &case);
         let record = HandoffRecord {
             restart_id: TX.into(),
             config_identity: identity.identity().into(),

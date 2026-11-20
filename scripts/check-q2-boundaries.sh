@@ -7,6 +7,7 @@ violations=$(
   grep -rn --include='*.rs' -E 'claim_physical_bootstrap_owners|retained_physical_owners|finish_recovery_graph_control|write_recovery_graph_progress' crates 2>/dev/null | awk '
     {
       file=$0; sub(/:.*/,"",file); text=$0; sub(/^[^:]*:[0-9]+:/,"",text); sub(/^[[:space:]]+/,"",text)
+      if (file == "crates/runtime/shared-test-support/physical_ownership.rs") next
       if (file ~ /(^|\/)tests\// || file ~ /(^|\/)tests\.rs$/ || file ~ /_tests\.rs$/ || text ~ /^\/\//) next
       if (index(text,"claim_physical_bootstrap_owners")) {
         if (file=="crates/runtime/src/runtime/physical_owners.rs" && text ~ /pub fn /) definitions++

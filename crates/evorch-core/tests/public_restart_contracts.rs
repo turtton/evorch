@@ -386,8 +386,28 @@ async fn without_a_registered_leaf_every_management_request_is_unsupported_befor
     let mut conn = core.connect(&client_hello("unsupported", None)).await;
     let epoch = conn.hello.instance_epoch;
 
+    // The Q2 integration port must not implicitly install its later leaf facade.
+    use workbench_protocol::namespaces::lifecycle::{LifecycleCommand, owned_graphs::*};
+    use workbench_protocol::{commands::Command, envelope::RequestBody};
+    let graph: ConfirmedOwnedGraph = serde_json::from_value(json!({
+        "binding": {
+            "graph": {"graph_id":"graph", "restart_tx_id":"tx", "capture_id":"capture",
+                "expected_revision":"1", "expected_core_epoch":epoch, "owner_identity":null,
+                "owner_generation":null, "operation_id":"unsupported-owned"},
+            "owners":[], "expected_control_revision":"0"
+        }, "confirmed":true
+    }))
+    .unwrap();
+    let owned_request = |id, command| {
+        envelope(
+            id,
+            RequestBody::Command(Command::Lifecycle(LifecycleCommand::OwnedGraphs(command))),
+        )
+    };
     // When: a verified local client uses each kind of management request.
     let requests = [
+        owned_request("r-release", OwnedGraphsCommand::Release(graph.clone())),
+        owned_request("r-resume", OwnedGraphsCommand::Resume(graph)),
         restart_request(epoch, "r-restart", "unsupported-restart"),
         cancel_request(epoch, "r-cancel", "unsupported-cancel"),
         status_request("r-status"),

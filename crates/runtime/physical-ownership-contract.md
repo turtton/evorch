@@ -80,6 +80,23 @@ let _ = <runtime::DisposalAuthority as Default>::default();
 let _: runtime::DisposalAuthority = serde_json::from_str("{}").unwrap();
 ```
 
+Fields cannot be read or rewritten, even when valid authority was obtained from
+the positive retained path:
+
+```compile_fail,E0616
+fn widen(authority: &mut runtime::DisposalAuthority, graph: storage::recovery::graph_control::GraphControlCas) {
+    authority.expected = graph;
+}
+```
+
+```compile_fail,E0616
+fn permits(authority: runtime::DisposalAuthority) { let _ = authority.permits; }
+```
+
+```compile_fail,E0599
+fn duplicate(authority: runtime::DisposalAuthority) { let _ = authority.clone(); }
+```
+
 ## Disposal cannot become execution authority
 
 Positive: independent current execution authority supplies an execution config.

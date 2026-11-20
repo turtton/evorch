@@ -616,3 +616,48 @@ fn residual_release_changes_only_control_and_journal_and_rejects_every_cas_confl
         Some(result)
     );
 }
+
+#[test]
+fn relational_membership_is_complete_in_readonly_snapshot_and_full_writer_cas() {
+    for assignment in [None, Some("foreign-component")] {
+        let f = Fixture::new();
+        let (request, _) = graph(&f, true);
+        assert_eq!(
+            f.db().recovery_graph_cas("restart", "component").unwrap(),
+            request.expected
+        );
+        f.sql()
+            .execute(
+                "UPDATE restart_expected_members SET manifest_id=?1 WHERE run_id=?2",
+                rusqlite::params![assignment, request.expected.membership[0].run_id],
+            )
+            .unwrap();
+        assert!(f.db().recovery_graph_cas("restart", "component").is_err());
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_control(request)
+                .is_err()
+        );
+        assert!(
+            f.db()
+                .recovery_graph_control("component")
+                .unwrap()
+                .is_none()
+        );
+        assert!(f.db().recovery_graph_effect("release").unwrap().is_none());
+        assert!(matches!(
+            f.db().recovery_claims().unwrap()[0].state,
+            RecoveryClaimState::Prepared
+        ));
+        assert_eq!(
+            f.db()
+                .restart_transaction("restart")
+                .unwrap()
+                .unwrap()
+                .components[0]
+                .disposition,
+            RestartDisposition::RetryPending
+        );
+    }
+}

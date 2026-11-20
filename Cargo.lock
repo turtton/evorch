@@ -8544,6 +8544,7 @@ dependencies = [
  "browser",
  "catalog",
  "config",
+ "core-instance",
  "eval",
  "event-bus",
  "futures-util",

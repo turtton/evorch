@@ -94,15 +94,7 @@ impl Database {
             .find(|c| c.manifest_id == manifest_id)
             .cloned()
             .ok_or_else(|| invalid("foreign graph"))?;
-        let membership: Vec<_> = tx
-            .expected
-            .iter()
-            .filter(|m| manifest.members.iter().any(|r| r.run_id == m.run_id))
-            .cloned()
-            .collect();
-        if membership.len() != manifest.members.len() {
-            return Err(invalid("incomplete graph membership"));
-        }
+        let membership = graph_membership(&snapshot, &tx, &manifest)?;
         let ids: Vec<String> = snapshot
             .prepare("SELECT claim_id FROM recovery_claims WHERE manifest_id=?1 ORDER BY claim_id")?
             .query_map([manifest_id], |r| r.get(0))?
@@ -198,23 +190,41 @@ pub(super) fn resolve_activation(
     }
     Ok(())
 }
+fn graph_membership(
+    conn: &Connection,
+    tx: &restart::RestartTransaction,
+    manifest: &RecoveryManifestRecord,
+) -> Result<Vec<restart::RestartExpectedMember>, StorageError> {
+    let assigned: Vec<String> = conn.prepare(
+        "SELECT run_id FROM restart_expected_members WHERE restart_id=?1 AND manifest_id=?2 ORDER BY run_id"
+    )?.query_map(params![tx.metadata.restart_id, manifest.manifest_id], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut captured = manifest
+        .members
+        .iter()
+        .map(|m| m.run_id.clone())
+        .collect::<Vec<_>>();
+    captured.sort();
+    if assigned != captured {
+        return Err(invalid("incomplete relational graph membership"));
+    }
+    let members = tx
+        .expected
+        .iter()
+        .filter(|m| assigned.contains(&m.run_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if members.len() != assigned.len() {
+        return Err(invalid("incomplete graph inventory"));
+    }
+    Ok(members)
+}
 fn check_cas(conn: &Connection, expected: &GraphControlCas) -> Result<(), StorageError> {
     let tx = restart::load(conn, &expected.restart_id)?
         .ok_or_else(|| invalid("missing graph transaction"))?;
     let manifest_id = &expected.manifest.manifest_id;
     let component = tx.components.iter().find(|c| &c.manifest_id == manifest_id);
-    let membership: Vec<_> = tx
-        .expected
-        .iter()
-        .filter(|m| {
-            expected
-                .manifest
-                .members
-                .iter()
-                .any(|r| r.run_id == m.run_id)
-        })
-        .cloned()
-        .collect();
+    let membership = graph_membership(conn, &tx, &expected.manifest)?;
     if tx.metadata.capture_id != expected.capture_id
         || tx.metadata.successor_epoch != expected.successor_epoch
         || tx.adopted_epoch != Some(expected.successor_epoch)

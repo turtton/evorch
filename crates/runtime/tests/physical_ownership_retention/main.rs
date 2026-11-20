@@ -3,9 +3,12 @@
 #[path = "../../shared-test-support/physical_ownership.rs"]
 mod fixture;
 #[cfg(target_os = "linux")]
+mod i9;
+#[cfg(target_os = "linux")]
 fn main() {
     fixture::run(
         &[
+            "i9-batch",
             "sealed-positive",
             "forged-evidence",
             "db-hold",
@@ -33,6 +36,7 @@ fn check(f: &fixture::Fixture, case: &str) {
         }
     }
     match case {
+        "i9-batch" => i9::check(f),
         "sealed-positive" => {
             let mut first = 0;
             let evidence = f.runtime.adopted_restart_ownership_evidence().unwrap();

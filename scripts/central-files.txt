@@ -85,6 +85,9 @@ crates/workbench-protocol/src/namespaces/browser/observation.rs
 crates/workbench-protocol/src/namespaces/browser/observation/data.rs
 
 # Q2 integration: retained authority, writer eligibility, publication and registration.
+crates/runtime/shared-test-support/physical_ownership.rs
+crates/runtime/shared-test-support/physical_test_harness.rs
+crates/runtime/physical-ownership-contract.md
 crates/runtime/src/runtime.rs
 crates/runtime/src/runtime/restart_handoff.rs
 crates/runtime/src/runtime/recovery_activation.rs

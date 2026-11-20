@@ -1,3 +1,5 @@
+#![cfg_attr(doctest, doc = include_str!("../physical-ownership-contract.md"))]
+
 //! ロール実行ランタイム (role-execution runtime)。
 //!
 //! ADR 0002 の capability boundary を持つロール (Orchestrator / Explorer / Worker /

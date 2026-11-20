@@ -509,6 +509,8 @@ expect ok "Q2 runtime is in exactly one CI group" bash -c "[[ \$(jq '[.groups[].
 expect ok "Q2 host is in the support group" bash -c "jq -e '.groups.support.packages | index(\"workbench-host\")' scripts/ci-test-groups.json"
 expect ok "Q2 core is in the runtime group" bash -c "jq -e '.groups.runtime.packages | index(\"evorch-core\")' scripts/ci-test-groups.json"
 expect ok "Q2 cache targets are separately registered for runtime and core" bash -c "[[ \$(grep -c 'binary(=recovery_disposal)' scripts/contract-test-filters.sh) == 2 ]]"
+expect ok "physical retention targets use custom harnesses" bash -c 'grep -A2 "name = \"physical_ownership_retention\"" crates/runtime/Cargo.toml | grep -q "harness = false" && grep -A2 "name = \"q2_disposal_retention\"" crates/workbench-host/Cargo.toml | grep -q "harness = false"'
+expect ok "physical fixtures remain integration-owned" bash -c 'grep -qx "crates/runtime/shared-test-support/physical_ownership.rs" scripts/central-files.txt && grep -qx "crates/runtime/shared-test-support/physical_test_harness.rs" scripts/central-files.txt'
 expect ok "CI runs the physical retention callsite gate" grep -q 'bash scripts/check-q2-boundaries.sh' "$ci"
 
 if (( fails > 0 )); then

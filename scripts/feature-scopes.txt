@@ -107,6 +107,8 @@ pr16bov3 crates/evorch-core/tests/agent_observation_cache.rs
 # pr07b5ar: R (restart targets/request/cancel/status over the #710 coordinator).
 # pr07b5aq1: Q1 (quarantine list/detail/discard/release/resume leaf).
 # pr07b5aq2: Q2 (owned graphs and the graph disposition).
+# Shared physical_ownership.rs and physical_test_harness.rs are central,
+# integration-owned test support. No leaf may add authority constructors.
 # pr07b5acn: CN (native clients: launcher diagnostics, client helper, CLI, GUI).
 # pr07b5acw: CW (the Web adapter and its front end).
 # public_restart_cache.rs is reserved to 5a-V (integration), not any leaf scope.

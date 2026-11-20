@@ -14,7 +14,10 @@ use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
 const LATEST_SCHEMA: u32 = 71;
 
-const EXPECTED_TABLES: [&str; 123] = [
+const EXPECTED_TABLES: [&str; 126] = [
+    "recovery_graph_control",
+    "recovery_graph_effects",
+    "recovery_graph_thread_progress",
     "restart_learning_inventory",
     "restart_learning_members",
     "restart_run_tools",
