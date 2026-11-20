@@ -45,62 +45,61 @@ niced CPU stressors in the same scope (both through
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 1599.5 / 1671.0 | 20 | 1505.9 / 1620.4 / 1707.8 | 0 |
-| `reprobe_before_capture` | 5 | 1575.2 / 1689.1 | 20 | 1503.6 / 1609.9 / 1628.9 | 0 |
-| `before_exec_check` | 5 | 525.6 / 554.8 | 20 | 499.7 / 532.8 / 559.4 | 0 |
-| `describe_probe_run` | 5 | 264.3 / 286.4 | 20 | 256.2 / 284.7 / 285.1 | 0 |
-| `hash_pass` | 5 | 259.5 / 295.8 | 20 | 250.9 / 276.6 / 289.5 | 0 |
-| `cold_spawn_to_ready` | 5 | 399.0 / 400.8 | 20 | 375.8 / 387.0 / 387.2 | 0 |
-| `exec_to_ready` | 5 | 364.4 / 410.7 | 20 | 347.7 / 389.1 / 393.1 | 0 |
-| `exec_to_claim` | 5 | 302.0 / 316.0 | 20 | 288.0 / 329.0 / 334.0 | 0 |
+| `preflight` | 5 | 1734.3 / 1768.7 | 20 | 1689.3 / 1774.1 / 1789.8 | 0 |
+| `reprobe_before_capture` | 5 | 1747.0 / 1777.6 | 20 | 1675.1 / 1785.3 / 1803.8 | 0 |
+| `before_exec_check` | 5 | 580.5 / 589.9 | 20 | 563.0 / 589.0 / 589.9 | 0 |
+| `describe_probe_run` | 5 | 296.1 / 303.2 | 20 | 285.1 / 304.8 / 306.4 | 0 |
+| `hash_pass` | 5 | 286.1 / 293.2 | 20 | 281.2 / 296.8 / 299.6 | 0 |
+| `cold_spawn_to_ready` | 5 | 378.7 / 391.4 | 20 | 376.1 / 403.5 / 420.1 | 0 |
+| `exec_to_ready` | 5 | 384.8 / 399.7 | 20 | 379.4 / 398.5 / 398.6 | 0 |
+| `exec_to_claim` | 5 | 324.0 / 336.0 | 20 | 318.0 / 336.0 / 337.0 | 0 |
 
 ### debug / loaded
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 1519.9 / 1553.1 | 20 | 1601.4 / 1750.9 / 1769.8 | 0 |
-| `reprobe_before_capture` | 5 | 1518.6 / 1552.6 | 20 | 1583.4 / 1688.4 / 1813.4 | 0 |
-| `before_exec_check` | 5 | 508.4 / 514.2 | 20 | 523.9 / 553.9 / 572.0 | 0 |
-| `describe_probe_run` | 5 | 263.4 / 267.2 | 20 | 270.7 / 291.7 / 296.8 | 0 |
-| `hash_pass` | 5 | 255.6 / 257.8 | 20 | 262.3 / 286.6 / 320.3 | 0 |
-| `cold_spawn_to_ready` | 5 | 388.6 / 403.4 | 20 | 398.0 / 466.0 / 535.3 | 0 |
-| `exec_to_ready` | 5 | 356.0 / 389.3 | 20 | 370.5 / 415.2 / 416.5 | 0 |
-| `exec_to_claim` | 5 | 294.0 / 320.0 | 20 | 307.0 / 341.0 / 341.0 | 0 |
+| `preflight` | 5 | 1548.9 / 1576.4 | 20 | 1526.6 / 1555.6 / 1571.3 | 0 |
+| `reprobe_before_capture` | 5 | 1548.2 / 1571.2 | 20 | 1523.8 / 1570.1 / 1574.6 | 0 |
+| `before_exec_check` | 5 | 514.7 / 519.1 | 20 | 506.1 / 519.1 / 521.5 | 0 |
+| `describe_probe_run` | 5 | 264.6 / 266.0 | 20 | 259.7 / 269.1 / 270.2 | 0 |
+| `hash_pass` | 5 | 257.0 / 259.8 | 20 | 252.2 / 259.6 / 261.0 | 0 |
+| `cold_spawn_to_ready` | 5 | 390.5 / 399.2 | 20 | 385.9 / 406.7 / 429.5 | 0 |
+| `exec_to_ready` | 5 | 362.7 / 379.0 | 20 | 354.8 / 362.7 / 372.1 | 0 |
+| `exec_to_claim` | 5 | 298.0 / 310.0 | 20 | 293.0 / 299.0 / 302.0 | 0 |
 
 ### release / limited
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 336.8 / 400.6 | 20 | 341.5 / 362.7 / 383.3 | 0 |
-| `reprobe_before_capture` | 5 | 361.0 / 393.2 | 20 | 335.6 / 383.5 / 383.8 | 0 |
-| `before_exec_check` | 5 | 119.3 / 129.9 | 20 | 110.1 / 125.9 / 128.4 | 0 |
-| `describe_probe_run` | 5 | 64.6 / 67.8 | 20 | 58.6 / 66.5 / 69.0 | 0 |
-| `hash_pass` | 5 | 56.7 / 65.0 | 20 | 55.0 / 63.4 / 63.8 | 0 |
-| `cold_spawn_to_ready` | 5 | 164.0 / 175.6 | 20 | 162.1 / 394.2 / 899.2 | 0 |
-| `exec_to_ready` | 5 | 96.2 / 106.4 | 20 | 95.6 / 123.0 / 153.6 | 0 |
-| `exec_to_claim` | 5 | 72.0 / 80.0 | 20 | 72.0 / 78.0 / 120.0 | 0 |
+| `preflight` | 5 | 390.1 / 394.4 | 20 | 382.6 / 392.9 / 399.8 | 0 |
+| `reprobe_before_capture` | 5 | 378.9 / 391.0 | 20 | 378.5 / 395.7 / 398.4 | 0 |
+| `before_exec_check` | 5 | 127.5 / 128.9 | 20 | 128.2 / 130.9 / 131.1 | 0 |
+| `describe_probe_run` | 5 | 64.5 / 66.0 | 20 | 67.3 / 68.7 / 69.6 | 0 |
+| `hash_pass` | 5 | 64.5 / 64.9 | 20 | 64.9 / 65.4 / 65.6 | 0 |
+| `cold_spawn_to_ready` | 5 | 153.7 / 172.3 | 20 | 152.6 / 174.9 / 176.7 | 0 |
+| `exec_to_ready` | 5 | 102.7 / 104.2 | 20 | 102.0 / 106.8 / 111.8 | 0 |
+| `exec_to_claim` | 5 | 80.0 / 81.0 | 20 | 79.0 / 85.0 / 90.0 | 0 |
 
 ### release / loaded
 
 | interval | first n | first p50 / max ms | warm n | warm p50 / p95 / max ms | failures |
 |---|---:|---:|---:|---:|---:|
-| `preflight` | 5 | 371.1 / 375.9 | 20 | 344.0 / 356.5 / 379.9 | 0 |
-| `reprobe_before_capture` | 5 | 370.9 / 380.3 | 20 | 341.7 / 352.9 / 366.9 | 0 |
-| `before_exec_check` | 5 | 121.7 / 123.7 | 20 | 112.5 / 113.9 / 116.8 | 0 |
-| `describe_probe_run` | 5 | 64.3 / 68.2 | 20 | 59.6 / 60.9 / 62.1 | 0 |
-| `hash_pass` | 5 | 60.4 / 62.0 | 20 | 56.2 / 58.0 / 58.4 | 0 |
-| `cold_spawn_to_ready` | 5 | 161.9 / 175.4 | 20 | 170.4 / 428.2 / 594.6 | 0 |
-| `exec_to_ready` | 5 | 103.0 / 108.0 | 20 | 98.7 / 119.3 / 177.9 | 0 |
-| `exec_to_claim` | 5 | 79.0 / 82.0 | 20 | 73.0 / 97.0 / 114.0 | 0 |
-
-**Run-to-run variation on this shared host is real.** Two earlier runs of the
-same method gave debug maxima for `cold_spawn_to_ready` of 486 ms and 4171 ms
-(superseded runs on slightly different fixtures); this run has
-535.3 ms. Causes were not investigated; the host is shared with other work. The
-maxima below are the largest of this run and are a sample, not a bound. The
-`loaded` condition is not consistently slower than `limited`, and whether
-the stressors really competed for the 4-CPU quota was not verified beyond the
-script's own setup: do not read the loaded rows as a contention bound.
+| `preflight` | 5 | 335.8 / 337.6 | 20 | 338.1 / 343.0 / 346.7 | 0 |
+| `reprobe_before_capture` | 5 | 334.8 / 354.8 | 20 | 337.8 / 342.0 / 344.4 | 0 |
+| `before_exec_check` | 5 | 110.3 / 111.3 | 20 | 111.0 / 112.0 / 115.4 | 0 |
+| `describe_probe_run` | 5 | 58.2 / 58.8 | 20 | 58.9 / 60.7 / 61.4 | 0 |
+| `hash_pass` | 5 | 54.7 / 55.0 | 20 | 55.4 / 57.2 / 57.2 | 0 |
+| `cold_spawn_to_ready` | 5 | 153.7 / 172.3 | 20 | 155.4 / 183.4 / 187.8 | 0 |
+| `exec_to_ready` | 5 | 94.4 / 95.7 | 20 | 95.1 / 101.2 / 105.8 | 0 |
+| `exec_to_claim` | 5 | 71.0 / 72.0 | 20 | 72.0 / 75.0 / 75.0 | 0 |
+**Run-to-run variation on this shared host is real.** Earlier runs of the same
+method gave debug maxima for `cold_spawn_to_ready` of 486 ms, 4171 ms and
+535 ms (superseded runs on earlier fixtures); this run has 429.5 ms. Causes
+were not investigated; the host is shared with other work. The maxima below are
+the largest of this run and are a sample, not a bound. The `loaded` condition is
+not consistently slower than `limited`, and whether the stressors really
+competed for the 4-CPU quota was not verified beyond the script's own setup: do
+not read the loaded rows as a contention bound.
 
 ### What the intervals are
 
@@ -124,14 +123,14 @@ Maximum over all four runs of each profile, and the margin to the unchanged limi
 
 | interval / limit | debug max | release max | margin (debug / release) |
 |---|---:|---:|---|
-| `describe_probe_run` vs probe deadline **5 s** | 296.8 | 69.0 | 4.70 s / 4.93 s |
-| `preflight` (no limit of its own; target timeout 300 s) | 1769.8 | 400.6 | - |
-| `reprobe_before_capture` | 1813.4 | 393.2 | - |
-| `before_exec_check` | 572.0 | 129.9 | - |
-| `exec_to_ready` vs boot deadline **120 s** | 416.5 | 177.9 | 119.58 s / 119.82 s, successor side only (see below) |
-| `exec_to_claim` vs lease + grace **15 s** | 341.0 | 120.0 | 14.66 s / 14.88 s; 13.66 s / 13.88 s if the last old heartbeat was one `heartbeat_ms` earlier |
-| one hash pass `H` | 320.3 | 65.0 | - |
-| `cold_spawn_to_ready` (reference) | 535.3 | 899.2 | - |
+| `describe_probe_run` vs probe deadline **5 s** | 306.4 | 69.6 | 4.69 s / 4.93 s |
+| `preflight` (no limit of its own; target timeout 300 s) | 1789.8 | 399.8 | - |
+| `reprobe_before_capture` | 1803.8 | 398.4 | - |
+| `before_exec_check` | 589.9 | 131.1 | - |
+| `exec_to_ready` vs boot deadline **120 s** | 399.7 | 111.8 | 119.60 s / 119.89 s, successor side only (see below) |
+| `exec_to_claim` vs lease + grace **15 s** | 337.0 | 90.0 | 14.66 s / 14.91 s; 13.66 s / 13.91 s if the last old heartbeat was one `heartbeat_ms` earlier |
+| one hash pass `H` | 299.6 | 65.6 | - |
+| `cold_spawn_to_ready` (reference) | 429.5 | 187.8 | - |
 
 Reading the margins:
 
@@ -152,8 +151,8 @@ Reading the margins:
   own ELF, which the harness cannot do at product size. Derived (not
   measured), from the launcher code: `preflight` +2H, `reprobe_before_capture`
   +1H, `before_exec_check` +1H. With the maximum H this gives for debug:
-  preflight ~2.41 s, re-probe ~2.13 s, before_exec ~0.89 s; for release:
-  ~0.53 s, ~0.46 s, ~0.19 s. None of the derived values reaches 5 s, but
+  preflight ~2.39 s, re-probe ~2.10 s, before_exec ~0.89 s; for release:
+  ~0.53 s, ~0.46 s, ~0.20 s. None of the derived values reaches 5 s, but
   the 5 s limit applies to the describe run only, not to these spans.
 
 No number was used to extend a deadline, and no latency is asserted in any test.
@@ -176,8 +175,17 @@ Executed here (`fixture` unless noted):
   looking (no marker, token, path or time is used). The reaper kills and reaps
   only its own direct children, holds the leader as a zombie (pid and group
   reserved) until the cleanup, and cleans up by itself when its control pipe
-  closes. The harness signals only the leader, through a pidfd, and talks to the
-  reaper. Tests (all synchronised by events): an orphan made before anything
+  closes. Inside the reaper every reap of a child, and every conversion of a
+  child's pid into a pidfd that is then signalled, happens under one lock, and
+  the kernel confirms that the pidfd names a child of the reaper before it is
+  signalled; a JOIN waits without reaping and reaps under the lock, so a JOIN and
+  a KILL cannot race on a pid. The harness signals only the leader, through a
+  pidfd opened while it was unreaped, and talks to the reaper; a family is
+  described by a `LaunchSpec` (program, arguments, environment, working
+  directory), not a `Command`, so no setting can be silently dropped. The
+  cleanup is bounded: a reaper that stops answering (tested with SIGSTOP) or
+  dies before reporting the exit (tested with SIGKILL) is killed through its
+  pidfd and reported as `reaper_lost`, never a hang or a panic. Tests (all synchronised by events): an orphan made before anything
   observed it, also one that left the session with a cleared environment,
   is adopted by the reaper (`ppid == reaper`, not the harness) and reclaimed;
   processes that are not in the family are never touched whatever they
