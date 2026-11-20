@@ -26,8 +26,8 @@ mod recovery_activation;
 mod recovery_control;
 pub use physical_owners::{DisposalAuthority, OwnedThreadCas, PhysicalClaimReport};
 pub use recovery_control::{
-    ActivationReservation, ActivationReservationProblem, AutomaticActivationReservation,
-    ManualActivationReservation,
+    ActivatedReservation, ActivationReservation, ActivationReservationProblem,
+    AutomaticActivationReservation, ManualActivationReservation,
 };
 pub mod recovery_disposal;
 #[cfg(any(test, feature = "recovery-test-support"))]

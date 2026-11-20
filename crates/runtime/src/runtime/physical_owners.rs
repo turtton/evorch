@@ -39,10 +39,24 @@ pub struct PhysicalClaimReport {
 /// }
 /// ```
 pub struct DisposalAuthority {
-    pub(crate) runtime: Weak<Shared>,
-    pub(crate) expected: GraphControlCas,
-    pub(crate) registry_path: PathBuf,
-    pub(crate) permits: BTreeMap<String, Option<OwnerPermit>>,
+    runtime: Weak<Shared>,
+    expected: GraphControlCas,
+    registry_path: PathBuf,
+    permits: BTreeMap<String, Option<OwnerPermit>>,
+}
+impl DisposalAuthority {
+    pub(crate) fn runtime(&self) -> &Weak<Shared> {
+        &self.runtime
+    }
+    pub(crate) fn expected(&self) -> &GraphControlCas {
+        &self.expected
+    }
+    pub(crate) fn registry_path(&self) -> &std::path::Path {
+        &self.registry_path
+    }
+    pub(crate) fn permits(&self) -> &BTreeMap<String, Option<OwnerPermit>> {
+        &self.permits
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedThreadCas {

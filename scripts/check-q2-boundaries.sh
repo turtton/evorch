@@ -25,5 +25,12 @@ violations=$(
       if(calls!=1) print "VIOLATION: expected one planned bootstrap retention call, found "calls+0
     }' || true
 )
+# Visibility is a same-crate leaf boundary too, not just an external Rust API.
+visibility=$(awk '
+  /pub struct DisposalAuthority/ { inside=1; next }
+  inside && /^}/ { inside=0 }
+  inside && /pub[ (]/ { print "VIOLATION: DisposalAuthority field must stay private: " $0 }
+' crates/runtime/src/runtime/physical_owners.rs)
+if [[ -n $visibility ]]; then printf '%s\n' "$visibility"; exit 1; fi
 if [[ -n $violations ]]; then printf '%s\n' "$violations"; exit 1; fi
 echo 'Q2 retention boundaries passed'

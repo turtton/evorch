@@ -12,7 +12,7 @@ fn was_cleaned(
     permit: &OwnerPermit,
 ) -> Result<bool, RegistryError> {
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM disposal_cleanup_receipt_members WHERE restart_id=?1 AND capture_id=?2 AND thread_id=?3 AND owner_id=?4 AND owner_generation=?5 AND cleaned=1)",
-        params![authority.expected.restart_id,authority.expected.capture_id,thread,permit.lease.owner_id,permit.lease.generation], |r|r.get(0))?)
+        params![authority.expected().restart_id,authority.expected().capture_id,thread,permit.lease.owner_id,permit.lease.generation], |r|r.get(0))?)
 }
 fn check_owner(
     conn: &rusqlite::Connection,
@@ -41,7 +41,7 @@ fn check_owner(
             match &owner.planned_claim {
                 Some(hold) => {
                     let members = authority
-                        .expected
+                        .expected()
                         .membership
                         .iter()
                         .filter(|m| m.thread_id.as_deref() == Some(thread))
@@ -50,8 +50,8 @@ fn check_owner(
                         .active_runs
                         .union(&hold.parked_runs)
                         .collect::<BTreeSet<_>>();
-                    if hold.transaction_id != authority.expected.restart_id
-                        || hold.capture_id != authority.expected.capture_id
+                    if hold.transaction_id != authority.expected().restart_id
+                        || hold.capture_id != authority.expected().capture_id
                         || hold.orphaned
                         || members.iter().any(|m| {
                             !runs.contains(&m.run_id)
@@ -71,9 +71,9 @@ fn check_owner(
     }
 }
 pub(crate) fn guard(authority: &DisposalAuthority) -> Result<Registry, RegistryError> {
-    let registry = Registry::open_readonly(&authority.registry_path)?;
+    let registry = Registry::open_readonly(authority.registry_path())?;
     registry.connection.execute_batch("BEGIN DEFERRED")?;
-    for (thread, permit) in &authority.permits {
+    for (thread, permit) in authority.permits() {
         check_owner(&registry.connection, authority, thread, permit)?;
     }
     Ok(registry)
@@ -117,16 +117,16 @@ pub(crate) fn cleanup(
 ) -> Result<DisposalOwnerReceipt, RegistryError> {
     if shared
         .iter()
-        .any(|thread| !authority.permits.contains_key(thread))
+        .any(|thread| !authority.permits().contains_key(thread))
     {
         return Err(OwnershipError::PlannedMismatch.into());
     }
-    let mut registry = Registry::open_existing(&authority.registry_path)?;
+    let mut registry = Registry::open_existing(authority.registry_path())?;
     let tx = registry
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
     let generations: BTreeMap<_, _> = authority
-        .permits
+        .permits()
         .iter()
         .filter_map(|(thread, p)| {
             p.as_ref().map(|p| {
@@ -139,9 +139,9 @@ pub(crate) fn cleanup(
         .collect();
     if let Some(receipt) = read_on(&tx, &effect.operation_id)? {
         if receipt.effect != effect
-            || receipt.manifest_id != authority.expected.manifest.manifest_id
-            || receipt.restart_id != authority.expected.restart_id
-            || receipt.capture_id != authority.expected.capture_id
+            || receipt.manifest_id != authority.expected().manifest.manifest_id
+            || receipt.restart_id != authority.expected().restart_id
+            || receipt.capture_id != authority.expected().capture_id
             || receipt.owner_generations != generations
             || receipt
                 .shared_threads
@@ -155,19 +155,19 @@ pub(crate) fn cleanup(
         return Ok(receipt);
     }
     // Validate every expected owner, including absence, before the first update.
-    for (thread, permit) in &authority.permits {
+    for (thread, permit) in authority.permits() {
         check_owner(&tx, authority, thread, permit)?;
     }
     let mut receipt = DisposalOwnerReceipt {
         effect,
-        manifest_id: authority.expected.manifest.manifest_id.clone(),
-        restart_id: authority.expected.restart_id.clone(),
-        capture_id: authority.expected.capture_id.clone(),
+        manifest_id: authority.expected().manifest.manifest_id.clone(),
+        restart_id: authority.expected().restart_id.clone(),
+        capture_id: authority.expected().capture_id.clone(),
         owner_generations: generations,
         cleaned_threads: Vec::new(),
         shared_threads: Vec::new(),
     };
-    for (thread, permit) in &authority.permits {
+    for (thread, permit) in authority.permits() {
         let Some(permit) = permit else {
             continue;
         };

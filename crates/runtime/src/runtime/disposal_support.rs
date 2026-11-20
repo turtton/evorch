@@ -17,14 +17,14 @@ impl AgentRuntime {
         self.record_graph_effect(1);
         self.validate_disposal_runtime(authority)?;
         let ids = authority
-            .expected
+            .expected()
             .manifest
             .members
             .iter()
             .map(|m| m.run_id.parse::<RunId>().map_err(error))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let claim_id = authority
-            .expected
+            .expected()
             .claim
             .as_ref()
             .map(|c| c.claim_id.as_str());
@@ -63,7 +63,7 @@ impl AgentRuntime {
         for id in &ids {
             if let Some(index) = indexes.get(id) {
                 let captured = authority
-                    .expected
+                    .expected()
                     .manifest
                     .members
                     .iter()
@@ -91,7 +91,7 @@ impl AgentRuntime {
             .get()
             .ok_or_else(|| error("no run store"))?;
         let request = GraphControlWrite {
-            expected: authority.expected.clone(),
+            expected: authority.expected().clone(),
             effect: effect.clone(),
             action: GraphControlAction::Release,
         };
@@ -103,7 +103,7 @@ impl AgentRuntime {
                 .filter(|r| {
                     r.revoked
                         && r.effect == effect
-                        && r.manifest_id == authority.expected.manifest.manifest_id
+                        && r.manifest_id == authority.expected().manifest.manifest_id
                 })
                 .ok_or_else(|| error(write_error))?,
         };
@@ -136,7 +136,9 @@ impl AgentRuntime {
             .get()
             .ok_or_else(|| error("no run store"))?;
         if !store
-            .with_database(|db| db.recovery_graph_control(&authority.expected.manifest.manifest_id))
+            .with_database(|db| {
+                db.recovery_graph_control(&authority.expected().manifest.manifest_id)
+            })
             .map_err(error)?
             .is_some_and(|c| c.revoked)
         {
@@ -146,7 +148,7 @@ impl AgentRuntime {
             .map_err(error)
     }
     fn validate_disposal_runtime(&self, authority: &DisposalAuthority) -> Result<(), RuntimeError> {
-        if !Weak::ptr_eq(&authority.runtime, &Arc::downgrade(&self.shared)) {
+        if !Weak::ptr_eq(authority.runtime(), &Arc::downgrade(&self.shared)) {
             return Err(error("foreign disposal authority"));
         }
         Ok(())

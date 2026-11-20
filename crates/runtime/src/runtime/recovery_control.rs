@@ -54,6 +54,37 @@ impl Drop for Reservation {
 /// }
 /// ```
 pub struct AutomaticActivationReservation(Reservation);
+/// Retains the original graph reservation after FULL activation ACK until the
+/// caller has finished publishing the root binding (including failure).
+///
+/// This is not execution authority. Release explicitly after publication, or
+/// let Drop return the slot when a caller exits early.
+///
+/// ```no_run
+/// fn published(guard: runtime::ActivatedReservation) { guard.release(); }
+/// ```
+/// ```compile_fail
+/// fn duplicate(guard: runtime::ActivatedReservation) {
+///     let second = guard.clone();
+/// }
+/// ```
+#[must_use = "retain until complete_root_recovery finishes, then release"]
+pub struct ActivatedReservation(ActivationReservation);
+impl ActivatedReservation {
+    pub(super) fn new(reservation: ActivationReservation) -> Self {
+        Self(reservation)
+    }
+    pub fn release(self) {
+        drop(self.0);
+    }
+}
+impl std::fmt::Debug for ActivatedReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivatedReservation")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Manual execution still requires independently resolved execution authority.
 pub struct ManualActivationReservation {
     reservation: Reservation,
@@ -66,7 +97,8 @@ pub struct ManualActivationReservation {
 /// # fn run(rt: &runtime::AgentRuntime, paused: runtime::PausedRecoveryComponent,
 /// # authority: runtime::CurrentRecoveryAuthority) -> Result<(), runtime::RuntimeError> {
 /// let reservation = rt.reserve_automatic_activation(&paused.claim().manifest_id)?;
-/// rt.activate_component(paused, authority, reservation)?;
+/// let (_runs, publication) = rt.activate_component(paused, authority, reservation)?;
+/// publication.release();
 /// # Ok(()) }
 /// ```
 /// ```compile_fail

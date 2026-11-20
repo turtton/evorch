@@ -68,7 +68,9 @@ async fn prepared_owner_handoff_rejects_old_stop_and_shutdown_but_successor_can_
             .unwrap();
         successor.activate_component(adopted, authority, reservation)
     })
-    .unwrap();
+    .unwrap()
+    .1
+    .release();
     f.model.entered.notified().await;
     successor.cancel(run).unwrap();
     let _ = successor.wait(run).await;

@@ -493,7 +493,8 @@ async fn resume_legacy_manifests(include_events: bool) {
                     .unwrap();
                 runtime.activate_component(paused, authority, reservation)
             })
-            .unwrap(),
+            .unwrap()
+            .0,
         );
     }
     assert_eq!(ids.len(), 12);

@@ -135,7 +135,9 @@ async fn project_catalog_validation_adoption_admission_and_execution_share_one_p
             .unwrap();
         runtime.activate_component_with_models(paused, authority, models, reservation)
     })
-    .unwrap();
+    .unwrap()
+    .1
+    .release();
     selected.entered.notified().await;
     assert_eq!(selected.catalogs.load(Ordering::SeqCst), 1);
     assert_eq!(selected.checks.load(Ordering::SeqCst), 1);

@@ -337,7 +337,9 @@ async fn assert_recovery_cache(human_after_c3: bool) {
                 .unwrap();
             runtime.activate_component(paused, authority, reservation)
         })
-        .unwrap();
+        .unwrap()
+        .1
+        .release();
         let evidence = graph_evidence(&config);
         model.parent_resumed.notified().await;
         assert_eq!(graph_evidence(&config), evidence);

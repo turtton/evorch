@@ -106,6 +106,56 @@ fn graph_reservations_are_exclusive_bounded_and_released_on_drop() {
 }
 
 #[tokio::test]
+async fn activation_ack_keeps_manual_reservation_contended_until_binding_publication_finishes() {
+    for explicit_release in [false, true] {
+        let f = Fixture::new(0);
+        let run = saved(&f).await;
+        let runtime = new_process(&f);
+        let prepared = prepare(&f, &runtime);
+        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let (proof, startup, root) = prepared_adoption::evidence(&f, &prepared.claim().claim_id);
+        let mut paused = runtime
+            .adopt_prepared_claim(proof, startup, &root, &authority)
+            .unwrap();
+        runtime
+            .restore_relations_and_continuations(&mut paused)
+            .unwrap();
+        let manifest = paused.claim().manifest_id.clone();
+        let reservation = runtime.reserve_automatic_activation(&manifest).unwrap();
+        let (runs, published) = runtime
+            .activate_component(paused, authority, reservation)
+            .unwrap();
+        assert_eq!(runs, vec![run]);
+        let effect = storage::recovery::graph_control::GraphEffectKey {
+            operation_id: "manual-after-ack".into(),
+            attempt_nonce: "attempt".into(),
+        };
+        // The caller has the FULL ACK but deliberately has not yet called
+        // complete_root_recovery. No timing or provider scheduling is involved.
+        assert!(matches!(
+            runtime.reserve_manual_activation(&manifest, effect.clone(), 0),
+            Err(crate::RuntimeError::ActivationReservationUnavailable {
+                reason: crate::ActivationReservationProblem::Contended
+            })
+        ));
+        // Both normal publication completion and early-return/failure drop
+        // return precisely this slot; the guard does not mint authority.
+        if explicit_release {
+            published.release();
+        } else {
+            drop(published);
+        }
+        drop(
+            runtime
+                .reserve_manual_activation(&manifest, effect, 0)
+                .unwrap(),
+        );
+        runtime.cancel(run).unwrap();
+        let _ = runtime.wait(run).await;
+    }
+}
+
+#[tokio::test]
 async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effects() {
     use storage::recovery::RecoveryActivationObservation as Observation;
     for (committed, corrupt_readback, expected) in [
@@ -403,7 +453,9 @@ async fn startup_message_ids(retain_correlations: bool) {
                 reservation,
             )
         })
-        .unwrap();
+        .unwrap()
+        .1
+        .release();
         let between = runtime
             .send_agent_message(
                 fresh,
@@ -872,6 +924,7 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
             runtime.activate_component(paused, authority, reservation)
         })
         .unwrap()
+        .0
         .len(),
         2
     );
@@ -1134,7 +1187,9 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
             reservation,
         )
     })
-    .unwrap();
+    .unwrap()
+    .1
+    .release();
     while f.model.admission_calls.load(Ordering::SeqCst) == calls_before {
         f.model.admission_entered.notified().await;
     }

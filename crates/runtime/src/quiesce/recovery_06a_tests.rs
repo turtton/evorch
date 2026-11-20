@@ -804,7 +804,8 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
                 .unwrap();
             restored.activate_component(adopted, authority, reservation)
         })
-        .unwrap(),
+        .unwrap()
+        .0,
         [parent]
     );
     // Drive the one resumed parent turn through a real tool and back to a safe

@@ -16,6 +16,11 @@ if bash "$gate" "$work" >/dev/null; then echo 'external retained-set write accep
 printf 'handle.finish_recovery_graph_control(observation);\n' > "$work/crates/runtime/src/extra.rs"
 if bash "$gate" "$work" >/dev/null; then echo 'automatic/query call to manual-only writer accepted'; exit 1; fi
 rm "$work/crates/runtime/src/extra.rs"
+printf 'pub struct DisposalAuthority {\n    expected: GraphControlCas,\n}\n' >> "$work/crates/runtime/src/runtime/physical_owners.rs"
+bash "$gate" "$work" >/dev/null
+printf 'pub struct DisposalAuthority {\n    pub(crate) expected: GraphControlCas,\n}\n' >> "$work/crates/runtime/src/runtime/physical_owners.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'crate-visible authority field accepted'; exit 1; fi
+printf 'pub fn claim_physical_bootstrap_owners($evidence: RestartOwnershipEvidence) {}\n' > "$work/crates/runtime/src/runtime/physical_owners.rs"
 : > "$work/crates/workbench-host/src/bootstrap/planned.rs"
 if bash "$gate" "$work" >/dev/null; then echo 'missing bootstrap call accepted'; exit 1; fi
 echo 'Q2 boundary fixtures passed'

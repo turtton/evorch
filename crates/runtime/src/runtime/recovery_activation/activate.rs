@@ -74,7 +74,7 @@ impl AgentRuntime {
         paused: PausedRecoveryComponent,
         authority: CurrentRecoveryAuthority,
         reservation: impl Into<ActivationReservation>,
-    ) -> Result<Vec<RunId>, RuntimeError> {
+    ) -> Result<(Vec<RunId>, ActivatedReservation), RuntimeError> {
         let models = self.pin_recovery_models(&authority);
         self.activate_component_with_models(paused, authority, models, reservation)
     }
@@ -87,7 +87,7 @@ impl AgentRuntime {
         mut authority: CurrentRecoveryAuthority,
         models: RecoveryModels,
         reservation: impl Into<ActivationReservation>,
-    ) -> Result<Vec<RunId>, RuntimeError> {
+    ) -> Result<(Vec<RunId>, ActivatedReservation), RuntimeError> {
         #[cfg(test)]
         self.record_graph_effect(0);
         let reservation = reservation.into();
@@ -402,7 +402,10 @@ impl AgentRuntime {
             cancellation::HookPoint::RecoveryGateOpened,
             &paused.controls[0].1,
         );
-        Ok(resume.into_iter().collect())
+        Ok((
+            resume.into_iter().collect(),
+            ActivatedReservation::new(reservation),
+        ))
     }
 
     pub(super) fn validate_recovery_authority(

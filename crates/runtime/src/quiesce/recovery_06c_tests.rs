@@ -93,7 +93,9 @@ async fn same_adopted_successor_reattaches_the_same_prepared_claim_before_activa
             .unwrap();
         runtime.activate_component(adopted, authority, reservation)
     })
-    .unwrap();
+    .unwrap()
+    .1
+    .release();
     let row = db.resume_intent(&run.to_string()).unwrap().unwrap();
     assert_eq!(row.incarnation, claim.members[0].new_incarnation);
     assert_eq!(
