@@ -89,3 +89,31 @@ IO_CONTRACT_FILTER='
       | binary(=diagnostic_ledger)
       | binary(=ownership_close_headless)))
 '
+
+# Explicit D-3a2-A registration in the existing remaining inventory (not cache
+# or I/O). The runtime inventory has bootstrap-test-support and I0's sealed
+# product artifact. A removed target/feature or an accidental reclassification
+# must fail the existing inventory step, without adding another test run.
+check_planned_shutdown_watchdog_inventory() {
+  local inventory=$1 binary
+  for binary in evorch-core evorch-core::planned_shutdown_watchdog evorch-core::planned_shutdown_watchdog_composition; do
+    if ! awk -F '\t' -v binary="$binary" '
+      $1 == "evorch-core" && $2 == binary && $4 == "false" &&
+      (binary != "evorch-core" || index($3, "restart::shutdown_watchdog_tests::") == 1) { found = 1 }
+      END { exit !found }
+    ' "$inventory/remaining.tsv"; then
+      echo "missing non-ignored planned shutdown watchdog tests in remaining: $binary" >&2
+      return 1
+    fi
+  done
+  if ! awk -F '\t' '
+    $1 == "evorch-core" &&
+    ($2 == "evorch-core::planned_shutdown_watchdog" ||
+     $2 == "evorch-core::planned_shutdown_watchdog_composition" ||
+     ($2 == "evorch-core" && index($3, "restart::shutdown_watchdog_tests::") == 1)) { found = 1 }
+    END { exit found }
+  ' "$inventory/cache.tsv" "$inventory/io.tsv"; then
+    echo 'planned shutdown watchdog tests must not enter cache or I/O suites' >&2
+    return 1
+  fi
+}

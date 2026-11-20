@@ -4,6 +4,7 @@
 use core_instance::handoff::{BlockedShutdownSignals, ShutdownInbox};
 use std::{
     io,
+    os::fd::AsRawFd,
     sync::{Arc, Mutex},
     task::{Poll, Waker},
 };
@@ -12,6 +13,7 @@ use tokio::io::unix::AsyncFd;
 #[derive(Clone)]
 pub struct OperatorSignals(Arc<Mutex<Reader>>);
 struct Reader {
+    watchdog: Option<super::shutdown_watchdog::Observer>,
     inbox: Option<AsyncFd<ShutdownInbox>>,
     shutdown: bool,
     wake: Option<Waker>,
@@ -31,10 +33,23 @@ impl OperatorSignals {
     /// Transfer the bootstrap inbox after its watchdog has stopped.
     pub fn from_inbox(inbox: ShutdownInbox) -> io::Result<Self> {
         Ok(Self(Arc::new(Mutex::new(Reader {
+            watchdog: None,
             inbox: Some(AsyncFd::new(inbox)?),
             shutdown: false,
             wake: None,
         }))))
+    }
+    pub(crate) fn set_shutdown_watchdog(
+        &self,
+        observer: super::shutdown_watchdog::Observer,
+    ) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if state.watchdog.is_some() {
+            return Err(io::Error::other("signal watchdog already installed"));
+        }
+        observer.installed_hook();
+        state.watchdog = Some(observer);
+        Ok(())
     }
     pub async fn received(&mut self) {
         std::future::poll_fn(|cx| {
@@ -44,7 +59,10 @@ impl OperatorSignals {
             }
             state.wake = Some(cx.waker().clone());
             let Reader {
-                inbox, shutdown, ..
+                inbox,
+                shutdown,
+                watchdog,
+                ..
             } = &mut *state;
             let Some(inbox) = inbox.as_ref() else {
                 return Poll::Pending;
@@ -60,7 +78,12 @@ impl OperatorSignals {
             // Latch before consuming. Only an empty/spurious readiness clears
             // this provisional latch, under the same transfer-excluding mutex.
             *shutdown = true;
-            let result = ready.try_io(|inbox| inbox.get_ref().read_pending());
+            let result = ready.try_io(|inbox| match watchdog {
+                Some(observer) => observer.read_pending(inbox.get_ref().as_raw_fd(), || {
+                    inbox.get_ref().read_pending()
+                }),
+                None => inbox.get_ref().read_pending(),
+            });
             drop(ready);
             match result {
                 Err(_) => {
@@ -109,12 +132,11 @@ impl StoppedSignals {
         let mut state = self.owner.0.lock().unwrap();
         let already_requested = state.shutdown;
         state.shutdown = true;
-        let pending = self
-            .inbox
-            .as_ref()
-            .expect("owned stopped reader")
-            .get_ref()
-            .read_pending();
+        let inbox = self.inbox.as_ref().expect("owned stopped reader").get_ref();
+        let pending = match &state.watchdog {
+            Some(observer) => observer.read_pending(inbox.as_raw_fd(), || inbox.read_pending()),
+            None => inbox.read_pending(),
+        };
         if matches!(&pending, Ok(signals) if signals.is_empty()) {
             state.shutdown = already_requested;
         } else {

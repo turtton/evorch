@@ -81,16 +81,38 @@ only after releasing ownership. The narrowly scoped central bootstrap change
 reorders that operation and calls a private planned-exit helper; its tracing
 events observe progress only and grant no production authority.
 
-Explicit shutdown while drain is pending still waits for actual cleanup **with
-no upper bound**, as it did before this ordering fix. D-3a bounds M2 stage 5,
-not shutdown or Tokio runtime destruction. A follow-up **D-3a2** PR must design
-and independently review bounded process termination: a planned-shutdown-only
-independent watchdog with a separate 10s budget; expiry must leave owner rows
-untouched and end the process without running Drop, allowing leases to expire.
-An async timeout returning an error is insufficient because runtime destruction
-can still join outstanding blocking work, and synchronous DB calls can stall
-the executor. The termination primitive, ordinary-shutdown interaction and
-channel/injected-clock subprocess proof belong to that follow-up, not this PR.
+### D-3a2-A: Linux core watchdog (not the complete D-3a2 guarantee)
+
+D-3a's stage-5 drain deadline does not bound shutdown or runtime destruction.
+The independent OS watchdog adds a separate, fixed **10 seconds**, armed once
+when both this incarnation's irreversible capture and explicit SIGINT/SIGTERM
+have been observed, in either order. Cold and planned entry start ineligible;
+request acceptance or successor origin alone never qualifies. Idle exit,
+startup/listener errors, successful exec, and shutdown without capture do not
+arm it. Non-Linux retains its previous behavior and has **no watchdog guarantee**.
+
+Both product entries use the same outer runtime lifetime. The watchdog is
+prepared after single-threaded entry/adoption, before Tokio, and is completed
+only after runtime destruction. It observes a CLOEXEC duplicate of the existing
+signal inbox without consuming it. Both ordinary and stopped-reader consuming
+paths observe pending signals before reading; a stopped executor/reader or host
+lock cannot stop the OS watcher. Capture publication performs no fd I/O.
+
+Expiry atomically wins against normal completion and calls **_exit(74)** without
+Drop. It performs no DB/owner/generation/scratch/TX mutation, logger, formatting,
+allocation, lock, join or child-ledger kill. Leases are left to expire; the next
+cold boot keeps the existing recovery/quarantine rules. **74 does not certify
+cleanup completion, owner release, or restart success.** A fixed diagnostic is
+best effort: one nonblocking write to an independently opened pipe, or one
+nonblocking SIGPIPE-safe socket send. No expiry write is attempted for regular
+files, terminals or closed stderr; the original stderr flags are never changed.
+
+**A does not satisfy D-7 and does not complete D-3a2.** Direct renderer/MCP/LSP/
+shell children cannot all be assumed to have a generic lifeline. In particular,
+bubblewrap's --die-with-parent is not a blanket guarantee for direct spawns or
+PTY paths. Owned-child/group termination is a separately reviewed B follow-up;
+the complete D-3a2 guarantee requires both A and B. The expiry tail deliberately
+does not call lock-taking ProcessGroup/ledger cleanup.
 
 ## Tests and observation
 
@@ -187,8 +209,8 @@ canonical project's catalog. A missing default-project cache cannot borrow
 another project's metadata to admit a graph. UsagePricing remains unchanged.
 
 Public restart/quarantine operations and capability publication, client
-reconnection and CLI continuity remain 5a/5b work. The explicit-shutdown watchdog
-remains D-3a2 and is not added here.
+reconnection and CLI continuity remain 5a/5b work. D-3a2-A adds only the core
+watchdog described above; owned-child coverage remains the separate B follow-up.
 
 ### Product and full-core contract matrix
 
@@ -264,7 +286,8 @@ explicitly select Edit; no selection is guessed from captured input.
   retain these internal entry, lifetime, activation and fail-closed invariants.
 - **5b:** CLI invocation/token continuity and its distinct reconnect deadlines;
   ordinary conversation follow-up routing here is not CLI invocation resumption.
-- **D-3a2:** bounded explicit-shutdown watchdog, unchanged and out of scope here.
+- **D-3a2-B:** owned-child/group termination. A alone does not meet D-7 or
+  complete D-3a2; completion requires both separately reviewed changes.
 - **F4:** same-build product-to-product real exec remains separate. The raw
   cache fixtures use different predecessor/successor images.
 - **MCP evidence:** no-I/O is structural with no server configured; the MCP

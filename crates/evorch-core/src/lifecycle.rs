@@ -46,6 +46,8 @@ impl IdleGrace {
 }
 
 #[cfg(target_os = "linux")]
+pub mod shutdown_watchdog;
+#[cfg(target_os = "linux")]
 pub mod signals;
 #[cfg(target_os = "linux")]
 pub use signals::OperatorSignals;
@@ -70,6 +72,8 @@ impl OperatorSignals {
 /// Shared signal/idle/restart arbitration. Client loss never cancels a restart attempt.
 pub mod control;
 pub struct LifecycleDriver {
+    #[cfg(target_os = "linux")]
+    watchdog: Option<shutdown_watchdog::Observer>,
     control: control::ControlDrainHandle,
     control_requests: tokio::sync::mpsc::UnboundedReceiver<control::Request>,
     pub restart: crate::restart::RestartCoordinator,
@@ -79,11 +83,24 @@ impl LifecycleDriver {
     pub fn new(host: &workbench_host::bootstrap::BootstrappedHost) -> Self {
         let (send, control_requests) = tokio::sync::mpsc::unbounded_channel();
         Self {
+            #[cfg(target_os = "linux")]
+            watchdog: None,
             control: control::ControlDrainHandle(send),
             control_requests,
             restart: crate::restart::RestartCoordinator::new(host),
             idle: IdleGrace::new(Duration::from_secs(host.config.core.idle_grace_secs)),
         }
+    }
+    /// Optional outside product entry; product wrappers require all wiring receipts.
+    #[cfg(target_os = "linux")]
+    pub fn set_shutdown_watchdog(
+        &mut self,
+        observer: shutdown_watchdog::Observer,
+    ) -> std::io::Result<()> {
+        self.restart.set_shutdown_watchdog(observer.clone())?;
+        observer.installed_lifecycle();
+        self.watchdog = Some(observer);
+        Ok(())
     }
     pub fn control_drain(&self) -> control::ControlDrainHandle {
         self.control.clone()
@@ -120,6 +137,11 @@ impl LifecycleDriver {
         web: Option<workbench_web::WebServer>,
         signals: OperatorSignals,
     ) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(observer) = &self.watchdog {
+            signals.set_shutdown_watchdog(observer.clone())?;
+            observer.validate_wiring()?;
+        }
         self.run_with_clock(
             host,
             backend,
