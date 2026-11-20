@@ -15,7 +15,10 @@ use tokio::sync::{Semaphore, oneshot};
 use workbench_authority::IngressContext;
 use workbench_protocol::{
     errors::ErrorCode,
-    namespaces::lifecycle::{AdminAction, restart::RestartQuery},
+    namespaces::lifecycle::{
+        AdminAction,
+        restart::{RestartQuery, RestartReply},
+    },
     wire::InstanceEpoch,
 };
 pub type AdminReplyReceiver = oneshot::Receiver<Result<AdminAccepted, AdminFailure>>;
@@ -239,12 +242,10 @@ impl AdminService {
             };
             let service = self.clone();
             let _ = self.tasks.spawn("admin-cancel-audit", move |_| async move {
-                if let Some(_permit) = service.background.try_enter() {
-                    let _ = service
-                        .audit
-                        .background_cancel(entry, outcome, &_permit)
-                        .await;
-                }
+                let _ = service
+                    .audit
+                    .background_cancel(entry, outcome, &service.background)
+                    .await;
                 Ok(())
             });
             let _ = tx.send(Ok(AdminAccepted { receipt }));
@@ -309,7 +310,24 @@ impl AdminService {
                 let _ = reply.send(result);
                 return;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if let Some(prior) = self.audit.pending_entry(&entry.key.operation_id) {
+                    let result = if audit::same_intent(&entry, &prior) {
+                        Ok(AdminAccepted {
+                            receipt: AdminReceipt {
+                                operation_id: request.intent.operation_id().clone(),
+                                state: AdminOperationState::Unknown,
+                                outcome: AdminOutcome::Unknown,
+                                audit_warning: true,
+                            },
+                        })
+                    } else {
+                        Err(conflict())
+                    };
+                    let _ = reply.send(result);
+                    return;
+                }
+            }
             Err(e) => {
                 let _ = reply.send(Err(e));
                 return;
@@ -476,6 +494,10 @@ impl AdminService {
             },
         }
     }
+    /// Denial aggregate rows explicitly dropped or with unknown persistence.
+    pub fn denial_persistence_failures(&self) -> u64 {
+        self.denials.persistence_failures()
+    }
     pub fn query(
         self: &Arc<Self>,
         request: AuthorizedAdminQuery,
@@ -563,7 +585,11 @@ impl AdminService {
         )?;
         let (tx, rx) = oneshot::channel();
         if matches!(request.query, AdminQuery::Restart(RestartQuery::Status)) {
-            let _ = tx.send(facade.status());
+            let _ = tx.send(
+                facade
+                    .status()
+                    .map(|view| self.stamp_management_epoch(view)),
+            );
             return Ok(rx);
         }
         let slot = self
@@ -586,12 +612,43 @@ impl AdminService {
                 };
                 let result = service
                     .authorize(&request.context, request.query.action().unwrap())
-                    .and(result);
+                    .and(result)
+                    .map(|view| service.stamp_management_epoch(view));
                 let _ = tx.send(result);
                 Ok(())
             })
             .map_err(|_| busy())?;
         Ok(rx)
+    }
+    fn stamp_management_epoch(&self, mut view: AdminView) -> AdminView {
+        match &mut view {
+            LifecycleReply::Restart(RestartReply::Targets(t)) => t.core_epoch = self.epoch,
+            LifecycleReply::Restart(RestartReply::Status(s)) => {
+                s.core_epoch = self.epoch;
+                s.audit = self.denials.diagnostics();
+            }
+            LifecycleReply::OwnedGraphs(
+                workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsReply::Detail(
+                    d,
+                ),
+            ) => d.binding.graph.expected_core_epoch = self.epoch,
+            _ => {}
+        }
+        view
+    }
+    /// Test-only observation after joining owned tasks; no polling is needed.
+    #[cfg(feature = "test-support")]
+    pub fn available_admission_slots(&self) -> (usize, usize) {
+        (
+            self.requests.available_permits(),
+            self.continuations.available_permits(),
+        )
+    }
+    /// Join admission completion without cancelling the request task.
+    #[cfg(feature = "test-support")]
+    pub async fn wait_for_request_slots(&self) {
+        let _requests = self.requests.acquire_many(64).await.unwrap();
+        let _continuations = self.continuations.acquire_many(32).await.unwrap();
     }
     fn entry(
         &self,

@@ -393,6 +393,7 @@ jobs:
           if [[ "${{ matrix.group }}" == runtime ]]; then
             source scripts/contract-test-filters.sh
             check_planned_shutdown_watchdog_inventory "$EVORCH_TEST_INVENTORY_DIR"
+            check_public_restart_contracts_inventory "$EVORCH_TEST_INVENTORY_DIR"
           fi
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the

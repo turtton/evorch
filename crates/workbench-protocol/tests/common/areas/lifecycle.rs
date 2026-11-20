@@ -45,7 +45,7 @@ pub fn samples() -> AreaSamples {
                 json!({"type":"lifecycle","payload":{"type":"operation_status","payload":{"operation_id":"op1","state":"unknown","outcome":"unknown","audit_warning":true}}}),
             ),
             de(
-                json!({"type":"lifecycle","payload":{"type":"restart","payload":{"type":"targets","payload":{"revision":"1","targets":[{"id":"current","revision":"1"}],"truncated":false}}}}),
+                json!({"type":"lifecycle","payload":{"type":"restart","payload":{"type":"targets","payload":{"core_epoch":"7","revision":"1","targets":[{"id":"current","revision":"1"}],"truncated":false}}}}),
             ),
             de(
                 json!({"type":"lifecycle","payload":{"type":"quarantine","payload":{"type":"list","payload":{"items":[],"revision":"1","truncated":false}}}}),
@@ -61,6 +61,38 @@ pub fn samples() -> AreaSamples {
 pub fn extra_goldens() -> Vec<(String, Value)> {
     let mut out = vec![];
     let mut samples = samples();
+    {
+        use workbench_protocol::{
+            namespaces::lifecycle::{restart::*, *},
+            wire::{InstanceEpoch, Revision},
+        };
+        samples.query_replies[0] = workbench_protocol::queries::QueryReply::Lifecycle(
+            LifecycleReply::Restart(RestartReply::Status(RestartManagementStatus {
+                core_epoch: InstanceEpoch(7),
+                audit: AdminAuditDiagnostics {
+                    denial_persistence_failures: Revision(2),
+                    denial_loss: Some(DenialLossSummary {
+                        count: Revision(18),
+                        first_ms: Revision(120001),
+                        last_ms: Revision(180002),
+                    }),
+                },
+                status: RestartStatus {
+                    restart_id: None,
+                    phase: RestartPhase::Running,
+                    revision: 1,
+                    blockers: vec![],
+                    blocker_total: 0,
+                    blocker_omitted: 0,
+                    active_producers: 0,
+                },
+            })),
+        );
+        out.push((
+            "query_reply/lifecycle/restart/status".into(),
+            serde_json::to_value(&samples.query_replies[0]).unwrap(),
+        ));
+    }
     samples.queries[0] = de(
         json!({"type":"lifecycle","payload":{"type":"owned_graphs","payload":{"type":"detail","payload":{"graph_ref":"g1"}}}}),
     );

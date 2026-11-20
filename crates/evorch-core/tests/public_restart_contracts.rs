@@ -414,3 +414,53 @@ async fn without_a_registered_leaf_every_management_request_is_unsupported_befor
     );
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn projection_cursor_invalidation_does_not_invalidate_management_cas() {
+    let mut core = Core::start(true).await;
+    core.host.lock().unwrap().projection().invalidate();
+    let mut conn = core.connect(&client_hello("epoch-split", None)).await;
+    assert_ne!(conn.hello.instance_epoch, core.epoch);
+    conn.send(&query_request(
+        "targets",
+        LifecycleQuery::Restart(RestartQuery::Targets),
+    ))
+    .await;
+    let reply = conn.reply().await;
+    let LifecycleReply::Restart(RestartReply::Targets(targets)) = lifecycle_view(&reply) else {
+        panic!("targets")
+    };
+    assert_eq!(targets.core_epoch, core.epoch);
+    conn.send(&status_request("management-status")).await;
+    let reply = conn.reply().await;
+    let LifecycleReply::Restart(RestartReply::Status(status)) = lifecycle_view(&reply) else {
+        panic!("status")
+    };
+    assert_eq!(status.core_epoch, core.epoch);
+    assert_eq!(
+        status.audit,
+        Default::default(),
+        "host diagnostic values override untrusted facade values"
+    );
+    conn.send(&restart_request(
+        targets.core_epoch,
+        "management-request",
+        "management-operation",
+    ))
+    .await;
+    assert_eq!(
+        receipt(&conn.reply().await).state,
+        AdminOperationState::Started
+    );
+    core.event("finalize", "management-operation").await;
+    conn.send(&restart_request(
+        conn.hello.instance_epoch,
+        "wrong-cursor",
+        "wrong-cursor-operation",
+    ))
+    .await;
+    assert_eq!(error_code(&conn.reply().await), ErrorCode::Conflict);
+    assert!(core.port.record("wrong-cursor-operation").is_none());
+    drop(conn);
+    core.shutdown().await;
+}

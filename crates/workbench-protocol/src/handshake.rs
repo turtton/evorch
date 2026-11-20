@@ -305,6 +305,8 @@ pub struct ServerHello {
     pub capabilities: Vec<Capability>,
     pub server_build: BuildInfo,
     pub core: CoreIdentity,
+    /// Projection/cursor epoch. It may advance within a process; use lifecycle
+    /// management query bindings, not this value, for administrative CAS.
     pub instance_epoch: InstanceEpoch,
     pub limits: WireLimits,
     pub status: CoreStatus,

@@ -122,3 +122,17 @@ check_planned_shutdown_watchdog_inventory() {
     return 1
   fi
 }
+
+# 5a-I's real-UDS authority/fast-lane contract stays in the runtime group's
+# remaining suite (not cache, not I/O). Package/features are ci-test-groups owned.
+check_public_restart_contracts_inventory() {
+  local inventory=$1
+  if ! awk -F '	' '$1 == "evorch-core" && $2 == "evorch-core::public_restart_contracts" && $4 == "false" { n++ } END { exit n < 8 }' "$inventory/remaining.tsv"; then
+    echo 'missing public restart contracts in remaining (at least eight non-ignored tests required)' >&2
+    return 1
+  fi
+  if ! awk -F '	' '$1 == "evorch-core" && $2 == "evorch-core::public_restart_contracts" { found = 1 } END { exit found }' "$inventory/cache.tsv" "$inventory/io.tsv"; then
+    echo 'public restart authority contracts must not enter cache or I/O suites' >&2
+    return 1
+  fi
+}

@@ -334,6 +334,26 @@ for suite in cache io; do
   : > "$watchdog_inventory/$suite.tsv"
 done
 expect ok "watchdog guard is wired into CI's existing inventory step" bash -c "grep -q 'check_planned_shutdown_watchdog_inventory \"\$EVORCH_TEST_INVENTORY_DIR\"' $ci"
+
+# Package inventory is the existing ci-test-groups registration; the explicit
+# guard must fail if the public UDS binary is absent, ignored or misclassified.
+expect ok "public restart contracts belong to the runtime package inventory" jq -e '.groups.runtime.packages | index("evorch-core") != null' scripts/ci-test-groups.json
+expect ok "public restart contracts have bootstrap support" jq -e '.groups.runtime.features | index("evorch-core/bootstrap-test-support") != null' scripts/ci-test-groups.json
+public_inventory="$work/public-inventory"
+mkdir -p "$public_inventory"
+printf '%s\n' 'evorch-core	evorch-core::public_restart_contracts	contract_0	false' 'evorch-core	evorch-core::public_restart_contracts	contract_1	false' 'evorch-core	evorch-core::public_restart_contracts	contract_2	false' 'evorch-core	evorch-core::public_restart_contracts	contract_3	false' 'evorch-core	evorch-core::public_restart_contracts	contract_4	false' 'evorch-core	evorch-core::public_restart_contracts	contract_5	false' 'evorch-core	evorch-core::public_restart_contracts	contract_6	false' 'evorch-core	evorch-core::public_restart_contracts	contract_7	false' > "$public_inventory/remaining.tsv"
+: > "$public_inventory/cache.tsv"
+: > "$public_inventory/io.tsv"
+expect ok "all eight public restart contracts remain selected" check_public_restart_contracts_inventory "$public_inventory"
+cp "$public_inventory/remaining.tsv" "$public_inventory/cache.tsv"
+expect fail "public authority contracts cannot enter cache" check_public_restart_contracts_inventory "$public_inventory"
+: > "$public_inventory/cache.tsv"
+cp "$public_inventory/remaining.tsv" "$public_inventory/io.tsv"
+expect fail "public authority contracts cannot enter I/O" check_public_restart_contracts_inventory "$public_inventory"
+: > "$public_inventory/io.tsv"
+: > "$public_inventory/remaining.tsv"
+expect fail "a missing public restart contract inventory is rejected" check_public_restart_contracts_inventory "$public_inventory"
+expect ok "public guard is wired into CI inventory" grep -q check_public_restart_contracts_inventory "$ci"
 watchdog_manifest_is_feature_gated() {
   local block
   block=$(grep -A4 '^name = "planned_shutdown_watchdog_composition"$' "$1")

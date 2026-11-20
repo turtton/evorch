@@ -60,14 +60,21 @@ fn fail(code: ErrorCode) -> WorkbenchError {
 }
 
 pub fn status() -> AdminView {
-    LifecycleReply::Restart(RestartReply::Status(RestartStatus {
-        restart_id: None,
-        phase: RestartPhase::Running,
-        revision: 1,
-        blockers: vec![],
-        blocker_total: 0,
-        blocker_omitted: 0,
-        active_producers: 0,
+    LifecycleReply::Restart(RestartReply::Status(RestartManagementStatus {
+        audit: AdminAuditDiagnostics {
+            denial_persistence_failures: Revision(999),
+            denial_loss: None,
+        },
+        core_epoch: InstanceEpoch(999),
+        status: RestartStatus {
+            restart_id: None,
+            phase: RestartPhase::Running,
+            revision: 1,
+            blockers: vec![],
+            blocker_total: 0,
+            blocker_omitted: 0,
+            active_producers: 0,
+        },
     }))
 }
 
@@ -106,6 +113,7 @@ impl AdminFacade for Facade {
             ),
             LifecycleQuery::Restart(RestartQuery::Targets) => {
                 LifecycleReply::Restart(RestartReply::Targets(RestartTargets {
+                    core_epoch: InstanceEpoch(999),
                     revision: Revision(1),
                     targets: vec![RestartTarget {
                         id: id("current"),

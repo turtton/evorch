@@ -57,14 +57,18 @@ fn inspection(intent: &AdminIntent) -> AdminInspection {
     }
 }
 fn status() -> AdminView {
-    LifecycleReply::Restart(RestartReply::Status(RestartStatus {
-        restart_id: None,
-        phase: RestartPhase::Running,
-        revision: 1,
-        blockers: vec![],
-        blocker_total: 0,
-        blocker_omitted: 0,
-        active_producers: 0,
+    LifecycleReply::Restart(RestartReply::Status(RestartManagementStatus {
+        audit: Default::default(),
+        core_epoch: InstanceEpoch(999),
+        status: RestartStatus {
+            restart_id: None,
+            phase: RestartPhase::Running,
+            revision: 1,
+            blockers: vec![],
+            blocker_total: 0,
+            blocker_omitted: 0,
+            active_producers: 0,
+        },
     }))
 }
 fn owned(graph: GraphCas) -> owned_graphs::ConfirmedOwnedGraph {
@@ -83,6 +87,8 @@ struct Facade {
     effects: Arc<AtomicUsize>,
     after_register: AtomicUsize,
     inspections: AtomicUsize,
+    await_recovery: AtomicBool,
+    bind_recovery: AtomicBool,
 }
 impl Facade {
     fn new(intent: &AdminIntent) -> Arc<Self> {
@@ -92,6 +98,8 @@ impl Facade {
             effects: Arc::new(AtomicUsize::new(0)),
             after_register: AtomicUsize::new(0),
             inspections: AtomicUsize::new(0),
+            await_recovery: AtomicBool::new(false),
+            bind_recovery: AtomicBool::new(false),
         })
     }
 }
@@ -138,8 +146,17 @@ impl AdminFacade for Facade {
             return Err(fail(ErrorCode::Conflict));
         }
         let effects = self.effects.clone();
+        let binding = admission.restart_audit();
+        let await_recovery = self.await_recovery.load(Ordering::SeqCst);
+        let bind_recovery = self.bind_recovery.load(Ordering::SeqCst);
         let accepted = admission.register(Box::pin(async move {
             effects.fetch_add(1, Ordering::SeqCst);
+            if bind_recovery {
+                binding.bind(&id("bound-restart")).await?;
+            }
+            if await_recovery {
+                return Ok(AdminExecutionOutcome::AwaitRestartRecovery);
+            }
             Ok(AdminExecutionOutcome::Complete(AdminOutcome::Succeeded))
         }));
         match self.after_register.load(Ordering::SeqCst) {
@@ -456,7 +473,11 @@ async fn cancel_and_status_bypass_pending_ack_and_full_general_capacity() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(view, status());
+    let mut expected = status();
+    if let LifecycleReply::Restart(RestartReply::Status(s)) = &mut expected {
+        s.core_epoch = InstanceEpoch(7);
+    }
+    assert_eq!(view, expected);
     let cancel = LifecycleCommand::Restart(RestartCommand::Cancel(CancelRestart {
         restart_id: id("restart"),
         expected_core_epoch: InstanceEpoch(7),
@@ -890,5 +911,53 @@ async fn owned_same_id_is_readback_before_inspection_even_after_control_and_owne
         assert_eq!(h.facade.inspections.load(Ordering::SeqCst), 1);
         assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
         h.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn only_a_bound_request_can_defer_finalization_to_recovery_and_all_release_slots() {
+    for (intent, bind, deferred) in [
+        (request("bound-request"), true, true),
+        (request("unbound-request"), false, false),
+        (
+            LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Release(owned(
+                GraphCas {
+                    graph_id: id("g"),
+                    restart_tx_id: id("tx"),
+                    capture_id: id("cap"),
+                    expected_revision: Revision(1),
+                    expected_core_epoch: InstanceEpoch(7),
+                    owner_identity: None,
+                    owner_generation: None,
+                    operation_id: id("other-bound"),
+                },
+            ))),
+            true,
+            false,
+        ),
+    ] {
+        let mut h = Harness::new(&intent);
+        h.facade.await_recovery.store(true, Ordering::SeqCst);
+        h.facade.bind_recovery.store(bind, Ordering::SeqCst);
+        let operation = intent.operation_id().as_str().to_owned();
+        let accepted = h.submit(intent).unwrap().await.unwrap().unwrap();
+        assert_eq!(accepted.receipt().state, AdminOperationState::Started);
+        if !deferred {
+            h.event("finalize").await;
+        }
+        h.service.wait_for_request_slots().await;
+        assert_eq!(h.service.available_admission_slots(), (64, 32));
+        h.shutdown().await;
+        let row = h.port.record(&operation);
+        assert_eq!(row.restart_id.is_some(), bind);
+        if deferred {
+            assert_eq!(row.state, AuditState::Started);
+            assert_eq!(row.outcome, None);
+        } else {
+            assert_eq!(row.state, AuditState::Finished);
+            assert_eq!(row.outcome, Some(AuditOutcome::Unknown));
+        }
+        assert_eq!(h.service.available_admission_slots(), (64, 32));
+        assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
     }
 }

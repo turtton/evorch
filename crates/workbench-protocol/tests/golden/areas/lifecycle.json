@@ -258,6 +258,7 @@
     "payload": {
       "payload": {
         "payload": {
+          "core_epoch": "7",
           "revision": "1",
           "targets": [
             {
@@ -268,6 +269,35 @@
           "truncated": false
         },
         "type": "targets"
+      },
+      "type": "restart"
+    },
+    "type": "lifecycle"
+  },
+  "query_reply/lifecycle/restart/status": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "audit": {
+            "denial_loss": {
+              "count": "18",
+              "first_ms": "120001",
+              "last_ms": "180002"
+            },
+            "denial_persistence_failures": "2"
+          },
+          "core_epoch": "7",
+          "status": {
+            "active_producers": 0,
+            "blocker_omitted": 0,
+            "blocker_total": 0,
+            "blockers": [],
+            "phase": "running",
+            "restart_id": null,
+            "revision": 1
+          }
+        },
+        "type": "status"
       },
       "type": "restart"
     },

@@ -110,9 +110,19 @@ pub struct RestartTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestartTargets {
+    /// Process management epoch, independent of the event cursor epoch.
+    pub core_epoch: InstanceEpoch,
     pub revision: Revision,
     pub targets: Vec<RestartTarget>,
     pub truncated: bool,
+}
+/// Public management status; the legacy quiesce DTO remains unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartManagementStatus {
+    pub audit: AdminAuditDiagnostics,
+    pub core_epoch: InstanceEpoch,
+    pub status: RestartStatus,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -123,14 +133,32 @@ pub struct RestartTargets {
 )]
 pub enum RestartReply {
     Targets(RestartTargets),
-    Status(RestartStatus),
+    Status(RestartManagementStatus),
 }
 impl RestartReply {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::Targets(t) => items(&t.targets)?,
-            Self::Status(s) => s.validate()?,
+            Self::Status(s) => s.status.validate()?,
         };
         bounded(self)
     }
+}
+
+/// Process-local, bounded best-effort audit diagnostics. All values reset on restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminAuditDiagnostics {
+    /// Aggregate rows dropped, unknown, or lost to cross-window queue saturation.
+    pub denial_persistence_failures: Revision,
+    pub denial_loss: Option<DenialLossSummary>,
+}
+/// Denials lost specifically to cross-window queue saturation. Memory only: this
+/// is not an audit row, never rewrites timestamps, and is cleared on restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenialLossSummary {
+    pub count: Revision,
+    pub first_ms: Revision,
+    pub last_ms: Revision,
 }
