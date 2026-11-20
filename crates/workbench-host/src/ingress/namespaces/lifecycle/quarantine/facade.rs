@@ -4,7 +4,8 @@ use super::{
 };
 use crate::admin::{
     AdminAccepted, AdminExecutionOutcome, AdminFacade, AdminFailure, AdminInspection, AdminIntent,
-    AdminIo, AdminQuery, AdminReader, AdminView, CommitAdmission, conflict, failure,
+    AdminIo, AdminQuery, AdminReader, AdminView, CommitAdmission, VerifiedConnection, conflict,
+    failure,
 };
 use std::sync::Arc;
 use storage::recovery::quarantine::{
@@ -54,7 +55,11 @@ fn snapshot(store: &dyn QuarantineStore, limit: usize) -> Result<QuarantineSnaps
 impl AdminFacade for QuarantineFacade {
     /// The current state of the one graph a discard names, as the binding a
     /// client would have to hold. A graph with an owner is not this leaf's.
-    fn inspect<'a>(&'a self, intent: &'a AdminIntent) -> AdminIo<'a, AdminInspection> {
+    fn inspect<'a>(
+        &'a self,
+        intent: &'a AdminIntent,
+        _connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminInspection> {
         Box::pin(async move {
             let LifecycleCommand::Quarantine(QuarantineCommand::Discard(confirmed)) = intent else {
                 return Err(conflict());
@@ -84,7 +89,11 @@ impl AdminFacade for QuarantineFacade {
         })
     }
 
-    fn query<'a>(&'a self, query: &'a AdminQuery) -> AdminIo<'a, AdminView> {
+    fn query<'a>(
+        &'a self,
+        query: &'a AdminQuery,
+        _connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminView> {
         Box::pin(async move {
             let LifecycleQuery::Quarantine(query) = query else {
                 return Err(conflict());
@@ -131,6 +140,7 @@ impl AdminFacade for QuarantineFacade {
         intent: AdminIntent,
         expected: AdminInspection,
         admission: CommitAdmission,
+        _connection: &VerifiedConnection,
     ) -> Result<AdminAccepted, AdminFailure> {
         let LifecycleCommand::Quarantine(QuarantineCommand::Discard(confirmed)) = intent else {
             return Err(conflict());
