@@ -929,9 +929,11 @@ pub(crate) async fn run_agent(
             // discovery could follow a trial-created symlink outside the sandbox.
             state.rules_session = None;
         }
-        _restart_shell_executor = state.runtime().map(|runtime| {
-            runtime.register_restart_shell_executor(state.task.run_id, &state.shared.executor)
-        });
+        if !benchmark_mode {
+            _restart_shell_executor = state.runtime().map(|runtime| {
+                runtime.register_restart_shell_executor(state.task.run_id, &state.shared.executor)
+            });
+        }
         state.publish_message_count();
         if state.transition(AgentRunPhase::Running, None).is_err() {
             return;

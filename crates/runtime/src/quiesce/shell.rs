@@ -216,6 +216,54 @@ mod tests {
     use tools::Tool;
 
     #[tokio::test]
+    async fn benchmark_keeps_its_existing_executor_registration_path() {
+        struct UnselectedRecorder;
+        #[async_trait::async_trait]
+        impl crate::benchmark::BenchmarkRecorder for UnselectedRecorder {
+            async fn capture(
+                &self,
+                _: &crate::benchmark::BenchmarkCheckpoint,
+            ) -> Result<(), String> {
+                panic!("the benchmark selector must not select this Worker");
+            }
+        }
+        let mut f = super::super::fixture::Fixture::new(0);
+        f.runtime = f
+            .runtime
+            .with_benchmark_recorder(
+                crate::benchmark::BenchmarkSelector {
+                    role: crate::Role::Reviewer,
+                    category: None,
+                    occurrence: 1,
+                },
+                Arc::new(UnselectedRecorder),
+            )
+            .unwrap();
+        let run = f.start();
+        f.model.entered.notified().await;
+        let benchmark_registered = f
+            .runtime
+            .shared
+            .benchmark_executors
+            .lock()
+            .unwrap()
+            .contains_key(&run);
+        let restart_registered = f
+            .runtime
+            .shared
+            .restart_shell_executors
+            .lock()
+            .unwrap()
+            .contains_key(&run);
+        f.cleanup(run).await;
+        assert!(benchmark_registered);
+        assert!(
+            !restart_registered,
+            "benchmark registration must be unchanged"
+        );
+    }
+
+    #[tokio::test]
     async fn real_loop_unregisters_on_completion_without_retaining_executor() {
         let f = super::super::fixture::Fixture::new(0);
         let run = f.start();
