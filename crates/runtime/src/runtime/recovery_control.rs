@@ -1,0 +1,292 @@
+//! Process-local graph reservations. Durable control rows never reconstruct these.
+use super::*;
+use storage::recovery::graph_control::{ActivationControl, GraphEffectKey};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationReservationProblem {
+    Contended,
+    Capacity,
+}
+
+#[derive(Default)]
+pub(super) struct GraphReservations {
+    next: u64,
+    graphs: HashMap<String, (u64, bool)>,
+    supervised: HashMap<String, (ActivationReservation, storage::recovery::RecoveryClaim)>,
+}
+struct Reservation {
+    runtime: Weak<Shared>,
+    manifest: String,
+    nonce: u64,
+    unknown: bool,
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.unknown {
+            return;
+        }
+        if let Some(runtime) = self.runtime.upgrade() {
+            let mut state = runtime
+                .graph_reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.graphs.get(&self.manifest) == Some(&(self.nonce, false)) {
+                state.graphs.remove(&self.manifest);
+            }
+        }
+    }
+}
+/// A single automatic attempt, including binding publication and FULL activation.
+///
+/// ```no_run
+/// # fn reserve(rt: &runtime::AgentRuntime) -> Result<(), runtime::RuntimeError> {
+/// let reservation = rt.reserve_automatic_activation("graph")?;
+/// rt.check_automatic_activation(&reservation)?;
+/// # Ok(()) }
+/// ```
+/// ```compile_fail
+/// fn duplicate(rt: &runtime::AgentRuntime) {
+///     let reservation = rt.reserve_automatic_activation("graph").unwrap();
+///     let first = reservation;
+///     let second = reservation;
+/// }
+/// ```
+pub struct AutomaticActivationReservation(Reservation);
+/// Manual execution still requires independently resolved execution authority.
+pub struct ManualActivationReservation {
+    reservation: Reservation,
+    effect: GraphEffectKey,
+    control_revision: u64,
+}
+/// Typed activation boundary, distinct from disposal authority.
+///
+/// ```no_run
+/// # fn run(rt: &runtime::AgentRuntime, paused: runtime::PausedRecoveryComponent,
+/// # authority: runtime::CurrentRecoveryAuthority) -> Result<(), runtime::RuntimeError> {
+/// let reservation = rt.reserve_automatic_activation(&paused.claim().manifest_id)?;
+/// rt.activate_component(paused, authority, reservation)?;
+/// # Ok(()) }
+/// ```
+/// ```compile_fail
+/// fn unreserved(rt: &runtime::AgentRuntime, paused: runtime::PausedRecoveryComponent,
+///     authority: runtime::CurrentRecoveryAuthority) {
+///     rt.activate_component(paused, authority);
+/// }
+/// ```
+/// ```compile_fail
+/// fn disposal(rt: &runtime::AgentRuntime, paused: runtime::PausedRecoveryComponent,
+///     authority: runtime::CurrentRecoveryAuthority, disposal: runtime::DisposalAuthority) {
+///     rt.activate_component(paused, authority, disposal);
+/// }
+/// ```
+pub enum ActivationReservation {
+    Automatic(AutomaticActivationReservation),
+    Manual(ManualActivationReservation),
+}
+impl From<AutomaticActivationReservation> for ActivationReservation {
+    fn from(value: AutomaticActivationReservation) -> Self {
+        Self::Automatic(value)
+    }
+}
+impl From<ManualActivationReservation> for ActivationReservation {
+    fn from(value: ManualActivationReservation) -> Self {
+        Self::Manual(value)
+    }
+}
+impl ActivationReservation {
+    fn inner(&self) -> &Reservation {
+        match self {
+            Self::Automatic(a) => &a.0,
+            Self::Manual(m) => &m.reservation,
+        }
+    }
+    pub(super) fn validate(
+        &self,
+        runtime: &AgentRuntime,
+        manifest: &str,
+    ) -> Result<(), RuntimeError> {
+        let r = self.inner();
+        if r.manifest != manifest || !Weak::ptr_eq(&r.runtime, &Arc::downgrade(&runtime.shared)) {
+            return Err(error("foreign activation reservation"));
+        }
+        let state = runtime
+            .shared
+            .graph_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.graphs.get(manifest) != Some(&(r.nonce, false)) {
+            return Err(error("activation reservation unavailable"));
+        }
+        Ok(())
+    }
+    pub(super) fn control(&self) -> ActivationControl {
+        match self {
+            Self::Automatic(_) => ActivationControl::Automatic,
+            Self::Manual(m) => ActivationControl::Manual {
+                effect: m.effect.clone(),
+                control_revision: m.control_revision,
+            },
+        }
+    }
+    pub(super) fn retain_unknown(&mut self) {
+        let r = match self {
+            Self::Automatic(a) => &mut a.0,
+            Self::Manual(m) => &mut m.reservation,
+        };
+        r.unknown = true;
+        if let Some(runtime) = r.runtime.upgrade() {
+            let mut state = runtime
+                .graph_reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.graphs.get(&r.manifest) == Some(&(r.nonce, false)) {
+                state.graphs.insert(r.manifest.clone(), (r.nonce, true));
+            }
+        }
+    }
+}
+impl AgentRuntime {
+    /// Original supervisor readback only. A known result releases the automatic
+    /// slot; an unknown result stays owned. This never starts another effect.
+    pub fn reconcile_automatic_activation_reservations(&self) -> Result<usize, RuntimeError> {
+        let claims = {
+            let state = self
+                .shared
+                .graph_reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state
+                .supervised
+                .values()
+                .filter_map(|(token, claim)| {
+                    matches!(token, ActivationReservation::Automatic(_)).then_some(claim.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(0);
+        };
+        let mut resolved = 0;
+        for claim in claims {
+            let observed = store
+                .with_database(|db| db.observe_recovery_activation(&claim))
+                .map_err(error)?;
+            if observed == storage::recovery::RecoveryActivationObservation::Indeterminate {
+                continue;
+            }
+            let mut state = self
+                .shared
+                .graph_reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.supervised.remove(&claim.manifest_id).is_some() {
+                state.graphs.remove(&claim.manifest_id);
+                resolved += 1;
+            }
+        }
+        Ok(resolved)
+    }
+    pub(super) fn supervise_activation(
+        &self,
+        mut reservation: ActivationReservation,
+        claim: storage::recovery::RecoveryClaim,
+    ) {
+        reservation.retain_unknown();
+        self.shared
+            .graph_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .supervised
+            .insert(claim.manifest_id.clone(), (reservation, claim));
+    }
+    fn reserve_graph(&self, manifest: &str) -> Result<Reservation, RuntimeError> {
+        if manifest.is_empty() {
+            return Err(error("empty recovery graph"));
+        }
+        let mut state = self
+            .shared
+            .graph_reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.graphs.contains_key(manifest) {
+            return Err(RuntimeError::ActivationReservationUnavailable {
+                reason: ActivationReservationProblem::Contended,
+            });
+        }
+        if state.graphs.len() >= 64 {
+            return Err(RuntimeError::ActivationReservationUnavailable {
+                reason: ActivationReservationProblem::Capacity,
+            });
+        }
+        state.next = state
+            .next
+            .checked_add(1)
+            .ok_or_else(|| error("reservation sequence exhausted"))?;
+        let nonce = state.next;
+        state.graphs.insert(manifest.into(), (nonce, false));
+        Ok(Reservation {
+            runtime: Arc::downgrade(&self.shared),
+            manifest: manifest.into(),
+            nonce,
+            unknown: false,
+        })
+    }
+    pub fn reserve_automatic_activation(
+        &self,
+        manifest_id: &str,
+    ) -> Result<AutomaticActivationReservation, RuntimeError> {
+        if let Some(store) = self.shared.run_store.get() {
+            if store
+                .with_database(|db| db.recovery_graph_control(manifest_id))
+                .map_err(error)?
+                .is_some()
+            {
+                return Err(RuntimeError::ActivationReservationUnavailable {
+                    reason: ActivationReservationProblem::Contended,
+                });
+            }
+        }
+        Ok(AutomaticActivationReservation(
+            self.reserve_graph(manifest_id)?,
+        ))
+    }
+    pub fn check_automatic_activation(
+        &self,
+        reservation: &AutomaticActivationReservation,
+    ) -> Result<(), RuntimeError> {
+        let r = &reservation.0;
+        if !Weak::ptr_eq(&r.runtime, &Arc::downgrade(&self.shared))
+            || self
+                .shared
+                .graph_reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .graphs
+                .get(&r.manifest)
+                != Some(&(r.nonce, false))
+        {
+            return Err(error("stale automatic reservation"));
+        }
+        Ok(())
+    }
+    /// Memory-only admission. The continuation persists the marker at this
+    /// expected revision; the activation writer independently checks it.
+    pub fn reserve_manual_activation(
+        &self,
+        manifest_id: &str,
+        effect: GraphEffectKey,
+        expected_control_revision: u64,
+    ) -> Result<ManualActivationReservation, RuntimeError> {
+        let control_revision = expected_control_revision
+            .checked_add(1)
+            .ok_or_else(|| error("control revision exhausted"))?;
+        Ok(ManualActivationReservation {
+            reservation: self.reserve_graph(manifest_id)?,
+            effect,
+            control_revision,
+        })
+    }
+}
+fn error(reason: impl ToString) -> RuntimeError {
+    crate::quiesce::runtime::error(reason)
+}

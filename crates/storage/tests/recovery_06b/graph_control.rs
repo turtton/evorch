@@ -1,0 +1,332 @@
+use super::*;
+use storage::recovery::{graph_control::*, restart::*};
+
+fn graph(f: &Fixture, claimed: bool) -> (GraphControlWrite, RecoveryActivationRequest) {
+    let activation = f.seed(false);
+    let claim = claimed.then(|| f.claim(&activation));
+    let manifest = f
+        .db()
+        .recovery_manifests()
+        .unwrap()
+        .remove(0)
+        .record
+        .unwrap();
+    let metadata = RestartMetadata {
+        restart_id: "restart".into(),
+        capture_id: "capture".into(),
+        config_identity: "config".into(),
+        old_epoch: 1,
+        successor_epoch: 2,
+        old_build: "old".into(),
+        successor_build: "new".into(),
+        target_identity: "target".into(),
+        handoff_version: 1,
+        snapshot_version: 1,
+        storage_version: 71,
+        old_builtin_tool_names: Default::default(),
+        old_compiled_catalog_fingerprint: None,
+        new_compiled_catalog_fingerprint: None,
+        old_effective_tools_fingerprint: None,
+        new_effective_tools_fingerprint: None,
+    };
+    f.storage
+        .handle()
+        .mutate_restart(
+            "restart".into(),
+            None,
+            RestartMutation::Create(Box::new(metadata)),
+        )
+        .unwrap();
+    let sql = f.sql();
+    sql.execute("UPDATE restart_transactions SET phase='adopted',adopted_epoch=2 WHERE restart_id='restart'",[]).unwrap();
+    sql.execute("INSERT INTO restart_components(restart_id,manifest_id,disposition) VALUES('restart','component','retry_pending')",[]).unwrap();
+    let membership: Vec<_> = manifest
+        .members
+        .iter()
+        .map(|m| RestartExpectedMember {
+            run_id: m.run_id.clone(),
+            incarnation: m.incarnation.clone(),
+            root_run_id: m.run_id.clone(),
+            thread_id: Some(m.run_id.clone()),
+            intent_revision: m.intent_revision,
+            snapshot: m.snapshot.clone(),
+            owner_id: Some("owner".into()),
+            owner_generation: Some(7),
+            lane_id: None,
+        })
+        .collect();
+    for m in &membership {
+        sql.execute("INSERT INTO restart_expected_members(restart_id,run_id,root_run_id,member_json,manifest_id) VALUES('restart',?1,?2,?3,'component')",
+            rusqlite::params![m.run_id,m.root_run_id,serde_json::to_string(m).unwrap()]).unwrap();
+    }
+    let component = f
+        .db()
+        .restart_transaction("restart")
+        .unwrap()
+        .unwrap()
+        .components
+        .remove(0);
+    (
+        GraphControlWrite {
+            expected: GraphControlCas {
+                restart_id: "restart".into(),
+                capture_id: "capture".into(),
+                successor_epoch: 2,
+                phase: RestartPhase::Adopted,
+                component,
+                membership,
+                manifest,
+                claim,
+                control_revision: 0,
+                control_effect: None,
+            },
+            effect: GraphEffectKey {
+                operation_id: "release".into(),
+                attempt_nonce: "nonce".into(),
+            },
+            action: GraphControlAction::Release,
+        },
+        activation,
+    )
+}
+
+#[test]
+fn release_atomically_revokes_and_releases_existing_prepared() {
+    let f = Fixture::new();
+    let (request, activation) = graph(&f, true);
+    let result = f
+        .storage
+        .handle()
+        .write_recovery_graph_control(request.clone())
+        .unwrap();
+    assert!(result.revoked);
+    assert_eq!(result.mode, "revoked_running");
+    assert!(matches!(
+        f.db().recovery_claims().unwrap()[0].state,
+        RecoveryClaimState::Released { .. }
+    ));
+    assert_eq!(
+        f.db()
+            .restart_transaction("restart")
+            .unwrap()
+            .unwrap()
+            .components[0]
+            .disposition,
+        RestartDisposition::Released
+    );
+    assert!(
+        f.storage
+            .handle()
+            .activate_recovery_claim(activation)
+            .is_err()
+    );
+    assert!(
+        f.storage
+            .handle()
+            .claim_recovery_manifest(RecoveryClaimRequest {
+                claim_id: "new".into(),
+                manifest_id: "component".into(),
+                incarnations: vec![]
+            })
+            .is_err()
+    );
+    assert_eq!(
+        f.storage
+            .handle()
+            .write_recovery_graph_control(request.clone())
+            .unwrap(),
+        result
+    );
+    let mut changed = request;
+    changed.effect.attempt_nonce = "different".into();
+    assert!(
+        f.storage
+            .handle()
+            .write_recovery_graph_control(changed)
+            .is_err()
+    );
+    assert_eq!(
+        f.db().recovery_graph_effect("release").unwrap(),
+        Some(result)
+    );
+}
+
+#[test]
+fn claim_absent_is_quarantined_without_creating_a_claim() {
+    let f = Fixture::new();
+    let (request, _) = graph(&f, false);
+    let result = f
+        .storage
+        .handle()
+        .write_recovery_graph_control(request)
+        .unwrap();
+    assert_eq!(result.origin, "manual_release_without_claim");
+    assert!(f.db().recovery_claims().unwrap().is_empty());
+    let tx = f.db().restart_transaction("restart").unwrap().unwrap();
+    assert_eq!(
+        tx.components[0].disposition,
+        RestartDisposition::Quarantined
+    );
+}
+
+#[test]
+fn every_main_cas_mismatch_leaves_all_effects_unapplied() {
+    let mutations: [fn(&mut GraphControlCas); 12] = [
+        |c| c.restart_id.push('x'),
+        |c| c.capture_id.push('x'),
+        |c| c.successor_epoch += 1,
+        |c| c.phase = RestartPhase::Completed,
+        |c| c.component.revision += 1,
+        |c| c.component.disposition = RestartDisposition::Activated,
+        |c| c.control_revision += 1,
+        |c| {
+            c.control_effect = Some(GraphEffectKey {
+                operation_id: "other".into(),
+                attempt_nonce: "other".into(),
+            })
+        },
+        |c| {
+            c.membership.pop();
+        },
+        |c| c.membership[0].owner_generation = Some(8),
+        |c| c.manifest.members[0].incarnation.push('x'),
+        |c| c.claim.as_mut().unwrap().members[0].reserved_revision += 1,
+    ];
+    for mutate in mutations {
+        let f = Fixture::new();
+        let (mut request, _) = graph(&f, true);
+        let claim = request.expected.claim.clone().unwrap();
+        mutate(&mut request.expected);
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_control(request)
+                .is_err()
+        );
+        f.assert_prepared(&claim);
+        assert!(
+            f.db()
+                .recovery_graph_control("component")
+                .unwrap()
+                .is_none()
+        );
+        assert!(f.db().recovery_graph_effect("release").unwrap().is_none());
+        assert_eq!(
+            f.db()
+                .restart_transaction("restart")
+                .unwrap()
+                .unwrap()
+                .components[0]
+                .revision,
+            0
+        );
+    }
+}
+
+#[test]
+fn pre_and_post_commit_ack_loss_are_distinguishable_by_same_id_readback() {
+    for after in [false, true] {
+        let f = Fixture::new();
+        let (request, _) = graph(&f, true);
+        f.storage
+            .handle()
+            .inject_restart_write_fault(after)
+            .unwrap();
+        assert!(
+            f.storage
+                .handle()
+                .write_recovery_graph_control(request)
+                .is_err()
+        );
+        let result = f.db().recovery_graph_effect("release").unwrap();
+        assert_eq!(result.is_some(), after);
+        assert_eq!(
+            f.db()
+                .recovery_graph_control("component")
+                .unwrap()
+                .is_some(),
+            after
+        );
+        assert_eq!(
+            matches!(
+                f.db().recovery_claims().unwrap()[0].state,
+                RecoveryClaimState::Released { .. }
+            ),
+            after
+        );
+    }
+}
+
+#[test]
+fn activation_checks_reservation_and_resolves_manual_marker_in_same_transaction() {
+    let f = Fixture::new();
+    let (mut request, mut activation) = graph(&f, true);
+    request.action = GraphControlAction::Resume;
+    let result = f
+        .storage
+        .handle()
+        .write_recovery_graph_control(request.clone())
+        .unwrap();
+    assert!(
+        f.storage
+            .handle()
+            .activate_recovery_claim(activation.clone())
+            .is_err()
+    );
+    for control in [
+        ActivationControl::Manual {
+            effect: request.effect.clone(),
+            control_revision: result.revision + 1,
+        },
+        ActivationControl::Manual {
+            effect: GraphEffectKey {
+                operation_id: "other".into(),
+                attempt_nonce: "nonce".into(),
+            },
+            control_revision: result.revision,
+        },
+    ] {
+        activation.reservation = control;
+        assert!(
+            f.storage
+                .handle()
+                .activate_recovery_claim(activation.clone())
+                .is_err()
+        );
+        f.assert_prepared(request.expected.claim.as_ref().unwrap());
+    }
+    activation.reservation = ActivationControl::Manual {
+        effect: request.effect,
+        control_revision: result.revision,
+    };
+    f.storage
+        .handle()
+        .inject_restart_write_fault(false)
+        .unwrap();
+    assert!(
+        f.storage
+            .handle()
+            .activate_recovery_claim(activation.clone())
+            .is_err()
+    );
+    assert_eq!(
+        f.db()
+            .recovery_graph_control("component")
+            .unwrap()
+            .unwrap()
+            .mode,
+        "manual_running"
+    );
+    f.storage
+        .handle()
+        .activate_recovery_claim(activation)
+        .unwrap();
+    assert_eq!(
+        f.db()
+            .recovery_graph_control("component")
+            .unwrap()
+            .unwrap()
+            .mode,
+        "resolved"
+    );
+}

@@ -1,6 +1,16 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Caller retains its owner guards until this FULL writer reply or readback.
+    pub fn write_recovery_graph_control(
+        &self,
+        request: graph_control::GraphControlWrite,
+    ) -> Result<graph_control::GraphControlRecord, StorageError> {
+        match self.recovery_write(Write::GraphControl(request))? {
+            Written::GraphControl(record) => Ok(record),
+            _ => unreachable!("graph control reply"),
+        }
+    }
     /// Per-writer deterministic fault for the next restart mutation only.
     #[cfg(any(test, feature = "recovery-test-support"))]
     pub fn inject_restart_write_fault(&self, after_commit: bool) -> Result<(), StorageError> {

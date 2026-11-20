@@ -72,6 +72,39 @@ fn adopt_for_stop(
     (owner, adopted)
 }
 
+#[test]
+fn graph_reservations_are_exclusive_bounded_and_released_on_drop() {
+    let f = Fixture::new(0);
+    let runtime = &f.runtime;
+    let first = runtime.reserve_automatic_activation("graph").unwrap();
+    assert!(matches!(
+        runtime.reserve_automatic_activation("graph"),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Contended
+        })
+    ));
+    let mut held = (0..63)
+        .map(|n| {
+            runtime
+                .reserve_automatic_activation(&format!("graph-{n}"))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        runtime.reserve_automatic_activation("overflow"),
+        Err(crate::RuntimeError::ActivationReservationUnavailable {
+            reason: crate::ActivationReservationProblem::Capacity
+        })
+    ));
+    drop(first);
+    held.push(runtime.reserve_automatic_activation("graph").unwrap());
+    runtime
+        .check_automatic_activation(held.last().unwrap())
+        .unwrap();
+    drop(held);
+    runtime.reserve_automatic_activation("overflow").unwrap();
+}
+
 #[tokio::test]
 async fn recovery_rejects_store_attached_after_a_message_was_issued() {
     let f = Fixture::new(0);
@@ -238,8 +271,11 @@ async fn startup_message_ids(retain_correlations: bool) {
         runtime
             .restore_relations_and_continuations(&mut paused)
             .unwrap();
-        runtime
-            .activate_component(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(
                 paused,
                 crate::CurrentRecoveryAuthority {
                     members: component
@@ -258,8 +294,10 @@ async fn startup_message_ids(retain_correlations: bool) {
                         })
                         .collect(),
                 },
+                reservation,
             )
-            .unwrap();
+        })
+        .unwrap();
         let between = runtime
             .send_agent_message(
                 fresh,
@@ -480,6 +518,7 @@ async fn activation_history_is_skipped_and_adopt_does_not_write_the_new_intent_t
     f._storage
         .handle()
         .activate_recovery_claim(storage::recovery::RecoveryActivationRequest {
+            reservation: storage::recovery::graph_control::ActivationControl::Automatic,
             claim_id: claim.claim_id.clone(),
             intents: vec![storage::resume_intent::ResumeIntentRecord {
                 run_id: run.to_string(),
@@ -720,7 +759,14 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
         },
     );
     assert_eq!(
-        runtime.activate_component(paused, authority).unwrap().len(),
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
+        })
+        .unwrap()
+        .len(),
         2
     );
     assert!(!runtime.has_paused_recovery());
@@ -843,7 +889,10 @@ async fn post_activation_fault(point: crate::runtime::HookPoint, published: bool
     });
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.activate_component(paused, authority)
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
         }))
         .is_err()
     );
@@ -959,8 +1008,11 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
             assert_eq!(model.calls.load(Ordering::SeqCst), 0);
         },
     );
-    runtime
-        .activate_component(
+    ({
+        let reservation = runtime
+            .reserve_automatic_activation(&(paused).claim().manifest_id)
+            .unwrap();
+        runtime.activate_component(
             paused,
             crate::CurrentRecoveryAuthority {
                 members: BTreeMap::from([(
@@ -973,8 +1025,10 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
                     },
                 )]),
             },
+            reservation,
         )
-        .unwrap();
+    })
+    .unwrap();
     while f.model.admission_calls.load(Ordering::SeqCst) == calls_before {
         f.model.admission_entered.notified().await;
     }

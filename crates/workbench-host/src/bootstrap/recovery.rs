@@ -45,9 +45,10 @@ pub fn activate(
     runtime: &AgentRuntime,
     mut component: runtime::PausedRecoveryComponent,
     authority: runtime::CurrentRecoveryAuthority,
+    reservation: impl Into<runtime::ActivationReservation>,
 ) -> Result<Vec<RunId>, BootstrapError> {
     runtime.restore_relations_and_continuations(&mut component)?;
-    Ok(runtime.activate_component(component, authority)?)
+    Ok(runtime.activate_component(component, authority, reservation)?)
 }
 
 /// Legacy independent-manifest fixture writer, not the production capture protocol.

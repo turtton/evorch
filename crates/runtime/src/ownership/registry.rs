@@ -196,7 +196,7 @@ pub(super) enum HeartbeatChange {
 }
 
 pub struct Registry {
-    connection: Connection,
+    pub(super) connection: Connection,
     attempt: u32,
     quiet_contention: bool,
     guard: Option<GuardHold>,
@@ -387,7 +387,8 @@ impl Registry {
         let connection = Connection::open(path)?;
         connection.busy_timeout(ATTEMPT_TIMEOUT)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS thread_owners (thread_id TEXT PRIMARY KEY, state TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS owner_checkpoints (thread_id TEXT PRIMARY KEY, generation TEXT NOT NULL, payload TEXT NOT NULL)")?;
+            CREATE TABLE IF NOT EXISTS owner_checkpoints (thread_id TEXT PRIMARY KEY, generation TEXT NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS disposal_cleanup_receipts (operation_id TEXT PRIMARY KEY, receipt_json TEXT NOT NULL)")?;
         Ok(Self::from_connection(connection, 1, false))
     }
 

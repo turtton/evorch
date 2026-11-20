@@ -87,7 +87,13 @@ async fn same_adopted_successor_reattaches_the_same_prepared_claim_before_activa
     runtime
         .restore_relations_and_continuations(&mut adopted)
         .unwrap();
-    runtime.activate_component(adopted, authority).unwrap();
+    ({
+        let reservation = runtime
+            .reserve_automatic_activation(&(adopted).claim().manifest_id)
+            .unwrap();
+        runtime.activate_component(adopted, authority, reservation)
+    })
+    .unwrap();
     let row = db.resume_intent(&run.to_string()).unwrap().unwrap();
     assert_eq!(row.incarnation, claim.members[0].new_incarnation);
     assert_eq!(
@@ -108,14 +114,19 @@ async fn failed_activation_can_reacquire_the_exact_local_control() {
     let (_owner, authority) = authority(&f, run);
     // Missing relations is an ordinary, pre-transaction activation failure.
     assert!(
-        runtime
-            .activate_component(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(
                 paused,
                 CurrentRecoveryAuthority {
-                    members: BTreeMap::new()
-                }
+                    members: BTreeMap::new(),
+                },
+                reservation,
             )
-            .is_err()
+        })
+        .is_err()
     );
     let (proof, startup, root) = evidence(&f, &id);
     drop(proof);
@@ -195,7 +206,15 @@ fn lose_ack(f: &Fixture, runtime: &AgentRuntime, authority: CurrentRecoveryAutho
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
     paused.lose_activation_ack_for_test();
-    assert!(runtime.activate_component(paused, authority).is_err());
+    assert!(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
+        })
+        .is_err()
+    );
     assert_eq!(
         storage::Database::open(&f.config)
             .unwrap()

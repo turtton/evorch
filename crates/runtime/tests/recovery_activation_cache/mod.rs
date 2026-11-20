@@ -613,7 +613,12 @@ async fn recover_case(
             .bind_thread_root("wire-recovery-thread", run)
             .unwrap();
     }
-    let result = restarted.activate_component(paused, authority);
+    let result = ({
+        let reservation = restarted
+            .reserve_automatic_activation(&(paused).claim().manifest_id)
+            .unwrap();
+        restarted.activate_component(paused, authority, reservation)
+    });
     if changed_settings {
         assert!(
             result.is_err(),

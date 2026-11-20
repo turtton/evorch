@@ -1,6 +1,7 @@
 //! Component-scoped graph receipts and durable, revision-fenced claims (PR 06a).
 //! Payloads are runtime-owned. No method here starts work or grants authority.
 mod activation;
+pub mod graph_control;
 pub mod owned_graphs;
 pub mod quarantine;
 pub mod restart;
@@ -22,7 +23,8 @@ pub struct RecoveryEdge {
     pub to: String,
     pub kind: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryMemberRecord {
     pub run_id: String,
     pub incarnation: String,
@@ -31,7 +33,8 @@ pub struct RecoveryMemberRecord {
     pub resume: bool,
     pub record_json: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryManifestRecord {
     pub manifest_id: String,
     pub schema_version: u32,
@@ -61,14 +64,16 @@ pub enum RecoveryClaimState {
     Activated,
     Released { reason: String },
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryClaimMember {
     pub run_id: String,
     pub old_incarnation: String,
     pub reserved_revision: u64,
     pub new_incarnation: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryClaim {
     pub claim_id: String,
     pub manifest_id: String,
@@ -102,6 +107,7 @@ pub(crate) enum Write {
         expected_revision: Option<u64>,
         mutation: restart::RestartMutation,
     },
+    GraphControl(graph_control::GraphControlWrite),
     Prepare(RecoveryManifestRecord),
     Commit(String),
     Claim(RecoveryClaimRequest),
@@ -122,6 +128,7 @@ pub(crate) enum Write {
 pub(crate) enum Written {
     Restart(Box<restart::RestartTransaction>),
     Saved,
+    GraphControl(graph_control::GraphControlRecord),
     Claimed(RecoveryClaim),
     Validated(Box<prepared::PreparedClaimEvidence>),
     Released(RecoveryReleaseOutcome),
@@ -312,7 +319,9 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     #[cfg(any(test, feature = "recovery-test-support"))]
     let restart_command = matches!(
         &command,
-        Write::Restart { .. }
+        Write::GraphControl(_)
+            | Write::Activate(_)
+            | Write::Restart { .. }
             | Write::RestartInvalidation { .. }
             | Write::RestartColdQuarantine { .. }
     );
@@ -351,6 +360,9 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
                 expected_revision,
                 mutation,
             )?)),
+            Write::GraphControl(request) => {
+                Written::GraphControl(graph_control::write(&tx, &request)?)
+            }
             Write::Prepare(record) => {
                 prepare(&tx, &record)?;
                 Written::Saved
@@ -525,6 +537,7 @@ fn prepare_claim(
     conn: &Connection,
     request: &RecoveryClaimRequest,
 ) -> Result<RecoveryClaim, StorageError> {
+    graph_control::check_prepare(conn, &request.manifest_id)?;
     let record =
         load(conn, &request.manifest_id).map_err(|_| invalid("corrupt recovery manifest"))?;
     if !record.committed || record.superseded {

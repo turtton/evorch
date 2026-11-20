@@ -129,9 +129,13 @@ async fn project_catalog_validation_adoption_admission_and_execution_share_one_p
         &runtime.execution_snapshot(run).unwrap(),
         move || wrapper.replace(reload),
     );
-    runtime
-        .activate_component_with_models(paused, authority, models)
-        .unwrap();
+    ({
+        let reservation = runtime
+            .reserve_automatic_activation(&(paused).claim().manifest_id)
+            .unwrap();
+        runtime.activate_component_with_models(paused, authority, models, reservation)
+    })
+    .unwrap();
     selected.entered.notified().await;
     assert_eq!(selected.catalogs.load(Ordering::SeqCst), 1);
     assert_eq!(selected.checks.load(Ordering::SeqCst), 1);
@@ -170,9 +174,13 @@ async fn inner_reload_at_the_last_pre_ack_boundary_rejects_without_writes_or_req
         move || wrapper.replace(reload),
     );
     assert!(
-        runtime
-            .activate_component_with_models(paused, authority, models)
-            .is_err()
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component_with_models(paused, authority, models, reservation)
+        })
+        .is_err()
     );
     assert_eq!(db.recovery_claim_snapshot(&id).unwrap(), before);
     assert_eq!(selected.adopts.load(Ordering::SeqCst), 0);
@@ -195,14 +203,19 @@ async fn a_retained_context_cannot_cross_an_activation_retry_with_inner_reload()
     publish(&old_models, run).await;
     // Missing relations consumes the handle but never activates the claim.
     assert!(
-        runtime
-            .activate_component(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(
                 paused,
                 CurrentRecoveryAuthority {
-                    members: authority.members.clone()
-                }
+                    members: authority.members.clone(),
+                },
+                reservation,
             )
-            .is_err()
+        })
+        .is_err()
     );
     wrapper.replace(replacement.clone());
     publish(&runtime.pin_recovery_models(&authority), run).await;
@@ -219,9 +232,13 @@ async fn a_retained_context_cannot_cross_an_activation_retry_with_inner_reload()
     let db = storage::Database::open(&f.config).unwrap();
     let before = db.recovery_claim_snapshot(&id).unwrap();
     assert!(
-        runtime
-            .activate_component_with_models(*retry, authority, old_models)
-            .is_err()
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(*retry).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component_with_models(*retry, authority, old_models, reservation)
+        })
+        .is_err()
     );
     assert_eq!(db.recovery_claim_snapshot(&id).unwrap(), before);
     assert_eq!(selected.adopts.load(Ordering::SeqCst), 0);
@@ -244,7 +261,15 @@ async fn missing_project_catalog_never_falls_back_to_the_main_model() {
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    assert!(runtime.activate_component(paused, authority).is_err());
+    assert!(
+        ({
+            let reservation = runtime
+                .reserve_automatic_activation(&(paused).claim().manifest_id)
+                .unwrap();
+            runtime.activate_component(paused, authority, reservation)
+        })
+        .is_err()
+    );
     assert_eq!(db.recovery_claim_snapshot(&id).unwrap(), before);
     assert_eq!(selected.checks.load(Ordering::SeqCst), 1);
     assert_eq!(selected.adopts.load(Ordering::SeqCst), 0);

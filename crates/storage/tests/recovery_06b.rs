@@ -5,6 +5,8 @@ use storage::{
     resume_intent::ResumeIntentRecord,
 };
 
+#[path = "recovery_06b/graph_control.rs"]
+mod graph_control;
 #[path = "recovery_06b/prepared.rs"]
 mod prepared;
 #[path = "recovery_06b/quarantine.rs"]
@@ -121,6 +123,7 @@ impl Fixture {
             .commit_recovery_manifest("component".into())
             .unwrap();
         RecoveryActivationRequest {
+            reservation: storage::recovery::graph_control::ActivationControl::Automatic,
             claim_id: "claim".into(),
             intents,
             snapshots,

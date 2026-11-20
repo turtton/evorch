@@ -798,7 +798,13 @@ async fn stopped_child_with_interrupted_tool_does_not_block_its_report_recipient
     assert_eq!(f.model.calls.load(Ordering::SeqCst), calls);
     let terminal_before = db.resume_intent(&child.to_string()).unwrap();
     assert_eq!(
-        restored.activate_component(adopted, authority).unwrap(),
+        ({
+            let reservation = restored
+                .reserve_automatic_activation(&(adopted).claim().manifest_id)
+                .unwrap();
+            restored.activate_component(adopted, authority, reservation)
+        })
+        .unwrap(),
         [parent]
     );
     // Drive the one resumed parent turn through a real tool and back to a safe

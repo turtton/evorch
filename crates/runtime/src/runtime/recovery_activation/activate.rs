@@ -73,9 +73,10 @@ impl AgentRuntime {
         &self,
         paused: PausedRecoveryComponent,
         authority: CurrentRecoveryAuthority,
+        reservation: impl Into<ActivationReservation>,
     ) -> Result<Vec<RunId>, RuntimeError> {
         let models = self.pin_recovery_models(&authority);
-        self.activate_component_with_models(paused, authority, models)
+        self.activate_component_with_models(paused, authority, models, reservation)
     }
 
     /// Core startup retains these same pins while publishing catalogs. A stale
@@ -85,7 +86,10 @@ impl AgentRuntime {
         mut paused: PausedRecoveryComponent,
         mut authority: CurrentRecoveryAuthority,
         models: RecoveryModels,
+        reservation: impl Into<ActivationReservation>,
     ) -> Result<Vec<RunId>, RuntimeError> {
+        let reservation = reservation.into();
+        reservation.validate(self, &paused.claim.manifest_id)?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.require_planned_manifest(&paused.claim.manifest_id)?;
         if !Weak::ptr_eq(&paused.runtime, &Arc::downgrade(&self.shared)) {
@@ -295,7 +299,9 @@ impl AgentRuntime {
         // Hold generation guards across the writer transaction and publication.
         // Never hold the global runs lock while waiting for the writer.
         let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
+        reservation.validate(self, &paused.claim.manifest_id)?;
         let request = RecoveryActivationRequest {
+            reservation: reservation.control(),
             claim_id: paused.claim.claim_id.clone(),
             intents: intents
                 .iter()
@@ -324,6 +330,7 @@ impl AgentRuntime {
         #[cfg(feature = "recovery-test-support")]
         self.recovery_activation_probe(RecoveryActivationBoundary::BeforeFullAck)?;
         if let Err(write_error) = store.handle.activate_recovery_claim(request) {
+            self.supervise_activation(reservation, paused.claim.clone());
             let observation =
                 store.with_database(|db| db.observe_recovery_activation(&paused.claim));
             return Err(error(format!(
