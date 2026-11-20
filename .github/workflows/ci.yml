@@ -18,7 +18,7 @@ jobs:
   # checks configured today.
   ci:
     if: always()
-    needs: [quick-checks, scope-gate, lint, docs-schema, otel, tests]
+    needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -103,6 +103,10 @@ jobs:
           scripts/tests/test_check_central_files.sh
           scripts/check-central-files.sh --check-data
           scripts/check-core-client-refs.sh
+      # The sealed product artifact (scripts/product-artifact.sh) accepts only the
+      # distribution's build and refuses a changed, featured or unsealed copy.
+      - name: Product artifact sealing
+        run: scripts/tests/test_product_artifact.sh
       # Every workspace member is in exactly one test group, and the merge gate
       # of the group inventories rejects what it should.
       - name: Test group definition and inventory merge gate
@@ -244,6 +248,51 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p event-bus --features otel-exporter --doc --locked
 
+  # The shipped evorch-core, built apart from every test build with the arguments
+  # of the distribution (flake.nix `evorch-core`: `-p evorch-core --bin evorch-core`,
+  # release profile, no feature). scripts/product-artifact.sh seals an immutable
+  # copy with a manifest; every job that runs a product test downloads that copy and
+  # reads it through EVORCH_PRODUCT_CORE_EXE / EVORCH_PRODUCT_MANIFEST
+  # (crates/test-support/src/product_artifact.rs). A test build never touches it.
+  product-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.99.0
+      - name: Install linker and Claude transport build dependencies
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: mold cmake clang libclang-dev ninja-build perl git
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ${{ runner.os }}-product
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build and seal the product artifact
+        run: |
+          started=$SECONDS
+          scripts/product-artifact.sh build "$RUNNER_TEMP/evorch-product" > /dev/null
+          {
+            echo "### Product artifact"
+            echo
+            echo "build and seal: $((SECONDS - started)) s"
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/evorch-product/product-manifest.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: product-core
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/evorch-product
+
   # The workspace test suite, one job per crate group (scripts/ci-test-groups.json
   # is the single definition; the matrix below repeats its group names and shard
   # counts, and the merge gate in `ci` rejects any drift). A group's shards build
@@ -252,6 +301,7 @@ jobs:
   # contracts, then everything else.
   tests:
     name: tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: product-artifact
     runs-on: ubuntu-latest
     # Normal runs take a few minutes; a cold dependency cache roughly doubles that.
     timeout-minutes: 45
@@ -259,12 +309,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: runtime, shard: 1, shards: 2, cef: false }
-          - { group: runtime, shard: 2, shards: 2, cef: false }
-          - { group: gui, shard: 1, shards: 2, cef: true }
-          - { group: gui, shard: 2, shards: 2, cef: true }
-          - { group: storage-tools, shard: 1, shards: 1, cef: false }
-          - { group: support, shard: 1, shards: 1, cef: false }
+          - { group: runtime, shard: 1, shards: 2, cef: false, product: true }
+          - { group: runtime, shard: 2, shards: 2, cef: false, product: true }
+          - { group: gui, shard: 1, shards: 2, cef: true, product: false }
+          - { group: gui, shard: 2, shards: 2, cef: true, product: false }
+          - { group: storage-tools, shard: 1, shards: 1, cef: false, product: false }
+          - { group: support, shard: 1, shards: 1, cef: false, product: false }
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -308,6 +358,17 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      # The groups that run product tests (the evorch-core placeholders and, later,
+      # the real tests, including the f4_product_cache and agent_observation_cache
+      # cache binaries of the gate below) receive the sealed product artifact.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.product
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        if: matrix.product
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
       # `ci` job merges these listings. The runs below reuse the binaries.
       - name: Build and list the test inventory
@@ -679,10 +740,14 @@ jobs:
           path: target/gui-evidence
 
   browser-e2e:
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+      # The host source lifecycle test of O-V1 (crates/workbench-host/tests/<name>.rs,
+      # an ignored test): the one place to change when O-V1 renames its binary.
+      HOST_LIFECYCLE_TEST: agent_observation_lifecycle
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -706,6 +771,19 @@ jobs:
           tool: cargo-nextest
       - name: Run agent browser test
         run: cargo nextest run -p browser --test agent_chromium --test agent_observation --run-ignored only --success-output immediate --no-tests fail
+      # Registered by I0 for O-V1 and O-V2; the placeholders only prove the targets
+      # are selected (--no-tests fail), and the second one checks the sealed product
+      # artifact the job downloaded.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
+      - name: Run the host observation source lifecycle against Chromium
+        run: cargo nextest run -p workbench-host --test "$HOST_LIFECYCLE_TEST" --run-ignored only --success-output immediate --no-tests fail
+      - name: Run the core observation test against Chromium
+        run: cargo nextest run -p evorch-core --test agent_observation_chromium --run-ignored only --success-output immediate --no-tests fail
       - name: Run web workbench browser test
         env:
           WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
@@ -722,6 +800,7 @@ jobs:
   # job also starts it. The lint of the CEF feature is the workspace clippy in
   # the lint job, which builds gui with its default features.
   cef-e2e:
+    needs: product-artifact
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -750,6 +829,18 @@ jobs:
       # chrome-sandbox is never used (ADR 0034).
       - name: Allow unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The GUI observation test uses the same browser as the Chromium job, so the
+      # runner's Chromium is located here as well as CEF.
+      - name: Locate Chrome/Chromium executable
+        run: |
+          CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
+          echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
@@ -781,3 +872,10 @@ jobs:
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           cargo nextest run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
+      # Registered by I0 for F4-E, O-V3 and O-V2. The placeholders prove only that
+      # the targets are selected (--no-tests fail) and that the sealed product
+      # artifact reached this job; the real tests replace them.
+      - name: Product tests through real CEF
+        run: cargo nextest run -p evorch-core --test f4_product_cef --test agent_observation_restart --run-ignored only --success-output immediate --no-tests fail
+      - name: GUI observation through real CEF and Chromium
+        run: cargo nextest run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
