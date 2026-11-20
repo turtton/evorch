@@ -205,3 +205,14 @@ scripts/reproduce-under-limits.sh --cpus 4 --memory 8G --tasks 4096 --timeout 30
 (`loaded`: add `--stress-cpus 3` and label `loaded`.) The measurement ran
 the test binary directly (not under `cargo`), so that a Cargo rebuild cannot
 replace the artifact.
+
+## Note on a later fixture change
+
+CI (nextest on GitHub runners) showed two descriptors without close-on-exec
+leaking from the runner into the product. After the measurements above were
+taken, `ManagedProcess::spawn` was changed to close, in the child before exec,
+the descriptors above 2 that the test process holds without close-on-exec
+(tested by `descriptors_without_close_on_exec_do_not_reach_a_child`, which
+fails without the change). The measured code paths are otherwise unchanged; a
+handful of `close` calls per spawn is not expected to move any interval, but the
+tables were not re-taken after it.

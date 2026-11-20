@@ -26,6 +26,7 @@ use std::{
 
 const FAKE_ROLE_ENV: &str = "F4P_FAKE_ROLE";
 const FAKE_PID_PREFIX: &str = "F4P-GRANDCHILD ";
+const FAKE_FDS_PREFIX: &str = "F4P-FDS ";
 
 // ---------------------------------------------------------------- artifact
 
@@ -267,6 +268,25 @@ fn fake_role_process() {
         }
         "sleeper" => {
             println!("up");
+            std::io::stdout().flush().unwrap();
+            let mut sink = String::new();
+            let _ = std::io::stdin().read_line(&mut sink);
+        }
+        // Lists its own descriptors above stderr, then waits for stdin EOF.
+        "fds" => {
+            let mut listed = Vec::new();
+            for entry in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+                let fd: i32 = entry.file_name().to_str().unwrap().parse().unwrap();
+                if fd > 2
+                    && let Ok(target) = std::fs::read_link(entry.path())
+                {
+                    listed.push(target.to_string_lossy().into_owned());
+                }
+            }
+            println!(
+                "{FAKE_FDS_PREFIX}{}",
+                serde_json::to_string(&listed).unwrap()
+            );
             std::io::stdout().flush().unwrap();
             let mut sink = String::new();
             let _ = std::io::stdin().read_line(&mut sink);
@@ -721,4 +741,28 @@ fn product_starts_and_takes_back_the_real_renderer_helper() {
         "{helper:?} is not a real renderer"
     );
     renderer_scenario();
+}
+
+#[test]
+fn descriptors_without_close_on_exec_do_not_reach_a_child() {
+    use std::os::fd::AsRawFd;
+    // A runner can leave such a descriptor in the test process. Make one, and
+    // name it by its pipe inode.
+    let (reader, writer) = std::io::pipe().unwrap();
+    rustix::io::fcntl_setfd(&writer, rustix::io::FdFlags::empty()).unwrap();
+    let leaked = std::fs::read_link(format!("/proc/self/fd/{}", writer.as_raw_fd())).unwrap();
+    let mut child = ManagedProcess::spawn(fake_command("fds")).unwrap();
+    let (listed, _) = child
+        .wait_for(Duration::from_secs(60), |line| {
+            serde_json::from_str::<Vec<String>>(line.strip_prefix(FAKE_FDS_PREFIX)?).ok()
+        })
+        .unwrap();
+    assert!(
+        !listed.iter().any(|t| Path::new(t) == leaked),
+        "{leaked:?} reached the child: {listed:?}"
+    );
+    child.close_stdin();
+    assert!(child.wait_exit(Duration::from_secs(60)).unwrap().success());
+    assert!(child.join().orphans.is_empty());
+    drop((reader, writer));
 }

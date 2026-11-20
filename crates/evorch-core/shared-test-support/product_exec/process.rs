@@ -67,6 +67,26 @@ impl ManagedProcess {
             rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
                 .expect("become a child subreaper");
         });
+        // The test runner may leave descriptors without close-on-exec in this
+        // process (CI runners do: jobserver or result pipes). They would be
+        // inherited by the child. Close exactly those, in the child, before exec;
+        // the list is made here, so the closure allocates nothing.
+        let inherited: Vec<i32> = observe::open_fds(std::process::id() as i32)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f.fd > 2 && !f.cloexec)
+            .map(|f| f.fd)
+            .collect();
+        // SAFETY: runs between fork and exec; it only closes descriptors that
+        // this process holds, which is async-signal-safe and allocation-free.
+        unsafe {
+            command.pre_exec(move || {
+                for fd in &inherited {
+                    drop(<std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(*fd));
+                }
+                Ok(())
+            });
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
