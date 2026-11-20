@@ -1,4 +1,5 @@
 #![cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
 fn shell() -> std::ffi::OsString {
     std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| "/bin/sh".into())
 }
@@ -553,22 +554,7 @@ fn core_fixture() {
     let name = format!("guard-fixture-{}", std::process::id());
     let listener =
         UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
-    let [dev, ino] = rt.image().identity_args();
-    let mut helper = Command::new(rt.image().inherited_exec_path())
-        .args([
-            "--launch",
-            &dev,
-            &ino,
-            &std::process::id().to_string(),
-            &unsafe { libc::getuid() }.to_string(),
-            &name,
-            "public-nonce",
-        ])
-        .env_clear()
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    let mut helper = helper_command(&rt, &name, unsafe { libc::getuid() })
         .spawn()
         .unwrap();
     let (mut socket, _) = listener.accept().unwrap();
@@ -850,4 +836,239 @@ fn guard_lost_never_uses_a_core_pgid_fallback() {
         0
     );
     assert_eq!(libc::WTERMSIG(wait_pid(descendant)), libc::SIGKILL);
+}
+
+fn helper_command(rt: &GuardRuntime, name: &str, uid: u32) -> Command {
+    let [dev, ino] = rt.image().identity_args();
+    let mut command = Command::new(rt.image().inherited_exec_path());
+    command
+        .args([
+            "--launch",
+            &dev,
+            &ino,
+            &std::process::id().to_string(),
+            &uid.to_string(),
+            name,
+            "public-nonce",
+        ])
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+#[test]
+fn wrong_core_uid_is_rejected_before_hello_even_with_known_nonce() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+    let mut reaper = FixtureReaper::new();
+    let rt = runtime();
+    let name = format!("guard-wrong-peer-{}", std::process::id());
+    let listener =
+        UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
+    let mut helper = helper_command(&rt, &name, unsafe { libc::getuid() }.wrapping_add(1))
+        .spawn()
+        .unwrap();
+    reaper.add(helper.id() as i32);
+    listener.set_nonblocking(true).unwrap();
+    let death = pidfd_open(helper.id() as i32).unwrap();
+    let mut fds = [
+        wire::fd(listener.as_raw_fd(), libc::POLLIN),
+        wire::fd(death.as_raw_fd(), libc::POLLIN),
+    ];
+    wire::poll(&mut fds, None).unwrap();
+    if fds[0].revents != 0 {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let result = wire::receive(
+            &mut socket,
+            &mut wire::Decoder::default(),
+            death.as_raw_fd(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "wrong UID must never receive Hello: {result:?}"
+        );
+    } else {
+        assert_ne!(
+            fds[1].revents, 0,
+            "wrong launch UID is rejected even before connect"
+        );
+    }
+    assert_eq!(helper.wait().unwrap().code(), Some(125));
+}
+#[test]
+fn closed_stdio_fixture() {
+    if std::env::var_os("GUARD_CLOSED_STDIO_FIXTURE").is_none() {
+        return;
+    }
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+        libc::close(2);
+    }
+    let rt = runtime();
+    let mut spec = LaunchSpec::new(shell()).unwrap();
+    spec.argv.extend([b"-c".to_vec(), b"exit 37".to_vec()]);
+    let mut child = rt
+        .spawn(&spec, [Stdio::null(), Stdio::null(), Stdio::null()])
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+    // Accepted B1 boundary: Rust startup fills absent stdio with /dev/null.
+    // Intentional EBADF inheritance is deferred to the B2 stdio API design.
+    let mut spec = LaunchSpec::new(shell()).unwrap();
+    spec.argv.extend([
+        b"-c".to_vec(),
+        b"for fd in 0 1 2; do test /proc/self/fd/$fd -ef /dev/null || exit 90; done; exit 37"
+            .to_vec(),
+    ]);
+    let mut child = rt
+        .spawn(
+            &spec,
+            [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()],
+        )
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+    for fd in 0..=2 {
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+    // Do not ask the test harness to print to its deliberately closed stdout.
+    unsafe { libc::_exit(0) }
+}
+#[test]
+fn closed_stdio_is_sanitized_to_dev_null_by_helper_startup() {
+    let mut reaper = FixtureReaper::new();
+    let mut core = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "closed_stdio_fixture", "--nocapture"])
+        .env("GUARD_CLOSED_STDIO_FIXTURE", "1")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    reaper.add(core.id() as i32);
+    assert_eq!(core.wait().unwrap().code(), Some(0));
+}
+#[test]
+fn slow_chunk_peer_cannot_extend_absolute_handshake_deadline() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::{
+        net::{SocketAddr, UnixListener},
+        process::CommandExt,
+    };
+    let mut reaper = FixtureReaper::new();
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("clock.c");
+    let library = temp.path().join("clock.so");
+    // A standalone raw-helper fixture only: no product fault switch and no
+    // change to the production env_clear launch. Each consumed chunk advances
+    // a frozen monotonic clock by one second and emits an event. No sleep or
+    // real-time speed assertion. This catches resetting the deadline per frame.
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <errno.h>
+static long ticks;
+static int note=-1;
+__attribute__((constructor)) static void init(void) {
+    const char *s=getenv("GUARD_FIXTURE_CLOCK_FD"); if(s) note=atoi(s);
+}
+int clock_gettime(clockid_t id,struct timespec *out) {
+    static int (*real)(clockid_t,struct timespec*);
+    static struct timespec base;
+    if(!real) real=dlsym(RTLD_NEXT,"clock_gettime");
+    if(note<0 || id!=CLOCK_MONOTONIC) return real(id,out);
+    if(!base.tv_sec && real(id,&base)) return -1;
+    *out=base; out->tv_sec+=ticks; return 0;
+}
+static void consumed(int fd,ssize_t count) {
+    int save=errno,kind=0; socklen_t len=sizeof(kind);
+    if(note>=0 && count>0 && !getsockopt(fd,SOL_SOCKET,SO_TYPE,&kind,&len) && kind==SOCK_STREAM) {
+        ++ticks; if(write(note,"R",1)!=1) _exit(120);
+    }
+    errno=save;
+}
+ssize_t read(int fd,void *buf,size_t len) {
+    static ssize_t (*real)(int,void*,size_t);
+    if(!real) real=dlsym(RTLD_NEXT,"read");
+    ssize_t n=real(fd,buf,len); consumed(fd,n); return n;
+}
+ssize_t recv(int fd,void *buf,size_t len,int flags) {
+    static ssize_t (*real)(int,void*,size_t,int);
+    if(!real) real=dlsym(RTLD_NEXT,"recv");
+    ssize_t n=real(fd,buf,len,flags); consumed(fd,n); return n;
+}
+"#,
+    )
+    .unwrap();
+    assert!(
+        Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args(["-shared", "-fPIC", "-o"])
+            .arg(&library)
+            .arg(&source)
+            .arg("-ldl")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (mut events, write_events) = UnixStream::pair().unwrap();
+    let high = unsafe { libc::fcntl(write_events.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+    assert!(high >= 64);
+    let inherited = unsafe { std::os::fd::OwnedFd::from_raw_fd(high) };
+    let rt = runtime();
+    let name = format!("guard-slow-{}", std::process::id());
+    let listener =
+        UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
+    let mut command = helper_command(&rt, &name, unsafe { libc::getuid() });
+    command
+        .env("LD_PRELOAD", &library)
+        .env("GUARD_FIXTURE_CLOCK_FD", high.to_string());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(high, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut helper = command.spawn().unwrap();
+    reaper.add(helper.id() as i32);
+    drop((inherited, write_events));
+    let (mut socket, _) = listener.accept().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let death = pidfd_open(helper.id() as i32).unwrap();
+    assert_eq!(
+        wire::receive(
+            &mut socket,
+            &mut wire::Decoder::default(),
+            death.as_raw_fd(),
+            None
+        )
+        .unwrap()
+        .0,
+        wire::Kind::Hello
+    );
+    let mut consumed = 0;
+    for _ in 0..8 {
+        if wire::send(&mut socket, wire::Kind::LaunchChunk, b"x", None).is_err() {
+            break;
+        }
+        let mut event = [0];
+        if events.read_exact(&mut event).is_err() {
+            break;
+        }
+        assert_eq!(event, [b'R']);
+        consumed += 1;
+    }
+    assert_eq!(
+        consumed, 5,
+        "the first 5s deadline must not slide with progress"
+    );
+    assert_eq!(helper.wait().unwrap().code(), Some(125));
 }

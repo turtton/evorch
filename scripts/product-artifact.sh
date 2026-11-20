@@ -175,8 +175,9 @@ build() { # <outdir>
   trap 'rm -f "$listing"' RETURN
   # The distribution's arguments, release profile, no feature. Diagnostics go
   # to stderr (json-render-diagnostics); stdout is the artifact listing.
+  if [[ "$linux" == true ]]; then "$guard_tool" check-dependencies; fi
   # shellcheck disable=SC2046 # the arguments are fixed words
-  (cd "$repo" && cargo $(jq -r '.[]' <<< "$build_args") --message-format=json-render-diagnostics) > "$listing"
+  (cd "$repo" && CARGO_BUILD_GC_ENABLED=false cargo $(jq -r '.[]' <<< "$build_args") --message-format=json-render-diagnostics) > "$listing"
   exe=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "evorch-core"
       and (.target.kind | index("bin")) and .executable != null) | .executable' "$listing" | tail -n 1)
   [[ -n "$exe" ]] || die "cargo did not report the evorch-core executable"

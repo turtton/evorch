@@ -100,7 +100,7 @@ mod client {
                 .collect::<String>();
             let name = format!("evorch-guard-{}-{nonce}", std::process::id());
             let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
-            let listener = UnixListener::bind_addr(&addr)?;
+            let listener = non_stdio(UnixListener::bind_addr(&addr)?)?;
             listener.set_nonblocking(true)?;
             let [stdin, stdout, stderr] = stdio;
             let [dev, ino] = self.image.identity_args();
@@ -135,6 +135,7 @@ mod client {
                     }
                     match listener.accept() {
                         Ok((s, _)) => {
+                            let s = non_stdio(s)?;
                             if peer(&s, helper.id() as i32, unsafe { libc::getuid() })? {
                                 break s;
                             }
@@ -212,22 +213,26 @@ mod client {
             }
         }
     }
-    pub fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        // A helper has closed stdio after fork. Do not reuse those numbers for
-        // its newly-opened target pidfd and accidentally violate that contract.
+    /// Internal descriptors must never fill a caller's closed stdio slot.
+    /// Duplication retains CLOEXEC atomically; the original is closed by RAII.
+    pub(crate) fn non_stdio<T: AsRawFd + Into<OwnedFd> + From<OwnedFd>>(fd: T) -> io::Result<T> {
+        let owned: OwnedFd = fd.into();
+        let fd = owned.as_raw_fd();
         if fd < 3 {
             let high = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
             if high < 0 {
                 return Err(io::Error::last_os_error());
             }
-            return Ok(unsafe { OwnedFd::from_raw_fd(high) });
+            return Ok(T::from(unsafe { OwnedFd::from_raw_fd(high) }));
         }
-        Ok(owned)
+        Ok(T::from(owned))
+    }
+    pub fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        non_stdio(unsafe { OwnedFd::from_raw_fd(fd) })
     }
     pub fn peer(s: &UnixStream, pid: i32, uid: u32) -> io::Result<bool> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };

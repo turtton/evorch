@@ -1,3 +1,12 @@
+### B1 の closed stdio 境界（B2 follow-up）
+
+helper の Rust startup は、閉じている fd 0/1/2 を `/dev/null` で埋める。
+意図して閉じた stdio を target にそのまま渡すこと（EBADF の保持）は B1 の保証外で、
+EOF や書き込み成功へ変わり得る。B2 の stdio API 移行時に経路ごとに扱いを決める。
+B1 は既存 caller を変えない。内部 image/control/monitor fd は atomic な
+`F_DUPFD_CLOEXEC >= 3` で退避し、core の閉じた stdio を clobber しない。
+`closed_stdio_is_sanitized_to_dev_null_by_helper_startup` が現在の期待値を固定する。
+
 # D-3a2 B1: helper and distribution only
 
 **B 未適用、D-7 未完了.** B1 delivers `evorch-process-guard`, its library and

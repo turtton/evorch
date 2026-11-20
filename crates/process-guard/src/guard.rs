@@ -183,7 +183,7 @@ fn signals() -> io::Result<OwnedFd> {
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(OwnedFd::from_raw_fd(n))
+        crate::non_stdio(OwnedFd::from_raw_fd(n))
     }
 }
 fn connect(name: &str, death: i32, deadline: Instant) -> io::Result<UnixStream> {
@@ -197,7 +197,8 @@ fn connect(name: &str, death: i32, deadline: Instant) -> io::Result<UnixStream> 
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let owned = crate::non_stdio(unsafe { OwnedFd::from_raw_fd(fd) })?;
+    let fd = owned.as_raw_fd();
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as _;
     if name.len() + 1 > addr.sun_path.len() {
@@ -347,6 +348,8 @@ pub fn entry() -> io::Result<()> {
     }
     let error_read = unsafe { OwnedFd::from_raw_fd(pipes[0]) };
     let error_write = unsafe { OwnedFd::from_raw_fd(pipes[1]) };
+    let error_read = crate::non_stdio(error_read)?;
+    let error_write = crate::non_stdio(error_write)?;
     let guard = unsafe { libc::getpid() };
     let root = unsafe { libc::fork() };
     if root < 0 {

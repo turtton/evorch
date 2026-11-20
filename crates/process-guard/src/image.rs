@@ -245,7 +245,11 @@ impl GuardImage {
         for part in &components[..components.len() - 1] {
             d = open_at(&d, part, libc::O_RDONLY | libc::O_DIRECTORY)?;
         }
-        let mut file = open_at(&d, components[components.len() - 1], libc::O_RDONLY)?;
+        let mut file = crate::non_stdio(open_at(
+            &d,
+            components[components.len() - 1],
+            libc::O_RDONLY,
+        )?)?;
         sealed(&file, 0o555)?;
         if digest(&mut file)? != (h.size_bytes, h.sha256.clone()) {
             return Err(invalid("guard helper hash/size mismatch"));
