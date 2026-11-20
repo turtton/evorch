@@ -1,6 +1,7 @@
 use super::*;
 use graph_control::{GraphControlRecord, GraphEffectKey};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 const SELECT_GRAPHS: &str = "SELECT c.restart_id,c.manifest_id,c.disposition,c.reason,c.revision,\
      t.capture_id,t.phase,t.adopted_epoch \
@@ -88,14 +89,20 @@ fn claim_state(conn: &Connection, manifest: &str) -> Result<QuarantineClaim, Sto
 fn build(conn: &Connection, row: Row) -> Result<QuarantinedGraph, StorageError> {
     let control = graph_control::control(conn, &row.manifest_id)?;
     let claim = claim_state(conn, &row.manifest_id)?;
-    let progress: Vec<(String, String, u64)> = conn
+    let progress: Vec<Progress> = conn
         .prepare(
-            "SELECT owners,scratch,revision FROM recovery_graph_thread_progress WHERE manifest_id=?1",
+            "SELECT thread_id,owners,scratch,revision FROM recovery_graph_thread_progress WHERE manifest_id=?1",
         )?
         .query_map([&row.manifest_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok(Progress {
+                thread: r.get(0)?,
+                owners: r.get(1)?,
+                scratch: r.get(2)?,
+                revision: r.get(3)?,
+            })
         })?
         .collect::<Result<_, _>>()?;
+    let threads = threads(conn, &row.restart_id, &row.manifest_id)?;
     let members: u32 = conn.query_row(
         "SELECT COUNT(*) FROM restart_expected_members WHERE restart_id=?1 AND manifest_id=?2",
         [&row.restart_id, &row.manifest_id],
@@ -107,14 +114,11 @@ fn build(conn: &Connection, row: Row) -> Result<QuarantinedGraph, StorageError> 
         .try_fold(
             row.revision
                 .checked_add(control.as_ref().map_or(0, |c| c.revision)),
-            |sum, (_, _, revision)| Some(sum?.checked_add(*revision)),
+            |sum, p| Some(sum?.checked_add(p.revision)),
         )
         .flatten()
         .ok_or_else(|| invalid("quarantine revision exhausted"))?;
-    let steps = progress
-        .iter()
-        .flat_map(|(o, s, _)| [o.as_str(), s.as_str()]);
-    let completion = completion(revoked, claim, steps);
+    let completion = completion(revoked, claim, threads.as_ref(), &progress);
     Ok(QuarantinedGraph {
         restart_id: row.restart_id,
         capture_id: row.capture_id,
@@ -134,12 +138,48 @@ fn build(conn: &Connection, row: Row) -> Result<QuarantinedGraph, StorageError> 
     })
 }
 
-/// A revoked graph is complete only with no prepared claim and no step that is
-/// still not started. A step or claim in an unknown state is never complete.
-fn completion<'a>(
+struct Progress {
+    thread: String,
+    owners: String,
+    scratch: String,
+    revision: u64,
+}
+
+/// The threads the graph's members belong to: each may hold an owner and a
+/// scratch that this leaf can neither inspect nor clean. A member record that
+/// cannot be read leaves the set unknown.
+fn threads(
+    conn: &Connection,
+    restart: &str,
+    manifest: &str,
+) -> Result<Result<BTreeSet<String>, ()>, StorageError> {
+    let members: Vec<String> = conn
+        .prepare(
+            "SELECT member_json FROM restart_expected_members WHERE restart_id=?1 AND manifest_id=?2",
+        )?
+        .query_map([restart, manifest], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(members
+        .iter()
+        .map(|json| {
+            serde_json::from_str::<restart::RestartExpectedMember>(json)
+                .map(|m| m.thread_id)
+                .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|ids| ids.into_iter().flatten().collect()))
+}
+
+/// Complete needs evidence for everything: no prepared claim, and every thread
+/// of the graph recorded as finished (applied, or not applicable) for both its
+/// owners and its scratch. No record is not evidence that nothing remains: a
+/// thread without one is not started, and an unreadable or unknown record is
+/// unknown. A graph whose members belong to no thread has nothing to clean.
+fn completion(
     revoked: bool,
     claim: QuarantineClaim,
-    steps: impl Iterator<Item = &'a str>,
+    threads: Result<&BTreeSet<String>, &()>,
+    progress: &[Progress],
 ) -> QuarantineCompletion {
     if !revoked {
         return QuarantineCompletion::NotStarted;
@@ -149,12 +189,21 @@ fn completion<'a>(
         QuarantineClaim::Prepared => QuarantineCompletion::Partial,
         QuarantineClaim::Activated => return QuarantineCompletion::Unknown,
     };
-    for step in steps {
-        match step {
+    let Ok(threads) = threads else {
+        return QuarantineCompletion::Unknown;
+    };
+    for step in progress.iter().flat_map(|p| [&p.owners, &p.scratch]) {
+        match step.as_str() {
             "applied" | "not_applicable" => {}
             "not_started" => result = QuarantineCompletion::Partial,
             _ => return QuarantineCompletion::Unknown,
         }
+    }
+    if threads
+        .iter()
+        .any(|thread| !progress.iter().any(|p| &p.thread == thread))
+    {
+        result = QuarantineCompletion::Partial;
     }
     result
 }

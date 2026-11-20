@@ -44,7 +44,7 @@ fn id(s: &str) -> AdminId {
 
 /// A committed two-member manifest, a transaction, and the production cold-boot
 /// transition that quarantines it.
-fn seed(storage: &Storage, config: &StorageConfig, claimed: bool) {
+fn seed(storage: &Storage, config: &StorageConfig, claimed: bool, threads: bool) {
     let handle = storage.handle();
     let mut members = Vec::new();
     let mut incarnations = Vec::new();
@@ -146,7 +146,7 @@ fn seed(storage: &Storage, config: &StorageConfig, claimed: bool) {
             run_id: run.into(),
             incarnation: "old".into(),
             root_run_id: run.into(),
-            thread_id: Some(run.into()),
+            thread_id: threads.then(|| run.into()),
             intent_revision: 0,
             snapshot: None,
             owner_id: None,
@@ -251,7 +251,15 @@ impl Harness {
             _lease: lease,
         }
     }
+    /// Members that belong to no thread: the claim is the only cleanup there is.
     fn new(claimed: bool) -> (tempfile::TempDir, Self) {
+        Self::build(claimed, false)
+    }
+    /// Members on threads whose owner and scratch this leaf can neither see nor clean.
+    fn with_threads(claimed: bool) -> (tempfile::TempDir, Self) {
+        Self::build(claimed, true)
+    }
+    fn build(claimed: bool, threads: bool) -> (tempfile::TempDir, Self) {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("q1.db"),
@@ -259,7 +267,7 @@ impl Harness {
         };
         {
             let storage = Storage::open(config.clone()).unwrap();
-            seed(&storage, &config, claimed);
+            seed(&storage, &config, claimed, threads);
         }
         (dir, Self::open(config))
     }
@@ -597,5 +605,55 @@ async fn a_discard_needs_explicit_confirmation_and_the_current_epoch() {
             .is_err()
     );
     assert_eq!(h.hooks.discards.load(Ordering::SeqCst), 0);
+    h.close().await;
+}
+
+#[tokio::test]
+async fn threads_with_no_disposal_record_are_never_reported_as_a_successful_discard() {
+    use storage::recovery::graph_progress::{
+        GraphDisposalProgressKey, GraphDisposalStep, GraphThreadProgressWrite,
+    };
+    let (_dir, h) = Harness::with_threads(false);
+    let item = h.item().await;
+    h.discard(Harness::binding(&item, "op-1")).await.unwrap();
+    // The eligibility is revoked, yet an owner or scratch may remain and nothing
+    // recorded that they were handled: that is not success.
+    assert_ne!(h.audit_outcome("op-1"), Some(AuditOutcome::Succeeded));
+    assert_eq!(h.audit_outcome("op-1"), Some(AuditOutcome::Failed));
+    let revoked = h.item().await;
+    assert_eq!(revoked.eligibility, QuarantineEligibility::Revoked);
+    assert_eq!(revoked.completion, QuarantineCompletion::Partial);
+    assert!(!revoked.discard_complete());
+
+    // Only the production progress write for every thread lets it finish.
+    let control = Database::open(&h.config)
+        .unwrap()
+        .recovery_graph_control(MANIFEST)
+        .unwrap()
+        .unwrap();
+    for thread in ["run-a", "run-b"] {
+        h.storage
+            .handle()
+            .write_recovery_graph_progress(GraphThreadProgressWrite {
+                key: GraphDisposalProgressKey {
+                    manifest_id: MANIFEST.into(),
+                    restart_id: TX.into(),
+                    capture_id: CAPTURE.into(),
+                    thread_id: thread.into(),
+                    owner_generation: 1,
+                },
+                expected_revision: 0,
+                control: control.clone(),
+                owners: GraphDisposalStep::NotApplicable,
+                scratch: GraphDisposalStep::Applied,
+            })
+            .unwrap();
+    }
+    let recorded = h.item().await;
+    assert!(recorded.discard_complete());
+    h.discard(Harness::binding(&recorded, "op-2"))
+        .await
+        .unwrap();
+    assert_eq!(h.audit_outcome("op-2"), Some(AuditOutcome::Succeeded));
     h.close().await;
 }

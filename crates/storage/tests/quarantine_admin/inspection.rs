@@ -69,7 +69,7 @@ fn an_adopted_quarantine_is_listed_as_owned_not_cold() {
 fn only_quarantined_or_discarded_components_are_inspectable() {
     let f = Fixture::new();
     f.seed(false);
-    f.transaction();
+    f.transaction(true);
     assert!(f.db().quarantined_graph(TX, MANIFEST).unwrap().is_none());
     assert!(f.db().quarantined_graph(TX, "nope").unwrap().is_none());
 }

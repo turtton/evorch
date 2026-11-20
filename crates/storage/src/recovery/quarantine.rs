@@ -42,9 +42,11 @@ pub enum QuarantineClaim {
 pub enum QuarantineCompletion {
     /// Eligibility is still open.
     NotStarted,
-    /// Revoked and no cleanup is recorded as outstanding.
+    /// Revoked, no claim is prepared, and every thread of the graph has a
+    /// finished record for its owners and scratch (or the graph has no thread).
     Complete,
-    /// Revoked, with a prepared claim or a disposal step still outstanding.
+    /// Revoked, with a prepared claim, a disposal step, or a thread with no
+    /// disposal record yet. A missing record is not evidence of nothing to clean.
     Partial,
     /// Revoked, but a recorded step is unknown or a claim is in an unexpected state.
     Unknown,

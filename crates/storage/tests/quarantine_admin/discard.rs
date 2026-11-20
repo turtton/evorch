@@ -7,7 +7,7 @@ fn discard(f: &Fixture, request: DiscardRequest) -> DiscardReport {
 
 #[test]
 fn discard_revokes_eligibility_permanently_without_a_claim() {
-    let (mut f, _) = Fixture::cold_quarantine(false);
+    let (mut f, _) = Fixture::cold_quarantine_threadless(false);
     let before = f.graph();
     let request = f.request("op-1");
     let result = discard(&f, request).unwrap();
@@ -37,7 +37,7 @@ fn discard_revokes_eligibility_permanently_without_a_claim() {
 
 #[test]
 fn discard_releases_a_prepared_claim_and_blocks_automatic_activation_after_reload() {
-    let (mut f, activation) = Fixture::cold_quarantine(true);
+    let (mut f, activation) = Fixture::cold_quarantine_threadless(true);
     assert_eq!(f.graph().claim, QuarantineClaim::Prepared);
     let result = discard(&f, f.request("op-1")).unwrap();
     assert_eq!(result.change, DiscardChange::Revoked);
@@ -130,7 +130,7 @@ fn a_new_operation_on_a_revoked_graph_changes_nothing_and_reports_the_state() {
 
 #[test]
 fn an_unfinished_claim_release_leaves_the_revocation_partial_until_it_completes() {
-    let (f, _) = Fixture::cold_quarantine(true);
+    let (f, _) = Fixture::cold_quarantine_threadless(true);
     // A member intent moved on: the claim cannot be released without losing that fence.
     f.sql()
         .execute(
@@ -253,7 +253,7 @@ fn history_and_run_snapshots_are_untouched_by_a_discard() {
 
 #[test]
 fn recorded_progress_that_is_not_finished_keeps_the_discard_partial() {
-    let (f, _) = Fixture::cold_quarantine(false);
+    let (f, _) = Fixture::cold_quarantine_threadless(false);
     discard(&f, f.request("op-1")).unwrap();
     let sql = f.sql();
     for (steps, expected) in [
@@ -271,4 +271,71 @@ fn recorded_progress_that_is_not_finished_keeps_the_discard_partial() {
         .unwrap();
         assert_eq!(f.graph().completion, expected, "{steps:?}");
     }
+}
+
+#[test]
+fn no_disposal_record_is_not_evidence_that_nothing_remains() {
+    // The members belong to threads whose owner and scratch this leaf can
+    // neither see nor clean, and nothing has recorded that they were handled.
+    let (f, _) = Fixture::cold_quarantine(false);
+    let result = discard(&f, f.request("op-1")).unwrap();
+    assert_eq!(result.change, DiscardChange::Revoked);
+    assert!(result.graph.revoked);
+    assert_eq!(result.graph.completion, QuarantineCompletion::Partial);
+
+    // One thread recorded, the other still unknown to the record: still not complete.
+    let control = f.db().recovery_graph_control(MANIFEST).unwrap().unwrap();
+    f.handle()
+        .write_recovery_graph_progress(
+            storage::recovery::graph_progress::GraphThreadProgressWrite {
+                key: storage::recovery::graph_progress::GraphDisposalProgressKey {
+                    manifest_id: MANIFEST.into(),
+                    restart_id: TX.into(),
+                    capture_id: CAPTURE.into(),
+                    thread_id: "run-a".into(),
+                    owner_generation: 1,
+                },
+                expected_revision: 0,
+                control,
+                owners: storage::recovery::graph_progress::GraphDisposalStep::NotApplicable,
+                scratch: storage::recovery::graph_progress::GraphDisposalStep::Applied,
+            },
+        )
+        .unwrap();
+    assert_eq!(f.graph().completion, QuarantineCompletion::Partial);
+}
+
+#[test]
+fn a_graph_is_complete_only_when_every_thread_has_a_finished_record() {
+    use storage::recovery::graph_progress::GraphDisposalStep::*;
+    let (f, _) = Fixture::cold_quarantine(false);
+    discard(&f, f.request("op-1")).unwrap();
+    f.record_cleanup(NotApplicable, Applied);
+    let done = f.graph();
+    assert_eq!(done.completion, QuarantineCompletion::Complete);
+    // A later request on the revoked graph reports that same finished state.
+    let again = discard(&f, f.request("op-2")).unwrap();
+    assert_eq!(again.change, DiscardChange::AlreadyRevoked);
+    assert_eq!(again.graph.completion, QuarantineCompletion::Complete);
+}
+
+#[test]
+fn an_unknown_disposal_step_or_unreadable_membership_is_unknown_not_complete() {
+    use storage::recovery::graph_progress::GraphDisposalStep::*;
+    let (f, _) = Fixture::cold_quarantine(false);
+    discard(&f, f.request("op-1")).unwrap();
+    f.record_cleanup(Unknown, Applied);
+    assert_eq!(f.graph().completion, QuarantineCompletion::Unknown);
+
+    let (f, _) = Fixture::cold_quarantine(false);
+    discard(&f, f.request("op-1")).unwrap();
+    f.record_cleanup(NotApplicable, NotApplicable);
+    assert_eq!(f.graph().completion, QuarantineCompletion::Complete);
+    f.sql()
+        .execute(
+            "UPDATE restart_expected_members SET member_json='{' WHERE run_id='run-a'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.graph().completion, QuarantineCompletion::Unknown);
 }

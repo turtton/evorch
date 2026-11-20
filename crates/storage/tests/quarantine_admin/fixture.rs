@@ -2,7 +2,7 @@
 use serde_json::{Value, json};
 use storage::{
     Database, RunContextRecord, Storage, StorageConfig,
-    recovery::{restart::*, *},
+    recovery::{graph_progress::*, restart::*, *},
     resume_intent::ResumeIntentRecord,
 };
 
@@ -140,7 +140,7 @@ impl Fixture {
         request
     }
     /// A transaction with the one manifest as a retry-pending component.
-    pub fn transaction(&self) {
+    pub fn transaction(&self, threads: bool) {
         let metadata = RestartMetadata {
             restart_id: TX.into(),
             capture_id: CAPTURE.into(),
@@ -173,7 +173,7 @@ impl Fixture {
                 run_id: run.into(),
                 incarnation: "old".into(),
                 root_run_id: run.into(),
-                thread_id: Some(run.into()),
+                thread_id: threads.then(|| run.into()),
                 intent_revision: 0,
                 snapshot: None,
                 owner_id: None,
@@ -189,14 +189,42 @@ impl Fixture {
     }
     /// The production cold-boot transition: the tx ends and the component is quarantined.
     pub fn cold_quarantine(claimed: bool) -> (Self, RecoveryActivationRequest) {
+        Self::quarantine(claimed, true)
+    }
+    /// Members that belong to no thread: no owner or scratch can remain.
+    pub fn cold_quarantine_threadless(claimed: bool) -> (Self, RecoveryActivationRequest) {
+        Self::quarantine(claimed, false)
+    }
+    fn quarantine(claimed: bool, threads: bool) -> (Self, RecoveryActivationRequest) {
         let f = Self::new();
         let activation = f.seed(claimed);
-        f.transaction();
+        f.transaction(threads);
         let (revision, _) = f.db().restart_revision_phase(TX).unwrap().unwrap();
         f.handle()
             .quarantine_cold_restart(TX.into(), revision)
             .unwrap();
         (f, activation)
+    }
+    /// What a disposal records through the production progress write, per thread.
+    pub fn record_cleanup(&self, owners: GraphDisposalStep, scratch: GraphDisposalStep) {
+        let control = self.db().recovery_graph_control(MANIFEST).unwrap().unwrap();
+        for thread in ["run-a", "run-b"] {
+            self.handle()
+                .write_recovery_graph_progress(GraphThreadProgressWrite {
+                    key: GraphDisposalProgressKey {
+                        manifest_id: MANIFEST.into(),
+                        restart_id: TX.into(),
+                        capture_id: CAPTURE.into(),
+                        thread_id: thread.into(),
+                        owner_generation: 1,
+                    },
+                    expected_revision: 0,
+                    control: control.clone(),
+                    owners,
+                    scratch,
+                })
+                .unwrap();
+        }
     }
     pub fn graph(&self) -> quarantine::QuarantinedGraph {
         self.db()
