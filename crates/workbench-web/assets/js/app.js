@@ -7,6 +7,7 @@ import { EventStream } from "./sse.js";
 import { createStore } from "./store.js";
 import { homeView, inboxView, projectView, threadView } from "./views.js";
 import { fetchAllPages } from "./paging.js";
+import { adminView } from "./restart.js";
 import { describeError, pageRequest } from "./wire.js";
 
 const DEFAULT_BODY_CHUNK = 64 * 1024;
@@ -160,6 +161,7 @@ function parseRoute(hash) {
   if (parts[0] === "p" && parts[1]) return { name: "project", id: parts[1] };
   if (parts[0] === "t" && parts[1]) return { name: "thread", id: parts[1] };
   if (parts[0] === "inbox") return { name: "inbox" };
+  if (parts[0] === "admin") return { name: "admin" };
   return { name: "home" };
 }
 
@@ -175,6 +177,9 @@ function navigate() {
       break;
     case "inbox":
       current = inboxView(ctx);
+      break;
+    case "admin":
+      current = adminView(ctx);
       break;
     default:
       current = homeView(ctx);

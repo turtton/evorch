@@ -122,6 +122,14 @@ export class EventStream {
         this.retry("unreadable subscription_started");
         return;
       }
+      // A replay must continue exactly from the cursor that was sent. Any
+      // other position means the core did not honour it (another epoch, too
+      // old): the cursor is dropped and a fresh snapshot is asked for.
+      if (after && !started.snapshot_id && formatCursor(started.high_water) !== formatCursor(after)) {
+        this.last = null;
+        this.retry("cursor_mismatch");
+        return;
+      }
       this.last = started.high_water;
       this.subscribed = true;
       this.stableTimer = this.schedule(

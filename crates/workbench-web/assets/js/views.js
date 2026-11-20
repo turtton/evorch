@@ -138,6 +138,7 @@ export function homeView(ctx) {
     list,
     empty,
     paging.el,
+    h("a", { class: "button link admin-link", href: "#/admin", text: "管理" }),
   );
 
   function row(project) {
