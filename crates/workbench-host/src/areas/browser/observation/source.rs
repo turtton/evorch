@@ -15,6 +15,8 @@ struct Inner {
     runtime: runtime::runtime::BrowserExecutionReader,
     core_epoch: u64,
     feeds: Mutex<HashMap<ObservationScope, watch::Sender<Option<Arc<ObservedPage>>>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    gate: std::sync::OnceLock<Arc<dyn gate::SourceGate>>,
 }
 impl AgentObservationSource {
     pub fn new(
@@ -29,9 +31,17 @@ impl AgentObservationSource {
                 runtime,
                 core_epoch,
                 feeds: Mutex::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                gate: std::sync::OnceLock::new(),
             }),
             tasks,
         }
+    }
+    /// Installs the test gate of the task (once). Without it the task never waits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_gate_for_test(self, gate: Arc<dyn gate::SourceGate>) -> Self {
+        let _ = self.inner.gate.set(gate);
+        self
     }
 }
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -148,6 +158,8 @@ impl AgentObservationPort for AgentObservationSource {
             let scope = worker_scope;
             // Acquire the upstream only after task admission. Full/closed task
             // registries must not leave an untracked producer behind.
+            #[cfg(any(test, feature = "test-support"))]
+            gate::pass(&inner, gate::GatePoint::BeforeUpstream).await;
             let feed = match inner.browser.observe(&execution(&scope)) {
                 Ok(feed) => feed,
                 Err(_) => {
@@ -176,10 +188,14 @@ impl AgentObservationPort for AgentObservationSource {
                 }
             }
             tx.send_replace(None);
+            #[cfg(any(test, feature = "test-support"))]
+            gate::pass(&inner, gate::GatePoint::Retiring).await;
             {
                 let mut feeds = locked(&inner.feeds);
                 if feeds.get(&scope).is_some_and(|current| current.same_channel(&tx)) { feeds.remove(&scope); }
             }
+            #[cfg(any(test, feature = "test-support"))]
+            gate::pass(&inner, gate::GatePoint::Retired).await;
             drop(source_updates);
             feed.close().await;
             Ok(())
@@ -283,6 +299,9 @@ fn bounded(s: &str) -> String {
     }
     s[..n].into()
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod gate;
 
 #[cfg(test)]
 mod tests;

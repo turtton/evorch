@@ -9,6 +9,8 @@
 //!   GUI runs its own phase only when it holds the exclusive leases.
 //! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
+#[cfg(any(test, feature = "test-support"))]
+mod agent_observation_seam;
 pub mod components;
 pub mod core_startup;
 pub mod evaluation;
@@ -605,6 +607,8 @@ impl BootstrappedHost {
                 ),
             ) as Arc<dyn crate::areas::browser::observation::AgentObservationPort>
         });
+        #[cfg(any(test, feature = "test-support"))]
+        let agent_observation = agent_observation_seam::injected().or(agent_observation);
         let areas = Areas::new(&AreaHandles {
             agent_observation,
             runtime: runtime.clone(),
