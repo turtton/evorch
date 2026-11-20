@@ -12,6 +12,7 @@ description = "Web adapter (HTTP + SSE) for the evorch workbench protocol (ADR 0
 test-support = []
 
 [dependencies]
+workbench-authority = { path = "../workbench-authority" }
 workbench-protocol = { path = "../workbench-protocol" }
 axum = { workspace = true }
 futures-core = { workspace = true }
@@ -26,6 +27,7 @@ tokio-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "macros", "time"] }
 
 [dev-dependencies]
+workbench-authority = { path = "../workbench-authority", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
 # Browser end-to-end test of the embedded front end (tests/web_ui_chromium.rs).

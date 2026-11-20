@@ -390,6 +390,20 @@ impl PendingPlannedHost {
             self.boot
                 .fail(BootFailure::AdoptedBeforeReady, Some(&runtime));
         }
+        if let Err(error) = self
+            .host
+            .admin
+            .audit()
+            .reconcile(storage::admin_audit::AuditReconcile::Ready {
+                restart_id: before.metadata.restart_id.clone(),
+            })
+            .await
+        {
+            tracing::warn!(
+                ?error,
+                "management restart audit Ready reconciliation deferred"
+            );
+        }
         if self
             .boot
             .instance

@@ -758,7 +758,12 @@ impl Projection {
     }
 
     fn lifecycle_query(&self, q: &LifecycleQuery) -> Result<LifecycleReply, WorkbenchError> {
-        let LifecycleQuery::GetCoreStatus = q;
+        if !matches!(q, LifecycleQuery::GetCoreStatus) {
+            return Err(queries::error(
+                ErrorCode::PermissionDenied,
+                "management query requires verified ingress",
+            ));
+        }
         self.with_models(|m| Ok(LifecycleReply::CoreStatus(m.status())))
     }
 
@@ -1117,6 +1122,7 @@ fn matches_scope(models: &Models, scope: &SubscriptionScope, event: &UiEvent) ->
         })
         .collect();
     match scope {
+        SubscriptionScope::Management => false,
         SubscriptionScope::All => true,
         SubscriptionScope::Thread { thread } => threads.contains(&thread),
         SubscriptionScope::Project { project } => threads.into_iter().any(|t| {
@@ -1134,6 +1140,7 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
             .projects
             .values()
             .filter(|p| match scope {
+                SubscriptionScope::Management => false,
                 SubscriptionScope::All => true,
                 SubscriptionScope::Project { project } => &p.id == project,
                 SubscriptionScope::Thread { thread } => models

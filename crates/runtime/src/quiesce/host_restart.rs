@@ -99,6 +99,26 @@ impl HostRestartGate {
         state.active += 1;
         Ok(HostCommandPermit(Arc::new(HostCommandLease(self.clone()))))
     }
+    /// Short request-audit admission, atomic with sealing. Unlike background
+    /// producers this remains available during Preparing. No admission after a
+    /// sealed proof is minted: capture can never overtake an accepted write.
+    ///
+    /// The common audit runner holds this only for ACK + one readback (10s each,
+    /// at most 20s), never for the restart driver. Cancel/status do not use it.
+    pub fn enter_admin_audit(&self) -> Result<HostCommandPermit, RuntimeError> {
+        let mut state = self.0.state.lock().unwrap();
+        if !matches!(
+            state.phase,
+            HostRestartPhase::Open
+                | HostRestartPhase::Preparing
+                | HostRestartPhase::Sealing
+                | HostRestartPhase::Cancelling
+        ) {
+            return Err(RuntimeError::RestartBusy);
+        }
+        state.active += 1;
+        Ok(HostCommandPermit(Arc::new(HostCommandLease(self.clone()))))
+    }
     pub async fn drained(&self) {
         let mut changed = self.subscribe();
         loop {

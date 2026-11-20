@@ -25,6 +25,7 @@ mod project_models;
 pub mod recovery;
 #[cfg(test)]
 mod recovery_06a_tests;
+pub mod recovery_disposal;
 pub mod restart;
 pub mod retention;
 #[cfg(test)]
@@ -132,6 +133,7 @@ pub struct BootstrappedHost {
     deferred: Option<DeferredStartup>,
     planned_sandbox: Option<Arc<sandbox::bwrap::PlannedBwrap>>,
     area_tasks: AreaTasks,
+    pub admin: Arc<crate::admin::AdminService>,
     pub usage_pricing: recorder::pricing::SharedUsagePricing,
     pub evaluator: Arc<evaluation::EvaluatorHost>,
     evaluations: eval::evaluator::EvaluationService,
@@ -639,7 +641,18 @@ impl BootstrappedHost {
         areas.workspace.declare_saved().map_err(|error| {
             format!("the saved workspace access could not be declared: {error:?}")
         })?;
-        let host = Arc::new(Mutex::new(command_host.with_areas(areas)));
+        let admin = crate::admin::AdminService::new(
+            crate::admin::AdminAudit::new(
+                Arc::new(handle.clone()),
+                command_host.service().restart_gate(),
+            ),
+            area_tasks.clone(),
+            command_host.projection().instance_epoch(),
+        );
+        admin.install_operation_reader(Arc::new(storage_config.clone()));
+        let host = Arc::new(Mutex::new(
+            command_host.with_areas(areas).with_admin(admin.clone()),
+        ));
         #[cfg(any(test, feature = "test-support"))]
         let composition = CompositionInventory {
             tools: executor.tool_specs(),
@@ -656,6 +669,7 @@ impl BootstrappedHost {
             evaluations: evaluations.clone(),
             config,
             services: services::BackgroundServices::default(),
+            admin,
             area_tasks,
             deferred: None,
             planned_sandbox,
@@ -672,6 +686,24 @@ impl BootstrappedHost {
             executor,
             _leases: leases,
         };
+        bootstrap.admin.register_worker(&mut bootstrap.services);
+        if !planned {
+            let live_core_epoch = bootstrap
+                .host
+                .lock()
+                .unwrap()
+                .projection()
+                .instance_epoch()
+                .get();
+            if let Err(error) = bootstrap
+                .admin
+                .audit()
+                .reconcile(storage::admin_audit::AuditReconcile::Cold { live_core_epoch })
+                .await
+            {
+                tracing::warn!(?error, "management audit cold reconciliation deferred");
+            }
+        }
         bootstrap.deferred = Some(DeferredStartup {
             mode: if planned {
                 core_startup::CoreBootMode::PlannedHandoff
@@ -853,6 +885,7 @@ impl BootstrappedHost {
             self.runtime.producer_gate(),
             self.evaluations.producers.clone(),
             self.area_tasks.producer_gate(),
+            self.admin.producer_gate(),
         ];
         if let Some(pr) = self.runtime.pull_requests() {
             gates.push(pr.producer_gate());

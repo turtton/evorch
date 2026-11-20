@@ -109,8 +109,7 @@ pr16bov3 crates/evorch-core/tests/agent_observation_cache.rs
 # pr07b5aq2: Q2 (owned graphs and the graph disposition).
 # pr07b5acn: CN (native clients: launcher diagnostics, client helper, CLI, GUI).
 # pr07b5acw: CW (the Web adapter and its front end).
-# public_restart_cache.rs is shared by R and CW, whose PRs are not open at the same
-# time (as O-V1 and O-V2 share paths with pr16bos and pr16bog).
+# public_restart_cache.rs is reserved to 5a-V (integration), not any leaf scope.
 pr07b5ar crates/evorch-core/src/restart.rs
 pr07b5ar crates/evorch-core/src/restart/public.rs
 pr07b5ar crates/evorch-core/src/restart/public/*
@@ -120,7 +119,6 @@ pr07b5ar crates/workbench-protocol/src/namespaces/lifecycle/restart.rs
 pr07b5ar crates/workbench-protocol/src/namespaces/lifecycle/restart/*
 pr07b5ar crates/evorch-core/tests/public_restart_coordinator.rs
 pr07b5ar crates/evorch-core/tests/public_restart_coordinator/*
-pr07b5ar crates/evorch-core/tests/public_restart_cache.rs
 pr07b5aq1 crates/workbench-host/src/ingress/namespaces/lifecycle/quarantine.rs
 pr07b5aq1 crates/workbench-host/src/ingress/namespaces/lifecycle/quarantine/*
 pr07b5aq1 crates/workbench-protocol/src/namespaces/lifecycle/quarantine.rs
@@ -181,4 +179,3 @@ pr07b5acw crates/workbench-web/tests/public_restart.rs
 pr07b5acw crates/workbench-web/tests/public_restart/*
 pr07b5acw crates/workbench-web/tests/public_restart_chromium.rs
 pr07b5acw crates/workbench-web/tests/public_restart_chromium/*
-pr07b5acw crates/evorch-core/tests/public_restart_cache.rs

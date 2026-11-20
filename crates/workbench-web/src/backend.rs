@@ -16,7 +16,8 @@
 
 use std::future::Future;
 use tokio::sync::mpsc;
-use workbench_protocol::envelope::{Provenance, ReplyEnvelope, RequestEnvelope};
+use workbench_authority::IngressContext;
+use workbench_protocol::envelope::{ReplyEnvelope, RequestEnvelope};
 use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::events::{EventEnvelope, Subscribe, SubscriptionStarted};
 use workbench_protocol::handshake::ServerHello;
@@ -62,6 +63,22 @@ pub struct BackendSubscription {
 ///
 /// Futures must be `Send` because the adapter runs on a multi-threaded runtime.
 pub trait WorkbenchBackend: Send + Sync + 'static {
+    /// Nonblocking common authorization hook. Production records bounded denial
+    /// aggregates here; this never waits for audit I/O or permits a denied call.
+    fn authorize_management(
+        &self,
+        context: &IngressContext,
+        _action: workbench_protocol::namespaces::lifecycle::AdminAction,
+    ) -> Result<(), WorkbenchError> {
+        context.authorize().map(|_| ()).map_err(|_| {
+            WorkbenchError::new(
+                workbench_protocol::errors::ErrorCode::PermissionDenied,
+                "verified human transport principal required",
+                workbench_protocol::errors::RetryAdvice::Never,
+            )
+        })
+    }
+
     /// After the adapter has joined its requests and SSE pumps, join any
     /// backend-owned detached delivery work. Override when the backend spawns
     /// such work. This is NOT called by ordinary connection-only shutdown.
@@ -88,7 +105,7 @@ pub trait WorkbenchBackend: Send + Sync + 'static {
         &self,
         session: &WebSession,
         request: RequestEnvelope,
-        provenance: Provenance,
+        provenance: IngressContext,
     ) -> impl Future<Output = ReplyEnvelope> + Send;
 
     /// Start a subscription for one SSE connection.
@@ -99,10 +116,14 @@ pub trait WorkbenchBackend: Send + Sync + 'static {
         &self,
         client: ClientId,
         subscribe: Subscribe,
+        _context: IngressContext,
     ) -> impl Future<Output = Result<BackendSubscription, WorkbenchError>> + Send;
 
     /// What the core is and how it is doing, for `GET /api/v1/health`: server
     /// build, protocol version, capabilities, core identity and epoch, limits
     /// and status. The same value a socket client gets from the handshake.
-    fn server_hello(&self) -> impl Future<Output = Result<ServerHello, WorkbenchError>> + Send;
+    fn server_hello(
+        &self,
+        _context: &IngressContext,
+    ) -> impl Future<Output = Result<ServerHello, WorkbenchError>> + Send;
 }

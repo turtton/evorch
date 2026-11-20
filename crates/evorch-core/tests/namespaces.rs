@@ -48,6 +48,7 @@ fn hello(versions: &[ProtocolVersion], required: &[&str]) -> ClientHello {
         },
         client_instance_id: ClientId::new("namespaces").unwrap(),
         desired_core: None,
+        local_surface: None,
     }
 }
 

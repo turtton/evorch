@@ -29,7 +29,7 @@ mod evaluation;
 mod execution;
 mod improvement;
 mod lanes;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod maintenance;
 mod mcp;
 mod memory;

@@ -20,6 +20,7 @@
 //! Set `WORKBENCH_WEB_SCREENSHOT_DIR` to keep PNG screenshots of the main
 //! screens (mobile light, mobile dark, desktop).
 
+use workbench_authority::IngressContext;
 mod common;
 
 use chromiumoxide::cdp::browser_protocol::emulation::{
@@ -874,7 +875,7 @@ impl WorkbenchBackend for UiBackend {
         &self,
         _session: &WebSession,
         request: RequestEnvelope,
-        provenance: Provenance,
+        provenance: IngressContext,
     ) -> ReplyEnvelope {
         let value = serde_json::to_value(&request).unwrap();
         let held = value["payload"]["payload"]["type"]
@@ -885,7 +886,7 @@ impl WorkbenchBackend for UiBackend {
             hold.permits.acquire().await.unwrap().forget();
         }
         let mut reply = match value["kind"].as_str() {
-            Some("command") => self.answer(&value, &provenance),
+            Some("command") => self.answer(&value, provenance.provenance()),
             _ => self.query(&value),
         };
         reply["request_id"] = value["request_id"].clone();
@@ -897,6 +898,7 @@ impl WorkbenchBackend for UiBackend {
         &self,
         _client: ClientId,
         subscribe: Subscribe,
+        _context: IngressContext,
     ) -> Result<BackendSubscription, WorkbenchError> {
         let mut world = self.world.lock().unwrap();
         world.subscriptions += 1;
@@ -954,7 +956,7 @@ impl WorkbenchBackend for UiBackend {
         })
     }
 
-    async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
+    async fn server_hello(&self, _context: &IngressContext) -> Result<ServerHello, WorkbenchError> {
         let mut hello = common::server_hello();
         hello.instance_epoch = InstanceEpoch(self.world.lock().unwrap().epoch);
         Ok(hello)

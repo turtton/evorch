@@ -126,6 +126,14 @@ impl BuildInfo {
     }
 }
 
+/// Claimed local interface for audit display only; never transport authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSurface {
+    Desktop,
+    Cli,
+}
+
 /// First frame, client to core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +148,8 @@ pub struct ClientHello {
     /// Refuse to talk to any other core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desired_core: Option<CoreIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_surface: Option<LocalSurface>,
 }
 
 const MAX_HELLO_VERSIONS: usize = 16;

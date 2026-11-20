@@ -113,6 +113,7 @@ async fn handshake(stream: &mut tokio::net::UnixStream, name: &str) {
         },
         client_instance_id: ClientId::new(name).unwrap(),
         desired_core: None,
+        local_surface: None,
     };
     stream
         .write_all(&encode_frame(&hello, WireLimits::default().max_frame_bytes).unwrap())
