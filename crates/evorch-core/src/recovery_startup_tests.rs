@@ -294,8 +294,50 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         );
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         if activate {
+            let publication = host
+                .lock()
+                .unwrap()
+                .service()
+                .begin_root_recovery(adopted.command_bindings())
+                .unwrap();
             let reservation = second.reserve_automatic_activation(&manifests[0]).unwrap();
-            assert_eq!(adopted.activate(&second, reservation).unwrap(), [run]);
+            let activated = adopted.activate(&second, reservation).unwrap();
+            let mut remained_exclusive = false;
+            let runs = crate::recovery_service::publish_activation(activated, || {
+                // The FULL ACK must not open a gap before command bindings publish.
+                let manual_after_ack = second.reserve_manual_activation(
+                    &manifests[0],
+                    storage::recovery::graph_control::GraphEffectKey {
+                        operation_id: "before-binding-publication".into(),
+                        attempt_nonce: "attempt".into(),
+                    },
+                    0,
+                );
+                remained_exclusive = matches!(
+                    &manual_after_ack,
+                    Err(runtime::RuntimeError::ActivationReservationUnavailable {
+                        reason: runtime::ActivationReservationProblem::Contended
+                    })
+                );
+                drop(manual_after_ack);
+                host.lock()
+                    .unwrap()
+                    .service_mut()
+                    .complete_root_recovery(publication);
+            });
+            assert_eq!(runs, [run]);
+            assert!(
+                second
+                    .reserve_manual_activation(
+                        &manifests[0],
+                        storage::recovery::graph_control::GraphEffectKey {
+                            operation_id: "after-binding-publication".into(),
+                            attempt_nonce: "attempt".into(),
+                        },
+                        0,
+                    )
+                    .is_ok()
+            );
             model.entered.notified().await;
             assert_eq!(model.admissions.load(Ordering::SeqCst), before + 1);
             let after_ack = leases
@@ -346,6 +388,10 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             assert_eq!(model.admissions.load(Ordering::SeqCst), before + 1);
             second.stop(run, runtime::StopScope::Subtree).unwrap();
             second.wait(run).await.unwrap();
+            assert!(
+                remained_exclusive,
+                "automatic reservation released between activation ACK and binding publication"
+            );
         } else {
             adopted.release(&second).unwrap();
             assert!(!second.has_paused_recovery());

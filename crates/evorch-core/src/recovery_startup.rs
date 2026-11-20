@@ -587,11 +587,12 @@ impl PreparedStartupComponent {
             .map_err(|_| StartupBlocked::NeedsAttention)
     }
     /// Activate only after current authority and full-component preparation.
+    /// Keep the returned reservation until command binding publication settles.
     pub fn activate(
         self,
         runtime: &AgentRuntime,
         reservation: impl Into<runtime::ActivationReservation>,
-    ) -> Result<Vec<RunId>, StartupBlocked> {
+    ) -> Result<(Vec<RunId>, runtime::ActivatedReservation), StartupBlocked> {
         runtime
             .activate_component_with_models(self.paused, self.authority, self.models, reservation)
             .map_err(|_| StartupBlocked::NeedsAttention)

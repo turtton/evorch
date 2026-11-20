@@ -288,6 +288,18 @@ pub(crate) enum AutomaticAttempt {
     Contended,
     Capacity,
 }
+
+/// Keep the original graph slot until command binding publication has settled.
+/// Unwinding drops the slot only after the publication closure has unwound.
+pub(crate) fn publish_activation(
+    (runs, reservation): (Vec<runtime::RunId>, runtime::ActivatedReservation),
+    publish: impl FnOnce(),
+) -> Vec<runtime::RunId> {
+    publish();
+    reservation.release();
+    runs
+}
+
 pub(crate) fn attempt(
     coordinator: &StartupCoordinator<'_>,
     runtime: &runtime::AgentRuntime,
@@ -343,12 +355,13 @@ pub(crate) fn attempt(
                         .map_err(|_| StartupBlocked::CurrentBindingRequired)?;
                     // No host lock spans activation/DB/runtime work. The guard
                     // also removes the admission fence on error or unwind.
-                    let runs = prepared.activate(runtime, reservation)?;
-                    host.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .service_mut()
-                        .complete_root_recovery(guard);
-                    Ok(runs)
+                    let activated = prepared.activate(runtime, reservation)?;
+                    Ok(publish_activation(activated, || {
+                        host.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .service_mut()
+                            .complete_root_recovery(guard);
+                    }))
                 }) {
                 Ok(_) => (RecoveryState::Activated, None),
                 Err(StartupBlocked::OwnerBlocked) => {
