@@ -183,11 +183,41 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
         permit.run_id = Some(run_id(thread).to_string());
         permit.begin_turn().unwrap();
         let run = run_id(thread).to_string();
-        handle.save_resume_intent(storage::resume_intent::ResumeIntentRecord {
-            run_id: run.clone(), incarnation: "old".into(),
-            payload: serde_json::json!({"run_id":run,"incarnation":"old","active":true,"stop_reason":null,
-                "tool_intent":[],"initial_input":{"id":"initial"},"wait":{"kind":"admission_queued"}}).to_string(),
-        }, None).unwrap();
+        let intent = ResumeIntent {
+            version: 1,
+            run_id: run_id(thread),
+            incarnation: "old".into(),
+            parent_run_id: None,
+            role: "Worker".into(),
+            wait: ResumeWait::AdmissionQueued,
+            initial_input: Some(DurableInput {
+                id: "initial".into(),
+                text: "physical fixture".into(),
+                trusted_user: false,
+            }),
+            inputs: vec![],
+            active: true,
+            resume_requested: false,
+            stop_reason: None,
+            checkpoint: None,
+            snapshot: None,
+            tool_intent: vec![],
+            provider_input: None,
+            boundary_pending: false,
+            responses_replay: Default::default(),
+            compactions: vec![],
+            route_pins: vec![],
+        };
+        handle
+            .save_resume_intent(
+                storage::resume_intent::ResumeIntentRecord {
+                    run_id: run.clone(),
+                    incarnation: "old".into(),
+                    payload: serde_json::to_string(&intent).unwrap(),
+                },
+                None,
+            )
+            .unwrap();
         expected.push(RestartExpectedMember {
             run_id: run.clone(),
             incarnation: "old".into(),
@@ -301,16 +331,18 @@ mod harness;
 
 /// Each case is a fresh process: physical adoption must precede all DB/owner/runtime threads.
 /// Child exit is the completion event; no sleeps, polling, or test-local timeout.
-pub type RuntimeFactory =
-    fn(&str, Arc<EventBus>) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>);
+pub type RuntimeSetup = (
+    Arc<::tools::ToolExecutor>,
+    Arc<dyn runtime::AgentModel>,
+    Option<Arc<dyn runtime::SandboxFactory>>,
+);
+pub type RuntimeFactory = fn(&str, Arc<EventBus>) -> RuntimeSetup;
 
-pub fn default_factory(
-    _: &str,
-    bus: Arc<EventBus>,
-) -> (Arc<::tools::ToolExecutor>, Arc<dyn runtime::AgentModel>) {
+pub fn default_factory(_: &str, bus: Arc<EventBus>) -> RuntimeSetup {
     (
         Arc::new(::tools::ToolExecutor::new(bus)),
         Arc::new(NeverModel),
+        None,
     )
 }
 
@@ -385,9 +417,12 @@ pub fn run_with(cases: &[&str], check: fn(&Fixture, &str), factory: RuntimeFacto
         let owner = Arc::new(
             OwnerHost::open_planned(&root.join("owners"), Default::default(), bus.clone()).unwrap(),
         );
-        let (tools, model) = factory(&case, bus.clone());
-        let runtime = AgentRuntime::new(bus, tools, model)
-            .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let (tools, model, sandbox) = factory(&case, bus.clone());
+        let runtime = match sandbox {
+            Some(factory) => AgentRuntime::with_sandbox_factory(bus, tools, model, factory),
+            None => AgentRuntime::new(bus, tools, model),
+        }
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         runtime
             .adopt_restart_handoff(proof)
             .unwrap_or_else(|e| panic!("DB Adopt failed: {}", e.error));
