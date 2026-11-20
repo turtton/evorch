@@ -6,6 +6,7 @@ use crate::api;
 use crate::assets::{StaticAsset, UI_ASSETS};
 use crate::backend::WorkbenchBackend;
 use crate::config::{ConfigError, WebServerConfig};
+use crate::restart::Guarded;
 use crate::security::{Shared, guard};
 use crate::shutdown::ShutdownSignal;
 use crate::sse;
@@ -68,6 +69,7 @@ impl WebApp {
         assets: &'static [StaticAsset],
     ) -> Result<Self, ConfigError> {
         let policy = config.policy()?;
+        let backend = Arc::new(Guarded::new(backend));
         let shutdown = ShutdownSignal::new();
         let tasks = crate::RestartTasks::default();
         let observer = crate::restart_observer::Observer::default();
@@ -85,22 +87,22 @@ impl WebApp {
         let router = Router::new()
             .route(
                 "/api/v1/request",
-                post(api::request::<B>).fallback(api::method_not_allowed("POST")),
+                post(api::request::<Guarded<B>>).fallback(api::method_not_allowed("POST")),
             )
             .route(
                 "/api/v1/events",
-                get(sse::events::<B>).fallback(api::method_not_allowed("GET")),
+                get(sse::events::<Guarded<B>>).fallback(api::method_not_allowed("GET")),
             )
             .route(
                 "/api/v1/health",
-                get(api::health::<B>).fallback(api::method_not_allowed("GET")),
+                get(api::health::<Guarded<B>>).fallback(api::method_not_allowed("GET")),
             )
-            .fallback(api::fallback::<B>)
+            .fallback(api::fallback::<Guarded<B>>)
             .with_state(state)
             .layer(from_fn_with_state(shared, guard))
             .layer(from_fn_with_state(
                 output_backend,
-                crate::output::protect_response::<B>,
+                crate::output::protect_response::<Guarded<B>>,
             ));
         Ok(Self {
             router,

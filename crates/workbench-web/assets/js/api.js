@@ -53,6 +53,17 @@ export class Api {
     return expectQuery(await this.request(query(type, payload)), queryReplyType(type));
   }
 
+  /**
+   * One management request (restart, quarantine, owned graphs), sent exactly
+   * once. It never retries or checks a receipt: an unknown outcome is read back
+   * by the caller with the operation id (OperationStatus), because sending a
+   * management mutation again is a decision for the user, not for the transport.
+   * The result is `parseReply`'s: `{ok, kind, value}` or `{ok: false, error}`.
+   */
+  adminRequest(body) {
+    return this.request(body);
+  }
+
   async health() {
     let response;
     try {

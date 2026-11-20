@@ -32,11 +32,12 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use workbench_protocol::errors::{ErrorCode, WorkbenchError};
 use workbench_protocol::events::{
-    CursorDecision, CursorTracker, EventCursor, EventEnvelope, ResyncReason, Subscribe,
-    SubscriptionScope, UiEvent,
+    CursorDecision, CursorTracker, EventCursor, EventEnvelope, ResyncReason, SnapshotItem,
+    Subscribe, SubscriptionScope, SubscriptionStarted, UiEvent,
 };
 use workbench_protocol::ids::{ClientId, ProjectId, SubscriptionId, ThreadId};
 use workbench_protocol::namespaces::ProjectionEvent;
+use workbench_protocol::namespaces::lifecycle::LifecycleEvent;
 use workbench_protocol::wire::{InstanceEpoch, Sequence, parse_u64};
 
 #[derive(Debug, Deserialize)]
@@ -143,17 +144,40 @@ fn resync_item<B: WorkbenchBackend>(
     )
 }
 
+/// Whether an event may be shown on a stream of this kind. Management notices
+/// exist only on the management scope, and that scope carries nothing but
+/// lifecycle notices and the control events of the subscription itself. This
+/// holds whatever the backend sends: it is the adapter's own backstop.
+fn visible_on(management: bool, event: &UiEvent) -> bool {
+    match event {
+        UiEvent::Projection(_) => true,
+        UiEvent::Lifecycle(LifecycleEvent::AdminChanged { .. }) => management,
+        UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { .. }) => true,
+        _ => !management,
+    }
+}
+
+/// A management snapshot may carry the core status and nothing else.
+fn management_snapshot_is_status_only(started: &SubscriptionStarted) -> bool {
+    started.initial_page.as_ref().is_none_or(|page| {
+        page.items
+            .iter()
+            .all(|item| matches!(item, SnapshotItem::CoreStatus(_)))
+    })
+}
+
 /// Moves events from the backend into the bounded queue and never waits for
 /// the browser: a full queue ends the stream with `ResyncRequired`.
 async fn pump<B: WorkbenchBackend>(
     backend: Arc<B>,
     mut events: mpsc::Receiver<EventEnvelope>,
     queue: Queue,
-    mut tracker: CursorTracker,
-    subscription_id: SubscriptionId,
+    (subscription_id, high_water): (SubscriptionId, EventCursor),
     shutdown: crate::shutdown::ShutdownSignal,
     authority: workbench_authority::TransportAuthority,
+    management: bool,
 ) {
+    let mut tracker = CursorTracker::new(high_water);
     loop {
         let envelope = tokio::select! {
             biased;
@@ -179,6 +203,14 @@ async fn pump<B: WorkbenchBackend>(
                 return;
             }
             CursorDecision::Deliver => {}
+        }
+        // A management stream lives only while its proof is live: checked per
+        // event as well as by `expired()`, so a lost proof never forwards one more.
+        if management && authority.principal().is_none() {
+            return;
+        }
+        if !visible_on(management, &envelope.event) {
+            continue;
         }
         let terminal = envelope.event.ends_subscription();
         let Some(item) = ui_item(backend.as_ref(), &envelope, true) else {
@@ -286,10 +318,21 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         Ok(None) => query.after.as_deref().map(parse_cursor),
         Err(error) => Some(Err(error)),
     };
-    let after = match after.transpose() {
+    let mut after = match after.transpose() {
         Ok(after) => after,
         Err(error) => return error_response(error, None),
     };
+    let management = scope == SubscriptionScope::Management;
+    // A management stream never resumes from a cursor of another epoch: the
+    // old cursor is dropped here and the backend answers with a fresh snapshot,
+    // whatever it would have done with the stale one.
+    if management && let Some(cursor) = after {
+        match state.backend.server_hello(&context).await {
+            Ok(hello) if hello.instance_epoch == cursor.core_epoch => {}
+            Ok(_) => after = None,
+            Err(error) => return error_response(error, None),
+        }
+    }
 
     if state.shared.shutdown.is_triggered() {
         return reject(
@@ -319,6 +362,20 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         Err(error) => return error_response(error, None),
     };
     let BackendSubscription { started, events } = subscription;
+    // A replay continues exactly from the cursor that was asked for; anything
+    // else would silently skip or repeat events, so it is not delivered.
+    let replay_mismatch = started.snapshot_id.is_none()
+        && after.is_some_and(|requested| requested != started.high_water);
+    if replay_mismatch || (management && !management_snapshot_is_status_only(&started)) {
+        return error_response(
+            WorkbenchError::new(
+                ErrorCode::Internal,
+                "internal error",
+                workbench_protocol::errors::RetryAdvice::Never,
+            ),
+            None,
+        );
+    }
 
     let limits = state.wire_limits;
     let capacity = limits.subscription_queue_events as usize + 2;
@@ -353,10 +410,10 @@ pub(crate) async fn events<B: WorkbenchBackend>(
                 Arc::clone(&state.backend),
                 events,
                 queue,
-                CursorTracker::new(started.high_water),
-                started.subscription_id.clone(),
+                (started.subscription_id.clone(), started.high_water),
                 state.shared.shutdown.clone(),
                 authority.clone(),
+                management,
             );
             let observer = state.shared.observer.clone();
             async move {
