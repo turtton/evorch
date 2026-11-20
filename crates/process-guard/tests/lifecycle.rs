@@ -116,6 +116,91 @@ fn status_errno_stdio_and_wait_reservation() {
     assert_eq!(child.wait().unwrap().code(), Some(37));
 }
 #[test]
+fn cancelled_wait_then_try_wait_keeps_sticky_request_and_cached_final() {
+    let rt = runtime();
+    let (mut child, mut input, mut output) = run(&rt, "echo READY; read gate; exit 37");
+    assert_eq!(line(&mut output), "READY");
+    let death = pidfd_open(child.id() as i32).unwrap();
+    // B1 exposes split-phase request_wait, not an async adapter. Cancel an
+    // external future immediately after its request, retaining only the owner.
+    let mut future = Box::pin(async {
+        child.request_wait()?;
+        std::future::pending::<()>().await;
+        child.wait()
+    });
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(matches!(
+        std::future::Future::poll(future.as_mut(), &mut context),
+        std::task::Poll::Pending
+    ));
+    drop(future);
+    assert!(child.try_wait().unwrap().is_none());
+    input.write_all(b"GO\n").unwrap();
+    wire::poll(&mut [wire::fd(death.as_raw_fd(), libc::POLLIN)], None).unwrap();
+    assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(37));
+    assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(37));
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+}
+#[test]
+fn force_then_try_wait_is_nonblocking_until_final_and_preserves_status() {
+    struct Resume(i32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            // This guard is our unreaped direct child, so its PID is reserved.
+            unsafe { libc::kill(self.0, libc::SIGCONT) };
+        }
+    }
+    let rt = runtime();
+    let (mut child, _input, mut output) = run(&rt, "echo READY; read gate");
+    assert_eq!(line(&mut output), "READY");
+    let helper = child.id() as i32;
+    let death = pidfd_open(helper).unwrap();
+    let resume = Resume(helper);
+    assert_eq!(unsafe { libc::kill(helper, libc::SIGSTOP) }, 0);
+    let mut stopped: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe {
+            libc::waitid(
+                libc::P_PID,
+                helper as libc::id_t,
+                &mut stopped,
+                libc::WSTOPPED | libc::WNOWAIT,
+            )
+        },
+        0
+    );
+    assert_eq!(stopped.si_code, libc::CLD_STOPPED);
+    child.force_kill().unwrap();
+    assert!(child.try_wait().unwrap().is_none());
+    drop(resume);
+    wire::poll(&mut [wire::fd(death.as_raw_fd(), libc::POLLIN)], None).unwrap();
+    assert_eq!(
+        child.try_wait().unwrap().unwrap().signal(),
+        Some(libc::SIGKILL)
+    );
+    assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+}
+#[test]
+fn unread_final_after_helper_exit_is_drained_before_any_new_try_reap() {
+    let rt = runtime();
+    let (mut child, mut input, mut output) = run(&rt, "echo READY; read gate; exit 37");
+    assert_eq!(line(&mut output), "READY");
+    let death = pidfd_open(child.id() as i32).unwrap();
+    // Exercise a valid protocol request through the public control boundary,
+    // without relying on the client's sticky flag to know Final is pending.
+    wire::send(
+        &mut child.control().try_clone().unwrap(),
+        wire::Kind::Wait,
+        &[],
+        None,
+    )
+    .unwrap();
+    input.write_all(b"GO\n").unwrap();
+    wire::poll(&mut [wire::fd(death.as_raw_fd(), libc::POLLIN)], None).unwrap();
+    assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(37));
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+}
+#[test]
 fn wnowait_anchor_then_group_kill_not_root_exit() {
     // Only the outer test controller adopts fixture descendants. The product
     // guard never becomes subreaper, and waits for exactly its target PID.

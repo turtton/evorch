@@ -179,6 +179,54 @@ pub fn try_send(s: &mut UnixStream, kind: Kind, p: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+/// Consume only immediately available bytes. A readable death fd triggers one
+/// last stream read: poll's per-fd readiness snapshot is not atomic, and a
+/// FinalStatus may arrive between the stream check and the death check.
+pub fn try_receive(
+    s: &mut UnixStream,
+    d: &mut Decoder,
+    death: i32,
+) -> io::Result<Option<(Kind, Vec<u8>)>> {
+    loop {
+        if let Some(frame) = d.next_frame()? {
+            return Ok(Some(frame));
+        }
+        match d.read(s) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "GuardLost: control EOF",
+                ));
+            }
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+        let mut dead = fd(death, libc::POLLIN);
+        if unsafe { libc::poll(&mut dead, 1, 0) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        if dead.revents == 0 {
+            return Ok(None);
+        }
+        match d.read(s) {
+            Ok(n) if n > 0 => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() != io::ErrorKind::WouldBlock => return Err(e),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "GuardLost: helper exited without FinalStatus",
+                ));
+            }
+        }
+    }
+}
 pub fn receive(
     s: &mut UnixStream,
     d: &mut Decoder,
@@ -200,7 +248,7 @@ pub fn receive(
         let mut fds = [fd(s.as_raw_fd(), libc::POLLIN), fd(death, libc::POLLIN)];
         poll(&mut fds, deadline)?;
         // Drain an already-sent FinalStatus before diagnosing helper death.
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 || fds[1].revents != 0 {
             match d.read(s) {
                 Ok(0) => {
                     return Err(io::Error::new(
@@ -229,6 +277,36 @@ pub fn integer(p: &[u8]) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nonblocking_receive_retains_partial_frames_and_rejects_missing_final() {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut decoder = Decoder::default();
+        assert!(
+            try_receive(&mut receiver, &mut decoder, -1)
+                .unwrap()
+                .is_none()
+        );
+        let bytes = frame(Kind::FinalStatus, &37i32.to_le_bytes()).unwrap();
+        sender.write_all(&bytes[..9]).unwrap();
+        assert!(
+            try_receive(&mut receiver, &mut decoder, -1)
+                .unwrap()
+                .is_none()
+        );
+        sender.write_all(&bytes[9..]).unwrap();
+        drop(sender);
+        assert_eq!(
+            try_receive(&mut receiver, &mut decoder, -1).unwrap(),
+            Some((Kind::FinalStatus, 37i32.to_le_bytes().to_vec()))
+        );
+        assert_eq!(
+            try_receive(&mut receiver, &mut decoder, -1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
     #[test]
     fn split_frames_and_bad_lengths_are_bounded() {
         let encoded = frame(Kind::LaunchChunk, &[1, 2, 3]).unwrap();

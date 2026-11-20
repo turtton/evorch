@@ -282,6 +282,9 @@ mod client {
                 None,
             )
             .map_err(|e| io::Error::new(e.kind(), format!("GuardLost: {e}")))?;
+            self.record(k, p)
+        }
+        fn record(&mut self, k: Kind, p: Vec<u8>) -> io::Result<Kind> {
             match k {
                 Kind::RootExited => self.root = Some(wire::integer(&p)?),
                 Kind::FinalStatus => {
@@ -301,6 +304,20 @@ mod client {
             }
             Ok(k)
         }
+        fn available_status(&mut self) -> io::Result<Option<ExitStatus>> {
+            loop {
+                let Some((kind, payload)) =
+                    wire::try_receive(&mut self.stream, &mut self.decoder, self.pidfd.as_raw_fd())
+                        .map_err(|e| io::Error::new(e.kind(), format!("GuardLost: {e}")))?
+                else {
+                    return Ok(None);
+                };
+                self.record(kind, payload)?;
+                if let Some(status) = self.final_status {
+                    return Ok(Some(ExitStatus::from_raw(status)));
+                }
+            }
+        }
         pub fn exited(&mut self) -> io::Result<ExitStatus> {
             while self.root.is_none() {
                 self.receive()?;
@@ -310,7 +327,16 @@ mod client {
         /// Sticky reservation: cancelling the caller's future does not undo this.
         pub fn request_wait(&mut self) -> io::Result<()> {
             if !self.wait_requested && !self.write_closed && self.final_status.is_none() {
-                self.request(Kind::Wait, &[])?;
+                if self.available_status()?.is_some() {
+                    return Ok(());
+                }
+                if let Err(error) = self.request(Kind::Wait, &[]) {
+                    // A Final may race the request write and helper exit.
+                    if self.available_status()?.is_some() {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
                 self.wait_requested = true;
             }
             Ok(())
@@ -326,7 +352,20 @@ mod client {
             if let Some(s) = self.final_status {
                 return Ok(Some(ExitStatus::from_raw(s)));
             }
-            self.request(Kind::TryReap, &[])?;
+            if let Some(status) = self.available_status()? {
+                return Ok(Some(status));
+            }
+            // Wait is sticky and half-close already requests retirement. Do
+            // not write to a retiring helper or block awaiting root exit.
+            if self.wait_requested || self.write_closed {
+                return Ok(None);
+            }
+            if let Err(error) = self.request(Kind::TryReap, &[]) {
+                if let Some(status) = self.available_status()? {
+                    return Ok(Some(status));
+                }
+                return Err(error);
+            }
             loop {
                 match self.receive()? {
                     Kind::Running => return Ok(None),

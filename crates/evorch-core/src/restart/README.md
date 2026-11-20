@@ -1,12 +1,3 @@
-### B1 の closed stdio 境界（B2 follow-up）
-
-helper の Rust startup は、閉じている fd 0/1/2 を `/dev/null` で埋める。
-意図して閉じた stdio を target にそのまま渡すこと（EBADF の保持）は B1 の保証外で、
-EOF や書き込み成功へ変わり得る。B2 の stdio API 移行時に経路ごとに扱いを決める。
-B1 は既存 caller を変えない。内部 image/control/monitor fd は atomic な
-`F_DUPFD_CLOEXEC >= 3` で退避し、core の閉じた stdio を clobber しない。
-`closed_stdio_is_sanitized_to_dev_null_by_helper_startup` が現在の期待値を固定する。
-
 # D-3a2 B1: helper and distribution only
 
 **B 未適用、D-7 未完了.** B1 delivers `evorch-process-guard`, its library and
@@ -47,6 +38,25 @@ group escape, D-state/scheduling delays and unreaping PID 1 are outside the
 guarantee. Guard loss is an error, not confirmed cleanup. Only outer fixture
 controllers become subreapers and reclaim all fixture processes.
 
+## B1 の closed stdio 境界（B2 follow-up）
+
+helper の Rust startup は、閉じている fd 0/1/2 を `/dev/null` で埋める。
+意図して閉じた stdio を target にそのまま渡すこと（EBADF の保持）は B1 の保証外で、
+EOF や書き込み成功へ変わり得る。B2 の stdio API 移行時に経路ごとに扱いを決める。
+B1 は既存 caller を変えない。内部 image/control/monitor fd は atomic な
+`F_DUPFD_CLOEXEC >= 3` で退避し、core の閉じた stdio を clobber しない。
+`closed_stdio_is_sanitized_to_dev_null_by_helper_startup` が現在の期待値を固定する。
+
+## Sticky wait / force and nonblocking status
+
+After cancelling an external waiter or half-closing control, `try_wait` never
+writes another request. It drains an immediately available FinalStatus, or
+returns None while it is pending. FinalStatus is drained before diagnosing
+helper death or a raced write error; EOF without FinalStatus remains GuardLost.
+The owner retains decoder/status state, and repeated waits return the same
+root status after reaping the helper. Event-gated cancellation, force and
+unread-Final/helper-exit tests fail when unconditional TryReap writes return.
+
 ## Delivery and development
 
 Installed policy uses only the bundle beside the canonical running ELF and
@@ -74,6 +84,18 @@ Cargo-owned helper or rebuilds a missing app. Doctests remain separate
 `cargo test --doc` runs with the inherited bundle. Raw cargo test/run rebuilds
 invalidate application bindings; rebind before execution. B2 makes Installed
 binding mandatory for real entrypoints; B1 provides/checks distribution only.
+
+## DB-23: fresh-worktree observation
+
+With fork Cargo `0.102.0-9-turtton.4` (GC disabled), a fresh worktree at the
+same commit rebuilt the helper build-script, library and binary (three units,
+1.02s in the focused dev build). The compat ID stayed exactly equal. Recreating
+the same worktree path also reported `build.rs` mtime as the dirty reason.
+Inputs remain only the seven package-local files and TARGET: no workspace
+lockfile or other crate is read. Build-script fingerprint/target-root handling
+or rerun-if-changed mtime handling are hypotheses, **not verified causes**.
+Cargo-side investigation/workarounds and downstream rebuild-cost measurement
+are follow-ups, not a B1 change or a claim of cross-worktree artifact reuse.
 
 ## DB-26 addendum: approved PTY-only locator
 
