@@ -162,10 +162,27 @@
           ln -s ${cefDist}/libcef.so $out/lib/libcef.so
         '';
         testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // workspaceCefArgs);
+        # The sealed product artifact the product tests of the workspace read
+        # (crates/test-support/src/product_artifact.rs): the existing evorch-core
+        # package (`-p evorch-core --bin evorch-core`, release, no feature), so no
+        # new build derivation, taken without its PATH wrapper and described by the
+        # same sealing code as the CI product-artifact job (scripts/product-artifact.sh
+        # seal). GITHUB_SHA is how that script learns the source identity.
+        evorch-core-product = pkgs.runCommand "evorch-core-product"
+          {
+            nativeBuildInputs = [ pkgs.jq rustToolchain ];
+            GITHUB_SHA = self.rev or self.dirtyRev or "unknown";
+          }
+          ''
+            bash ${./scripts/product-artifact.sh} seal ${evorch-core}/bin/.evorch-core-wrapped "$out" > /dev/null
+          '';
         tests = craneLib.cargoTest (commonArgs // workspaceCefArgs // {
           cargoArtifacts = testCargoArtifacts;
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
-          preCheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+          preCheck = ''
+            export EVORCH_PRODUCT_CORE_EXE=${evorch-core-product}/evorch-core
+            export EVORCH_PRODUCT_MANIFEST=${evorch-core-product}/product-manifest.json
+          '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (runtimeLibraries ++ pkgs.lib.optionals isCefSystem [ cefLibcefOnly ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.

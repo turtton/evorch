@@ -266,7 +266,7 @@ for i in "${!next_wave_scopes[@]}"; do
     .github/workflows/ci.yml scripts/feature-scopes.txt scripts/contract-test-filters.sh scripts/check-central-files.sh \
     scripts/tests/test_check_central_files.sh scripts/ci-test-groups.json scripts/product-artifact.sh \
     crates/test-support/src/lib.rs crates/test-support/src/product_artifact.rs \
-    crates/evorch-core/tests/core_cache.rs crates/evorch-core/src/main.rs; do
+    crates/evorch-core/tests/core_cache.rs crates/evorch-core/src/main.rs crates/workbench-host/src/ingress.rs; do
     files "${owned[0]}" "$refused"
     expect fail "${next_wave_scopes[$i]} may not change $refused" "$central" --scope "${next_wave_scopes[$i]}" --files-from "$work/files"
   done

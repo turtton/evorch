@@ -746,7 +746,8 @@ jobs:
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       # The host source lifecycle test of O-V1 (crates/workbench-host/tests/<name>.rs,
-      # an ignored test): the one place to change when O-V1 renames its binary.
+      # an ignored test that needs the Chromium found above through CHROME): the
+      # one place to change when O-V1 renames its binary.
       HOST_LIFECYCLE_TEST: agent_observation_lifecycle
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
