@@ -15,8 +15,9 @@ CREATE TABLE recovery_graph_effects (
  operation_id TEXT PRIMARY KEY NOT NULL,
  attempt_nonce TEXT NOT NULL,
  manifest_id TEXT NOT NULL,
- request_json TEXT NOT NULL,
- result_json TEXT NOT NULL
+ request_digest TEXT NOT NULL,
+ result_json TEXT NOT NULL,
+ finish_json TEXT
 );
 -- One reset per graph disposal/thread/generation, independent of operation ID.
 CREATE TABLE recovery_graph_thread_progress (

@@ -1,6 +1,16 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Explicit manual supervisor completion; queries and automatic recovery never call this.
+    pub fn finish_recovery_graph_control(
+        &self,
+        expected: graph_control::GraphControlRecord,
+    ) -> Result<graph_control::GraphControlRecord, StorageError> {
+        match self.recovery_write(Write::GraphFinish(expected))? {
+            Written::GraphControl(record) => Ok(record),
+            _ => unreachable!("graph finish reply"),
+        }
+    }
     /// Persist per-thread observations without creating executable authority.
     pub fn write_recovery_graph_progress(
         &self,

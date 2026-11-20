@@ -22,6 +22,7 @@ pub use retry::RetryPolicy;
 #[cfg(test)]
 pub(crate) use retry::virtual_time::VirtualClock;
 pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
+pub(crate) mod disposal;
 pub(crate) mod disposal_support;
 mod registry;
 pub use disposal_support::DisposalOwnerReceipt;

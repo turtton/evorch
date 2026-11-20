@@ -253,10 +253,11 @@ pub(super) fn write(
     conn: &Connection,
     request: &GraphControlWrite,
 ) -> Result<GraphControlRecord, StorageError> {
-    let json = encode(request)?;
+    use sha2::{Digest, Sha256};
+    let json = format!("{:x}", Sha256::digest(encode(request)?.as_bytes()));
     let prior: Option<(String, String)> = conn
         .query_row(
-            "SELECT request_json,result_json FROM recovery_graph_effects WHERE operation_id=?1",
+            "SELECT request_digest,result_json FROM recovery_graph_effects WHERE operation_id=?1",
             [&request.effect.operation_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -274,11 +275,17 @@ pub(super) fn write(
     }
     check_cas(conn, &request.expected)?;
     let e = &request.expected;
-    if e.phase != RestartPhase::Adopted
-        || e.component.disposition != RestartDisposition::RetryPending
-        || e.claim
-            .as_ref()
-            .is_some_and(|c| c.state != RecoveryClaimState::Prepared)
+    let prior_control = control(conn, &e.manifest.manifest_id)?;
+    let residual = prior_control
+        .as_ref()
+        .is_some_and(|c| c.revoked && c.mode == "revoked_idle")
+        && request.action == GraphControlAction::Release;
+    if !residual
+        && (e.phase != RestartPhase::Adopted
+            || e.component.disposition != RestartDisposition::RetryPending
+            || e.claim
+                .as_ref()
+                .is_some_and(|c| c.state != RecoveryClaimState::Prepared))
     {
         return Err(invalid("graph is not eligible"));
     }
@@ -286,7 +293,13 @@ pub(super) fn write(
     if !release && e.claim.is_none() {
         return Err(invalid("manual resume requires existing prepared claim"));
     }
-    let origin = if !release {
+    let origin = if residual {
+        prior_control
+            .as_ref()
+            .expect("revoked control")
+            .origin
+            .as_str()
+    } else if !release {
         "manual_resume"
     } else if e.claim.is_some() {
         "manual_release"
@@ -302,11 +315,15 @@ pub(super) fn write(
     } else {
         "manual_running"
     };
-    conn.execute(
+    if residual {
+        conn.execute("UPDATE recovery_graph_control SET mode=?2,revision=?3,operation_id=?4,attempt_nonce=?5 WHERE manifest_id=?1", params![e.manifest.manifest_id,mode,revision,request.effect.operation_id,request.effect.attempt_nonce])?;
+    } else {
+        conn.execute(
         "INSERT INTO recovery_graph_control(manifest_id,mode,revision,operation_id,attempt_nonce,revoked,origin) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(manifest_id) DO UPDATE SET mode=excluded.mode,revision=excluded.revision,operation_id=excluded.operation_id,attempt_nonce=excluded.attempt_nonce,revoked=excluded.revoked,origin=excluded.origin",
         params![e.manifest.manifest_id,mode,revision,request.effect.operation_id,request.effect.attempt_nonce,release,origin],
     )?;
-    if release {
+    }
+    if release && !residual {
         if let Some(c) = &e.claim {
             prepared::release(conn, &c.claim_id, "manual graph release")?;
         } else {
@@ -319,7 +336,7 @@ pub(super) fn write(
     let result =
         control(conn, &e.manifest.manifest_id)?.ok_or_else(|| invalid("missing graph control"))?;
     conn.execute(
-        "INSERT INTO recovery_graph_effects VALUES(?1,?2,?3,?4,?5)",
+        "INSERT INTO recovery_graph_effects(operation_id,attempt_nonce,manifest_id,request_digest,result_json) VALUES(?1,?2,?3,?4,?5)",
         params![
             request.effect.operation_id,
             request.effect.attempt_nonce,
@@ -327,6 +344,47 @@ pub(super) fn write(
             json,
             encode(&result)?
         ],
+    )?;
+    Ok(result)
+}
+
+/// Explicit leaf-supervisor transition: running -> idle, never automatic policy.
+pub(super) fn finish(
+    conn: &Connection,
+    expected: &GraphControlRecord,
+) -> Result<GraphControlRecord, StorageError> {
+    let request_json = encode(expected)?;
+    let journal: Option<(Option<String>,String)>=conn.query_row("SELECT finish_json,result_json FROM recovery_graph_effects WHERE operation_id=?1 AND attempt_nonce=?2",params![expected.effect.operation_id,expected.effect.attempt_nonce],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let (prior, result) = journal.ok_or_else(|| invalid("missing graph effect journal"))?;
+    if let Some(prior) = prior {
+        if prior != request_json {
+            return Err(invalid("graph finish identity conflict"));
+        }
+        return serde_json::from_str(&result).map_err(|_| invalid("unreadable graph effect"));
+    }
+    let actual =
+        control(conn, &expected.manifest_id)?.ok_or_else(|| invalid("missing graph control"))?;
+    if actual != *expected {
+        return Err(invalid("graph finish CAS conflict"));
+    }
+    let mode = match (actual.revoked, actual.mode.as_str()) {
+        (false, "manual_running") => "manual_idle",
+        (true, "revoked_running") => "revoked_idle",
+        _ => return Err(invalid("graph finish mode conflict")),
+    };
+    let revision = actual
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("graph control revision exhausted"))?;
+    conn.execute(
+        "UPDATE recovery_graph_control SET mode=?2,revision=?3 WHERE manifest_id=?1",
+        params![actual.manifest_id, mode, revision],
+    )?;
+    let result =
+        control(conn, &actual.manifest_id)?.ok_or_else(|| invalid("missing graph control"))?;
+    conn.execute(
+        "UPDATE recovery_graph_effects SET finish_json=?2,result_json=?3 WHERE operation_id=?1",
+        params![actual.effect.operation_id, request_json, encode(&result)?],
     )?;
     Ok(result)
 }

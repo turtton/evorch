@@ -15,10 +15,6 @@ pub(crate) struct GraphDisposalKey {
 }
 
 impl GraphDisposalKey {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
-    )]
     pub(crate) fn new(
         graph: String,
         tx: String,

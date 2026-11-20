@@ -21,8 +21,7 @@ impl GraphDisposalProgressKey {
             &self.thread_id,
         ]
         .iter()
-        .any(|s| s.is_empty() || s.len() > 128)
-            || self.owner_generation == 0
+        .any(|s| s.is_empty())
         {
             return Err(invalid("invalid graph disposal progress key"));
         }
@@ -163,4 +162,21 @@ pub(super) fn write(
         owners: request.owners,
         scratch: request.scratch,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn internal_raw_ids_are_not_wire_admin_ids() {
+        let key = GraphDisposalProgressKey {
+            manifest_id: format!("{}/run", "capture".repeat(30)),
+            restart_id: "tx".into(),
+            capture_id: "capture".repeat(30),
+            thread_id: "thread".repeat(30),
+            owner_generation: 1,
+        };
+        assert!(key.manifest_id.len() > 128);
+        assert_eq!(key.encoded().unwrap().len(), 64);
+    }
 }

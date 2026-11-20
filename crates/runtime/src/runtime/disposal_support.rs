@@ -155,3 +155,21 @@ impl AgentRuntime {
 fn error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
 }
+
+// One operation-independent tuple in both the durable journal and scratch memory.
+impl TryFrom<&storage::recovery::graph_progress::GraphDisposalProgressKey>
+    for crate::scratch::GraphDisposalKey
+{
+    type Error = std::io::Error;
+    fn try_from(
+        key: &storage::recovery::graph_progress::GraphDisposalProgressKey,
+    ) -> Result<Self, Self::Error> {
+        Self::new(
+            key.manifest_id.clone(),
+            key.restart_id.clone(),
+            key.capture_id.clone(),
+            key.thread_id.clone(),
+            key.owner_generation,
+        )
+    }
+}

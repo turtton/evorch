@@ -109,6 +109,7 @@ pub(crate) enum Write {
         mutation: restart::RestartMutation,
     },
     GraphControl(Box<graph_control::GraphControlWrite>),
+    GraphFinish(graph_control::GraphControlRecord),
     GraphProgress(Box<graph_progress::GraphThreadProgressWrite>),
     Prepare(RecoveryManifestRecord),
     Commit(String),
@@ -323,6 +324,7 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
     let restart_command = matches!(
         &command,
         Write::GraphControl(_)
+            | Write::GraphFinish(_)
             | Write::GraphProgress(_)
             | Write::Activate(_)
             | Write::Restart { .. }
@@ -366,6 +368,9 @@ pub(crate) fn write(conn: &Connection, command: Write) -> Result<Written, Storag
             )?)),
             Write::GraphProgress(request) => {
                 Written::GraphProgress(graph_progress::write(&tx, &request)?)
+            }
+            Write::GraphFinish(expected) => {
+                Written::GraphControl(graph_control::finish(&tx, &expected)?)
             }
             Write::GraphControl(request) => {
                 Written::GraphControl(graph_control::write(&tx, &request)?)
