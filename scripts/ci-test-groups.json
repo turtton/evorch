@@ -65,6 +65,7 @@
         "recorder",
         "routing",
         "secret-guard",
+        "workbench-authority",
         "workbench-client",
         "workbench-host",
         "workbench-protocol",
