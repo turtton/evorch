@@ -69,6 +69,7 @@ struct Facade {
     live: Mutex<AdminInspection>,
     cancelled: AtomicBool,
     effects: Arc<AtomicUsize>,
+    after_register: AtomicUsize,
 }
 impl Facade {
     fn new(intent: &AdminIntent) -> Arc<Self> {
@@ -76,6 +77,7 @@ impl Facade {
             live: Mutex::new(inspection(intent)),
             cancelled: AtomicBool::new(false),
             effects: Arc::new(AtomicUsize::new(0)),
+            after_register: AtomicUsize::new(0),
         })
     }
 }
@@ -119,10 +121,15 @@ impl AdminFacade for Facade {
             return Err(fail(ErrorCode::Conflict));
         }
         let effects = self.effects.clone();
-        Ok(admission.register(Box::pin(async move {
+        let accepted = admission.register(Box::pin(async move {
             effects.fetch_add(1, Ordering::SeqCst);
             Ok(AdminExecutionOutcome::Complete(AdminOutcome::Succeeded))
-        })))
+        }));
+        match self.after_register.load(Ordering::SeqCst) {
+            1 => Err(fail(ErrorCode::Conflict)),
+            2 => panic!("after registration"),
+            _ => Ok(accepted),
+        }
     }
 }
 type Held = (AuditReplyCallback, Result<AuditReply, StorageError>);
@@ -510,7 +517,7 @@ async fn outcome_record_failure_is_unknown_and_not_reexecuted() {
     assert_eq!(h.port.record("unknown").state, AuditState::Started);
 }
 #[tokio::test(start_paused = true)]
-async fn pending_audit_ack_releases_sealing_within_two_ten_second_budgets() {
+async fn response_budget_never_releases_a_still_owned_writer_command() {
     let (port, mut events) = Port::new();
     port.hold_accept.store(true, Ordering::SeqCst);
     let gate = HostRestartGate::default();
@@ -538,8 +545,13 @@ async fn pending_audit_ack_releases_sealing_within_two_ten_second_budgets() {
     tokio::time::advance(std::time::Duration::from_secs(10)).await;
     assert_eq!(events.recv().await, Some("read"));
     let _ = rx.await.unwrap();
-    gate.drained().await;
+    let mut drained = Box::pin(gate.drained());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drained.as_mut().poll(cx).is_pending()))
+            .await
+    );
     port.release();
+    drained.await;
     tasks.request_stop();
     tasks.shutdown().await.unwrap();
     assert_eq!(facade.effects.load(Ordering::SeqCst), 0);
@@ -648,4 +660,128 @@ async fn operation_readback_hides_foreign_existence_and_unknown_never_reexecutes
     tasks.request_stop();
     tasks.shutdown().await.unwrap();
     services.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn registered_continuation_survives_commit_error_or_panic() {
+    for mode in [1, 2] {
+        let mut h = Harness::new(&request("registered"));
+        h.facade.after_register.store(mode, Ordering::SeqCst);
+        let accepted = h
+            .submit(request("registered"))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.receipt().state, AdminOperationState::Started);
+        h.event("finalize").await;
+        h.shutdown().await;
+        assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.port.record("registered").outcome,
+            Some(AuditOutcome::Succeeded)
+        );
+    }
+}
+#[tokio::test]
+async fn every_interrupt_binding_is_rechecked_after_audit_before_effect() {
+    let binding = InterruptBinding {
+        restart_id: id("restart"),
+        core_epoch: InstanceEpoch(7),
+        connection_epoch: InstanceEpoch(3),
+        run_incarnation: id("inc"),
+        blocker_identity: id("opaque"),
+        revision: Revision(1),
+        phase: RestartPhase::WaitingSafePoint,
+    };
+    for field in 0..7 {
+        let intent = LifecycleCommand::Restart(RestartCommand::Interrupt(InterruptShell {
+            binding: binding.clone(),
+            operation_id: id("stop"),
+            confirmed: true,
+        }));
+        let mut h = Harness::new(&intent);
+        h.port.hold_accept.store(true, Ordering::SeqCst);
+        let rx = h.submit(intent).unwrap();
+        h.event("accept").await;
+        {
+            let mut live = h.facade.live.lock().unwrap();
+            let AdminInspection::Interrupt(b) = &mut *live else {
+                panic!()
+            };
+            match field {
+                0 => b.restart_id = id("different"),
+                1 => b.core_epoch = InstanceEpoch(8),
+                2 => b.connection_epoch = InstanceEpoch(4),
+                3 => b.run_incarnation = id("reused-run"),
+                4 => b.blocker_identity = id("replacement-job"),
+                5 => b.revision = Revision(2),
+                _ => b.phase = RestartPhase::PreparingDrains,
+            }
+        }
+        h.port.release();
+        assert_eq!(rx.await.unwrap().unwrap_err().code, ErrorCode::Conflict);
+        h.shutdown().await;
+        assert_eq!(h.facade.effects.load(Ordering::SeqCst), 0);
+    }
+}
+#[tokio::test]
+async fn reused_operation_id_with_different_contents_conflicts_without_second_effect() {
+    let mut h = Harness::new(&request("idempotent"));
+    h.submit(request("idempotent"))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    h.event("finalize").await;
+    let mut changed = request("idempotent");
+    let LifecycleCommand::Restart(RestartCommand::Request(ref mut r)) = changed else {
+        panic!()
+    };
+    r.binding.target_id = id("other-configured-id");
+    *h.facade.live.lock().unwrap() = inspection(&changed);
+    assert_eq!(
+        h.submit(changed).unwrap().await.unwrap().unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    h.shutdown().await;
+    assert_eq!(h.facade.effects.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn missing_owned_collection_and_old_epoch_fail_before_audit() {
+    let h = Harness::new(&request("epoch"));
+    let mut old = request("epoch");
+    let LifecycleCommand::Restart(RestartCommand::Request(ref mut r)) = old else {
+        panic!()
+    };
+    r.binding.expected_core_epoch = InstanceEpoch(6);
+    assert!(h.submit(old).is_err());
+    assert!(h.port.memory.lock().unwrap().rows.is_empty());
+    h.shutdown().await;
+    let (port, _events) = Port::new();
+    let tasks = AreaTasks::new(tokio::runtime::Handle::current());
+    let service = AdminService::new(
+        AdminAudit::new(port.clone(), HostRestartGate::default()),
+        tasks.clone(),
+        InstanceEpoch(7),
+    );
+    service.install_restart(Facade::new(&request("missing")));
+    let (proof, _lease) = test_support::local();
+    let context = IngressContext::new(
+        Provenance::human(Surface::Cli, ClientId::new("cli").unwrap()),
+        proof,
+    );
+    let result = service
+        .submit(
+            service
+                .authorize_request(context, request("missing"))
+                .unwrap(),
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(result.is_err());
+    assert!(port.memory.lock().unwrap().rows.is_empty());
+    tasks.request_stop();
+    tasks.shutdown().await.unwrap();
 }

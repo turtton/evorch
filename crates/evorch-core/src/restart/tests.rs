@@ -836,3 +836,57 @@ async fn accepted_unpolled_mcp_operation_finishes_before_seal_and_late_request_i
     core.cancel(id).unwrap();
     host.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn held_audit_callback_cancels_at_original_preparation_deadline() {
+    use storage::admin_audit::{AuditReconcile, AuditReplyCallback, AuditWrite};
+    struct HeldPort(tokio::sync::mpsc::UnboundedSender<AuditReplyCallback>);
+    impl workbench_host::admin::AuditPort for HeldPort {
+        fn submit(
+            &self,
+            _: AuditWrite,
+            reply: AuditReplyCallback,
+        ) -> Result<(), storage::StorageError> {
+            self.0.send(reply).unwrap();
+            Ok(())
+        }
+    }
+    let (_dir, mut host) = boot().await;
+    let core = RestartCoordinator::new(&host);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let audit = workbench_host::admin::AdminAudit::new(Arc::new(HeldPort(tx)), core.0.gate.clone());
+    tokio::time::pause();
+    let query = tokio::spawn(async move {
+        audit
+            .reconcile(AuditReconcile::Cold { live_core_epoch: 1 })
+            .await
+    });
+    let callback = rx.recv().await.unwrap();
+    // Pause only after the real blocking bootstrap has finished. Advance the
+    // same preparation clock, not a new sealing timeout.
+    let id = core.request().unwrap();
+    phase(&core, RestartPhase::Sealing).await;
+    let mut sealed = Box::pin(core.wait_sealed(id));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(sealed.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    let deadline = core.0.state.lock().unwrap().preparation_deadline.unwrap();
+    // Manual pause after real bootstrap may have a sub-millisecond origin.
+    // Tokio rounds timers up to a millisecond; test the first tick after the
+    // original deadline, without wall-clock waiting or a new product budget.
+    tokio::time::advance(
+        deadline - tokio::time::Instant::now() + std::time::Duration::from_millis(1),
+    )
+    .await;
+    assert!(sealed.await.is_err());
+    assert!(query.await.unwrap().is_err());
+    assert_eq!(core.snapshot().phase, RestartPhase::Running);
+    assert_eq!(core.0.gate.phase(), HostRestartPhase::Open);
+    assert!(core.0.state.lock().unwrap().sealed.is_none());
+    // Completing the old command cannot revive a cancelled attempt or capture.
+    callback(Err(storage::StorageError::Io("injected".into())));
+    assert!(core.wait_sealed(id).await.is_err());
+    tokio::time::resume();
+    host.shutdown().await.unwrap();
+}

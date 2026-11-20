@@ -160,11 +160,88 @@ pub(crate) fn items<T>(items: &[T]) -> Result<(), ValidationError> {
 }
 
 impl crate::envelope::RequestBody {
+    /// Only coordinator memory operations may execute inline on a transport.
+    /// OperationStatus and owned-graph collection can read storage and are not
+    /// this fast lane even though authorization classifies them as Status.
+    pub fn is_admin_fast_lane(&self) -> bool {
+        use crate::{
+            commands::Command,
+            namespaces::lifecycle::{
+                LifecycleCommand, LifecycleQuery,
+                restart::{RestartCommand, RestartQuery},
+            },
+            queries::Query,
+        };
+        matches!(
+            self,
+            Self::Command(Command::Lifecycle(LifecycleCommand::Restart(
+                RestartCommand::Cancel(_)
+            ))) | Self::Query(Query::Lifecycle(LifecycleQuery::Restart(
+                RestartQuery::Status
+            )))
+        )
+    }
     pub fn admin_action(&self) -> Option<AdminAction> {
         match self {
             Self::Command(crate::commands::Command::Lifecycle(c)) => Some(c.action()),
             Self::Query(crate::queries::Query::Lifecycle(q)) => q.action(),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::envelope::RequestBody;
+    use serde_json::json;
+
+    #[test]
+    fn fast_lane_is_exactly_cancel_and_coordinator_status() {
+        let cases = [
+            (
+                "command",
+                json!({"type":"restart","payload":{"type":"cancel","payload":{"restart_id":"r1","expected_core_epoch":"2","expected_revision":"1","operation_id":"op1"}}}),
+                true,
+            ),
+            (
+                "query",
+                json!({"type":"restart","payload":{"type":"status"}}),
+                true,
+            ),
+            (
+                "query",
+                json!({"type":"operation_status","payload":{"operation_id":"op1"}}),
+                false,
+            ),
+            (
+                "query",
+                json!({"type":"owned_graphs","payload":{"type":"undisposed"}}),
+                false,
+            ),
+            (
+                "query",
+                json!({"type":"restart","payload":{"type":"targets"}}),
+                false,
+            ),
+            (
+                "query",
+                json!({"type":"quarantine","payload":{"type":"list"}}),
+                false,
+            ),
+        ];
+        for (kind, payload, fast_lane) in cases {
+            let body: RequestBody = serde_json::from_value(
+                json!({"kind":kind,"payload":{"type":"lifecycle","payload":payload}}),
+            )
+            .unwrap();
+            assert_eq!(body.is_admin_fast_lane(), fast_lane, "{body:?}");
+            if fast_lane {
+                assert!(matches!(
+                    body.admin_action(),
+                    Some(AdminAction::Cancel | AdminAction::Status)
+                ));
+            }
         }
     }
 }

@@ -30,6 +30,22 @@ pub struct AuthorizedAdminQuery {
 }
 /// Cannot be cloned, deserialized or constructed by a leaf/payload.
 /// register consumes the one admitted operation; a second call cannot compile.
+///
+/// ```no_run
+/// use workbench_host::admin::{CommitAdmission, AdminExecutionOutcome};
+/// use workbench_protocol::namespaces::lifecycle::AdminOutcome;
+/// fn once(admission: CommitAdmission) {
+///     let _ = admission.register(Box::pin(async { Ok(AdminExecutionOutcome::Complete(AdminOutcome::Succeeded)) }));
+/// }
+/// ```
+/// ```compile_fail
+/// use workbench_host::admin::{CommitAdmission, AdminExecutionOutcome};
+/// use workbench_protocol::namespaces::lifecycle::AdminOutcome;
+/// fn twice(admission: CommitAdmission) {
+///     let _ = admission.register(Box::pin(async { Ok(AdminExecutionOutcome::Complete(AdminOutcome::Succeeded)) }));
+///     let _ = admission.register(Box::pin(async { Ok(AdminExecutionOutcome::Complete(AdminOutcome::Succeeded)) }));
+/// }
+/// ```
 pub struct CommitAdmission {
     reply: oneshot::Sender<AdminContinuation>,
     receipt: AdminReceipt,
@@ -137,6 +153,23 @@ impl AdminService {
             )
         })
     }
+    fn refusal(
+        &self,
+        context: &IngressContext,
+        action: AdminAction,
+        error: AdminFailure,
+    ) -> AdminFailure {
+        if error.code == ErrorCode::PermissionDenied {
+            return error;
+        }
+        let reason = match error.code {
+            ErrorCode::Conflict | ErrorCode::InvalidRequest => DenialReason::StaleBinding,
+            ErrorCode::Busy => DenialReason::Capacity,
+            _ => DenialReason::Unavailable,
+        };
+        self.denials.record_reason(context, action, reason);
+        error
+    }
     pub fn authorize_request(
         &self,
         context: IngressContext,
@@ -144,14 +177,18 @@ impl AdminService {
     ) -> Result<AuthorizedAdminRequest, AdminFailure> {
         self.authorize(&context, intent.action())?;
         intent.validate().map_err(|_| {
-            failure(
-                ErrorCode::InvalidRequest,
-                "invalid management confirmation or binding",
+            self.refusal(
+                &context,
+                intent.action(),
+                failure(
+                    ErrorCode::InvalidRequest,
+                    "invalid management confirmation or binding",
+                ),
             )
         })?;
         let epoch=match &intent{LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Request(r))=>r.binding.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(r))=>r.expected_core_epoch,LifecycleCommand::Restart(workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Interrupt(r))=>r.binding.core_epoch,LifecycleCommand::Quarantine(workbench_protocol::namespaces::lifecycle::quarantine::QuarantineCommand::Discard(r))|LifecycleCommand::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Release(r)|workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsCommand::Resume(r))=>r.binding.expected_core_epoch};
         if epoch != self.epoch {
-            return Err(conflict());
+            return Err(self.refusal(&context, intent.action(), conflict()));
         }
         Ok(AuthorizedAdminRequest { intent, context })
     }
@@ -182,12 +219,16 @@ impl AdminService {
         request: AuthorizedAdminRequest,
     ) -> Result<AdminReplyReceiver, AdminFailure> {
         self.authorize(&request.context, request.intent.action())?;
-        let facade = self.facade(request.intent.action(), false)?;
+        let facade = self
+            .facade(request.intent.action(), false)
+            .map_err(|e| self.refusal(&request.context, request.intent.action(), e))?;
         let (tx, rx) = oneshot::channel();
         if request.intent.action() == AdminAction::Cancel {
             let entry = self.entry(&request.intent, &request.context)?;
             self.authorize(&request.context, AdminAction::Cancel)?;
-            let outcome = facade.cancel(&request.intent)?;
+            let outcome = facade
+                .cancel(&request.intent)
+                .map_err(|e| self.refusal(&request.context, AdminAction::Cancel, e))?;
             // Never wait for audit ACK, a general slot or an audit gate. Warn even if the
             // best-effort record later succeeds: the response does not claim durability.
             let receipt = AdminReceipt {
@@ -255,7 +296,7 @@ impl AdminService {
             match self.audit.effect_admission() {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    let _ = reply.send(Err(e));
+                    let _ = reply.send(Err(self.refusal(&request.context, action, e)));
                     return;
                 }
             }
@@ -267,7 +308,7 @@ impl AdminService {
             match self.background.try_enter() {
                 Some(p) => Some(p),
                 None => {
-                    let _ = reply.send(Err(busy()));
+                    let _ = reply.send(Err(self.refusal(&request.context, action, busy())));
                     return;
                 }
             }
@@ -276,7 +317,7 @@ impl AdminService {
         };
         let undisposed_revision = if action == AdminAction::Request {
             let Some(collector) = self.facades.owned_graphs.get() else {
-                let _ = reply.send(Err(unavailable()));
+                let _ = reply.send(Err(self.refusal(&request.context, action, unavailable())));
                 return;
             };
             let query=LifecycleQuery::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsQuery::Undisposed);
@@ -293,18 +334,18 @@ impl AdminService {
             {
                 Ok(Ok(i)) if i.matches(&request.intent) => i,
                 Ok(Err(e)) => {
-                    let _ = reply.send(Err(e));
+                    let _ = reply.send(Err(self.refusal(&request.context, action, e)));
                     return;
                 }
                 _ => {
-                    let _ = reply.send(Err(conflict()));
+                    let _ = reply.send(Err(self.refusal(&request.context, action, conflict())));
                     return;
                 }
             };
         let entry = match self.entry(&request.intent, &request.context) {
             Ok(e) => e,
             Err(e) => {
-                let _ = reply.send(Err(e));
+                let _ = reply.send(Err(self.refusal(&request.context, action, e)));
                 return;
             }
         };
@@ -339,7 +380,7 @@ impl AdminService {
                 return;
             }
             Err(e) => {
-                let _ = reply.send(Err(e));
+                let _ = reply.send(Err(self.refusal(&request.context, action, e)));
                 return;
             }
         }
@@ -353,7 +394,7 @@ impl AdminService {
                 .audit
                 .finalize(&key, AuditOutcome::AbortedBeforeEffect)
                 .await;
-            let _ = reply.send(Err(e));
+            let _ = reply.send(Err(self.refusal(&request.context, action, e)));
             return;
         }
         if let Err(e) = self.authorize(&request.context, action) {
@@ -361,7 +402,7 @@ impl AdminService {
                 .audit
                 .finalize(&key, AuditOutcome::AbortedBeforeEffect)
                 .await;
-            let _ = reply.send(Err(e));
+            let _ = reply.send(Err(self.refusal(&request.context, action, e)));
             return;
         }
         let binding = self.audit.binding(key.clone());
