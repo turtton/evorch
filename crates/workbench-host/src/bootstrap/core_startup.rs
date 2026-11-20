@@ -57,6 +57,8 @@ pub struct RecoveryResumeRequest {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryAdminError {
+    /// The admitted manual operation was synchronously refused before application.
+    Conflict,
     Unsupported,
     Busy,
     Stopped,

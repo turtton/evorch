@@ -118,6 +118,8 @@ pub enum StorageError {
     LaneOperation(event_bus::lane::LaneOperationError),
     LaneManagement(crate::lane_management::LaneManagementError),
     StaleMutation,
+    /// A graph CAS was synchronously refused before applying any effect.
+    RecoveryGraphConflict(String),
     /// An administrative audit command was refused; see [`crate::admin_audit::AuditError`].
     AdminAudit(crate::admin_audit::AuditError),
     /// SQLite 操作が失敗しました。
@@ -257,6 +259,9 @@ impl fmt::Display for StorageError {
                 write!(formatter, "lane delivery conflict: {reason}")
             }
             Self::StaleMutation => write!(formatter, "mutation owner generation is stale"),
+            Self::RecoveryGraphConflict(reason) => {
+                write!(formatter, "recovery graph conflict: {reason}")
+            }
             Self::AdminAudit(error) => write!(formatter, "{error}"),
             Self::Sqlite(error) => write!(formatter, "SQLite error: {error}"),
             Self::Migration { version, message } => {
@@ -478,6 +483,7 @@ impl std::error::Error for StorageError {
             | Self::Migration { .. }
             | Self::AdminAudit(_)
             | Self::StaleMutation
+            | Self::RecoveryGraphConflict(_)
             | Self::SchemaTooNew { .. }
             | Self::ConversionRequired { .. }
             | Self::LimitExceeded { .. }

@@ -15,13 +15,18 @@ impl AgentRuntime {
     ) -> Result<GraphControlRecord, RuntimeError> {
         #[cfg(test)]
         self.record_graph_effect(1);
-        self.validate_disposal_runtime(authority)?;
+        self.validate_disposal_runtime(authority)
+            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let ids = authority
             .expected()
             .manifest
             .members
             .iter()
-            .map(|m| m.run_id.parse::<RunId>().map_err(error))
+            .map(|m| {
+                m.run_id
+                    .parse::<RunId>()
+                    .map_err(|_| RuntimeError::GraphControlConflict)
+            })
             .collect::<Result<BTreeSet<_>, _>>()?;
         let claim_id = authority
             .expected()
@@ -68,7 +73,7 @@ impl AgentRuntime {
                     .members
                     .iter()
                     .find(|m| m.run_id == id.to_string())
-                    .ok_or_else(|| error("missing disposal member"))?;
+                    .ok_or(RuntimeError::GraphControlConflict)?;
                 if index.paused_recovery.as_ref().is_none_or(|p| {
                     Some(p.claim_id.as_str()) != claim_id
                         || p.old_incarnation != captured.incarnation
@@ -80,16 +85,17 @@ impl AgentRuntime {
                     (None, None) => false,
                     _ => true,
                 } {
-                    return Err(error("disposal index is not the captured paused execution"));
+                    return Err(RuntimeError::GraphControlConflict);
                 }
             }
         }
-        let _owners = crate::ownership::disposal_support::guard(authority).map_err(error)?;
+        let _owners = crate::ownership::disposal_support::guard(authority)
+            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let store = self
             .shared
             .run_store
             .get()
-            .ok_or_else(|| error("no run store"))?;
+            .ok_or(RuntimeError::GraphControlNotApplied)?;
         let request = GraphControlWrite {
             expected: authority.expected().clone(),
             effect: effect.clone(),
@@ -98,24 +104,27 @@ impl AgentRuntime {
                 storage::recovery::restart::RestartPhase::Aborted
                     | storage::recovery::restart::RestartPhase::Invalidated
                     | storage::recovery::restart::RestartPhase::Superseded
-            ) {
+                    | storage::recovery::restart::RestartPhase::Completed
+            ) || authority.expected().claim.as_ref().is_some_and(|claim| {
+                matches!(
+                    claim.state,
+                    storage::recovery::RecoveryClaimState::Released { .. }
+                )
+            }) {
                 GraphControlAction::TerminalCleanup
             } else {
                 GraphControlAction::Release
             },
         };
-        let result = match store.handle.write_recovery_graph_control(request) {
-            Ok(result) => result,
-            Err(write_error) => store
-                .with_database(|db| db.recovery_graph_effect(&effect.operation_id))
-                .map_err(error)?
-                .filter(|r| {
-                    r.revoked
-                        && r.effect == effect
-                        && r.manifest_id == authority.expected().manifest.manifest_id
-                })
-                .ok_or_else(|| error(write_error))?,
-        };
+        let result = graph_control_write_result(
+            store.handle.write_recovery_graph_control(request),
+            || store.with_database(|db| db.recovery_graph_effect(&effect.operation_id)),
+            |r| {
+                r.revoked
+                    && r.effect == effect
+                    && r.manifest_id == authority.expected().manifest.manifest_id
+            },
+        )?;
         for id in &ids {
             if let Some(index) = indexes.remove(id) {
                 if let Some(execution) = index.execution {
@@ -182,5 +191,82 @@ impl TryFrom<&storage::recovery::graph_progress::GraphDisposalProgressKey>
             key.thread_id.clone(),
             key.owner_generation,
         )
+    }
+}
+
+/// Only an ACKed refusal plus a readable absent/nonmatching receipt proves
+/// non-application. Channel closure or unreadable readback remains unknown.
+pub(super) fn graph_control_write_result(
+    result: Result<GraphControlRecord, storage::StorageError>,
+    read: impl FnOnce() -> Result<Option<GraphControlRecord>, storage::StorageError>,
+    matches: impl FnOnce(&GraphControlRecord) -> bool,
+) -> Result<GraphControlRecord, RuntimeError> {
+    match result {
+        Ok(record) => Ok(record),
+        Err(write_error) => {
+            let observed = read().map_err(|_| RuntimeError::GraphControlUnknown)?;
+            if let Some(record) = observed
+                && matches(&record)
+            {
+                return Ok(record);
+            }
+            Err(match write_error {
+                storage::StorageError::WriterClosed => RuntimeError::GraphControlUnknown,
+                storage::StorageError::RecoveryGraphConflict(_) => {
+                    RuntimeError::GraphControlConflict
+                }
+                _ => RuntimeError::GraphControlNotApplied,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_result_tests {
+    use super::*;
+    #[test]
+    fn writer_closed_and_absent_receipt_is_unknown_not_a_rejection() {
+        assert_eq!(
+            graph_control_write_result(
+                Err(storage::StorageError::WriterClosed),
+                || Ok(None),
+                |_| false
+            ),
+            Err(RuntimeError::GraphControlUnknown)
+        );
+    }
+    #[test]
+    fn unreadable_receipt_is_unknown_even_after_a_reply() {
+        assert_eq!(
+            graph_control_write_result(
+                Err(storage::StorageError::RecoveryGraphConflict(
+                    "changed".into()
+                )),
+                || Err(storage::StorageError::Io("unreadable".into())),
+                |_| false
+            ),
+            Err(RuntimeError::GraphControlUnknown)
+        );
+    }
+    #[test]
+    fn acknowledged_refusal_is_classified_without_retrying() {
+        assert_eq!(
+            graph_control_write_result(
+                Err(storage::StorageError::RecoveryGraphConflict(
+                    "changed".into()
+                )),
+                || Ok(None),
+                |_| false
+            ),
+            Err(RuntimeError::GraphControlConflict)
+        );
+        assert_eq!(
+            graph_control_write_result(
+                Err(storage::StorageError::Serialization("refused".into())),
+                || Ok(None),
+                |_| false
+            ),
+            Err(RuntimeError::GraphControlNotApplied)
+        );
     }
 }

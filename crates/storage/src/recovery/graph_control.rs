@@ -290,7 +290,10 @@ pub(super) fn write(
             return Err(invalid("invalid graph effect key"));
         }
     }
-    check_cas(conn, &request.expected)?;
+    check_cas(conn, &request.expected).map_err(|error| match error {
+        StorageError::Serialization(reason) => StorageError::RecoveryGraphConflict(reason),
+        other => other,
+    })?;
     let e = &request.expected;
     let prior_control = control(conn, &e.manifest.manifest_id)?;
     let residual = prior_control
@@ -299,13 +302,26 @@ pub(super) fn write(
         && request.action != GraphControlAction::Resume;
     let terminal_cleanup = request.action == GraphControlAction::TerminalCleanup;
     if terminal_cleanup {
-        if !matches!(
+        let cleanup_phase = matches!(
             e.phase,
-            RestartPhase::Aborted | RestartPhase::Invalidated | RestartPhase::Superseded
-        ) || e.component.disposition == RestartDisposition::Activated
-            || e.claim
+            RestartPhase::Aborted
+                | RestartPhase::Invalidated
+                | RestartPhase::Superseded
+                | RestartPhase::Completed
+                | RestartPhase::Adopted
+        );
+        let ended_claim = if e.phase == RestartPhase::Adopted {
+            e.claim
                 .as_ref()
-                .is_some_and(|claim| !matches!(claim.state, RecoveryClaimState::Released { .. }))
+                .is_some_and(|claim| matches!(claim.state, RecoveryClaimState::Released { .. }))
+        } else {
+            e.claim
+                .as_ref()
+                .is_none_or(|claim| matches!(claim.state, RecoveryClaimState::Released { .. }))
+        };
+        if !cleanup_phase
+            || e.component.disposition == RestartDisposition::Activated
+            || !ended_claim
         {
             return Err(invalid("terminal cleanup conflicts with executable state"));
         }
