@@ -90,7 +90,10 @@ impl AgentRuntime {
     ) -> Result<(Vec<RunId>, ActivatedReservation), crate::ActivationFailure> {
         let mut reservation = Some(reservation.into());
         self.activate_component_reserved(paused, authority, models, &mut reservation)
-            .map_err(|error| crate::ActivationFailure { error, reservation })
+            .map_err(|error| crate::ActivationFailure {
+                error: Box::new(error),
+                reservation,
+            })
     }
 
     fn activate_component_reserved(

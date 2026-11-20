@@ -50,7 +50,7 @@ pub fn activate(
     let reservation = reservation.into();
     if let Err(error) = runtime.restore_relations_and_continuations(&mut component) {
         return Err(runtime::ActivationFailure {
-            error,
+            error: Box::new(error),
             reservation: Some(reservation),
         });
     }

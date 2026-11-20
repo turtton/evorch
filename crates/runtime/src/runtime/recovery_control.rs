@@ -89,7 +89,7 @@ impl std::fmt::Debug for ActivatedReservation {
 /// When the ACK is uncertain, the runtime supervisor owns it instead.
 /// No conversion to RuntimeError is provided: callers must decide the lifetime.
 pub struct ActivationFailure {
-    pub error: RuntimeError,
+    pub error: Box<RuntimeError>,
     pub reservation: Option<ActivationReservation>,
 }
 impl std::fmt::Debug for ActivationFailure {

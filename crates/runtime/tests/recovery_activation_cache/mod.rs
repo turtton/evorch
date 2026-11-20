@@ -613,12 +613,12 @@ async fn recover_case(
             .bind_thread_root("wire-recovery-thread", run)
             .unwrap();
     }
-    let result = ({
+    let result = {
         let reservation = restarted
-            .reserve_automatic_activation(&(paused).claim().manifest_id)
+            .reserve_automatic_activation(&paused.claim().manifest_id)
             .unwrap();
         restarted.activate_component(paused, authority, reservation)
-    });
+    };
     if changed_settings {
         assert!(
             result.is_err(),
@@ -644,7 +644,9 @@ async fn recover_case(
         );
         return;
     }
-    assert_eq!(result.unwrap(), [run]);
+    let (activated, publication) = result.unwrap();
+    assert_eq!(activated, [run]);
+    publication.release();
     assert_eq!(model.route_pins(&run.to_string()), [pin]);
     all_events.extend(through_phase(&mut events, run, AgentRunPhase::Waiting).await);
     restarted
