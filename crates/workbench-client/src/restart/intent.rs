@@ -15,8 +15,9 @@ use workbench_protocol::{
 /// The target every command line means unless it names another.
 pub const CURRENT_TARGET: &str = "current";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TargetSelector {
+    #[default]
     Current,
     Id(AdminId),
 }
@@ -33,11 +34,6 @@ impl TargetSelector {
             Self::Current => CURRENT_TARGET,
             Self::Id(id) => id.as_str(),
         }
-    }
-}
-impl Default for TargetSelector {
-    fn default() -> Self {
-        Self::Current
     }
 }
 

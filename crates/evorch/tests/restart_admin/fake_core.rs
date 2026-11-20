@@ -85,12 +85,14 @@ pub struct FakeCore {
     accept: JoinHandle<()>,
 }
 
+type Connection = (usize, mpsc::UnboundedSender<Vec<u8>>, JoinHandle<()>);
+
 struct Shared {
     epoch: u64,
     capabilities: Vec<Capability>,
     state: Mutex<State>,
     changed: Notify,
-    connections: Mutex<Vec<(usize, mpsc::UnboundedSender<Vec<u8>>, JoinHandle<()>)>>,
+    connections: Mutex<Vec<Connection>>,
     subscription_ids: Mutex<HashMap<usize, Vec<SubscriptionId>>>,
     sequence: Mutex<u64>,
 }
