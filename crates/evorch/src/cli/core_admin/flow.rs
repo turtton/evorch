@@ -222,7 +222,15 @@ impl Flow<'_> {
             Ok(proof) => proof,
             Err(code) => return code,
         };
-        match admin.send(request_restart(binding, proof)).await {
+        let sent = tokio::select! {
+            biased;
+            () = &mut self.env.interrupt => {
+                self.warn("stopped waiting for the reply (Ctrl-C): the request may already have reached the core and was not cancelled, so its outcome is unknown");
+                return exit::INTERRUPTED;
+            }
+            sent = admin.send(request_restart(binding, proof)) => sent,
+        };
+        match sent {
             Ok(receipt) => {
                 for line in describe_receipt(&receipt) {
                     self.say(line);
@@ -351,26 +359,48 @@ impl Flow<'_> {
         op: &AdminId,
         held: Option<EventCursor>,
     ) -> Result<Rebuilt, u8> {
-        let core = match attempt(&self.env.target, &self.env.client).await {
-            Ok(Attempt::Ready(core)) => core,
-            _ => {
+        enum Settled {
+            Interrupted,
+            Unreachable,
+            Session(Result<Rebuilt, String>),
+        }
+        let settled = {
+            let target = &self.env.target;
+            let config = &self.env.client;
+            let interrupt = &mut self.env.interrupt;
+            tokio::select! {
+                biased;
+                () = &mut *interrupt => Settled::Interrupted,
+                settled = async {
+                    match attempt(target, config).await {
+                        Ok(Attempt::Ready(core)) => {
+                            Settled::Session(rebuild(core, held, op.clone()).await)
+                        }
+                        _ => Settled::Unreachable,
+                    }
+                } => settled,
+            }
+        };
+        match settled {
+            Settled::Interrupted => Err(self.interrupted(op)),
+            Settled::Unreachable => {
                 self.warn(format!(
                     "the core cannot be reached, so operation {} is unknown. It was not sent again; read `evorch core restart status` once the core is back",
                     op.as_str()
                 ));
-                return Err(exit::FAILURE);
+                Err(exit::FAILURE)
             }
-        };
-        match rebuild(core, held, op.clone()).await {
-            Ok((client, subscription, Some(receipt))) => Ok((client, subscription, Some(receipt))),
-            Ok((_, _, None)) => {
+            Settled::Session(Ok((client, subscription, Some(receipt)))) => {
+                Ok((client, subscription, Some(receipt)))
+            }
+            Settled::Session(Ok((_, _, None))) => {
                 self.warn(format!(
                     "the core does not know operation {}: it may not have arrived. Check `evorch core restart status` before asking again",
                     op.as_str()
                 ));
                 Err(exit::FAILURE)
             }
-            Err(error) => {
+            Settled::Session(Err(error)) => {
                 self.warn(format!(
                     "the core answered but the session could not be rebuilt: {error}"
                 ));
@@ -393,7 +423,6 @@ impl Flow<'_> {
     }
 
     async fn read_state(
-        &mut self,
         client: &WorkbenchClient,
         op: &AdminId,
     ) -> Result<
@@ -471,13 +500,14 @@ impl Flow<'_> {
         loop {
             let mut subscription = match pending.take() {
                 Some(subscription) => subscription,
-                None => match client
-                    .subscribe(workbench_protocol::events::Subscribe {
+                None => match tokio::select! {
+                    biased;
+                    () = &mut self.env.interrupt => return self.interrupted(&op),
+                    started = client.subscribe(workbench_protocol::events::Subscribe {
                         scope: SubscriptionScope::Management,
                         after: None,
-                    })
-                    .await
-                {
+                    }) => started,
+                } {
                     Ok(subscription) => subscription,
                     Err(error) => {
                         if matches!(error, ClientError::Transport(_)) {
@@ -505,7 +535,11 @@ impl Flow<'_> {
             let epoch = client.server_hello().instance_epoch;
             let mut lost_connection = false;
             loop {
-                match self.read_state(&client, &op).await {
+                match tokio::select! {
+                    biased;
+                    () = &mut self.env.interrupt => return self.interrupted(&op),
+                    read = Self::read_state(&client, &op) => read,
+                } {
                     Ok((found, status)) => {
                         observer.observe_status(&status, clock_now());
                         if last_phase != Some(status.status.phase) {
@@ -594,16 +628,16 @@ impl Flow<'_> {
             client: &self.env.client,
         };
         let policy = self.env.policy;
-        let mut printed: Option<u64> = None;
+        let mut printed: Option<(workbench_client::restart::reconnect::Stage, u64)> = None;
         let err = &mut *self.env.err;
         let wait = reconnect_after_planned_restart(
             &connector,
             &evidence,
             policy,
             |view: ReconnectView| {
-                let bucket = view.remaining.as_secs() / 10;
-                if printed != Some(bucket) {
-                    printed = Some(bucket);
+                let key = (view.stage, view.remaining.as_secs() / 10);
+                if printed != Some(key) {
+                    printed = Some(key);
                     let _ = writeln!(err, "{}", describe_reconnect(&view));
                 }
             },

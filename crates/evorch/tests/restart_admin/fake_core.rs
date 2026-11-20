@@ -71,6 +71,10 @@ pub struct State {
     pub audit_warning: bool,
     pub on_request: OnRequest,
     pub subscribe_mode: SubscribeMode,
+    /// Read subscribe requests but never answer them.
+    pub hold_subscribe: bool,
+    /// Read operation queries but never answer them.
+    pub hold_operation_status: bool,
     pub blockers: Option<ShellBlockers>,
     pub operations: HashMap<String, AdminReceipt>,
     pub seen: Vec<Seen>,
@@ -132,6 +136,8 @@ impl FakeCore {
                 audit_warning: false,
                 on_request: OnRequest::Accept,
                 subscribe_mode: SubscribeMode::Honest,
+                hold_subscribe: false,
+                hold_operation_status: false,
                 blockers: None,
                 operations: HashMap::new(),
                 seen: Vec::new(),
@@ -310,6 +316,7 @@ fn lifecycle_reply(reply: LifecycleReply) -> ReplyResult {
 enum Reaction {
     Reply(ReplyResult),
     Close,
+    Silent,
 }
 
 fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
@@ -320,6 +327,12 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
         body: request.body.clone(),
     });
     let reaction = match &request.body {
+        RequestBody::Control(Control::Subscribe(_)) if state.hold_subscribe => Reaction::Silent,
+        RequestBody::Query(Query::Lifecycle(LifecycleQuery::OperationStatus { .. }))
+            if state.hold_operation_status =>
+        {
+            Reaction::Silent
+        }
         RequestBody::Control(Control::Subscribe(subscribe)) => {
             let replay = match state.subscribe_mode {
                 SubscribeMode::AlwaysReplay => true,
@@ -463,6 +476,7 @@ async fn serve(
                     let request: RequestEnvelope = decode_payload(&payload).expect("a request");
                     match react(&shared, conn, &request) {
                         Reaction::Close => return,
+                        Reaction::Silent => {}
                         Reaction::Reply(result) => {
                             let frame = ServerFrame::Reply(ReplyEnvelope { request_id: request.request_id, result });
                             if write.write_all(&encode_frame(&frame, u32::MAX).unwrap()).await.is_err() { return }

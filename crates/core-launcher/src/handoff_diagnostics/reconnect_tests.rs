@@ -151,13 +151,20 @@ async fn a_successor_that_appears_while_the_old_core_drains_is_reconnected() {
     };
     assert_eq!((epoch, value), (InstanceEpoch(8), 8));
     assert_eq!(script.attempts.load(Ordering::SeqCst), 4);
-    assert_eq!(seen.len(), 3, "a progress line before each wait");
+    assert_eq!(
+        seen.len(),
+        4,
+        "a progress line before each wait and one when ready"
+    );
+    let (waiting, ready) = seen.split_at(3);
     assert!(
-        seen.iter()
+        waiting
+            .iter()
             .all(|(stage, _)| *stage == Stage::RestartingToReady)
     );
+    assert_eq!(ready[0].0, Stage::ReadyToReconnect);
     assert!(
-        seen.windows(2).all(|w| w[0].1 >= w[1].1) && seen[0].1 > seen[2].1,
+        waiting.windows(2).all(|w| w[0].1 >= w[1].1) && waiting[0].1 > waiting[2].1,
         "the time left never grows: {seen:?}"
     );
 }
@@ -219,4 +226,19 @@ async fn a_core_that_answers_but_is_not_ready_does_not_end_the_wait_early() {
         result,
         Err(ReconnectError::Expired(Stage::RestartingToReady))
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ready_stage_and_its_deadline_are_announced_before_the_session_is_rebuilt() {
+    let script = Script::new(vec![Scripted::Down], || Scripted::Ready(8));
+    let (result, seen) = run(&script, true).await;
+    assert!(matches!(
+        result,
+        Err(ReconnectError::Expired(Stage::ReadyToReconnect))
+    ));
+    assert_eq!(
+        seen.last(),
+        Some(&(Stage::ReadyToReconnect, 30)),
+        "the 30 second window is shown when it opens: {seen:?}"
+    );
 }

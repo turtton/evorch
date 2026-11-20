@@ -528,3 +528,106 @@ async fn cancel_is_only_sent_before_capture() {
     );
     assert!(b.commands().is_empty());
 }
+
+#[tokio::test]
+async fn ctrl_c_ends_the_wait_even_while_the_subscription_is_unanswered() {
+    let env = env();
+    let a = core(&env, 7);
+    a.state().hold_subscribe = true;
+    let run = Run::new();
+    let (interrupt, fire) = tokio::sync::oneshot::channel::<()>();
+    let (code, _) = both(
+        run.drive(&env, request(true, false), &NONE, async {
+            let _ = fire.await;
+        }),
+        async {
+            // The core read the subscribe and says nothing: the CLI is waiting on it.
+            a.wait_for(|s| {
+                s.seen
+                    .iter()
+                    .any(|x| matches!(x.body, RequestBody::Control(_)))
+            })
+            .await;
+            let _ = interrupt.send(());
+        },
+    )
+    .await;
+    assert_eq!(code, 130, "{}", run.err.text());
+    assert!(run.err.text().contains("Nothing was cancelled or stopped"));
+    let commands = a.restart_commands();
+    assert!(
+        matches!(commands.as_slice(), [RestartCommand::Request(_)]),
+        "{commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_c_ends_the_wait_even_while_the_operation_read_is_unanswered_and_never_succeeds() {
+    let env = env();
+    let a = core(&env, 7);
+    a.state().hold_operation_status = true;
+    let run = Run::new();
+    let (interrupt, fire) = tokio::sync::oneshot::channel::<()>();
+    let (code, _) = both(
+        run.drive(&env, request(true, false), &NONE, async {
+            let _ = fire.await;
+        }),
+        async {
+            a.wait_for(|s| {
+                s.seen.iter().any(|x| {
+                    matches!(
+                        x.body,
+                        RequestBody::Query(Query::Lifecycle(
+                            LifecycleQuery::OperationStatus { .. }
+                        ))
+                    )
+                })
+            })
+            .await;
+            // The operation is already complete, but the read that would say so
+            // is still in flight when Ctrl-C comes.
+            let op = the_operation(&a);
+            a.complete_operation(&op, AdminOutcome::Succeeded);
+            let _ = interrupt.send(());
+        },
+    )
+    .await;
+    assert_eq!(code, 130, "{}", run.err.text());
+    assert_eq!(a.restart_commands().len(), 1, "no cancel and no interrupt");
+}
+
+#[tokio::test(start_paused = true)]
+async fn once_the_successor_is_ready_the_30_second_window_is_shown_and_enforced() {
+    let env = env();
+    let a = core(&env, 7);
+    let run = Run::new();
+    let (code, driven) = both(
+        run.drive(&env, request(true, false), &NONE, never()),
+        async {
+            a.wait_for(|s| {
+                s.seen
+                    .iter()
+                    .any(|x| matches!(x.body, RequestBody::Command(_)))
+            })
+            .await;
+            a.set_phase(RestartPhase::Finalizing);
+            a.wait_for(|s| s.served_status.contains(&RestartPhase::Finalizing))
+                .await;
+            a.stop_by_ref();
+            let b = core(&env, 8);
+            // The successor accepts control connections but never answers the subscribe.
+            b.state().hold_subscribe = true;
+            b
+        },
+    )
+    .await;
+    assert_eq!(code, 1);
+    let b = driven.expect("the successor started");
+    let err = run.err.text();
+    assert!(
+        err.contains("the successor is ready; rebuilding this session (30s left of 30s)"),
+        "{err}"
+    );
+    assert!(err.contains("not rebuilt within 30 seconds"), "{err}");
+    assert!(b.restart_commands().is_empty(), "nothing was resent");
+}

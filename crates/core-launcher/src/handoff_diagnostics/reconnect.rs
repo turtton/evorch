@@ -136,7 +136,11 @@ where
             }
             Step::SuccessorReady { epoch } => {
                 let core = held.expect("a ready core was found");
-                let (_, deadline) = machine.deadline();
+                let (stage, deadline) = machine.deadline();
+                progress(ReconnectView {
+                    stage,
+                    remaining: deadline.saturating_duration_since(clock_now()),
+                });
                 let value = match timeout_at(Instant::from_std(deadline), finish(core)).await {
                     Ok(Ok(value)) => value,
                     Ok(Err(e)) => return Err(ReconnectError::Session(e)),
