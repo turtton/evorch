@@ -395,6 +395,16 @@ async fn check_success(scenario: &str) {
     assert_eq!(f.identity().read_record().unwrap().unwrap().epoch, 2);
     f.excludes_second_core();
     f.advance();
+    let activated = f.event("activated");
+    let services = activated["services"].as_array().unwrap();
+    for name in ["admin-read-io", "admin-audit"] {
+        assert_eq!(
+            services.iter().filter(|service| **service == name).count(),
+            1,
+            "management worker starts exactly once after activation: {name}"
+        );
+    }
+    assert_eq!(activated["admin_read"], 123);
     assert!(f.child.wait().unwrap().success());
 }
 

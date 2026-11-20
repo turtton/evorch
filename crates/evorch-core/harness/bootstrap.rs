@@ -258,6 +258,11 @@ mod linux {
                     // production hook only after the parent has audited Ready.
                     host.activate_after_ready(&evorch_core::recovery_service::CoreGraphRecovery)
                         .await?;
+                    say(serde_json::json!({
+                        "status":"activated",
+                        "services":host.services.names().collect::<Vec<_>>(),
+                        "admin_read":host.admin.reader().read(|| Ok(123u64)).await.unwrap(),
+                    }));
                     host.shutdown().await?;
                     drop(listener);
                     drop(host);

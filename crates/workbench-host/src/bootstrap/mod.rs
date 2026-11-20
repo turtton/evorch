@@ -690,7 +690,6 @@ impl BootstrappedHost {
             executor,
             _leases: leases,
         };
-        bootstrap.admin.register_worker(&mut bootstrap.services);
         if !planned {
             let live_core_epoch = bootstrap
                 .host
@@ -792,6 +791,10 @@ impl BootstrappedHost {
         recovery: Option<&dyn core_startup::CoreStartupHook>,
     ) -> Result<(), BootstrapError> {
         let deferred = self.deferred.take().ok_or("startup already activated")?;
+        // Composition only wires management capabilities. Their workers obey the
+        // same activation boundary as every other producer, including after
+        // durable Ready during a planned handoff. Taking deferred starts them once.
+        self.admin.register_worker(&mut self.services);
         if matches!(deferred.mode, core_startup::CoreBootMode::PlannedHandoff) {
             self.runtime = learning::configure(
                 self.runtime.clone(),
