@@ -9,6 +9,7 @@ pub use audit::{AdminAudit, AuditPort, AuditReceipt, RestartAuditBinding};
 pub use bindings::*;
 pub use service::*;
 use std::{future::Future, pin::Pin};
+pub use workbench_authority::VerifiedConnection;
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     namespaces::lifecycle::{
@@ -42,18 +43,27 @@ impl AdminAccepted {
 /// inspect/query may await I/O, without a host/coordinator mutex. commit and
 /// the two fast-lane methods MUST only compare/change memory (no I/O or await).
 pub trait AdminFacade: Send + Sync + 'static {
-    fn inspect<'a>(&'a self, intent: &'a AdminIntent) -> AdminIo<'a, AdminInspection>;
-    fn query<'a>(&'a self, query: &'a AdminQuery) -> AdminIo<'a, AdminView>;
+    fn inspect<'a>(
+        &'a self,
+        intent: &'a AdminIntent,
+        connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminInspection>;
+    fn query<'a>(
+        &'a self,
+        query: &'a AdminQuery,
+        connection: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminView>;
     fn commit(
         &self,
         intent: AdminIntent,
         expected: AdminInspection,
         admission: CommitAdmission,
+        connection: &VerifiedConnection,
     ) -> Result<AdminAccepted, AdminFailure>;
     fn cancel(&self, _intent: &AdminIntent) -> Result<AdminOutcome, AdminFailure> {
         Err(unavailable())
     }
-    fn status(&self) -> Result<AdminView, AdminFailure> {
+    fn status(&self, _connection: &VerifiedConnection) -> Result<AdminView, AdminFailure> {
         Err(unavailable())
     }
 }

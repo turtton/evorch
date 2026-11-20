@@ -87,7 +87,11 @@ pub struct Facade {
 }
 
 impl AdminFacade for Facade {
-    fn inspect<'a>(&'a self, intent: &'a AdminIntent) -> AdminIo<'a, AdminInspection> {
+    fn inspect<'a>(
+        &'a self,
+        intent: &'a AdminIntent,
+        _: &'a VerifiedConnection,
+    ) -> AdminIo<'a, AdminInspection> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let inspection = match intent {
             LifecycleCommand::Restart(RestartCommand::Request(r)) => {
@@ -127,7 +131,7 @@ impl AdminFacade for Facade {
         Box::pin(async move { Ok(view) })
     }
 
-    fn status(&self) -> Result<AdminView, AdminFailure> {
+    fn status(&self, _: &VerifiedConnection) -> Result<AdminView, AdminFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(status())
     }
@@ -145,6 +149,7 @@ impl AdminFacade for Facade {
         intent: AdminIntent,
         expected: AdminInspection,
         admission: CommitAdmission,
+        _connection: &VerifiedConnection,
     ) -> Result<AdminAccepted, AdminFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !expected.matches(&intent) {

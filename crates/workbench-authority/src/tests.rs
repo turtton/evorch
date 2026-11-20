@@ -1,4 +1,32 @@
 use super::*;
+#[cfg(unix)]
+#[tokio::test]
+async fn verified_connection_epoch_is_socket_scoped_and_dies_with_its_lease() {
+    let (a, _a_peer) = tokio::net::UnixStream::pair().unwrap();
+    let (b, _b_peer) = tokio::net::UnixStream::pair().unwrap();
+    let a = verify_unix_peer(&a).unwrap();
+    let b = verify_unix_peer(&b).unwrap();
+    let first = a.authority().connection().unwrap();
+    let same = a.authority().connection().unwrap();
+    let other = b.authority().connection().unwrap();
+    assert!(first.matches(same.epoch()));
+    assert!(
+        !other.matches(first.epoch()),
+        "another actual connection cannot reuse confirmation"
+    );
+    let epoch = first.epoch();
+    drop(a);
+    assert!(
+        !first.matches(epoch),
+        "saved context cannot revive a disconnected connection"
+    );
+    assert!(!same.matches(epoch));
+    assert!(
+        !other.matches(epoch),
+        "reconnecting never restores the old epoch"
+    );
+    assert!(TransportAuthority::default().connection().is_none());
+}
 use workbench_protocol::{
     ids::{ClientId, RunId},
     namespaces::lifecycle::AdminAction,

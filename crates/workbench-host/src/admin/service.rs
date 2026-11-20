@@ -54,8 +54,12 @@ pub struct CommitAdmission {
     receipt: AdminReceipt,
     binding: RestartAuditBinding,
     undisposed_revision: Option<workbench_protocol::wire::Revision>,
+    connection: VerifiedConnection,
 }
 impl CommitAdmission {
+    pub fn connection(&self) -> &VerifiedConnection {
+        &self.connection
+    }
     /// Restart commits must recheck this snapshot revision against the live owned-graph collector in their memory-only gate transition.
     pub fn undisposed_revision(&self) -> Option<workbench_protocol::wire::Revision> {
         self.undisposed_revision
@@ -291,6 +295,10 @@ impl AdminService {
             let _ = reply.send(Err(error));
             return;
         }
+        let Some(connection) = request.context.authority().connection() else {
+            let _ = reply.send(Err(conflict()));
+            return;
+        };
         let entry = match self.entry(&request.intent, &request.context) {
             Ok(e) => e,
             Err(e) => {
@@ -364,27 +372,29 @@ impl AdminService {
                 return;
             };
             let query=LifecycleQuery::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsQuery::Undisposed);
-            match tokio::time::timeout(audit::ADMIN_IO_ACK_BUDGET,collector.query(&query)).await{
+            match tokio::time::timeout(audit::ADMIN_IO_ACK_BUDGET,collector.query(&query, &connection)).await{
     Ok(Ok(LifecycleReply::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsReply::Undisposed(snapshot)))) if snapshot.validate().is_ok() && snapshot.count.get()==0 =>Some(snapshot.snapshot_revision),
     _=>{let _=reply.send(Err(conflict()));return;}
    }
         } else {
             None
         };
-        let inspected =
-            match tokio::time::timeout(audit::ADMIN_IO_ACK_BUDGET, facade.inspect(&request.intent))
-                .await
-            {
-                Ok(Ok(i)) if i.matches(&request.intent) => i,
-                Ok(Err(e)) => {
-                    let _ = reply.send(Err(self.refusal(&request.context, action, e)));
-                    return;
-                }
-                _ => {
-                    let _ = reply.send(Err(self.refusal(&request.context, action, conflict())));
-                    return;
-                }
-            };
+        let inspected = match tokio::time::timeout(
+            audit::ADMIN_IO_ACK_BUDGET,
+            facade.inspect(&request.intent, &connection),
+        )
+        .await
+        {
+            Ok(Ok(i)) if i.matches(&request.intent) => i,
+            Ok(Err(e)) => {
+                let _ = reply.send(Err(self.refusal(&request.context, action, e)));
+                return;
+            }
+            _ => {
+                let _ = reply.send(Err(self.refusal(&request.context, action, conflict())));
+                return;
+            }
+        };
         let key = entry.key.clone();
         let digest = entry.intent_digest.clone();
         match self.audit.accept(entry).await {
@@ -437,9 +447,10 @@ impl AdminService {
             receipt: receipt.clone(),
             binding: binding.clone(),
             undisposed_revision,
+            connection: connection.clone(),
         };
         let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            facade.commit(request.intent, inspected, admission)
+            facade.commit(request.intent, inspected, admission, &connection)
         }))
         .unwrap_or_else(|_| Err(unknown()));
         drop(request.context);
@@ -584,10 +595,15 @@ impl AdminService {
             matches!(&request.query, AdminQuery::OwnedGraphs(_)),
         )?;
         let (tx, rx) = oneshot::channel();
+        let connection = request
+            .context
+            .authority()
+            .connection()
+            .ok_or_else(conflict)?;
         if matches!(request.query, AdminQuery::Restart(RestartQuery::Status)) {
             let _ = tx.send(
                 facade
-                    .status()
+                    .status(&connection)
                     .map(|view| self.stamp_management_epoch(view)),
             );
             return Ok(rx);
@@ -603,7 +619,7 @@ impl AdminService {
                 let _slot = slot;
                 let result = match tokio::time::timeout(
                     audit::ADMIN_IO_ACK_BUDGET,
-                    facade.query(&request.query),
+                    facade.query(&request.query, &connection),
                 )
                 .await
                 {
