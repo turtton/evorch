@@ -1,6 +1,35 @@
 //! Process-local shell controls. No wire entry point or restart policy change.
 use super::*;
 use crate::{AgentRuntime, RuntimeError};
+use std::sync::{Arc, Weak};
+
+pub(crate) struct RestartShellExecutorRegistration {
+    runtime: Weak<crate::runtime::Shared>,
+    run: RunId,
+    executor: Weak<tools::ToolExecutor>,
+}
+impl Drop for RestartShellExecutorRegistration {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.upgrade() else {
+            return;
+        };
+        let _gate = runtime
+            .quiesce
+            .checkpoint_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = runtime
+            .restart_shell_executors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries
+            .get(&self.run)
+            .is_some_and(|current| current.ptr_eq(&self.executor))
+        {
+            entries.remove(&self.run);
+        }
+    }
+}
 
 /// Opaque, non-serializable job selection from one restart and incarnation.
 #[derive(Clone)]
@@ -25,6 +54,49 @@ impl RestartShellJob {
 }
 
 impl AgentRuntime {
+    pub(crate) fn register_restart_shell_executor(
+        &self,
+        run: RunId,
+        executor: &Arc<tools::ToolExecutor>,
+    ) -> RestartShellExecutorRegistration {
+        let _gate = self
+            .shared
+            .quiesce
+            .checkpoint_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let executor = Arc::downgrade(executor);
+        self.shared
+            .restart_shell_executors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run, executor.clone());
+        RestartShellExecutorRegistration {
+            runtime: Arc::downgrade(&self.shared),
+            run,
+            executor,
+        }
+    }
+    // Caller holds checkpoint_gate through selection and observation/signal.
+    // An expired registered run must NOT fall back to a process-global Shell.
+    fn restart_shell_executor(&self, run: RunId) -> Option<Arc<tools::ToolExecutor>> {
+        let entries = self
+            .shared
+            .restart_shell_executors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(executor) = entries.get(&run) {
+            return executor.upgrade();
+        }
+        drop(entries);
+        Some(Arc::clone(
+            &self
+                .shared
+                .executor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ))
+    }
     /// Bind verified host request identities to this attempt, once. Merely listing
     /// jobs uses Wait semantics: it sends no signal and acknowledges no result.
     /// 4b supplies the durable restart ID and current instance epoch.
@@ -66,28 +138,26 @@ impl AgentRuntime {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        let executor = self
-            .shared
-            .executor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        Ok(intents
-            .into_iter()
-            .flat_map(|intent| {
+        let mut jobs = Vec::new();
+        for intent in intents {
+            let Some(executor) = self.restart_shell_executor(intent.run_id) else {
+                continue;
+            };
+            jobs.extend(
                 executor
                     .shell_job_snapshots(&intent.run_id.to_string())
                     .into_iter()
-                    .map(move |snapshot| RestartShellJob {
+                    .map(|snapshot| RestartShellJob {
                         generation: attempt.generation(),
                         restart_id: restart_id.into(),
                         instance_epoch: instance_epoch.into(),
                         run_id: intent.run_id,
                         incarnation: intent.incarnation.clone(),
                         snapshot,
-                    })
-            })
-            .collect())
+                    }),
+            );
+        }
+        Ok(jobs)
     }
 
     /// Explicit Interrupt only. Returns after terminal observation and confirmed
@@ -100,13 +170,7 @@ impl AgentRuntime {
         instance_epoch: &str,
         job: &RestartShellJob,
     ) -> Result<tools::ShellJobSnapshot, RuntimeError> {
-        let executor = self
-            .shared
-            .executor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        {
+        let executor = {
             let _gate = self
                 .shared
                 .quiesce
@@ -114,6 +178,9 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.validate_restart_attempt(attempt)?;
+            let executor = self
+                .restart_shell_executor(job.run_id)
+                .ok_or_else(|| runtime::error("restart shell executor ended"))?;
             let inner = self.shared.quiesce.lock();
             if job.generation != attempt.generation()
                 || job.restart_id != restart_id
@@ -134,7 +201,8 @@ impl AgentRuntime {
             executor
                 .interrupt_shell_job(&job.snapshot.identity)
                 .map_err(|error| runtime::error(error.to_string()))?;
-        }
+            executor
+        };
         executor
             .wait_shell_job_terminal(&job.snapshot.identity)
             .await
@@ -146,6 +214,168 @@ impl AgentRuntime {
 mod tests {
     use std::sync::Arc;
     use tools::Tool;
+
+    #[tokio::test]
+    async fn benchmark_keeps_its_existing_executor_registration_path() {
+        struct UnselectedRecorder;
+        #[async_trait::async_trait]
+        impl crate::benchmark::BenchmarkRecorder for UnselectedRecorder {
+            async fn capture(
+                &self,
+                _: &crate::benchmark::BenchmarkCheckpoint,
+            ) -> Result<(), String> {
+                panic!("the benchmark selector must not select this Worker");
+            }
+        }
+        let mut f = super::super::fixture::Fixture::new(0);
+        f.runtime = f
+            .runtime
+            .with_benchmark_recorder(
+                crate::benchmark::BenchmarkSelector {
+                    role: crate::Role::Reviewer,
+                    category: None,
+                    occurrence: 1,
+                },
+                Arc::new(UnselectedRecorder),
+            )
+            .unwrap();
+        let run = f.start();
+        f.model.entered.notified().await;
+        let benchmark_registered = f
+            .runtime
+            .shared
+            .benchmark_executors
+            .lock()
+            .unwrap()
+            .contains_key(&run);
+        let restart_registered = f
+            .runtime
+            .shared
+            .restart_shell_executors
+            .lock()
+            .unwrap()
+            .contains_key(&run);
+        f.cleanup(run).await;
+        assert!(benchmark_registered);
+        assert!(
+            !restart_registered,
+            "benchmark registration must be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_loop_unregisters_on_completion_without_retaining_executor() {
+        let f = super::super::fixture::Fixture::new(0);
+        let run = f.start();
+        f.model.entered.notified().await;
+        assert!(
+            f.runtime
+                .shared
+                .restart_shell_executors
+                .lock()
+                .unwrap()
+                .contains_key(&run)
+        );
+        f.cleanup(run).await;
+        assert!(
+            !f.runtime
+                .shared
+                .restart_shell_executors
+                .lock()
+                .unwrap()
+                .contains_key(&run)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_registration_cleanup_cannot_remove_a_replacement_executor() {
+        let f = super::super::fixture::Fixture::new(0);
+        let run = f.start();
+        f.model.entered.notified().await;
+        let old = Arc::new(tools::ToolExecutor::new(f.runtime.shared.bus.clone()));
+        let replacement = Arc::new(tools::ToolExecutor::new(f.runtime.shared.bus.clone()));
+        let first = f.runtime.register_restart_shell_executor(run, &old);
+        let second = f.runtime.register_restart_shell_executor(run, &replacement);
+        drop(first);
+        assert!(Arc::ptr_eq(
+            &f.runtime.restart_shell_executor(run).unwrap(),
+            &replacement
+        ));
+        drop(second);
+        assert!(
+            !f.runtime
+                .shared
+                .restart_shell_executors
+                .lock()
+                .unwrap()
+                .contains_key(&run)
+        );
+        f.cleanup(run).await;
+    }
+
+    #[tokio::test]
+    async fn ending_executor_and_blocker_query_do_not_retain_or_return_an_expired_weak() {
+        let f = super::super::fixture::Fixture::new(0);
+        let shell = Arc::new(tools::Shell::new(Arc::new(
+            sandbox::DirectSandbox::new_unchecked(),
+        )));
+        let mut base = tools::ToolExecutor::new(f.runtime.shared.bus.clone());
+        base.register(shell.clone()).unwrap();
+        *f.runtime.shared.executor.lock().unwrap() = Arc::new(base);
+        let attempt = f.runtime.begin_restart_quiesce().unwrap();
+        let run = f.start();
+        f.runtime.wait_quiesced().await.unwrap();
+        shell
+            .execute_with_context(
+                &tools::ToolExecutionContext {
+                    run_id: run.to_string(),
+                    ..Default::default()
+                },
+                serde_json::json!({"command":"read value","yield_ms":0}),
+            )
+            .await
+            .unwrap();
+        let executor = Arc::new(tools::ToolExecutor::new(f.runtime.shared.bus.clone()));
+        let weak = Arc::downgrade(&executor);
+        let registration = f.runtime.register_restart_shell_executor(run, &executor);
+        assert_eq!(Arc::strong_count(&executor), 1, "registration must be weak");
+        let (ended, ending) = std::sync::mpsc::channel();
+        let (release, cleanup) = std::sync::mpsc::channel();
+        let owner = std::thread::spawn(move || {
+            drop(executor);
+            ended.send(()).unwrap();
+            // Force observation into the resource-drop / registration-drop gap.
+            cleanup.recv().unwrap();
+            drop(registration);
+        });
+        ending.recv().unwrap();
+        assert!(weak.upgrade().is_none());
+        let jobs = f
+            .runtime
+            .restart_shell_jobs(&attempt, "restart", "epoch")
+            .unwrap();
+        release.send(()).unwrap();
+        owner.join().unwrap();
+        let unregistered = !f
+            .runtime
+            .shared
+            .restart_shell_executors
+            .lock()
+            .unwrap()
+            .contains_key(&run);
+        let base_job = shell.shell_job_snapshots(&run.to_string()).pop().unwrap();
+        shell.interrupt_shell_job(&base_job.identity).unwrap();
+        shell
+            .wait_shell_job_terminal(&base_job.identity)
+            .await
+            .unwrap();
+        f.cleanup(run).await;
+        assert!(
+            jobs.is_empty(),
+            "expired run must not fall back to a base Shell"
+        );
+        assert!(unregistered);
+    }
 
     #[tokio::test]
     async fn restart_interrupt_rejects_changed_incarnation_and_job_without_signalling() {

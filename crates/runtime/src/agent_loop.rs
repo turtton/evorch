@@ -560,6 +560,8 @@ pub(crate) async fn run_agent(
             &state.shared.model,
         )));
     }
+    // Registration outlives execute AND finalize, but never owns the executor.
+    let mut _restart_shell_executor = None;
     // Every setup/execute return flows through one finalization boundary.
     async {
         if let Some(error) = state.task.startup_failure.take() {
@@ -926,6 +928,11 @@ pub(crate) async fn run_agent(
             // Startup rules are already in the frozen context. Dynamic host-side
             // discovery could follow a trial-created symlink outside the sandbox.
             state.rules_session = None;
+        }
+        if !benchmark_mode {
+            _restart_shell_executor = state.runtime().map(|runtime| {
+                runtime.register_restart_shell_executor(state.task.run_id, &state.shared.executor)
+            });
         }
         state.publish_message_count();
         if state.transition(AgentRunPhase::Running, None).is_err() {
