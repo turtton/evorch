@@ -306,17 +306,23 @@ pub(crate) fn attempt(
     host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
     component: &ComponentStatus,
 ) -> AutomaticAttempt {
-    attempt_before_decline(coordinator, runtime, host, component, |_| {})
+    attempt_observed(coordinator, runtime, host, component, |_| {})
 }
 
-// The observer is a no-op in production. Tests park the real failure path at
-// this boundary to exercise manual admission before decline starts.
-pub(crate) fn attempt_before_decline(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticAttemptEvent {
+    BeforeActivation,
+    BeforeDecline(StartupBlocked),
+}
+
+// The observer is a no-op in production. Tests park the real path at these
+// boundaries to arrange an activation failure and exercise manual admission.
+pub(crate) fn attempt_observed(
     coordinator: &StartupCoordinator<'_>,
     runtime: &runtime::AgentRuntime,
     host: &Arc<std::sync::Mutex<workbench_host::CommandHost>>,
     component: &ComponentStatus,
-    before_decline: impl FnOnce(StartupBlocked),
+    mut observe: impl FnMut(AutomaticAttemptEvent),
 ) -> AutomaticAttempt {
     // Keep ownership outside the fallible preparation closure: dropping that
     // closure must not admit a manual attempt before decline/cleanup finishes.
@@ -340,6 +346,9 @@ pub(crate) fn attempt_before_decline(
     } else {
         None
     };
+    // A definite activation failure returns this same original reservation.
+    // Unknown returns None: its original supervisor keeps ownership instead.
+    let mut failed_activation_reservation = None;
     let (state, reason) = match component.disposition {
         Disposition::Released => (RecoveryState::Released, Some(StartupBlocked::Released)),
         Disposition::AlreadyActivated => (
@@ -370,12 +379,18 @@ pub(crate) fn attempt_before_decline(
                         .map_err(|_| StartupBlocked::CurrentBindingRequired)?;
                     // No host lock spans activation/DB/runtime work. The guard
                     // also removes the admission fence on error or unwind.
-                    let activated = prepared.activate(
-                        runtime,
-                        reservation
-                            .take()
-                            .expect("reservation held until activation"),
-                    )?;
+                    observe(AutomaticAttemptEvent::BeforeActivation);
+                    let activated = prepared
+                        .activate(
+                            runtime,
+                            reservation
+                                .take()
+                                .expect("reservation held until activation"),
+                        )
+                        .map_err(|failure| {
+                            failed_activation_reservation = failure.reservation;
+                            StartupBlocked::NeedsAttention
+                        })?;
                     Ok(publish_activation(activated, || {
                         host.lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -394,7 +409,7 @@ pub(crate) fn attempt_before_decline(
                     Some(StartupBlocked::NeedsAttention),
                 ),
                 Err(reason) => {
-                    before_decline(reason);
+                    observe(AutomaticAttemptEvent::BeforeDecline(reason));
                     match coordinator.decline(&component.manifest_id) {
                         Ok(()) => (RecoveryState::Released, Some(reason)),
                         Err(StartupBlocked::OwnerBlocked) => {
@@ -418,6 +433,7 @@ pub(crate) fn attempt_before_decline(
     };
     // Failure disposition includes conditional release and paused-state cleanup.
     // Only now may a competing manual attempt acquire this original graph slot.
+    drop(failed_activation_reservation);
     drop(reservation);
     AutomaticAttempt::Finished(RecoveryDiagnostic {
         manifest_id: component.manifest_id.clone(),

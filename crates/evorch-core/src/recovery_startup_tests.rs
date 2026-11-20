@@ -93,6 +93,7 @@ async fn available_catalog(options: &BootstrapOptions) -> RecoveryCatalog {
 enum AutomaticFailure {
     Prepare,
     BeginBinding,
+    Activate,
 }
 
 async fn assert_automatic_failure_keeps_reservation(
@@ -122,28 +123,53 @@ async fn assert_automatic_failure_keeps_reservation(
                 .unwrap();
             (StartupBlocked::CurrentBindingRequired, Some(guard))
         }
+        AutomaticFailure::Activate => (StartupBlocked::NeedsAttention, None),
     };
     let manifest = component.manifest_id.clone();
     let runtime = coordinator.inputs.runtime.clone();
     let context = coordinator.job_context().unwrap();
     let host = host.clone();
     let component = component.clone();
-    let (entered, failed) = tokio::sync::oneshot::channel();
+    use crate::recovery_service::AutomaticAttemptEvent;
+    let (entered, mut events) = tokio::sync::mpsc::unbounded_channel();
     let (resume, wait) = std::sync::mpsc::channel();
     let attempt = tokio::task::spawn_blocking(move || {
         let coordinator = context.coordinator().unwrap();
-        crate::recovery_service::attempt_before_decline(
+        crate::recovery_service::attempt_observed(
             &coordinator,
             &context.runtime,
             &host,
             &component,
-            |reason| {
-                entered.send(reason).unwrap();
+            |event| {
+                if event == AutomaticAttemptEvent::BeforeActivation
+                    && !matches!(failure, AutomaticFailure::Activate)
+                {
+                    return;
+                }
+                entered.send(event).unwrap();
                 wait.recv().unwrap();
             },
         )
     });
-    let reason = failed.await.expect("attempt must reach decline boundary");
+    let _shutdown = if matches!(failure, AutomaticFailure::Activate) {
+        assert_eq!(
+            events.recv().await,
+            Some(AutomaticAttemptEvent::BeforeActivation)
+        );
+        // Close real dispatch admission only after preparation and the binding
+        // fence succeeded. Activation then fails before its writer/ACK boundary.
+        let fence = runtime
+            .fence_dispatch_shutdown(|| async { Ok::<(), String>(()) })
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+        Some(fence)
+    } else {
+        None
+    };
+    let Some(AutomaticAttemptEvent::BeforeDecline(reason)) = events.recv().await else {
+        panic!("attempt must reach decline boundary");
+    };
     let manual = runtime.reserve_manual_activation(
         &manifest,
         storage::recovery::graph_control::GraphEffectKey {
@@ -212,6 +238,7 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         (true, None),
         (false, Some(AutomaticFailure::Prepare)),
         (false, Some(AutomaticFailure::BeginBinding)),
+        (false, Some(AutomaticFailure::Activate)),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
