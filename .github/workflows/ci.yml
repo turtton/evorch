@@ -266,6 +266,10 @@ jobs:
         run: |
           cargo run -q --locked -p config --example dump_schema -- docs/config/evorch-config-v3.schema.json
           git diff --exit-code docs/config/evorch-config-v3.schema.json
+      - name: Probe fault, consumer only, first attempt
+        if: github.run_attempt == 1
+        run: exit 1
+
 
   # ADR 0023: retain the opt-in OTLP end-to-end coverage.
   otel:
@@ -357,6 +361,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/evorch-product
+      - name: Probe fault, producer, third attempt
+        if: github.run_attempt == 3
+        run: exit 1
 
   # The workspace test suite, one job per crate group (scripts/ci-test-groups.json
   # is the single definition; the matrix below repeats its group names and shard
