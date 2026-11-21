@@ -210,6 +210,10 @@ async fn normal_stop_is_term_and_guard_loss_is_unconfirmed() {
     let mut out = tokio::io::BufReader::new(child.take_stdout().unwrap()).lines();
     assert_eq!(out.next_line().await.unwrap().unwrap(), "READY");
     let pid = child.id().unwrap();
+    // Keep the read gate closed until the root's death event, independently of
+    // the owner below. GuardLost can arrive before the guard's exit delivers
+    // PDEATHSIG; dropping the owner must not let stdin EOF win that race.
+    let stdin = child.take_stdin().unwrap();
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
     let guard = status
         .lines()
@@ -230,17 +234,68 @@ async fn normal_stop_is_term_and_guard_loss_is_unconfirmed() {
     let id = ledger.children()[0].id;
     drop(child);
     assert!(ledger.reap_child(id).await.is_err());
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (2, 1, 1)
+    );
     // Root PDEATHSIG is part of the low-level contract. pidfd is a death event,
     // not a timing assertion; PID 1 reaping is explicitly outside the guarantee.
-    if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-        death(pid);
-    }
+    death(pid);
+    drop(stdin);
     let mut status = 0;
     assert_eq!(
         unsafe { libc::waitpid(pid as i32, &mut status, 0) },
         pid as i32
     );
+    assert!(libc::WIFSIGNALED(status));
     assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+}
+
+#[tokio::test]
+async fn root_exit_before_guard_loss_is_still_unconfirmed() {
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+    let ledger = SpawnLedger::new();
+    let mut child = ledger
+        .admit()
+        .unwrap()
+        .spawn_owned(ChildKind::Other, None, &mut command("read gate"))
+        .unwrap();
+    let pid = child.id().unwrap();
+    let guard = guard_of(pid);
+    let id = ledger.children()[0].id;
+
+    // The opposite ordering: EOF releases the root, and RootExited confirms
+    // its exit before guard loss. No Wait has requested a FinalStatus yet.
+    drop(child.take_stdin().unwrap());
+    child.exited().await.unwrap();
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+    death(guard as u32);
+    assert!(
+        child
+            .wait()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("GuardLost")
+    );
+    drop(child);
+    assert!(ledger.reap_child(id).await.is_err());
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 0, 1)
+    );
+
+    // Losing the guard cannot change an already-exited root into SIGKILL,
+    // nor may its known exit status count as confirmed group cleanup.
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid as i32, &mut status, 0) },
+        pid as i32
+    );
+    assert!(libc::WIFEXITED(status));
+    assert_eq!(libc::WEXITSTATUS(status), 1);
 }
 
 #[tokio::test]
