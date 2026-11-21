@@ -129,6 +129,8 @@ pub struct BootstrappedHost {
     pub config: config::Config,
     // The exact production DB configuration; composition inventory is test-only.
     restart_storage: storage::StorageConfig,
+    // The handle every other owner of the writer was given; never a new writer.
+    storage_writer: storage::StorageHandle,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
@@ -172,6 +174,16 @@ struct DeferredStartup {
 }
 
 impl BootstrappedHost {
+    /// The production database configuration, read-only. Leaves that read or
+    /// write storage are built from this and `storage_writer`, nothing else.
+    pub fn storage_config(&self) -> &storage::StorageConfig {
+        &self.restart_storage
+    }
+    /// The storage writer handle the host was composed with, read-only. Callers
+    /// clone it to share the one writer; nothing here opens or replaces a writer.
+    pub fn storage_writer(&self) -> &storage::StorageHandle {
+        &self.storage_writer
+    }
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
         Self::open_composed(options, None, None, None, None, None).await
     }
@@ -669,6 +681,7 @@ impl BootstrappedHost {
             runtime,
             owner,
             restart_storage: storage_config.clone(),
+            storage_writer: handle.clone(),
             evaluator,
             evaluations: evaluations.clone(),
             config,

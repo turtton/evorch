@@ -148,6 +148,42 @@ mod tests {
         boot.shutdown().await.unwrap();
     }
 
+    /// Read-only storage accessors change nothing: management stays refused and
+    /// unadvertised with them in hand, and the handle is the host's own writer.
+    #[tokio::test]
+    async fn storage_accessors_do_not_open_management() {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let mut boot = BootstrappedHost::open(BootstrapOptions {
+            config_dir: root.clone(),
+            project_root: root.clone(),
+            ownership_root: dir.sockets().to_path_buf(),
+        })
+        .await
+        .unwrap();
+        let backend = HostBackend::new(boot.host.clone(), "core-inputs".into());
+        let inputs = crate::admin_composition::Inputs::new(&boot, &backend);
+        assert_eq!(*inputs.storage_config(), boot.composition.storage);
+        inputs.storage_writer().barrier().unwrap();
+        let _shared = inputs.storage_writer().clone();
+        assert_eq!(crate::admin_composition::install(&inputs), Publication::Off);
+        assert!(!boot.admin.management_enabled());
+        assert!(!offered(&backend.hello()));
+        let forged = Provenance::human(Surface::Cli, ClientId::new("claimed-human").unwrap());
+        let refused = boot
+            .admin
+            .authorize(
+                &IngressContext::unverified(forged),
+                workbench_protocol::namespaces::lifecycle::AdminAction::Request,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refused.code,
+            workbench_protocol::errors::ErrorCode::UnsupportedCapability
+        );
+        boot.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn the_advertisement_follows_the_service_switch() {
         let dir = test_socket_dir::SplitDir::new();
