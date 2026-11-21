@@ -205,17 +205,17 @@ check_e2e_target() { # <ci.yml>
   return "$bad"
 }
 
-recipe_lines() { # <job file>: the prepare selections and cargo build lines
-  sed -n -e 's/^ *scripts\/guard-cargo\.sh prepare "\$warm\/[a-z0-9-]*" /prepare /p' -e 's/^ *\(cargo build .*\)$/\1/p' "$1" | sort -u
+recipe_lines() { # <job file>: the prepare selections, cargo build and check lines, target installs
+  sed -n -e 's/^ *scripts\/guard-cargo\.sh prepare "\$warm\/[a-z0-9-]*" /prepare /p' -e 's/^ *\(cargo build .*\)$/\1/p' -e 's/^ *\(cargo check .*\)$/\1/p' -e 's/^ *\(rustup target add .*\)$/\1/p' "$1" | sort -u
 }
 
-# Every prepare selection and cargo build of the readers is also built by cache-save.
+# Every prepare selection, cargo build and cargo check of the readers is also built by cache-save.
 check_recipe_covers_readers() { # <ci.yml>
   local ci=$1 dir job bad=0 missing
   dir=$(mktemp -d "$work/recipe.XXXXXX")
   split_jobs "$ci" "$dir"
-  for job in browser-e2e cef-e2e; do
-    [[ -n "$(recipe_lines "$dir/$job")" ]] || { echo "$job: no prepare or cargo build lines found" >&2; bad=1; continue; }
+  for job in lint browser-e2e cef-e2e; do
+    [[ -n "$(recipe_lines "$dir/$job")" ]] || { echo "$job: no prepare, cargo build or check lines found" >&2; bad=1; continue; }
     missing=$(comm -23 <(recipe_lines "$dir/$job") <(recipe_lines "$dir/cache-save"))
     if [[ -n "$missing" ]]; then
       echo "cache-save does not build what $job builds:" >&2
@@ -341,6 +341,8 @@ awk '/^  cef-e2e:/ { on = 1 } on && /CARGO_TARGET_DIR: target\/ci-shared/ && !do
 rejects "a cef-e2e cargo step outside the shared target" check_e2e_target "$work/ci-cef-target.yml"
 mutate ci-recipe-gap.yml '/prepare "\$warm\/browser-5"/d' "$ci"
 rejects "a browser selection cache-save does not build" check_recipe_covers_readers "$work/ci-recipe-gap.yml"
+awk '/^  cache-save:/ { on = 1 } on && /cargo check --target aarch64-apple-darwin/ { next } { print }' "$ci" > "$work/ci-lint-gap.yml"
+rejects "a lint check cache-save does not build" check_recipe_covers_readers "$work/ci-lint-gap.yml"
 mutate ci-cef-cell.yml '0,/if: matrix.cell == .client./{/if: matrix.cell == .client./d}' "$ci"
 rejects "a cef-e2e step outside any cell" check_cef_cells "$work/ci-cef-cell.yml"
 mutate ci-docs-needs.yml 's/needs: \[scope-gate, quick-checks\]/needs: scope-gate/' "$ci"

@@ -534,8 +534,9 @@ jobs:
   # main pushes only, so it is never on a PR's critical path and PRs never
   # crowd the repository's 10GB cache budget. It compiles every dependency
   # artifact the other jobs need, with each of their own package and feature
-  # selections: the workspace check and the handoff fixtures (lint), the
-  # doctests and the schema example (docs-schema), the otel-exporter build
+  # selections: the workspace check, the handoff fixtures and the non-Linux
+  # sandbox check (lint), the doctests and the schema example (docs-schema),
+  # the otel-exporter build
   # (otel), the test binaries of every group in scripts/ci-test-groups.json
   # (the test jobs, offscreen-gate and gui-evidence share the gui group's
   # selection) and the browser-e2e and cef-e2e selections, which resolve
@@ -587,6 +588,8 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           cargo clippy -p event-bus --all-targets --features otel-exporter --locked
           cargo clippy -p core-instance -p core-launcher --all-targets --features core-instance/recovery-test-support,core-launcher/handoff-test-support --locked
+          rustup target add aarch64-apple-darwin
+          cargo check --target aarch64-apple-darwin -p sandbox --lib --locked
           cargo test --workspace --exclude workbench-authority --doc --locked
           cargo test --locked -p workbench-authority --doc --no-default-features
           cargo build --locked -p config --example dump_schema
