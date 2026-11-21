@@ -286,7 +286,18 @@ impl Tool for StartEvaluation {
         let Some(producer) = self.0.lifecycle.producers.try_enter() else {
             return Ok(ToolResult::error("evaluation host is busy or stopping"));
         };
-        let record = match groups::launch(&self.0, &ctx.run_id, &args.candidate, launches) {
+        // Each launch waits for the process guard's handshake, so the whole
+        // launch runs on a blocking thread and holds no async worker. A caller
+        // that drops this future does not cancel it: the evaluations it
+        // started stay owned by their watchers and the ledger.
+        let shared = Arc::clone(&self.0);
+        let (run_id, candidate) = (ctx.run_id.clone(), args.candidate.clone());
+        let launched = tokio::task::spawn_blocking(move || {
+            groups::launch(&shared, &run_id, &candidate, launches)
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        let record = match launched {
             Ok(record) => record,
             Err(message) => {
                 return Ok(ToolResult::error(format!(

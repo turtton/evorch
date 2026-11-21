@@ -18,16 +18,16 @@
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use sandbox::{ChildKind, SpawnLedger};
 
-fn command(script: &str) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("sh");
+fn command(script: &str) -> OwnedCommand {
+    let mut command = OwnedCommand::new("sh");
     command
         .args(["-c", script])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    sandbox::process::apply_launch_policy(command.as_std_mut());
     command
 }
 
@@ -89,7 +89,7 @@ async fn stopped(pid: u32) -> bool {
     state == 'T'
 }
 
-async fn ready(child: &mut sandbox::process::GroupChild) -> u32 {
+async fn ready(child: &mut OwnedChild) -> u32 {
     let mut line = String::new();
     BufReader::new(child.take_stdout().unwrap())
         .read_line(&mut line)
@@ -148,18 +148,14 @@ fn report(label: &str, mut samples: Vec<Duration>) {
     );
 }
 
-async fn start(
-    ledger: &SpawnLedger,
-    script: &str,
-    children: usize,
-) -> Vec<sandbox::process::GroupChild> {
+async fn start(ledger: &SpawnLedger, script: &str, children: usize) -> Vec<OwnedChild> {
     let mut owned = Vec::new();
     for _ in 0..children {
         let admission = ledger.admit().unwrap();
         let mut command = command(script);
         owned.push(
             admission
-                .spawn_group(ChildKind::Other, Some("latency"), &mut command)
+                .spawn_owned(ChildKind::Other, Some("latency"), &mut command)
                 .unwrap(),
         );
     }
@@ -180,7 +176,7 @@ async fn readiness_observes_stop_without_stealing_owner_wait() {
         let mut child = ledger
             .admit()
             .unwrap()
-            .spawn_group(ChildKind::Other, Some("readiness-test"), &mut command)
+            .spawn_owned(ChildKind::Other, Some("readiness-test"), &mut command)
             .unwrap();
         let pid = ready(&mut child).await;
         assert!(stopped(pid).await);

@@ -38,7 +38,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sandbox::SpawnLedger;
 use sandbox::ledger::ChildKind;
-use sandbox::process::apply_launch_policy;
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use serde::Deserialize;
 use storage::pull_requests::{
     CheckConclusion, CheckKind, CheckStatus, DisplayTitle, PULL_REQUEST_BRANCH_MAX_CHARS,
@@ -157,10 +157,10 @@ pub trait ProcessRunner: Send + Sync {
 /// Runs real processes with `tokio`. The child has no stdin, and is killed when the future
 /// is dropped (a cancelled or timed-out fetch) or once its stdout passes the limit.
 ///
-/// Without a ledger that is all: the leader is killed on drop, as it always was. With a
-/// [`SpawnLedger`] the child is registered as a [`ChildKind::PullRequestSource`], runs under
-/// evorch's launch policy as a process group of its own, and the ledger's planned cleanup stops
-/// it with its descendants; the final spawn fence refuses a new one.
+/// The child is always owned by the process guard (a group of its own, killed with its
+/// descendants on drop, whether or not there is a ledger). With a [`SpawnLedger`] it is also
+/// registered as a [`ChildKind::PullRequestSource`], the ledger's planned cleanup stops it, and
+/// the final spawn fence refuses a new one.
 #[derive(Debug, Clone, Default)]
 pub struct TokioProcessRunner {
     ledger: Option<SpawnLedger>,
@@ -214,55 +214,40 @@ async fn read_pipes(
 #[async_trait]
 impl ProcessRunner for TokioProcessRunner {
     async fn run(&self, spec: ProcessSpec) -> Result<ProcessOutput, ProcessError> {
-        let mut command = tokio::process::Command::new(&spec.program);
+        // stdin is /dev/null and both output streams are piped, so the source
+        // depends on no inherited descriptor. With or without a ledger the guard
+        // owns the child; only a ledger registers it.
+        let mut command = OwnedCommand::new(&spec.program);
         command
             .args(&spec.args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         for name in &spec.env_remove {
             command.env_remove(name);
         }
         for (name, value) in &spec.env_set {
             command.env(name, value);
         }
-        let (exit_code, pipes) = match &self.ledger {
-            None => {
-                let mut child = command.spawn().map_err(|error| spawn_error(&error))?;
-                let mut stdout = child.stdout.take().expect("piped stdout");
-                let mut stderr = child.stderr.take().expect("piped stderr");
-                let pipes = read_pipes(&mut stdout, &mut stderr, &spec, || {
-                    let _ = child.start_kill();
-                })
-                .await?;
-                let status = child
-                    .wait()
-                    .await
-                    .map_err(|error| ProcessError::Io(error.to_string()))?;
-                (status.code(), pipes)
-            }
-            Some(ledger) => {
-                apply_launch_policy(command.as_std_mut());
-                let mut child = {
-                    // The admission holds the spawn fence open: use it without an await.
-                    let admission = ledger
-                        .admit()
-                        .map_err(|error| ProcessError::Spawn(error.to_string()))?;
-                    admission
-                        .spawn_group(ChildKind::PullRequestSource, None, &mut command)
-                        .map_err(|error| spawn_error(&error))?
-                };
-                let mut stdout = child.take_stdout().expect("piped stdout");
-                let mut stderr = child.take_stderr().expect("piped stderr");
-                let pipes = read_pipes(&mut stdout, &mut stderr, &spec, || child.kill()).await?;
-                let status = child
-                    .wait()
-                    .await
-                    .map_err(|error| ProcessError::Io(error.to_string()))?;
-                (status.code(), pipes)
-            }
-        };
+        let mut child = OwnedChild::spawn_blocking(
+            self.ledger.clone(),
+            ChildKind::PullRequestSource,
+            None,
+            command,
+        )
+        .await
+        .map_err(|error| spawn_error(&error))?;
+        let mut stdout = child.take_stdout().expect("piped stdout");
+        let mut stderr = child.take_stderr().expect("piped stderr");
+        let pipes = read_pipes(&mut stdout, &mut stderr, &spec, || {
+            let _ = child.kill();
+        })
+        .await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|error| ProcessError::Io(error.to_string()))?;
+        let exit_code = status.code();
         let (stdout, stdout_truncated, stderr, stderr_truncated) = pipes;
         Ok(ProcessOutput {
             exit_code,

@@ -62,7 +62,7 @@ pub struct ChildInfo {
 pub struct ChildStats {
     pub registered: u64,
     /// The leader was reaped: by its owner, or by the ledger's own reaper after
-    /// the owner dropped a [`GroupChild`](crate::process::GroupChild).
+    /// the owner was dropped.
     pub reaped: u64,
     /// The owner let go of the child without confirming a reap. Never a
     /// success: [`SpawnLedger::reap_all_children`] reports it.
@@ -194,9 +194,9 @@ fn depart(inner: &Inner, id: ChildId, reaped: bool) {
 /// [`reaped`](Self::reaped) says the leader has been reaped. Dropping the
 /// entry says the owner let go of the child without confirming that: it leaves
 /// the ledger as *unconfirmed*, which [`SpawnLedger::reap_child`] and
-/// [`SpawnLedger::reap_all_children`] report as an error. (A `GroupChild`
-/// never does this: when dropped it hands its leader to a reaper that
-/// confirms the reap.)
+/// [`SpawnLedger::reap_all_children`] report as an error. (A dropped
+/// guard-backed owner never does this: it hands its guard to a reaper that
+/// confirms the reap, unless the guard itself was lost.)
 #[derive(Debug)]
 pub struct ChildEntry {
     inner: Option<Arc<Inner>>,
@@ -221,6 +221,7 @@ impl ChildEntry {
     /// leader on a thread of the ledger and only then leave the ledger as
     /// reaped. If that cannot be done (no thread, or the leader cannot be
     /// observed) the entry is dropped, which the ledger reports as unconfirmed.
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn reap_in_background(self, mut child: tokio::process::Child) {
         let spawned = std::thread::Builder::new()
             .name("child-reaper".to_owned())

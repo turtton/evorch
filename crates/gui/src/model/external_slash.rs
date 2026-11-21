@@ -1,14 +1,13 @@
 use super::{ExternalSlashCommand, SLASH_COMMANDS, SlashCommandRegistry};
+use sandbox::owned::OwnedCommand;
 #[path = "slash_process.rs"]
 mod process;
 
 impl SlashCommandRegistry {
     pub async fn discover(executable: std::path::PathBuf) -> Result<Self, String> {
-        let stdout = process::run(
-            tokio::process::Command::new(&executable).arg("--list-commands"),
-            std::time::Duration::from_secs(10),
-        )
-        .await?;
+        let mut command = OwnedCommand::new(&executable);
+        command.arg("--list-commands");
+        let stdout = process::run(command, std::time::Duration::from_secs(10)).await?;
         let mut registry = Self {
             executable: Some(executable),
             ..Self::default()
@@ -71,13 +70,8 @@ impl SlashCommandRegistry {
             .executable
             .as_ref()
             .ok_or("external command executable is not configured")?;
-        process::run(
-            tokio::process::Command::new(executable)
-                .arg(&command.name)
-                .arg(args)
-                .current_dir(root),
-            std::time::Duration::from_secs(30),
-        )
-        .await
+        let mut process = OwnedCommand::new(executable);
+        process.arg(&command.name).arg(args).current_dir(root);
+        process::run(process, std::time::Duration::from_secs(30)).await
     }
 }

@@ -1,4 +1,4 @@
-//! Non-PTY ownership API (D-3a2 B2a; callers migrate in B2b parts). Remaining raw owners stay until B2b-iii.
+//! Non-PTY ownership API (D-3a2 B2a; every non-PTY caller migrated by B2b-i..iii; the PTY backend is B3).
 //! Linux uses an authenticated process guard, regardless of ledger presence.
 mod command;
 use crate::{

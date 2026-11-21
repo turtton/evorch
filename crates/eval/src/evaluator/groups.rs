@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
-use sandbox::process::GroupChild;
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use serde_json::{Value, json};
 
 use super::{Shared, read_json};
@@ -95,44 +95,21 @@ fn spawn(
     args: &[OsString],
     member: &Member,
     ledger: Option<&sandbox::SpawnLedger>,
-) -> std::io::Result<GroupChild> {
-    let mut command = tokio::process::Command::new(cli);
+) -> std::io::Result<OwnedChild> {
+    // stdin is /dev/null and both output streams are files, so the evaluation
+    // depends on no inherited descriptor. The guard owns it in its own session
+    // without the GUI's terminal or descriptors, and stops it with the core
+    // (a core death is a KILL of its group, not the old creator-thread TERM).
+    let mut command = OwnedCommand::new(cli);
     command
         .args(args)
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&member.stdout)?)
         .stderr(std::fs::File::create(&member.stderr)?);
-    // A background evaluation must not be stopped by the terminal the GUI was
-    // started from, nor hold the GUI's descriptors.
-    sandbox::process::apply_launch_policy(command.as_std_mut());
-    end_with_parent(&mut command);
-    command.kill_on_drop(true);
     sandbox::SpawnLedger::admit_optional(ledger)
         .map_err(std::io::Error::from)?
-        .spawn_group(sandbox::ChildKind::Eval, Some("evaluation"), &mut command)
+        .spawn_owned(sandbox::ChildKind::Eval, Some("evaluation"), &mut command)
 }
-
-/// Ask the kernel to stop the evaluation when this process ends, crashes
-/// included. The signal follows the spawning thread, so callers spawn from
-/// an async task on a runtime worker, which lives as long as the runtime.
-#[cfg(target_os = "linux")]
-fn end_with_parent(command: &mut tokio::process::Command) {
-    let parent = rustix::process::getpid();
-    // SAFETY: between fork and exec the closure makes only async-signal-safe
-    // system calls and allocates nothing.
-    unsafe {
-        command.pre_exec(move || {
-            rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))?;
-            if rustix::process::getppid() != Some(parent) {
-                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn end_with_parent(_command: &mut tokio::process::Command) {}
 
 /// Start one `eval run` per thread and watch them; fails without a group when
 /// no process could be started.
@@ -155,7 +132,7 @@ fn launch_with(
         &[OsString],
         &Member,
         Option<&sandbox::SpawnLedger>,
-    ) -> std::io::Result<GroupChild>,
+    ) -> std::io::Result<OwnedChild>,
 ) -> Result<GroupRecord, String> {
     let ledger = shared.lifecycle.spawn_ledger();
     let mut admission = shared.lifecycle.state.lock().unwrap();
@@ -272,7 +249,7 @@ async fn watch(
     mut stopped: tokio::sync::watch::Receiver<bool>,
     record: Arc<Mutex<GroupRecord>>,
     index: usize,
-    mut child: GroupChild,
+    mut child: OwnedChild,
 ) {
     let stop = async {
         loop {

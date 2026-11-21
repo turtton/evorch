@@ -962,11 +962,11 @@ mod processes {
     }
 
     // Given: a runner without a ledger and one with a ledger / When: each runs a
-    // program that reports its process group / Then: only the owned child leads a
-    // group of its own, so the unowned one keeps the old leader-only behaviour
+    // program that reports its process group / Then: both children are guard-owned
+    // and lead a group of their own, not the caller's
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn only_a_ledger_owned_child_leads_its_own_process_group() {
+    async fn every_source_child_leads_its_own_process_group() {
         fn group_of(stat: &str) -> String {
             let after_name = stat.rsplit_once(')').unwrap().1;
             after_name.split_whitespace().nth(2).unwrap().to_owned()
@@ -990,7 +990,7 @@ mod processes {
         let unowned = report(TokioProcessRunner::default()).await;
         let owned = report(TokioProcessRunner::with_ledger(SpawnLedger::new())).await;
 
-        assert_eq!(unowned, own);
+        assert_ne!(unowned, own);
         assert_ne!(owned, own);
     }
 

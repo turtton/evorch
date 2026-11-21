@@ -1,19 +1,20 @@
-//! The launch policy of `sandbox::process`, which every child evorch starts
-//! outside a pseudo-terminal gets.
+//! The launch policy of the typed owners (`sandbox::owned`), which every
+//! non-PTY child evorch starts gets from its process guard.
 //!
 //! A child must not reach evorch's controlling terminal (reading it from a
 //! background process group stops the child with SIGTTIN for good), must not
 //! inherit descriptors evorch holds without `O_CLOEXEC` (the GUI's browser
-//! engine leaves many), and must stop together with its descendants without a
-//! reaped group id ever being signalled.
+//! engine leaves many) nor evorch's blocked shutdown signals, and must stop
+//! together with its descendants without a reaped group id ever being
+//! signalled. The raw `ProcessGroup` handle that pseudo-terminal children keep
+//! until B3 is exercised at the end.
 
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use sandbox::process::{apply_launch_policy, detach_from_terminal};
-use sandbox::{CommandSpec, DirectSandbox, Sandbox, StdioSession};
+use sandbox::owned::{OwnedChild, OwnedCommand, OwnedSession};
+use sandbox::{CommandSpec, DirectSandbox, Sandbox};
 
 const CHILD_FLAG: &str = "SANDBOX_LAUNCH_POLICY_TERMINAL_CHILD";
 const TERMINAL_TEST: &str = "children_cannot_reach_the_evorch_terminal";
@@ -45,15 +46,30 @@ fn stdout_of(mut command: Command) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-fn with(mut command: Command, policy: fn(&mut Command)) -> Command {
-    policy(&mut command);
+/// An owned `sh -c script` with /dev/null stdin and piped output.
+fn owned_sh(script: &str) -> OwnedCommand {
+    let mut command = OwnedCommand::new("sh");
+    command
+        .args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
     command
 }
 
+/// stdout of an owned command, run to its end by a guard-owned session.
+fn owned_stdout(mut command: OwnedCommand) -> String {
+    let output = OwnedSession::spawn(&mut command)
+        .expect("start the owned command")
+        .output(None)
+        .expect("collect the output");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 // Given: evorch runs with a controlling terminal (the test re-runs itself
-// inside a pseudo-terminal) / When: children start with the launch policy, as
-// std and Tokio commands, wrapped commands and stdio sessions / Then: none of
-// them can open that terminal, while a child without the policy can.
+// inside a pseudo-terminal) / When: children start as owned sessions, owned
+// children, wrapped commands and sandboxed sessions / Then: none of them can
+// open that terminal, while a raw child can.
 #[test]
 fn children_cannot_reach_the_evorch_terminal() {
     if std::env::var_os(CHILD_FLAG).is_some() {
@@ -99,36 +115,36 @@ fn run_terminal_probes() {
         "without the policy a child shares the terminal, or this probe proves nothing"
     );
     assert_eq!(
-        stdout_of(with(sh(TERMINAL_PROBE), detach_from_terminal)),
-        "terminal-detached\n"
-    );
-    assert_eq!(
-        stdout_of(with(sh(TERMINAL_PROBE), apply_launch_policy)),
+        owned_stdout(owned_sh(TERMINAL_PROBE)),
         "terminal-detached\n"
     );
     let wrapped = DirectSandbox::new_unchecked()
         .wrap(spec("sh", &["-c", TERMINAL_PROBE]))
         .expect("wrap the probe");
-    assert_eq!(stdout_of(wrapped.to_command()), "terminal-detached\n");
+    let mut command = wrapped.to_owned_command();
+    command.stdin(Stdio::null()).stdout(Stdio::piped());
+    assert_eq!(owned_stdout(command), "terminal-detached\n");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("build the test runtime");
-    let mut tokio_command = tokio::process::Command::new("sh");
-    tokio_command
-        .args(["-c", TERMINAL_PROBE])
-        .stdin(Stdio::null());
-    apply_launch_policy(tokio_command.as_std_mut());
-    let output = runtime
-        .block_on(async { tokio_command.output().await })
-        .expect("run the Tokio probe");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "terminal-detached\n"
-    );
+    let output = runtime.block_on(async {
+        let mut child = OwnedChild::spawn(&mut owned_sh(TERMINAL_PROBE)).expect("start the child");
+        let mut stdout = String::new();
+        tokio::io::AsyncReadExt::read_to_string(
+            &mut child.take_stdout().expect("child stdout"),
+            &mut stdout,
+        )
+        .await
+        .expect("read the probe");
+        child.wait().await.expect("reap the child");
+        stdout
+    });
+    assert_eq!(output, "terminal-detached\n");
 
-    let mut session = StdioSession::spawn(
+    let mut session = OwnedSession::spawn_sandboxed(
+        None,
         &DirectSandbox::new_unchecked(),
         spec("sh", &["-c", TERMINAL_PROBE]),
     )
@@ -142,44 +158,25 @@ fn run_terminal_probes() {
     assert_eq!(stdout, "terminal-detached\n");
 }
 
-// Given: a program that does not exist / When: it starts with the policy /
-// Then: the spawn still reports NotFound, through the exec error pipe.
+// Given: a program that does not exist / When: it starts as an owned session
+// or child / Then: the launch reports NotFound.
 #[tokio::test]
 async fn a_missing_program_is_reported_as_not_found() {
     let absent = "/nonexistent/evorch-launch-policy-probe";
-    let error = with(Command::new(absent), apply_launch_policy)
-        .spawn()
-        .expect_err("the program is missing");
+    let error =
+        OwnedSession::spawn(&mut OwnedCommand::new(absent)).expect_err("the program is missing");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    let mut tokio_command = tokio::process::Command::new("evorch-launch-policy-probe-on-no-path");
-    apply_launch_policy(tokio_command.as_std_mut());
-    let error = tokio_command.spawn().expect_err("the program is missing");
+    let error = OwnedChild::spawn(&mut OwnedCommand::new(
+        "evorch-launch-policy-probe-on-no-path",
+    ))
+    .expect_err("the program is missing");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     let wrapped = DirectSandbox::new_unchecked()
         .wrap(spec(absent, &[]))
         .expect("wrap the command");
-    let error = wrapped
-        .to_command()
-        .spawn()
-        .expect_err("the program is missing");
+    let error =
+        OwnedSession::spawn(&mut wrapped.to_owned_command()).expect_err("the program is missing");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-}
-
-// Given: a command that already asks for process_group(0) / When: it is also
-// detached / Then: the spawn fails with EPERM, as the documentation warns;
-// the standard library makes the child a group leader before the hook runs.
-#[test]
-fn detaching_a_process_group_leader_fails() {
-    let mut command = Command::new("true");
-    command.process_group(0);
-    detach_from_terminal(&mut command);
-    let error = command
-        .spawn()
-        .expect_err("setsid fails for a group leader");
-    assert_eq!(
-        error.raw_os_error(),
-        Some(rustix::io::Errno::PERM.raw_os_error())
-    );
 }
 
 /// Expectations that need `/proc`, `close_range` or a pidfd.
@@ -187,17 +184,18 @@ fn detaching_a_process_group_leader_fails() {
 mod linux {
     use std::io::{BufRead, BufReader};
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::time::{Duration, Instant};
+    use std::os::unix::process::CommandExt;
+    use std::time::Duration;
 
     use rustix::process::Pid;
+    use sandbox::owned::{OwnedChild, OwnedSession};
     use sandbox::process::{
-        GroupChild, ProcessGroup, ProcessGroupGuard, apply_launch_policy,
-        close_inherited_fds_on_exec, has_exited,
+        ProcessGroup, ProcessGroupGuard, close_inherited_fds_on_exec, has_exited,
     };
-    use sandbox::{BwrapConfig, BwrapSandbox, DirectSandbox, Sandbox, StdioSession};
+    use sandbox::{BwrapConfig, BwrapSandbox, DirectSandbox, Sandbox};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
-    use super::{sh, spec, stdout_of, with};
+    use super::{owned_sh, owned_stdout, sh, spec, stdout_of};
 
     fn running(pid: Pid) -> bool {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
@@ -215,13 +213,8 @@ mod linux {
 
     /// Wait until `pid` no longer runs; a zombie waiting for its reaper counts as stopped.
     fn assert_stops(pid: Pid) {
-        let deadline = Instant::now() + Duration::from_secs(10);
         while running(pid) {
-            assert!(
-                Instant::now() < deadline,
-                "process {pid} still runs after its group was killed"
-            );
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::yield_now();
         }
     }
 
@@ -237,14 +230,8 @@ mod linux {
         parse_pid(&line)
     }
 
-    /// A Tokio command running `script` under the launch policy.
-    fn detached(script: &str) -> tokio::process::Command {
-        let mut command = tokio::process::Command::from(with(sh(script), apply_launch_policy));
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        command
+    fn pid_of(id: Option<u32>) -> Pid {
+        Pid::from_raw(i32::try_from(id.expect("a running target")).unwrap()).expect("a pid")
     }
 
     /// A descriptor numbered 100 or above that a child would inherit (no
@@ -263,8 +250,8 @@ mod linux {
     }
 
     // Given: evorch holds a descriptor without O_CLOEXEC / When: children start
-    // with the policy as std, Tokio and wrapped commands / Then: none of them sees
-    // that descriptor number, while a child without the policy sees the file.
+    // as owned sessions, owned children and wrapped commands / Then: none of them
+    // sees that descriptor number, while a raw child sees the file.
     #[tokio::test]
     async fn children_do_not_inherit_descriptors_beyond_their_standard_streams() {
         let (_file, fd, name) = inheritable_descriptor();
@@ -273,43 +260,55 @@ mod linux {
             stdout_of(sh(&probe)).contains(&name),
             "without the policy the child inherits the descriptor, or this probe proves nothing"
         );
-        for (label, command) in [
-            (
-                "close_inherited_fds_on_exec",
-                with(sh(&probe), close_inherited_fds_on_exec),
-            ),
-            ("apply_launch_policy", with(sh(&probe), apply_launch_policy)),
-            (
-                "WrappedCommand::to_command",
-                DirectSandbox::new_unchecked()
-                    .wrap(spec("sh", &["-c", &probe]))
-                    .expect("wrap the probe")
-                    .to_command(),
-            ),
-        ] {
-            let seen = stdout_of(command);
+        let wrapped = DirectSandbox::new_unchecked()
+            .wrap(spec("sh", &["-c", &probe]))
+            .expect("wrap the probe")
+            .to_owned_command();
+        for (label, command) in [("OwnedSession", owned_sh(&probe)), ("wrapped", wrapped)] {
+            let mut command = command;
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped());
+            let seen = owned_stdout(command);
             assert!(
                 !seen.contains(&name),
                 "{label} leaked the descriptor: {seen}"
             );
         }
-        let mut tokio_command = tokio::process::Command::new("sh");
-        tokio_command
-            .args(["-c", &probe])
-            .stdin(std::process::Stdio::null());
-        apply_launch_policy(tokio_command.as_std_mut());
-        let output = tokio_command.output().await.expect("run the Tokio probe");
-        let seen = String::from_utf8_lossy(&output.stdout);
+        let mut child = OwnedChild::spawn(&mut owned_sh(&probe)).expect("start the child");
+        let mut seen = String::new();
+        child
+            .take_stdout()
+            .expect("child stdout")
+            .read_to_string(&mut seen)
+            .await
+            .expect("read the probe");
+        child.wait().await.expect("reap the child");
         assert!(
             !seen.contains(&name),
-            "Tokio command leaked the descriptor: {seen}"
+            "OwnedChild leaked the descriptor: {seen}"
+        );
+    }
+
+    // The hygiene hook for a std command a fixture supervises itself: it keeps
+    // the standard streams and nothing else.
+    #[test]
+    fn the_hygiene_hook_closes_descriptors_beyond_the_standard_streams() {
+        let (_file, fd, name) = inheritable_descriptor();
+        let probe = format!("readlink /proc/self/fd/{} || true", fd.as_raw_fd());
+        let mut command = sh(&probe);
+        close_inherited_fds_on_exec(&mut command);
+        let seen = stdout_of(command);
+        assert!(
+            !seen.contains(&name),
+            "the hook leaked the descriptor: {seen}"
         );
     }
 
     // Given: evorch holds a descriptor without O_CLOEXEC / When: a command runs
     // inside bubblewrap / Then: bubblewrap hands the descriptor on to a command
-    // started without the policy, but the command from to_command sees neither it
-    // nor evorch's session.
+    // started without the policy, but the owned command sees neither it nor
+    // evorch's session.
     #[ignore = "bwrap 実行環境が必要"]
     #[test]
     fn bwrap_commands_do_not_inherit_descriptors() {
@@ -335,7 +334,11 @@ mod linux {
             plain.contains(&name),
             "without the policy bubblewrap passes the descriptor on, or this probe proves nothing: {plain}"
         );
-        let detached = stdout_of(wrapped.to_command());
+        let mut command = wrapped.to_owned_command();
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped());
+        let detached = owned_stdout(command);
         let lines: Vec<&str> = detached.lines().collect();
         let [session, descriptor] = lines[..] else {
             panic!("{detached}");
@@ -350,13 +353,30 @@ mod linux {
         assert_eq!(descriptor, "descriptor-closed", "{detached}");
     }
 
-    // Given: a detached child that started a background grandchild / When: a
-    // guard of its group is dropped / Then: the child leads its own session and
-    // group, the grandchild stays in that group, and both stop.
+    // Given: an owned child that started a background grandchild / When: the
+    // owner is dropped / Then: the child leads its own session and group, the
+    // grandchild stays in that group, and both stop.
     #[test]
-    fn dropping_a_group_guard_stops_descendants() {
-        let mut command = with(sh("sleep 60 & echo $!; wait"), apply_launch_policy);
+    fn dropping_an_owned_session_stops_descendants() {
+        let mut command = owned_sh("sleep 60 & echo $!; wait");
+        let mut session = OwnedSession::spawn(&mut command).expect("start the child");
+        let leader = pid_of(session.id());
+        let grandchild = read_pid(session.take_stdout().expect("child stdout"));
+        assert_eq!(rustix::process::getsid(Some(leader)), Ok(leader));
+        assert_eq!(rustix::process::getpgid(Some(leader)), Ok(leader));
+        assert_eq!(rustix::process::getpgid(Some(grandchild)), Ok(leader));
+        drop(session);
+        assert_stops(grandchild);
+        assert!(!running(leader));
+    }
+
+    // Given: a raw leader (the pseudo-terminal shell jobs keep this until B3) and
+    // a guard of its group / When: the guard is dropped / Then: the group stops.
+    #[test]
+    fn dropping_a_raw_group_guard_stops_descendants() {
+        let mut command = sh("sleep 60 & echo $!; wait");
         let mut child = command
+            .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -364,21 +384,19 @@ mod linux {
         let group = ProcessGroup::new(Some(child.id()));
         let leader = group.leader().expect("the child's pid");
         let grandchild = read_pid(child.stdout.take().expect("child stdout"));
-        assert_eq!(rustix::process::getsid(Some(leader)), Ok(leader));
-        assert_eq!(rustix::process::getpgid(Some(leader)), Ok(leader));
         assert_eq!(rustix::process::getpgid(Some(grandchild)), Ok(leader));
         drop(ProcessGroupGuard::new(group));
         child.wait().expect("reap the child");
         assert_stops(grandchild);
     }
 
-    // Given: a live detached child / When: a handle to its group is released
-    // (or retired by a reap) and then asked to kill / Then: nothing is
-    // signalled, so a reaped and reused id could not be reached either.
+    // Given: a live raw leader / When: a handle to its group is released (or
+    // retired by a reap) and then asked to kill / Then: nothing is signalled, so
+    // a reaped and reused id could not be reached either.
     #[test]
     fn a_retired_group_signals_nothing() {
-        let mut command = with(sh("exec sleep 60"), apply_launch_policy);
-        let mut child = command.spawn().expect("start the child");
+        let mut command = sh("exec sleep 60");
+        let mut child = command.process_group(0).spawn().expect("start the child");
         let group = ProcessGroup::new(Some(child.id()));
         let leader = group.leader().expect("the child's pid");
         let clone = group.clone();
@@ -402,13 +420,12 @@ mod linux {
     // Given: a leader that exits while a background helper keeps its stdout
     // open / When: the child is awaited / Then: the exited leader stays
     // unreaped (a zombie reserving the group id) until the helper is killed,
-    // the output then ends, and the reaped group is retired.
+    // and the output then ends.
     #[tokio::test]
     async fn waiting_kills_the_helpers_of_an_exited_leader_before_reaping_it() {
         let mut child =
-            GroupChild::spawn(&mut detached("sleep 60 & echo $!; exit 0")).expect("spawn");
-        let leader = child.group().leader().expect("the leader's pid");
-        let handle = child.group().clone();
+            OwnedChild::spawn(&mut owned_sh("sleep 60 & echo $!; exit 0")).expect("spawn");
+        let leader = pid_of(child.id());
         let mut stdout = tokio::io::BufReader::new(child.take_stdout().expect("stdout"));
         let mut line = String::new();
         stdout
@@ -420,47 +437,43 @@ mod linux {
         child.exited().await.expect("observe the exit");
         assert!(zombie(leader), "the exited leader must stay unreaped");
         assert!(running(helper), "nothing is killed before the wait");
-        assert_eq!(handle.leader(), Some(leader));
+        assert_eq!(child.id(), Some(leader.as_raw_nonzero().get() as u32));
 
-        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-            .await
-            .expect("waiting must not depend on the helper's pipe")
-            .expect("reap the leader");
+        let status = child.wait().await.expect("reap the leader");
         assert!(status.success());
-        assert_eq!(handle.leader(), None, "the reaped group is retired");
+        assert_eq!(child.id(), None, "the reaped group is retired");
         assert_stops(helper);
         let mut rest = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), stdout.read_to_end(&mut rest))
+        stdout
+            .read_to_end(&mut rest)
             .await
-            .expect("the output ends once the helper is killed")
-            .expect("read the rest");
-        drop(child);
+            .expect("the output ends once the helper is killed");
     }
 
-    // Given: a running child / When: it is killed and reaped, then dropped
-    // later / Then: the group is retired before the drop, for every clone.
+    // Given: a running child / When: it is killed and reaped, then waited again
+    // and dropped / Then: the status is cached and nothing is signalled later.
     #[tokio::test]
     async fn kill_and_wait_retires_the_group_before_a_later_drop() {
-        let mut child = GroupChild::spawn(&mut detached("exec sleep 60")).expect("spawn");
+        let mut child = OwnedChild::spawn(&mut owned_sh("exec sleep 60")).expect("spawn");
         let handle = child.group().clone();
         let status = child.kill_and_wait().await.expect("reap the child");
         assert!(!status.success());
-        assert_eq!(handle.leader(), None);
-        // Neither another wait nor the drop has anything left to signal.
+        assert_eq!(handle.id(), None);
         assert!(!child.wait().await.expect("cached status").success());
         drop(child);
-        handle.kill();
+        handle
+            .kill()
+            .expect("a retired group has nothing to signal");
     }
 
-    // Given: a running child with a background helper, and a clone of its
-    // group handle kept elsewhere (as a shell job keeps one for stop) / When:
-    // the child is dropped without being awaited / Then: its whole group
-    // stops, and the clone is retired before Tokio reaps the leader, so a
-    // later kill or guard drop through it cannot reach a reused id.
+    // Given: a running child with a background helper, and a clone of its group
+    // capability kept elsewhere (as a shell job keeps one for stop) / When: the
+    // child is dropped without being awaited / Then: its whole group stops, and
+    // the kept clone has nothing left to signal.
     #[tokio::test]
-    async fn dropping_a_group_child_stops_its_group_and_retires_every_clone() {
+    async fn dropping_an_owned_child_stops_its_group_and_retires_every_clone() {
         let mut child =
-            GroupChild::spawn(&mut detached("sleep 60 & echo $!; wait")).expect("spawn");
+            OwnedChild::spawn(&mut owned_sh("sleep 60 & echo $!; wait")).expect("spawn");
         let mut stdout = tokio::io::BufReader::new(child.take_stdout().expect("stdout"));
         let mut line = String::new();
         stdout
@@ -469,21 +482,19 @@ mod linux {
             .expect("read the helper pid");
         let helper = parse_pid(&line);
         let kept = child.group().clone();
-        let leader = kept.leader().expect("the leader's pid");
+        let leader = pid_of(kept.id());
         drop(child);
-        assert_eq!(kept.leader(), None, "the kept clone outlived the drop");
         assert_stops(helper);
         assert_stops(leader);
-        kept.kill();
-        drop(ProcessGroupGuard::new(kept.clone()));
-        assert_eq!(kept.leader(), None);
+        kept.kill().expect("nothing is left to signal");
     }
 
     // Given: a stdio server that started a background helper / When: the session
     // is dropped / Then: the helper stops with the server.
     #[test]
-    fn dropping_a_stdio_session_stops_its_descendants() {
-        let mut session = StdioSession::spawn(
+    fn dropping_a_sandboxed_session_stops_its_descendants() {
+        let mut session = OwnedSession::spawn_sandboxed(
+            None,
             &DirectSandbox::new_unchecked(),
             spec("sh", &["-c", "sleep 60 & echo $!; exec cat"]),
         )
@@ -518,16 +529,22 @@ fn ordinary_children_do_not_inherit_core_shutdown_signal_mask() {
         );
     }
     let _restore = Restore(old);
-    fn child_mask(policy: bool) -> u64 {
-        let mut child = Command::new("cat");
-        child.arg("/proc/self/status");
-        if policy {
-            apply_launch_policy(&mut child);
-        }
-        let output = child.output().unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .unwrap()
+    fn child_mask(owned: bool) -> u64 {
+        let stdout = if owned {
+            let mut child = OwnedCommand::new("cat");
+            child
+                .arg("/proc/self/status")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped());
+            owned_stdout(child)
+        } else {
+            let mut child = Command::new("cat");
+            child.arg("/proc/self/status");
+            let output = child.output().unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        stdout
             .lines()
             .find_map(|s| s.strip_prefix("SigBlk:"))
             .map(|s| u64::from_str_radix(s.trim(), 16).unwrap())

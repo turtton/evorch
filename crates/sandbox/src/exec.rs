@@ -35,23 +35,9 @@ impl WrappedCommand {
         command.envs(self.env.iter().cloned());
     }
 
-    /// The process command that starts this wrapped command: program,
-    /// arguments, environment and working directory under evorch's launch
-    /// policy ([`crate::process::apply_launch_policy`]), so it runs in its own
-    /// session and inherits only its standard streams. Tokio callers convert it
-    /// with `tokio::process::Command::from`.
-    pub fn to_command(&self) -> Command {
-        let mut command = Command::new(&self.program);
-        command.args(&self.args);
-        self.apply_environment(&mut command);
-        if let Some(cwd) = &self.cwd {
-            command.current_dir(cwd);
-        }
-        crate::process::apply_launch_policy(&mut command);
-        command
-    }
-
-    /// Typed non-PTY description for the guarded owner API. B2b migrates callers.
+    /// Typed non-PTY description for the guarded owner API: program, arguments,
+    /// environment and working directory. The owner starts it in its own session
+    /// with only its standard streams; there is no raw `Command` form.
     pub fn to_owned_command(&self) -> crate::owned::OwnedCommand {
         let mut command = crate::owned::OwnedCommand::new(&self.program);
         command.args(&self.args);

@@ -548,3 +548,136 @@ async fn a_term_after_a_kill_is_not_a_lost_transport() {
         (1, 1, 0)
     );
 }
+
+/// The guard helper of an owned target: the target's parent.
+fn guard_of(pid: u32) -> i32 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// `/proc` state letter of `pid`.
+fn state_of(pid: i32) -> char {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat.rsplit_once(") ").unwrap().1.chars().next().unwrap()
+}
+
+// Given: a registered target whose guard has not yet acted on a KILL request /
+// When: the guard is then really lost (SIGKILL) and a TERM arrives late /
+// Then: the late TERM does not turn the loss into a clean stop: wait fails, the
+// ledger entry stays unconfirmed, and the target still dies with its guard.
+#[tokio::test]
+async fn a_guard_lost_after_a_kill_stays_unconfirmed_when_a_term_arrives_late() {
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+    let ledger = SpawnLedger::new();
+    let mut child = OwnedChild::spawn_blocking(
+        Some(ledger.clone()),
+        ChildKind::Other,
+        None,
+        command("sleep 60"),
+    )
+    .await
+    .unwrap();
+    let pid = child.id().unwrap();
+    let id = ledger.children()[0].id;
+    let guard = guard_of(pid);
+    // Hold the guard so the KILL request is written but never executed. The
+    // state letter is the guard's own report that it has stopped.
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGSTOP) }, 0);
+    while state_of(guard) != 'T' {
+        std::thread::yield_now();
+    }
+    child.group().kill().unwrap();
+    assert_eq!(unsafe { libc::kill(guard, libc::SIGKILL) }, 0);
+
+    // The late TERM is a no-op (a KILL is already requested); it must not mask
+    // the loss the wait reports.
+    child.group().terminate().unwrap();
+    assert!(
+        child.wait().await.is_err(),
+        "a lost guard is never a finished wait"
+    );
+    drop(child);
+    assert!(ledger.reap_child(id).await.is_err());
+    let stats = ledger.child_stats();
+    assert_eq!((stats.reaped, stats.unconfirmed), (0, 1));
+
+    // The target's root PDEATHSIG still ended it; its parent is now this
+    // subreaper, so the reap is ours.
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid as i32, &mut status, 0) },
+        pid as i32
+    );
+    assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+}
+
+// Given: a command that echoes its input, then leaves a helper holding its
+// stdout open as it exits / When: its output is collected / Then: the reads end,
+// which they can only once the helper holding the pipes is gone, and the ledger
+// saw the leader reaped.
+#[test]
+fn output_collects_the_streams_and_stops_a_helper_that_holds_the_pipes() {
+    let ledger = SpawnLedger::new();
+    let mut command = command("cat; echo err >&2; sh -c 'kill -STOP $$' &");
+    let session = OwnedSession::spawn_in(
+        &ledger.admit().unwrap(),
+        ChildKind::Other,
+        Some("output-test"),
+        &mut command,
+    )
+    .unwrap();
+    assert_eq!(ledger.children().len(), 1);
+
+    let output = session.output(Some(b"hello")).unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"hello");
+    assert_eq!(output.stderr, b"err\n");
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+}
+
+// Given: a session whose leader exits at once and leaves a same-group helper /
+// When: only try_wait observes the exit / Then: reaping the leader also stops the
+// helper, and the ledger entry is confirmed (the raw session's cleanup, kept).
+#[test]
+fn try_wait_stops_a_leftover_helper_when_it_reaps_the_leader() {
+    use std::os::fd::AsRawFd;
+    let ledger = SpawnLedger::new();
+    let mut session = OwnedSession::spawn_in(
+        &ledger.admit().unwrap(),
+        ChildKind::Other,
+        Some("try-wait-test"),
+        &mut command("sleep 3600 & echo $!; exit 0"),
+    )
+    .unwrap();
+    let mut stdout = BufReader::new(session.take_stdout().unwrap());
+    let helper: i32 = line(&mut stdout).parse().unwrap();
+
+    while session.try_wait().unwrap().is_none() {
+        std::thread::yield_now();
+    }
+
+    // The helper is gone once its pidfd reports death (or it is already reaped).
+    if let Ok(fd) = process_guard::pidfd_open(helper) {
+        process_guard::wire::poll(
+            &mut [process_guard::wire::fd(fd.as_raw_fd(), libc::POLLIN)],
+            None,
+        )
+        .unwrap();
+    }
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+}

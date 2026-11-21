@@ -39,4 +39,4 @@ pub use minimal::MinimalSandbox;
 pub use network::NetworkPolicy;
 pub use policy::{Action, ApprovalMode, ApprovalPolicy, Capabilities, PolicyDecision, resolve};
 pub use scratch::{BoundedError, BoundedRemoval, ScratchRoot};
-pub use session::{SessionError, StdioSession};
+pub use session::SessionError;

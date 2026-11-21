@@ -1,9 +1,10 @@
 # D-3a2 B2a / B2b handoff
 
-B2a added the typed API; B2b migrates its callers in parts. **Migration is
-incomplete and D-7 is not complete.** Existing raw GroupChild/StdioSession/
-ProcessGroup paths remain for the callers of the later parts and still have their
-old guarantees; entry binding does **not** guard them.
+B2a added the typed API; B2b migrated its non-PTY callers in three parts
+(B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: the pseudo-terminal shell jobs
+and agent Chromium (B3) still run on the raw backend described under
+"Raw boundary left for B3", with their old guarantees; entry binding does **not**
+guard them.
 
 ## B2b-i: sandbox, session, LSP, js-worker
 
@@ -15,8 +16,8 @@ without a ledger):
   `OwnedSession::spawn_owned(ledger, kind, label, command)` are the typed helpers.
 - LSP (`tools/src/lsp/client.rs`), js-worker owner (`run_js/worker.rs`), the
   `MinimalSandbox` library listing (`minimal.rs`), the bwrap probe (`bwrap.rs`)
-  and the comment-checker (`post_edit.rs`, `OwnedChild` through
-  `Admission::spawn_owned`).
+  and the comment-checker (`post_edit.rs`, started with
+  `OwnedChild::spawn_blocking`, B2b-ii).
 - Closed stdio choices: the listing and the probe pass `/dev/null` as stdin; every
   other migrated caller pipes all three streams, so none depends on an inherited
   closed descriptor.
@@ -24,7 +25,7 @@ without a ledger):
   with `scripts/guard-cargo.sh`; a test that clears its child's environment has to
   pass `EVORCH_PROCESS_GUARD_BUNDLE` through.
 
-## B2b-ii (this part): tools, providers, runtime and eval direct commands
+## B2b-ii: tools, providers, runtime and eval direct commands
 
 Migrated to the guard-owned API (guard-owned on Linux, with or without a ledger):
 
@@ -54,10 +55,92 @@ Migrated to the guard-owned API (guard-owned on Linux, with or without a ledger)
 - A test that clears its child's environment and then reaches a migrated path has
   to pass `EVORCH_PROCESS_GUARD_BUNDLE` through (`tools/tests/host_environment.rs`).
 
-Left raw on purpose until B2b-iii removes them: `StdioSession::spawn*` with a
-sandbox (only tests use them now), `StdioSession::spawn_command_*` and
-`GroupChild` (non-Linux adapter, eval groups/verify, PR source, renderer, GUI
-slash), and `WrappedCommand::to_command` (eval verify).
+## B2b-iii (this part): eval, PR source, renderer, GUI slash, raw API removal
+
+Migrated (guard-owned on Linux, with or without a ledger):
+
+- Eval groups (`ChildKind::Eval`) and verify (no ledger, `ChildKind::SandboxSession`,
+  `OwnedChild::spawn_blocking`; the root-exit / output-drain / fixed 1 s reap phases
+  are unchanged). The creator-thread `PDEATHSIG(TERM)` of the evaluation child is
+  gone: the guard kills the group when the core dies, and the ledger's cooperative
+  stop still sends TERM (`OwnedGroup::terminate`). `eval_start` runs the whole
+  launch (`groups::launch`) on a blocking thread.
+- The PR source runner, both its ledger and its ledger-less branch
+  (`ChildKind::PullRequestSource`, `spawn_blocking`).
+- The offline renderer (`ChildKind::Renderer`). `Generation::spawn` stays one
+  synchronous admission transaction, so the guard handshake (bounded) holds the
+  renderer owner's task while it runs; the helper's stdin/stdout are the IPC channel
+  endpoints and stderr is `/dev/null`.
+- GUI slash commands (`slash_process::run` takes an `OwnedCommand`; no ledger).
+- Test and example seams: `ledger_latency`, the ledger tests, the launch-policy tests
+  (now exercising the guard's policy through the owners), evorch-core's core-owner
+  fixture. That fixture also tracks the owner's own guard helper: when the owner dies
+  the helper is orphaned to the test's subreaper and is reaped through the owner's
+  group.
+
+Removed: `GroupChild`, `StdioSession::spawn*`/`spawn_command_*`,
+`WrappedCommand::to_command`, `apply_launch_policy` and `detach_from_terminal` on
+Linux. The non-Linux adapter keeps them as private (`pub(crate)`) items of its own
+backend; it makes no new D-7 claim and its code is only compile-checked by CI.
+
+### Raw boundary left for B3
+
+Nothing a non-PTY caller can reach. What stays, and who uses it:
+
+- `process::ProcessGroup`, `ProcessGroupGuard`, `wait_for_exit`, `has_exited` and
+  `Admission::register_group` (ledger `ChildGroup::Raw`): the shell **PTY** jobs
+  (`run_pty`, started by `portable-pty`) and the restart test that registers a raw
+  group. They take a numeric group handle and a raw child; they start nothing.
+- `process::close_inherited_fds_on_exec`: a descriptor-hygiene hook for the std
+  command an evorch-core fixture (`product_exec`) starts and supervises itself. It
+  owns nothing and is no way to start a product child.
+- Agent Chromium (`crates/browser`, chromiumoxide's own spawn) and the private
+  core-launcher preflight supervisor (`--die-with-parent`): unchanged.
+
+Std spawns outside the audited inventory that this part did not touch: the GUI's
+short git calls (`diff/git_cli.rs`, `evorch-gui.rs`, `composer_mention.rs`,
+`runtime_sink.rs`) and `fc-match` (`theme/fonts.rs`), and `core-launcher` starting the
+core. They never had the launch policy.
+
+### Closed stdio, per path
+
+Every owned launch sets the three streams explicitly, so nothing depends on an
+inherited descriptor. An inherited **closed** descriptor would be normalized to
+`/dev/null` by the helper (`process-guard` `closed_stdio_is_sanitized_to_dev_null_by_helper_startup`);
+no caller relies on that.
+
+| Path | stdin | stdout | stderr |
+|---|---|---|---|
+| `spawn_sandboxed` (LSP, js-worker, sessions) | piped | piped | piped |
+| MCP stdio, comment-checker | piped | piped | piped |
+| minimal listing, bwrap probe | `/dev/null` | piped | piped |
+| shell pipe job | `/dev/null` (synchronous) or piped | piped | piped |
+| grep (`rg`) | `/dev/null` | piped | `/dev/null` |
+| git diff, git read, eval git | `/dev/null` | piped | piped |
+| snapshot git | piped | piped | piped |
+| codex quota RPC | piped | piped | `/dev/null` |
+| PR source | `/dev/null` | piped | piped |
+| eval verify | `/dev/null` | piped | piped |
+| eval group member | `/dev/null` | file | file |
+| GUI slash command | `/dev/null` | piped | piped |
+| renderer helper | IPC endpoint | IPC endpoint | `/dev/null` |
+
+### Death matrix and cleanup evidence
+
+`sandbox/tests/owner_death.rs` kills (SIGKILL) a separate owner process that holds
+eleven roots, each with a same-group grandchild: the eight `ChildKind`s through
+`OwnedChild::spawn_blocking` with a ledger, a ledger `SandboxSession`
+`OwnedSession`, and a child and a session with no ledger. All roots and grandchildren
+end (awaited on pidfds, no sleeps), and an unrelated process in its own group
+survives. It covers the typed owners every caller goes through, not the real release
+core running its callers (B3's "real core expiry"). Real-caller coverage that exists
+today: the renderer owner's abrupt core exit (`renderer_owner`), MCP and ledger stop
+(`mcp_stdio`), eval groups (`groups` unit tests).
+
+Mid-launch abandonment (#744 S1): `mcp_stdio::a_launch_abandoned_mid_way_...` parks
+the launch on its blocking thread, drops the caller, releases it, and shows the
+server and its descendant end, the ledger confirm the reap and the permit release.
+A guard lost *after* a KILL (#744 S2): `owned::a_guard_lost_after_a_kill_stays_unconfirmed_...`.
 
 ## New contract
 
@@ -80,9 +163,8 @@ slash), and `WrappedCommand::to_command` (eval verify).
   after a ledger stop) is a no-op, not a lost transport; the flag is read and set
   under the owner lock together with the control write.
 - Inherited **closed** stdio is normalized to /dev/null (EOF / accepted writes).
-  Explicit pipes/null/files keep their semantics. B2b must document each caller's
-  selection; preserving EBADF is not promised by this new API. No caller changes
-  in B2a imply a change to its current stdio behavior.
+  Explicit pipes/null/files keep their semantics. Preserving EBADF is not promised;
+  each caller's explicit selection is the table under "Closed stdio, per path".
 - Applications bind the installed sibling bundle (not the inherited env), before
   logging/config/runtime. Core planned entry first physically adopts handoff FDs.
   Core --describe-handoff/--print-renderer-helper require binding; help/version
@@ -94,16 +176,16 @@ slash), and `WrappedCommand::to_command` (eval verify).
 
 | Owner | Production paths to migrate |
 |---|---|
-| Common sandbox/session | **B2b-i: minimal.rs, bwrap probe migrated**; to_command/raw session seams stay until B2b-iii |
+| Common sandbox/session | **B2b-i: minimal.rs, bwrap probe migrated**; **B2b-iii: raw session seams and to_command removed** |
 | Shell pipe | **B2b-ii: migrated** tools/src/tools/shell/jobs/process.rs::run_pipe (run_pty is B3) |
-| SandboxSession, LSP, js-worker | **B2b-i: migrated** (sandbox/src/session.rs raw spawn stays for tests until B2b-iii) |
+| SandboxSession, LSP, js-worker | **B2b-i: migrated** (raw session spawn removed in B2b-iii) |
 | MCP | **B2b-ii: migrated** tools/src/mcp/transport/stdio.rs, ChildLease supervision |
-| Eval | eval/src/evaluator/groups.rs and eval/src/verify.rs; remove creator-thread PDEATHSIG(TERM), retain normal Stop TERM |
-| PR source | runtime/src/pull_requests/source.rs, **both** Some(ledger) and None branches |
+| Eval | **B2b-iii: migrated** eval/src/evaluator/groups.rs and eval/src/verify.rs; creator-thread PDEATHSIG(TERM) removed, normal Stop stays TERM |
+| PR source | **B2b-iii: migrated** runtime/src/pull_requests/source.rs, both Some(ledger) and None branches |
 | Other direct commands | **B2b-ii: migrated** tools/src/tools/{grep,git_diff}.rs; providers/src/provider/codex/quota/rpc.rs; runtime/src/{git_read,snapshot}.rs; eval/src/git.rs |
-| Offline renderer/CEF root | workbench-host/src/areas/browser/renderer.rs and renderer ownership test support; actual CEF E2E remains B3 |
-| GUI slash | gui/src/model/slash_process.rs and caller command builders in external_slash/external_commands |
-| Examples/test seams | sandbox/examples/ledger_latency.rs, sandbox tests/ledger fixtures; evorch-core renderer_support launch and owner/restart fixtures |
+| Offline renderer/CEF root | **B2b-iii: migrated** workbench-host/src/areas/browser/renderer.rs and renderer ownership test support; actual CEF E2E remains B3 |
+| GUI slash | **B2b-iii: migrated** gui/src/model/slash_process.rs and the builders in external_slash |
+| Examples/test seams | **B2b-iii: migrated** sandbox/examples/ledger_latency.rs, sandbox tests/ledger fixtures; evorch-core renderer_support launch (the owner/restart fixtures keep the raw PTY-style group handle) |
 
 Audit external crates separately rather than assuming the Rust API can control
 an internal spawn. The private core-launcher preflight supervisor and bwrap

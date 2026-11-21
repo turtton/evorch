@@ -111,16 +111,17 @@ pub async fn core_eof(executable: std::path::PathBuf, profiles: &std::path::Path
                 .unwrap()
                 .join("evorch-renderer-test-helper")
         });
-    let mut command = tokio::process::Command::new(harness);
+    // stdin is /dev/null, stdout is the readiness pipe, stderr is the test's own.
+    let mut command = sandbox::owned::OwnedCommand::new(harness);
     command
         .arg("--owner-core")
         .arg(executable)
         .arg(profiles)
         .env("EVORCH_RENDERER_TEST_SECRET", "must-not-be-inherited")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
-    sandbox::process::apply_launch_policy(command.as_std_mut());
-    let mut core = sandbox::process::GroupChild::spawn(&mut command).unwrap();
+    let mut core = sandbox::owned::OwnedChild::spawn(&mut command).unwrap();
     let mut output = tokio::io::BufReader::new(core.take_stdout().unwrap());
     let mut line = String::new();
     assert!(
@@ -128,6 +129,10 @@ pub async fn core_eof(executable: std::path::PathBuf, profiles: &std::path::Path
         "core owner did not report readiness"
     );
     tree.track_pid(line.trim().parse().unwrap());
+    // The core owner's own guard helper (a child of the owner, in its group) is
+    // orphaned to this subreaper when the owner dies and is reaped through the
+    // owner's group below.
+    tree.track_pid(core.id().unwrap() as i32);
     core.kill_and_wait().await.unwrap();
     // Core is dead, so the orphan helper belongs to this subreaper. Blocking
     // waitid is safe on this test-only thread; the helper needs no core work.

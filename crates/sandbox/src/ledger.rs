@@ -7,8 +7,9 @@
 //! core starts is registered here, while it is started, and the core stops and
 //! reaps it by name:
 //!
-//! * **Children.** [`Admission::spawn_group`] and [`Admission::register_group`]
-//!   enter a child in the ledger. [`SpawnLedger::stop_child`],
+//! * **Children.** [`Admission::spawn_owned`] (a guard-owned child) and
+//!   [`Admission::register_group`] (a pseudo-terminal child, until B3) enter a
+//!   child in the ledger. [`SpawnLedger::stop_child`],
 //!   [`terminate_child`](SpawnLedger::terminate_child) and
 //!   [`stop_all_children`](SpawnLedger::stop_all_children) signal the process
 //!   group of a registered child only: there is no way to name a process by its
@@ -49,7 +50,9 @@ pub use children::{
 };
 pub use workers::{JoinFailed, WorkerActivity, WorkerId, WorkerInfo, WorkerStats};
 
-use crate::process::{GroupChild, ProcessGroup};
+#[cfg(not(target_os = "linux"))]
+use crate::process::GroupChild;
+use crate::process::ProcessGroup;
 
 /// Why a child or a worker could not be started through the ledger.
 #[derive(Debug, thiserror::Error)]
@@ -237,14 +240,14 @@ impl Admission<'_> {
         self.managed.as_ref().map(|(ledger, _)| *ledger)
     }
 
-    /// Spawn `command` as a [`GroupChild`] and register it.
+    /// Spawn `command` as a `GroupChild` and register it (non-Linux adapter only).
     ///
-    /// `command` must carry the launch policy, as for [`GroupChild::spawn`].
-    /// `label` is a short name for diagnostics; never put a secret in it.
+    /// `command` must carry the launch policy.
     ///
     /// # Errors
-    /// The spawn error of [`GroupChild::spawn`].
-    pub fn spawn_group(
+    /// The spawn error of `GroupChild::spawn`.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn spawn_group(
         &self,
         kind: ChildKind,
         label: Option<&str>,

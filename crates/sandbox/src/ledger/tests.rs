@@ -1,31 +1,44 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use rustix::process::Pid;
 
 use super::*;
-use crate::process::{GroupChild, apply_launch_policy, has_exited};
-use crate::{CommandSpec, DirectSandbox, StdioSession};
+use crate::owned::{OwnedChild, OwnedCommand, OwnedSession};
+use crate::{CommandSpec, DirectSandbox};
 
 /// A child that runs until its group is killed: `cat` on a pipe that stays open.
-fn blocked_child() -> tokio::process::Command {
-    let mut command = std::process::Command::new("cat");
+fn blocked_child() -> OwnedCommand {
+    let mut command = OwnedCommand::new("cat");
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    apply_launch_policy(&mut command);
-    tokio::process::Command::from(command)
+    command
 }
 
-fn spawn_child(ledger: &SpawnLedger, kind: ChildKind) -> Result<GroupChild, SpawnError> {
+/// Whether `pid` still exists as a process. The guard, not this test, is the
+/// parent of an owned child, so its disappearance is the proof of a reap.
+fn exists(pid: Pid) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn is_alive(pid: Pid) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+fn spawn_child(ledger: &SpawnLedger, kind: ChildKind) -> Result<OwnedChild, SpawnError> {
     let admission = ledger.admit()?;
-    Ok(admission.spawn_group(kind, None, &mut blocked_child())?)
+    Ok(admission.spawn_owned(kind, None, &mut blocked_child())?)
 }
 
 /// The owner side: reap the child once it is stopped, as a supervisor does.
-fn own(mut child: GroupChild) -> tokio::task::JoinHandle<std::process::ExitStatus> {
+fn own(mut child: OwnedChild) -> tokio::task::JoinHandle<std::process::ExitStatus> {
     tokio::spawn(async move { child.wait().await.expect("the child is reaped") })
 }
 
@@ -80,10 +93,7 @@ async fn children_spawned_before_the_fence_are_listed_and_reaped() {
         }
     );
     for pid in pids {
-        assert!(
-            has_exited(pid).is_err(),
-            "{pid:?} must be reaped, not an unreaped child"
-        );
+        assert!(!exists(pid), "{pid:?} must be reaped, not left as a zombie");
     }
     for owner in owners {
         use std::os::unix::process::ExitStatusExt;
@@ -131,7 +141,7 @@ async fn the_fence_waits_for_admitted_spawns_and_refuses_later_ones() {
             tokio::task::spawn_blocking(move || {
                 let admission = ledger.admit().expect("the fence is still open");
                 let child = admission
-                    .spawn_group(ChildKind::Other, None, &mut blocked_child())
+                    .spawn_owned(ChildKind::Other, None, &mut blocked_child())
                     .expect("spawn");
                 held_sender.send(()).unwrap();
                 // The admission lives until the test lets it go.
@@ -201,7 +211,7 @@ async fn stop_names_one_child_and_a_gone_id_is_unknown() {
     let remaining = ledger.children();
     assert_eq!(remaining.len(), 1);
     assert!(!remaining[0].stop_requested);
-    assert!(!has_exited(second_leader).unwrap());
+    assert!(is_alive(second_leader));
 
     ledger.terminate_child(ids[1]).unwrap();
     // One listing: the child may already have gone, or shows the request.
@@ -221,7 +231,7 @@ async fn a_process_the_ledger_does_not_own_is_never_signalled() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    apply_launch_policy(&mut bystander);
+    bystander.process_group(0);
     let mut bystander = bystander.spawn().expect("spawn the bystander");
     let ledger = SpawnLedger::new();
     let owner = own(spawn_child(&ledger, ChildKind::Other).unwrap());
@@ -263,8 +273,8 @@ async fn a_dropped_child_is_reaped_by_the_ledger_before_reaping_resolves() {
             unconfirmed: 0
         }
     );
-    // Reaped: it is not our child any more, so it cannot even be observed.
-    assert!(has_exited(leader).is_err());
+    // Reaped by the guard: not even a zombie is left.
+    assert!(!exists(leader));
 }
 
 // Given: an owner that lets go of a registered child without any reap / When:
@@ -274,12 +284,12 @@ async fn a_child_that_left_without_a_reap_is_reported_unconfirmed() {
     let ledger = SpawnLedger::new();
     // Started outside the ledger, as a shell job runtime would start its own.
     let mut child = Admission::unmanaged()
-        .spawn_group(ChildKind::Other, None, &mut blocked_child())
+        .spawn_owned(ChildKind::Other, None, &mut blocked_child())
         .unwrap();
     let entry = {
         let admission = ledger.admit().unwrap();
         admission
-            .register_group(ChildKind::ShellJob, None, child.group())
+            .register_owned(ChildKind::ShellJob, None, child.group())
             .unwrap()
     };
     let id = entry.id();
@@ -300,7 +310,7 @@ async fn a_stdio_session_is_registered_and_reaped_with_the_ledger() {
     let ledger = SpawnLedger::new();
     let session = {
         let admission = ledger.admit().unwrap();
-        StdioSession::spawn_in(
+        OwnedSession::spawn_sandboxed_in(
             &admission,
             &DirectSandbox::new_unchecked(),
             CommandSpec {
@@ -408,16 +418,16 @@ async fn no_worker_starts_after_the_fence() {
 async fn an_unmanaged_admission_registers_nothing() {
     let admission = Admission::unmanaged();
     let mut child = admission
-        .spawn_group(ChildKind::Other, None, &mut blocked_child())
+        .spawn_owned(ChildKind::Other, None, &mut blocked_child())
         .unwrap();
 
     assert!(admission.ledger().is_none());
     assert!(
         admission
-            .register_group(ChildKind::Other, None, child.group())
+            .register_owned(ChildKind::Other, None, child.group())
             .is_none()
     );
-    child.kill();
+    child.kill().unwrap();
     child.wait().await.unwrap();
 }
 
