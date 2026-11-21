@@ -1074,26 +1074,86 @@ fn closed_stdio_fixture() {
     if std::env::var_os("GUARD_CLOSED_STDIO_FIXTURE").is_none() {
         return;
     }
-    unsafe {
-        libc::close(0);
-        libc::close(1);
-        libc::close(2);
+    fn reset_stdio() {
+        for fd in 0..=2 {
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF)
+                );
+                let null = b"/dev/null\0";
+                let opened =
+                    unsafe { libc::open(null.as_ptr().cast(), libc::O_RDWR | libc::O_CLOEXEC) };
+                assert!(opened >= 0);
+                if opened != fd {
+                    assert_eq!(unsafe { libc::dup2(opened, fd) }, fd);
+                    assert_eq!(unsafe { libc::close(opened) }, 0);
+                }
+            }
+        }
+    }
+    fn assert_stdio_mask(mask: u8) {
+        for fd in 0..=2 {
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if mask & (1 << fd) != 0 {
+                assert_eq!(result, -1, "fd {fd} should be closed");
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF),
+                    "fd {fd} must be EBADF immediately before launch"
+                );
+            } else {
+                assert!(result >= 0, "fd {fd} should remain open");
+            }
+        }
     }
     let rt = runtime();
     let mut spec = LaunchSpec::new(shell()).unwrap();
     spec.argv.extend([b"-c".to_vec(), b"exit 37".to_vec()]);
-    let mut child = rt
-        .spawn(&spec, [Stdio::null(), Stdio::null(), Stdio::null()])
-        .unwrap();
-    assert_eq!(child.wait().unwrap().code(), Some(37));
-    // Accepted B1 boundary: Rust startup fills absent stdio with /dev/null.
-    // Intentional EBADF inheritance is deferred to the B2 stdio API design.
-    let mut spec = LaunchSpec::new(shell()).unwrap();
-    spec.argv.extend([
-        b"-c".to_vec(),
-        b"for fd in 0 1 2; do test /proc/self/fd/$fd -ef /dev/null || exit 90; done; exit 37"
-            .to_vec(),
-    ]);
+    // This role is already running as a Rust process. Close stdio only after
+    // Rust startup (and after loading the image), then prove the API receives
+    // the deliberately closed descriptors rather than startup-normalized ones.
+    for mask in 1..=0b111 {
+        reset_stdio();
+        for fd in 0..=2 {
+            if mask & (1 << fd) != 0 {
+                assert_eq!(unsafe { libc::close(fd) }, 0);
+            }
+        }
+        assert_stdio_mask(mask);
+        let mut child = rt
+            .spawn(
+                &spec,
+                [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()],
+            )
+            .unwrap();
+        assert_eq!(
+            child.wait().unwrap().code(),
+            Some(37),
+            "closed mask {mask:#05b}"
+        );
+        assert_stdio_mask(mask);
+    }
+
+    // An exec failure must leave the role's closed stdio untouched, and a
+    // subsequent launch must still work.
+    reset_stdio();
+    for fd in 0..=2 {
+        assert_eq!(unsafe { libc::close(fd) }, 0);
+    }
+    assert_stdio_mask(0b111);
+    let mut missing = LaunchSpec::new("/evorch/closed-stdio/missing").unwrap();
+    missing.argv = vec![b"/evorch/closed-stdio/missing".to_vec()];
+    assert_eq!(
+        rt.spawn(
+            &missing,
+            [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()]
+        )
+        .unwrap_err()
+        .raw_os_error(),
+        Some(libc::ENOENT)
+    );
+    assert_stdio_mask(0b111);
     let mut child = rt
         .spawn(
             &spec,
@@ -1101,9 +1161,7 @@ fn closed_stdio_fixture() {
         )
         .unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(37));
-    for fd in 0..=2 {
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
-    }
+    assert_stdio_mask(0b111);
     // Do not ask the test harness to print to its deliberately closed stdout.
     unsafe { libc::_exit(0) }
 }

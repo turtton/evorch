@@ -264,7 +264,7 @@ impl Admission<'_> {
     /// admission (B3 replaces this raw path).
     ///
     /// A [`ProcessGroup`] can only come from a portable-pty child
-    /// ([`ProcessGroup::of_pty_child`]), so no other kind of child can enter the
+    /// ([`ProcessGroup::spawn_pty`]), so no other kind of child can enter the
     /// ledger through here. The owner calls [`ChildEntry::reaped`] once it has
     /// reaped the leader; a dropped entry means the owner gave the child up
     /// without reaping it. `None` without a ledger.
