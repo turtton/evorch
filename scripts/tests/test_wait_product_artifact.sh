@@ -35,6 +35,19 @@ while [[ $# -gt 0 ]]; do
 done
 echo "$url" >> "$d/urls.log"
 [[ -z "$cfg" ]] || cat "$cfg" >> "$d/auth.log"
+resp=resp
+if [[ "$url" == *"/artifacts?"* ]]; then
+  # The artifact check has its own scripted responses (default: exactly one live artifact).
+  resp=resp_art
+  an=$(($(cat "$d/art_count" 2> /dev/null || echo 0) + 1))
+  echo "$an" > "$d/art_count"
+  n=$an
+  if [[ ! -d "$d/resp_art/$n" && ! -d "$d/resp_art/last" ]]; then
+    printf '%s' '{"total_count":1,"artifacts":[{"id":9001,"name":"product-core","expired":false,"workflow_run":{"id":4242}}]}' > "$body"
+    printf 200
+    exit 0
+  fi
+fi
 if [[ -p "$d/fifo" ]]; then
   # Cancellation case: tell the test we are in flight, then stay alive holding the
   # write end of the FIFO until the script under test kills us.
@@ -42,8 +55,8 @@ if [[ -p "$d/fifo" ]]; then
   echo started >&3
   exec "$REAL_SLEEP" 600
 fi
-r=$d/resp/$n
-[[ -d "$r" ]] || r=$d/resp/last
+r=$d/$resp/$n
+[[ -d "$r" ]] || r=$d/$resp/last
 if [[ -f "$r/exit" ]]; then
   echo "curl: (28) Operation timed out" >&2
   exit "$(cat "$r/exit")"
@@ -102,6 +115,18 @@ respond() {
   printf '%s' "$body" > "$d/resp/$n/body"
   if (($# > 0)); then printf '%s\r\n' "$@" > "$d/resp/$n/headers"; fi
 }
+# respond_art <n|last> <status> <body> [header line...]: the artifact check's scripted responses
+respond_art() {
+  local n=$1 status=$2 body=$3
+  shift 3
+  mkdir -p "$d/resp_art/$n"
+  echo "$status" > "$d/resp_art/$n/status"
+  printf '%s' "$body" > "$d/resp_art/$n/body"
+  if (($# > 0)); then printf '%s\r\n' "$@" > "$d/resp_art/$n/headers"; fi
+}
+# art_entry <name> <expired> <run_id>; art_list <entry...>
+art_entry() { jq -nc --arg n "${1:-product-core}" --argjson e "${2:-false}" --argjson run "${3:-4242}" '{id: 9001, name: $n, expired: $e, workflow_run: {id: $run}}'; }
+art_list() { printf '%s\n' "$@" | jq -sc '{total_count: length, artifacts: .}'; }
 transport_failure() { mkdir -p "$d/resp/$1"; echo "$2" > "$d/resp/$1/exit"; }
 # jobs <status> <conclusion|null> [run_id]: a listing with the producer among
 # decoys whose names merely contain the producer's.
@@ -137,18 +162,20 @@ new_case
 respond 1 200 "$(jobs completed success)" 'X-RateLimit-Remaining: 4321'
 run_wait
 eq "immediate success: exit" "$rc" 0
-eq "immediate success: one request" "$(requests)" 1
+eq "immediate success: the jobs poll and the artifact check" "$(requests)" 2
 eq "immediate success: no wait" "$(sleeps)" ''
-eq "the one URL is the latest-attempt jobs listing of this run" "$(cat "$d/urls.log")" \
-  'https://api.github.com/repos/owner/repo/actions/runs/4242/jobs?filter=latest&per_page=100'
+eq "the requests are the latest-attempt jobs listing, then the product-core artifacts, of this run" "$(cat "$d/urls.log")" \
+  'https://api.github.com/repos/owner/repo/actions/runs/4242/jobs?filter=latest&per_page=100
+https://api.github.com/repos/owner/repo/actions/runs/4242/artifacts?name=product-core&per_page=100'
 check "producer job id, its run_attempt and completed_at are reported" \
-  grep -q 'job_id=77 producer_run_attempt=2 producer_completed_at=2026-05-01T10:20:30Z consumer_run_attempt=2 requests=1' "$d/out"
+  grep -q 'job_id=77 producer_run_attempt=2 producer_completed_at=2026-05-01T10:20:30Z consumer_run_attempt=2 requests=2' "$d/out"
 check "outputs are written for the workflow" grep -qx 'product_job_id=77' "$d/gh_output"
 check "producer attempt is an output" grep -qx 'product_run_attempt=2' "$d/gh_output"
 check "completion time is an output" grep -qx 'product_completed_at=2026-05-01T10:20:30Z' "$d/gh_output"
-check "request count is an output" grep -qx 'requests=1' "$d/gh_output"
+check "request count is an output" grep -qx 'requests=2' "$d/gh_output"
 check "the rate-limit remainder is an output" grep -qx 'ratelimit_remaining=4321' "$d/gh_output"
-check "no artifact id is reported" absent -i 'artifact_id' "$d/gh_output"
+check "no artifact id is reported in the outputs" absent -i 'artifact_id' "$d/gh_output"
+check "no artifact id is reported in the log" absent 9001 "$d/out"
 check "the token reaches curl through the config file" grep -q "Authorization: Bearer $token" "$d/auth.log"
 check "the token is not in curl's arguments" absent "$token" "$d/argv.log"
 check "the token is not in the log" absent "$token" "$d/out"
@@ -168,7 +195,7 @@ respond 2 200 "$(jobs in_progress null)"
 respond 3 200 "$(jobs completed success)"
 run_wait
 eq "queued, running, done: exit" "$rc" 0
-eq "queued, running, done: requests" "$(requests)" 3
+eq "queued, running, done: requests" "$(requests)" 4
 eq "queued, running, done: 45 s between requests" "$(sleeps)" '45 45'
 
 new_case
@@ -176,7 +203,7 @@ respond 1 200 '{"total_count":1,"jobs":[{"id":1,"run_id":4242,"name":"scope-gate
 respond 2 200 "$(jobs completed success)"
 run_wait
 eq "producer not listed yet is waited for: exit" "$rc" 0
-eq "producer not listed yet: requests" "$(requests)" 2
+eq "producer not listed yet: requests" "$(requests)" 3
 
 new_case
 respond last 200 '{"total_count":0,"jobs":[]}'
@@ -331,7 +358,7 @@ respond 3 200 "$(jobs completed success)"
 run_wait
 eq "transport failure and 5xx: exit" "$rc" 0
 eq "transport failure and 5xx are retried on the normal gap" "$(sleeps)" '45 45'
-eq "transport failure and 5xx count as requests" "$(requests)" 3
+eq "transport failure and 5xx count as requests" "$(requests)" 4
 
 new_case
 transport_failure last 28
@@ -348,6 +375,99 @@ eq "at most 24 requests" "$(requests)" 24
 eq "requests 2-14 follow after 45 s, request 15 on after 120 s" \
   "$(sleeps)" "$(repeat 13 45) $(repeat 10 120)"
 check "running out of requests is reported" grep -q '24 requests' "$d/out"
+
+# --- the artifact check after the producer's success -------------------------
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art 1 200 "$(art_list "$(art_entry product-core false)" "$(art_entry web-ui-screenshots false)")"
+run_wait
+eq "an unrelated artifact next to the one product-core: exit" "$rc" 0
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list)"
+run_wait
+failed "no product-core artifact"
+eq "no product-core artifact: not retried" "$(requests)" 2
+check "no product-core artifact: says how many" grep -q 'holds 0 artifacts named' "$d/out"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)" "$(art_entry product-core false)")"
+run_wait
+failed "two product-core artifacts (a failed attempt's leftover)"
+eq "two product-core artifacts: not retried" "$(requests)" 2
+check "two product-core artifacts: says how many" grep -q 'holds 2 artifacts named' "$d/out"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core true)")"
+run_wait
+failed "an expired product-core artifact"
+check "an expired product-core artifact: says so" grep -q 'has expired' "$d/out"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)" "$(art_entry product-core true)")"
+run_wait
+failed "a live and an expired product-core artifact"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false 9999)")"
+run_wait
+failed "another run's artifact"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 'not json'
+run_wait
+failed "artifacts response is not JSON"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 '{"total_count":1,"artifacts":[{"id":1,"name":"product-core","workflow_run":{"id":4242}}]}'
+run_wait
+failed "an artifact without expired"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)" | jq -c '.total_count = 150')"
+run_wait
+failed "more artifacts than one page"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)")" 'Link: <https://api.github.com/x?page=2>; rel="next"'
+run_wait
+failed "a next page of artifacts"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 403 '{"message":"Resource not accessible by integration"}'
+run_wait
+failed "artifacts: permission denied"
+eq "artifacts: permission denied is not retried" "$(requests)" 2
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art 1 429 '{}' 'Retry-After: 30'
+respond_art 2 502 '{}'
+run_wait
+eq "artifacts: rate limit then 5xx then the default answer: exit" "$rc" 0
+eq "artifacts: both retries wait the normal gap or the server's time" "$(sleeps)" '45 45'
+eq "artifacts: retries count as requests" "$(requests)" 4
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art 1 403 '{"message":"API rate limit exceeded"}' 'X-RateLimit-Remaining: 0' "X-RateLimit-Reset: $((epoch + 4000))"
+run_wait
+failed "artifacts: reset after the deadline"
+eq "artifacts: reset after the deadline gives up at once" "$(requests)" 2
+# The check shares the 24-request budget: a producer seen done on the last
+# request leaves nothing to check its artifact with.
+new_case
+respond 24 200 "$(jobs completed success)"
+respond last 200 "$(jobs queued null)"
+run_wait
+failed "producer done on the last request"
+eq "producer done on the last request: no 25th request" "$(requests)" 24
+check "producer done on the last request: says so" grep -q 'no request left' "$d/out"
+new_case
+respond 23 200 "$(jobs completed success)"
+respond last 200 "$(jobs queued null)"
+respond_art last 502 '{}'
+run_wait
+failed "artifact check retries run out of the shared budget"
+eq "artifact check retries run out of the shared budget: 24 requests" "$(requests)" 24
 
 # --- cancellation ------------------------------------------------------------
 new_case

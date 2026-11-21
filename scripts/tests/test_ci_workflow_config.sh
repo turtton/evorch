@@ -13,6 +13,8 @@
 #     consumer that starts next to the producer, waits for the producer's
 #     success with scripts/wait-product-artifact.sh, and holds exactly the
 #     read-only permissions that wait needs.
+#  3. The producer's upload of `product-core` replaces an older same-name artifact
+#     (`overwrite: true`), so a re-run after a failed attempt cannot leave two.
 # Each check also fails on a mutated copy of the real files.
 # shellcheck disable=SC2016 # the workflow expression is matched literally
 set -euo pipefail
@@ -99,6 +101,19 @@ check_consumers() { # <ci.yml>
   return "$bad"
 }
 
+check_producer_overwrite() { # <ci.yml>
+  local dir
+  dir=$(mktemp -d "$work/producer.XXXXXX")
+  split_jobs "$1" "$dir"
+  [[ -f "$dir/product-artifact" ]] || { echo "no product-artifact job" >&2; return 1; }
+  # The upload step is the one that names product-core.
+  awk '
+    /^      - / { if (step ~ /actions\/upload-artifact/ && step ~ /name: product-core/) { found = 1; if (step ~ /\n *overwrite: true\n/) good = 1 } step = "" }
+    { step = step "\n" $0 }
+    END { if (step ~ /actions\/upload-artifact/ && step ~ /name: product-core/) { found = 1; if (step ~ /\n *overwrite: true(\n|$)/) good = 1 } exit !(found && good) }
+  ' "$dir/product-artifact" || { echo "the product-core upload must set overwrite: true" >&2; return 1; }
+}
+
 ci=.github/workflows/ci.yml
 groups=scripts/ci-test-groups.json
 fails=0
@@ -122,6 +137,7 @@ rejects() { # <description> <command...>
 
 ok "the tests matrix repeats ci-test-groups.json" check_matrix "$ci" "$groups"
 ok "every product artifact consumer waits for the producer or needs it" check_consumers "$ci"
+ok "the producer's product-core upload overwrites an older artifact" check_producer_overwrite "$ci"
 
 # The same checks reject drift.
 mutate() { # <name> <sed-script> <file>
@@ -163,6 +179,9 @@ awk -v job="$consumer" '
   $0 ~ "^  " job ":[[:space:]]*$" { on = 1 } on && /check-source/ && !done { done = 1; print "        run: true"; next } { print }
 ' "$ci" > "$work/ci-nosource.yml"
 rejects "a consumer that skips the source check" check_consumers "$work/ci-nosource.yml"
+
+mutate ci-no-overwrite.yml '/^          overwrite: true$/d' "$ci"
+rejects "a product-core upload without overwrite" check_producer_overwrite "$work/ci-no-overwrite.yml"
 
 if ((fails > 0)); then
   echo "$fails failure(s)" >&2

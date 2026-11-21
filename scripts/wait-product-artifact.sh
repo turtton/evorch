@@ -20,11 +20,22 @@
 #   One request per poll, always the same one:
 #     GET /repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100
 #   `filter=latest` is the latest attempt of each job, so a "re-run failed jobs"
-#   attempt still sees the producer's earlier success. No artifact listing, no
-#   per-attempt query, no other run is consulted.
+#   attempt still sees the producer's earlier success. No per-attempt query and
+#   no other run is consulted.
 #
-#   Budget: at most 24 requests (retries included) and 1800 seconds from the
-#   start. Request 1 is immediate, requests 2-14 are at least 45 s after the
+#   Once the producer has succeeded there is exactly one more request (plus
+#   retries of it):
+#     GET /repos/{repository}/actions/runs/{run_id}/artifacts?name=product-core&per_page=100
+#   The run must hold exactly one artifact of that name and it must not have
+#   expired; zero, several (a failed attempt's leftover next to a newer upload),
+#   an expired one, another run's entry, a malformed or a paged response all
+#   fail the job (fail closed). The producer's upload replaces an older
+#   same-name artifact (overwrite: true); this check is what notices that it
+#   did not. Which artifact is downloaded stays the download action's business:
+#   nothing here selects by id or by attempt, and no id is ever reported.
+#
+#   Budget (shared by both requests): at most 24 requests (retries included) and
+#   1800 seconds from the start. Request 1 is immediate, requests 2-14 are at least 45 s after the
 #   previous one, request 15 on at least 120 s, each plus a random 0-5 s. Rate
 #   limit responses (429, and 403 that carries Retry-After, an exhausted
 #   X-RateLimit-Remaining or a rate-limit message) are retried within the same
@@ -46,6 +57,7 @@
 set -euo pipefail
 
 producer_name=product-artifact
+artifact_name=product-core
 deadline_seconds=1800
 max_requests=24
 fast_requests=14   # requests 2..14 follow the short gap
@@ -95,7 +107,10 @@ token=${GITHUB_TOKEN:-${GH_TOKEN:-}}
 [[ "$jitter_max" =~ ^[0-9]+$ ]] || die "WAIT_PRODUCT_JITTER_MAX must be a number"
 attempt=${GITHUB_RUN_ATTEMPT:-unknown}
 api=${GITHUB_API_URL:-https://api.github.com}
-url="$api/repos/$repo/actions/runs/$run_id/jobs?filter=latest&per_page=100"
+jobs_url="$api/repos/$repo/actions/runs/$run_id/jobs?filter=latest&per_page=100"
+artifacts_url="$api/repos/$repo/actions/runs/$run_id/artifacts?name=$artifact_name&per_page=100"
+url=$jobs_url
+phase='jobs' # jobs: waiting for the producer; artifacts: the one-off artifact check
 
 tmp=$(umask 077 && mktemp -d)
 child=''
@@ -157,6 +172,16 @@ gap_before() { # <request number>
   local jitter=0
   if ((jitter_max > 0)); then jitter=$((RANDOM % (jitter_max + 1))); fi
   echo $((gap + jitter))
+}
+
+finish_waiting() { # the artifact check passed
+  local waited
+  waited=$(elapsed)
+  log "the product artifact job succeeded: job_id=$job_id producer_run_attempt=$producer_attempt producer_completed_at=$completed_at consumer_run_attempt=$attempt requests=$requests waited=${waited}s rate_limited=$rate_limited ratelimit_remaining=$last_remaining"
+  emit_outputs "product_job_id=$job_id" "product_run_attempt=$producer_attempt" \
+    "product_completed_at=$completed_at" "requests=$requests" "waited_seconds=$waited" \
+    "ratelimit_remaining=$last_remaining"
+  exit 0
 }
 
 log "waiting for the '$producer_name' job of run $run_id (consumer run_attempt=$attempt, deadline ${deadline_seconds} s, at most $max_requests requests)"
@@ -240,6 +265,27 @@ while true; do
     outcome=retry
   fi
 
+  if [[ "$outcome" == parse && "$phase" == artifacts ]]; then
+    backoff=$backoff_start
+    jq -e --arg run "$run_id" '
+      type == "object" and (.total_count | type) == "number" and (.artifacts | type) == "array"
+      and all(.artifacts[]; type == "object"
+        and (.name | type) == "string" and (.expired | type) == "boolean"
+        and (.id | type) == "number" and ((.workflow_run.id | tostring) == $run))' "$tmp/body" > /dev/null 2>&1 \
+      || fail_with "the artifacts response is malformed or belongs to another run"
+    total=$(jq -r '.total_count' "$tmp/body")
+    listed=$(jq -r '.artifacts | length' "$tmp/body")
+    if ((total > 100)) || ((listed != total)) || [[ "$(header_value link)" == *'rel="next"'* ]]; then
+      fail_with "the run has more artifacts ($total) than one page lists ($listed); this script supports one page"
+    fi
+    named=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name)] | length' "$tmp/body")
+    live=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | length' "$tmp/body")
+    log "request $requests: $named artifact(s) named '$artifact_name', $live not expired"
+    ((named == 1)) || fail_with "run $run_id holds $named artifacts named '$artifact_name', expected exactly 1 (a leftover of an earlier attempt, or the producer's upload is missing)"
+    ((live == 1)) || fail_with "the '$artifact_name' artifact of run $run_id has expired"
+    finish_waiting
+  fi
+
   if [[ "$outcome" == parse ]]; then
     backoff=$backoff_start
     jq -e --arg run "$run_id" '
@@ -268,12 +314,13 @@ while true; do
           completed)
             case "$conclusion" in
               success)
-                waited=$(elapsed)
-                log "the product artifact job succeeded: job_id=$job_id producer_run_attempt=$producer_attempt producer_completed_at=$completed_at consumer_run_attempt=$attempt requests=$requests waited=${waited}s rate_limited=$rate_limited ratelimit_remaining=$last_remaining"
-                emit_outputs "product_job_id=$job_id" "product_run_attempt=$producer_attempt" \
-                  "product_completed_at=$completed_at" "requests=$requests" "waited_seconds=$waited" \
-                  "ratelimit_remaining=$last_remaining"
-                exit 0
+                # The producer is done: check its artifact next, at once (this
+                # request is not a poll, so no gap), still inside the budget.
+                phase=artifacts
+                url=$artifacts_url
+                next_wait=0
+                ((requests < max_requests)) || fail_with "no request left within $max_requests requests to check the '$artifact_name' artifact"
+                continue
                 ;;
               null) fail_with "job $job_id is completed without a conclusion" ;;
               *) fail_with "the product artifact job finished with conclusion $conclusion (job $job_id)" ;;

@@ -354,6 +354,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: product-core
+          # A re-run of a failed producer replaces an older same-name artifact
+          # instead of leaving two for the consumers to pick from.
+          overwrite: true
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/evorch-product
