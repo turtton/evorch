@@ -49,20 +49,6 @@ pr18a crates/evorch-core/src/backend.rs crates/workbench-host/src/ingress/namesp
 # an input-carrying tool call, additive) and one assertion in
 # crates/evorch-core/tests/startup_recovery.rs, and the gate files themselves.
 
-# 5a-V test leaves are split along the §3 ownership table in
-# docs/single-core/5a-v-plan.md. The shared test target roots are integration
-# owned and deliberately absent from these scopes.
-pr5avq1 crates/evorch-core/tests/recovery_admin_install/q1.rs
-pr5avq2 crates/evorch-core/tests/recovery_admin_install/q2.rs
-pr5avadm crates/evorch-core/tests/recovery_admission.rs
-pr5avtargets crates/evorch-core/tests/public_restart_compose/targets.rs
-pr5avrecipes crates/evorch-core/tests/public_restart_compose/recipes.rs
-pr5avfinalize crates/evorch-core/tests/public_restart_compose/finalization.rs
-pr5avexec crates/evorch-core/tests/public_restart_exec.rs
-pr5avdeny crates/evorch-core/tests/public_restart_deny.rs
-pr5avsafe crates/evorch-core/tests/public_restart_safe.rs
-pr5avprod crates/evorch-core/tests/public_restart_product.rs
-pr5avnative crates/core-client-e2e/tests/public_restart_native.rs
 # F3 (the renderer data plane) adds three non-central leaves: the one-line
 # `pub mod renderer;` of crates/workbench-client/src/lib.rs, and the explicit
 # `open_artifact` implementations of crates/gui/src/html_preview/agent_pages.rs

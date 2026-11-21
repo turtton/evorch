@@ -71,42 +71,6 @@ expect ok "pr13 owns memory" "$central" --scope pr13 --files-from "$work/files"
 files crates/runtime/src/lib.rs
 expect fail "a file outside every scope" "$central" --scope pr13 --files-from "$work/files"
 
-# 5a-V's split test leaves are writable only by the owner named in §3. Shared
-# roots stay integration-owned and cannot be claimed by one of the leaf scopes.
-assert_owned_leaf() {
-  local owner=$1 other=$2 path=$3 label=$4
-  files "$path"
-  expect ok "$label is allowed in $owner" "$central" --scope "$owner" --files-from "$work/files"
-  expect fail "$label is denied in $other" "$central" --scope "$other" --files-from "$work/files"
-}
-assert_owned_leaf pr5avq1 pr5avq2 \
-  crates/evorch-core/tests/recovery_admin_install/q1.rs "V1a-1's Q1 leaf"
-assert_owned_leaf pr5avq2 pr5avq1 \
-  crates/evorch-core/tests/recovery_admin_install/q2.rs "V1a-2's Q2 leaf"
-assert_owned_leaf pr5avadm pr5avexec \
-  crates/evorch-core/tests/recovery_admission.rs "V-admission's target"
-assert_owned_leaf pr5avtargets pr5avrecipes \
-  crates/evorch-core/tests/public_restart_compose/targets.rs "V1b-2a's targets leaf"
-assert_owned_leaf pr5avrecipes pr5avtargets \
-  crates/evorch-core/tests/public_restart_compose/recipes.rs "V1b-2a's recipes leaf"
-assert_owned_leaf pr5avfinalize pr5avtargets \
-  crates/evorch-core/tests/public_restart_compose/finalization.rs "V1b-2b's finalization leaf"
-assert_owned_leaf pr5avexec pr5avdeny \
-  crates/evorch-core/tests/public_restart_exec.rs "V-exec's target"
-assert_owned_leaf pr5avdeny pr5avsafe \
-  crates/evorch-core/tests/public_restart_deny.rs "V-deny's target"
-assert_owned_leaf pr5avsafe pr5avdeny \
-  crates/evorch-core/tests/public_restart_safe.rs "V-safe's target"
-assert_owned_leaf pr5avprod pr5avexec \
-  crates/evorch-core/tests/public_restart_product.rs "V-prod's target"
-assert_owned_leaf pr5avnative pr5avq1 \
-  crates/core-client-e2e/tests/public_restart_native.rs "V-native's target"
-
-files crates/evorch-core/tests/recovery_admin_install/main.rs
-expect fail "Q1 cannot edit the shared recovery_admin_install root" "$central" --scope pr5avq1 --files-from "$work/files"
-files crates/evorch-core/tests/public_restart_compose/main.rs
-expect fail "targets cannot edit the shared public_restart_compose root" "$central" --scope pr5avtargets --files-from "$work/files"
-
 # 17d and 17e do not share a parser.
 files crates/evorch/src/backfill.rs
 expect ok "17d owns the online backfill" "$central" --scope pr17d --files-from "$work/files"
