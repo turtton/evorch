@@ -5,7 +5,7 @@ use evorch_core::{lifecycle::OperatorSignals, planned_bootstrap::PlannedBoot};
 
 pub fn run(
     args: args::Args,
-    mask: BlockedShutdownSignals,
+    mask: Arc<BlockedShutdownSignals>,
     inherited: HandoffEntry,
 ) -> Result<(), BootstrapError> {
     let config_dir = args
@@ -14,6 +14,9 @@ pub fn run(
         .ok_or("cannot resolve config directory; pass --config-dir")?;
     let identity = ConfigIdentity::new(&config_dir)?;
     let core_identity = identity.identity().to_owned();
+    let config_dir = identity.config_dir().to_path_buf();
+    let options =
+        evorch_core::lifecycle::product_exit::ProductOptions::new(config_dir.clone(), args.web);
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::home_dir().map(|p| p.join(".local/state")))
@@ -80,12 +83,20 @@ pub fn run(
         );
         let mut lifecycle = LifecycleDriver::new(&host);
         lifecycle.set_shutdown_watchdog(observer)?;
+        let exit = evorch_core::lifecycle::product_exit::ProductExitContext::new(
+            instance.clone(), mask, signals.clone(), lifecycle.control_drain(), options,
+        );
+        evorch_core::admin_composition::install(
+            &evorch_core::admin_composition::Inputs::new(&host, &backend)
+                .with_finalization(lifecycle.finalization(), &exit),
+        );
         let outcome = lifecycle
-            .run_with_web(&host, backend.clone(), listener, server, signals)
+            .run_owned_with_web(&mut host, backend.clone(), listener, server, signals, &exit)
             .await;
         host.shutdown().await?;
         drop(backend);
         drop(host);
+        drop(exit);
         drop(instance);
         outcome?;
         Ok(())

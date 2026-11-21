@@ -3,28 +3,27 @@ mod audit_sealing;
 #[cfg(target_os = "linux")]
 mod later;
 mod m2;
-use std::collections::{BTreeMap, BTreeSet};
-use storage::recovery::restart::{RestartMetadata, RestartMutation, RestartTransaction};
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
+use storage::recovery::restart::RestartMetadata;
+use storage::recovery::restart::{RestartMutation, RestartTransaction};
 use workbench_host::bootstrap::planned_exit::ExitStage;
-fn metadata() -> RestartMetadata {
-    RestartMetadata {
-        restart_id: "restart".into(),
-        capture_id: "capture".into(),
-        config_identity: "config".into(),
-        old_epoch: 1,
-        successor_epoch: 2,
-        old_build: "old".into(),
-        successor_build: "new".into(),
-        target_identity: "target".into(),
-        handoff_version: 1,
-        snapshot_version: 1,
-        storage_version: 62,
-        old_builtin_tool_names: BTreeSet::from(["read".into()]),
-        old_compiled_catalog_fingerprint: None,
-        new_compiled_catalog_fingerprint: None,
-        old_effective_tools_fingerprint: None,
-        new_effective_tools_fingerprint: None,
-    }
+#[path = "../../../shared-test-support/restart_metadata.rs"]
+mod restart_metadata;
+use restart_metadata::metadata;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn assert_workers_joined(core: &RestartCoordinator) {
+    let state = core.0.state.lock().unwrap();
+    assert!(
+        state
+            .completed_stage
+            .is_some_and(|stage| stage >= ExitStage::WorkersJoined),
+        "{:?}",
+        state.completed_stage
+    );
 }
 
 fn transaction(host: &BootstrappedHost) -> RestartTransaction {

@@ -1,5 +1,5 @@
 use super::*;
-mod finalization;
+pub(crate) mod finalization;
 mod learning;
 mod preparing;
 mod shutdown;
