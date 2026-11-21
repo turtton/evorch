@@ -38,10 +38,6 @@ impl GraphDisposalKey {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
-)]
 impl ThreadScratch {
     /// Recheck an unused snapshot after runtime/main DB observations, while the
     /// caller holds the existing owners-registry reservation. Never read runtime

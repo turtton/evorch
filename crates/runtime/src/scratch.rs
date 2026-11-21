@@ -160,10 +160,6 @@ struct State {
     archived: HashMap<String, u64>,
     archive_seen: HashMap<RunId, (String, u64)>,
     execution_keys: HashMap<(RunId, String), ScratchKey>,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Q2 leaf (pr07b5aq2) wires the product caller")
-    )]
     reset_effects: HashMap<GraphDisposalKey, bool>,
 }
 
