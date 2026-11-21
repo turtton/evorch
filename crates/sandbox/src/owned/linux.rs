@@ -15,6 +15,10 @@ struct State {
     child: Option<GuardChild>,
     pid: Option<u32>,
     lost: Option<String>,
+    /// KILL was requested: control is half-closed and the group is already being
+    /// torn down, so a later TERM has nothing to do and must not read as a lost
+    /// transport.
+    killed: bool,
 }
 impl OwnedGroup {
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -23,15 +27,23 @@ impl OwnedGroup {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     fn call<T>(&self, f: impl FnOnce(&mut GuardChild) -> io::Result<T>) -> io::Result<T> {
+        self.call_flagged(|child, _| f(child))
+    }
+    /// `call` whose operation can also read and set the `killed` flag under
+    /// the same lock, so a KILL and a later TERM cannot interleave.
+    fn call_flagged<T>(
+        &self,
+        f: impl FnOnce(&mut GuardChild, &mut bool) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut state = self.lock();
         if let Some(error) = &state.lost {
             return Err(io::Error::other(error.clone()));
         }
-        let child = state
-            .child
+        let State { child, killed, .. } = &mut *state;
+        let child = child
             .as_mut()
             .ok_or_else(|| io::Error::other("owner retired"))?;
-        match f(child) {
+        match f(child, killed) {
             Ok(value) => {
                 if state.child.as_ref().expect("checked child").is_reaped() {
                     state.pid = None;
@@ -53,15 +65,19 @@ impl OwnedGroup {
         if self.id().is_none() {
             return Ok(());
         }
-        self.call(GuardChild::force_kill)
+        self.call_flagged(|child, killed| {
+            child.force_kill()?;
+            *killed = true;
+            Ok(())
+        })
     }
     /// Normal Stop remains TERM. Core death/force/Drop use KILL.
     pub fn terminate(&self) -> io::Result<()> {
         if self.id().is_none() {
             return Ok(());
         }
-        self.call(|child| {
-            if child.poll_status()?.is_some() {
+        self.call_flagged(|child, killed| {
+            if *killed || child.poll_status()?.is_some() {
                 return Ok(());
             }
             child.request_signal(libc::SIGTERM)
@@ -96,6 +112,7 @@ impl Owner {
                 child: Some(child),
                 pid: Some(pid),
                 lost: None,
+                killed: false,
             }))),
             stdin,
             stdout,

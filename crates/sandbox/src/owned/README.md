@@ -76,6 +76,9 @@ slash), and `WrappedCommand::to_command` (eval verify).
 - TERM is normal Stop; force/Drop/core death use KILL. No bare-PGID fallback.
   Control requests return io::Result, not cleanup success. Transport/decoder loss
   stays sticky until wait reports failure; a reaper cannot confirm that ledger entry.
+- A TERM after a KILL (control already half-closed, e.g. a supervisor's grace expiry
+  after a ledger stop) is a no-op, not a lost transport; the flag is read and set
+  under the owner lock together with the control write.
 - Inherited **closed** stdio is normalized to /dev/null (EOF / accepted writes).
   Explicit pipes/null/files keep their semantics. B2b must document each caller's
   selection; preserving EBADF is not promised by this new API. No caller changes

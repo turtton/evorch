@@ -521,3 +521,30 @@ async fn spawn_blocking_registers_in_the_ledger_and_reports_launch_failures() {
     .expect_err("a closed fence starts nothing");
     assert_eq!(ledger.child_stats().registered, 1);
 }
+
+// Given: a group that was force-killed (control half-closed) / When: a late
+// TERM follows, as a supervisor's grace expiry sends after a ledger stop /
+// Then: it is a no-op, not a lost transport, and the ledger still confirms.
+#[tokio::test]
+async fn a_term_after_a_kill_is_not_a_lost_transport() {
+    let ledger = SpawnLedger::new();
+    let mut child = OwnedChild::spawn_blocking(
+        Some(ledger.clone()),
+        ChildKind::Other,
+        None,
+        command("sleep 60"),
+    )
+    .await
+    .unwrap();
+    child.group().kill().unwrap();
+    child.group().terminate().unwrap();
+    child.group().kill().unwrap();
+    let status = child.wait().await.unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    drop(child);
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+}
