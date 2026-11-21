@@ -150,6 +150,29 @@ fresh; printf 'pub use gui::core_client;\n' >> "$t/crates/gui/tests/support/mod.
 expect_fail "core_client in a shared support file reached by #[path]" "support/mod.rs names core_client" "$t" "$reg" check-sources
 fresh; printf 'include!("../shared.rs");\n' >> "$t/crates/gui/tests/matrix/geometry.rs"; printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared.rs"
 expect_fail "core_client in a file reached by include!" "shared.rs names core_client" "$t" "$reg" check-sources
+# A shared source reached by #[path] is followed through its own mod child;
+# declarations (mod.rs directory rule, then the <stem>/ directory rule), several levels deep.
+fresh; mkdir -p "$t/crates/gui/tests/shared/child" "$t/crates/gui/tests/shared/inline"
+printf '#[path = "../shared/mod.rs"]\nmod shared;\n' >> "$t/crates/gui/tests/attention/main.rs"
+printf 'mod child;\n' > "$t/crates/gui/tests/shared/mod.rs"
+printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"
+printf "pub fn g() {}\n" > "$t/crates/gui/tests/shared/child/grand.rs"
+expect_ok "a multi-level shared module tree without core_client" "$t" "$reg" check-sources
+printf 'use gui::core_client;\n' > "$t/crates/gui/tests/shared/child.rs"
+expect_fail "core_client in a shared mod child; (mod.rs rule)" "shared/child.rs names core_client" "$t" "$reg" check-sources
+printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"; printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared/child/grand.rs"
+expect_fail "core_client two levels below the shared root (<stem>/ rule)" "shared/child/grand.rs names core_client" "$t" "$reg" check-sources
+printf 'pub fn g() {}\n' > "$t/crates/gui/tests/shared/child/grand.rs"; printf 'pub mod ghost;\n' >> "$t/crates/gui/tests/shared/child.rs"
+expect_fail "a shared mod ghost; that resolves to no file" "mod ghost;.*which does not resolve" "$t" "$reg" check-sources
+printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"; printf 'pub mod inline { mod nested; }\n' >> "$t/crates/gui/tests/shared/mod.rs"
+printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared/inline/nested.rs"
+expect_fail "a mod x; nested in an inline module of a shared file" "inline/nested.rs names core_client" "$t" "$reg" check-sources
+fresh; mkdir -p "$t/crates/gui/tests/shared"
+printf '#[path = "../shared/mod.rs"]\nmod shared;\n' >> "$t/crates/gui/tests/attention/main.rs"
+printf '#[cfg(test)]\n#[path = "other.rs"]\npub mod renamed;\nconst S: &str = "mod notreal;";\n// mod commented;\n' > "$t/crates/gui/tests/shared/mod.rs"
+printf 'pub fn o() {}\n' > "$t/crates/gui/tests/shared/other.rs"
+expect_ok "a path-attributed mod, a string and a comment are not module declarations" "$t" "$reg" check-sources
+
 fresh; printf 'use r#core_client::P;\n' >> "$t/crates/gui/tests/attention/panel.rs"
 expect_fail "a raw identifier" "names core_client" "$t" "$reg" check-sources
 fresh; printf '#[path = "../missing.rs"]\nmod missing;\n' >> "$t/crates/gui/tests/attention/main.rs"

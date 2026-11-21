@@ -42,6 +42,29 @@ for group in runtime gui storage-tools support; do
   done
 done
 
+# What is listed and run does not depend on the event: a pull request and a push
+# to main select the same tests, so the inventory they merge is the same.
+for group in runtime gui storage-tools support; do
+  shards=$(jq -r --arg g "$group" '.groups[$g].shards' scripts/ci-test-groups.json)
+  for suite in cache io remaining ci-remaining main-only-gui; do
+    for event in "pull_request refs/pull/762/merge" "push refs/heads/main" "workflow_dispatch refs/heads/other"; do
+      export STUB_OUT="$work/event.${event%% *}.out"
+      GITHUB_EVENT_NAME=${event%% *} GITHUB_REF=${event#* } PATH="$work/bin:$PATH" \
+        "$work/scripts/run-contract-tests.sh" --group "$group" --shard "1/$shards" --list "$suite"
+    done
+    if ! cmp -s "$work/event.pull_request.out" "$work/event.push.out" || ! cmp -s "$work/event.push.out" "$work/event.workflow_dispatch.out"; then
+      echo "FAIL: $group $suite: the listed selection depends on the event" >&2
+      fails=$((fails + 1))
+    fi
+  done
+done
+for script in run-contract-tests.sh run-test-group.sh verify-test-inventory.sh; do
+  if grep -qE 'GITHUB_(EVENT_NAME|REF|BASE_REF|HEAD_REF)' "scripts/$script"; then
+    echo "FAIL: scripts/$script reads the event; the inventory must not depend on it" >&2
+    fails=$((fails + 1))
+  fi
+done
+
 # The local remaining suite keeps its meaning: it is neither cache nor io, and it
 # does not mention the main-only registry.
 if "$work/scripts/run-contract-tests.sh" --print-filter remaining | grep -q 'binary(=attention)'; then

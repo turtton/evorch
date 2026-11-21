@@ -118,16 +118,57 @@ strip_comments() {
     }' "$1"
 }
 
+# Names of the `mod name;` declarations of a comment-stripped source that are
+# not given a `#[path]` (those are followed through the path attribute).
+mod_declarations() {
+  tr '\n' ' ' < "$1" \
+    | sed -E 's/#\[ *path *= *"[^"]*" *\]( *#\[[^]]*\])* *(pub( *\([^)]*\))? +)?mod +[A-Za-z_][A-Za-z0-9_]* *;/ /g' \
+    | sed -E 's/"([^"\\]|\\.)*"/""/g' \
+    | { grep -oE '(^|[^A-Za-z0-9_])mod +[A-Za-z_][A-Za-z0-9_]* *;' || true; } \
+    | sed -E 's/^[^m]*mod +([A-Za-z_][A-Za-z0-9_]*) *;$/\1/'
+}
+
+# The file of module `$2` declared as `mod $2;` in a file whose child modules
+# live in directory $1: <dir>/<name>.rs or <dir>/<name>/mod.rs. A declaration
+# nested in an inline `mod { }` block looks in a deeper directory, so when the
+# direct candidates do not exist the subtree of $1 is searched before failing.
+resolve_module() {
+  local dir=$1 name=$2 found
+  if [[ -f "$dir/$name.rs" ]]; then echo "$dir/$name.rs"; return 0; fi
+  if [[ -f "$dir/$name/mod.rs" ]]; then echo "$dir/$name/mod.rs"; return 0; fi
+  found=$(find "$dir" -type f \( -name "$name.rs" -o -path "*/$name/mod.rs" \) -print 2>/dev/null | LC_ALL=C sort | head -n 1)
+  [[ -n "$found" ]] || return 1
+  echo "$found"
+}
+
+# The directory in which the child modules of a module file live: the file's
+# own directory for mod.rs, <dir>/<stem> for any other module file.
+child_moddir() {
+  local f
+  f=$(canonical "$1")
+  if [[ "${f##*/}" == mod.rs ]]; then echo "${f%/*}"; else echo "${f%.rs}"; fi
+}
+
+canonical() { echo "$(cd "${1%/*}" && pwd -P)/${1##*/}"; }
+
 check_sources() {
-  local target src base file ref resolved dir stripped hits n_path n_path_ok n_inc n_inc_ok files_total=0
+  local target src base file ref resolved dir stripped hits n_path n_path_ok n_inc n_inc_ok name modfile files_total=0
   local -a queue
-  declare -A seen
+  declare -A seen moddir
   for target in $(targets); do
     source_of "$target"
     queue=()
     seen=()
-    add() { if [[ -z "${seen[$1]:-}" ]]; then seen[$1]=1; queue+=("$1"); fi; }
-    add "$src"
+    moddir=()
+    # add FILE [MODDIR]: a file with a MODDIR is followed through its `mod x;`
+    # declarations; the files found by scanning the binary directory are not.
+    add() {
+      local f
+      f=$(canonical "$1")
+      if [[ -z "${seen[$f]:-}" ]]; then seen[$f]=1; queue+=("$f"); fi
+      if [[ -n "${2:-}" && -z "${moddir[$f]:-}" ]]; then moddir[$f]=$2; fi
+    }
+    add "$src" "$(canonical "$src" | sed 's|/[^/]*$||')"
     if [[ "${src##*/}" == main.rs ]]; then base=${src%/*}; else base=${src%.rs}; fi
     if [[ -d "$base" ]]; then
       while IFS= read -r -d '' file; do add "$file"; done < <(find "$base" -type f -name '*.rs' -print0 | LC_ALL=C sort -z)
@@ -160,11 +201,19 @@ check_sources() {
         resolved="$dir/$ref"
         [[ -f "$resolved" ]] || fail "binary $target: $file refers to $ref, which does not exist"
         resolved=$(cd "${resolved%/*}" && pwd -P)/${resolved##*/}
-        add "$resolved"
+        add "$resolved" "$(canonical "$resolved" | sed 's|/[^/]*$||')"
       done < <({
         { grep -oE '#\[path *= *"[^"]*" *\]' "$stripped" || true; } | sed -E 's/^#\[path *= *"([^"]*)" *\]$/\1/'
         { grep -oE '(^|[^A-Za-z0-9_])include! *\( *"[^"]*" *\)' "$stripped" || true; } | sed -E 's/^.*include! *\( *"([^"]*)" *\)$/\1/'
       })
+      if [[ -n "${moddir[$file]:-}" ]]; then
+        while IFS= read -r name; do
+          [[ -n "$name" ]] || continue
+          modfile=$(resolve_module "${moddir[$file]}" "$name") \
+            || fail "binary $target: $file declares 'mod $name;', which does not resolve under ${moddir[$file]}"
+          add "$modfile" "$(child_moddir "$modfile")"
+        done < <(mod_declarations "$stripped")
+      fi
     done
   done
   echo "main-only GUI sources: $(targets | wc -l | tr -d ' ') binaries, $files_total files read, no core_client reference"

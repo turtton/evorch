@@ -384,8 +384,12 @@ check_cache_hit() { # <ci.yml>
 
 # The condition as a truth table over the action's output: only the exact string
 # true skips the steps; false, empty and anything unknown run them.
+# Models the condition the way Actions evaluates it: string `==` and `!=` compare
+# ignoring case, and a missing output is the empty string. The producer's range
+# is "true" or "false" (Swatinem/rust-cache sets cache-hit from a boolean); the
+# other values only pin that anything but an exact hit runs the recipe.
 check_cache_hit_truth() { # <ci.yml>
-  local dir f cond op lit value want got bad=0
+  local dir f cond op lit value want got bad=0 lower
   dir=$(mktemp -d "$work/truth.XXXXXX")
   split_jobs "$1" "$dir"
   f="$dir/cache-save"
@@ -394,13 +398,14 @@ check_cache_hit_truth() { # <ci.yml>
   op=${cond%% *}
   lit=${cond#* }
   for value in true false '' unknown TRUE 1; do
+    lower=${value,,}
     if [[ "$op" == '!=' ]]; then
-      if [[ "$value" != "$lit" ]]; then got=run; else got=skip; fi
+      if [[ "$lower" != "$lit" ]]; then got=run; else got=skip; fi
     else
-      if [[ "$value" == "$lit" ]]; then got=run; else got=skip; fi
+      if [[ "$lower" == "$lit" ]]; then got=run; else got=skip; fi
     fi
     want=run
-    [[ "$value" != true ]] || want=skip
+    [[ "${value,,}" != true ]] || want=skip
     if [[ "$got" != "$want" ]]; then
       echo "cache-hit '$value': the recipe steps would $got, expected $want" >&2
       bad=1
