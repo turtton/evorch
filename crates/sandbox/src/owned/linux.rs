@@ -162,10 +162,11 @@ impl Drop for Owner {
             let _ = std::thread::Builder::new()
                 .name("guard-reaper".into())
                 .spawn(move || {
-                    if child.wait().is_ok() && !known_lost {
-                        if let Some(entry) = entry {
-                            entry.reaped();
-                        }
+                    if child.wait().is_ok()
+                        && !known_lost
+                        && let Some(entry) = entry
+                    {
+                        entry.reaped();
                     }
                 });
         }
@@ -246,10 +247,10 @@ impl OwnedSession {
             let stderr = err
                 .join()
                 .map_err(|_| io::Error::other("stderr reader panicked"))??;
-            if let Err(error) = written {
-                if error.kind() != io::ErrorKind::BrokenPipe {
-                    return Err(error);
-                }
+            if let Err(error) = written
+                && error.kind() != io::ErrorKind::BrokenPipe
+            {
+                return Err(error);
             }
             Ok(std::process::Output {
                 status: status?,
