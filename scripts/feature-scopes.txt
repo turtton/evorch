@@ -8,6 +8,9 @@
 # samples and golden file, each as `<area>.rs` or inside `<area>/`, and the tests
 # whose file name starts with `<area>`.
 #
+# V0-reg owns integration-only test target registrations and shared module roots;
+# their leaf modules remain owned by later feature PRs.
+#
 # memory, improvement and evaluation are owned by PR 13 first; 14 and 17c take
 # them over only after 13 is merged, so no two scopes are open on them at once.
 # `docs/*` is every scope's. PR 16a-1 measures the renderer outside the

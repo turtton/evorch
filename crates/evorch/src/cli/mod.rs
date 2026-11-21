@@ -29,6 +29,8 @@ pub enum Route {
     Backfill,
     /// `evorch maintenance <anything else>`: the offline tool.
     Maintenance,
+    /// `evorch core ...`: management of a running core.
+    CoreAdmin,
     Inspect,
     Benchmark,
 }
@@ -36,6 +38,7 @@ pub enum Route {
 /// The command `argv` (without the program name) names.
 pub fn route(argv: &[String]) -> Route {
     match argv.first().map(String::as_str) {
+        Some("core") => Route::CoreAdmin,
         Some("benchmark") => Route::Benchmark,
         Some("maintenance") if argv.get(1).map(String::as_str) == Some("backfill-events") => {
             Route::Backfill
@@ -56,6 +59,7 @@ pub fn dispatch(argv: Vec<String>) -> ExitCode {
         Route::Reindex => reindex::main(argv),
         Route::Backfill => backfill::main(argv),
         Route::Maintenance => maintenance::main(argv),
+        Route::CoreAdmin => core_admin::main(argv),
         Route::Inspect => inspect::main(argv),
         Route::Benchmark => benchmark::main(argv),
     }
@@ -100,6 +104,8 @@ mod tests {
     fn each_command_line_goes_to_its_module() {
         assert_eq!(route_of(&[]), Route::Run);
         assert_eq!(route_of(&["--prompt", "x"]), Route::Run);
+        assert_eq!(route_of(&["restart"]), Route::Run);
+        assert_eq!(route_of(&["core", "restart", "request"]), Route::CoreAdmin);
         assert_eq!(route_of(&["eval", "run"]), Route::Eval);
         assert_eq!(route_of(&["reindex-threads"]), Route::Reindex);
         assert_eq!(route_of(&["inspect", "--db", "x"]), Route::Inspect);

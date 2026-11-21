@@ -102,6 +102,8 @@ jobs:
         run: |
           scripts/tests/test_check_central_files.sh
           scripts/check-central-files.sh --check-data
+          bash scripts/tests/test_check_admin_publish_boundary.sh
+          bash scripts/check-admin-publish-boundary.sh
           bash scripts/tests/test_check_q2_boundaries.sh
           bash scripts/check-q2-boundaries.sh
           scripts/check-core-client-refs.sh
@@ -969,10 +971,11 @@ jobs:
           export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           scripts/guard-cargo.sh run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
-      # Registered by I0 for F4-E, O-V3 and O-V2. The placeholders prove only that
+      # Registered by I0 for F4-E, O-V3 and O-V2, and V0-reg for public restart.
+      # The placeholders prove only that
       # the targets are selected (--no-tests fail) and that the sealed product
       # artifact reached this job; the real tests replace them.
       - name: Product tests through real CEF
-        run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --run-ignored only --success-output immediate --no-tests fail
+        run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --test public_restart_product --run-ignored only --success-output immediate --no-tests fail
       - name: GUI observation through real CEF and Chromium
         run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
