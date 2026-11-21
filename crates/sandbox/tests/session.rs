@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use sandbox::owned::OwnedSession;
 use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, DirectSandbox, Sandbox, SandboxError};
 
 fn spec(program: &str, args: &[&str]) -> CommandSpec {
@@ -20,7 +21,7 @@ fn spec(program: &str, args: &[&str]) -> CommandSpec {
 }
 
 fn round_trip(sandbox: &dyn Sandbox, command: CommandSpec) {
-    let mut session = sandbox::StdioSession::spawn(sandbox, command).expect("spawn session");
+    let mut session = OwnedSession::spawn_sandboxed(None, sandbox, command).expect("spawn session");
     let mut stdin = session.take_stdin().expect("stdin");
     let mut stdout = session.take_stdout().expect("stdout");
     let mut stderr = session.take_stderr().expect("stderr");
@@ -63,10 +64,10 @@ fn echoes_when_stderr_exceeds_pipe_capacity() {
 fn reaps_when_dropped_with_stdin_still_owned_by_consumer() {
     // Given: cat cannot exit from stdin EOF because the consumer retains its pipe.
     let mut session =
-        sandbox::StdioSession::spawn(&DirectSandbox::new_unchecked(), spec("cat", &[]))
+        OwnedSession::spawn_sandboxed(None, &DirectSandbox::new_unchecked(), spec("cat", &[]))
             .expect("spawn session");
     let _stdin = session.take_stdin().expect("stdin");
-    let pid = session.id();
+    let pid = session.id().expect("a running target");
     // When: destroy the process owner.
     drop(session);
     // Then: kill -0 would succeed for a zombie; failure proves synchronous reaping.
@@ -93,7 +94,7 @@ impl Sandbox for DeniedSandbox {
 #[test]
 fn fails_closed_when_wrapping_is_denied() {
     // Given: a sandbox rejecting a valid executable / When: request a session.
-    let result = sandbox::StdioSession::spawn(&DeniedSandbox, spec("cat", &[]));
+    let result = OwnedSession::spawn_sandboxed(None, &DeniedSandbox, spec("cat", &[]));
     // Then: no fallback execution occurs and the policy error survives.
     assert!(matches!(
         result,
@@ -106,7 +107,8 @@ fn fails_closed_when_wrapping_is_denied() {
 #[test]
 fn returns_io_error_when_executable_is_missing() {
     // Given: a nonexistent executable / When: request a session.
-    let result = sandbox::StdioSession::spawn(
+    let result = OwnedSession::spawn_sandboxed(
+        None,
         &DirectSandbox::new_unchecked(),
         spec("/nonexistent/session-command", &[]),
     );

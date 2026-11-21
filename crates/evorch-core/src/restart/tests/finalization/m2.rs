@@ -49,12 +49,12 @@ async fn unconfirmed_reap_blocks_worker_join_and_storage_drain() {
     let (_dir, mut host) = boot().await;
     let core = RestartCoordinator::new(&host);
     // No pid: this synthetic receipt cannot signal any real process.
-    let group = sandbox::process::ProcessGroup::new(None);
+    let group = sandbox::process::ProcessGroup::retired();
     let entry = host
         .spawn_ledger
         .admit()
         .unwrap()
-        .register_group(sandbox::ledger::ChildKind::Other, None, &group)
+        .register_pty_group(sandbox::ledger::ChildKind::Other, None, &group)
         .unwrap();
     drop(entry); // Lose the owner's reap confirmation, not an actual child.
     let id = start(&mut host, &core).await;

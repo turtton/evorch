@@ -7,8 +7,9 @@
 //! core starts is registered here, while it is started, and the core stops and
 //! reaps it by name:
 //!
-//! * **Children.** [`Admission::spawn_group`] and [`Admission::register_group`]
-//!   enter a child in the ledger. [`SpawnLedger::stop_child`],
+//! * **Children.** [`Admission::spawn_owned`] (a guard-owned child) and
+//!   [`Admission::register_pty_group`] (a pseudo-terminal child, until B3) enter a
+//!   child in the ledger. [`SpawnLedger::stop_child`],
 //!   [`terminate_child`](SpawnLedger::terminate_child) and
 //!   [`stop_all_children`](SpawnLedger::stop_all_children) signal the process
 //!   group of a registered child only: there is no way to name a process by its
@@ -49,7 +50,9 @@ pub use children::{
 };
 pub use workers::{JoinFailed, WorkerActivity, WorkerId, WorkerInfo, WorkerStats};
 
-use crate::process::{GroupChild, ProcessGroup};
+#[cfg(not(target_os = "linux"))]
+use crate::process::GroupChild;
+use crate::process::ProcessGroup;
 
 /// Why a child or a worker could not be started through the ledger.
 #[derive(Debug, thiserror::Error)]
@@ -237,33 +240,35 @@ impl Admission<'_> {
         self.managed.as_ref().map(|(ledger, _)| *ledger)
     }
 
-    /// Spawn `command` as a [`GroupChild`] and register it.
+    /// Spawn `command` as a `GroupChild` and register it (non-Linux adapter only).
     ///
-    /// `command` must carry the launch policy, as for [`GroupChild::spawn`].
-    /// `label` is a short name for diagnostics; never put a secret in it.
+    /// `command` must carry the launch policy.
     ///
     /// # Errors
-    /// The spawn error of [`GroupChild::spawn`].
-    pub fn spawn_group(
+    /// The spawn error of `GroupChild::spawn`.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn spawn_group(
         &self,
         kind: ChildKind,
         label: Option<&str>,
         command: &mut tokio::process::Command,
     ) -> io::Result<GroupChild> {
         let mut child = GroupChild::spawn(command)?;
-        if let Some(entry) = self.register_group(kind, label, child.group()) {
+        if let Some(entry) = self.register_pty_group(kind, label, child.group()) {
             child.attach(entry);
         }
         Ok(child)
     }
 
-    /// Register a child some other owner started inside this admission.
+    /// Register a pseudo-terminal child its own owner started inside this
+    /// admission (B3 replaces this raw path).
     ///
-    /// `group` is the group of a child started with the launch policy. The
-    /// owner calls [`ChildEntry::reaped`] once it has reaped the leader; a
-    /// dropped entry means the owner gave the child up without reaping it.
-    /// `None` without a ledger.
-    pub fn register_group(
+    /// A [`ProcessGroup`] can only come from a portable-pty child
+    /// ([`ProcessGroup::of_pty_child`]), so no other kind of child can enter the
+    /// ledger through here. The owner calls [`ChildEntry::reaped`] once it has
+    /// reaped the leader; a dropped entry means the owner gave the child up
+    /// without reaping it. `None` without a ledger.
+    pub fn register_pty_group(
         &self,
         kind: ChildKind,
         label: Option<&str>,

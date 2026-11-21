@@ -1,8 +1,9 @@
-use std::{process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
+use sandbox::{
+    ChildKind,
+    owned::{OwnedChild, OwnedCommand},
 };
+use std::{process::Stdio, time::Duration};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const OUTPUT_LIMIT: usize = 64 * 1024;
 
@@ -21,23 +22,22 @@ async fn read_output(mut pipe: impl AsyncRead + Unpin) -> Result<Vec<u8>, String
     }
 }
 
-/// Run a fresh `command` (each call adds the launch policy to it) and return
-/// its stdout.
-pub async fn run(command: &mut Command, timeout: Duration) -> Result<String, String> {
-    // User-defined executables run in their own session without the GUI's
-    // terminal or descriptors. When the command exits, what it left running is
-    // killed so held output pipes cannot turn a result into a timeout; leaving
-    // early (timeout, output limit, drop) kills the whole group, not only the
-    // direct child.
-    sandbox::process::apply_launch_policy(command.as_std_mut());
-    let mut child = sandbox::process::GroupChild::spawn(
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true),
-    )
-    .map_err(|e| e.to_string())?;
+/// Run `command` and return its stdout.
+///
+/// stdin is /dev/null and stdout and stderr are piped: the command depends on no
+/// inherited descriptor. User-defined executables run guard-owned in their own
+/// session without the GUI's terminal or descriptors. When the command exits, what
+/// it left running is killed so held output pipes cannot turn a result into a
+/// timeout; leaving early (timeout, output limit, drop) kills the whole group, not
+/// only the direct child.
+pub async fn run(mut command: OwnedCommand, timeout: Duration) -> Result<String, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = OwnedChild::spawn_blocking(None, ChildKind::Other, None, command)
+        .await
+        .map_err(|e| e.to_string())?;
     let stdout = child.take_stdout().ok_or("missing stdout")?;
     let stderr = child.take_stderr().ok_or("missing stderr")?;
     let work = async {
@@ -63,21 +63,31 @@ pub async fn run(command: &mut Command, timeout: Duration) -> Result<String, Str
 mod tests {
     use super::*;
 
+    fn sh(script: &str) -> OwnedCommand {
+        let mut command = OwnedCommand::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
     #[tokio::test]
     async fn output_limit_rejects_unbounded_stdout_and_stderr() {
         for script in ["yes x", "yes x >&2"] {
-            let result = run(
-                Command::new("sh").args(["-c", script]),
-                Duration::from_secs(2),
-            )
-            .await;
+            let result = run(sh(script), Duration::from_secs(2)).await;
             assert_eq!(result, Err("external command output limit exceeded".into()));
         }
     }
 
     #[tokio::test]
     async fn timeout_stops_pending_process() {
-        let result = run(Command::new("sleep").arg("60"), Duration::from_millis(10)).await;
+        let result = run(
+            {
+                let mut command = OwnedCommand::new("sleep");
+                command.arg("60");
+                command
+            },
+            Duration::from_millis(10),
+        )
+        .await;
         assert_eq!(result, Err("external command timed out".into()));
     }
 }
@@ -85,6 +95,12 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::*;
+
+    fn sh(script: &str) -> OwnedCommand {
+        let mut command = OwnedCommand::new("sh");
+        command.args(["-c", script]);
+        command
+    }
 
     /// Wait until `pid` no longer runs; a zombie waiting for its reaper counts as stopped.
     async fn assert_stops(pid: &str) {
@@ -120,11 +136,7 @@ mod linux_tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("helper.pid");
         let script = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
-        let result = run(
-            Command::new("sh").args(["-c", &script]),
-            Duration::from_secs(1),
-        )
-        .await;
+        let result = run(sh(&script), Duration::from_secs(1)).await;
 
         // Then: the helper stops with the command, not only the direct child.
         assert_eq!(result, Err("external command timed out".into()));
@@ -136,7 +148,7 @@ mod linux_tests {
         // Given: a command that succeeds but leaves a helper holding its stdout.
         let started = std::time::Instant::now();
         let result = run(
-            Command::new("sh").args(["-c", "sleep 60 & printf '%s' $!; exit 0"]),
+            sh("sleep 60 & printf '%s' $!; exit 0"),
             Duration::from_secs(30),
         )
         .await;
@@ -154,13 +166,7 @@ mod linux_tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("helper.pid");
         let script = format!("sleep 60 & echo $! > '{}'; wait", pid_file.display());
-        let task = tokio::spawn(async move {
-            run(
-                Command::new("sh").args(["-c", &script]),
-                Duration::from_secs(60),
-            )
-            .await
-        });
+        let task = tokio::spawn(async move { run(sh(&script), Duration::from_secs(60)).await });
         let helper = wait_for_pid_file(&pid_file).await;
 
         // When: the caller drops the run.
@@ -184,12 +190,7 @@ mod linux_tests {
         );
 
         // When: the command reports its pid, its session and that descriptor.
-        let stdout = run(
-            Command::new("sh").args(["-c", &probe]),
-            Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
+        let stdout = run(sh(&probe), Duration::from_secs(10)).await.unwrap();
 
         // Then: it leads a session of its own and the descriptor did not reach it.
         let lines: Vec<&str> = stdout.lines().collect();

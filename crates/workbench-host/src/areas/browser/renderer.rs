@@ -13,7 +13,7 @@ pub mod data;
 pub use sandbox::SpawnLedger;
 use sandbox::{
     ChildKind,
-    process::{GroupChild, apply_launch_policy},
+    owned::{OwnedChild, OwnedCommand},
 };
 use std::{
     path::PathBuf,
@@ -481,7 +481,7 @@ impl FrameSource {
     }
 }
 struct Generation {
-    child: GroupChild,
+    child: OwnedChild,
     client: Arc<RendererClient>,
     work: Option<blocking::Sender<Work>>,
     ledger: SpawnLedger,
@@ -510,7 +510,7 @@ impl Generation {
         let (client, jobs) =
             RendererClient::prepare(channels.control, channels.frames, client_config)?;
         let client = Arc::new(client);
-        let mut command = tokio::process::Command::new(&config.executable);
+        let mut command = OwnedCommand::new(&config.executable);
         command
             .arg("--cache-dir")
             .arg(&profile.path)
@@ -540,10 +540,9 @@ impl Generation {
                 command.env(name, value);
             }
         }
-        apply_launch_policy(command.as_std_mut());
         let admission = ledger.admit().map_err(|_| OwnerError::Stopping)?;
         let child = admission
-            .spawn_group(ChildKind::Renderer, Some("offline-renderer"), &mut command)
+            .spawn_owned(ChildKind::Renderer, Some("offline-renderer"), &mut command)
             .map_err(|_| OwnerError::Unavailable)?;
         profile.mark_launched();
         #[cfg(feature = "test-support")]
@@ -619,7 +618,7 @@ impl Generation {
     async fn reclaim(&mut self) -> Result<(), OwnerError> {
         self.client.close();
         self.work.take();
-        // GroupChild pins the leader until group kill, then reaps it. Never
+        // OwnedChild's guard pins the leader until group kill, then reaps it. Never
         // waitpid(-1), set subreaper, or signal a saved numeric pgid here.
         self.child
             .kill_and_wait()
@@ -644,7 +643,7 @@ impl Generation {
 impl Drop for Generation {
     fn drop(&mut self) {
         self.client.close();
-        self.work.take(); /* GroupChild retains cleanup ownership even on cancellation. */
+        self.work.take(); /* The owner's guard retains cleanup ownership even on cancellation. */
     }
 }
 struct Actor {

@@ -3,7 +3,21 @@
 
 use std::path::{Path, PathBuf};
 
-use sandbox::{CommandSpec, MinimalSandbox, Sandbox};
+use sandbox::owned::OwnedSession;
+use sandbox::{CommandSpec, MinimalSandbox, Sandbox, WrappedCommand};
+
+/// Runs the wrapped command guard-owned: stdin is /dev/null, both output streams piped.
+fn run(wrapped: &WrappedCommand) -> std::process::Output {
+    let mut command = wrapped.to_owned_command();
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    OwnedSession::spawn(&mut command)
+        .unwrap()
+        .output(None)
+        .unwrap()
+}
 
 fn shell() -> PathBuf {
     PathBuf::from("/bin/sh").canonicalize().unwrap()
@@ -21,7 +35,7 @@ fn run_in_sandbox(script: &str, forward: &[&str]) -> (String, MinimalSandbox) {
             extra_env: Vec::new(),
         })
         .unwrap();
-    let output = wrapped.to_command().output().unwrap();
+    let output = run(&wrapped);
     assert!(
         output.status.success(),
         "{}",
@@ -126,6 +140,6 @@ fn a_relative_symlinked_program_is_mounted_and_run_by_its_resolved_path() {
             extra_env: Vec::new(),
         })
         .unwrap();
-    let output = wrapped.to_command().output().unwrap();
+    let output = run(&wrapped);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "resolved\n");
 }

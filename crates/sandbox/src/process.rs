@@ -1,27 +1,29 @@
-//! How evorch starts child processes: detached from its terminal, without its
-//! descriptors, and stoppable together with their descendants.
+//! The raw process-group backend that survives the typed owner API.
 //!
-//! evorch may run from a terminal, and it holds descriptors it never meant to
-//! share: the GUI's browser engine keeps databases, GPU buffers and IPC sockets
-//! open without `O_CLOEXEC`, and a bubblewrap sandbox passes them on to the
-//! sandboxed command. [`apply_launch_policy`] starts a child in its own session
-//! and lets the program it executes inherit only stdin, stdout and stderr.
-//! [`ProcessGroup`] then stops the child with its descendants, and
-//! [`GroupChild`] does so for Tokio children without ever signalling a group
-//! id that a reaped leader has released.
+//! Linux non-PTY children are owned by [`crate::owned`] (an authenticated process
+//! guard, with or without a ledger); nothing here starts one. What remains is the
+//! boundary B3 replaces: [`ProcessGroup`] / [`ProcessGroupGuard`] /
+//! [`wait_for_exit`] / [`has_exited`] for a pseudo-terminal child (the shell's PTY
+//! jobs, started by `portable-pty`, which already starts its own session and closes
+//! inherited descriptors), registered through
+//! [`crate::ledger::Admission::register_pty_group`], and
+//! [`close_inherited_fds_on_exec`], a descriptor-hygiene hook for a std command that
+//! a test fixture starts and supervises itself (it owns nothing).
 //!
-//! These are pre-exec hooks, so the standard library forks the parent instead
-//! of using `posix_spawn`; a large parent pays for copying its page tables on
-//! every launch. Pseudo-terminal launches (`portable-pty`) already start a new
-//! session and close inherited descriptors, and do not need them.
+//! The non-Linux owner adapter keeps its previous backend privately
+//! (`GroupChild`, the launch policy); it carries no new D-7 claim.
 
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, ExitStatus};
+#[cfg(not(target_os = "linux"))]
+use std::process::Command;
+#[cfg(not(target_os = "linux"))]
+use std::process::ExitStatus;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
+#[cfg(not(target_os = "linux"))]
 use crate::ledger::ChildEntry;
 
 /// Start the child in a new session, which is also a new process group.
@@ -38,7 +40,8 @@ use crate::ledger::ChildEntry;
 /// moves the child into the requested group before it runs pre-exec hooks, a
 /// process group leader cannot start a session, and the spawn fails with
 /// `EPERM`. The new session already is the child's own group.
-pub fn detach_from_terminal(command: &mut Command) {
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn detach_from_terminal(command: &mut Command) {
     // SAFETY: between fork and exec the hook makes one async-signal-safe
     // system call and allocates nothing.
     unsafe {
@@ -61,6 +64,10 @@ pub fn detach_from_terminal(command: &mut Command) {
 
 /// Close every descriptor above stderr when the child executes its program.
 ///
+/// Not an ownership API: it only marks descriptors for a std command that a test
+/// fixture starts and supervises itself. Product children are started through
+/// [`crate::owned::OwnedCommand`], whose guard helper applies the same policy.
+///
 /// The child keeps the standard streams configured on `command`; nothing else
 /// evorch has open reaches the executed program. The descriptors are marked
 /// close-on-exec rather than closed, which keeps the pipe the standard library
@@ -70,7 +77,7 @@ pub fn detach_from_terminal(command: &mut Command) {
 /// Linux needs 5.11 or later (`close_range` with `CLOSE_RANGE_CLOEXEC`); on an
 /// older kernel the spawn fails instead of leaking the descriptors. Other Unix
 /// systems keep the standard inheritance.
-pub fn close_inherited_fds_on_exec(command: &mut Command) {
+pub fn close_inherited_fds_on_exec(command: &mut std::process::Command) {
     #[cfg(target_os = "linux")]
     // SAFETY: between fork and exec the hook makes one async-signal-safe
     // system call and allocates nothing.
@@ -102,19 +109,15 @@ fn mark_inherited_fds_close_on_exec() -> std::io::Result<()> {
     }
 }
 
-/// evorch's launch policy for every child that is not started on a
-/// pseudo-terminal: [`detach_from_terminal`] and [`close_inherited_fds_on_exec`].
-///
-/// Sandboxed commands get it from [`crate::WrappedCommand::to_command`]. Tokio
-/// commands apply it through `as_std_mut` and run as a [`GroupChild`], which
-/// stops descendants too.
-pub fn apply_launch_policy(command: &mut Command) {
+/// evorch's launch policy for the non-Linux adapter's children.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_launch_policy(command: &mut Command) {
     detach_from_terminal(command);
     close_inherited_fds_on_exec(command);
 }
 
-/// The process group of a child started with [`detach_from_terminal`], shared by
-/// everything that may stop it.
+/// The process group of a child that leads its own session, shared by everything
+/// that may stop it.
 ///
 /// The group id is the leader's pid, and the kernel keeps it reserved while the
 /// leader exists, including as an exited but unreaped zombie. Once the leader
@@ -125,15 +128,76 @@ pub fn apply_launch_policy(command: &mut Command) {
 /// leader left to another reaper is first stopped and retired with
 /// [`kill_and_release`](Self::kill_and_release). After that,
 /// [`kill`](Self::kill) on any clone sends nothing.
+///
+/// # Only a pseudo-terminal child can lead one
+///
+/// Linux children that are not on a pseudo-terminal are owned by
+/// [`crate::owned`]; this raw handle is the PTY boundary B3 replaces. A live
+/// group comes only from a command started on a pseudo-terminal slave:
+///
+/// ```no_run
+/// fn start(
+///     slave: &dyn portable_pty::SlavePty,
+/// ) -> std::io::Result<sandbox::process::ProcessGroup> {
+///     let command = portable_pty::CommandBuilder::new("true");
+///     sandbox::process::ProcessGroup::spawn_pty(slave, command).map(|(_child, group)| group)
+/// }
+/// ```
+///
+/// A bare pid has no constructor:
+///
+/// ```compile_fail,E0624
+/// let child = std::process::Command::new("true").spawn().unwrap();
+/// let _ = sandbox::process::ProcessGroup::new(Some(child.id()));
+/// ```
+///
+/// and a std or Tokio child is not a pseudo-terminal slave:
+///
+/// ```compile_fail,E0277
+/// let child = std::process::Command::new("true").spawn().unwrap();
+/// let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
+/// ```
+///
+/// ```compile_fail,E0277
+/// async fn start() {
+///     let child = tokio::process::Command::new("true").spawn().unwrap();
+///     let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ProcessGroup {
     leader: Arc<Mutex<Option<Pid>>>,
 }
 
 impl ProcessGroup {
+    /// Start `command` on the pseudo-terminal `slave` and take the group it
+    /// leads. portable-pty starts the child in a session of its own, so its pid
+    /// is the group id.
+    ///
+    /// The only way to obtain a live group: there is no constructor from a bare
+    /// pid, and a std or Tokio child cannot be passed (`portable_pty::Child` is
+    /// implemented for `std::process::Child`, so the child itself would prove
+    /// nothing; the pseudo-terminal slave that starts it does).
+    ///
+    /// # Errors
+    /// The error of the pseudo-terminal's spawn.
+    pub fn spawn_pty(
+        slave: &dyn portable_pty::SlavePty,
+        command: portable_pty::CommandBuilder,
+    ) -> io::Result<(Box<dyn portable_pty::Child + Send + Sync>, Self)> {
+        let child = slave.spawn_command(command).map_err(io::Error::other)?;
+        let group = Self::new(child.process_id());
+        Ok((child, group))
+    }
+
+    /// A group with no leader: it signals nothing and is already retired.
+    pub fn retired() -> Self {
+        Self::new(None)
+    }
+
     /// The group led by the child with this pid (`Child::id`). `None`, as
     /// reported by an already reaped Tokio child, is a retired group.
-    pub fn new(leader: Option<u32>) -> Self {
+    pub(crate) fn new(leader: Option<u32>) -> Self {
         let leader = leader
             .and_then(|pid| i32::try_from(pid).ok())
             .and_then(Pid::from_raw);
@@ -242,45 +306,24 @@ pub fn wait_for_exit(leader: Pid) -> io::Result<()> {
     }
 }
 
-/// A Tokio child started under the launch policy, which owns its process group.
-///
-/// Waiting notices the leader's exit without reaping it (Linux: a pidfd), kills
-/// the group while the exited leader still reserves its id, which also stops
-/// descendants holding the leader's pipes, and only then reaps the leader.
-/// Dropping a child that was not reaped kills its group and retires every
-/// clone of the group handle before Tokio reaps the child in the background.
-#[derive(Debug)]
-pub struct GroupChild {
-    /// `None` only while `Drop` hands the child to the ledger's reaper.
-    child: Option<tokio::process::Child>,
-    group: ProcessGroup,
-    #[cfg(target_os = "linux")]
-    exit: ExitNotifier,
-    /// The ledger's record of this child, when it was started through one.
-    entry: Option<ChildEntry>,
-}
+#[cfg(not(target_os = "linux"))]
+pub(crate) use legacy::GroupChild;
 
-/// Turns readable once the watched process has exited.
-#[cfg(target_os = "linux")]
-type ExitNotifier = tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>;
+/// The non-Linux adapter's Tokio child. Kept private; Linux owners are guard-backed.
+#[cfg(not(target_os = "linux"))]
+mod legacy {
+    use super::{ChildEntry, ExitStatus, ProcessGroup, has_exited, io, wait_for_exit};
 
-impl GroupChild {
-    /// Spawn `command`, which must already carry the launch policy
-    /// ([`apply_launch_policy`] or [`crate::WrappedCommand::to_command`]).
-    ///
-    /// On Linux the exit is watched through a pidfd (`pidfd_open`, Linux 5.3
-    /// or later). There is no fallback: where `pidfd_open` is refused, for
-    /// example by a seccomp filter that still allows `close_range`, the started
-    /// child's group is killed and the spawn fails.
-    ///
-    /// # Errors
-    /// Returns the spawn error, or the error of watching the started child,
-    /// naming the child and stating that its group was killed.
-    pub fn spawn(command: &mut tokio::process::Command) -> io::Result<Self> {
-        #[cfg(target_os = "linux")]
-        return Self::spawn_watched(command, exit_notifier);
-        #[cfg(not(target_os = "linux"))]
-        {
+    #[derive(Debug)]
+    pub(crate) struct GroupChild {
+        /// `None` only while `Drop` hands the child to the ledger's reaper.
+        child: Option<tokio::process::Child>,
+        group: ProcessGroup,
+        entry: Option<ChildEntry>,
+    }
+
+    impl GroupChild {
+        pub(crate) fn spawn(command: &mut tokio::process::Command) -> io::Result<Self> {
             let child = command.spawn()?;
             let group = ProcessGroup::new(child.id());
             Ok(Self {
@@ -289,270 +332,113 @@ impl GroupChild {
                 entry: None,
             })
         }
-    }
 
-    /// Record the ledger entry that [`Admission::spawn_group`] made for this
-    /// child. It is told when the leader is reaped.
-    ///
-    /// [`Admission::spawn_group`]: crate::ledger::Admission::spawn_group
-    pub(crate) fn attach(&mut self, entry: ChildEntry) {
-        self.entry = Some(entry);
-    }
-
-    fn note_reaped(&mut self) {
-        if let Some(entry) = self.entry.take() {
-            entry.reaped();
+        pub(crate) fn attach(&mut self, entry: ChildEntry) {
+            self.entry = Some(entry);
         }
-    }
 
-    #[cfg(target_os = "linux")]
-    fn spawn_watched(
-        command: &mut tokio::process::Command,
-        watch: impl FnOnce(&ProcessGroup) -> io::Result<ExitNotifier>,
-    ) -> io::Result<Self> {
-        let mut child = command.spawn()?;
-        let group = ProcessGroup::new(child.id());
-        let exit = match watch(&group) {
-            Ok(exit) => exit,
-            Err(error) => {
-                // A caller may hold admission until spawn returns. Reap even
-                // this failed launch before returning, not later in Tokio's
-                // orphan queue. The unreaped leader reserves the group id.
-                let pid = child
-                    .id()
-                    .map_or_else(|| "?".to_owned(), |pid| pid.to_string());
-                group.kill();
-                if let Some(leader) = group.leader() {
-                    wait_for_exit(leader)?;
-                    group.kill_and_reap(|| child.try_wait())?;
-                }
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "cannot watch child {pid} for its exit ({error}); its process group was \
-                         killed. pidfd_open (Linux 5.3+) must be permitted; there is no fallback"
-                    ),
-                ));
-            }
-        };
-        Ok(Self {
-            child: Some(child),
-            group,
-            exit,
-            entry: None,
-        })
-    }
-
-    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
-        self.child.as_mut().and_then(|child| child.stdin.take())
-    }
-
-    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
-        self.child.as_mut().and_then(|child| child.stdout.take())
-    }
-
-    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
-        self.child.as_mut().and_then(|child| child.stderr.take())
-    }
-
-    /// The leader's pid, until it has been reaped.
-    pub fn id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(tokio::process::Child::id)
-    }
-
-    /// The child's process group, for stopping it from elsewhere.
-    pub const fn group(&self) -> &ProcessGroup {
-        &self.group
-    }
-
-    /// Kill the whole group, unless the leader has been reaped.
-    pub fn kill(&self) {
-        self.group.kill();
-    }
-
-    /// Resolves once the leader has exited; it stays unreaped, keeping the
-    /// group id reserved. Cancel-safe.
-    ///
-    /// # Errors
-    /// Fails when the exit cannot be observed.
-    pub async fn exited(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            // An exit is permanent, so the readiness is never cleared.
-            self.exit.readable().await.map(drop)
-        }
-        #[cfg(not(target_os = "linux"))]
-        loop {
-            match self.group.leader() {
-                Some(leader) if !has_exited(leader)? => {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                _ => return Ok(()),
+        fn note_reaped(&mut self) {
+            if let Some(entry) = self.entry.take() {
+                entry.reaped();
             }
         }
-    }
 
-    /// Wait for the leader to exit, kill what is left of its group, and reap
-    /// the leader. Cancel-safe.
-    ///
-    /// # Errors
-    /// Fails when the exit cannot be observed or the leader cannot be reaped.
-    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
-        loop {
-            self.exited().await?;
-            let child = &mut self.child;
-            let reaped = match self.group.leader() {
-                Some(leader) => match has_exited(leader) {
-                    Ok(true) => self.group.kill_and_reap(|| try_wait(child))?,
-                    Ok(false) => None,
-                    Err(error) => {
-                        // Not an unreaped child any more: its id may be reused.
-                        self.group.release();
-                        return Err(error);
+        pub(crate) fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+            self.child.as_mut().and_then(|child| child.stdin.take())
+        }
+
+        pub(crate) fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+            self.child.as_mut().and_then(|child| child.stdout.take())
+        }
+
+        pub(crate) fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+            self.child.as_mut().and_then(|child| child.stderr.take())
+        }
+
+        pub(crate) fn id(&self) -> Option<u32> {
+            self.child.as_ref().and_then(tokio::process::Child::id)
+        }
+
+        pub(crate) const fn group(&self) -> &ProcessGroup {
+            &self.group
+        }
+
+        pub(crate) fn kill(&self) {
+            self.group.kill();
+        }
+
+        pub(crate) async fn exited(&self) -> io::Result<()> {
+            loop {
+                match self.group.leader() {
+                    Some(leader) if !has_exited(leader)? => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
-                },
-                None => try_wait(child)?,
-            };
-            if let Some(status) = reaped {
-                self.note_reaped();
-                return Ok(status);
+                    _ => return Ok(()),
+                }
             }
-            // Readiness without an exit is not expected; do not spin on it.
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        pub(crate) async fn wait(&mut self) -> io::Result<ExitStatus> {
+            loop {
+                self.exited().await?;
+                let child = &mut self.child;
+                let reaped = match self.group.leader() {
+                    Some(leader) => match has_exited(leader) {
+                        Ok(true) => self.group.kill_and_reap(|| try_wait(child))?,
+                        Ok(false) => None,
+                        Err(error) => {
+                            self.group.release();
+                            return Err(error);
+                        }
+                    },
+                    None => try_wait(child)?,
+                };
+                if let Some(status) = reaped {
+                    self.note_reaped();
+                    return Ok(status);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        pub(crate) fn kill_and_reap_blocking(&mut self) -> io::Result<()> {
+            self.kill();
+            if let Some(leader) = self.group.leader() {
+                wait_for_exit(leader)?;
+                let child = &mut self.child;
+                self.group.kill_and_reap(|| try_wait(child))?;
+            }
+            self.note_reaped();
+            Ok(())
+        }
+
+        pub(crate) async fn kill_and_wait(&mut self) -> io::Result<ExitStatus> {
+            self.kill();
+            self.wait().await
         }
     }
 
-    /// Last-resort cleanup outside a Tokio runtime (for supervisor unwinding).
-    /// Blocks until the killed leader is reaped; do not call on an async worker.
-    ///
-    /// # Errors
-    /// Returns an error if the leader cannot be observed or reaped.
-    pub fn kill_and_reap_blocking(&mut self) -> io::Result<()> {
-        self.kill();
-        if let Some(leader) = self.group.leader() {
-            wait_for_exit(leader)?;
-            // Reap through Tokio's synchronous try_wait so its Child also knows
-            // the id is retired (including its kill_on_drop bookkeeping).
-            let child = &mut self.child;
-            self.group.kill_and_reap(|| try_wait(child))?;
-        }
-        self.note_reaped();
-        Ok(())
+    fn try_wait(child: &mut Option<tokio::process::Child>) -> io::Result<Option<ExitStatus>> {
+        child
+            .as_mut()
+            .map_or(Ok(None), tokio::process::Child::try_wait)
     }
 
-    /// Kill the whole group, then reap the leader. Cancel-safe.
-    ///
-    /// # Errors
-    /// Fails when the leader cannot be reaped.
-    pub async fn kill_and_wait(&mut self) -> io::Result<ExitStatus> {
-        self.kill();
-        self.wait().await
-    }
-}
-
-fn try_wait(child: &mut Option<tokio::process::Child>) -> io::Result<Option<ExitStatus>> {
-    child
-        .as_mut()
-        .map_or(Ok(None), tokio::process::Child::try_wait)
-}
-
-impl Drop for GroupChild {
-    fn drop(&mut self) {
-        // Tokio reaps a dropped child in the background, when no handle can
-        // tell any more. So the group is killed one last time and every clone
-        // retired before the child is handed over.
-        self.group.kill_and_release();
-        // A child in a ledger is not handed to Tokio: the ledger reaps it and
-        // counts it only once the leader is really gone, so that waiting for
-        // the ledger to empty still means "no child is left".
-        if let (Some(entry), Some(child)) = (self.entry.take(), self.child.take()) {
-            entry.reap_in_background(child);
+    impl Drop for GroupChild {
+        fn drop(&mut self) {
+            self.group.kill_and_release();
+            if let (Some(entry), Some(child)) = (self.entry.take(), self.child.take()) {
+                entry.reap_in_background(child);
+            }
         }
     }
 }
 
 /// Pid of a Tokio child that has not been reaped.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn unreaped_pid(child: &tokio::process::Child) -> Option<Pid> {
     child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(Pid::from_raw)
-}
-
-#[cfg(target_os = "linux")]
-fn exit_notifier(group: &ProcessGroup) -> io::Result<ExitNotifier> {
-    let leader = group
-        .leader()
-        .ok_or_else(|| io::Error::other("the started child has no pid"))?;
-    // A pidfd turns readable when the process exits and stays so; unlike a
-    // wait, observing it does not reap the process.
-    let pidfd = rustix::process::pidfd_open(leader, rustix::process::PidfdFlags::empty())?;
-    tokio::io::unix::AsyncFd::with_interest(pidfd, tokio::io::Interest::READABLE)
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn a_child_whose_exit_cannot_be_watched_is_stopped_and_reported() {
-        // Given: a started child with a background helper whose exit cannot be
-        // watched, as where a seccomp filter refuses pidfd_open.
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("helper.pid");
-        let mut command = Command::new("sh");
-        command.args([
-            "-c",
-            &format!(
-                "sleep 60 & echo $! > '{0}.tmp' && mv '{0}.tmp' '{0}'; wait",
-                pid_file.display()
-            ),
-        ]);
-        apply_launch_policy(&mut command);
-        let mut command = tokio::process::Command::from(command);
-        command.kill_on_drop(true);
-
-        // When: watching it fails once the helper runs.
-        let error = GroupChild::spawn_watched(&mut command, |_| {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !pid_file.exists() {
-                assert!(Instant::now() < deadline, "the helper did not start");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        })
-        .expect_err("watching the child fails");
-
-        // Then: the spawn fails closed, the error names the child and says its
-        // group was killed, and the child and the helper only a group kill
-        // reaches both stop.
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        let message = error.to_string();
-        assert!(
-            message.contains("its process group was killed"),
-            "{message}"
-        );
-        assert!(message.contains("there is no fallback"), "{message}");
-        let child = message
-            .strip_prefix("cannot watch child ")
-            .and_then(|rest| rest.split_once(' '))
-            .map(|(pid, _)| pid.to_owned())
-            .expect("the child's pid");
-        let helper = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .to_owned();
-        for pid in [child, helper] {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-                stat.rsplit_once(')')
-                    .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-            }) {
-                assert!(Instant::now() < deadline, "process {pid} still runs");
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
 }

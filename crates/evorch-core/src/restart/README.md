@@ -1,18 +1,18 @@
 # D-3a2 B1/B2a: distribution and additive ownership API
 
-**B caller 移行は一部のみ、D-7 未完了.** B1 delivers `evorch-process-guard` and
+**D-7 未完了 (PTY / agent Chromium は B3).** B1 delivers `evorch-process-guard` and
 immutable Linux bundles. B2a adds typed `sandbox::owned` owners and startup bundle
-binding for CLI/core/GUI. B2b migrates the non-PTY callers in three parts (see
-`sandbox/src/owned/README.md`); the raw Linux ownership APIs are removed only in
-the last one.
+binding for CLI/core/GUI. B2b migrated the non-PTY callers in three parts (see
+`sandbox/src/owned/README.md`); B2b-iii removed the raw Linux ownership APIs.
 
-- Migrated to the guard-owned API (B2b-i, B2b-ii): SandboxSession (LSP, js-worker
+- Migrated to the guard-owned API (B2b-i, -ii, -iii): SandboxSession (LSP, js-worker
   owner, library listing, bwrap probe), the comment-checker, the shell **pipe**
   jobs, MCP stdio, grep, git diff, the codex quota RPC, runtime git reads and
-  snapshots, and eval's host git.
-- Still unprotected by B: eval groups/verify, PR source with or without a ledger,
-  the offline renderer/CEF root, GUI slash commands and the test/example seams
-  (B2b-iii); the shell **PTY** jobs and agent Chromium (B3).
+  snapshots, eval's host git, eval groups/verify, the PR source (with or without a
+  ledger), the offline renderer, GUI slash commands and the test/example seams.
+- Still unprotected by B (B3): the shell **PTY** jobs (raw `ProcessGroup`, registered
+  through `Admission::register_pty_group`) and agent Chromium. The std spawns outside
+  the audited inventory (GUI git/`fc-match`) are listed in the owned README.
 
 B3 migrates PTY/Chromium and supplies release-core expiry, real Chromium/CEF and
 end-to-end evidence. The private preflight

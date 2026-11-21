@@ -1032,3 +1032,123 @@ async fn closed_fence_refuses_stdio_connect_and_restart() {
     assert_eq!(ledger.child_stats().registered, 1);
     assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
 }
+
+/// A shutdown clock that decides nothing until the test releases it, so the
+/// supervisor leaves a stopped-but-alive server alone and the test can look at it.
+#[derive(Debug)]
+struct GatedClock(tokio::sync::watch::Receiver<bool>);
+#[async_trait::async_trait]
+impl StdioShutdownClock for GatedClock {
+    async fn expired(&self, _: Duration) {
+        let _ = self.0.clone().wait_for(|released| *released).await;
+    }
+}
+
+/// A limiter that parks the launch (on its blocking thread) inside
+/// `try_acquire`, after telling the test it got there, until the test opens the gate.
+struct ParkedLimiter {
+    inner: Arc<Limiter>,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl McpProcessLimiter for ParkedLimiter {
+    fn try_acquire(&self, root: &Path) -> Result<Box<dyn McpProcessPermit>, McpErrorKind> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        let _ = self.gate.lock().unwrap().recv();
+        self.inner.try_acquire(root)
+    }
+}
+
+// Given: a launch parked mid-way on its blocking thread / When: the caller
+// drops its future, and only then the launch is released / Then: the launch is
+// not cancelled: the server and its descendant start, the nobody-took-it session
+// is stopped, both processes end, the ledger confirms the reap and the permit is
+// released. (A FIFO write end held by both processes ends only when both are gone.)
+#[tokio::test]
+async fn a_launch_abandoned_mid_way_still_stops_its_server_descendant_and_releases_the_permit() {
+    let mut h = Harness::new(&[]);
+    let ledger = sandbox::SpawnLedger::new();
+    let root = h.inspection.scope.canonical_root.clone();
+    let fifo = root.join("alive.fifo");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (open_gate, gate) = std::sync::mpsc::channel();
+    let limiter = Arc::new(ParkedLimiter {
+        inner: h.limiter.clone(),
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+        gate: std::sync::Mutex::new(gate),
+    });
+    let (release_clock, clock) = tokio::sync::watch::channel(false);
+    let server = ResolvedMcpServer {
+        transport: ResolvedMcpTransport::Stdio {
+            executable: "/bin/sh".into(),
+            args: [
+                "-c",
+                "exec 3>\"$0\"; sleep 3600 & echo ready >&3; wait",
+                fifo.to_str().unwrap(),
+            ]
+            .map(|arg| Secret::from(arg.to_owned()))
+            .to_vec(),
+            cwd: root.clone(),
+            env: BTreeMap::new(),
+        },
+        ..h.server()
+    };
+    let approval = h.approval();
+    let launch = tokio::spawn(StdioTransport::connect_owned(
+        server,
+        approval,
+        limiter,
+        CancelContext::default(),
+        StdioShutdownPolicy {
+            stdin_grace: Duration::ZERO,
+            term_grace: Duration::ZERO,
+            clock: Arc::new(GatedClock(clock)),
+        },
+        Some(ledger.clone()),
+    ));
+
+    // When: the launch is parked and its caller is dropped, then it is released.
+    entered_rx.await.unwrap();
+    launch.abort();
+    assert!(launch.await.err().unwrap().is_cancelled());
+    assert_eq!(ledger.child_stats().registered, 0, "nothing started yet");
+    open_gate.send(()).unwrap();
+
+    // Then: the launch finished anyway; the server and its descendant run, held
+    // by the stopped session whose supervisor waits for the clock.
+    let mut alive = tokio::io::BufReader::new(
+        tokio::net::unix::pipe::OpenOptions::new()
+            .open_receiver(&fifo)
+            .unwrap(),
+    );
+    let mut ready = String::new();
+    alive.read_line(&mut ready).await.unwrap();
+    assert_eq!(ready, "ready\n");
+    assert_eq!(ledger.children().len(), 1);
+    assert_eq!(ledger.children()[0].kind, sandbox::ChildKind::McpStdio);
+
+    // Releasing the clock lets the supervisor stop and reap them.
+    release_clock.send(true).unwrap();
+    let mut rest = Vec::new();
+    alive.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    h.assert_released().await;
+    ledger.reap_all_children().await.unwrap();
+    ledger.join_workers().await.unwrap();
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+    assert_eq!(h.limiter.live.load(Ordering::Acquire), 0);
+}

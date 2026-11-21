@@ -6,7 +6,8 @@ use std::{
     process::Command,
 };
 
-use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, DirectSandbox, Sandbox, StdioSession};
+use sandbox::owned::OwnedSession;
+use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, DirectSandbox, Sandbox};
 
 const SECRET: &str = "opaque-fixture-credential-94376821";
 const VARIABLES: &[(&str, &str)] = &[
@@ -28,7 +29,7 @@ fn spec(script: &str) -> CommandSpec {
 }
 
 fn output(sandbox: &dyn Sandbox, spec: CommandSpec) -> Vec<u8> {
-    let mut session = StdioSession::spawn(sandbox, spec).unwrap();
+    let mut session = OwnedSession::spawn_sandboxed(None, sandbox, spec).unwrap();
     let mut result = Vec::new();
     session
         .take_stdout()

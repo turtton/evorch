@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use sandbox::process::GroupChild;
+use sandbox::owned::OwnedChild;
 use sandbox::{CommandSpec, Sandbox};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -72,14 +72,23 @@ pub async fn run(
         Ok(wrapped) => wrapped,
         Err(error) => return Verification::unstarted(command, error.to_string()),
     };
-    let mut process = tokio::process::Command::from(wrapped.to_command());
+    // stdin is /dev/null and both output streams are piped: the command
+    // depends on no inherited descriptor. There is no ledger here; the guard
+    // alone owns the child and kills its group when the owner is dropped.
+    let mut process = wrapped.to_owned_command();
     process
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::piped());
     let started = Instant::now();
-    let mut child = match GroupChild::spawn(&mut process) {
+    let mut child = match OwnedChild::spawn_blocking(
+        None,
+        sandbox::ChildKind::SandboxSession,
+        Some("verify".to_owned()),
+        process,
+    )
+    .await
+    {
         Ok(child) => child,
         Err(error) => return Verification::unstarted(command, error.to_string()),
     };

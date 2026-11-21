@@ -16,9 +16,9 @@ impl OwnedGroup {
     }
 }
 use crate::{
-    StdioSession,
     ledger::{Admission, ChildKind},
     process::GroupChild,
+    session::StdioSession,
 };
 use std::{
     io,
