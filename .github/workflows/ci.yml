@@ -175,7 +175,7 @@ jobs:
       # CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       - name: Clippy (workspace)
         env:
@@ -204,7 +204,10 @@ jobs:
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.
   docs-schema:
-    needs: scope-gate
+    # Behind quick-checks as well: with the CEF E2E split in two, the consumers
+    # that start next to scope-gate already fill the concurrent-job budget of 20
+    # while quick-checks runs; this job takes the slot quick-checks frees.
+    needs: [scope-gate, quick-checks]
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
     permissions:
@@ -230,7 +233,7 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       # The doctests start owned children through the library policy: the helper
       # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
@@ -298,7 +301,7 @@ jobs:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -443,7 +446,7 @@ jobs:
       # Restore only: the cache-save job writes the shared dependency cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -525,15 +528,22 @@ jobs:
         if: always()
         run: df -h /
 
-  # The only writer of the shared dependency cache (key *-ci-workspace) that
-  # lint, docs-schema, otel and the test groups restore. It runs on main pushes
-  # only, so it is never on a PR's critical path and PRs never crowd the
-  # repository's 10GB cache budget. It compiles every dependency artifact the
-  # other jobs need, with each of their own package and feature selections:
-  # the workspace check (lint), the doctests and the schema example
-  # (docs-schema), the otel-exporter build (otel) and the test binaries of
-  # every group in scripts/ci-test-groups.json. It does not run the normal
-  # nextest suite (the doctests above do run).
+  # The only writer of the shared dependency cache (key *-ci-workspace-v2) that
+  # every cargo job restores: lint, docs-schema, otel, the test groups,
+  # offscreen-gate, gui-evidence, browser-e2e and both cef-e2e cells. It runs on
+  # main pushes only, so it is never on a PR's critical path and PRs never
+  # crowd the repository's 10GB cache budget. It compiles every dependency
+  # artifact the other jobs need, with each of their own package and feature
+  # selections: the workspace check and the handoff fixtures (lint), the
+  # doctests and the schema example (docs-schema), the otel-exporter build
+  # (otel), the test binaries of every group in scripts/ci-test-groups.json
+  # (the test jobs, offscreen-gate and gui-evidence share the gui group's
+  # selection) and the browser-e2e and cef-e2e selections, which resolve
+  # features differently. It does not run the normal nextest suite (the
+  # doctests above do run). A failing recipe fails the job, and rust-cache does
+  # not save after a failure, so a partial cache is never written. The browser
+  # and CEF selections must match the readers' `prepare` and `cargo build`
+  # lines (scripts/tests/test_ci_workflow_config.sh compares them).
   cache-save:
     if: github.ref == 'refs/heads/main'
     needs: product-artifact
@@ -557,7 +567,7 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: true
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -576,6 +586,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --locked
           cargo clippy -p event-bus --all-targets --features otel-exporter --locked
+          cargo clippy -p core-instance -p core-launcher --all-targets --features core-instance/recovery-test-support,core-launcher/handoff-test-support --locked
           cargo test --workspace --exclude workbench-authority --doc --locked
           cargo test --locked -p workbench-authority --doc --no-default-features
           cargo build --locked -p config --example dump_schema
@@ -585,6 +596,36 @@ jobs:
             scripts/run-contract-tests.sh --group "$group" --list default > /dev/null
             echo "::endgroup::"
           done
+      # The tests job's support fixtures and the browser-e2e and cef-e2e jobs
+      # resolve features per invocation, differently from the group builds above,
+      # so each is its own invocation (never one workspace-wide feature union).
+      # `prepare` builds and lists the test binaries and runs none of them; its
+      # metadata goes to a directory that is dropped.
+      - name: Build the dependencies of the fixture, browser and CEF test selections
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
+          trap 'rm -rf "$warm"' EXIT
+          # One definition of the test name: the env of browser-e2e.
+          HOST_LIFECYCLE_TEST=$(sed -n 's/^ *HOST_LIFECYCLE_TEST: *//p' .github/workflows/ci.yml)
+          test -n "$HOST_LIFECYCLE_TEST"
+          scripts/guard-cargo.sh prepare "$warm/support-1" -p core-instance --features recovery-test-support --locked
+          scripts/guard-cargo.sh prepare "$warm/support-2" -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked
+          scripts/guard-cargo.sh prepare "$warm/browser-1" -p browser --test agent_chromium --test agent_observation
+          scripts/guard-cargo.sh prepare "$warm/browser-2" -p workbench-host --test "$HOST_LIFECYCLE_TEST"
+          scripts/guard-cargo.sh prepare "$warm/browser-3" -p evorch-core --test agent_observation_chromium
+          scripts/guard-cargo.sh prepare "$warm/browser-4" -p workbench-web --test web_ui_chromium
+          scripts/guard-cargo.sh prepare "$warm/browser-5" -p workbench-web --test public_restart_chromium
+          scripts/guard-cargo.sh prepare "$warm/cef-1" -p browser-cef --features cef
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          scripts/guard-cargo.sh prepare "$warm/cef-2" -p evorch-renderer
+          cargo build -p evorch-renderer
+          scripts/guard-cargo.sh prepare "$warm/cef-3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
+          scripts/guard-cargo.sh prepare "$warm/cef-4" -p core-client-e2e --features gui/cef --test preview_cef
+          scripts/guard-cargo.sh prepare "$warm/cef-5" -p gui --lib
+          scripts/guard-cargo.sh prepare "$warm/cef-6" -p evorch-core --test f4_product_cef --test agent_observation_restart
+          scripts/guard-cargo.sh prepare "$warm/cef-7" -p core-client-e2e --features gui/cef --test agent_observation_gui
       - name: Report disk usage
         if: always()
         run: |
@@ -738,7 +779,7 @@ jobs:
       # sets exactly cache-save's.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
       # hour (2026-10-23). The action caches the .debs per package set and runner
@@ -845,7 +886,7 @@ jobs:
       # sets exactly cache-save's.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace
+          shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
       # The Azure Ubuntu mirror once served packages at tens of kB/s for over an
       # hour (2026-10-23). The action caches the .debs per package set and runner
@@ -940,7 +981,12 @@ jobs:
       actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
+    # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
+    # the steps that run cargo only.
     env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       # The host source lifecycle test of O-V1 (crates/workbench-host/tests/<name>.rs,
       # an ignored test that needs the Chromium found above through CHROME): the
@@ -953,8 +999,8 @@ jobs:
           toolchain: 1.99.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cargo
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace-v2
+          save-if: false
       - name: Install linker and Claude transport build dependencies
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
@@ -972,6 +1018,8 @@ jobs:
       # listings are dropped: every run after the install prepares again, so what
       # it executes is bound to the sealed helper bundle.
       - name: Warm the target of the browser tests (no product needed)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
           warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
           trap 'rm -rf "$warm"' EXIT
@@ -1003,19 +1051,28 @@ jobs:
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Run agent browser test
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p browser --test agent_chromium --test agent_observation --run-ignored only --success-output immediate --no-tests fail
       - name: Run the host observation source lifecycle against Chromium
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p workbench-host --test "$HOST_LIFECYCLE_TEST" --run-ignored only --success-output immediate --no-tests fail
       - name: Run the core observation test against Chromium
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p evorch-core --test agent_observation_chromium --run-ignored only --success-output immediate --no-tests fail
       - name: Run web workbench browser test
         env:
+          CARGO_TARGET_DIR: target/ci-shared
           WORKBENCH_WEB_SCREENSHOT_DIR: ${{ github.workspace }}/target/web-ui-screenshots
         run: scripts/guard-cargo.sh run -p workbench-web --test web_ui_chromium --run-ignored only --success-output immediate --no-tests fail
       # Registered by the 5a-I integration PR for CW: a placeholder target until the
       # leaf adds the browser test of the public restart management (the contract
       # tests over real HTTP are public_restart_contracts).
       - name: Run the public restart web browser test
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -1029,6 +1086,7 @@ jobs:
   # job also starts it. The lint of the CEF feature is the workspace clippy in
   # the lint job, which builds gui with its default features.
   cef-e2e:
+    name: cef-e2e (${{ matrix.cell }})
     needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
@@ -1037,6 +1095,17 @@ jobs:
       actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    # Two cells split the real-CEF invocations: `engine` runs the browser-cef
+    # isolation/recovery tests, the renderer helper and the core renderer owner;
+    # `client` runs the core-client page, the html_preview cards, the product
+    # placeholders and the GUI observation. Each cell warms, builds and runs what
+    # it needs on its own runner, and neither writes a cache (cache-save does).
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [engine, client]
+    # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
+    # into its key. CARGO_TARGET_DIR is set on the steps that run cargo only.
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -1046,10 +1115,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.99.0
+      # Restore only: the cache-save job writes the shared dependency cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-cef
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os }}-ci-workspace-v2
+          save-if: false
       - name: Install linker and Claude transport build dependencies
         timeout-minutes: 30
         uses: ./.github/actions/apt-install
@@ -1069,15 +1139,18 @@ jobs:
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
           echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
-      # The real-CEF selections below are compiled, in their own order and with
-      # their own helper/renderer builds, while the product artifact job is still
-      # running (`prepare` compiles and lists, it runs no test). The listings are
-      # dropped: every run after the install builds and prepares again, so what it
-      # executes is bound to the sealed helper bundle.
+      # The real-CEF selections of this cell are compiled, in their own order and
+      # with their own helper/renderer builds, while the product artifact job is
+      # still running (`prepare` compiles and lists, it runs no test). The listings
+      # are dropped: every run after the install builds and prepares again, so what
+      # it executes is bound to the sealed helper bundle.
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      - name: Warm the target of the real-CEF tests (no product needed)
+      - name: Warm the target of the engine real-CEF tests (no product needed)
+        if: matrix.cell == 'engine'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
           warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
           trap 'rm -rf "$warm"' EXIT
@@ -1086,6 +1159,13 @@ jobs:
           scripts/guard-cargo.sh prepare "$warm/2" -p evorch-renderer
           cargo build -p evorch-renderer
           scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
+      - name: Warm the target of the client real-CEF tests (no product needed)
+        if: matrix.cell == 'client'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
+          trap 'rm -rf "$warm"' EXIT
           cargo build -p evorch-renderer
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           scripts/guard-cargo.sh prepare "$warm/4" -p core-client-e2e --features gui/cef --test preview_cef
@@ -1111,31 +1191,46 @@ jobs:
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: CEF offline isolation and crash recovery
+        if: matrix.cell == 'engine'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
       # The real renderer binary beside the CEF helper it starts (16a-2). The
       # ignored tests are the only ones that run real CEF in the renderer
       # process; the ordinary matrix runs the fake helper instead.
       - name: Out-of-process renderer helper through real CEF
+        if: matrix.cell == 'engine'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           scripts/guard-cargo.sh run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
       # Production core owner tests replace the installation placeholder in F1.
       - name: Core renderer owner through real CEF
+        if: matrix.cell == 'engine'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo build -p evorch-renderer
-          export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
+          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           scripts/guard-cargo.sh run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only --success-output immediate --no-tests fail
       # Stage 16b PR V: the core-client page against a production core and the real
       # helper (conversation -> artifact -> preview -> inspection; exit and kill).
       - name: Core-client page through real CEF
+        if: matrix.cell == 'client'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
           cargo build -p evorch-renderer
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
-          export EVORCH_RENDERER_EXE="$PWD/target/debug/evorch-renderer"
+          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
+        if: matrix.cell == 'client'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: |
-          export EVORCH_CEF_HELPER="$PWD/target/debug/evorch-cef-helper"
+          export EVORCH_CEF_HELPER="$PWD/target/ci-shared/debug/evorch-cef-helper"
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           scripts/guard-cargo.sh run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only --success-output immediate --no-tests fail
       # Registered by I0 for F4-E, O-V3 and O-V2, and V0-reg for public restart.
@@ -1143,6 +1238,12 @@ jobs:
       # the targets are selected (--no-tests fail) and that the sealed product
       # artifact reached this job; the real tests replace them.
       - name: Product tests through real CEF
+        if: matrix.cell == 'client'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --test public_restart_product --run-ignored only --success-output immediate --no-tests fail
       - name: GUI observation through real CEF and Chromium
+        if: matrix.cell == 'client'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
