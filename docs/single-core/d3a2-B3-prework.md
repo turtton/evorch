@@ -15,6 +15,8 @@
 
 ## 1. baseline の固定（計画 §3-1）
 
+### 初読時に固定した baseline（履歴）
+
 | 項目 | 値 | 備考 |
 |---|---|---|
 | 作業時点の main | `1aa7d8993f720fb68784c9e583ddd00774a5eb80` | `ci: unify the dependency cache under a single writer and split CEF E2E in two (#752)` |
@@ -28,6 +30,21 @@
   作成時点で `1aa7d899` を指す。`d3a2-b3-01` には未 commit の変更がある（`process-guard/tests/lifecycle.rs`、
   `sandbox/src/ledger.rs`、`sandbox/tests/closed_stdio.rs`）。この作業では触っていない。
 - 各担当は、編集前に main を更新し、実際の差分でファイル数を見積もり直すこと（計画 §3-1）。
+
+### 承認に使う baseline と依存変更
+
+初読時の値は上に履歴として残し、承認には以下の更新後の状態を使う。
+
+| 項目 | SHA／状態 | 確認内容 |
+|---|---|---|
+| 承認用 main（`origin/main`） | `2cdc33f1f10dd91f2d513acb1bf40acaf7b78908` | 今回 `git pull --ff-only` 後の `git rev-parse origin/main` |
+| V1b-2b | `fcd35b25` | `feat(core): compose public restart finalization ownership (#755)` |
+| harness 修正 | `74ebfd61` | `fix(runtime): avoid parent-only waits and duplicate project rules (#753)`。runtime wait/rules harness 関係の変更であることを `git show --stat` で確認 |
+| B3-01 | `2cdc33f1` | `test(sandbox): cover closed-fd launch boundaries (#754)` |
+| B3-02 | PR #758、未 merge | `gh pr view 758` で OPEN。merge SHA なし |
+| B3-04 | PR #756、未 merge | `gh pr view 756` で OPEN。merge SHA なし |
+
+承認時点の baseline は main の `2cdc33f1`。依存変更として V1b-2b、harness 修正、B3-01 の SHA を記録し、B3-02／04 は未 merge として扱う。
 
 ## 2. 用語と「11 root」の定義（レビュー S1）
 
@@ -46,8 +63,8 @@
   `PullRequestSource`、`ShellJob`、`Eval`、`Probe`、`Renderer`、`Other`。
 - 「StdioSession」は、設計 v2 の測定では、**ledger の種別ではなく、同期の stdio session を直接起動する経路**
   （LSP 相当）の root だった。**`StdioSession` 型は #750 で削除済み**で、今の同期 session の入口は
-  `OwnedSession` である。**現在のコードのどの経路が「StdioSession の root」に当たるかは、履歴に明記がない。**
-  表 1 では候補を示すだけで、**対応は親の承認事項**とする（§8-1）。
+  `OwnedSession` である。旧枠の意味は `OwnedSession` または LSP を試験注入した T cell で保ち、製品 caller 表とは分ける。
+  R09／R10 は短命な検出処理であり、この session とは同一視しない（親の判断、末尾）。
 - 承認条件（承認 review の B3 節）：「実 release core の実満了で、11 個の root と同じ group の孫がすべて終わる」。
 
 ### 「13 synthetic 経路」との違い
@@ -64,14 +81,14 @@
 | # | root | 定義の根拠 | 現在の実 caller（表 3） | 合成試験での扱い（13 経路） | 実 caller の cell で必要な artifact | 状態・欠落 |
 |---|---|---|---|---|---|---|
 | 1 | `mcp-stdio`（`McpStdio`） | `children.rs:13` | R07 | `mcp-stdio` | 製品 ELF（config と protocol で MCP server を起動） | 合成 root のみ。実 caller の SIGKILL・満了は未実施（B3-06、07） |
-| 2 | `sandbox-session`（`SandboxSession`） | `children.rs:15` | R05（comment-checker）、R06（LSP）、R08（js-worker。ただし #11 に数える）、R09（minimal の library 一覧）。ledger なしの verify は表 4 の L17 | `sandbox-session`、`session-spawn-owned`、`session-spawn-sandboxed` | 製品 ELF（agent の tool 経由）。bwrap と DirectSandbox の両方が要る（S2）。DirectSandbox は試験 binary | 同上 |
+| 2 | `sandbox-session`（`SandboxSession`） | `children.rs:15` | R05（comment-checker）、R08（js-worker。ただし #11 に数える）、R09（minimal の library 一覧）。ledger なしの verify は表 4 の L17。LSP（R06）は試験で明示登録した場合だけの T 経路 | `sandbox-session`、`session-spawn-owned`、`session-spawn-sandboxed` | 製品 ELF（製品 caller 経由）。bwrap と DirectSandbox の両方が要る（S2）。DirectSandbox は試験 binary | 同上 |
 | 3 | `pull-request-source`（`PullRequestSource`） | `children.rs:17` | R15 | `pull-request-source` | 製品 ELF（PR area。外部ツール `gh` が要る） | 同上 |
 | 4 | `shell-job`（`ShellJob`、pipe） | `children.rs:19`。#210.2 の「ShellJob(pipe)」 | R01 | `shell-job` | 製品 ELF（agent の `shell` tool。provider が要る） | 同上 |
 | 5 | `eval`（`Eval`） | `children.rs:21` | R12 | `eval`、`admission-spawn-owned` | 製品 ELF ＋ 隣の `evorch` CLI（または PATH 上の `evorch`） | 同上 |
-| 6 | `probe`（`Probe`） | `children.rs:23` | **なし** | `probe`（合成のみ） | 実 caller がない。**製品経路を作って埋めない**（計画 §3-2、C-8） | **欠落**。親へ提示（§8-2） |
+| 6 | `probe`（`Probe`） | `children.rs:23` | **なし** | `probe`（合成のみ） | 実 caller がない。**製品経路を作って埋めない**（計画 §3-2、C-8） | **製品 caller なし。8 kind の API fixture に保持**（親の判断、末尾） |
 | 7 | `renderer`（`Renderer`） | `children.rs:25` | R13 | `renderer` | 製品 ELF ＋ `evorch-renderer`（CEF）。fake helper は試験 binary | 同上。既存に core の owner が abrupt に終わる試験がある（`renderer_owner`、fake helper 使用） |
-| 8 | `other`（`Other`） | `children.rs:26` | R03、R04、R10、R11、R16 | `other`、`blocking-no-ledger` | 製品 ELF（種別が多い。代表を選ぶ必要があり、**親の承認事項**） | 同上 |
-| 9 | **StdioSession**（LSP 相当の同期 stdio session） | #210.2 | 候補：R06（LSP）。他に同期 session の経路 R09、R10 | `session-spawn-owned`、`session-spawn-sandboxed`、`session-no-ledger` | 製品 ELF ＋ LSP server の設定 | **対応が未承認**（§8-1）。#2 と同じ入口を共有する |
+| 8 | `other`（`Other`） | `children.rs:26` | R03、R04、R10、R16。Codex quota RPC（R11）は試験だけの T 経路 | `other`、`blocking-no-ledger` | 製品 ELF（種別が多い。代表を選ぶ必要があり、**親の承認事項**） | 同上 |
+| 9 | **StdioSession**（LSP 相当の同期 stdio session） | #210.2 | 製品 caller なし。旧枠の意味は `OwnedSession` または LSP を試験注入した T cell で保つ（親の判断、末尾） | `session-spawn-owned`、`session-spawn-sandboxed`、`session-no-ledger` | T cell の試験 binary | 製品の実 caller 表とは別。R09、R10 は短命な検出処理であり、この session と同一視しない |
 | 10 | **PTY** | #210.2 | R02 | **なし**（合成の 13 に PTY 経路は含まれない。raw backend のまま） | 製品 ELF（agent の `shell` tool の PTY 指定） | **B3-02、03 の前は typed 所有がない**。raw のまま |
 | 11 | **js-worker** | #390.3 | R08 | **なし**（13 の外。静的な境界試験は B2 の計画だったが、この表では未確認） | 製品 ELF ＋ 隣の `evorch` CLI（または `EVORCH_JS_WORKER`）。bwrap 経路と、`WorkerLauncher::injected` の DirectSandbox（試験 binary）の両方 | 設計 v3 §6.2 の「bind しない」例外と「初期 exec 後に新しい process を作らない」確認が必要（B3-06） |
 
@@ -87,17 +104,17 @@
 **API の入口を網羅する表。実 caller の証明ではない。** 定義位置は `crates/sandbox/src/` 配下（Linux）。
 「13 経路の label」は `crates/sandbox/tests/owner_death.rs` の root。
 
-| # | API | 定義 | 13 経路の label | 本番の呼出元（表 3、4 の ID） | メモ |
-|---|---|---|---|---|---|
-| A1 | `OwnedChild::spawn_blocking(ledger?, kind, label, cmd)` | `owned.rs:84` | 8 種の `ChildKind`（ledger あり）、`blocking-no-ledger`（ledger なし） | R01、R03、R04、R05、R11、R15、L17、L20 | 非同期の入口。blocking thread で admission・起動・登録 |
-| A2 | `OwnedChild::spawn_in(&Admission, kind, label, cmd)` | `owned/linux.rs:326` | A1、A4 経由 | R07（MCP） | 直接の matrix 行なし |
-| A3 | `OwnedChild::spawn(cmd)` | `owned/linux.rs:298` | なし | なし（本番の呼出元を確認していない） | ledger に登録されない |
-| A4 | `Admission::spawn_owned(kind, label, cmd)` | `ledger.rs:304` | `admission-spawn-owned` | R12、R13 | A2 に委譲 |
-| A5 | `OwnedSession::spawn(cmd)` | `owned/linux.rs:200` | `session-no-ledger` | L18（eval の git） | 同期。ledger なし |
-| A6 | `OwnedSession::spawn_in(&Admission, …)` | `owned/linux.rs:205` | A7、A8 経由 | なし | |
-| A7 | `OwnedSession::spawn_owned(ledger?, kind, label, cmd)` | `owned.rs:69` | `session-spawn-owned` | R09、R10、R16、L19 | |
-| A8 | `OwnedSession::spawn_sandboxed(ledger?, sandbox, spec)` | `owned.rs:31` | `session-spawn-sandboxed` | R06（LSP）、R08（js-worker） | `ChildKind::SandboxSession` 固定 |
-| A9 | `OwnedSession::spawn_sandboxed_in(&Admission, …)` | `owned.rs:44` | A8 経由 | なし | |
+| # | API | 定義 | 13 経路の label | 製品の実 caller | T 経路（試験のみ） | メモ |
+|---|---|---|---|---|---|---|
+| A1 | `OwnedChild::spawn_blocking(ledger?, kind, label, cmd)` | `owned.rs:84` | 8 種の `ChildKind`（ledger あり）、`blocking-no-ledger`（ledger なし） | R01、R03、R04、R05、R15、L17、L20 | R11（Codex quota RPC の T 経路） | 非同期の入口。blocking thread で admission・起動・登録 |
+| A2 | `OwnedChild::spawn_in(&Admission, kind, label, cmd)` | `owned/linux.rs:326` | A1、A4 経由 | R07（MCP） | なし | 直接の matrix 行なし |
+| A3 | `OwnedChild::spawn(cmd)` | `owned/linux.rs:298` | なし | なし（本番の呼出元を確認していない） | なし | ledger に登録されない |
+| A4 | `Admission::spawn_owned(kind, label, cmd)` | `ledger.rs:304` | `admission-spawn-owned` | R12、R13 | なし | A2 に委譲 |
+| A5 | `OwnedSession::spawn(cmd)` | `owned/linux.rs:200` | `session-no-ledger` | L18（eval の git） | なし | 同期。ledger なし |
+| A6 | `OwnedSession::spawn_in(&Admission, …)` | `owned/linux.rs:205` | A7、A8 経由 | なし | なし | |
+| A7 | `OwnedSession::spawn_owned(ledger?, kind, label, cmd)` | `owned.rs:69` | `session-spawn-owned` | R09、R10、R16、L19 | なし | |
+| A8 | `OwnedSession::spawn_sandboxed(ledger?, sandbox, spec)` | `owned.rs:31` | `session-spawn-sandboxed` | R08（js-worker） | R06（LSP、試験で明示登録した場合だけ） | `ChildKind::SandboxSession` 固定 |
+| A9 | `OwnedSession::spawn_sandboxed_in(&Admission, …)` | `owned.rs:44` | A8 経由 | なし | なし | |
 | R1 | `ProcessGroup::spawn_pty(slave, cmd)`（raw） | `process.rs:184` | **なし** | R02 | **B3-05 で撤去予定。typed の PTY 入口は B3-02、03 で作る** |
 | R2 | `Admission::register_pty_group(kind, label, &group)`（raw） | `ledger.rs:275` | なし | R02 | 同上 |
 | R3 | `ProcessGroup::retired()` | `process.rs:194` | なし | なし（試験の `m2.rs` が使う。計画 B3-05） | |
@@ -109,9 +126,9 @@
   残る。**この表の対象外**（計画 B3-05：無理に同時撤去しない）。
 - 13 経路のうち、A2、A3、A6、A9 に直接対応する label はない。A2、A9 は A4、A8 経由で通る。
 
-## 5. 表 3：実 caller 表（実 evorch-core から届く本番の起動元）
+## 5. 表 3：製品の実 caller 表（製品に配線された起動元）
 
-**API 網羅表（表 2）とは別の表。** 実 core の呼出元だけを並べる。「ledger」は、core が作る単一の
+**API 網羅表（表 2）とは別の表。** 製品に登録・配線された caller だけを並べる。試験でのみ明示登録・注入する経路は下の T 経路表に分離する。「ledger」は、core が作る単一の
 `SpawnLedger`（`workbench-host/src/bootstrap/mod.rs:292`）が登録先になるか。
 「既存の死亡・終了の試験」は README と test ファイルの先頭の記述から確認した範囲。
 
@@ -122,21 +139,26 @@
 | R03 | grep（`rg`） | `tools/src/tools/grep.rs:115` | Other（#8） | A1 | あり（`self.ledger()`） | null / pipe / null | `rg` | 合成のみ |
 | R04 | git diff tool | `tools/src/tools/git_diff.rs:139` | Other（#8） | A1 | あり | null / pipe / pipe | git と helper | 合成のみ |
 | R05 | comment-checker（post-edit） | `tools/src/post_edit.rs:368` | SandboxSession（#2） | A1 | あり | pipe ×3 | checker | 合成のみ |
-| R06 | LSP | `tools/src/lsp/client.rs:34` | SandboxSession（#2。#9 の候補） | A8 | あり（設定時） | pipe ×3 | server | 合成のみ。`--die-with-parent` と creator thread の関係は設計 v3 実測 1 |
 | R07 | MCP stdio | `tools/src/mcp/transport/stdio.rs:668` | McpStdio（#1） | A2 | あり | pipe ×3 | server | `mcp_stdio`（ledger stop、README） |
 | R08 | js-worker | `tools/src/tools/run_js/worker.rs:444` | SandboxSession（#11 に数える） | A8 | あり | pipe ×3 | worker（自身の子は作らない前提） | なし（B3-06 で新設） |
 | R09 | minimal sandbox の library 一覧 | `sandbox/src/minimal.rs:404` | SandboxSession（#2） | A7 | あり（`detect_owned`） | null / pipe / pipe | 短命。一覧が終わると終了 | 合成のみ |
 | R10 | bwrap の機能確認 | `sandbox/src/bwrap.rs:293` | Other（#8。#9 の候補） | A7 | あり（`detect_owned`）。ledger なしの呼出しもある | null / pipe / pipe | 短命（`true` を実行） | 合成のみ |
-| R11 | codex の quota RPC | `providers/src/provider/codex/quota/rpc.rs:143` | Other（#8） | A1 | あり（`config.ledger`） | pipe / pipe / null | app-server | 合成のみ |
 | R12 | eval の group member | `eval/src/evaluator/groups.rs:111` | Eval（#5） | A4 | あり | null / file / file | `evorch eval run` の process。その先の子は別の owner（表 4 の L17、L18） | `groups` の unit test（README） |
 | R13 | offline renderer | `workbench-host/src/areas/browser/renderer.rs:545` | Renderer（#7） | A4 | あり | IPC endpoint ×2 / null | CEF の native 子（同 group と設計 v3 §6 は想定。実測は B3-08） | `renderer_owner`（fake helper。core の abrupt な終了）、`renderer_owner_cef`（実 CEF。test-only の subreaper 確認） |
 | R14 | agent Chromium | `browser/src/agent/chromium.rs:249`。本番の `AgentBrowser::new` は `tools/src/executor.rs:701` の 1 箇所 | 追加セル（11 に数えない） | X1（外部 crate） | **なし** | chromiumoxide 任せ | Chromium の子孫。group の構成は未測定（B3-04 の最初に採る） | `agent_observation_chromium`、`agent_chromium` |
 | R15 | PR source（`gh`） | `runtime/src/pull_requests/source.rs:232`。runner は `workbench-host/src/bootstrap/lane_pr.rs:30` | PullRequestSource（#3） | A1 | あり | null / pipe / pipe | `gh` | `pull_requests_core` ほか |
 | R16 | git の読み取り（thread 開始時など） | `runtime/src/git_read.rs:151`。呼出元は `runtime/src/thread_start.rs:77`、`repository.rs:143` | Other（#8） | A7 | あり | null / pipe / pipe | git | 合成のみ |
 
-- R01〜R16 のうち、**typed 所有になっていないのは R02（PTY）と R14（agent Chromium）**。B3-02〜04 の対象。
+- 製品の実 caller は **14 件**（R01〜R05、R07〜R10、R12〜R16）。このうち typed 所有になっていないのは R02（PTY）と R14（agent Chromium）。B3-02〜04 の対象。
 - core の ledger を設定する箇所は `bootstrap/mod.rs` の `with_spawn_ledger`、`set_spawn_ledger` 等。
   **「core では全 caller の ledger が Some」とまでは確認していない**（呼出元ごとの設定漏れは未調査）。
+
+試験でのみ到達する経路（製品 caller 表には含めない）：
+
+| ID | T 経路 | 実装／入口 | 製品側の根拠 |
+|---|---|---|---|
+| R06 | LSP（`LspDiagnostics`） | `tools/src/lsp/client.rs:34`。明示登録で利用可能（`tools/src/lsp/mod.rs:34`） | 標準ツール一覧（`tools/src/executor.rs:327`）にない。constructor の呼出しは試験だけ |
+| R11 | Codex quota RPC（app-server 経路） | `providers/src/provider/codex/quota/rpc.rs:143` | 製品 constructor の GUI `new_for_account` は `use_app_server=false`（`gui/src/model/quota.rs:293`、`providers/src/provider/codex/quota.rs:173–174,202–203`）。ledger の既定値も `None`（同 `:114`） |
 
 ## 6. 表 4：spawn 台帳（全分類）
 
@@ -166,12 +188,12 @@
 | L03 | grep（R03） | core | Other／あり | A1 | `rg` | P\* | agent の `grep` tool | provider、`rg` |
 | L04 | git diff tool（R04） | core | Other／あり | A1 | git | P\* | agent の git diff tool | provider、git |
 | L05 | comment-checker（R05） | core | SandboxSession／あり | A1 | checker | P\* | edit、write、apply_patch の post-edit hook（`tools/src/tools/edit.rs:22` 等） | hook の構成と checker の実行ファイル。**構成の有無は未確認** |
-| L06 | LSP（R06） | core | SandboxSession／あり | A8 | server | P\* | agent の LSP tool | provider、LSP server、bwrap（DirectSandbox は T） |
+| L06 | LSP（R06、`LspDiagnostics`） | core（試験時のみ） | SandboxSession／あり | A8 | server | T | 試験で明示登録した場合だけ到達。製品の標準ツール一覧（`tools/src/executor.rs:327`）にない。定義は `tools/src/lsp/mod.rs:34`、constructor の呼出しは試験だけ | provider、LSP server、bwrap。製品 caller ではない |
 | L07 | MCP stdio（R07） | core | McpStdio／あり | A2 | server | P\* | `mcp` 名前空間の protocol command ＋ config（`runtime/src/mcp/service.rs:367`。`mcp_area_ops` が既存の入口の試験） | MCP server の実行ファイル（試験の `core-mcp-test-peer` は試験 bin。製品は任意の server を起動できる） |
 | L08 | js-worker（R08） | core | SandboxSession／あり | A8 | worker（evorch js-worker）。**guard は core 側だけ** | P\* | agent の `run_js` tool。worker の場所は `EVORCH_JS_WORKER` か、current_exe の隣の `evorch`（`run_js/worker.rs:476`） | **`evorch` を隣に置くか env を設定**（sealed の 4 ファイルには `evorch` がない）。provider、bwrap。**注入した DirectSandbox（`WorkerLauncher::injected`）は T** |
 | L09 | minimal sandbox の library 一覧（R09） | core | SandboxSession／あり | A7 | 短命 | P\* | L08 の準備中だけ（`worker.rs:406` の `detect_owned`） | L08 と同じ |
 | L10 | bwrap の機能確認（R10） | core | Other／あり（ledger なしの呼出しもある） | A7 | 短命 | P | core 起動時の sandbox 検出（`bootstrap/components.rs:54`）ほか（`runtime/src/network.rs:76`、`bwrap/startup.rs:23`） | bwrap |
-| L11 | codex の quota RPC（R11） | core | Other／あり | A1 | app-server | P\* | provider の quota 取得 | codex の app-server の実行ファイルと設定 |
+| L11 | Codex quota RPC（R11、app-server 経路） | core（試験時のみ） | Other／あり | A1 | app-server | T | RPC 実装は台帳に残す。製品 GUI constructor `new_for_account` は `use_app_server=false`（`gui/src/model/quota.rs:293`、provider quota `:173–174,202–203`）、ledger 既定値も `None`（同 `:114`） | 製品の実 caller ではない。app-server 経路は T |
 | L12 | eval group member（R12） | core | Eval／あり | A4 | `evorch eval run`。その先は別の owner（L17、L18） | P\* | agent の eval tool（`bootstrap/mod.rs:390`）。CLI は `find_cli`（隣の `evorch`、なければ PATH。`groups.rs:40`） | `evorch` CLI、provider。**sealed の 4 ファイルだけでは隣に `evorch` がない（PATH で補える）** |
 | L13 | offline renderer（R13） | core | Renderer／あり | A4 | CEF の native 子 | P\* | browser area の tab 操作（`areas/browser.rs:38`）。renderer の場所は `EVORCH_RENDERER_EXEC` か隣の `evorch-renderer`（`renderer.rs:94`） | `evorch-renderer`（CEF）、CEF の配布、display の要否は未確認。**fake helper（feature `renderer-test-helper`）は T** |
 | L14 | agent Chromium（R14） | core | （kind なし）／**なし** | X1 | Chromium の子孫 | P\* ・**raw** | agent の browser tool（`tools/src/executor.rs:701`、`detect` に成功した場合のみ） | Chromium、provider。**未移行（B3-04）** |
@@ -214,29 +236,39 @@
 | L31 | target の fork と exec（`process-guard/src/guard.rs:354`、`:150`） | helper の中 | 対象外（guard の実装） | |
 | L32 | build script（`process-guard/build.rs:3`、`rustc -V`） | build 時 | 対象外 | |
 
-### 6-F. 試験専用
+### 6-F. 試験・測定用の追加記録
 
 | ID | 内容 | 分類 |
 |---|---|---|
-| L33 | tests、test-support、examples、harness にある spawn：**124 ファイル**（grep による。`Command::new`、`OwnedCommand::new`、`OwnedChild::spawn`、`OwnedSession::spawn`、`spawn_owned`、`spawn_sandboxed`、`spawn_command`、`native_pty_system`、`libc::fork`、`ProcessGroup::spawn_pty` のいずれかを含む）。crate 別：evorch-core 30、runtime 29、tools 17、sandbox 11、gui 10、storage 6、evorch 6、core-launcher 4、workbench-host 3、process-guard 2、その他 5。加えて、`src` 内の `#[cfg(test)]` の中にある spawn（`storage`、`config/src/load.rs:541`、`tools/src/output.rs`、`tools/src/tools/run_js/*`、`core-instance/src/handoff_boot.rs:534`、`handoff_physical_deadline.rs:303`、`workbench-host/src/attachments.rs:1035`、`ingress/attachment_race.rs:187`、`sandbox/src/minimal.rs:743`、`evorch-core/src/lifecycle/idle.rs:79`、`gui/src/runtime_sink.rs:2226`、`gui/src/bin/evorch-gui.rs:1908,1927` など） | **対象外（試験）**。個々の行は分類していない。ファイル単位の grep なので、**行単位の網羅ではない** |
+| L33 | tests、test-support、examples、harness および `src` 内の `#[cfg(test)]` にある試験 spawn：**123 ファイル**。検索語に該当するファイルを file 単位で数えた。crate 別：evorch-core 30、runtime 29、tools 17、sandbox 11、gui 10、storage 6、evorch 6、core-launcher 4、workbench-host 3、process-guard 2、その他 5（合計 **123**）。対象は試験用の spawn を含むファイルで、`storage`、`config/src/load.rs:541`、`tools/src/output.rs`、`tools/src/tools/run_js/*`、`core-instance/src/handoff_boot.rs:534`、`handoff_physical_deadline.rs:303`、`workbench-host/src/attachments.rs:1035`、`ingress/attachment_race.rs:187`、`sandbox/src/minimal.rs:743`、`evorch-core/src/lifecycle/idle.rs:79`、`gui/src/runtime_sink.rs:2226`、`gui/src/bin/evorch-gui.rs:1908,1927` 等の test-only code を含む | **対象外（試験）**。個々の行は分類していない。ファイル単位の検索で、行単位の網羅ではない |
+| L34 | 測定 helper の raw spawn（`scripts/measure-renderer/src/helper.rs:143–161`、`Command::new(...).spawn()`） | X・**raw** |
+
+検索語は `Command::new`、`OwnedCommand::new`、`OwnedChild::spawn`、`OwnedSession::spawn`、`spawn_owned`、`spawn_sandboxed`、`spawn_command`、`native_pty_system`、`libc::fork`、`ProcessGroup::spawn_pty`。候補抽出コマンド：
+
+```sh
+rg -l --hidden --glob '!target/**' --glob '!.git/**' --glob '*.rs' \
+  'Command::new|OwnedCommand::new|OwnedChild::spawn|OwnedSession::spawn|spawn_owned|spawn_sandboxed|spawn_command|native_pty_system|libc::fork|ProcessGroup::spawn_pty' crates scripts/measure-renderer
+```
+
+候補のうち L33 は試験専用のファイル（`tests/`、`test-support/`、`shared-test-support/`、`examples/`、`harness/` と `src` 内の test-only code）だけを数え、L34 はその範囲外にある測定 helper の製品外 spawn として分離した。対象ファイルは crate 内の一覧 123 件（crate 別内訳も合計 123）と `scripts/measure-renderer/src/helper.rs` の 1 件で、重複なしの計 124 件。L33 は file-level の集計であり、個々の spawn 行を網羅するものではない。
 
 ## 7. 台帳の要点
 
-- **行数：** 個別の行は **32 行**（L01〜L32）。L33 は試験専用の集約 1 行（124 ファイル）。
-- **artifact 種別ごとの件数（L01〜L32）：**
+- **行数：** 個別の台帳行は **33 行**（L01〜L32、L34）。L33 は試験専用の集約 1 行（123 ファイル）。
+- **artifact 種別ごとの件数（L01〜L32、L34）：**
 
 | 種別 | 件数 | 行 |
 |---|---|---|
 | P | 2 | L10、L16 |
-| P\* | 14 | L01〜L09、L11〜L15 |
-| X（owner が core でない、または製品の spawn でない） | 16 | L17〜L32 |
-| T | 0 行 | ただし **P\* の行に T の変種が付く**：L01、L06（DirectSandbox）、L08（`WorkerLauncher::injected`）、L13（`renderer-test-helper`） |
-| raw（未移行。上の種別と併記。X の行にも付く） | 3 | L02、L14（core の caller。B3 の対象）、L21（GUI の PTY。対象外） |
+| P\* | 12 | L01〜L05、L07〜L09、L12〜L15 |
+| X（owner が core でない、または製品の spawn でない） | 17 | L17〜L32、L34 |
+| T（試験でのみ到達する独立経路） | 2 | L06（LSP）、L11（Codex quota RPC） |
+| raw（未移行。上の種別と併記。X の行にも付く） | 4 | L02、L14（core の caller。B3 の対象）、L21（GUI の PTY）、L34（測定 helper。対象外） |
 
   - **typed 所有でない core の caller は L02、L14 の 2 行。** GUI にも typed でない起動がある：
-    PTY が L21、std の `Command` が L22〜L25（4 行）。これらは X に数え、raw の件数（3）には L21 だけを入れた。
-- **core 所有の本番 caller（表 3）：16 件（R01〜R16）。うち typed 所有でないのは 2 件（R02 PTY、R14 agent Chromium）。**
-- **11 root との対応：** 実 caller がある root は 10 個。**`probe` は実 caller がない。** 同期 session（#9）の対応は未承認。
+    PTY が L21、std の `Command` が L22〜L25（4 行）。これらは X に数える。L34 も測定 helper の raw spawn なので X／raw に数える。
+- **core 所有の製品 caller（表 3）：14 件。** R06（LSP）と R11（Codex quota RPC）は製品の実 caller ではなく、試験時だけ到達する T 経路。製品 caller のうち typed 所有でないのは 2 件（R02 PTY、R14 agent Chromium）。
+- **11 root との対応：** 製品 caller がある root は 9 個。**`probe` は製品 caller がない。** #9 StdioSession の旧枠は T cell で保つ（親の判断、末尾）。
 - **sealed の 4 ファイル（`evorch-core-product`）だけでは届かない実 caller：**
   - L08 js-worker と L09 の library 一覧（隣の `evorch` が要る。`EVORCH_JS_WORKER` で補える）
   - L12 eval（隣の `evorch` が要る。PATH で補える）
@@ -244,36 +276,41 @@
   - **補えるかどうかは、どれも実行して確かめていない。**
 - **製品 ELF からも届かない、または届かない可能性がある実 caller（読解）：**
   - `Probe`：caller がない。
+  - R06／L06 の LSP：`LspDiagnostics` は明示登録が必要で標準ツール一覧にない。constructor 呼出しは試験だけ（T）。
+  - R11／L11 の Codex quota RPC：製品 GUI の constructor は `use_app_server=false`、ledger も既定 `None`。app-server RPC は試験だけの T 経路。
   - L19 snapshot の git：core の実 caller ではない（CLI の benchmark）。
   - L17、L18：core の直接の子ではない（L12 の子）。
-  - **DirectSandbox を使う cell（L01、L06、L08 の変種）は、試験 binary でしか作れない。**
+  - **DirectSandbox を使う cell（L01、L08 の変種）は、試験 binary でしか作れない。**
     製品 ELF の sandbox は実 bwrap（`bootstrap/components.rs:54`）。
 - 製品 ELF の起動入口が実在するかを含め、**どの行も実行では確認していない**。
   provider を mock に向けられるのは config の `base_url` が根拠で、**製品 ELF が mock provider と鍵の取得経路で
   動くことは未検証**。
 
-## 8. 親へ提示する事項（計画 §3-2、レビュー S1、S2）
+## 8. 実装時の留意点（レビュー S1、S2）
 
-1. **「StdioSession」root の対応。** 設計 v2 の「LSP 相当 direct StdioSession」は、型の削除後、現在のどの経路に
-   当たるのか履歴に明記がない。候補は R06（LSP）と、同期 session の R09、R10。**承認が要る。**
-   承認するまで、表 1 の #9 は「未承認」のまま。
-2. **`Probe` には本番の caller がない。** 製品経路を作って埋めない。合成の root（`owner_death.rs`）で扱うか、
-   11 root から外すかは親が決める。
-3. **S2：製品 ELF で既存の入口から起動できない caller、または試験 binary でしか作れない cell。**
-   - DirectSandbox の cell（L01、L06、L08 の変種）は試験 binary。B3-06 は、製品 ELF の cell と試験 binary の
-     cell の**両方**を別々に提出し、artifact の種別を各行に書く必要がある。
-   - sealed の 4 ファイルに隣の binary が要る caller は、上の §7 のとおり。expiry と同じ扱い（親の判断が先）。
-4. **新たに見つけた未移行の経路：GUI の埋め込み terminal PTY（L21）。** README の未移行の一覧になかった。
-   親の判断 C に従い、台帳に載せ、別の follow-up とする。GUI が owner なので、core の SIGKILL・満了の対象外。
-5. **README の「runtime snapshot」の扱い。** L19 は core の caller ではなく、CLI の benchmark から呼ばれる。
-   B3-05 の台帳では「core 所有」に入れない。
-6. **core が作る単一の ledger が全 caller に渡っているか**は未確認（表 3 の注）。B3-06 の前に確認する。
+1. 表 3 は製品に配線された実 caller のみ。L06／R06 と L11／R11 は §5 の T 経路表と §6 の T cell に分離した。
+2. 製品経路と試験 binary でのみ作る cell（例：L01、L08 の DirectSandbox 変種）は、B3-06 の報告でも区別し、
+   artifact 種別を明記する。L06 自体は T-only の LSP cell である。
+3. sealed の 4 ファイルに隣の binary が要る caller は §7 に記録した。到達判断は読解のみで、製品 ELF による
+   実行確認ではない。
+4. L19 snapshot の git は core の caller ではなく、CLI benchmark から呼ばれるため、core 所有の caller に数えない。
+5. core が作る単一 ledger が各製品 caller に渡るかは未確認（表 3 の注）。B3-06 の検証で確かめる。
 
 ## 9. 未実施・未確認
 
 - 計画 §3-3（expiry 入口の実現性調査）と §3-4（測定条件の固定）は、この作業では行っていない。
 - どの行も実行していない。到達の判断はコード読解で、provider の mock 化、bwrap の有無、CEF の配布、display の要否は
   実環境で確かめていない。
-- 並行 harness 修正の SHA と、V1b-2b の SHA は取得できていない（§1）。
 - 外部 crate と native の内部 spawn（chromiumoxide の内側、CEF の内部）の監査はしていない（L14、L26）。
-- 試験専用の spawn（L33）は、ファイル単位の grep で、行単位の分類ではない。
+- 試験専用の spawn（L33）は、crate 別に合計 123 ファイルの file-level 集計で、行単位の分類ではない。
+- 測定 helper の raw spawn（L34）は X とし、別の測定ツール follow-up に分離した。
+
+## 親の判断（台帳）
+
+- **Probe：** 8 kind の API fixture に残す。製品に caller はない。13 個の synthetic な経路が成功しても、
+  それは製品到達性の証拠に数えない。
+- **StdioSession 削除後：** 旧 root の意味は T cell（`OwnedSession` または LSP の試験注入）で保ち、製品の実 caller 表とは分ける。
+  R09／R10 は短命な検出処理であり、LSP の session と同じものとして扱わない。
+- **GUI PTY（L21）：** X として台帳に残し、別の follow-up とする。core の保証範囲に含めない。
+- **承認：** 上記を反映したこの台帳を承認済みとし、B3-06 に着手してよい。B3-06 では製品 caller と T cell を分け、
+  個々の caller に対する ledger の有無を確認する。
