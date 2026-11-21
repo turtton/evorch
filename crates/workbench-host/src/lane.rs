@@ -22,14 +22,43 @@ pub struct ThreadBinding {
 
 /// The sink's bindings as of its last change, shared with the host.
 #[derive(Clone, Default)]
-pub struct BindingTable(Arc<Mutex<BTreeMap<String, ThreadBinding>>>);
+pub struct BindingTable(
+    Arc<Mutex<BTreeMap<String, ThreadBinding>>>,
+    Arc<std::sync::atomic::AtomicU64>,
+);
+/// Opaque non-authority observation. Commit checks it without the host mutex.
+#[derive(Clone)]
+pub struct BindingObservation {
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    expected: u64,
+}
+impl BindingObservation {
+    pub fn is_current(&self) -> bool {
+        self.expected != u64::MAX
+            && self.generation.load(std::sync::atomic::Ordering::Acquire) == self.expected
+    }
+}
 
 impl BindingTable {
+    pub fn observe(&self) -> BindingObservation {
+        BindingObservation {
+            generation: self.1.clone(),
+            expected: self.1.load(std::sync::atomic::Ordering::Acquire),
+        }
+    }
     pub fn replace(&self, bindings: BTreeMap<String, ThreadBinding>) {
-        *self
+        let mut current = self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = bindings;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Invalidate BEFORE publishing. Exhaustion is permanently unavailable;
+        // never wrap or reuse a binding observation after A -> B -> A.
+        let _ = self.1.try_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |v| v.checked_add(1),
+        );
+        *current = bindings;
     }
 
     pub fn get(&self, thread: &str) -> Option<ThreadBinding> {
@@ -103,5 +132,29 @@ impl TeamSource<'_> {
         );
         authority.finding_store = Some(config.db_path.clone());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod binding_observation_tests {
+    use super::*;
+    #[test]
+    fn equal_binding_aba_and_exhaustion_never_revalidate_an_observation() {
+        let table = BindingTable::default();
+        let proof = table.observe();
+        assert!(proof.is_current());
+        table.replace(Default::default());
+        table.replace(Default::default());
+        assert!(!proof.is_current());
+        assert!(table.observe().is_current());
+        table
+            .1
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
+        let last = table.observe();
+        table.replace(Default::default());
+        assert!(!last.is_current());
+        assert!(!table.observe().is_current());
+        table.replace(Default::default());
+        assert!(!table.observe().is_current());
     }
 }

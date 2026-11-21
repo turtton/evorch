@@ -57,7 +57,9 @@ impl ExistingPreparedResume {
             {
                 continue;
             }
-            if self.uncertain.lock().unwrap().remove(&id).is_some() {
+            let settled = self.uncertain.lock().unwrap().remove(&id);
+            if let Some(job) = settled {
+                job._reservation.confirm_graph_observation();
                 resolved += 1;
             }
         }
@@ -83,8 +85,14 @@ impl ExistingPreparedResume {
         error: runtime::RuntimeError,
     ) -> RecoveryAdminError {
         match error {
-            runtime::RuntimeError::GraphControlConflict => RecoveryAdminError::Conflict,
-            runtime::RuntimeError::GraphControlNotApplied => RecoveryAdminError::Stopped,
+            runtime::RuntimeError::GraphControlConflict => {
+                reservation.confirm_graph_observation();
+                RecoveryAdminError::Conflict
+            }
+            runtime::RuntimeError::GraphControlNotApplied => {
+                reservation.confirm_graph_observation();
+                RecoveryAdminError::Stopped
+            }
             _ => {
                 self.retain(manifest, effect, reservation);
                 RecoveryAdminError::Unavailable
@@ -119,6 +127,7 @@ impl ExistingPreparedResume {
         }
         // Failed manual Resume deliberately preserves the existing Prepared
         // claim. No decline(), release(), or automatic-policy fallback here.
+        reservation.confirm_graph_observation();
         drop(reservation);
         Err(error)
     }
@@ -131,6 +140,20 @@ impl RecoveryAdminHandler for ExistingPreparedResume {
         }
     }
     fn resume(
+        &self,
+        context: &RecoveryAdminContext,
+        request: RecoveryResumeRequest,
+    ) -> RecoveryAdminResult {
+        let observe = request.reservation.observation_readback();
+        let result = self.resume_observed(context, request);
+        if !matches!(result, Err(RecoveryAdminError::Unavailable)) {
+            let _ = observe();
+        }
+        result
+    }
+}
+impl ExistingPreparedResume {
+    fn resume_observed(
         &self,
         context: &RecoveryAdminContext,
         request: RecoveryResumeRequest,

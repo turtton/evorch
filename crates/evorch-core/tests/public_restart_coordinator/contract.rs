@@ -362,3 +362,81 @@ async fn strict_local_config_and_pre_capture_reprobe_fail_before_transaction() {
     );
     f.shutdown().await;
 }
+
+#[tokio::test]
+async fn recipe_binding_aba_after_inspect_refuses_before_gate_and_transaction() {
+    let mut f = Fixture::new().await;
+    let request = f.request("recipe-binding-race").await;
+    f.port.hold.store(2, Ordering::SeqCst);
+    let response = f.submit(command(request)).unwrap();
+    f.event(2, "recipe-binding-race").await;
+    // Equal contents do not restore an older binding observation.
+    f.recipes.1.replace(Default::default());
+    f.recipes.1.replace(Default::default());
+    f.port.release();
+    assert!(response.await.unwrap().is_err());
+    f.assert_running_untouched();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn live_adapter_releases_reservation_only_after_canonical_reversible_cancel() {
+    use evorch_core::restart::public::{LiveUndisposedAdmission, UndisposedAdmission};
+    let f = Fixture::new().await;
+    let epoch = f.host.host.lock().unwrap().projection().instance_epoch();
+    let collector = f.host.graph_collector().clone();
+    let adapter = LiveUndisposedAdmission {
+        collector: collector.clone(),
+        core: f.core.clone(),
+        epoch,
+    };
+    let revision = collector.snapshot().unwrap().snapshot_revision;
+    let id = adapter
+        .admit(revision, &mut || f.core.request().map_err(|_| conflict()))
+        .unwrap();
+    assert!(
+        adapter
+            .admit(revision, &mut || -> Result<_, AdminFailure> {
+                panic!("reservation must refuse before transition")
+            })
+            .is_err()
+    );
+    f.core.cancel(id).unwrap();
+    assert_eq!(
+        f.core.snapshot().phase,
+        evorch_core::restart::RestartPhase::Running
+    );
+    let next = adapter
+        .admit(revision, &mut || f.core.request().map_err(|_| conflict()))
+        .unwrap();
+    assert_ne!(id, next);
+    f.core.cancel(next).unwrap();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn recipe_collection_metadata_race_refuses_prepared_before_gate_or_transaction() {
+    let f = Fixture::new().await;
+    // A retained run's metadata changes, not its live-set membership. The runtime
+    // unit regression also covers active runs with unchanged incarnations.
+    let run = f.host.runtime.delegate_background(
+        runtime::Role::Worker,
+        "done".into(),
+        Default::default(),
+    );
+    f.host.runtime.wait(run).await.unwrap();
+    let request = f.request("recipe-metadata-race").await;
+    let entered = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    *f.recipes.2.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let response = f.submit(command(request)).unwrap();
+    entered.wait().await;
+    f.host
+        .runtime
+        .bind_thread_root("changed-during-collect", run)
+        .unwrap();
+    release.wait().await;
+    assert!(response.await.unwrap().is_err());
+    f.assert_running_untouched();
+    f.shutdown().await;
+}

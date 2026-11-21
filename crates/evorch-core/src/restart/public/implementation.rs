@@ -30,10 +30,15 @@ use workbench_protocol::{
 };
 
 pub type Recipes = BTreeMap<RunId, RecoveryRecipe>;
+/// Recipes and the binding generation inspected by their source. No always-valid default.
+pub struct ObservedRecipes {
+    pub recipes: Recipes,
+    pub bindings: workbench_host::lane::BindingObservation,
+}
 /// The integration supplies CURRENT recipes without changing CLI ownership policy.
 /// Runtime preflight remains authoritative; this port cannot grant execution authority.
 pub trait RecipeSource: Send + Sync + 'static {
-    fn collect(&self) -> AdminIo<'_, Recipes>;
+    fn collect(&self) -> AdminIo<'_, ObservedRecipes>;
 }
 /// Hold the live Q2 collector's revision/empty-set lock through the supplied memory-only
 /// transition. A read followed by an unlocked comparison is NOT an implementation.
@@ -44,6 +49,37 @@ pub trait UndisposedAdmission: Send + Sync + 'static {
         revision: Revision,
         transition: &mut dyn FnMut() -> Result<RestartId, AdminFailure>,
     ) -> Result<RestartId, AdminFailure>;
+}
+/// Adapter over the SAME host collector as the Q2 aggregate. No storage access.
+pub struct LiveUndisposedAdmission {
+    pub collector: Arc<workbench_host::bootstrap::recovery_disposal::LiveGraphCollector>,
+    pub core: RestartCoordinator,
+    pub epoch: InstanceEpoch,
+}
+impl UndisposedAdmission for LiveUndisposedAdmission {
+    fn admit(
+        &self,
+        revision: Revision,
+        transition: &mut dyn FnMut() -> Result<RestartId, AdminFailure>,
+    ) -> Result<RestartId, AdminFailure> {
+        self.collector
+            .admit(self.epoch, revision, transition, |id| {
+                let id = *id;
+                let core = Arc::downgrade(&self.core.0);
+                Arc::new(move || {
+                    core.upgrade().is_some_and(|core| {
+                        // Canonical reopened() clears id but retains generation.
+                        // Comparing the old id to snapshot.id would never release.
+                        core.owner == id.owner
+                            && core.state.lock().is_ok_and(|state| {
+                                state.generation == id.generation
+                                    && state.id.is_none()
+                                    && state.phase == super::RestartPhase::Running
+                            })
+                    })
+                })
+            })
+    }
 }
 /// V owns BootstrappedHost, transaction creation and the exec environment. This port
 /// must create/read back a Preparing tx and invoke the existing start_finalization;
@@ -62,6 +98,8 @@ struct Prepared {
     binding: RestartBinding,
     target: RestartTarget,
     recipes: Recipes,
+    preflight: runtime::RestartPreflight,
+    bindings: workbench_host::lane::BindingObservation,
 }
 #[derive(Clone)]
 struct Active {
@@ -145,12 +183,24 @@ impl PublicRestartCoordinator {
             return Ok(AdminInspection::Restart(binding.clone()));
         }
         let target = self.targets.prepare(binding).await?;
-        let recipes = self.recipes.collect().await?;
-        self.core
-            .0
-            .runtime
-            .preflight_restart_capture(&recipes)
-            .map_err(|_| conflict())?;
+        let runtime = self.core.0.runtime.clone();
+        let recipe_observation = runtime.observe_restart_recipes();
+        let observed = self.recipes.collect().await?;
+        if !observed.bindings.is_current() {
+            return Err(conflict());
+        }
+        let recipes = observed.recipes;
+        let (recipes, preflight) = tokio::task::spawn_blocking(move || {
+            let proof = runtime
+                .prepare_restart_quiesce_observed(&recipes, recipe_observation)
+                .map_err(|_| conflict())?;
+            Ok::<_, AdminFailure>((recipes, proof))
+        })
+        .await
+        .map_err(|_| conflict())??;
+        if !observed.bindings.is_current() {
+            return Err(conflict());
+        }
         let mut state = self.state.lock().unwrap();
         if state.prepared.len() == 32 {
             state.prepared.pop_front();
@@ -162,6 +212,8 @@ impl PublicRestartCoordinator {
             binding: binding.clone(),
             target,
             recipes,
+            preflight,
+            bindings: observed.bindings,
         });
         Ok(AdminInspection::Restart(binding.clone()))
     }
@@ -199,10 +251,13 @@ impl PublicRestartCoordinator {
         let timeout = prepared.target.timeout();
         let id = self.graphs.admit(revision, &mut || {
             let recipes = recipes.take().ok_or_else(conflict)?;
+            if !prepared.bindings.is_current() {
+                return Err(conflict());
+            }
             self.core
                 .0
                 .runtime
-                .preflight_restart_capture(&recipes)
+                .validate_restart_preflight(&prepared.preflight, &recipes)
                 .map_err(|_| conflict())?;
             self.core
                 .request_inner(Some(recipes), timeout)

@@ -17,11 +17,19 @@ pub struct RestartCaptureSession {
     pub(super) revision: u64,
     expected_persisted: bool,
 }
+/// Memory-only recipe-collection observation; never admission or capture authority.
+pub struct RestartRecipeObservation {
+    runtime: Weak<Shared>,
+    intents: BTreeMap<RunId, ResumeIntent>,
+    metadata: BTreeMap<RunId, String>,
+}
 /// One-use read-only DB preflight, bound to this runtime and the inspected live set.
 /// Consuming it performs memory checks only; it is not capture/exec authority.
 pub struct RestartPreflight {
     runtime: Weak<Shared>,
     intents: BTreeMap<RunId, ResumeIntent>,
+    metadata: BTreeMap<RunId, String>,
+    recipes: String,
 }
 /// Failed adoption retains the physical proof, including on readback failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +209,7 @@ impl AgentRuntime {
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<RestartPreflight, RuntimeError> {
         let intents = self.shared.quiesce.live_capture_intents();
+        let metadata = self.restart_recipe_metadata();
         self.preflight_restart_capture(recipes)?;
         if let Some(store) = self.shared.run_store.get()
             && store
@@ -211,13 +220,112 @@ impl AgentRuntime {
                 "previous adopted restart has RetryPending components",
             ));
         }
-        if intents != self.shared.quiesce.live_capture_intents() {
+        if intents != self.shared.quiesce.live_capture_intents()
+            || metadata != self.restart_recipe_metadata()
+        {
             return Err(error("restart preflight live set changed"));
         }
         Ok(RestartPreflight {
             runtime: Arc::downgrade(&self.shared),
             intents,
+            metadata,
+            recipes: serde_json::to_string(recipes).map_err(error)?,
         })
+    }
+    /// Observe before collecting host recipes. No I/O and no authority is minted.
+    pub fn observe_restart_recipes(&self) -> RestartRecipeObservation {
+        RestartRecipeObservation {
+            runtime: Arc::downgrade(&self.shared),
+            intents: self.shared.quiesce.live_capture_intents(),
+            metadata: self.restart_recipe_metadata(),
+        }
+    }
+    fn validate_restart_recipe_observation(
+        &self,
+        observed: &RestartRecipeObservation,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&observed.runtime, &Arc::downgrade(&self.shared))
+            || observed.intents != self.shared.quiesce.live_capture_intents()
+            || observed.metadata != self.restart_recipe_metadata()
+        {
+            return Err(error("recipe collection observation changed"));
+        }
+        Ok(())
+    }
+    /// DB preflight is bound to the observation taken before host recipe collection.
+    pub fn prepare_restart_quiesce_observed(
+        &self,
+        recipes: &BTreeMap<RunId, RecoveryRecipe>,
+        observed: RestartRecipeObservation,
+    ) -> Result<RestartPreflight, RuntimeError> {
+        self.validate_restart_recipe_observation(&observed)?;
+        let proof = self.prepare_restart_quiesce(recipes)?;
+        self.validate_restart_recipe_observation(&observed)?;
+        Ok(proof)
+    }
+    fn restart_recipe_metadata(&self) -> BTreeMap<RunId, String> {
+        let runs = self
+            .shared
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut metadata: BTreeMap<_, _> = runs
+            .iter()
+            .map(|(id, entry)| {
+                let c = &entry.config;
+                (
+                    *id,
+                    format!(
+                        "{:?}",
+                        (
+                            &entry.parent,
+                            c.conversation,
+                            &c.ownership,
+                            &c.lane_scope,
+                            &c.team,
+                            &c.team_task,
+                            &c.topology,
+                            &c.task_id
+                        )
+                    ),
+                )
+            })
+            .collect();
+        drop(runs);
+        for (id, value) in &mut metadata {
+            value.push_str(&format!(
+                "{:?}",
+                (
+                    self.goal_thread(*id),
+                    self.goal_for_root(*id).map(|goal| goal.goal_id)
+                )
+            ));
+        }
+        metadata
+    }
+    /// All checks here are memory-only. The inspected DB proof is never refreshed
+    /// under public/collector/coordinator locks. Capture still revalidates storage.
+    pub fn validate_restart_preflight(
+        &self,
+        proof: &RestartPreflight,
+        recipes: &BTreeMap<RunId, RecoveryRecipe>,
+    ) -> Result<(), RuntimeError> {
+        if !Weak::ptr_eq(&proof.runtime, &Arc::downgrade(&self.shared))
+            || proof.intents != self.shared.quiesce.live_capture_intents()
+            || proof.metadata != self.restart_recipe_metadata()
+            || proof.recipes != serde_json::to_string(recipes).map_err(error)?
+            || self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .any(|a| a.queued.is_some())
+            || !self.accepted_chat_resumes().is_empty()
+        {
+            return Err(error("stale or foreign restart preflight"));
+        }
+        self.check_restart_preparation()
     }
     /// Synchronous memory-only boundary. DB preflight is never run under the
     /// host coordinator mutex. Capture independently repeats durable validation.
@@ -225,13 +333,16 @@ impl AgentRuntime {
         &self,
         preflight: RestartPreflight,
     ) -> Result<RestartAttempt, RuntimeError> {
+        // Same external registration exclusion as ordinary planned admission.
+        let _registration = self.external_admission_guard()?;
         if !Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared))
             || preflight.intents != self.shared.quiesce.live_capture_intents()
+            || preflight.metadata != self.restart_recipe_metadata()
         {
             return Err(error("stale or foreign restart preflight"));
         }
         self.check_restart_preparation()?;
-        self.begin_restart_quiesce_mode(true)
+        self.begin_restart_quiesce_guarded(true, &_registration)
     }
     /// Production capture consumes the capability minted by the host drain gate.
     /// A raw dispatch fence cannot manufacture host admission evidence:
@@ -655,4 +766,103 @@ fn validate_complete_graph(records: &[RunRecoveryRecord]) -> Result<(), RuntimeE
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod admission_observation_tests {
+    use super::*;
+    struct Never;
+    #[async_trait::async_trait]
+    impl AgentModel for Never {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "never".into()
+        }
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+    fn runtime() -> AgentRuntime {
+        let bus = Arc::new(EventBus::new(16));
+        AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(Never),
+        )
+    }
+    #[tokio::test]
+    async fn commit_memory_proof_does_not_reopen_db_and_rejects_foreign_or_changed_recipes() {
+        let root = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: root.path().join("proof.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let rt =
+            runtime().with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let recipes = BTreeMap::new();
+        let proof = rt.prepare_restart_quiesce(&recipes).unwrap();
+        // Reader spy: any DB preflight here fails. A poisoned reader is never
+        // touched by memory validation (nor are owner/filesystem/provider ports).
+        let store = rt.shared.run_store.get().unwrap();
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.with_database::<()>(|_| panic!("reader disabled after inspect"));
+        }));
+        assert!(poison.is_err());
+        rt.validate_restart_preflight(&proof, &recipes).unwrap();
+        assert!(
+            runtime()
+                .validate_restart_preflight(&proof, &recipes)
+                .is_err()
+        );
+        let changed = BTreeMap::from([(
+            RunId::new(1),
+            RecoveryRecipe {
+                settings_reference: CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                policy: ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        )]);
+        assert!(rt.validate_restart_preflight(&proof, &changed).is_err());
+    }
+    #[tokio::test]
+    async fn live_recipe_metadata_change_invalidates_proof_without_membership_change() {
+        let rt = runtime();
+        let run = rt
+            .delegate_chat(
+                "thread",
+                Role::Orchestrator,
+                "wait".into(),
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let recipes = BTreeMap::new();
+        let proof = RestartPreflight {
+            runtime: Arc::downgrade(&rt.shared),
+            intents: rt.shared.quiesce.live_capture_intents(),
+            metadata: rt.restart_recipe_metadata(),
+            recipes: serde_json::to_string(&recipes).unwrap(),
+        };
+        rt.validate_restart_preflight(&proof, &recipes).unwrap();
+        let mut runs = rt.shared.runs.lock().unwrap();
+        let config = &mut runs.get_mut(&run).unwrap().config;
+        config.conversation = !config.conversation;
+        drop(runs);
+        assert_eq!(proof.intents, rt.shared.quiesce.live_capture_intents());
+        assert!(rt.validate_restart_preflight(&proof, &recipes).is_err());
+        rt.cancel(run).unwrap();
+        rt.wait(run).await.unwrap();
+    }
 }

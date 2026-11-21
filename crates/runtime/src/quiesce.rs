@@ -532,6 +532,15 @@ impl Coordinator {
             .manual_launch_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.begin_mode_guarded(planned, &_manual)
+    }
+    /// The caller retains this coordinator's manual_launch_gate across its
+    /// final observation comparison and admission close. Never reacquire it.
+    pub(crate) fn begin_mode_guarded(
+        &self,
+        planned: bool,
+        _manual: &std::sync::MutexGuard<'_, ()>,
+    ) -> Result<u64, String> {
         let mut inner = self.lock();
         if let QuiesceState::Failed { reason } = &inner.phase {
             return Err(reason.clone());

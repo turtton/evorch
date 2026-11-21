@@ -32,10 +32,23 @@ pub fn conflict() -> AdminFailure {
     WorkbenchError::new(ErrorCode::Conflict, "fixture conflict", RetryAdvice::Never)
 }
 #[derive(Default)]
-pub struct RecipesSource(pub Mutex<Recipes>);
+pub struct RecipesSource(
+    pub Mutex<Recipes>,
+    pub workbench_host::lane::BindingTable,
+    pub Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
+);
 impl RecipeSource for RecipesSource {
-    fn collect(&self) -> AdminIo<'_, Recipes> {
-        Box::pin(async { Ok(self.0.lock().unwrap().clone()) })
+    fn collect(&self) -> AdminIo<'_, ObservedRecipes> {
+        let bindings = self.1.observe();
+        let recipes = self.0.lock().unwrap().clone();
+        let pause = self.2.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some((entered, release)) = pause {
+                entered.wait().await;
+                release.wait().await;
+            }
+            Ok(ObservedRecipes { recipes, bindings })
+        })
     }
 }
 // The same lock covers the live revision and the supplied gate transition.

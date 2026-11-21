@@ -126,6 +126,9 @@ impl AgentRuntime {
             capture_id: tx.metadata.capture_id,
             permits,
         });
+        // Seal has completed; read every graph before the first automatic attempt.
+        self.rebuild_graph_observation()
+            .map_err(|_| OwnershipError::PlannedMismatch)?;
         Ok(PhysicalClaimReport { blocked_threads })
     }
     /// Restricts the sealed set; neither current DB rows nor caller permits can
@@ -287,6 +290,28 @@ impl AgentRuntime {
     /// authority constructor, this does not truncate the ownership check at 64.
     /// Neither the sealed set nor a graph authority is returned or reconstructed.
     pub fn owned_graph_ownership_diagnostic(
+        &self,
+        expected: &GraphControlCas,
+    ) -> Result<OwnedGraphOwnershipDiagnostic, RuntimeError> {
+        // A diagnostic may observe owner validity loss, but cannot settle an
+        // existing effect's Unknown ticket. External generations only advance.
+        let observation = self
+            .begin_graph_change(&expected.manifest.manifest_id, false)
+            .ok()
+            .flatten();
+        let result = self.owned_graph_ownership_readback(expected);
+        if let Some(observation) = observation {
+            if result.is_ok() {
+                let _ = observation.confirm();
+            } else {
+                observation.mark_unavailable();
+            }
+        }
+        result
+    }
+    /// Collector readback only; no recursive observation hook. This read grants
+    /// no permits and inspects the sealed inventory, never current DB claims.
+    pub fn owned_graph_ownership_readback(
         &self,
         expected: &GraphControlCas,
     ) -> Result<OwnedGraphOwnershipDiagnostic, RuntimeError> {

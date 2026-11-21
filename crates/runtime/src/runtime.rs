@@ -19,6 +19,7 @@ pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
 mod completion_relay;
 mod disposal_support;
+pub mod graph_observation;
 mod held_messages;
 mod host_prompt;
 mod physical_owners;
@@ -48,6 +49,7 @@ pub use recovery_activation::{
 pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
 pub use restart_transaction::{
     RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
+    RestartRecipeObservation,
 };
 mod nested_orchestrator;
 mod output;
@@ -249,6 +251,7 @@ pub(crate) struct Shared {
     next_message_id: AtomicU64,
     active_restart_capture: OnceLock<String>,
     planned_adoption: OnceLock<core_instance::InheritedHandoffProof>,
+    graph_observer: OnceLock<Arc<dyn graph_observation::GraphObserver>>,
     graph_reservations: Mutex<recovery_control::GraphReservations>,
     retained_physical_owners: Mutex<physical_owners::RetainedPhysicalOwners>,
     #[cfg(any(test, feature = "recovery-test-support"))]
@@ -905,6 +908,7 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                graph_observer: OnceLock::new(),
                 graph_reservations: Mutex::new(Default::default()),
                 retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]
@@ -1315,6 +1319,7 @@ impl AgentRuntime {
                 next_message_id: AtomicU64::new(1),
                 active_restart_capture: OnceLock::new(),
                 planned_adoption: OnceLock::new(),
+                graph_observer: OnceLock::new(),
                 graph_reservations: Mutex::new(Default::default()),
                 retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]

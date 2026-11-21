@@ -21,6 +21,7 @@ struct Reservation {
     manifest: String,
     nonce: u64,
     unknown: bool,
+    observation: Option<super::graph_observation::GraphChange>,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -54,6 +55,28 @@ impl Drop for Reservation {
 /// }
 /// ```
 pub struct AutomaticActivationReservation(Reservation);
+impl AutomaticActivationReservation {
+    pub fn mark_graph_observation_unavailable(&self) {
+        self.0.mark_graph_observation_unavailable();
+    }
+    pub fn confirm_graph_observation(&self) {
+        self.0.confirm_graph_observation();
+    }
+}
+impl Reservation {
+    fn mark_graph_observation_unavailable(&self) {
+        if let Some(observation) = &self.observation {
+            observation.mark_unavailable();
+        }
+    }
+    fn confirm_graph_observation(&self) {
+        if let Some(observation) = &self.observation {
+            if let Err(error) = observation.confirm() {
+                tracing::warn!(%error, "graph observation remains fenced");
+            }
+        }
+    }
+}
 /// Retains the original graph reservation after FULL activation ACK until the
 /// caller has finished publishing the root binding (including failure).
 ///
@@ -75,6 +98,7 @@ impl ActivatedReservation {
         Self(reservation)
     }
     pub fn release(self) {
+        self.0.confirm_graph_observation();
         drop(self.0);
     }
 }
@@ -108,6 +132,14 @@ impl std::fmt::Display for ActivationFailure {
 impl std::error::Error for ActivationFailure {}
 
 /// Manual execution still requires independently resolved execution authority.
+impl ManualActivationReservation {
+    /// A non-authority readback handle for the original supervisor's pre-effect
+    /// error paths. It cannot reserve or execute another activation.
+    pub fn observation_readback(&self) -> impl FnOnce() -> Result<(), RuntimeError> + 'static {
+        let observation = self.reservation.observation.clone();
+        move || observation.map_or(Ok(()), |observation| observation.confirm())
+    }
+}
 pub struct ManualActivationReservation {
     reservation: Reservation,
     effect: GraphEffectKey,
@@ -150,6 +182,13 @@ impl From<ManualActivationReservation> for ActivationReservation {
     }
 }
 impl ActivationReservation {
+    pub fn mark_graph_observation_unavailable(&self) {
+        self.inner().mark_graph_observation_unavailable();
+    }
+    /// Original supervisor only, after a confirmed outcome and after all lower locks.
+    pub fn confirm_graph_observation(&self) {
+        self.inner().confirm_graph_observation();
+    }
     fn inner(&self) -> &Reservation {
         match self {
             Self::Automatic(a) => &a.0,
@@ -265,8 +304,13 @@ impl AgentRuntime {
             {
                 continue;
             }
-            if state.supervised.remove(&claim.manifest_id).is_some() {
+            let settled = state.supervised.remove(&claim.manifest_id);
+            if settled.is_some() {
                 state.graphs.remove(&claim.manifest_id);
+            }
+            drop(state);
+            if let Some((token, _)) = settled {
+                token.confirm_graph_observation();
                 resolved += 1;
             }
         }
@@ -285,36 +329,51 @@ impl AgentRuntime {
             .supervised
             .insert(claim.manifest_id.clone(), (reservation, claim));
     }
-    fn reserve_graph(&self, manifest: &str) -> Result<Reservation, RuntimeError> {
+    fn reserve_graph(&self, manifest: &str, automatic: bool) -> Result<Reservation, RuntimeError> {
         if manifest.is_empty() {
             return Err(error("empty recovery graph"));
         }
+        let observation = self.begin_graph_change(manifest, automatic)?;
         let mut state = self
             .shared
             .graph_reservations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.graphs.contains_key(manifest) {
-            return Err(RuntimeError::ActivationReservationUnavailable {
-                reason: ActivationReservationProblem::Contended,
-            });
-        }
-        if state.graphs.len() >= 64 {
-            return Err(RuntimeError::ActivationReservationUnavailable {
-                reason: ActivationReservationProblem::Capacity,
-            });
-        }
-        state.next = state
-            .next
-            .checked_add(1)
-            .ok_or_else(|| error("reservation sequence exhausted"))?;
-        let nonce = state.next;
-        state.graphs.insert(manifest.into(), (nonce, false));
+        let reserve = (|| {
+            if state.graphs.contains_key(manifest) {
+                return Err(RuntimeError::ActivationReservationUnavailable {
+                    reason: ActivationReservationProblem::Contended,
+                });
+            }
+            if state.graphs.len() >= 64 {
+                return Err(RuntimeError::ActivationReservationUnavailable {
+                    reason: ActivationReservationProblem::Capacity,
+                });
+            }
+            state.next = state
+                .next
+                .checked_add(1)
+                .ok_or_else(|| error("reservation sequence exhausted"))?;
+            let nonce = state.next;
+            state.graphs.insert(manifest.into(), (nonce, false));
+            Ok(nonce)
+        })();
+        drop(state);
+        let nonce = match reserve {
+            Ok(nonce) => nonce,
+            Err(error) => {
+                if let Some(observation) = observation {
+                    let _ = observation.cancel_unstarted();
+                }
+                return Err(error);
+            }
+        };
         Ok(Reservation {
             runtime: Arc::downgrade(&self.shared),
             manifest: manifest.into(),
             nonce,
             unknown: false,
+            observation,
         })
     }
     pub fn reserve_automatic_activation(
@@ -332,7 +391,7 @@ impl AgentRuntime {
             });
         }
         Ok(AutomaticActivationReservation(
-            self.reserve_graph(manifest_id)?,
+            self.reserve_graph(manifest_id, true)?,
         ))
     }
     pub fn check_automatic_activation(
@@ -366,7 +425,7 @@ impl AgentRuntime {
             .checked_add(1)
             .ok_or_else(|| error("control revision exhausted"))?;
         Ok(ManualActivationReservation {
-            reservation: self.reserve_graph(manifest_id)?,
+            reservation: self.reserve_graph(manifest_id, false)?,
             effect,
             control_revision,
         })
