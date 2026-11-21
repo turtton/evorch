@@ -141,6 +141,72 @@ impl GraphObserver for LiveGraphCollector {
     fn mark_unavailable(&self) {
         self.invalidate();
     }
+    fn diagnostic_revision(&self, manifest: &str) -> Option<u64> {
+        let mut state = self.state.lock().ok()?;
+        state.available().ok()?;
+        state.reconcile_restart();
+        if state.restart.is_some()
+            || state.pending.contains_key(manifest)
+            || !state.graphs.contains_key(manifest)
+        {
+            return None;
+        }
+        Some(state.revision)
+    }
+    fn publish_diagnostic(
+        &self,
+        expected: &storage::recovery::graph_control::GraphControlCas,
+        revision: u64,
+        diagnostic: &runtime::OwnedGraphOwnershipDiagnostic,
+    ) -> Result<(), RuntimeError> {
+        let manifest = &expected.manifest.manifest_id;
+        // A diagnostic must never overwrite a newer effect result. Check both
+        // before I/O and at publication; effect begin advances the revision.
+        let current = |state: &LiveState| {
+            state.available().is_ok()
+                && state.revision == revision
+                && state.restart.is_none()
+                && !state.pending.contains_key(manifest)
+        };
+        {
+            let state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
+            if !current(&state) {
+                return Err(RuntimeError::RestartBusy);
+            }
+        }
+        // Project the very ownership result returned to the diagnostic caller,
+        // not a second owner read that could disagree with that response.
+        let fact =
+            storage::Database::read_owned_graphs(&self.storage, |db| db.owned_graph_snapshots())
+                .map_err(|_| unavailable())
+                .and_then(|graphs| {
+                    let graph = graphs
+                        .iter()
+                        .find(|graph| graph.cas == *expected)
+                        .ok_or_else(unavailable)?;
+                    if !diagnostic.verified_adoption() {
+                        return Err(unavailable());
+                    }
+                    view::graph_fact(graph, diagnostic)
+                });
+        let mut state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
+        if !current(&state) {
+            return Err(RuntimeError::RestartBusy);
+        }
+        let fact = match fact {
+            Ok(fact) => fact,
+            Err(error) => {
+                state.failed = true;
+                let _ = state.advance();
+                return Err(runtime_error(error));
+            }
+        };
+        if state.graphs.get(manifest) != Some(&fact) {
+            state.advance().map_err(runtime_error)?;
+            state.graphs.insert(manifest.into(), fact);
+        }
+        Ok(())
+    }
     fn begin_change(&self, manifest: &str) -> Result<u64, RuntimeError> {
         let mut state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
         state.available().map_err(runtime_error)?;

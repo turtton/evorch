@@ -405,12 +405,13 @@ pub(super) fn next_action(
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct GraphFact {
     pub reference: GraphReference,
     pub undisposed: bool,
     pub incomplete: bool,
     pub over_limit: bool,
+    pub ownership: (OwnedGraphOwnershipState, u64, u64),
 }
 pub(super) fn graph_fact(
     graph: &OwnedGraphSnapshot,
@@ -447,6 +448,11 @@ pub(super) fn graph_fact(
         undisposed: adopted && summary.is_undisposed(resumed, complete, revoked),
         incomplete: adopted && summary.is_incomplete_disposal(complete, revoked),
         over_limit: diagnostic.owner_count() > 64,
+        ownership: (
+            diagnostic.state(),
+            diagnostic.retained_owner_count(),
+            diagnostic.owner_count(),
+        ),
     })
 }
 pub(super) fn aggregate_facts<'a>(

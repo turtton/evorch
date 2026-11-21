@@ -191,8 +191,9 @@ impl ExistingPreparedResume {
         {
             return Err(blocked(GraphProblemDetail::NeedsAttention));
         }
+        let reservation: ActivationReservation = request.reservation.into();
         if runtime
-            .owned_graph_ownership_diagnostic(&graph.cas)
+            .reserved_owned_graph_ownership_diagnostic(&graph.cas, &reservation)
             .map_err(|_| RecoveryAdminError::Unavailable)?
             .state()
             != OwnedGraphOwnershipState::LiveSelf
@@ -209,7 +210,6 @@ impl ExistingPreparedResume {
                     .map_err(|_| blocked(GraphProblemDetail::ForeignOwner))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let reservation: ActivationReservation = request.reservation.into();
         let control = match runtime.begin_owned_graph_resume(&graph.cas, &permits, &reservation) {
             Ok(control) => control,
             Err(error) => {

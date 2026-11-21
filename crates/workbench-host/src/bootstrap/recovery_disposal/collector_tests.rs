@@ -19,6 +19,7 @@ fn fact(n: usize, undisposed: bool) -> GraphFact {
         undisposed,
         incomplete: false,
         over_limit: false,
+        ownership: (runtime::OwnedGraphOwnershipState::LiveSelf, 0, 0),
     }
 }
 fn runtime() -> AgentRuntime {

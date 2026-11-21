@@ -169,11 +169,12 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
     let owner = OwnerHost::open_planned(&root.join("owners"), Default::default(), bus).unwrap();
     let mut permits = BTreeMap::new();
     let mut expected = vec![];
-    let threads: Vec<String> = if case == "diagnostic-oversize" {
+    let threads: Vec<String> = if matches!(case, "diagnostic-64" | "diagnostic-oversize") {
+        let extra = if case == "diagnostic-64" { 62 } else { 63 };
         THREADS
             .into_iter()
             .map(str::to_owned)
-            .chain((0..63).map(|n| format!("t{n:03}")))
+            .chain((0..extra).map(|n| format!("t{n:03}")))
             .collect()
     } else {
         THREADS.into_iter().map(str::to_owned).collect()
@@ -259,7 +260,7 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
             .unwrap();
     };
     step(RestartMutation::BeginCapture(expected.clone()));
-    let groups: Vec<_> = if matches!(case, "i9-batch" | "diagnostic-oversize") {
+    let groups: Vec<_> = if matches!(case, "i9-batch" | "diagnostic-64" | "diagnostic-oversize") {
         vec![expected.iter().collect::<Vec<_>>()]
     } else {
         expected.iter().map(|m| vec![m]).collect()

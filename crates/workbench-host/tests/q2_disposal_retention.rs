@@ -4,6 +4,8 @@
 #[path = "../../runtime/shared-test-support/physical_ownership.rs"]
 mod fixture;
 #[cfg(target_os = "linux")]
+use runtime::runtime::graph_observation::GraphObserver;
+#[cfg(target_os = "linux")]
 fn main() {
     fixture::run(
         &[
@@ -11,6 +13,9 @@ fn main() {
             "current-authority-resolver",
             "live-collector-effects",
             "live-collector-owner-generation",
+            "live-collector-diagnostic-race",
+            "diagnostic-64",
+            "diagnostic-oversize",
         ],
         check,
     );
@@ -27,11 +32,18 @@ fn check(f: &fixture::Fixture, case: &str) {
         bootstrap::recovery::authority::{CurrentAuthorityProvider, claim_planned_owner_threads},
         lane::{BindingTable, ThreadBinding},
     };
+    if case.starts_with("diagnostic-") {
+        diagnostic_bounds(f, case);
+        return;
+    }
     for thread in fixture::THREADS {
         f.denied(thread);
     }
     match case {
-        "planned-owner-threads" | "live-collector-effects" | "live-collector-owner-generation" => {
+        "planned-owner-threads"
+        | "live-collector-effects"
+        | "live-collector-owner-generation"
+        | "live-collector-diagnostic-race" => {
             claim_planned_owner_threads(&f.runtime, &f.owner).unwrap()
         }
         "current-authority-resolver" => {
@@ -86,23 +98,194 @@ fn check(f: &fixture::Fixture, case: &str) {
             collector.snapshot().is_err(),
             "before physical seal is not empty success"
         );
-        f.runtime.install_graph_observer(collector.clone()).unwrap();
-        collector
+        let pause = (case == "live-collector-diagnostic-race").then(|| {
+            std::sync::Arc::new(PausedDiagnostic {
+                collector: collector.clone(),
+                entered: std::sync::Barrier::new(2),
+                leave: std::sync::Barrier::new(2),
+                paused: std::sync::atomic::AtomicBool::new(false),
+            })
+        });
+        let observer: std::sync::Arc<dyn GraphObserver> = match &pause {
+            Some(pause) => pause.clone(),
+            None => collector.clone(),
+        };
+        f.runtime.install_graph_observer(observer).unwrap();
+        (collector, pause)
     });
     f.retain();
     for thread in fixture::THREADS {
         f.allowed(thread);
     }
-    if let Some(collector) = collector {
-        live_collector(f, case, &collector);
+    if let Some((collector, pause)) = collector {
+        live_collector(f, case, &collector, pause.as_deref());
     }
 }
 
+#[cfg(target_os = "linux")]
+struct PausedDiagnostic {
+    collector: std::sync::Arc<workbench_host::bootstrap::recovery_disposal::LiveGraphCollector>,
+    entered: std::sync::Barrier,
+    leave: std::sync::Barrier,
+    paused: std::sync::atomic::AtomicBool,
+}
+#[cfg(target_os = "linux")]
+impl GraphObserver for PausedDiagnostic {
+    fn begin_change(&self, manifest: &str) -> Result<u64, runtime::RuntimeError> {
+        self.collector.begin_change(manifest)
+    }
+    fn begin_automatic_change(&self, manifest: &str) -> Result<Option<u64>, runtime::RuntimeError> {
+        self.collector.begin_automatic_change(manifest)
+    }
+    fn diagnostic_revision(&self, manifest: &str) -> Option<u64> {
+        self.collector.diagnostic_revision(manifest)
+    }
+    fn publish_diagnostic(
+        &self,
+        expected: &storage::recovery::graph_control::GraphControlCas,
+        revision: u64,
+        diagnostic: &runtime::OwnedGraphOwnershipDiagnostic,
+    ) -> Result<(), runtime::RuntimeError> {
+        if !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.wait();
+            self.leave.wait();
+        }
+        self.collector
+            .publish_diagnostic(expected, revision, diagnostic)
+    }
+    fn cancel_unstarted(&self, manifest: &str, ticket: u64) -> Result<(), runtime::RuntimeError> {
+        self.collector.cancel_unstarted(manifest, ticket)
+    }
+    fn readback(&self, manifest: &str, ticket: u64) -> Result<(), runtime::RuntimeError> {
+        self.collector.readback(manifest, ticket)
+    }
+    fn rebuild(&self) -> Result<(), runtime::RuntimeError> {
+        self.collector.rebuild()
+    }
+    fn mark_unavailable(&self) {
+        self.collector.mark_unavailable()
+    }
+}
+#[cfg(target_os = "linux")]
+fn diagnostic_race(
+    f: &fixture::Fixture,
+    collector: &workbench_host::bootstrap::recovery_disposal::LiveGraphCollector,
+    pause: &PausedDiagnostic,
+) {
+    struct Release<'a>(&'a std::sync::Barrier);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
+    let cas = f.cas("a");
+    std::thread::scope(|scope| {
+        let runtime = f.runtime.clone();
+        let worker = scope.spawn(move || runtime.owned_graph_ownership_diagnostic(&cas));
+        pause.entered.wait();
+        // Always release the worker even if the contention assertion fails.
+        let release = Release(&pause.leave);
+        let automatic = f.runtime.reserve_automatic_activation("graph-a");
+        assert!(
+            automatic.is_ok(),
+            "a parked diagnostic must not turn an automatic retry into Contended"
+        );
+        let automatic: runtime::ActivationReservation = automatic.unwrap().into();
+        assert!(
+            f.runtime
+                .reserved_owned_graph_ownership_diagnostic(&f.cas("b"), &automatic)
+                .is_err(),
+            "another manifest's reservation is not an internal readback scope"
+        );
+        assert_eq!(
+            f.runtime
+                .reserved_owned_graph_ownership_diagnostic(&f.cas("a"), &automatic)
+                .unwrap()
+                .state(),
+            runtime::OwnedGraphOwnershipState::LiveSelf
+        );
+        automatic.confirm_graph_observation();
+        drop(automatic);
+        let before_owner_change = collector.snapshot().unwrap().snapshot_revision;
+        let mut owner = f.owner.attach("a").unwrap();
+        owner.lease.generation += 1;
+        rusqlite::Connection::open(f.root.join("owners/owners.db"))
+            .unwrap()
+            .execute(
+                "UPDATE thread_owners SET state=?1 WHERE thread_id='a'",
+                [serde_json::to_string(&owner).unwrap()],
+            )
+            .unwrap();
+        let current = f
+            .runtime
+            .owned_graph_ownership_diagnostic(&f.cas("a"))
+            .unwrap();
+        assert_eq!(
+            current.state(),
+            runtime::OwnedGraphOwnershipState::GenerationChanged
+        );
+        let confirmed = collector.snapshot().unwrap().snapshot_revision;
+        assert!(confirmed > before_owner_change);
+        drop(release);
+        assert!(
+            matches!(
+                worker.join().unwrap(),
+                Err(runtime::RuntimeError::RestartBusy)
+            ),
+            "a stale diagnostic must not return its old ownership response"
+        );
+        assert_eq!(
+            collector.snapshot().unwrap().snapshot_revision,
+            confirmed,
+            "the old read must not publish facts over the newer observation"
+        );
+        f.runtime
+            .owned_graph_ownership_diagnostic(&f.cas("a"))
+            .unwrap();
+        assert_eq!(collector.snapshot().unwrap().snapshot_revision, confirmed);
+    });
+}
+#[cfg(target_os = "linux")]
+fn diagnostic_bounds(f: &fixture::Fixture, case: &str) {
+    use workbench_protocol::wire::{InstanceEpoch, Revision};
+    workbench_host::bootstrap::recovery::authority::claim_planned_owner_threads(
+        &f.runtime, &f.owner,
+    )
+    .unwrap();
+    let collector = workbench_host::bootstrap::recovery_disposal::LiveGraphCollector::new(
+        &f.runtime,
+        f.config.clone(),
+    );
+    collector.bind_epoch(InstanceEpoch(2)).unwrap();
+    f.runtime.install_graph_observer(collector.clone()).unwrap();
+    f.retain();
+    let cas = f.cas("a");
+    let before = collector.snapshot().unwrap();
+    let count = if case == "diagnostic-64" { 64 } else { 65 };
+    for _ in 0..2 {
+        let diagnostic = f.runtime.owned_graph_ownership_diagnostic(&cas).unwrap();
+        assert_eq!(diagnostic.owner_count(), count);
+        assert_eq!(diagnostic.retained_owner_count(), count);
+        assert_eq!(diagnostic.references().len(), 64);
+        assert_eq!(diagnostic.truncated(), count > 64);
+        let snapshot = collector.snapshot().unwrap();
+        assert_eq!(snapshot.count, Revision(1));
+        assert_eq!(snapshot.over_limit_count, Revision(u64::from(count > 64)));
+        assert_eq!(snapshot.snapshot_revision, before.snapshot_revision);
+    }
+    assert_eq!(
+        f.cas("a"),
+        cas,
+        "diagnostics must not change durable graph facts"
+    );
+    assert!(f.runtime.list_agents().is_empty());
+}
 #[cfg(target_os = "linux")]
 fn live_collector(
     f: &fixture::Fixture,
     case: &str,
     collector: &workbench_host::bootstrap::recovery_disposal::LiveGraphCollector,
+    pause: Option<&PausedDiagnostic>,
 ) {
     use storage::recovery::graph_control::GraphEffectKey;
     use workbench_protocol::wire::{InstanceEpoch, Revision};
@@ -112,6 +295,20 @@ fn live_collector(
         Revision(2),
         "seal builds the complete adopted inventory"
     );
+    if let Some(pause) = pause {
+        diagnostic_race(f, collector, pause);
+        return;
+    }
+    for _ in 0..2 {
+        f.runtime
+            .owned_graph_ownership_diagnostic(&f.cas("a"))
+            .unwrap();
+        assert_eq!(
+            collector.snapshot().unwrap().snapshot_revision,
+            initial.snapshot_revision,
+            "unchanged diagnostic reads must not invalidate admission"
+        );
+    }
     let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
     let roots = || {
         conn.prepare("SELECT thread_id,root_run_id FROM threads ORDER BY thread_id")

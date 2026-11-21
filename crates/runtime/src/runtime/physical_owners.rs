@@ -286,6 +286,16 @@ impl OwnedGraphOwnershipDiagnostic {
     }
 }
 impl AgentRuntime {
+    /// Internal validation by the attempt already holding the graph fence.
+    /// This read neither publishes diagnostics nor settles its observation.
+    pub fn reserved_owned_graph_ownership_diagnostic(
+        &self,
+        expected: &GraphControlCas,
+        reservation: &super::recovery_control::ActivationReservation,
+    ) -> Result<OwnedGraphOwnershipDiagnostic, RuntimeError> {
+        reservation.validate(self, &expected.manifest.manifest_id)?;
+        self.owned_graph_ownership_readback(expected)
+    }
     /// Inspect every member under one read-only owners snapshot. Unlike the
     /// authority constructor, this does not truncate the ownership check at 64.
     /// Neither the sealed set nor a graph authority is returned or reconstructed.
@@ -293,18 +303,15 @@ impl AgentRuntime {
         &self,
         expected: &GraphControlCas,
     ) -> Result<OwnedGraphOwnershipDiagnostic, RuntimeError> {
-        // A diagnostic may observe owner validity loss, but cannot settle an
-        // existing effect's Unknown ticket. External generations only advance.
-        let observation = self
-            .begin_graph_change(&expected.manifest.manifest_id, false)
-            .ok()
-            .flatten();
+        // A read cannot take over automatic recovery's effect reservation.
+        // Its optimistic revision is rechecked before publishing changed facts;
+        // a concurrent effect invalidates it without settling that effect.
+        let observation = self.begin_graph_diagnostic(&expected.manifest.manifest_id)?;
         let result = self.owned_graph_ownership_readback(expected);
         if let Some(observation) = observation {
-            if result.is_ok() {
-                let _ = observation.confirm();
-            } else {
-                observation.mark_unavailable();
+            match &result {
+                Ok(diagnostic) => observation.confirm(expected, diagnostic)?,
+                Err(_) => observation.mark_unavailable(),
             }
         }
         result
