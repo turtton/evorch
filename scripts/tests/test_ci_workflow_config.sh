@@ -15,6 +15,14 @@
 #     read-only permissions that wait needs.
 #  3. The producer's upload of `product-core` replaces an older same-name artifact
 #     (`overwrite: true`), so a re-run after a failed attempt cannot leave two.
+#  4. The shared dependency cache has one writer. Every job that restores the
+#     `ci-workspace-v2` key only restores it (`save-if: false`), only cache-save
+#     saves it, readers carry the job-level env that is part of the key, and the
+#     browser and CEF jobs build into the shared target. Every `prepare` and
+#     `cargo build` line of those jobs is also in cache-save, and each cef-e2e step
+#     that builds or runs belongs to a cell.
+#  5. docs-schema also waits for quick-checks (it takes the slot quick-checks
+#     frees); a PR supersedes older runs, a main run does not.
 # Each check also fails on a mutated copy of the real files.
 # shellcheck disable=SC2016 # the workflow expression is matched literally
 set -euo pipefail
@@ -114,6 +122,141 @@ check_producer_overwrite() { # <ci.yml>
   ' "$dir/product-artifact" || { echo "the product-core upload must set overwrite: true" >&2; return 1; }
 }
 
+cache_key='${{ runner.os }}-ci-workspace-v2'
+cargo_step_re='(guard-cargo\.sh |cargo (build|test|run|nextest|clippy|check) )'
+readers=(lint docs-schema otel tests offscreen-gate gui-evidence browser-e2e cef-e2e)
+
+# Prints "<job> <shared-key> <save-if>" (tab separated) for each rust-cache step.
+cache_steps() { # <ci.yml>
+  local dir f
+  dir=$(mktemp -d "$work/cache.XXXXXX")
+  split_jobs "$1" "$dir"
+  for f in "$dir"/*; do
+    awk -v job="${f##*/}" '
+      /uses: Swatinem\/rust-cache@/ { on = 1; key = ""; save = ""; next }
+      on && /^          shared-key: / { key = $0; sub(/^          shared-key: /, "", key) }
+      on && /^          save-if: / { save = $0; sub(/^          save-if: /, "", save) }
+      on && key != "" && save != "" { print job "\t" key "\t" save; on = 0 }
+    ' "$f"
+  done
+}
+
+job_env() { # <job file> <KEY>: value of a job-level env entry
+  awk -v key="$2" '
+    /^    env:/ { on = 1; next }
+    on && /^      [A-Za-z_]+: / { k = $1; sub(/:$/, "", k); if (k == key) { sub(/^      [A-Za-z_]+: /, ""); print; exit } next }
+    on { exit }
+  ' "$1"
+}
+
+check_cache_wiring() { # <ci.yml>
+  local ci=$1 bad=0 dir job key save writer_env reader_env k steps writers=0
+  dir=$(mktemp -d "$work/wiring.XXXXXX")
+  split_jobs "$ci" "$dir"
+  steps=$(cache_steps "$ci")
+  while IFS=$'\t' read -r job key save; do
+    [[ "$key" == "$cache_key" ]] || continue
+    if [[ "$job" == cache-save ]]; then
+      [[ "$save" == true ]] || { echo "cache-save must save the shared key (save-if: true)" >&2; bad=1; }
+      writers=$((writers + 1))
+    elif [[ "$save" != false ]]; then
+      echo "$job restores the shared key and must not save it (save-if: $save)" >&2
+      bad=1
+    fi
+  done <<< "$steps"
+  [[ "$writers" == 1 ]] || { echo "the shared key must have exactly one writer, found $writers" >&2; bad=1; }
+  for job in "${readers[@]}"; do
+    grep -q -F "$job	$cache_key	false" <<< "$steps" || { echo "$job must restore the shared key without saving it" >&2; bad=1; }
+  done
+  # The key hashes the job-level CARGO_* and RUSTFLAGS: a reader that differs from
+  # the writer restores nothing.
+  for k in CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG RUSTFLAGS; do
+    writer_env=$(job_env "$dir/cache-save" "$k")
+    [[ -n "$writer_env" ]] || { echo "cache-save has no job-level $k" >&2; bad=1; continue; }
+    for job in "${readers[@]}"; do
+      reader_env=$(job_env "$dir/$job" "$k")
+      [[ "$reader_env" == "$writer_env" ]] || { echo "$job: job-level $k differs from cache-save" >&2; bad=1; }
+    done
+  done
+  for job in "${readers[@]}" cache-save; do
+    [[ -z "$(job_env "$dir/$job" CARGO_TARGET_DIR)" ]] || { echo "$job: CARGO_TARGET_DIR belongs on cargo steps, not the job" >&2; bad=1; }
+  done
+  return "$bad"
+}
+
+# The cargo steps of browser-e2e and cef-e2e build into the shared target, and no
+# line names the default target directory.
+check_e2e_target() { # <ci.yml>
+  local ci=$1 dir job bad=0
+  dir=$(mktemp -d "$work/target.XXXXXX")
+  split_jobs "$ci" "$dir"
+  for job in browser-e2e cef-e2e; do
+    awk -v job="$job" -v re="$cargo_step_re" '
+      function flush() { if (step ~ re && step !~ /CARGO_TARGET_DIR: target\/ci-shared\n/) { print job ": a cargo step without CARGO_TARGET_DIR: target/ci-shared:" step; bad = 1 } }
+      /^      - / { flush(); step = "" }
+      { step = step "\n" $0 }
+      END { flush(); exit bad }
+    ' "$dir/$job" >&2 || bad=1
+    if grep -q 'target/debug' "$dir/$job"; then
+      echo "$job: a line names target/debug instead of the shared target" >&2
+      bad=1
+    fi
+  done
+  return "$bad"
+}
+
+recipe_lines() { # <job file>: the prepare selections, cargo build and check lines, target installs
+  sed -n -e 's/^ *scripts\/guard-cargo\.sh prepare "\$warm\/[a-z0-9-]*" /prepare /p' -e 's/^ *\(cargo build .*\)$/\1/p' -e 's/^ *\(cargo check .*\)$/\1/p' -e 's/^ *\(rustup target add .*\)$/\1/p' "$1" | sort -u
+}
+
+# Every prepare selection, cargo build and cargo check of the readers is also built by cache-save.
+check_recipe_covers_readers() { # <ci.yml>
+  local ci=$1 dir job bad=0 missing
+  dir=$(mktemp -d "$work/recipe.XXXXXX")
+  split_jobs "$ci" "$dir"
+  for job in lint browser-e2e cef-e2e; do
+    [[ -n "$(recipe_lines "$dir/$job")" ]] || { echo "$job: no prepare, cargo build or check lines found" >&2; bad=1; continue; }
+    missing=$(comm -23 <(recipe_lines "$dir/$job") <(recipe_lines "$dir/cache-save"))
+    if [[ -n "$missing" ]]; then
+      echo "cache-save does not build what $job builds:" >&2
+      sed 's/^/  /' <<< "$missing" >&2
+      bad=1
+    fi
+  done
+  return "$bad"
+}
+
+# Each step of cef-e2e that builds or runs belongs to one cell.
+check_cef_cells() { # <ci.yml>
+  local dir
+  dir=$(mktemp -d "$work/cells.XXXXXX")
+  split_jobs "$1" "$dir"
+  awk -v re="$cargo_step_re" '
+    function flush() {
+      if (step ~ re) {
+        if (step ~ /\n *if: matrix\.cell == .engine.\n/) engine++
+        else if (step ~ /\n *if: matrix\.cell == .client.\n/) client++
+        else { print "a cef-e2e step runs cargo outside any cell:" step; bad = 1 }
+      }
+    }
+    /^      - / { flush(); step = "" }
+    { step = step "\n" $0 }
+    END { flush(); if (!engine || !client) { print "each cef-e2e cell needs its own steps"; bad = 1 } exit bad }
+  ' "$dir/cef-e2e"
+}
+
+check_scheduling() { # <ci.yml>
+  local ci=$1 dir bad=0 needs
+  dir=$(mktemp -d "$work/sched.XXXXXX")
+  split_jobs "$ci" "$dir"
+  needs=$(grep -E '^    needs:' "$dir/docs-schema" || true)
+  { grep -q 'scope-gate' <<< "$needs" && grep -q 'quick-checks' <<< "$needs"; } \
+    || { echo "docs-schema must need scope-gate and quick-checks" >&2; bad=1; }
+  grep -q -F "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" "$ci" \
+    || { echo "only pull request runs may be cancelled by a newer run" >&2; bad=1; }
+  return "$bad"
+}
+
 ci=.github/workflows/ci.yml
 groups=scripts/ci-test-groups.json
 fails=0
@@ -138,6 +281,11 @@ rejects() { # <description> <command...>
 ok "the tests matrix repeats ci-test-groups.json" check_matrix "$ci" "$groups"
 ok "every product artifact consumer waits for the producer or needs it" check_consumers "$ci"
 ok "the producer's product-core upload overwrites an older artifact" check_producer_overwrite "$ci"
+ok "the shared dependency cache has one writer and matching readers" check_cache_wiring "$ci"
+ok "browser-e2e and cef-e2e build into the shared target" check_e2e_target "$ci"
+ok "cache-save builds what browser-e2e and cef-e2e build" check_recipe_covers_readers "$ci"
+ok "each cef-e2e build or run belongs to a cell" check_cef_cells "$ci"
+ok "docs-schema waits for quick-checks and only PR runs are cancelled" check_scheduling "$ci"
 
 # The same checks reject drift.
 mutate() { # <name> <sed-script> <file>
@@ -160,7 +308,7 @@ rejects "a JSON group the matrix lacks" check_matrix "$ci" "$work/groups-extra.j
 consumer=$(sed -n '/^  [a-z0-9-]*:[[:space:]]*$/{s/[: ]//g;h};/scripts\/wait-product-artifact.sh$/{g;p}' "$ci" | head -n 1)
 ok "the workflow has a consumer to mutate" test -n "$consumer"
 awk -v job="$consumer" '
-  $0 ~ "^  " job ":[[:space:]]*$" { on = 1 } on && /^    needs: scope-gate$/ && !done { print "    needs: product-artifact"; done = 1; next } { print }
+  $0 ~ "^  " job ":[[:space:]]*$" { on = 1 } on && /^    needs: / && !done { print "    needs: product-artifact"; done = 1; next } { print }
 ' "$ci" > "$work/ci-needs.yml"
 rejects "a consumer that both needs the producer and waits for it" check_consumers "$work/ci-needs.yml"
 awk -v job="$consumer" '
@@ -182,6 +330,25 @@ rejects "a consumer that skips the source check" check_consumers "$work/ci-nosou
 
 mutate ci-no-overwrite.yml '/^          overwrite: true$/d' "$ci"
 rejects "a product-core upload without overwrite" check_producer_overwrite "$work/ci-no-overwrite.yml"
+
+mutate ci-reader-key.yml '0,/shared-key: ${{ runner.os }}-ci-workspace-v2/s//shared-key: ${{ runner.os }}-ci-workspace/' "$ci"
+rejects "a reader on another cache key" check_cache_wiring "$work/ci-reader-key.yml"
+awk '/^  browser-e2e:/ { on = 1 } on && /save-if: false/ && !done { sub(/false/, "true"); done = 1 } { print }' "$ci" > "$work/ci-reader-saves.yml"
+rejects "a reader that saves the shared cache" check_cache_wiring "$work/ci-reader-saves.yml"
+awk '/^  browser-e2e:/ { on = 1 } on && /CARGO_PROFILE_TEST_DEBUG/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-reader-env.yml"
+rejects "a reader without the writer's job-level env" check_cache_wiring "$work/ci-reader-env.yml"
+awk '/^  cef-e2e:/ { on = 1 } on && /CARGO_TARGET_DIR: target\/ci-shared/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-cef-target.yml"
+rejects "a cef-e2e cargo step outside the shared target" check_e2e_target "$work/ci-cef-target.yml"
+mutate ci-recipe-gap.yml '/prepare "\$warm\/browser-5"/d' "$ci"
+rejects "a browser selection cache-save does not build" check_recipe_covers_readers "$work/ci-recipe-gap.yml"
+awk '/^  cache-save:/ { on = 1 } on && /cargo check --target aarch64-apple-darwin/ { next } { print }' "$ci" > "$work/ci-lint-gap.yml"
+rejects "a lint check cache-save does not build" check_recipe_covers_readers "$work/ci-lint-gap.yml"
+mutate ci-cef-cell.yml '0,/if: matrix.cell == .client./{/if: matrix.cell == .client./d}' "$ci"
+rejects "a cef-e2e step outside any cell" check_cef_cells "$work/ci-cef-cell.yml"
+mutate ci-docs-needs.yml 's/needs: \[scope-gate, quick-checks\]/needs: scope-gate/' "$ci"
+rejects "docs-schema without quick-checks" check_scheduling "$work/ci-docs-needs.yml"
+mutate ci-cancel.yml 's/cancel-in-progress: .*/cancel-in-progress: true/' "$ci"
+rejects "cancelling main runs" check_scheduling "$work/ci-cancel.yml"
 
 if ((fails > 0)); then
   echo "$fails failure(s)" >&2
