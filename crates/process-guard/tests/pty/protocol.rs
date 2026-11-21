@@ -238,31 +238,77 @@ fn disconnect_after_exec_is_force_kill_and_final_is_not_descendant_reap() {
     dead(&death);
 }
 
-#[test]
-fn wrong_image_and_uid_are_rejected_before_hello() {
+fn rejected_before_hello(wrong_image: bool) {
+    let mut reaper = ownership::Reaper::new();
     let rt = runtime();
-    for wrong_image in [false, true] {
-        let [dev, ino] = if wrong_image {
-            ["0".into(), "0".into()]
-        } else {
-            rt.image().identity_args()
-        };
-        let status = Command::new(rt.image().pty_exec_path())
-            .args([
-                "--launch-pty",
-                &dev,
-                &ino,
-                &std::process::id().to_string(),
-                &unsafe { libc::getuid() }.wrapping_add(1).to_string(),
-                "no-listener",
-                "known-nonce",
-            ])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert_eq!(status.code(), Some(125));
+    let name = format!("pty-identity-only-{}", std::process::id());
+    let listener =
+        UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (dev, ino) = rt.image().identity();
+    // Exactly one credential is wrong; listener, parent PID and other credential
+    // are valid, so a later connect/authentication failure cannot mask this check.
+    let ino = ino.wrapping_add(u64::from(wrong_image));
+    let uid = unsafe { libc::getuid() }.wrapping_add(u32::from(!wrong_image));
+    let mut helper = Command::new(rt.image().pty_exec_path())
+        .args([
+            "--launch-pty",
+            &dev.to_string(),
+            &ino.to_string(),
+            &std::process::id().to_string(),
+            &uid.to_string(),
+            &name,
+            "known-nonce",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    reaper.add(helper.id() as i32);
+    let death = pidfd_open(helper.id() as i32).unwrap();
+    let mut events = [
+        wire::fd(listener.as_raw_fd(), libc::POLLIN),
+        wire::fd(death.as_raw_fd(), libc::POLLIN),
+    ];
+    wire::poll(&mut events, None).unwrap();
+    if events[0].revents != 0 {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let (kind, _) = wire::receive(
+            &mut stream,
+            &mut wire::Decoder::default(),
+            death.as_raw_fd(),
+            None,
+        )
+        .unwrap();
+        panic!("invalid credential reached {kind:?} (wrong_image={wrong_image})");
+    }
+    assert_ne!(events[1].revents & libc::POLLIN, 0);
+    assert_eq!(helper.wait().unwrap().code(), Some(125));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn image_mismatch_alone_is_rejected_before_hello() {
+    if ownership::controller(
+        "protocol::image_mismatch_alone_is_rejected_before_hello",
+        "image-only",
+    ) {
+        rejected_before_hello(true);
+    }
+}
+
+#[test]
+fn uid_mismatch_alone_is_rejected_before_hello() {
+    if ownership::controller(
+        "protocol::uid_mismatch_alone_is_rejected_before_hello",
+        "uid-only",
+    ) {
+        rejected_before_hello(false);
     }
 }

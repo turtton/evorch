@@ -102,8 +102,11 @@ all mutations restored):
 | Reuse direct `setsid` target setup | Native target reached READY, same-SID assertion failed |
 | Remove running owner-pidfd monitor | Root and descendant reached READY; after core SIGKILL a live helper ACKed, test failed; outer controller reclaimed all |
 | Add `SHELL` after helper `env_clear` | Target reached READY, `/proc/helper/environ` emptiness assertion failed |
+| Omit running-image identity verification | With valid UID and a real listener, the wrong-inode helper reached Hello; the isolated authentication negative failed |
 | Reopen distribution pathname | Replacement was rejected instead of using the pinned image; separately, denied proc exec incorrectly returned an ExecOk owner, test failed |
 
 These are source mutations in test work only, not shipped fault knobs. The
 pathname-replacement failure is an authentication/startup negative after an
 already successful original launch, not a claim that its second target ran.
+The isolated wrong-image mutation likewise tests rejection before Hello, not
+a target-lifecycle guarantee.
