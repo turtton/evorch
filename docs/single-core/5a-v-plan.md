@@ -113,8 +113,8 @@
 | **install との関係** | `install_restart`／`install_quarantine`／`install_owned_graphs` は、off の間も受け付ける（登録と有効化は別） |
 | **有効にする箇所（1 か所）** | `evorch-core/src/admin_composition/capability.rs` の `const MANAGEMENT_PUBLISHED: bool = false;`。`true` のとき、かつ 3 つの facade と coordinator が全部登録され、Linux であるときだけ、`enable_management()` と広告（`HostBackend` の runtime flag）を行う。1 つでも欠けると有効にしない |
 | **広告** | `server_hello` の `safe_restart.v1` は、`enabled` かつ検証済み local のときだけ。Web には出さない（既存の挙動を維持）。`Capability::IMPLEMENTED` の定数は変えない（DC-31） |
-| **境界の検査** | `scripts/check-admin-publish-boundary.sh`（`check-q2-boundaries.sh` と同じ様式）。①製品コードで `enable_management` を呼ぶのは `capability.rs` の 1 か所だけ。②`MANAGEMENT_PUBLISHED` が `true` になる PR は T1 だけ。③`admin_composition::install` の呼び出しは `main.rs` と `planned_entry.rs` に 1 か所ずつ。CI に組み込む（V0-reg） |
-| **試験からの使い方** | 組み立て済みの in-process host（`BootstrappedHost`）の試験は、`AdminService::enable_management()` を明示的に呼んでよい（製品の入口ではなく、同じ公開 API）。**feature の無い製品 artifact には有効にする入口が無い**（DC-20 の「製品の main／bootstrap に試験入口を足さない」を守るため）。環境変数や設定の key も作らない |
+| **境界の検査** | `scripts/check-admin-publish-boundary.sh`（`check-q2-boundaries.sh` と同じ様式）。①製品コードで `enable_management` を呼ぶのは `capability.rs` の 1 か所だけ。②`MANAGEMENT_PUBLISHED` が `true` になる PR は T1 だけ。③`admin_composition::install` の呼び出しは `main.rs` と `planned_entry.rs` に 1 か所ずつ。CI に組み込む（V0-reg）。この script は `capability.rs` を SHA-256 で固定しているため、同ファイルを編集したらハッシュの更新が必要 |
+| **試験からの使い方** | 組み立て済みの in-process host（`BootstrappedHost`）の試験は、`AdminService::publish_for_test()` を明示的に呼んでよい（`#[cfg(any(test, feature = "test-support"))]` の下でのみ利用可能）。**feature の無い製品 artifact には有効にする入口が無い**（DC-20 の「製品の main／bootstrap に試験入口を足さない」を守るため）。環境変数や設定の key も作らない |
 
 ### 2.3 各 PR の負例（スイッチ off のとき）
 
@@ -256,9 +256,9 @@ DC-20、DC-30〜DC-40 は全 PR に適用する。特に、製品の main／boot
 
 ### V0-switch — 切替スイッチと骨格
 
-**範囲**: `AdminService` の `enabled`（既定 off）と拒否の位置、`enable_management()`。`HostBackend` の広告 flag（`enabled` かつ検証済み local のときだけ）。`admin_composition.rs`（根、入力の構造体、`install`）と `recovery`、`restart`、`capability` の根と stub（`MANAGEMENT_PUBLISHED = false`）。`bootstrap/mod.rs` の accessor。`scripts/check-admin-publish-boundary.sh` と試験。既存 fixture 4 つ（`public_restart_contracts/support.rs`、`public_restart_coordinator/fixture.rs`、`quarantine/tests.rs`、`admin_contracts.rs`）が `enable_management()` を呼ぶように更新する。
+**範囲**: `AdminService` の `enabled`（既定 off）と拒否の位置、製品コードで `capability.rs` が呼び出す `enable_management()`、および試験専用の `publish_for_test()`（`#[cfg(any(test, feature = "test-support"))]` の下でのみ利用可能）。`HostBackend` の広告 flag（`enabled` かつ検証済み local のときだけ）。`admin_composition.rs`（根、入力の構造体、`install`）と `recovery`、`restart`、`capability` の根と stub（`MANAGEMENT_PUBLISHED = false`）。`bootstrap/mod.rs` の accessor。`scripts/check-admin-publish-boundary.sh` と試験。既存 fixture 4 つ（`public_restart_contracts/support.rs`、`public_restart_coordinator/fixture.rs`、`quarantine/tests.rs`、`admin_contracts.rs`）が `publish_for_test()` を呼ぶように更新する。
 
-**完了条件**: §2.3 の V0-switch の負例。`enable_management()` を呼んだ fixture では、既存の契約試験が全部通る。`install` はまだ誰も呼ばない（hook は V1b-1）。`main.rs`／`planned_entry.rs` は触らない。
+**完了条件**: §2.3 の V0-switch の負例。`publish_for_test()` を呼んだ fixture では、既存の契約試験が全部通る。`install` はまだ誰も呼ばない（hook は V1b-1）。`main.rs`／`planned_entry.rs` は触らない。
 
 **試験・計測**: スイッチ off の単体試験（9 操作）。境界検査の script の試験（違反例と正例）。
 
