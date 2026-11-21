@@ -16,10 +16,6 @@ pub(super) struct Usage {
     shell_identities: HashMap<ScratchUser, tools::ShellJobIdentity>,
 }
 /// Read-only disposal observation. Unknown must not become a sharing proof.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "Q2 leaf wires disposal observation")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DisposalScratchUse {
     Unused { epoch: u64, lease: Lease },
@@ -27,10 +23,6 @@ pub(crate) enum DisposalScratchUse {
     Unknown,
 }
 impl ThreadScratch {
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Q2 leaf wires disposal observation")
-    )]
     pub(crate) fn disposal_usage(&self, thread: &str) -> DisposalScratchUse {
         let state = self.lock();
         let key = ScratchKey::Thread(thread.into());

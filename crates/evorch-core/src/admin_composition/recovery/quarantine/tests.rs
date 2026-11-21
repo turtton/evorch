@@ -4,222 +4,29 @@
 //! quarantined graph is read back from that database. Synchronization is by
 //! replies and joined request slots only. It lives in the tree because the
 //! publish-boundary check names `admin_composition` only there.
+use super::super::support::{Conn, error_of, id, seed, serve};
 use crate::admin_composition::{Inputs, capability::Publication, install};
-use crate::{backend::HostBackend, unix};
-use serde_json::{Value, json};
+use crate::backend::HostBackend;
 use std::{path::PathBuf, sync::Arc};
-use storage::{
-    Database, RunContextRecord, StorageConfig,
-    recovery::{
-        RecoveryEdge, RecoveryManifestRecord, RecoveryMemberRecord,
-        restart::{RestartExpectedMember, RestartMetadata, RestartMutation},
-    },
-    resume_intent::ResumeIntentRecord,
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
-    sync::watch,
-};
+use storage::StorageConfig;
+use tokio::sync::watch;
 use workbench_authority::IngressContext;
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost};
 use workbench_protocol::{
     commands::Command,
     envelope::{
-        Provenance, ReplyEnvelope, ReplyPayload, ReplyResult, RequestBody, RequestEnvelope,
-        ServerFrame, Surface,
+        Provenance, ReplyEnvelope, ReplyPayload, ReplyResult, RequestBody, RequestEnvelope, Surface,
     },
     errors::ErrorCode,
-    framing::encode_frame,
-    handshake::{
-        BuildInfo, Capability, ClientHello, HandshakeReply, LocalSurface, ProtocolVersion,
-        ServerHello,
-    },
-    ids::{CapabilityName, ClientId, RequestId, RunId, SessionId},
+    handshake::Capability,
+    ids::{ClientId, RequestId, RunId, SessionId},
     namespaces::lifecycle::{
-        AdminId, ConfirmedGraph, GraphCas, LifecycleCommand, LifecycleQuery, LifecycleReply,
+        ConfirmedGraph, GraphCas, LifecycleCommand, LifecycleQuery, LifecycleReply,
         quarantine::{QuarantineCommand, QuarantineItem, QuarantineQuery, QuarantineReply},
     },
     queries::{Query, QueryReply},
 };
 use workbench_web::{WebSession, WorkbenchBackend};
-
-const TX: &str = "restart";
-const MANIFEST: &str = "component";
-const MAX_FRAME: u32 = 1024 * 1024;
-
-fn id(s: &str) -> AdminId {
-    AdminId::new(s).unwrap()
-}
-
-/// A committed two-member manifest and a restart transaction, then the
-/// production cold-boot transition that quarantines them.
-fn seed(boot: &BootstrappedHost, config: &StorageConfig) {
-    let handle = boot.storage_writer();
-    let mut members = Vec::new();
-    for run in ["run-a", "run-b"] {
-        let record = RunContextRecord {
-            run_id: run.into(),
-            role: "Worker".into(),
-            name: run.into(),
-            parent_run_id: None,
-            config_json: "{}".into(),
-            messages_json: json!([{"role":"user","content":[]}]).to_string(),
-            checkpoints_json: "[]".into(),
-            terminal_phase: "running".into(),
-            restorable: false,
-            updated_at_ns: 1,
-            host_inputs_json: "[]".into(),
-        };
-        let receipt = handle.upsert_run_context_receipt(&record).unwrap();
-        let payload = json!({
-            "run_id":run,"incarnation":"old","parent_run_id":null,"role":"Worker",
-            "active":true,"stop_reason":Value::Null,"tool_intent":[],"snapshot":receipt,
-            "provider_input":{"prefix":["sent"]},"continuation":{"call_order":["first"]}
-        });
-        handle
-            .save_resume_intent(
-                ResumeIntentRecord {
-                    run_id: run.into(),
-                    incarnation: "old".into(),
-                    payload: payload.to_string(),
-                },
-                None,
-            )
-            .unwrap();
-        members.push(RecoveryMemberRecord {
-            run_id: run.into(),
-            incarnation: "old".into(),
-            intent_revision: 0,
-            snapshot: Some(receipt),
-            resume: true,
-            record_json:
-                json!({"run_id":run,"old_incarnation":"old","parent":null,"role":"Worker"})
-                    .to_string(),
-        });
-    }
-    handle
-        .prepare_recovery_manifest(RecoveryManifestRecord {
-            manifest_id: MANIFEST.into(),
-            schema_version: 1,
-            committed: false,
-            superseded: false,
-            edges: vec![RecoveryEdge {
-                from: "run-a".into(),
-                to: "run-b".into(),
-                kind: "wait".into(),
-            }],
-            members,
-        })
-        .unwrap();
-    handle.commit_recovery_manifest(MANIFEST.into()).unwrap();
-    let metadata = RestartMetadata {
-        restart_id: TX.into(),
-        capture_id: "capture".into(),
-        config_identity: "config".into(),
-        old_epoch: 1,
-        successor_epoch: 2,
-        old_build: "old".into(),
-        successor_build: "new".into(),
-        target_identity: "target".into(),
-        handoff_version: 1,
-        snapshot_version: 1,
-        storage_version: 71,
-        old_builtin_tool_names: Default::default(),
-        old_compiled_catalog_fingerprint: None,
-        new_compiled_catalog_fingerprint: None,
-        old_effective_tools_fingerprint: None,
-        new_effective_tools_fingerprint: None,
-    };
-    handle
-        .mutate_restart(TX.into(), None, RestartMutation::Create(Box::new(metadata)))
-        .unwrap();
-    let sql = rusqlite::Connection::open(&config.db_path).unwrap();
-    sql.execute(
-        "INSERT INTO restart_components(restart_id,manifest_id,disposition) VALUES(?1,?2,'retry_pending')",
-        [TX, MANIFEST],
-    )
-    .unwrap();
-    for run in ["run-a", "run-b"] {
-        let member = RestartExpectedMember {
-            run_id: run.into(),
-            incarnation: "old".into(),
-            root_run_id: run.into(),
-            thread_id: None,
-            intent_revision: 0,
-            snapshot: None,
-            owner_id: None,
-            owner_generation: None,
-            lane_id: None,
-        };
-        sql.execute(
-            "INSERT INTO restart_expected_members(restart_id,run_id,root_run_id,member_json,manifest_id) VALUES(?1,?2,?2,?3,?4)",
-            rusqlite::params![TX, run, serde_json::to_string(&member).unwrap(), MANIFEST],
-        )
-        .unwrap();
-    }
-    let (revision, _) = Database::open(config)
-        .unwrap()
-        .restart_revision_phase(TX)
-        .unwrap()
-        .unwrap();
-    handle.quarantine_cold_restart(TX.into(), revision).unwrap();
-}
-
-/// One raw verified-local connection.
-struct Conn {
-    stream: UnixStream,
-    hello: ServerHello,
-}
-impl Conn {
-    async fn open(socket: &std::path::Path) -> Self {
-        let mut stream = UnixStream::connect(socket).await.unwrap();
-        let hello = ClientHello {
-            supported_versions: vec![ProtocolVersion::CURRENT],
-            required_capabilities: vec![
-                CapabilityName::new("commands.v1").unwrap(),
-                CapabilityName::new("queries.v1").unwrap(),
-            ],
-            optional_capabilities: Vec::new(),
-            client_build: BuildInfo {
-                name: "q1-install".into(),
-                version: "1".into(),
-                revision: None,
-            },
-            client_instance_id: ClientId::new("operator").unwrap(),
-            desired_core: None,
-            local_surface: Some(LocalSurface::Cli),
-        };
-        write(&mut stream, &hello).await;
-        match serde_json::from_slice(&read(&mut stream).await).unwrap() {
-            HandshakeReply::Accepted(hello) => Self { stream, hello },
-            rejected => panic!("handshake refused: {rejected:?}"),
-        }
-    }
-    async fn call(&mut self, request: &RequestEnvelope) -> ReplyEnvelope {
-        write(&mut self.stream, request).await;
-        match serde_json::from_slice(&read(&mut self.stream).await).unwrap() {
-            ServerFrame::Reply(reply) => {
-                assert_eq!(reply.request_id, request.request_id);
-                reply
-            }
-            ServerFrame::Event(event) => panic!("unexpected event: {event:?}"),
-        }
-    }
-}
-async fn write(stream: &mut UnixStream, value: &impl serde::Serialize) {
-    stream
-        .write_all(&encode_frame(value, MAX_FRAME).unwrap())
-        .await
-        .unwrap();
-}
-async fn read(stream: &mut UnixStream) -> Vec<u8> {
-    let len = stream.read_u32().await.unwrap();
-    assert!(len <= MAX_FRAME);
-    let mut bytes = vec![0; len as usize];
-    stream.read_exact(&mut bytes).await.unwrap();
-    bytes
-}
 
 /// The production composition with Q1 installed, a quarantined cold graph in
 /// its database, and its Unix socket served by the real `unix::connection`.
@@ -245,24 +52,12 @@ impl Installed {
         .unwrap();
         let backend = Arc::new(HostBackend::new(boot.host.clone(), "q1-install".into()));
         let config = boot.composition.storage.clone();
-        seed(&boot, &config);
+        seed(&boot, &config, false);
         let publication = install(&Inputs::new(&boot, &backend));
 
         let socket = dir.sockets().join("q1-install.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let (stop, stopped) = watch::channel(false);
-        let server = tokio::spawn({
-            let backend = backend.clone();
-            async move {
-                loop {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let (backend, stopped) = (backend.clone(), stopped.clone());
-                    tokio::spawn(async move {
-                        let _ = unix::connection(stream, backend, stopped).await;
-                    });
-                }
-            }
-        });
+        let (stop, server) = serve(listener, backend.clone());
         let core = Self {
             _dir: dir,
             boot,
@@ -328,12 +123,6 @@ fn discard(request_id: &str, item: &QuarantineItem, epoch: u64) -> RequestEnvelo
         ))),
     )
 }
-fn error_of(reply: &ReplyEnvelope) -> (ErrorCode, &str) {
-    match &reply.result {
-        ReplyResult::Error(error) => (error.code, error.message.as_str()),
-        other => panic!("the request was accepted: {other:?}"),
-    }
-}
 fn quarantine_reply(reply: &ReplyEnvelope) -> QuarantineReply {
     match &reply.result {
         ReplyResult::Success(ReplyPayload::Query(QueryReply::Lifecycle(
@@ -362,7 +151,7 @@ async fn an_installed_leaf_refuses_every_request_while_management_is_off() {
     assert!(installed.quarantine && !installed.all());
     assert!(!core.backend.hello().has(Capability::SafeRestart));
 
-    let mut conn = Conn::open(&core.socket).await;
+    let mut conn = Conn::open(&core.socket, "q1-install").await;
     assert!(!conn.hello.has(Capability::SafeRestart));
     let before = core.untouched();
     let any = QuarantineItem {
@@ -410,7 +199,7 @@ async fn an_installed_leaf_refuses_every_request_while_management_is_off() {
 async fn the_installed_leaf_serves_a_verified_local_client_and_refuses_web_and_agent() {
     let (core, _) = Installed::start().await;
     core.boot.admin.publish_for_test();
-    let mut conn = Conn::open(&core.socket).await;
+    let mut conn = Conn::open(&core.socket, "q1-install").await;
     let epoch = conn.hello.instance_epoch.get();
 
     // List and detail agree, and the detail binds the epoch the hello carries.
@@ -458,15 +247,32 @@ async fn the_installed_leaf_serves_a_verified_local_client_and_refuses_web_and_a
             .discard_complete()
     );
 
-    // The verified local operator's confirmed discard goes through.
+    // The verified local operator's confirmed discard goes through where the
+    // management effects run (Linux); elsewhere the service refuses the effect
+    // and the graph stays as it was.
     let accepted = conn.call(&discard("op-discard", &item, epoch)).await;
-    assert!(matches!(
-        accepted.result,
-        ReplyResult::Success(ReplyPayload::Command(_))
-    ));
-    core.boot.admin.wait_for_request_slots().await;
-    let after = only_item(&mut conn, "r-after").await;
-    assert!(after.discard_complete());
-    assert!(after.revision > item.revision);
+    #[cfg(target_os = "linux")]
+    {
+        assert!(matches!(
+            accepted.result,
+            ReplyResult::Success(ReplyPayload::Command(_))
+        ));
+        core.boot.admin.wait_for_request_slots().await;
+        let after = only_item(&mut conn, "r-after").await;
+        assert!(after.discard_complete());
+        assert!(after.revision > item.revision);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_eq!(
+            error_of(&accepted),
+            (
+                ErrorCode::UnsupportedCapability,
+                "management effects require Linux"
+            )
+        );
+        let after = only_item(&mut conn, "r-after").await;
+        assert_eq!(after, item);
+    }
     core.shutdown().await;
 }
