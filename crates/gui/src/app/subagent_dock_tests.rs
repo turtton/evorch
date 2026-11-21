@@ -132,6 +132,7 @@ fn changed(run: &str, to: event_bus::AgentRunPhase) -> event_bus::Event {
         from: event_bus::AgentRunPhase::Pending,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

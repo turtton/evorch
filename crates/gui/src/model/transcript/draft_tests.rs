@@ -28,6 +28,7 @@ fn phase(to: AgentRunPhase) -> Event {
         from: AgentRunPhase::Running,
         to,
         reason: None,
+        waiting: None,
     })
 }
 
@@ -187,6 +188,7 @@ fn a_run_ending_discards_its_unconfirmed_drafts() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Error,
         reason: Some("boom".into()),
+        waiting: None,
     }));
 
     // Then: only the other run keeps its draft.

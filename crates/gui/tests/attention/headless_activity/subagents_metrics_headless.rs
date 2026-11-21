@@ -197,6 +197,7 @@ fn subagents_cards_show_their_own_running_time() {
                         from: before,
                         to: after,
                         reason: None,
+                        waiting: None,
                     }),
                     start + std::time::Duration::from_secs(at),
                 );

@@ -423,6 +423,7 @@ fn pending_user_question_keeps_blob_alongside_running_spinner() {
             from: event_bus::AgentRunPhase::Pending,
             to: event_bus::AgentRunPhase::Running,
             reason: None,
+            waiting: None,
         })]);
     }
     let mut harness = egui_kittest::Harness::builder()
@@ -463,6 +464,7 @@ fn pending_user_question_keeps_blob_alongside_running_spinner() {
             from: event_bus::AgentRunPhase::Running,
             to: event_bus::AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         })]);
     harness.run_steps(3);
     assert_eq!(thread_status_icon_color(&harness, "one"), waiting_question);

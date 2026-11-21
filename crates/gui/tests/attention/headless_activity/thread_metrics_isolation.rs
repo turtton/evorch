@@ -152,6 +152,7 @@ fn metrics_render_in_status_line_below_composer() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ]);
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1000.0]);

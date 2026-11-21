@@ -548,6 +548,7 @@ fn run_state_changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Ev
         from,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

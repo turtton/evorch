@@ -1,6 +1,6 @@
 //! AgentRun の位相状態機械 (event-sourced)。
 
-use event_bus::{AgentRunPhase, LifecycleEvent};
+use event_bus::{AgentRunPhase, LifecycleEvent, WaitingCause};
 
 use crate::error::RuntimeError;
 use crate::run::RunId;
@@ -136,19 +136,53 @@ impl RunState {
     /// [`LifecycleEvent::AgentRunStateChanged`] を組み立て、[`RunState::apply`]
     /// 経由で適用したうえで、emit 用にイベントを返す。
     ///
+    /// `Waiting` 以外への遷移専用。`Waiting` には理由が必須なので
+    /// [`RunState::transition_waiting`] を使う。
+    ///
     /// # Errors
-    /// 現在位相からの遷移が無効な場合 [`RuntimeError::InvalidTransition`] を返す。
+    /// 現在位相からの遷移が無効な場合、または `to` が `Waiting` の場合
+    /// [`RuntimeError::InvalidTransition`] を返す。
     pub fn transition(
         &mut self,
         run_id: RunId,
         to: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<LifecycleEvent, RuntimeError> {
+        if to == AgentRunPhase::Waiting {
+            return Err(RuntimeError::InvalidTransition {
+                from: self.phase,
+                to,
+            });
+        }
+        self.emit_transition(run_id, to, reason, None)
+    }
+
+    /// `Waiting` へ遷移するイベントを生成して適用する。型付き理由は必須で、
+    /// `reason` は常に `None` (既存の文字列理由の意味を変えない)。
+    ///
+    /// # Errors
+    /// 現在位相からの遷移が無効な場合 [`RuntimeError::InvalidTransition`] を返す。
+    pub fn transition_waiting(
+        &mut self,
+        run_id: RunId,
+        cause: WaitingCause,
+    ) -> Result<LifecycleEvent, RuntimeError> {
+        self.emit_transition(run_id, AgentRunPhase::Waiting, None, Some(cause))
+    }
+
+    fn emit_transition(
+        &mut self,
+        run_id: RunId,
+        to: AgentRunPhase,
+        reason: Option<String>,
+        waiting: Option<WaitingCause>,
+    ) -> Result<LifecycleEvent, RuntimeError> {
         let event = LifecycleEvent::AgentRunStateChanged {
             run_id: run_id.to_string(),
             from: self.phase,
             to,
             reason,
+            waiting,
         };
         self.apply(&event)?;
         Ok(event)
@@ -217,6 +251,7 @@ mod tests {
             from: Pending,
             to: Running,
             reason: None,
+            waiting: None,
         };
 
         let result = state.apply(&event);
@@ -239,6 +274,7 @@ mod tests {
             from: Running,
             to: Pending,
             reason: None,
+            waiting: None,
         };
 
         let result = state.apply(&event);
@@ -267,6 +303,7 @@ mod tests {
             from: Pending,
             to: Running,
             reason: None,
+            waiting: None,
         };
 
         assert_eq!(
@@ -311,6 +348,7 @@ mod tests {
                 from: Pending,
                 to: Running,
                 reason: None,
+                waiting: None,
             }
         );
         assert_eq!(state.phase(), Running);
@@ -334,6 +372,7 @@ mod tests {
                 from: Pending,
                 to: Error,
                 reason: Some("spawn failed".to_string()),
+                waiting: None,
             }
         );
         assert_eq!(state.phase(), Error);
@@ -348,7 +387,9 @@ mod tests {
         let run_id = RunId::new(3);
 
         state.transition(run_id, Running, None).expect("-> Running");
-        state.transition(run_id, Waiting, None).expect("-> Waiting");
+        state
+            .transition_waiting(run_id, WaitingCause::InputBoundary)
+            .expect("-> Waiting");
         state
             .transition(run_id, Running, None)
             .expect("-> Running (再開)");

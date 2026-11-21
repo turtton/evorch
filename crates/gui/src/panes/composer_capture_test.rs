@@ -28,7 +28,7 @@ fn capture_cancel_states() {
                 run_id: name.into(),
                 from: event_bus::AgentRunPhase::Pending,
                 to: phase,
-                reason: None,
+                reason: None, waiting: None,
             }),
         ]);
         let mut h = crate::headless::HeadlessWorkbench::new(state, [800.0, 600.0]);

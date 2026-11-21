@@ -28,7 +28,12 @@ async fn adoption_survives_claim_and_is_released_after_running_is_published() {
     let run = state.task.run_id;
     state.transition(AgentRunPhase::Running, None).unwrap();
     state
-        .transition_with_turn(AgentRunPhase::Waiting, None, Some(Some("old turn".into())))
+        .transition_with_turn(
+            AgentRunPhase::Waiting,
+            None,
+            Some(event_bus::WaitingCause::TurnCompleted),
+            Some(Some("old turn".into())),
+        )
         .unwrap();
     let inbox = state.channels.user_inbox.clone();
     let phase = state.channels.phase_tx.subscribe();
@@ -66,7 +71,12 @@ async fn input_adopted_while_running_releases_at_the_completed_turn_boundary() {
     state.transition(AgentRunPhase::Running, None).unwrap();
     adopt(&mut state);
     state
-        .transition_with_turn(AgentRunPhase::Waiting, None, Some(None))
+        .transition_with_turn(
+            AgentRunPhase::Waiting,
+            None,
+            Some(event_bus::WaitingCause::TurnCompleted),
+            Some(None),
+        )
         .unwrap();
     assert_eq!(*state.channels.phase_tx.borrow(), AgentRunPhase::Waiting);
     assert!(!state.channels.user_inbox.adopting());
@@ -82,7 +92,11 @@ async fn failed_phase_publication_keeps_adoption_until_loop_state_drops() {
     let inbox = state.channels.user_inbox.clone();
     adopt(&mut state);
     // Pending -> Waiting is invalid: no phase has replaced the old public state.
-    assert!(state.transition(AgentRunPhase::Waiting, None).is_err());
+    assert!(
+        state
+            .enter_waiting(event_bus::WaitingCause::InputBoundary)
+            .is_err()
+    );
     assert!(inbox.adopting());
     drop(state);
     assert!(!inbox.adopting());
@@ -100,7 +114,9 @@ async fn terminal_error_cancel_and_abandoned_loop_state_release_adoption() {
         let (runtime, mut state) = started_fixture(cancel_rx).await;
         let run = state.task.run_id;
         state.transition(AgentRunPhase::Running, None).unwrap();
-        state.transition(AgentRunPhase::Waiting, None).unwrap();
+        state
+            .enter_waiting(event_bus::WaitingCause::InputBoundary)
+            .unwrap();
         let inbox = state.channels.user_inbox.clone();
         adopt(&mut state);
         match terminal {

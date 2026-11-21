@@ -889,6 +889,7 @@ mod tests {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some("profile=x http error 401".into()),
+            waiting: None,
         });
         // When: routing and applying the event.
         let destinations = registry.route(&event);

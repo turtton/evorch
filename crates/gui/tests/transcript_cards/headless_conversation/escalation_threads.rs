@@ -297,6 +297,7 @@ fn events() -> Vec<Event> {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ]
 }
@@ -449,6 +450,7 @@ fn escalation_summary_stays_in_child_and_source_is_unchanged_on_start_done_or_er
             from: AgentRunPhase::Running,
             to: phase,
             reason: (phase == AgentRunPhase::Error).then(|| "fixture failure".into()),
+            waiting: None,
         });
         storage
             .handle()

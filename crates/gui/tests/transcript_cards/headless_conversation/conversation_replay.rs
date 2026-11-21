@@ -114,6 +114,7 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
                     from: AgentRunPhase::Running,
                     to: AgentRunPhase::Done,
                     reason: None,
+                    waiting: None,
                 }),
             ],
         );
@@ -186,6 +187,7 @@ fn past_subagents_remain_browsable_after_restart() {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
             started("run-3", None, "chat:two"),
             started("run-4", Some("run-3"), "agent two"),
@@ -195,6 +197,7 @@ fn past_subagents_remain_browsable_after_restart() {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
         ],
     );
@@ -266,6 +269,7 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
             started("child", Some("root"), "reviewer"),
             instruction,
@@ -390,6 +394,7 @@ fn unrelated_root_never_attaches_to_the_only_active_thread() {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
         ],
     );

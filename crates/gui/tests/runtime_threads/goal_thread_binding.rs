@@ -179,6 +179,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
             from: event_bus::AgentRunPhase::Running,
             to: event_bus::AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         })
     }));
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 2000.0]);

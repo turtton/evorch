@@ -28,7 +28,12 @@ mod context_pressure;
 
 #[path = "thread_metrics.rs"]
 mod thread_metrics;
+
 pub use thread_metrics::latency_label;
+
+#[path = "waiting_state.rs"]
+mod waiting_state;
+pub use waiting_state::WaitingState;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TelemetryRow {
@@ -41,6 +46,8 @@ pub struct TelemetryRow {
     pub context_composition: Option<event_bus::ContextComposition>,
     pub last_checkpoint: Option<std::time::SystemTime>,
     pub checkpoint_failure: Option<String>,
+    /// Why the run is Waiting, from its latest event; cleared by any other state.
+    pub waiting: Option<WaitingState>,
     pub usage: TokenUsage,
     conversation_usage: TokenUsage,
     pub cache_reuse: CacheReuseSummary,
@@ -463,6 +470,7 @@ impl TelemetryOverlay {
                 ..
             }) => {
                 let row = self.rows.entry(run_id.clone()).or_default();
+                row.waiting = None;
                 row.ttft_ms = None;
                 row.parent_run_id.clone_from(parent_run_id);
                 row.conversation_root |= agent_name.starts_with("chat:");
@@ -478,7 +486,20 @@ impl TelemetryOverlay {
                     .or_default()
                     .conversation_root = true;
             }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to,
+                waiting,
+                ..
+            }) => {
+                if *to == AgentRunPhase::Waiting {
+                    self.rows.entry(run_id.clone()).or_default().waiting = Some(WaitingState {
+                        cause: waiting.clone(),
+                        since: event.meta.wall_clock,
+                    });
+                } else if let Some(row) = self.rows.get_mut(run_id) {
+                    row.waiting = None;
+                }
                 match to {
                     AgentRunPhase::Running => {
                         self.active_running_start

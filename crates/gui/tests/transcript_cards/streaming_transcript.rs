@@ -160,6 +160,7 @@ fn failed_or_cancelled_stream_keeps_partial_display() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some(reason.into()),
+            waiting: None,
         }));
 
         // Then: partial arrival-ordered display survives with one terminal entry.
@@ -199,6 +200,7 @@ fn retries_exhausted_keeps_partial_display_with_one_terminal_error() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Error,
         reason: Some(reason),
+        waiting: None,
     }));
 
     // Then: 部分表示を保持し、終端エラーは1件だけで両transcriptが一致する。
@@ -253,6 +255,7 @@ fn stop_preserves_partial_display_and_resumed_turn_is_separate() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Stopped,
         reason: Some("stopped by operator".into()),
+        waiting: None,
     }));
     assert!(!registry.thread().thinking_is_streaming(0));
     // A stop leaves no transcript notice; the phase indicator carries it.
@@ -262,6 +265,7 @@ fn stop_preserves_partial_display_and_resumed_turn_is_separate() {
         from: AgentRunPhase::Stopped,
         to: AgentRunPhase::Running,
         reason: None,
+        waiting: None,
     }));
     registry.apply(&message("resumed"));
     registry.apply(&Event::new(MessageEvent::MessageCompleted {

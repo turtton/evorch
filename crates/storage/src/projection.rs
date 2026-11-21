@@ -326,7 +326,7 @@ mod tests {
     noop_test!(cache_stats_does_not_mutate, UsageEvent::CacheStats { provider: "p".into(), model: "m".into(), cache_hits: 1, cache_misses: 2 });
     noop_test!(provider_does_not_mutate, ProviderEvent::ProviderFallback { from_provider: "a".into(), to_provider: "b".into(), reason: "r".into() });
     noop_test!(fault_does_not_mutate, FaultEvent::SubscriberLagged { subscriber_id: 1, skipped: 2 });
-    noop_test!(agent_run_state_changed_does_not_mutate, LifecycleEvent::AgentRunStateChanged { run_id: "r".into(), from: AgentRunPhase::Pending, to: AgentRunPhase::Running, reason: None });
+    noop_test!(agent_run_state_changed_does_not_mutate, LifecycleEvent::AgentRunStateChanged { run_id: "r".into(), from: AgentRunPhase::Pending, to: AgentRunPhase::Running, reason: None, waiting: None });
     noop_test!(agent_run_restored_does_not_mutate, LifecycleEvent::AgentRunRestored { run_id: "r".into(), restored_by: "sender".into(), message_id: "msg-1".into() });
     noop_test!(run_ledger_appended_does_not_mutate, LedgerEvent::RunLedgerAppended { run_id: "r".into(), seq: 1, body: "entry".into() });
     noop_test!(routing_decision_does_not_touch_sessions_or_tasks, LifecycleEvent::RoutingDecision { shape: "Direct".into(), reason: "direct-keyword".into(), source: RoutingSource::LocalRule { rule: "direct-keyword:direct".into() } });

@@ -97,6 +97,7 @@ fn apply_events_surfaces_run_error_in_owning_thread() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some("profile=x http error 401".into()),
+            waiting: None,
         }),
     ]);
     harness.run();
@@ -400,5 +401,6 @@ fn run_state_changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Ev
         from,
         to,
         reason: None,
+        waiting: None,
     })
 }

@@ -255,6 +255,7 @@ fn stored_log(image: &Path, dir: tempfile::TempDir) -> Log {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         }
         .into(),
     );

@@ -317,6 +317,7 @@ mod tests {
             from: AgentRunPhase::Running,
             to,
             reason: reason.map(str::to_owned),
+            waiting: None,
         })
     }
     fn approval() -> Event {

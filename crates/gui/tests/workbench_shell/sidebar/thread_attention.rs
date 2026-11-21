@@ -120,6 +120,7 @@ fn phase(run: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
         from,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

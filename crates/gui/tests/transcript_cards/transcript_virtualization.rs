@@ -234,6 +234,7 @@ fn offscreen_thinking_end_remeasures_the_automatically_collapsed_body() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }));
     harness.run();
     assert!(content_height(&harness) < before);

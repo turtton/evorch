@@ -43,6 +43,7 @@ async fn terminal_replay_relays_once_without_final_output() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     };
     // When: the terminal publication is replayed.
     runtime.publish_terminal(child, terminal.clone());
@@ -74,6 +75,7 @@ fn publish(runtime: &AgentRuntime, run_id: RunId, to: AgentRunPhase) {
             from: AgentRunPhase::Running,
             to,
             reason: Some("operator stopped".into()),
+            waiting: None,
         },
     );
 }

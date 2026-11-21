@@ -103,6 +103,7 @@ fn ended(run: &str, to: AgentRunPhase) -> Event {
         from: AgentRunPhase::Running,
         to,
         reason: None,
+        waiting: None,
     })
 }
 
@@ -134,6 +135,7 @@ fn delegation(label: &str, result: &str) -> Vec<Event> {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ]
 }

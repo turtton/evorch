@@ -22,6 +22,7 @@ fn terminal(run: &str, to: AgentRunPhase) -> Event {
         from: AgentRunPhase::Running,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

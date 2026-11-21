@@ -90,6 +90,7 @@ mod tests {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
         ];
         model.restore_events(events.iter());
@@ -115,6 +116,7 @@ mod tests {
                 from: AgentRunPhase::Running,
                 to: phase,
                 reason: None,
+                waiting: None,
             }));
             assert_eq!(model.rows()[0].status, phase);
             assert_eq!(model.rows()[0].name, "custom-name");
@@ -129,6 +131,7 @@ mod tests {
                 from: AgentRunPhase::Running,
                 to,
                 reason: reason.map(Into::into),
+                waiting: None,
             })
         };
         // Given: two children that both end in Error, one of them by cancellation.
@@ -219,6 +222,7 @@ mod tests {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }));
         // Then: the status updates in place while name and model are preserved
         assert_eq!(model.rows()[0].status, AgentRunPhase::Done);

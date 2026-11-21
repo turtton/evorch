@@ -102,6 +102,7 @@ async fn phase_only_wait_leaves_notice_but_output_bearing_wait_acknowledges_it()
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         },
     );
     let result = crate::meta::dispatch(

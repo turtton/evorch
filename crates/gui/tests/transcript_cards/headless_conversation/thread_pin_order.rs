@@ -65,6 +65,7 @@ fn start(gui: &mut HeadlessWorkbench<EmptySource>, thread: &str, phase: AgentRun
             from: AgentRunPhase::Pending,
             to: phase,
             reason: None,
+            waiting: None,
         }),
     ]);
 }

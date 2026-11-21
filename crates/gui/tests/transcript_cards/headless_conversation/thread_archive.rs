@@ -80,6 +80,7 @@ fn set_thread_phase(
             from: AgentRunPhase::Pending,
             to: phase,
             reason: None,
+            waiting: None,
         }),
     ]);
 }
@@ -169,6 +170,7 @@ fn mixed_phases_block_archive_despite_stopped_or_error_display_state() {
                         from: AgentRunPhase::Pending,
                         to: active,
                         reason: None,
+                        waiting: None,
                     }),
                 ]);
                 let thread = state
@@ -499,6 +501,7 @@ fn persisted_archive_run(
             from: AgentRunPhase::Pending,
             to: phase,
             reason: None,
+            waiting: None,
         }),
     ] {
         storage.handle().append_event(Some("gui"), &event).unwrap();
@@ -924,6 +927,7 @@ fn claiming_a_thread_stops_its_orphaned_runs() {
                 from: AgentRunPhase::Pending,
                 to: AgentRunPhase::Running,
                 reason: None,
+                waiting: None,
             }),
         ] {
             storage.handle().append_event(Some("gui"), &event).unwrap();

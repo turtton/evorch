@@ -169,6 +169,7 @@ fn stopped_and_failed_streams_do_not_restore_unaccepted_answer_drafts() {
                 from: AgentRunPhase::Running,
                 to: terminal,
                 reason: Some("interrupted".into()),
+                waiting: None,
             }),
         ];
         // Check the ordered transcript projection, independently of sidebar

@@ -16,6 +16,7 @@ mod findings;
 mod handoffs;
 mod immutable_read;
 mod read_api;
+mod recorded_state;
 mod resume;
 mod review_evidence;
 mod run_context_redaction;

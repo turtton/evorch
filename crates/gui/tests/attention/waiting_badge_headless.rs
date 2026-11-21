@@ -23,6 +23,7 @@ fn waiting_transcript() -> WorkbenchState<gui::fixture::DemoSource> {
             from: event_bus::AgentRunPhase::Running,
             to: event_bus::AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         },
     )]);
     state

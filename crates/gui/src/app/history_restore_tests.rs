@@ -85,6 +85,7 @@ fn phase(run: &str, to: AgentRunPhase) -> Event {
         from: AgentRunPhase::Running,
         to,
         reason: None,
+        waiting: None,
     })
 }
 
@@ -669,6 +670,7 @@ fn task_history() -> Vec<Event> {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Error,
                 reason: Some(event_bus::CANCELLED_REASON.into()),
+                waiting: None,
             }),
         ),
         // Updates the oldest child after the others finished, but before run-13 waits.
@@ -852,4 +854,58 @@ fn unreadable_events_are_all_kept_by_id_once_and_never_for_deleted_runs() {
     );
     assert_eq!(restored.shown_through_event, db.last_event_id().unwrap());
     drop(storage);
+}
+
+#[test]
+fn restored_history_shows_the_waiting_reason_with_the_event_time_and_clears_it_after_a_restart() {
+    // Given: a run that stopped at a Waiting with a cause, and one that waited and was
+    // registered again afterwards, both read back from the event log.
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let cause = event_bus::WaitingCause::TurnCompleted;
+    let mut waiting = Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "run-1".into(),
+        from: AgentRunPhase::Running,
+        to: AgentRunPhase::Waiting,
+        reason: None,
+        waiting: Some(cause.clone()),
+    });
+    waiting.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let mut waited_then_restarted = waiting.clone();
+    if let event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+        run_id, ..
+    }) = &mut waited_then_restarted.kind
+    {
+        *run_id = "run-2".into();
+    }
+    for event in [
+        started("run-1", None, "agent"),
+        waiting.clone(),
+        started("run-2", None, "agent"),
+        waited_then_restarted,
+        started("run-2", None, "agent"),
+    ] {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    let db = Database::open(&config).unwrap();
+
+    // When: the history is restored.
+    let mut restored = state(SidebarState::default());
+    restored.restore_history(&db).unwrap();
+
+    // Then: the recorded cause and the event's own time are shown; the registration after
+    // the second wait left no reason.
+    let one = restored.telemetry.row("run-1").unwrap().waiting.clone();
+    assert_eq!(
+        one,
+        Some(crate::model::telemetry::WaitingState {
+            cause: Some(cause),
+            since: waiting.meta.wall_clock,
+        })
+    );
+    assert_eq!(restored.telemetry.row("run-2").unwrap().waiting, None);
 }

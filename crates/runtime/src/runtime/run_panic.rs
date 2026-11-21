@@ -114,6 +114,7 @@ impl AgentRuntime {
                     from,
                     to: AgentRunPhase::Error,
                     reason: Some(format!("panicked: {first_line}")),
+                    waiting: None,
                 },
             );
         }

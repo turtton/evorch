@@ -248,6 +248,7 @@ fn tasks_row_updates_after_state_change_event() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     }));
     assert!(repaint_rx.recv_timeout(Duration::from_secs(1)).is_ok());
     harness.run_steps(4);

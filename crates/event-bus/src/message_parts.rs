@@ -225,6 +225,7 @@ mod tests {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Stopped,
                 reason: None,
+                waiting: None,
             }),
         ];
         for boundary in boundaries {
