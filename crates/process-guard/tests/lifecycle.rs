@@ -1070,8 +1070,104 @@ fn a_listener_owned_by_another_process_never_receives_hello() {
     assert_eq!(wait_pid(foreign), 0);
 }
 #[test]
-fn closed_stdio_fixture() {
-    if std::env::var_os("GUARD_CLOSED_STDIO_FIXTURE").is_none() {
+fn closed_stdio_api_fixture() {
+    if std::env::var_os("GUARD_CLOSED_STDIO_API_FIXTURE").is_none() {
+        return;
+    }
+    fn reset_stdio() {
+        for fd in 0..=2 {
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF)
+                );
+                let null = b"/dev/null\0";
+                let opened =
+                    unsafe { libc::open(null.as_ptr().cast(), libc::O_RDWR | libc::O_CLOEXEC) };
+                assert!(opened >= 0);
+                if opened != fd {
+                    assert_eq!(unsafe { libc::dup2(opened, fd) }, fd);
+                    assert_eq!(unsafe { libc::close(opened) }, 0);
+                }
+            }
+        }
+    }
+    fn assert_stdio_mask(mask: u8) {
+        for fd in 0..=2 {
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if mask & (1 << fd) != 0 {
+                assert_eq!(result, -1, "fd {fd} should be closed");
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF),
+                    "fd {fd} must be EBADF immediately before launch"
+                );
+            } else {
+                assert!(result >= 0, "fd {fd} should remain open");
+            }
+        }
+    }
+    let rt = runtime();
+    let mut spec = LaunchSpec::new(shell()).unwrap();
+    spec.argv.extend([b"-c".to_vec(), b"exit 37".to_vec()]);
+    // This role is already running as a Rust process. Close stdio only after
+    // Rust startup (and after loading the image), then prove the API receives
+    // the deliberately closed descriptors rather than startup-normalized ones.
+    for mask in 1..=0b111 {
+        reset_stdio();
+        for fd in 0..=2 {
+            if mask & (1 << fd) != 0 {
+                assert_eq!(unsafe { libc::close(fd) }, 0);
+            }
+        }
+        assert_stdio_mask(mask);
+        let mut child = rt
+            .spawn(
+                &spec,
+                [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()],
+            )
+            .unwrap();
+        assert_eq!(
+            child.wait().unwrap().code(),
+            Some(37),
+            "closed mask {mask:#05b}"
+        );
+        assert_stdio_mask(mask);
+    }
+
+    // An exec failure must leave the role's closed stdio untouched, and a
+    // subsequent launch must still work.
+    reset_stdio();
+    for fd in 0..=2 {
+        assert_eq!(unsafe { libc::close(fd) }, 0);
+    }
+    assert_stdio_mask(0b111);
+    let mut missing = LaunchSpec::new("/evorch/closed-stdio/missing").unwrap();
+    missing.argv = vec![b"/evorch/closed-stdio/missing".to_vec()];
+    assert_eq!(
+        rt.spawn(
+            &missing,
+            [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()]
+        )
+        .unwrap_err()
+        .raw_os_error(),
+        Some(libc::ENOENT)
+    );
+    assert_stdio_mask(0b111);
+    let mut child = rt
+        .spawn(
+            &spec,
+            [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()],
+        )
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+    assert_stdio_mask(0b111);
+    // Do not ask the test harness to print to its deliberately closed stdout.
+    unsafe { libc::_exit(0) }
+}
+#[test]
+fn closed_stdio_normalization_fixture() {
+    if std::env::var_os("GUARD_CLOSED_STDIO_NORMALIZATION_FIXTURE").is_none() {
         return;
     }
     unsafe {
@@ -1086,8 +1182,9 @@ fn closed_stdio_fixture() {
         .spawn(&spec, [Stdio::null(), Stdio::null(), Stdio::null()])
         .unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(37));
-    // Accepted B1 boundary: Rust startup fills absent stdio with /dev/null.
-    // Intentional EBADF inheritance is deferred to the B2 stdio API design.
+
+    // Preserve the startup-normalization contract as a distinct case from
+    // the API test below: inherited target stdio is normalized to /dev/null.
     let mut spec = LaunchSpec::new(shell()).unwrap();
     spec.argv.extend([
         b"-c".to_vec(),
@@ -1111,8 +1208,24 @@ fn closed_stdio_fixture() {
 fn closed_stdio_is_sanitized_to_dev_null_by_helper_startup() {
     let mut reaper = FixtureReaper::new();
     let mut core = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "closed_stdio_fixture", "--nocapture"])
-        .env("GUARD_CLOSED_STDIO_FIXTURE", "1")
+        .args([
+            "--exact",
+            "closed_stdio_normalization_fixture",
+            "--nocapture",
+        ])
+        .env("GUARD_CLOSED_STDIO_NORMALIZATION_FIXTURE", "1")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    reaper.add(core.id() as i32);
+    assert_eq!(core.wait().unwrap().code(), Some(0));
+}
+#[test]
+fn closed_stdio_api_handles_descriptors_closed_after_role_startup() {
+    let mut reaper = FixtureReaper::new();
+    let mut core = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "closed_stdio_api_fixture", "--nocapture"])
+        .env("GUARD_CLOSED_STDIO_API_FIXTURE", "1")
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
