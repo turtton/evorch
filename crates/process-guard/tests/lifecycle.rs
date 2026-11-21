@@ -1070,8 +1070,8 @@ fn a_listener_owned_by_another_process_never_receives_hello() {
     assert_eq!(wait_pid(foreign), 0);
 }
 #[test]
-fn closed_stdio_fixture() {
-    if std::env::var_os("GUARD_CLOSED_STDIO_FIXTURE").is_none() {
+fn closed_stdio_api_fixture() {
+    if std::env::var_os("GUARD_CLOSED_STDIO_API_FIXTURE").is_none() {
         return;
     }
     fn reset_stdio() {
@@ -1166,11 +1166,66 @@ fn closed_stdio_fixture() {
     unsafe { libc::_exit(0) }
 }
 #[test]
+fn closed_stdio_normalization_fixture() {
+    if std::env::var_os("GUARD_CLOSED_STDIO_NORMALIZATION_FIXTURE").is_none() {
+        return;
+    }
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+        libc::close(2);
+    }
+    let rt = runtime();
+    let mut spec = LaunchSpec::new(shell()).unwrap();
+    spec.argv.extend([b"-c".to_vec(), b"exit 37".to_vec()]);
+    let mut child = rt
+        .spawn(&spec, [Stdio::null(), Stdio::null(), Stdio::null()])
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+
+    // Preserve the startup-normalization contract as a distinct case from
+    // the API test below: inherited target stdio is normalized to /dev/null.
+    let mut spec = LaunchSpec::new(shell()).unwrap();
+    spec.argv.extend([
+        b"-c".to_vec(),
+        b"for fd in 0 1 2; do test /proc/self/fd/$fd -ef /dev/null || exit 90; done; exit 37"
+            .to_vec(),
+    ]);
+    let mut child = rt
+        .spawn(
+            &spec,
+            [Stdio::inherit(), Stdio::inherit(), Stdio::inherit()],
+        )
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(37));
+    for fd in 0..=2 {
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+    // Do not ask the test harness to print to its deliberately closed stdout.
+    unsafe { libc::_exit(0) }
+}
+#[test]
 fn closed_stdio_is_sanitized_to_dev_null_by_helper_startup() {
     let mut reaper = FixtureReaper::new();
     let mut core = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "closed_stdio_fixture", "--nocapture"])
-        .env("GUARD_CLOSED_STDIO_FIXTURE", "1")
+        .args([
+            "--exact",
+            "closed_stdio_normalization_fixture",
+            "--nocapture",
+        ])
+        .env("GUARD_CLOSED_STDIO_NORMALIZATION_FIXTURE", "1")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    reaper.add(core.id() as i32);
+    assert_eq!(core.wait().unwrap().code(), Some(0));
+}
+#[test]
+fn closed_stdio_api_handles_descriptors_closed_after_role_startup() {
+    let mut reaper = FixtureReaper::new();
+    let mut core = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "closed_stdio_api_fixture", "--nocapture"])
+        .env("GUARD_CLOSED_STDIO_API_FIXTURE", "1")
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
