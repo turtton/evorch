@@ -504,6 +504,46 @@ expect ok "the recovery install root declares q1" grep -qx 'mod q1;' "$C/tests/r
 expect ok "the recovery install root declares q2" grep -qx 'mod q2;' "$C/tests/recovery_admin_install/main.rs"
 expect ok "the compose root declares target, recipe, and finalization modules" bash -c "grep -qx 'mod targets;' '$C/tests/public_restart_compose/main.rs' && grep -qx 'mod recipes;' '$C/tests/public_restart_compose/main.rs' && grep -qx 'mod finalization;' '$C/tests/public_restart_compose/main.rs'"
 expect ok "the shared test roots are central files" bash -c "grep -qx 'crates/evorch-core/tests/recovery_admin_install/main.rs' scripts/central-files.txt && grep -qx 'crates/evorch-core/tests/public_restart_compose/main.rs' scripts/central-files.txt"
+# 5a-V's split targets admit each planned leaf to its owner only. The shared
+# module roots and V-cache's integration-owned binary remain outside every leaf.
+v_scope_keys=(pr07b5aq1 pr07b5aq2 pr5avadmission pr5av1b2a pr5av1b2b pr5avexec pr5avdeny pr5avsafe pr5avprod pr07b5acn)
+v_leaf_owners=(
+  pr07b5aq1 pr07b5aq2 pr5avadmission
+  pr5av1b2a pr5av1b2a pr5av1b2b
+  pr5avexec pr5avdeny pr5avsafe pr5avprod pr07b5acn
+)
+v_leaf_paths=(
+  "$C/tests/recovery_admin_install/q1.rs"
+  "$C/tests/recovery_admin_install/q2.rs"
+  "$C/tests/recovery_admission.rs"
+  "$C/tests/public_restart_compose/targets.rs"
+  "$C/tests/public_restart_compose/recipes.rs"
+  "$C/tests/public_restart_compose/finalization.rs"
+  "$C/tests/public_restart_exec.rs"
+  "$C/tests/public_restart_deny.rs"
+  "$C/tests/public_restart_safe.rs"
+  "$C/tests/public_restart_product.rs"
+  "$X/tests/public_restart_native.rs"
+)
+for i in "${!v_leaf_paths[@]}"; do
+  owner=${v_leaf_owners[$i]}
+  leaf=${v_leaf_paths[$i]}
+  files "$leaf"
+  expect ok "$owner owns its 5a-V leaf $leaf" "$central" --scope "$owner" --files-from "$work/files"
+  for other in "${v_scope_keys[@]}"; do
+    [[ "$other" != "$owner" ]] || continue
+    expect fail "$other cannot edit $owner's 5a-V leaf $leaf" "$central" --scope "$other" --files-from "$work/files"
+  done
+done
+for shared_root in \
+  "$C/tests/recovery_admin_install/main.rs" "$C/tests/public_restart_compose/main.rs" \
+  "$C/tests/public_restart_cache.rs" "$C/Cargo.toml" scripts/ci-test-groups.json .github/workflows/ci.yml; do
+  files "$shared_root"
+  for scope in "${v_scope_keys[@]}"; do
+    expect fail "$scope cannot edit the shared 5a-V root or registration $shared_root" "$central" --scope "$scope" --files-from "$work/files"
+  done
+done
+expect ok "the integration PR owns the 5a-V shared roots and registrations" "$central" --scope integration --files-from "$work/files"
 expect ok "evorch-core remains in the runtime test group" bash -c "jq -e '.groups.runtime.packages | index(\"evorch-core\")' scripts/ci-test-groups.json"
 expect ok "core-client-e2e remains in the GUI test group" bash -c "jq -e '.groups.gui.packages | index(\"core-client-e2e\")' scripts/ci-test-groups.json"
 expect ok "the admin publish boundary test and gate run in CI" bash -c "grep -q 'bash scripts/tests/test_check_admin_publish_boundary.sh' '$ci' && grep -q 'bash scripts/check-admin-publish-boundary.sh' '$ci'"
