@@ -373,6 +373,7 @@ impl Core {
             tasks.clone(),
             epoch,
         );
+        admin.enable_management();
         let facade = Arc::new(Facade {
             calls: AtomicUsize::new(0),
             effects: Arc::new(AtomicUsize::new(0)),

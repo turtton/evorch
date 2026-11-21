@@ -23,6 +23,7 @@ pub struct HostBackend {
     closing: AtomicBool,
     unix_clients: AtomicU32,
     web_enabled: AtomicBool,
+    management_advertised: AtomicBool,
     web_clients: Mutex<Option<workbench_web::ActivityObserver>>,
     web_deliveries: workbench_web::RestartTasks,
 }
@@ -99,6 +100,7 @@ impl HostBackend {
             closing: AtomicBool::new(false),
             unix_clients: AtomicU32::new(0),
             web_enabled: AtomicBool::new(false),
+            management_advertised: AtomicBool::new(false),
             web_clients: Mutex::new(None),
             web_deliveries: Default::default(),
             hello: ServerHello {
@@ -125,6 +127,21 @@ impl HostBackend {
     }
     pub fn set_web_enabled(&self, enabled: bool) {
         self.web_enabled.store(enabled, Ordering::SeqCst);
+    }
+    /// Offer `safe_restart.v1` in the hello. Only `admin_composition::capability`
+    /// calls this; the capability is still withheld until the admin service's
+    /// publication switch is on, and `server_hello` withholds it from non-local peers.
+    pub(crate) fn advertise_management(&self) {
+        self.management_advertised.store(true, Ordering::SeqCst);
+    }
+    fn management_published(&self) -> bool {
+        self.management_advertised.load(Ordering::SeqCst)
+            && self
+                .host
+                .lock()
+                .unwrap()
+                .admin()
+                .is_some_and(|admin| admin.management_enabled())
     }
     pub(crate) fn track_web_clients(&self, clients: workbench_web::ActivityObserver) {
         *self.web_clients.lock().unwrap() = Some(clients);
@@ -193,6 +210,9 @@ impl HostBackend {
     pub fn hello(&self) -> ServerHello {
         let mut hello = self.hello.clone();
         hello.instance_epoch = self.projection.instance_epoch();
+        if self.management_published() {
+            hello.capabilities.push(Capability::SafeRestart);
+        }
         if let Ok(workbench_protocol::queries::QueryReply::Lifecycle(LifecycleReply::CoreStatus(
             status,
         ))) = self.host.lock().unwrap().handle_query(

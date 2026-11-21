@@ -294,6 +294,7 @@ impl Fixture {
         let tasks = AreaTasks::new(tokio::runtime::Handle::current());
         let gate = host.host.lock().unwrap().service().restart_gate();
         let service = AdminService::new(AdminAudit::new(port.clone(), gate), tasks.clone(), EPOCH);
+        service.enable_management();
         host.admin = service.clone();
         let core = RestartCoordinator::new(&host);
         let graphs = Arc::new(Graphs::default());

@@ -341,6 +341,9 @@ struct Harness {
 }
 impl Harness {
     fn new(intent: &AdminIntent) -> Self {
+        Self::with_switch(intent, true)
+    }
+    fn with_switch(intent: &AdminIntent, published: bool) -> Self {
         let (port, events) = Port::new();
         let tasks = AreaTasks::new(tokio::runtime::Handle::current());
         let service = AdminService::new(
@@ -348,6 +351,9 @@ impl Harness {
             tasks.clone(),
             InstanceEpoch(7),
         );
+        if published {
+            service.enable_management();
+        }
         let facade = Facade::new(intent);
         service.install_restart(facade.clone());
         service.install_quarantine(facade.clone());
@@ -540,6 +546,7 @@ async fn lost_ack_readback_and_caller_disconnect_never_repeat_effect() {
         tasks.clone(),
         InstanceEpoch(7),
     );
+    service.enable_management();
     service.install_restart(h.facade.clone());
     service.install_owned_graphs(h.facade.clone());
     let a = service
@@ -598,6 +605,7 @@ async fn response_budget_never_releases_a_still_owned_writer_command() {
         tasks.clone(),
         InstanceEpoch(7),
     );
+    service.enable_management();
     let intent = request("budget");
     let facade = Facade::new(&intent);
     service.install_restart(facade.clone());
@@ -652,6 +660,7 @@ async fn operation_readback_hides_foreign_existence_and_unknown_never_reexecutes
         tasks.clone(),
         InstanceEpoch(7),
     );
+    service.enable_management();
     service.install_operation_reader(h.port.clone());
     let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
     service.register_worker(&mut services);
@@ -837,6 +846,7 @@ async fn missing_owned_collection_and_old_epoch_fail_before_audit() {
         tasks.clone(),
         InstanceEpoch(7),
     );
+    service.enable_management();
     service.install_restart(Facade::new(&request("missing")));
     let (proof, _lease) = test_support::local();
     let context = IngressContext::new(
@@ -1019,4 +1029,146 @@ async fn service_passes_actual_connection_to_inspect_commit_query_and_fast_statu
     }
     assert!(observed.iter().all(|(_, got)| *got == epoch));
     h.shutdown().await;
+}
+fn every_command() -> Vec<AdminIntent> {
+    let graph = GraphCas {
+        graph_id: id("g"),
+        restart_tx_id: id("tx"),
+        capture_id: id("cap"),
+        expected_revision: Revision(1),
+        expected_core_epoch: InstanceEpoch(7),
+        owner_identity: None,
+        owner_generation: None,
+        operation_id: id("op"),
+    };
+    vec![
+        request("restart"),
+        LifecycleCommand::Restart(RestartCommand::Cancel(CancelRestart {
+            restart_id: id("restart"),
+            expected_core_epoch: InstanceEpoch(7),
+            expected_revision: Revision(1),
+            operation_id: id("cancel"),
+        })),
+        LifecycleCommand::Restart(RestartCommand::Interrupt(InterruptShell {
+            binding: InterruptBinding {
+                restart_id: id("restart"),
+                core_epoch: InstanceEpoch(7),
+                connection_epoch: InstanceEpoch(3),
+                run_incarnation: id("inc"),
+                blocker_identity: id("opaque"),
+                revision: Revision(1),
+                phase: RestartPhase::WaitingSafePoint,
+            },
+            operation_id: id("interrupt"),
+            confirmed: true,
+        })),
+        LifecycleCommand::Quarantine(quarantine::QuarantineCommand::Discard(ConfirmedGraph {
+            binding: graph.clone(),
+            confirmed: true,
+        })),
+        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Release(owned(
+            graph.clone(),
+        ))),
+        LifecycleCommand::OwnedGraphs(owned_graphs::OwnedGraphsCommand::Resume(owned(graph))),
+    ]
+}
+fn every_query() -> Vec<AdminQuery> {
+    vec![
+        LifecycleQuery::Restart(RestartQuery::Targets),
+        LifecycleQuery::Restart(RestartQuery::Status),
+        LifecycleQuery::Quarantine(quarantine::QuarantineQuery::List),
+        LifecycleQuery::OwnedGraphs(owned_graphs::OwnedGraphsQuery::Undisposed),
+    ]
+}
+/// The publication switch is off by default: a verified local human is refused
+/// by all nine operations at the first step, before any leaf, audit row, gate,
+/// transaction or owner is touched.
+#[tokio::test]
+async fn unpublished_management_refuses_all_nine_operations_without_side_effects() {
+    let seed = request("seed");
+    let mut off = Harness::with_switch(&seed, false);
+    assert!(!off.service.management_enabled());
+    // Authorized requests and queries can only come from a published service;
+    // the unpublished one must still refuse to run them.
+    let on = Harness::new(&seed);
+    let commands = every_command();
+    let queries = every_query();
+    let operations: Vec<_> = commands
+        .iter()
+        .map(|c| c.action())
+        .chain(queries.iter().filter_map(|q| q.action()))
+        .collect();
+    for action in AdminAction::ALL {
+        assert!(operations.contains(&action), "{action:?} is not exercised");
+    }
+    let refused = |error: AdminFailure| {
+        assert_eq!(error.code, ErrorCode::UnsupportedCapability);
+        assert_eq!(error.message, "management is not published");
+    };
+    for action in AdminAction::ALL {
+        refused(off.service.authorize(&off.context, action).unwrap_err());
+        assert!(on.service.authorize(&on.context, action).is_ok());
+    }
+    for intent in commands {
+        refused(
+            off.service
+                .authorize_request(off.context.clone(), intent.clone())
+                .err()
+                .unwrap(),
+        );
+        let authorized = on
+            .service
+            .authorize_request(on.context.clone(), intent)
+            .unwrap();
+        refused(off.service.submit(authorized).err().unwrap());
+    }
+    for query in queries {
+        refused(
+            off.service
+                .authorize_query(off.context.clone(), query.clone())
+                .err()
+                .unwrap(),
+        );
+        let authorized = on
+            .service
+            .authorize_query(on.context.clone(), query)
+            .unwrap();
+        refused(off.service.query(authorized).err().unwrap());
+    }
+    // The operation-status query is refused too.
+    let status = LifecycleQuery::OperationStatus {
+        operation_id: id("seed"),
+    };
+    refused(
+        off.service
+            .authorize_query(off.context.clone(), status)
+            .err()
+            .unwrap(),
+    );
+    // Unverified callers are refused by the switch as well: it comes first.
+    let forged = Provenance::human(Surface::Web, ClientId::new("claimed-human").unwrap());
+    refused(
+        off.service
+            .authorize(&IngressContext::unverified(forged), AdminAction::Request)
+            .unwrap_err(),
+    );
+    assert_eq!(off.facade.inspections.load(Ordering::SeqCst), 0);
+    assert_eq!(off.facade.effects.load(Ordering::SeqCst), 0);
+    assert!(!off.facade.cancelled.load(Ordering::SeqCst));
+    assert!(off.facade.connections.lock().unwrap().is_empty());
+    assert!(off.port.memory.lock().unwrap().rows.is_empty());
+    assert!(off.events.try_recv().is_err());
+    assert_eq!(off.service.denial_persistence_failures(), 0);
+    off.shutdown().await;
+    on.shutdown().await;
+}
+/// Registering the leaves is not publication.
+#[tokio::test]
+async fn installing_leaves_does_not_publish_management() {
+    let intent = request("installed");
+    let off = Harness::with_switch(&intent, false);
+    assert!(off.service.installed_facades().all());
+    assert!(!off.service.management_enabled());
+    assert!(off.submit(intent).is_err());
+    off.shutdown().await;
 }
