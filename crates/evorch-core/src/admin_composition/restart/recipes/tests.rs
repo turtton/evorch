@@ -23,6 +23,96 @@ use workbench_protocol::{
 
 use crate::restart::tests::restart_model as model;
 
+struct RecoveryModel {
+    inner: model::Model,
+    block_child: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+impl Default for RecoveryModel {
+    fn default() -> Self {
+        Self {
+            inner: Default::default(),
+            block_child: false.into(),
+            entered: Default::default(),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+#[async_trait::async_trait]
+impl runtime::AgentModel for RecoveryModel {
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        self.inner.selected_model(role, category)
+    }
+    fn requires_admission(&self) -> bool {
+        false
+    }
+    fn checkpoint_provider_input(&self, run: &str) -> Option<runtime::quiesce::ProviderInput> {
+        self.inner.checkpoint_provider_input(run)
+    }
+    fn validate_checkpoint_compatibility(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        _: Role,
+        pins: &[runtime::RoutePinRecord],
+        input: Option<&runtime::quiesce::ProviderInput>,
+    ) -> Result<(), runtime::RuntimeError> {
+        assert!(pins.is_empty());
+        assert!(input.is_some_and(|input| input.request.model == "restart-fixture"));
+        Ok(())
+    }
+    fn adopt_recovery_checkpoint(
+        &self,
+        run: &str,
+        pins: &[runtime::RoutePinRecord],
+        input: Option<&runtime::quiesce::ProviderInput>,
+    ) {
+        assert!(pins.is_empty());
+        self.inner
+            .1
+            .lock()
+            .unwrap()
+            .insert(run.into(), input.unwrap().clone());
+    }
+    async fn admit(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        _: Role,
+    ) -> Result<(), runtime::RuntimeError> {
+        Ok(())
+    }
+    async fn complete(
+        &self,
+        invocation: &runtime::AgentInvocationContext,
+        role: Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        let response = self
+            .inner
+            .complete(invocation, role, messages, tools)
+            .await?;
+        if role == Role::Worker && self.block_child.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            return Ok(providers::ChatResponse {
+                message: providers::Message {
+                    role: providers::Role::Assistant,
+                    content: vec![providers::ContentBlock::ToolUse {
+                        id: "child-read".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"file_path":"child-input.txt"}),
+                    }],
+                },
+                usage: Default::default(),
+                usage_reported: true,
+                finish_reason: providers::FinishReason::ToolUse,
+            });
+        }
+        Ok(response)
+    }
+}
+
 struct NoFinalization;
 impl FinalizationOwner for NoFinalization {
     fn finalize(
@@ -41,7 +131,7 @@ struct Fixture {
     boot: BootstrappedHost,
     source: HostRecipeSource,
     events: EventReceiver,
-    model: Arc<model::Model>,
+    model: Arc<RecoveryModel>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -65,7 +155,7 @@ impl Fixture {
             format!("[core.restart.targets.local]\npath = {wrapper:?}\n"),
         )
         .unwrap();
-        let model = Arc::new(model::Model::default());
+        let model = Arc::new(RecoveryModel::default());
         let boot = BootstrappedHost::open_for_core_with_test_seams(
             BootstrapOptions {
                 config_dir: root.clone(),
@@ -162,7 +252,7 @@ impl Fixture {
         run
     }
     fn calls(&self) -> usize {
-        self.model.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.model.inner.0.load(std::sync::atomic::Ordering::SeqCst)
     }
     async fn rejected(&self, kind: &str) {
         let calls = self.calls();
@@ -244,6 +334,10 @@ impl Fixture {
 async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
     let mut f = Fixture::new().await;
     let root = f.chat().await;
+    std::fs::write(f._dir.path().join("child-input.txt"), "recoverable child").unwrap();
+    f.model
+        .block_child
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let child = f
         .boot
         .runtime
@@ -252,13 +346,13 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
             Role::Worker,
             "ordinary delegated child",
             RunConfig {
-                interactive: true,
-                keep_alive: true,
+                interactive: false,
+                keep_alive: false,
                 ..Default::default()
             },
         )
         .unwrap();
-    f.waiting(child).await;
+    f.model.entered.notified().await;
     let inventory = f.inventory();
     let child_metadata = inventory.iter().find(|m| m.run == child).unwrap();
     assert_eq!(child_metadata.root, root);
@@ -302,6 +396,141 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         assert_eq!(recipe.goal_id, None);
     }
     assert_eq!(f.calls(), calls, "recipe evidence must not activate runs");
+    // A normal child parks before executing its returned tool. Recovery uses
+    // current owner/config authority, never the saved descriptor as authority.
+    f.boot
+        .runtime
+        .begin_planned_restart_quiesce(&observed.recipes)
+        .unwrap();
+    f.model
+        .block_child
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    f.model.release.add_permits(1);
+    f.boot.runtime.wait_quiesced().await.unwrap();
+    let fence = f.boot.runtime.fence_dispatch_restart().await.unwrap();
+    f.boot.runtime.drain_dispatch_tails(&fence).await.unwrap();
+    let records = f
+        .boot
+        .runtime
+        .capture_recovery_records(&fence, &observed.recipes)
+        .unwrap();
+    let manifests = f
+        .boot
+        .runtime
+        .save_recovery_graph("ordinary", &records)
+        .unwrap();
+    assert_eq!(manifests.len(), 1);
+    // Logical adoption does not perform the physical successor owner claim.
+    // End the parked child's live turn with its current scoped permit first.
+    let mut predecessor = f.boot.owner.owned_permit("plain").unwrap();
+    predecessor.run_id = Some(child.to_string());
+    predecessor.checkpoint(&[]).unwrap();
+    // Logical source and target coexist in this unit test. Take a consistent
+    // database snapshot so target incarnations cannot fence source cleanup.
+    let recovery_config = storage::StorageConfig {
+        db_path: f._dir.path().join("recovered.db"),
+        ..f.boot.storage_config().clone()
+    };
+    rusqlite::Connection::open(&f.boot.storage_config().db_path)
+        .unwrap()
+        .execute(
+            "VACUUM INTO ?1",
+            [recovery_config.db_path.to_str().unwrap()],
+        )
+        .unwrap();
+    let recovered_storage = storage::Storage::open(recovery_config.clone()).unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(256));
+    let restarted = runtime::AgentRuntime::with_sandbox_factory(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        f.model.clone(),
+        Arc::new(model::Direct),
+    )
+    .with_run_store(runtime::RunStore::open(&recovery_config, recovered_storage.handle()).unwrap());
+    restarted.install_planned_recovery_fixture().unwrap();
+    let ownership = f._dir.sockets();
+    let leases = storage::shared_with_wait(
+        &recovery_config.db_path,
+        ownership,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let startup = leases
+        .recovery_startup_complete(&recovery_config.db_path, ownership)
+        .unwrap();
+    let plan = restarted.recovery_plan().unwrap();
+    assert_eq!(plan.components.len(), 1, "{plan:?}");
+    let mut paused = restarted
+        .prepare_component(&plan.components[0], startup, ownership)
+        .unwrap();
+    restarted
+        .restore_relations_and_continuations(&mut paused)
+        .unwrap();
+    let permit = f.boot.owner.owned_permit("plain").unwrap();
+    // Current authority scopes each live owner permit to its actual run.
+    let mut root_permit = permit.clone();
+    root_permit.run_id = Some(root.to_string());
+    let mut child_permit = permit;
+    child_permit.run_id = Some(child.to_string());
+    let authority = runtime::CurrentRecoveryAuthority {
+        members: BTreeMap::from([
+            (
+                root,
+                RunConfig {
+                    project_root: Some(f._dir.path().canonicalize().unwrap()),
+                    ownership: Some(root_permit),
+                    conversation: true,
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                child,
+                RunConfig {
+                    project_root: Some(f._dir.path().canonicalize().unwrap()),
+                    ownership: Some(child_permit),
+                    interactive: false,
+                    keep_alive: false,
+                    ..Default::default()
+                },
+            ),
+        ]),
+    };
+    restarted.bind_thread_root("plain", root).unwrap();
+    let reservation = restarted
+        .reserve_automatic_activation(&manifests[0])
+        .unwrap();
+    assert_eq!(
+        f.calls(),
+        calls,
+        "preparation and reservation never invoke the model"
+    );
+    let (activated, publication) = restarted
+        .activate_component(paused, authority, reservation)
+        .unwrap();
+    assert_eq!(
+        activated
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [root, child].into_iter().collect()
+    );
+    let mut activation_events = restarted.event_bus().subscribe();
+    publication.release();
+    let phase = restarted.wait(child).await.unwrap();
+    loop {
+        let event = activation_events.recv().await.unwrap();
+        if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to, ..}) if run_id == &child.to_string() && *to == phase)
+        {
+            assert_eq!(phase, event_bus::AgentRunPhase::Done, "{:?}", event.kind);
+            break;
+        }
+    }
+    assert!(f.calls() > calls);
+    restarted.stop(root, runtime::StopScope::Subtree).unwrap();
+    restarted.wait(root).await.unwrap();
+    drop(restarted);
+    recovered_storage.close();
     f.shutdown().await;
 }
 
@@ -608,6 +837,60 @@ async fn foreign_retained_permit_cannot_match_live_runtime_metadata() {
     assert!(!f.inventory()[0].permit_matches);
     f.rejected("ownership").await;
     f.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_current_owner_generation_or_identity_changes_do_not_reauthorize_retained_permits() {
+    for change_identity in [false, true] {
+        let mut f = Fixture::new().await;
+        f.chat().await;
+        let inventory = f.inventory();
+        let binding = f.source.bindings().unwrap();
+        let held = binding.permits["plain"].clone();
+        let calls = f.calls();
+        let mut registry =
+            runtime::ownership::Registry::open_existing(&held.registry_path).unwrap();
+        let original = registry.attach("plain").unwrap();
+        registry
+            .update("plain", |owner| {
+                if change_identity {
+                    owner.lease.owner_id = "different-current-owner".into();
+                } else {
+                    owner.lease.generation += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            f.inventory(),
+            inventory,
+            "runtime and held permit stay unchanged"
+        );
+        assert!(binding.observed.is_current(), "only owner evidence changed");
+        let error = f
+            .source
+            .collect()
+            .await
+            .err()
+            .expect("current owner must match");
+        assert_eq!(error.code, ErrorCode::UnsupportedCapability);
+        assert!(error.message.contains("foreign or fenced owner"));
+        assert_eq!(f.calls(), calls);
+        assert!(
+            storage::Database::open(f.boot.storage_config())
+                .unwrap()
+                .restart_transactions()
+                .unwrap()
+                .is_empty()
+        );
+        registry
+            .update("plain", |owner| {
+                *owner = original.clone();
+                Ok(())
+            })
+            .unwrap();
+        f.shutdown().await;
+    }
 }
 
 #[tokio::test]

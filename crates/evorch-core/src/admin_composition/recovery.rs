@@ -4,7 +4,7 @@ use super::Inputs;
 mod owned_graphs;
 mod quarantine;
 #[cfg(test)]
-mod support;
+pub(super) mod support;
 
 pub(super) fn install(inputs: &Inputs<'_>) {
     quarantine::install(inputs);

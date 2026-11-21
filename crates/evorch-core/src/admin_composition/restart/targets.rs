@@ -9,13 +9,6 @@ use std::{path::PathBuf, sync::Arc};
 /// The caller shares the recorded current ELF with finalization. No wire field
 /// supplies a directory, target path, argv, environment or probe limits.
 #[cfg(target_os = "linux")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 pub fn build(
     directory: PathBuf,
     current: Arc<CurrentElf>,

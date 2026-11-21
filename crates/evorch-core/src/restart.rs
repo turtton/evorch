@@ -49,7 +49,7 @@ pub struct RestartId {
 impl RestartId {
     // Public management IDs use the 5a-I AdminId alphabet (no colon). This is
     // projection only; generation/attempt ownership remain in the #710 owner.
-    fn public_id(self) -> workbench_protocol::namespaces::lifecycle::AdminId {
+    pub(crate) fn public_id(self) -> workbench_protocol::namespaces::lifecycle::AdminId {
         workbench_protocol::namespaces::lifecycle::AdminId::new(format!(
             "{}.{}",
             self.owner, self.generation
@@ -81,6 +81,8 @@ struct State {
     recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
     finalization:
         Option<Arc<tokio::sync::Mutex<workbench_host::bootstrap::planned_exit::PlannedExit>>>,
+    #[cfg(target_os = "linux")]
+    recipe_source: Option<Arc<dyn public::RecipeSource>>,
     capture_started: bool,
     finalization_id: Option<RestartId>,
     finalization_done: bool,
@@ -175,6 +177,8 @@ impl RestartCoordinator {
                 sealed: None,
                 recipes: None,
                 finalization: None,
+                #[cfg(target_os = "linux")]
+                recipe_source: None,
                 capture_started: false,
                 finalization_id: None,
                 finalization_done: false,
@@ -253,6 +257,15 @@ impl RestartCoordinator {
         recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
         preparation_limit: std::time::Duration,
     ) -> Result<RestartId, RuntimeError> {
+        self.request_with_source(recipes, preparation_limit, None)
+    }
+    fn request_with_source(
+        &self,
+        recipes: Option<std::collections::BTreeMap<RunId, runtime::quiesce::RecoveryRecipe>>,
+        preparation_limit: std::time::Duration,
+        #[cfg(target_os = "linux")] recipe_source: Option<Arc<dyn public::RecipeSource>>,
+        #[cfg(not(target_os = "linux"))] _: Option<()>,
+    ) -> Result<RestartId, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if matches!(
             state.phase,
@@ -283,6 +296,10 @@ impl RestartCoordinator {
         };
         state.id = Some(id);
         state.recipes = recipes;
+        #[cfg(target_os = "linux")]
+        {
+            state.recipe_source = recipe_source;
+        }
         state.learning_pause = Some(self.0.runtime.pause_learning());
         state.evaluation_pause = Some(self.0.preparing.evaluations.producers.pause());
         state.preparation_deadline = Some(tokio::time::Instant::now() + preparation_limit);
@@ -540,6 +557,10 @@ impl RestartCoordinator {
         state.id = None;
         state.attempt = None;
         state.recipes = None;
+        #[cfg(target_os = "linux")]
+        {
+            state.recipe_source = None;
+        }
         state.preparation_deadline = None;
         self.0
             .gate

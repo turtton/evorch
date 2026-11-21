@@ -91,11 +91,33 @@ impl Installed {
             .unwrap()
     }
     /// The storage-side state a refused request must leave untouched.
-    fn untouched(&self) -> (i64, i64, i64) {
+    fn untouched(&self) -> (i64, i64, i64, String) {
+        let db = rusqlite::Connection::open(&self.config.db_path).unwrap();
+        let contents = [
+            "recovery_graph_control",
+            "recovery_graph_effects",
+            "accepted_admin_operations",
+        ]
+        .map(|table| {
+            let mut statement = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    Ok((0..columns)
+                        .map(|column| format!("{:?}", row.get_ref(column).unwrap()))
+                        .collect::<Vec<_>>())
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows.sort();
+            rows
+        });
         (
             self.rows("recovery_graph_control"),
             self.rows("recovery_graph_effects"),
             self.rows("accepted_admin_operations"),
+            format!("{contents:?}"),
         )
     }
     async fn shutdown(mut self) {
@@ -204,7 +226,9 @@ async fn an_installed_leaf_refuses_every_request_while_management_is_off() {
     let (core, publication) = Installed::start(true).await;
     assert_eq!(publication, Publication::Off);
     let installed = core.boot.admin.installed_facades();
-    assert!(installed.owned_graphs && installed.quarantine && !installed.all());
+    assert!(installed.owned_graphs && installed.quarantine);
+    assert_eq!(installed.restart, cfg!(not(target_os = "linux")));
+    assert_eq!(installed.all(), cfg!(not(target_os = "linux")));
     assert!(!core.backend.hello().has(Capability::SafeRestart));
 
     let mut conn = Conn::open(&core.socket, "q2-install").await;
