@@ -1,27 +1,99 @@
 //! 選択済みルールの予算内レンダリング。
 
+use super::types::ResolvedRule;
 use std::path::PathBuf;
 
-use super::types::ResolvedRule;
-
-const HEADER: &str = "[project-rules]";
-
-pub(crate) fn render(rules: Vec<ResolvedRule>, budget_bytes: u64) -> String {
-    render_under(HEADER, rules, budget_bytes).0
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RenderCoverage {
+    Full,
+    Truncated,
+    Omitted,
 }
 
-/// Renders under `header`, also returning the canonical paths whose bodies were
-/// included (the truncated deepest one counts), so omitted ones can be retried.
+pub(super) struct RenderedRule {
+    pub canonical_path: PathBuf,
+    pub coverage: RenderCoverage,
+    pub text: String,
+}
+
+pub(super) struct RenderedRules {
+    header: Option<String>,
+    pub sections: Vec<RenderedRule>,
+}
+
+impl RenderedRules {
+    pub fn text(&self) -> String {
+        let omitted = self
+            .sections
+            .iter()
+            .filter(|s| s.coverage == RenderCoverage::Omitted)
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut parts = Vec::new();
+        if !omitted.is_empty() {
+            parts.push(omitted);
+        }
+        parts.extend(
+            self.sections
+                .iter()
+                .filter(|s| s.coverage != RenderCoverage::Omitted)
+                .map(|s| s.text.clone()),
+        );
+        if parts.is_empty() {
+            return String::new();
+        }
+        let body = parts.join("\n\n");
+        match &self.header {
+            Some(header) => format!("{header}\n{body}"),
+            None => body,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn render(rules: Vec<ResolvedRule>, budget_bytes: u64) -> String {
+    render_under("[project-rules]", rules, budget_bytes).0
+}
+
+/// The allowed-directory API retains its included-path contract: a truncated
+/// deepest rule counts even when its mandatory framing exceeds a tiny budget.
 pub(crate) fn render_under(
     header: &str,
     rules: Vec<ResolvedRule>,
     budget_bytes: u64,
 ) -> (String, Vec<PathBuf>) {
+    let rendered = render_sections(header, rules, budget_bytes);
+    let included = rendered
+        .sections
+        .iter()
+        .filter(|s| s.coverage != RenderCoverage::Omitted)
+        .map(|s| s.canonical_path.clone())
+        .collect();
+    (rendered.text(), included)
+}
+
+pub(super) fn render_sections(
+    header: &str,
+    rules: Vec<ResolvedRule>,
+    budget_bytes: u64,
+) -> RenderedRules {
     if rules.is_empty() {
-        return (String::new(), Vec::new());
+        return RenderedRules {
+            header: None,
+            sections: Vec::new(),
+        };
     }
+    let omitted = |rule: &ResolvedRule| RenderedRule {
+        canonical_path: rule.source.canonical_path.clone(),
+        coverage: RenderCoverage::Omitted,
+        text: omitted_marker(rule),
+    };
     if budget_bytes == 0 {
-        return (omitted_markers(&rules), Vec::new());
+        return RenderedRules {
+            header: None,
+            sections: rules.iter().map(omitted).collect(),
+        };
     }
     let budget = usize::try_from(budget_bytes).unwrap_or(usize::MAX);
     let escaped: Vec<_> = rules
@@ -31,85 +103,79 @@ pub(crate) fn render_under(
             rule
         })
         .collect();
-
     let mut best = None;
     for keep_from in (0..escaped.len()).rev() {
-        let candidate = assemble(header, &escaped[..keep_from], &escaped[keep_from..]);
-        if candidate.len() <= budget {
-            best = Some((candidate, keep_from));
+        if assemble(header, &escaped[..keep_from], &escaped[keep_from..]).len() <= budget {
+            best = Some(keep_from);
         } else if best.is_some() {
             break;
         }
     }
-    let included = |kept: &[ResolvedRule]| {
-        kept.iter()
-            .map(|rule| rule.source.canonical_path.clone())
-            .collect()
+    if let Some(keep_from) = best {
+        let mut sections = escaped[..keep_from].iter().map(omitted).collect::<Vec<_>>();
+        sections.extend(escaped[keep_from..].iter().map(|rule| RenderedRule {
+            canonical_path: rule.source.canonical_path.clone(),
+            coverage: RenderCoverage::Full,
+            text: section(rule),
+        }));
+        return RenderedRules {
+            header: Some(header.to_owned()),
+            sections,
+        };
+    }
+    let deepest = escaped.last().unwrap();
+    let mut sections = escaped[..escaped.len() - 1]
+        .iter()
+        .map(omitted)
+        .collect::<Vec<_>>();
+    let omitted_text = sections
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rel_path = tools::escape_control_markers(&deepest.source.rel_path);
+    let heading = format!("## rules: {rel_path}\n");
+    let prefix = if omitted_text.is_empty() {
+        format!("{header}\n{heading}")
+    } else {
+        format!("{header}\n{omitted_text}\n\n{heading}")
     };
-    if let Some((output, keep_from)) = best {
-        return (output, included(&escaped[keep_from..]));
+    let suffix = format!("\n[rules truncated: {rel_path}]");
+    let available = budget.saturating_sub(prefix.len().saturating_add(suffix.len()));
+    let end = utf8_boundary_at_or_before(&deepest.body, available.min(deepest.body.len()));
+    sections.push(RenderedRule {
+        canonical_path: deepest.source.canonical_path.clone(),
+        coverage: RenderCoverage::Truncated,
+        text: format!("{heading}{}{suffix}", &deepest.body[..end]),
+    });
+    RenderedRules {
+        header: Some(header.to_owned()),
+        sections,
     }
-    (
-        truncate_deepest(header, &escaped, budget),
-        included(&escaped[escaped.len() - 1..]),
-    )
-}
-
-pub(crate) fn render_with_markers(
-    rules: Vec<ResolvedRule>,
-    budget_bytes: u64,
-    markers: &[String],
-) -> String {
-    let rendered = render(rules, budget_bytes);
-    if markers.is_empty() {
-        return rendered;
-    }
-    if rendered.is_empty() {
-        return format!("{HEADER}\n{}", markers.join("\n"));
-    }
-    format!("{rendered}\n{}", markers.join("\n"))
 }
 
 fn assemble(header: &str, omitted: &[ResolvedRule], kept: &[ResolvedRule]) -> String {
     let mut sections = Vec::new();
     if !omitted.is_empty() {
-        sections.push(omitted_markers(omitted));
+        sections.push(
+            omitted
+                .iter()
+                .map(omitted_marker)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     sections.extend(kept.iter().map(section));
     format!("{header}\n{}", sections.join("\n\n"))
 }
-
 fn section(rule: &ResolvedRule) -> String {
     let rel_path = tools::escape_control_markers(&rule.source.rel_path);
     format!("## rules: {rel_path}\n{}", rule.body)
 }
-
-fn omitted_markers(rules: &[ResolvedRule]) -> String {
-    rules
-        .iter()
-        .map(|rule| {
-            let rel_path = tools::escape_control_markers(&rule.source.rel_path);
-            format!("- [rules omitted: {rel_path}; re-read or grep the target path to re-inject]")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn omitted_marker(rule: &ResolvedRule) -> String {
+    let rel_path = tools::escape_control_markers(&rule.source.rel_path);
+    format!("- [rules omitted: {rel_path}; re-read or grep the target path to re-inject]")
 }
-
-fn truncate_deepest(header: &str, rules: &[ResolvedRule], budget: usize) -> String {
-    let deepest = &rules[rules.len() - 1];
-    let omitted = omitted_markers(&rules[..rules.len() - 1]);
-    let rel_path = tools::escape_control_markers(&deepest.source.rel_path);
-    let prefix = if omitted.is_empty() {
-        format!("{header}\n## rules: {rel_path}\n")
-    } else {
-        format!("{header}\n{omitted}\n\n## rules: {rel_path}\n")
-    };
-    let suffix = format!("\n[rules truncated: {rel_path}]");
-    let available = budget.saturating_sub(prefix.len().saturating_add(suffix.len()));
-    let end = utf8_boundary_at_or_before(&deepest.body, available.min(deepest.body.len()));
-    format!("{prefix}{}{suffix}", &deepest.body[..end])
-}
-
 fn utf8_boundary_at_or_before(text: &str, mut index: usize) -> usize {
     while !text.is_char_boundary(index) {
         index -= 1;

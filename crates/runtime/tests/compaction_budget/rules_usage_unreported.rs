@@ -49,7 +49,7 @@ async fn injected_rules(usage: Usage, usage_reported: bool) -> String {
     std::fs::write(&target, "fn x() {}\n").unwrap();
     // ~30 KB of rules: it fits a mostly free window but not what the turn leaves.
     let rules = format!("{HEAD_MARKER}\n{}\n{TAIL_MARKER}", "r".repeat(30_000));
-    std::fs::write(tmp.path().join("AGENTS.md"), rules).unwrap();
+    std::fs::write(tmp.path().join("src/AGENTS.md"), rules).unwrap();
     let model = Arc::new(ScriptedModel::new([
         Ok(big_tool_turn(&target, usage, usage_reported)),
         Ok(text_response("done", FinishReason::Stop)),

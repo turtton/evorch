@@ -1414,9 +1414,14 @@ impl LoopState {
         let routed = self.route_rule_targets(rule_targets, shell_cwds);
         if !routed.project.is_empty()
             && let Some(session) = &mut self.rules_session
-            && let Some(text) = rules::after_successful_tools(session, &routed.project)
+            && let Some(prepared) = rules::prepare_after_successful_tools(
+                session,
+                &routed.project,
+                &self.project_rule_injections,
+            )
         {
-            self.context.push_user(&text);
+            self.context.push_user(&prepared.text);
+            self.project_rule_injections.commit(prepared);
             self.publish_message_count();
         }
         if !routed.allowed.is_empty() {

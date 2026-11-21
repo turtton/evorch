@@ -22,7 +22,7 @@ enum SchemaCase {
     OutputAttachmentsUnchanged,
 }
 
-fn settings(h: &Harness) -> Config {
+pub(super) fn settings(h: &Harness) -> Config {
     let root = h._directory.path();
     let mut current = Config::load(&LoadOptions {
         project_dir: Some(root.into()),
@@ -61,7 +61,7 @@ fn settings(h: &Harness) -> Config {
     current
 }
 
-fn process_with_read(
+pub(super) fn process_with_read(
     h: &Harness,
     current: &Config,
     storage: &storage::Storage,
@@ -79,10 +79,36 @@ fn process_with_catalog(
     read: Arc<dyn Tool>,
     predecessor: Option<Arc<wait_schema::PredecessorCatalog>>,
 ) -> (AgentRuntime, Arc<dyn AgentModel>, EventReceiver) {
+    process_with_tools_and_catalog(h, current, storage, config, read, Vec::new(), predecessor)
+}
+
+pub(super) fn process_with_rule_tools(
+    h: &Harness,
+    current: &Config,
+    storage: &storage::Storage,
+    config: &storage::StorageConfig,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+) -> (AgentRuntime, Arc<dyn AgentModel>, EventReceiver) {
+    process_with_tools_and_catalog(h, current, storage, config, read, extra_tools, None)
+}
+
+fn process_with_tools_and_catalog(
+    h: &Harness,
+    current: &Config,
+    storage: &storage::Storage,
+    config: &storage::StorageConfig,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    predecessor: Option<Arc<wait_schema::PredecessorCatalog>>,
+) -> (AgentRuntime, Arc<dyn AgentModel>, EventReceiver) {
     let bus = Arc::new(EventBus::new(1024));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(read).unwrap();
+    for tool in extra_tools {
+        executor.register(tool).unwrap();
+    }
     let credentials =
         Arc::new(FileCredentialStore::open(h._directory.path().join("credentials")).unwrap());
     let model: Arc<dyn AgentModel> = if matches!(h.wire, Wire::Codex) {

@@ -881,15 +881,18 @@ fn install_prepared_context(
     }
     let old_directories = state.told_directories.clone();
     let old_instructions = state.allowed_instructions.clone();
+    let old_rule_injections = state.project_rule_injections.clone();
     let old_pending = state.boundary_pending;
     if replaced_history {
         state.told_directories.rewrite_pending = true;
         state.allowed_instructions.forget_history();
+        state.project_rule_injections.forget_history();
     }
     state.boundary_pending = true;
     if let Err(error) = crate::restore::persist_prepared_context(state, &prepared) {
         state.told_directories = old_directories;
         state.allowed_instructions = old_instructions;
+        state.project_rule_injections = old_rule_injections;
         state.boundary_pending = old_pending;
         return Err(CompactionError::PrepareFailed(error.to_string()));
     }

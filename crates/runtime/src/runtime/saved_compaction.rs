@@ -167,6 +167,7 @@ impl AgentRuntime {
         descriptor.responses_replay = Some(context.responses_replay.clone());
         descriptor.allowed_directories.rewrite_pending = true;
         descriptor.allowed_instructions.forget_history();
+        descriptor.project_rule_injections.forget_history();
         record.checkpoints_json = serde_json::to_string(context.checkpoints())
             .map_err(|error| fail(error.to_string()))?;
         record.config_json =

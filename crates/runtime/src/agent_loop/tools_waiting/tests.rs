@@ -143,6 +143,7 @@ async fn unobserved_shell_job_prevents_tools_waiting_persistence() {
 async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_resume() {
     let (_dir, storage, runtime, mut state) =
         crate::agent_loop::continuity_tests::stored_fixture_in("tools-waiting.db", false).await;
+    super::super::project_rule_tests::seed(&mut state, _dir.path());
     let (_cancel, cancel_rx) = tokio::sync::watch::channel(crate::RunInterrupt::None);
     state.channels.cancel_rx = cancel_rx;
     state
@@ -200,6 +201,11 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
     let restored =
         crate::restore::RestoredState::from_recovery_bundle(&bundle, &descriptor.recovery_waits)
             .unwrap();
+    assert_eq!(
+        restored.project_rule_injections,
+        state.project_rule_injections
+    );
+    assert!(!restored.project_rule_injections.is_empty());
     // Independent serialized input-prefix assertion: do not only trust a cache
     // counter or compare continuation structs.
     assert_eq!(

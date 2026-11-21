@@ -21,6 +21,8 @@ mod malformed_arguments_cache;
 mod output_attachments_cache;
 mod plan_boundary_cache;
 mod plan_cache;
+#[path = "project_rules_cache/mod.rs"]
+mod project_rules_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
 mod recovery_activation_cache;

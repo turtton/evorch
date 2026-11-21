@@ -191,6 +191,7 @@ fn fixture_with_model(
         delegated_thread_dirs: Default::default(),
         told_directories: Default::default(),
         allowed_instructions: Default::default(),
+        project_rule_injections: Default::default(),
         allowed_skill_origins: Default::default(),
     };
     (runtime, state)

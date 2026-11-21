@@ -101,6 +101,7 @@ impl RestoredState {
         restored.snapshot_revision = super::revision::SnapshotRevision::fresh();
         restored.allowed_directories.rewrite_pending = true;
         restored.allowed_instructions.forget_history();
+        restored.project_rule_injections.forget_history();
         // The seed keeps old history that may hold retired todo lists.
         restored.plan_notice = crate::conversation_plan::notice::PlanNotice::Pending;
         Ok(restored)

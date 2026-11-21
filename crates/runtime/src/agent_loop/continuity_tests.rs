@@ -52,6 +52,7 @@ pub(super) async fn stored_fixture_in(
 async fn prepared_checkpoint_restores_boundary_bookkeeping_and_failed_preparation_changes_nothing()
 {
     let (dir, storage, runtime, mut state) = stored_fixture().await;
+    let rule_source = super::project_rule_tests::seed(&mut state, dir.path());
     let run = state.caller_run_id();
     state.told_directories.mentioned = true;
     state
@@ -76,11 +77,15 @@ async fn prepared_checkpoint_restores_boundary_bookkeeping_and_failed_preparatio
     assert!(descriptor.allowed_directories.rewrite_pending);
     assert!(descriptor.allowed_instructions.touched.is_empty());
     assert!(descriptor.allowed_instructions.injected_rules.is_empty());
+    assert!(descriptor.project_rule_injections.is_empty());
+    assert!(state.project_rule_injections.is_empty());
     let restored = RestoredState::from_record(&record).unwrap();
     assert!(restored.boundary_pending);
     assert_eq!(restored.checkpoints, state.context.checkpoints());
     assert_eq!(restored.messages, state.context.messages);
     let before = state.context.clone();
+    super::project_rule_tests::reinject_once(&mut state, rule_source, dir.path());
+    let rule_injections = state.project_rule_injections.clone();
     state.boundary_pending = false;
     state.told_directories.rewrite_pending = false;
     state
@@ -105,6 +110,7 @@ async fn prepared_checkpoint_restores_boundary_bookkeeping_and_failed_preparatio
     assert!(!state.boundary_pending);
     assert_eq!(state.told_directories, directories);
     assert_eq!(state.allowed_instructions, instructions);
+    assert_eq!(state.project_rule_injections, rule_injections);
     assert_eq!(store.restore_record(run).unwrap().unwrap(), record);
     assert_eq!(before.messages, restored.messages);
     drop(storage);

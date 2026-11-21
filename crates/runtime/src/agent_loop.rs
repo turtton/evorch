@@ -20,6 +20,8 @@ mod messages;
 mod observability;
 #[cfg(test)]
 mod observed_completion_tests;
+#[cfg(test)]
+mod project_rule_tests;
 mod questions;
 mod retracted_delegates;
 #[cfg(test)]
@@ -257,6 +259,7 @@ pub(crate) struct LoopState {
     pub(crate) delegated_thread_dirs: crate::thread_read_dirs::DelegatedThreadDirs,
     pub(crate) told_directories: crate::allowed_directories::ToldDirectories,
     pub(crate) allowed_instructions: crate::allowed_instructions::AllowedInstructions,
+    pub(crate) project_rule_injections: crate::rules::ProjectRuleInjections,
     /// Allowed directory each run-local skill came from, checked before every load.
     pub(crate) allowed_skill_origins: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
@@ -344,6 +347,7 @@ impl LoopState {
             delegated_thread_dirs: Default::default(),
             told_directories: Default::default(),
             allowed_instructions: Default::default(),
+            project_rule_injections: Default::default(),
             allowed_skill_origins: Default::default(),
         }
     }
@@ -448,6 +452,10 @@ pub(crate) async fn run_agent(
         .as_ref()
         .map(|restored| (*restored.allowed_instructions).clone())
         .unwrap_or_default();
+    let project_rule_injections = restored
+        .as_ref()
+        .map(|restored| restored.project_rule_injections.clone())
+        .unwrap_or_default();
     let history_only = task.start == RunStart::Resume;
     let boundary_pending = restored
         .as_ref()
@@ -540,6 +548,7 @@ pub(crate) async fn run_agent(
     state.boundary_context_deferred = boundary_context_deferred;
     state.told_directories = told_directories;
     state.allowed_instructions = allowed_instructions;
+    state.project_rule_injections = project_rule_injections;
     state.plan_notice = plan_notice;
     // The run's own host prompt: already in a restored context (and committed
     // there when the same run resumed), or appended by setup below.
@@ -871,6 +880,7 @@ pub(crate) async fn run_agent(
                 state.rules_session.as_ref(),
                 &allowed,
                 &mut state.context,
+                &mut state.project_rule_injections,
             ) {
                 // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
                 // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
@@ -1011,8 +1021,9 @@ fn push_initial_system_message(
     rules_session: Option<&RulesSession>,
     allowed_directories: &[crate::allowed_directories::ToldDirectory],
     context: &mut AgentContext,
+    injections: &mut crate::rules::ProjectRuleInjections,
 ) -> Result<(), InitialSystemPromptError> {
-    let sections = base_context::compose_system_sections(
+    let (sections, prepared_injections) = base_context::prepare_system_sections(
         shared,
         &base_context::SystemInputs {
             role: task.role,
@@ -1029,6 +1040,7 @@ fn push_initial_system_message(
         return Ok(());
     }
     context.push_system(&composed);
+    *injections = prepared_injections;
     Ok(())
 }
 
