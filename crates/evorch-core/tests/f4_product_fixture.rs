@@ -897,12 +897,42 @@ fn renderer_scenario() {
         .unwrap();
     let (helpers, client) =
         runtime.block_on(r::open_page(&mut product, &provider, &env.project_dir()));
-    // One helper is the product's own child; any further process of the same
-    // image is that helper's descendant (it is a process tree, not a thread).
-    let own: Vec<_> = helpers.iter().filter(|h| h.ppid == product.pid()).collect();
-    assert_eq!(own.len(), 1, "one helper child of the product: {helpers:?}");
-    let helper_proc = own[0].clone();
+    // The product owns the renderer through its process guard: the guard is the
+    // product's direct child (one, and the only one with that image) and the
+    // helper is the guard's child. The helper is never the product's own child,
+    // and any further process of the helper's image is the helper's descendant
+    // (it is a process tree, not a thread).
+    // The sealed artifact ships its process guard next to the product binary.
+    let guard_image = artifact.path.with_file_name("evorch-process-guard");
     let observed = product.observe();
+    let guards: Vec<_> = observed
+        .children
+        .iter()
+        .filter(|p| {
+            p.exe
+                .as_deref()
+                .is_some_and(|exe| product_exec::observe::same_file(exe, &guard_image))
+        })
+        .collect();
+    assert_eq!(
+        guards.len(),
+        1,
+        "one process guard: {:?}",
+        observed.children
+    );
+    let guard = guards[0].clone();
+    assert_eq!(
+        guard.ppid,
+        product.pid(),
+        "the guard is the product's child"
+    );
+    assert!(
+        helpers.iter().all(|h| h.ppid != product.pid()),
+        "a helper bypassed the guard: {helpers:?}"
+    );
+    let own: Vec<_> = helpers.iter().filter(|h| h.ppid == guard.pid).collect();
+    assert_eq!(own.len(), 1, "one helper child of the guard: {helpers:?}");
+    let helper_proc = own[0].clone();
     assert!(observed.children.iter().any(|c| c.pid == helper_proc.pid));
     // The client connection is observable too: a second wire client sees the
     // renderer as Ready.
@@ -938,7 +968,7 @@ fn renderer_scenario() {
     eprintln!("F4P helper join: {joined:?}");
     let (report, footprint) = product.finish();
     assert!(report.orphans.is_empty(), "{:?}", report.orphans);
-    for helper in &helpers {
+    for helper in helpers.iter().chain([&guard]) {
         assert!(product_exec::observe::is_gone(helper), "{helper:?}");
     }
     drop(env);
