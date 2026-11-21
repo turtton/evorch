@@ -387,7 +387,7 @@ product_gate_in() { # <ci.yml> <job>
 sed '/scripts\/wait-product-artifact\.sh$/d' "$ci" > "$work/ci-no-wait"
 sed '/scripts\/product-artifact\.sh install/d' "$ci" > "$work/ci-no-install"
 sed '/- name: Wait for the product artifact job/i\      - run: scripts/guard-cargo.sh run -p early' "$ci" > "$work/ci-run-first"
-for product_job in tests; do
+for product_job in tests browser-e2e cef-e2e; do
   expect ok "$product_job waits for the producer and installs the sealed product artifact before its first test run" product_gate_in "$ci" "$product_job"
   expect fail "$product_job without the wait for the producer" product_gate_in "$work/ci-no-wait" "$product_job"
   expect fail "$product_job without the install" product_gate_in "$work/ci-no-install" "$product_job"
