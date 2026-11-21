@@ -30,15 +30,16 @@
 # builds from, gives the binary's path). Module resolution is therefore the
 # compiler's, whatever the nesting, the module names or the `#[path]` and
 # `include!` in use, and no part of it is re-implemented here. Every file in the
-# list is read, whatever its extension, because `include!` takes any file as Rust
-# source (`include!("body.inc")`) and the list does not say how a file was read. A
-# `.rs` file is read with its comments dropped and `core_client` as a whole word; any
-# other file, binaries included, is searched as it is for the plain text
-# `core_client`. One that matches fails. A dependency-info file that is missing, a
-# binary the metadata does not know, a listed file that does not exist, or a list
-# without any file is a failure, never a pass. The list also holds the files read
-# with `include_str!` and `include_bytes!`, so those are checked too: the check errs
-# on the side of rejecting. This is a guard against
+# list is read, whatever its extension (`include!("body.inc")` takes any file as
+# Rust source), and searched as it is for the plain text `core_client`, binaries
+# included. Nothing is parsed: not comments (a raw string such as r#"/*"# makes a
+# comment stripper discard real code), not word boundaries. One file that contains
+# the text fails, so a comment, a string or a longer identifier such as
+# core_client_e2e is rejected too; the check errs on the side of rejecting and has
+# no exception list. A dependency-info file that is missing, a binary the metadata
+# does not know, a listed file that does not exist, or a list without any file is a
+# failure, never a pass. The list also holds the files read with `include_str!` and
+# `include_bytes!`, so those are checked too. This is a guard against
 # the new core-client desktop (ADR 0045) entering a binary that a pull request no
 # longer runs; it does not prove that a registered test is not a core-client test,
 # so a test of the new system goes into a binary that is not registered.
@@ -110,30 +111,6 @@ source_of() {
   [[ -f "$src" ]] || fail "registered binary $target: $src does not exist"
 }
 
-# Source text without comments (strings are respected, so a URL stays intact).
-strip_comments() {
-  awk '
-    BEGIN { in_block = 0 }
-    {
-      line = $0; out = ""; n = length(line); in_str = 0; i = 1
-      while (i <= n) {
-        c = substr(line, i, 1); d = substr(line, i, 2)
-        if (in_block) { if (d == "*/") { in_block = 0; i += 2 } else { i++ }; continue }
-        if (in_str) {
-          out = out c
-          if (c == "\\") { out = out substr(line, i + 1, 1); i += 2; continue }
-          if (c == "\"") in_str = 0
-          i++; continue
-        }
-        if (d == "//") break
-        if (d == "/*") { in_block = 1; i += 2; continue }
-        if (c == "\"") in_str = 1
-        out = out c; i++
-      }
-      print out
-    }' "$1"
-}
-
 # The files listed in a dependency-info file (Makefile syntax: `target: dep...`,
 # a space in a name written `\ `, then one `dep:` rule per file). Only the first
 # line carries the list.
@@ -147,9 +124,8 @@ depinfo_sources() { # <file.d>
 }
 
 check_depinfo() {
-  local binaries_metadata=$1 target id bin dep src stripped hits files_total=0 n=0
+  local binaries_metadata=$1 target id bin dep src hits files_total=0 n=0
   [[ -f "$binaries_metadata" ]] || fail "$binaries_metadata does not exist"
-  stripped="$work/stripped.rs"
   for target in $(targets); do
     id="gui::$target"
     bin=$(jq -er --arg id "$id" '.["rust-binaries"][$id]["binary-path"]' "$binaries_metadata") \
@@ -167,12 +143,7 @@ check_depinfo() {
       [[ -f "$src" ]] || fail "binary $target: $dep lists $src, which does not exist"
       listed=$((listed + 1))
       files_total=$((files_total + 1))
-      if [[ "$src" == *.rs ]]; then
-        strip_comments "$src" > "$stripped"
-        hits=$(grep -nE '(^|[^A-Za-z0-9_])core_client([^A-Za-z0-9_]|$)' "$stripped" || true)
-      else
-        hits=$(grep -anF 'core_client' "$src" | cut -c1-200 || true)
-      fi
+      hits=$(grep -anF 'core_client' "$src" | cut -c1-200 || true)
       if [[ -n "$hits" ]]; then
         echo "FAIL: binary $target: $src names core_client:" >&2
         sed 's/^/  /' <<< "$hits" >&2

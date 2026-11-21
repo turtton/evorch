@@ -209,26 +209,23 @@ expect_ok "the same shapes without core_client" "$t" "$reg" --root "$t" check-de
 grep -q "shared/nested/child.rs" "$t/target/debug/deps/attention-0123abcd.d" \
   || { echo "FAIL: the compiler's list does not include the nested child module" >&2; fails=$((fails + 1)); }
 
-fresh; printf '// core_client is not used here\n/* nor core_client in\n   a block */\nfn f() {}\n' >> "$gui_dir/attention/panel.rs"; depinfo
-expect_ok "core_client only in comments" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
-fresh; printf 'include!("body.inc");\n' >> "$gui_dir/attention/panel.rs"; printf 'fn from_inc() { let _ = gui::core_client::x; }\n' > "$gui_dir/attention/body.inc"
-source_case "core_client in a non-.rs file read by include!" "body.inc names core_client|body.inc:"
-fresh; printf 'const B: &[u8] = include_bytes!("blob.bin");\n' >> "$gui_dir/attention/panel.rs"; printf '\000\001core_client\002' > "$gui_dir/attention/blob.bin"
-source_case "core_client in a binary file read by include_bytes!" "blob.bin"
-fresh; printf 'include!("body.inc");\n' >> "$gui_dir/attention/panel.rs"; printf 'fn from_inc() {}\n' > "$gui_dir/attention/body.inc"; depinfo
-expect_ok "a non-.rs include! without core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
-fresh; printf 'const SRC: &str = include_str!("../../registry.json");\n' >> "$gui_dir/attention/panel.rs"; depinfo
-expect_ok "include_str! of a file that is not Rust source" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
-fresh; printf 'const SRC: &str = include_str!("../../src/lib.rs");\n' >> "$gui_dir/attention/panel.rs"
-source_case "a .rs file read with include_str! is checked too (the check errs on rejecting)" "src/lib.rs names core_client"
-fresh; printf '#[test]\nfn added_later() {}\n' >> "$gui_dir/attention/panel.rs"; printf '#[test]\nfn renamed() {}\n' >> "$gui_dir/geometry.rs"; depinfo
-expect_ok "a test added to a registered binary needs no registry change" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
-fresh; printf 'fn core_client_like() {}\nconst CORE_CLIENT: u8 = 0;\nuse gui::core_client_e2e::X;\n' >> "$gui_dir/attention/panel.rs"; depinfo
-expect_ok "identifiers that only contain the word are not a reference" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; printf '// core_client is only named here\nfn f() {}\n' >> "$gui_dir/attention/panel.rs"
+source_case "core_client only in a line comment (nothing is parsed, so it is rejected)" "panel.rs names core_client"
+fresh; printf '/* nor core_client in\n   a block */\nfn f() {}\n' >> "$gui_dir/attention/panel.rs"
+source_case "core_client only in a block comment" "panel.rs names core_client"
+fresh; printf 'const GLOB: &str = r#"{"glob": "/*"}"#;\nmod core_client { pub fn check() {} }\nfn g() { core_client::check(); }\n' >> "$gui_dir/attention/panel.rs"
+# the fixture is real Rust: it compiles, and a comment stripper would drop its last line
+rustc --edition 2021 --crate-type lib --emit=metadata --out-dir "$work/rawstr" "$gui_dir/attention/panel.rs" > "$work/rawstr.log" 2>&1 \
+  || { echo "FAIL: the raw-string fixture is not compilable Rust" >&2; cat "$work/rawstr.log" >&2; fails=$((fails + 1)); }
+source_case "core_client after a raw string that contains /* (compilable)" "panel.rs names core_client"
+fresh; printf 'fn core_client_like() {}\n' >> "$gui_dir/attention/panel.rs"
+source_case "a longer identifier containing the word is rejected too" "panel.rs names core_client"
+fresh; printf 'const CORE_CLIENT: u8 = 0;\nfn other_client() {}\n' >> "$gui_dir/attention/panel.rs"; depinfo
+expect_ok "other spellings are not the text core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 fresh; depinfo
 expect_ok "an unregistered binary may use core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 variant with-newsys '.binaries += [{"target": "newsys", "reason": "x"}]'
-expect_fail "registering that binary is caught" "newsys/core_client_page.rs names core_client" "$t" "$work/with-newsys.json" --root "$t" check-depinfo "$t/binaries.json"
+expect_fail "registering that binary is caught" "newsys/main.rs names core_client" "$t" "$work/with-newsys.json" --root "$t" check-depinfo "$t/binaries.json"
 
 # Fail closed: nothing that cannot be read is a pass.
 fresh; depinfo; rm "$t/target/debug/deps/attention-0123abcd.d"

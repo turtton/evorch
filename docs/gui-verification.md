@@ -21,12 +21,14 @@ L1 から L7 のうち、下表の検証は **main への push でだけ** CI �
 - **新システムのテストは登録済み binary に入れない。** gui group の inventory step
   (`scripts/run-test-group.sh inventory`、PR でも main でも実行) が、登録した各 binary の
   コンパイラの dependency-info (rustc が test binary の隣に書く `<binary>.d`) に列挙された
-  **すべてのファイル**を、拡張子を問わず読み、`core_client` が現れたら失敗させる
-  (`scripts/ci-main-only-gui.sh check-depinfo`)。`.rs` はコメントを除いて単語として、それ以外
-  (`include!("body.inc")` で Rust として取り込まれるファイルやバイナリを含む) はそのまま文字列として検索する。
-  module の解決はコンパイラのもので、入れ子、同名の子 module、inline module、`#[path]`、`include!` を
-  すべて網羅する。dependency-info が見つからない、対応付けられない、列挙されたファイルが無い場合も失敗する。
-  `include_str!` や `include_bytes!` で読むファイルも列挙されるため検査対象になる (過剰に拒否する側)。
+  **すべてのファイル**を、拡張子を問わず、構文解析せずにそのまま読み、文字列 `core_client` を含めば失敗させる
+  (`scripts/ci-main-only-gui.sh check-depinfo`)。コメントの除去も単語境界の判定もしないため、
+  コメントや文字列、`core_client_e2e` のような長い識別子の中の出現も拒否する (過剰に拒否する側。例外の仕組みは無い)。
+  `include!("body.inc")` で Rust として取り込まれるファイルやバイナリも対象で、`include_str!` や
+  `include_bytes!` で読むファイルも列挙されるため検査対象になる。module の解決はコンパイラのもので、
+  入れ子、同名の子 module、inline module、`#[path]`、`include!` をすべて網羅する。dependency-info が
+  見つからない、対応付けられない、列挙されたファイルが無い場合も失敗する。登録 binary に `core_client` を
+  含む文章を書きたい場合は、その binary を登録から外す (PR 側に残す) 判断になる。
   これは直接の混入を見つける検査であり、テストの意味上の分類を証明するものではない。レビューで移動範囲を確認する。
 - 一覧・分割 (`scripts/verify-test-inventory.sh`、`ci` job) は event に依存せず、PR でも main でも
   同じ suite を列挙する。`default = cache + io + ci-remaining + main-only-gui`、
