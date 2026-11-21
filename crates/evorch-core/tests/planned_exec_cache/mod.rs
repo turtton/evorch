@@ -210,6 +210,7 @@ pub(super) async fn check(changed_catalog: bool, disconnected_mcp: bool) {
         Path::new(&std::env::var_os("CARGO_BIN_EXE_evorch-core").unwrap()),
         &root.path().join("product"),
     );
+    test_support::guard_bundle::bind_copy(&product, "core").unwrap();
     let predecessor_path = stripped_copy(
         &std::env::current_exe().unwrap(),
         &root.path().join("predecessor"),

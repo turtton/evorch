@@ -37,6 +37,7 @@ harness = false
 required-features = ["bootstrap-test-support"]
 
 [dependencies]
+sandbox = { path = "../sandbox" }
 workbench-authority = { path = "../workbench-authority" }
 core-instance = { path = "../core-instance" }
 core-launcher = { path = "../core-launcher" }
@@ -70,7 +71,6 @@ workbench-host = { path = "../workbench-host", features = ["test-support"] }
 providers = { path = "../providers" }
 async-trait = { workspace = true }
 test-support = { path = "../test-support" }
-sandbox = { path = "../sandbox" }
 tools = { path = "../tools" }
 routing = { path = "../routing" }
 recorder = { path = "../recorder" }

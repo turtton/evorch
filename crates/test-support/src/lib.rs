@@ -4,6 +4,8 @@
 //! the production defaults of the models.dev cache and the shell job handle
 //! state stay unchanged.
 
+#[cfg(target_os = "linux")]
+pub mod guard_bundle;
 pub mod product_artifact;
 pub mod product_exec;
 

@@ -6,7 +6,7 @@ pub const USAGE: &str =
 pub const HELP: &str = concat!(
     "usage: evorch-core [--config-dir <dir>] [--web] [--foreground] [--print-renderer-helper]\n",
     "\n  --print-renderer-helper  read-only diagnostic: print the configured helper path;\n",
-    "                           no bootstrap, process, file, socket, lock or database.\n",
+    "                           no config, DB, socket or lock; guard bundle verification applies.\n",
     "                           EVORCH_RENDERER_EXEC overrides the colocated default.\n",
 );
 

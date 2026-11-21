@@ -21,6 +21,11 @@ pub fn run(
         .join("evorch");
     let project_root = std::env::current_dir()?;
     let (mut boot, proof) = PlannedBoot::adopt_default_entry(identity, inherited)?;
+    // Physical adoption must precede opening the guard image too: never
+    // reuse a descriptor still owned by the handoff evidence.
+    if sandbox::owned::bind_installed("core").is_err() {
+        boot.fail(BootFailure::AdoptedBeforeReady, None);
+    }
     // Entry inspection AND physical adopt precede the first new signal FD.
     let inbox = match mask.inbox() {
         Ok(inbox) => inbox,

@@ -51,6 +51,20 @@ impl WrappedCommand {
         command
     }
 
+    /// Typed non-PTY description for the guarded owner API. B2b migrates callers.
+    pub fn to_owned_command(&self) -> crate::owned::OwnedCommand {
+        let mut command = crate::owned::OwnedCommand::new(&self.program);
+        command.args(&self.args);
+        if !self.inherit_env {
+            command.env_clear();
+        }
+        command.envs(self.env.iter().cloned());
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        command
+    }
+
     /// Diagnose deterministic launch failures before entering a model/tool retry
     /// loop. This does not execute a probe or disable sandboxing.
     pub fn preflight(&self) -> Result<(), SandboxError> {

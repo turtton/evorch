@@ -1717,6 +1717,16 @@ impl eframe::App for GuiApp {
 }
 
 fn main() {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--help" | "-h"))
+        && std::env::args_os().len() == 2
+    {
+        print_help();
+        return;
+    }
+    if sandbox::owned::bind_installed("gui").is_err() {
+        eprintln!("evorch-gui: process guard bundle validation failed");
+        std::process::exit(1);
+    }
     if let Err(error) = run() {
         eprintln!("evorch-gui: {error}");
         std::process::exit(1);

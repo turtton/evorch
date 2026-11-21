@@ -441,3 +441,67 @@ async fn a_child_shell_keeps_nul_bytes_and_the_whole_text_for_the_program() {
         large.content
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn js_worker_without_bundle_bypasses_parent_only_bind_and_help_remains_usable() {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("evorch");
+    std::fs::copy(worker_binary(), &exe).unwrap();
+    // A real target entry, without a bundle beside it or inside the sandbox.
+    let mut worker = Command::new(&exe)
+        .arg("js-worker")
+        .env("EVORCH_PROCESS_GUARD_BUNDLE", "/missing")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    worker.stdin.take().unwrap().write_all(b"{\"type\":\"run\",\"code\":\"return 23\",\"timeout_ms\":30000,\"memory_limit_bytes\":67108864,\"tools\":[]}\n").unwrap();
+    let output = worker.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.lines()
+            .any(
+                |line| serde_json::from_str::<Value>(line).is_ok_and(|message| message["type"]
+                    == "done"
+                    && message["value"] == 23
+                    && message["error"].is_null()
+                    && message["timed_out"] == false)
+            ),
+        "{text}"
+    );
+    let ordinary = Command::new(&exe).arg("run").output().unwrap();
+    assert_eq!(ordinary.status.code(), Some(1));
+    assert_eq!(
+        ordinary.stderr,
+        b"evorch: process guard bundle validation failed\n"
+    );
+    let help = Command::new(&exe).arg("--help").output().unwrap();
+    assert!(String::from_utf8_lossy(&help.stderr).contains("usage: evorch"));
+    // Preserve the existing CLI usage exit code; exemption must not change dispatch.
+    assert_ne!(help.stderr, ordinary.stderr);
+    let manifest = test_support::guard_bundle::bind_copy(&exe, "cli").unwrap();
+    let valid = Command::new(&exe)
+        .arg("--help")
+        .arg("--b2a-extra")
+        .env("EVORCH_PROCESS_GUARD_BUNDLE", "/missing")
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&valid.stderr).contains("usage: evorch"));
+    let mut bundle: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    bundle["callers"][0]["sha256"] = "0".repeat(64).into();
+    use std::os::unix::fs::PermissionsExt;
+    let next = manifest.with_extension("new");
+    std::fs::write(&next, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::rename(next, manifest).unwrap();
+    let mismatch = Command::new(&exe).arg("run").output().unwrap();
+    assert_eq!(mismatch.status.code(), Some(1));
+    assert_eq!(mismatch.stderr, ordinary.stderr);
+}

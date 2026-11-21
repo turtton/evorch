@@ -1,11 +1,13 @@
-# D-3a2 B1: helper and distribution only
+# D-3a2 B1/B2a: distribution and additive ownership API
 
-**B 未適用、D-7 未完了.** B1 delivers `evorch-process-guard`, its library and
-immutable Linux bundles. No existing owned-child launch path uses this library
-yet. Still unprotected by B: shell pipe/PTY jobs, SandboxSession (including
+**B caller 移行未適用、D-7 未完了.** B1 delivers `evorch-process-guard` and immutable
+Linux bundles. B2a adds typed `sandbox::owned` owners and startup bundle binding
+for CLI/core/GUI; only focused API fixtures use the new owners so far. No existing
+owned-child launch path has migrated yet. B2b must migrate callers and remove
+Linux raw-command ownership APIs (see `sandbox/src/owned/README.md`). Still unprotected by B: shell pipe/PTY jobs, SandboxSession (including
 js-worker), MCP, LSP, renderer/CEF, eval groups/verify, PR source with or without
 a ledger, probes/other commands, GUI slash commands, and agent Chromium.
-B2 migrates non-PTY owners; B3 migrates PTY/Chromium and supplies release-core
+B2b migrates non-PTY owners; B3 migrates PTY/Chromium and supplies release-core
 expiry, real Chromium/CEF and end-to-end evidence. The private preflight
 supervisor and bwrap `--die-with-parent` remain unchanged. A's real 10s watchdog
 and exit 74 tail do not call a ledger or guard and are not extended.

@@ -83,11 +83,46 @@ pub struct ChildActivity {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(super) enum ChildGroup {
+    Raw(ProcessGroup),
+    #[cfg(target_os = "linux")]
+    Owned(crate::owned::OwnedGroup),
+}
+impl ChildGroup {
+    fn leader(&self) -> Option<rustix::process::Pid> {
+        match self {
+            Self::Raw(group) => group.leader(),
+            #[cfg(target_os = "linux")]
+            Self::Owned(group) => group
+                .id()
+                .and_then(|pid| rustix::process::Pid::from_raw(pid as i32)),
+        }
+    }
+    fn kill(&self) {
+        match self {
+            Self::Raw(group) => group.kill(),
+            #[cfg(target_os = "linux")]
+            Self::Owned(group) => {
+                let _ = group.kill();
+            }
+        }
+    }
+    fn terminate(&self) {
+        match self {
+            Self::Raw(group) => group.terminate(),
+            #[cfg(target_os = "linux")]
+            Self::Owned(group) => {
+                let _ = group.terminate();
+            }
+        }
+    }
+}
 #[derive(Debug)]
 pub(super) struct Record {
     kind: ChildKind,
     label: Option<String>,
-    group: ProcessGroup,
+    group: ChildGroup,
     stop_requested: bool,
 }
 
@@ -115,7 +150,7 @@ pub(super) fn register(
     inner: &Arc<Inner>,
     kind: ChildKind,
     label: Option<&str>,
-    group: &ProcessGroup,
+    group: ChildGroup,
 ) -> ChildEntry {
     let mut table = locked(&inner.children);
     let id = ChildId(table.next);
@@ -125,7 +160,7 @@ pub(super) fn register(
         Record {
             kind,
             label: label.map(str::to_owned),
-            group: group.clone(),
+            group,
             stop_requested: false,
         },
     );
@@ -245,7 +280,7 @@ impl SpawnLedger {
     /// # Errors
     /// [`UnknownChild`] when the ledger does not hold `id`.
     pub fn stop_child(&self, id: ChildId) -> Result<(), UnknownChild> {
-        self.signal(id, ProcessGroup::kill)
+        self.signal(id, ChildGroup::kill)
     }
 
     /// SIGTERM the process group of a registered child.
@@ -253,10 +288,10 @@ impl SpawnLedger {
     /// # Errors
     /// [`UnknownChild`] when the ledger does not hold `id`.
     pub fn terminate_child(&self, id: ChildId) -> Result<(), UnknownChild> {
-        self.signal(id, ProcessGroup::terminate)
+        self.signal(id, ChildGroup::terminate)
     }
 
-    fn signal(&self, id: ChildId, send: fn(&ProcessGroup)) -> Result<(), UnknownChild> {
+    fn signal(&self, id: ChildId, send: fn(&ChildGroup)) -> Result<(), UnknownChild> {
         let mut table = locked(&self.inner.children);
         let record = table.live.get_mut(&id).ok_or(UnknownChild(id))?;
         record.stop_requested = true;

@@ -64,6 +64,11 @@ fn run() -> Result<(), BootstrapError> {
         }
         return planned_entry::run(args, mask, inherited);
     }
+    if args.mode == args::Mode::Help {
+        args::write_read_only(&args.mode, &mut std::io::stdout(), || unreachable!())?;
+        return Ok(());
+    }
+    sandbox::owned::bind_installed("core").map_err(|_| "process guard bundle validation failed")?;
     #[cfg(target_os = "linux")]
     if entry.describe {
         serde_json::to_writer(

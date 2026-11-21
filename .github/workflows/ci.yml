@@ -326,6 +326,8 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Guard artifact regression and mutation tests
+        run: EVORCH_PROCESS_GUARD_BUNDLE="$RUNNER_TEMP/evorch-product/guard-bundle.json" scripts/tests/test_guard_artifact.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: product-core

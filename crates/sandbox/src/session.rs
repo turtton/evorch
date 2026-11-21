@@ -181,7 +181,7 @@ impl StdioSession {
         })
     }
 
-    fn wait_for_status(&mut self) -> io::Result<ExitStatus> {
+    pub(crate) fn wait_for_status(&mut self) -> io::Result<ExitStatus> {
         let Some(leader) = self.group.leader() else {
             return self.child.wait();
         };
@@ -193,6 +193,11 @@ impl StdioSession {
             .ok_or_else(|| io::Error::other("the exited child was not reapable"))?;
         self.note_reaped();
         Ok(status)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn owned_group(&self) -> &ProcessGroup {
+        &self.group
     }
 
     pub fn id(&self) -> u32 {
