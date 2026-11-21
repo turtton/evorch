@@ -19,10 +19,22 @@ jobs:
     steps:
       - run: echo ci
   # nix comment
-  nix-build:
+  nix-scope-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo scope
+  nix-full-default:
     runs-on: ubuntu-latest
     steps:
       - run: nix build .#default
+  nix-full-core:
+    runs-on: ubuntu-latest
+    steps:
+      - run: nix build .#evorch-core
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verdict
   offscreen-gate:
     runs-on: ubuntu-latest
     steps:
@@ -86,6 +98,9 @@ case_path vendor true vendor/egui_commonmark/src/lib.rs
 case_path cef true crates/browser-cef/src/lib.rs
 case_path push-attic true scripts/push-attic.sh
 case_path scope-script true scripts/nix-build-scope.sh
+case_path scope-test true scripts/tests/test_nix_build_scope.sh
+case_path verdict-script true scripts/nix-build-verdict.sh
+case_path verdict-test true scripts/tests/test_nix_build_verdict.sh
 
 # Paths the Nix build does not read, or that cargo check and the ci job cover.
 case_path rust-source false crates/gui/src/lib.rs
@@ -113,7 +128,7 @@ git -C "$repo" mv flake.lock lock.txt
 git -C "$repo" commit -q -m rename
 expect "rename out of flake.lock" true "$repo" EVENT_NAME=pull_request
 
-# Workflow: only the header and the nix-build job count.
+# Workflow: only the header and the four Nix jobs count.
 workflow_case() {
   local name=$1 want=$2 from=$3 to=$4
   new_repo "$name"
@@ -126,9 +141,41 @@ workflow_case() {
 }
 workflow_case "workflow ci job edit" false 'echo ci' 'echo ci2'
 workflow_case "workflow other job edit" false 'echo gate' 'echo gate2'
-workflow_case "workflow nix-build edit" true 'nix build .#default' 'nix build .#evorch'
+workflow_case "workflow nix-scope-check edit" true 'echo scope' 'echo scope2'
+workflow_case "workflow nix-full-default edit" true 'nix build .#default' 'nix build .#evorch'
+workflow_case "workflow nix-full-core edit" true 'nix build .#evorch-core' 'nix build .#evorch-core2'
+workflow_case "workflow nix-build edit" true 'echo verdict' 'echo verdict2'
+workflow_case "workflow nix job renamed away" true 'nix-full-core:' 'nix-full-corx:'
 workflow_case "workflow header edit" true 'group: x' 'group: y'
 workflow_case "workflow comment edit" false '# nix comment' '# other comment'
+
+# The same through the real workflow: a line inside each Nix job decides, a line in
+# a job that does not reach Nix does not. This catches a Nix job that the scope
+# script does not know (a renamed or added one).
+real_workflow=$(cd "$(dirname "$scope")/.." && pwd)/.github/workflows/ci.yml
+real_workflow_case() {
+  local name=$1 want=$2 from=$3 to=$4
+  new_repo "$name"
+  cp "$real_workflow" "$repo/.github/workflows/ci.yml"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m real-workflow
+  git -C "$repo" checkout -q -B topic main
+  if [ "$(grep -cF -- "$from" "$repo/.github/workflows/ci.yml")" -ne 1 ]; then
+    echo "FAIL $name: '$from' is not exactly one line of the workflow"
+    failures=$((failures + 1))
+    return
+  fi
+  sed "s|$from|$to|" "$repo/.github/workflows/ci.yml" > "$repo/ci.tmp"
+  mv "$repo/ci.tmp" "$repo/.github/workflows/ci.yml"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m wf
+  expect "$name" "$want" "$repo" EVENT_NAME=pull_request
+}
+real_workflow_case "real workflow nix-scope-check" true 'scripts/tests/test_nix_build_verdict.sh' 'scripts/tests/test_nix_build_verdict.sh --x'
+real_workflow_case "real workflow nix-full-default" true 'run: nix build -L .#evorch-deps --out-link ./result-deps' 'run: nix build -L .#evorch-deps --out-link ./result-deps2'
+real_workflow_case "real workflow nix-full-core" true 'run: nix build -L .#evorch-core --out-link ./result-core' 'run: nix build -L .#evorch-core --out-link ./result-core2'
+real_workflow_case "real workflow nix-build" true 'run: scripts/nix-build-verdict.sh' 'run: scripts/nix-build-verdict.sh --x'
+real_workflow_case "real workflow non-Nix job" false 'scripts/tests/test_apt_install.sh' 'scripts/tests/test_apt_install.sh --x'
 
 # Top-level keys after the jobs count too: an env placed behind every job.
 # trailing_case <name> <want> <base block> <head block>: both blocks are appended to
