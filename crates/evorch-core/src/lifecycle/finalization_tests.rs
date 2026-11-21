@@ -338,7 +338,7 @@ async fn accept_error_releases_inbox_even_with_driver_retained() {
     host.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn db_worker_barrier_does_not_block_control_drain_or_signal() {
+async fn queued_mail_during_control_drain_is_released_on_signal() {
     if masked_child().await {
         return;
     }
@@ -349,15 +349,7 @@ async fn db_worker_barrier_does_not_block_control_drain_or_signal() {
     let id = sealed(&driver).await;
     let handle = driver.finalization();
     handle.install_environment_builder(environment).unwrap();
-    let permit = handle.claim(id).unwrap();
-    let (entered, ready) = oneshot::channel();
-    let (release, held) = std::sync::mpsc::channel();
-    let db = tokio::task::spawn_blocking(move || {
-        entered.send(()).unwrap();
-        held.recv().unwrap();
-        drop(permit);
-    });
-    ready.await.unwrap();
+    drop(handle.claim(id).unwrap());
     // A held join models a client still draining. This seam is test-only in
     // lifecycle, never in product entry/bootstrap; the real drain select runs.
     let (draining, entered_drain) = oneshot::channel();
@@ -392,10 +384,121 @@ async fn db_worker_barrier_does_not_block_control_drain_or_signal() {
         receipt.await,
         Ok(Err(FinalizationError::OwnerStopping)) | Err(_)
     ));
-    assert!(!db.is_finished());
     host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn paused_database_writer_allows_builder_receipt_drain_and_signal() {
+    if masked_child().await {
+        return;
+    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static BUILDER_RUNS: AtomicUsize = AtomicUsize::new(0);
+    fn observed_environment(context: &ProductExitContext) -> io::Result<FinalizationEnvironment> {
+        BUILDER_RUNS.fetch_add(1, Ordering::SeqCst);
+        environment(context)
+    }
+    BUILDER_RUNS.store(0, Ordering::SeqCst);
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = boot(&dir).await;
+    let mut driver = LifecycleDriver::new(&host);
+    let (context, signals, backend) = context(&dir, &host, &driver);
+    let handle = driver.finalization();
+    handle
+        .install_environment_builder(observed_environment)
+        .unwrap();
+    let id = sealed(&driver).await;
+    let (current, checked) = checked_target::checked_target(dir.path()).await;
+    let start = handle.claim(id).unwrap().start(tx(&host), current, checked);
+
+    // This is the host's actual single SQLite writer, not a stand-in task.
+    // The ACK proves it has entered the pause before the loop consumes mail.
+    let writer = host.storage_writer().clone();
+    let (entered, paused) = std::sync::mpsc::channel();
+    let (release, hold) = std::sync::mpsc::channel();
+    writer.pause_writer_for_test(entered, hold).unwrap();
+    paused.recv().unwrap();
+    let (draining, entered_drain) = oneshot::channel();
+    let (_release_drain, hold_drain) = oneshot::channel();
+    driver.drain_barrier = Some((draining, hold_drain));
+    let control = driver.control_drain();
+    let listener = tokio::net::UnixListener::bind(dir.sockets().join("loop")).unwrap();
+    {
+        let running =
+            driver.run_owned_with_web(&mut host, backend, listener, None, signals, &context);
+        tokio::pin!(running);
+        // Observe the forbidden operation at the real synchronous request
+        // boundary. An I/O mutation fails immediately, not by timing out while
+        // the writer is paused. The scope is restored after EACH future poll.
+        let running = std::future::poll_fn(|cx| {
+            storage::StorageHandle::without_blocking_requests_for_test(|| running.as_mut().poll(cx))
+        });
+        let action = async {
+            assert!(matches!(
+                start.await,
+                Ok(AdminExecutionOutcome::AwaitRestartRecovery)
+            ));
+            assert_eq!(BUILDER_RUNS.load(Ordering::SeqCst), 1);
+            let (reply, drained) = oneshot::channel();
+            control
+                .0
+                .send(crate::lifecycle::control::Request {
+                    deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(120),
+                    reply,
+                })
+                .unwrap();
+            entered_drain.await.unwrap();
+            signal();
+            assert!(drained.await.unwrap().is_err());
+        };
+        let (outcome, ()) = tokio::join!(running, action);
+        outcome.unwrap();
+    }
+    // No release was sent until builder, acceptance, drain and signal ALL
+    // progressed. Finalizer/storage cleanup may now use the original writer.
     release.send(()).unwrap();
-    db.await.unwrap();
+    writer.barrier().unwrap(); // the request guard was also restored
+    let _ = host.shutdown().await;
+    assert!(handle.core.wait_finalization(id).await.is_err());
+}
+
+#[tokio::test]
+async fn validation_error_releases_buffered_reply_and_delivery_with_driver_retained() {
+    if masked_child().await {
+        return;
+    }
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = boot(&dir).await;
+    let mut driver = LifecycleDriver::new(&host);
+    let (context, signals, backend) = context(&dir, &host, &driver);
+    let observer = crate::lifecycle::shutdown_watchdog::test_clock::TestClock::default().observer();
+    driver.set_shutdown_watchdog(observer.clone()).unwrap();
+    signals.set_shutdown_watchdog(observer).unwrap(); // duplicate hook must fail
+    let id = sealed(&driver).await;
+    let handle = driver.finalization();
+    let (command, receipt) = command(&dir, &host, id).await;
+    handle.send.send(command).await.ok().unwrap();
+    let waiting = handle.send.reserve();
+    tokio::pin!(waiting);
+    pending(waiting.as_mut()).await;
+    let listener = tokio::net::UnixListener::bind(dir.sockets().join("loop")).unwrap();
+    let error = driver
+        .run_owned_with_web(&mut host, backend, listener, None, signals, &context)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("signal watchdog already installed")
+    );
+    assert!(waiting.await.is_err());
+    assert_eq!(
+        receipt.await.unwrap(),
+        Err(FinalizationError::OwnerStopping)
+    );
+    assert!(handle.send.is_closed());
+    driver.restart.transition_to_shutdown();
+    host.shutdown().await.unwrap();
 }
 #[tokio::test]
 async fn owned_start_receipt_does_not_wait_for_stage_four() {
