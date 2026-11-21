@@ -13,6 +13,8 @@ keychain = ["dep:keyring", "dep:secret-service", "dep:security-framework"]
 [dependencies]
 event-bus = { path = "../event-bus" }
 keyring = { workspace = true, optional = true }
+# close_range(2) on Linux and the pre-exec signal/session hooks on every Unix.
+libc = "0.2"
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,8 +26,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# close_range(2), which rustix 1 does not wrap, for the child launch policy.
-libc = "0.2"
 process-guard = { path = "../process-guard" }
 secret-service = { version = "5.2", default-features = false, features = ["rt-tokio-crypto-rust"], optional = true }
 
