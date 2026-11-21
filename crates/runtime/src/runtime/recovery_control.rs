@@ -21,7 +21,9 @@ struct Reservation {
     manifest: String,
     nonce: u64,
     unknown: bool,
-    observation: Option<super::graph_observation::GraphChange>,
+    // Keep the reservation-bearing ActivationFailure small; the observation is
+    // retained with identical ownership and never clears its fence on Drop.
+    observation: Option<Box<super::graph_observation::GraphChange>>,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -70,10 +72,10 @@ impl Reservation {
         }
     }
     fn confirm_graph_observation(&self) {
-        if let Some(observation) = &self.observation {
-            if let Err(error) = observation.confirm() {
-                tracing::warn!(%error, "graph observation remains fenced");
-            }
+        if let Some(observation) = &self.observation
+            && let Err(error) = observation.confirm()
+        {
+            tracing::warn!(%error, "graph observation remains fenced");
         }
     }
 }
@@ -373,7 +375,7 @@ impl AgentRuntime {
             manifest: manifest.into(),
             nonce,
             unknown: false,
-            observation,
+            observation: observation.map(Box::new),
         })
     }
     pub fn reserve_automatic_activation(
