@@ -131,6 +131,7 @@ pub struct BootstrappedHost {
     restart_storage: storage::StorageConfig,
     // The handle every other owner of the writer was given; never a new writer.
     storage_writer: storage::StorageHandle,
+    graph_collector: Arc<recovery_disposal::LiveGraphCollector>,
     pub services: services::BackgroundServices,
     pub mcp: runtime::mcp::McpHostServices,
     pub recovery_diagnostics: Option<Arc<dyn core_startup::CoreStartupDiagnostics>>,
@@ -178,6 +179,10 @@ impl BootstrappedHost {
     /// write storage are built from this and `storage_writer`, nothing else.
     pub fn storage_config(&self) -> &storage::StorageConfig {
         &self.restart_storage
+    }
+    /// The single live collector installed before automatic recovery.
+    pub fn graph_collector(&self) -> &Arc<recovery_disposal::LiveGraphCollector> {
+        &self.graph_collector
     }
     /// The storage writer handle the host was composed with, read-only. Callers
     /// clone it to share the one writer; nothing here opens or replaces a writer.
@@ -287,7 +292,7 @@ impl BootstrappedHost {
         let spawn_ledger = sandbox::SpawnLedger::new();
         let adapters =
             adapters.unwrap_or_else(|| lane_pr::PullRequestAdapters::owned(spawn_ledger.clone()));
-        let (config, bus, storage_config, storage, leases, seed, claimed_owner) =
+        let (config, bus, storage_config, storage, leases, seed, claimed_owner, planned_collector) =
             if let Some(claimed) = claimed {
                 let planned::PlannedStorage {
                     config,
@@ -296,6 +301,7 @@ impl BootstrappedHost {
                     storage,
                     leases,
                     seed,
+                    collector,
                     ..
                 } = claimed.storage;
                 (
@@ -306,6 +312,7 @@ impl BootstrappedHost {
                     leases,
                     Some(seed),
                     Some(claimed.owner),
+                    Some(collector),
                 )
             } else {
                 let config = config::Config::load_strict(&config::LoadOptions {
@@ -332,7 +339,16 @@ impl BootstrappedHost {
                 let storage_config = components::storage_config(&config, db_path);
                 let storage =
                     storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
-                (config, bus, storage_config, storage, leases, None, None)
+                (
+                    config,
+                    bus,
+                    storage_config,
+                    storage,
+                    leases,
+                    None,
+                    None,
+                    None,
+                )
             };
         let handle = storage.handle();
         // This reload must stay AFTER acquire_leases (including any exclusive
@@ -657,6 +673,19 @@ impl BootstrappedHost {
         areas.workspace.declare_saved().map_err(|error| {
             format!("the saved workspace access could not be declared: {error:?}")
         })?;
+        // Install the same live collector before any deferred automatic recovery.
+        let graph_collector = if let Some(collector) = planned_collector {
+            collector
+        } else {
+            let collector =
+                recovery_disposal::LiveGraphCollector::new(&runtime, storage_config.clone());
+            runtime.install_graph_observer(collector.clone())?;
+            runtime.rebuild_graph_observation()?;
+            collector
+        };
+        graph_collector
+            .bind_epoch(command_host.projection().instance_epoch())
+            .map_err(|_| "live graph collector epoch unavailable")?;
         let admin = crate::admin::AdminService::new(
             crate::admin::AdminAudit::new(
                 Arc::new(handle.clone()),
@@ -682,6 +711,7 @@ impl BootstrappedHost {
             owner,
             restart_storage: storage_config.clone(),
             storage_writer: handle.clone(),
+            graph_collector,
             evaluator,
             evaluations: evaluations.clone(),
             config,
@@ -935,6 +965,8 @@ impl BootstrappedHost {
 
     /// Operator-stop drain (ADR 0024); not a planned safe-point restart.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
+        // Publish unavailability before stopping successor/owner validity.
+        self.graph_collector.invalidate();
         let mut failure = None;
         // Area tasks stop producing before the runtime drains; they are joined
         // below, with the other host-owned tasks.

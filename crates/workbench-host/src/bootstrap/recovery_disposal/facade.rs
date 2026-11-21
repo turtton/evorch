@@ -71,6 +71,7 @@ pub struct OwnedGraphsFacade {
     inspections: Mutex<BTreeMap<String, Inspection>>,
     uncertain: Arc<Mutex<BTreeMap<String, Arc<UncertainDisposal>>>>,
     snapshots: Arc<Mutex<super::snapshot::SnapshotClock>>,
+    collector: Arc<super::LiveGraphCollector>,
 }
 impl OwnedGraphsFacade {
     pub fn new(
@@ -79,6 +80,7 @@ impl OwnedGraphsFacade {
         storage: StorageConfig,
         reader: Arc<AdminReader>,
         diagnostics: Arc<dyn CoreStartupDiagnostics>,
+        collector: Arc<super::LiveGraphCollector>,
     ) -> Arc<Self> {
         Arc::new(Self {
             runtime,
@@ -90,6 +92,7 @@ impl OwnedGraphsFacade {
             inspections: Mutex::default(),
             uncertain: Arc::default(),
             snapshots: Arc::default(),
+            collector,
         })
     }
     /// Original supervisor ONLY, on its blocking worker. A finished original
@@ -110,6 +113,7 @@ impl OwnedGraphsFacade {
                 .reconcile_owned_graph_disposal(&job.effect, &job.reservation)
                 .map_err(|_| unavailable())?
             {
+                job.reservation.confirm_graph_observation();
                 let mut state = self.uncertain.lock().unwrap();
                 if state
                     .get(&id)
@@ -209,6 +213,11 @@ impl AdminFacade for OwnedGraphsFacade {
             let AdminQuery::OwnedGraphs(query) = query else {
                 return Err(admin::conflict());
             };
+            if matches!(query, OwnedGraphsQuery::Undisposed) {
+                return Ok(AdminView::OwnedGraphs(OwnedGraphsReply::Undisposed(
+                    self.collector.snapshot()?,
+                )));
+            }
             let query = query.clone();
             let storage = self.storage.clone();
             let owner = self.owner.clone();
@@ -223,15 +232,7 @@ impl AdminFacade for OwnedGraphsFacade {
                     .map_err(|_| unavailable())?;
                     let reply = match query {
                         OwnedGraphsQuery::Undisposed => {
-                            let mut snapshot = view::collect_undisposed(&runtime, &owner, &graphs)?;
-                            snapshot.snapshot_revision = workbench_protocol::wire::Revision(0);
-                            let fingerprint =
-                                serde_json::to_string(&snapshot).map_err(|_| unavailable())?;
-                            snapshot.snapshot_revision = snapshots
-                                .lock()
-                                .unwrap()
-                                .observe("undisposed", fingerprint)?;
-                            OwnedGraphsReply::Undisposed(snapshot)
+                            unreachable!("handled by shared live collector")
                         }
                         OwnedGraphsQuery::Detail { graph_ref } => {
                             let mut selected = None;
@@ -479,6 +480,7 @@ fn finish_disposal(
         _ => AdminOutcome::Unknown,
     };
     if outcome != AdminOutcome::Unknown {
+        job.reservation.confirm_graph_observation();
         let mut state = uncertain.lock().unwrap();
         if state
             .get(&job.effect.operation_id)

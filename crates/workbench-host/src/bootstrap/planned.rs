@@ -15,6 +15,7 @@ pub struct PlannedStorage {
     pub(super) leases: storage::SharedLeases,
     pub(super) seed: StartupRuntime,
     pub(super) bus: Arc<EventBus>,
+    pub(super) collector: Arc<super::recovery_disposal::LiveGraphCollector>,
 }
 /// Constructible only after proof-backed Adopt and a full inventory claim pass.
 /// Blocked threads are retained, never taken by an ordinary claim fallback.
@@ -71,7 +72,13 @@ impl PlannedStorage {
         seed.runtime()
             .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
             .map_err(|_| "startup tombstone guard already set")?;
+        let collector = super::recovery_disposal::LiveGraphCollector::new(
+            seed.runtime(),
+            storage_config.clone(),
+        );
+        seed.runtime().install_graph_observer(collector.clone())?;
         Ok(Self {
+            collector,
             options,
             config,
             storage,

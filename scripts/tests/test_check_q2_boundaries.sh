@@ -31,3 +31,36 @@ printf 'pub fn claim_physical_bootstrap_owners($evidence: RestartOwnershipEviden
 : > "$work/crates/workbench-host/src/bootstrap/planned.rs"
 if bash "$gate" "$work" >/dev/null; then echo 'missing bootstrap call accepted'; exit 1; fi
 echo 'Q2 boundary fixtures passed'
+
+# Real reservation/public bodies are the positive fixture for the live hooks.
+printf 'runtime.claim_physical_bootstrap_owners(owner, evidence, callback);\n' > "$work/crates/workbench-host/src/bootstrap/planned.rs"
+cp crates/runtime/src/runtime/recovery_control.rs "$work/crates/runtime/src/runtime/recovery_control.rs"
+mkdir -p "$work/crates/evorch-core/src/restart/public"
+cp crates/evorch-core/src/restart/public/implementation.rs "$work/crates/evorch-core/src/restart/public/implementation.rs"
+bash "$gate" "$work" >/dev/null
+printf 'no fence before the reservation\n' > "$work/crates/runtime/src/runtime/recovery_control.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'missing live reservation hook accepted'; exit 1; fi
+cp crates/runtime/src/runtime/recovery_control.rs "$work/crates/runtime/src/runtime/recovery_control.rs"
+printf 'self.graphs.admit(revision, &mut || {\n runtime.preflight_restart_capture();\n})?;\n' > "$work/crates/evorch-core/src/restart/public/implementation.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'I/O preflight in commit accepted'; exit 1; fi
+cp crates/evorch-core/src/restart/public/implementation.rs "$work/crates/evorch-core/src/restart/public/implementation.rs"
+printf 'runtime.owned_graph_ownership_readback(cas);\n' > "$work/crates/runtime/src/extra.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'unobserved owner read outside collector accepted'; exit 1; fi
+echo 'Q2 live admission boundary fixtures passed'
+rm "$work/crates/runtime/src/extra.rs"
+printf 'writer.activate_recovery_claim(request);\n' > "$work/crates/runtime/src/extra.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'unfenced activation writer accepted'; exit 1; fi
+printf 'writer.write_recovery_graph_control(request);\n' > "$work/crates/runtime/src/extra.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'unfenced graph-control writer accepted'; exit 1; fi
+echo 'Q2 durable writer bypass fixtures passed'
+
+rm "$work/crates/runtime/src/extra.rs"
+cp crates/runtime/src/runtime/restart_transaction.rs "$work/crates/runtime/src/runtime/restart_transaction.rs"
+bash "$gate" "$work" >/dev/null
+printf 'pub fn validate_restart_preflight() {
+ self.preflight_restart_capture(recipes);
+ restart_recipe_metadata();
+}
+' > "$work/crates/runtime/src/runtime/restart_transaction.rs"
+if bash "$gate" "$work" >/dev/null; then echo 'DB preflight revived behind opaque validator accepted'; exit 1; fi
+echo 'Q2 memory-proof boundary fixtures passed'

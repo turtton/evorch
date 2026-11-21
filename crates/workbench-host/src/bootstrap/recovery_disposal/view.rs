@@ -405,63 +405,72 @@ pub(super) fn next_action(
     }
 }
 
-pub fn collect_undisposed(
-    runtime: &AgentRuntime,
-    owner: &OwnerHost,
-    graphs: &[OwnedGraphSnapshot],
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct GraphFact {
+    pub reference: GraphReference,
+    pub undisposed: bool,
+    pub incomplete: bool,
+    pub over_limit: bool,
+    pub ownership: (OwnedGraphOwnershipState, u64, u64),
+}
+pub(super) fn graph_fact(
+    graph: &OwnedGraphSnapshot,
+    diagnostic: &runtime::OwnedGraphOwnershipDiagnostic,
+) -> Result<GraphFact, AdminFailure> {
+    let summary = GraphOwnershipSummary::try_from(diagnostic)?;
+    let complete = progress(graph).completion == DisposalCompletion::Complete;
+    let resumed = graph
+        .cas
+        .claim
+        .as_ref()
+        .is_some_and(|c| c.state == RecoveryClaimState::Activated)
+        || graph.cas.component.disposition == RestartDisposition::Activated;
+    let revoked = if graph.control.as_ref().is_some_and(|c| c.revoked) {
+        RevocationObservation::Confirmed
+    } else {
+        RevocationObservation::NotApplied
+    };
+    let mut refs = GraphReferences::default();
+    let cas = &graph.cas;
+    let reference = GraphReference {
+        graph_id: refs.graph_reference(
+            &cas.restart_id,
+            &cas.capture_id,
+            &cas.manifest.manifest_id,
+        )?,
+        restart_tx_id: refs.graph_reference("transaction", &cas.restart_id, &cas.restart_id)?,
+        capture_id: refs.graph_reference("capture", &cas.restart_id, &cas.capture_id)?,
+        revision: Revision(cas.component.revision),
+    };
+    let adopted = graph.adopted_epoch == Some(cas.successor_epoch);
+    Ok(GraphFact {
+        reference,
+        undisposed: adopted && summary.is_undisposed(resumed, complete, revoked),
+        incomplete: adopted && summary.is_incomplete_disposal(complete, revoked),
+        over_limit: diagnostic.owner_count() > 64,
+        ownership: (
+            diagnostic.state(),
+            diagnostic.retained_owner_count(),
+            diagnostic.owner_count(),
+        ),
+    })
+}
+pub(super) fn aggregate_facts<'a>(
+    facts: impl Iterator<Item = &'a GraphFact>,
+    revision: Revision,
 ) -> Result<UndisposedGraphs, AdminFailure> {
     let mut references = Vec::new();
     let mut incomplete = Vec::new();
     let mut over_limit = 0;
-    let mut revision = 0u64;
-    for graph in graphs {
-        revision = revision
-            .checked_add(graph.cas.component.revision)
-            .and_then(|r| r.checked_add(graph.cas.control_revision))
-            .ok_or_else(unavailable)?;
-        if graph.adopted_epoch != Some(graph.cas.successor_epoch) {
-            continue;
+    for fact in facts {
+        if fact.undisposed {
+            references.push(fact.reference.clone());
+            if fact.over_limit {
+                over_limit += 1;
+            }
         }
-        let diagnostic = runtime
-            .owned_graph_ownership_diagnostic(&graph.cas)
-            .map_err(|_| unavailable())?;
-        let summary = GraphOwnershipSummary::try_from(&diagnostic)?;
-        let complete = progress(graph).completion == DisposalCompletion::Complete;
-        let resumed = graph
-            .cas
-            .claim
-            .as_ref()
-            .is_some_and(|c| c.state == RecoveryClaimState::Activated)
-            || graph.cas.component.disposition == RestartDisposition::Activated;
-        let revoked = if graph.control.as_ref().is_some_and(|c| c.revoked) {
-            RevocationObservation::Confirmed
-        } else {
-            RevocationObservation::NotApplied
-        };
-        let undisposed = summary.is_undisposed(resumed, complete, revoked);
-        let warning = summary.is_incomplete_disposal(complete, revoked);
-        if undisposed || warning {
-            let (binding, _) = binding_for(
-                owner,
-                &graph.cas,
-                AdminId::new("unassigned").map_err(|_| unavailable())?,
-            )?;
-            let g = binding.graph;
-            let reference = GraphReference {
-                graph_id: g.graph_id,
-                restart_tx_id: g.restart_tx_id,
-                capture_id: g.capture_id,
-                revision: g.expected_revision,
-            };
-            if undisposed {
-                if diagnostic.owner_count() > 64 {
-                    over_limit += 1;
-                }
-                references.push(reference.clone());
-            }
-            if warning {
-                incomplete.push(reference);
-            }
+        if fact.incomplete {
+            incomplete.push(fact.reference.clone());
         }
     }
     references.sort_by(|a, b| a.graph_id.cmp(&b.graph_id));
@@ -473,7 +482,7 @@ pub fn collect_undisposed(
     let result = UndisposedGraphs {
         count: Revision(count as u64),
         references,
-        snapshot_revision: Revision(revision),
+        snapshot_revision: revision,
         truncated: count > 64,
         over_limit_count: Revision(over_limit),
         incomplete_disposals: IncompleteDisposals {
@@ -484,4 +493,21 @@ pub fn collect_undisposed(
     };
     result.validate().map_err(|_| unavailable())?;
     Ok(result)
+}
+/// Read-only diagnostic helper. Admission exclusively uses LiveGraphCollector.
+pub fn collect_undisposed(
+    runtime: &AgentRuntime,
+    _owner: &OwnerHost,
+    graphs: &[OwnedGraphSnapshot],
+) -> Result<UndisposedGraphs, AdminFailure> {
+    let facts = graphs
+        .iter()
+        .map(|g| {
+            runtime
+                .owned_graph_ownership_diagnostic(&g.cas)
+                .map_err(|_| unavailable())
+                .and_then(|d| graph_fact(g, &d))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    aggregate_facts(facts.iter(), Revision(0))
 }

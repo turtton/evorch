@@ -378,6 +378,7 @@ pub(crate) fn attempt_observed(
     // A definite activation failure returns this same original reservation.
     // Unknown returns None: its original supervisor keeps ownership instead.
     let mut failed_activation_reservation = None;
+    let mut observation_confirmed = true;
     let (state, reason) = match component.disposition {
         Disposition::Released => (RecoveryState::Released, Some(StartupBlocked::Released)),
         Disposition::AlreadyActivated => (
@@ -451,6 +452,10 @@ pub(crate) fn attempt_observed(
                             {
                                 StartupBlocked::AlreadyActivated
                             } else {
+                                // The lower API intentionally erases writer error
+                                // details. An old DB snapshot cannot prove a failed
+                                // decline was NotApplied: keep management closed.
+                                observation_confirmed = false;
                                 reason
                             };
                             (RecoveryState::Quarantined, Some(reason))
@@ -462,6 +467,20 @@ pub(crate) fn attempt_observed(
     };
     // Failure disposition includes conditional release and paused-state cleanup.
     // Only now may a competing manual attempt acquire this original graph slot.
+    if let Some(token) = &failed_activation_reservation {
+        if observation_confirmed {
+            token.confirm_graph_observation();
+        } else {
+            token.mark_graph_observation_unavailable();
+        }
+    }
+    if let Some(token) = &reservation {
+        if observation_confirmed {
+            token.confirm_graph_observation();
+        } else {
+            token.mark_graph_observation_unavailable();
+        }
+    }
     drop(failed_activation_reservation);
     drop(reservation);
     AutomaticAttempt::Finished(RecoveryDiagnostic {

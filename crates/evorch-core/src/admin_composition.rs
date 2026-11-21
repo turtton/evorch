@@ -22,6 +22,12 @@ impl<'a> Inputs<'a> {
     pub fn new(host: &'a BootstrappedHost, backend: &'a HostBackend) -> Self {
         Self { host, backend }
     }
+    /// The exact collector installed before automatic recovery, shared by both leaves.
+    pub fn graph_collector(
+        &self,
+    ) -> &'a std::sync::Arc<workbench_host::bootstrap::recovery_disposal::LiveGraphCollector> {
+        self.host.graph_collector()
+    }
     /// The production database configuration, read-only.
     pub fn storage_config(&self) -> &'a StorageConfig {
         self.host.storage_config()

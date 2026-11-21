@@ -145,6 +145,25 @@ impl AgentRuntime {
         })
     }
 
+    /// Same close boundary, with the registration lock already retained by
+    /// final preflight validation. The ordinary wrapper keeps its old ordering.
+    pub(crate) fn begin_restart_quiesce_guarded(
+        &self,
+        planned: bool,
+        manual: &std::sync::MutexGuard<'_, ()>,
+    ) -> Result<RestartAttempt, RuntimeError> {
+        self.shared.dispatch_tails.result()?;
+        let generation = self
+            .shared
+            .quiesce
+            .begin_mode_guarded(planned, manual)
+            .map_err(runtime::error)?;
+        Ok(RestartAttempt {
+            owner: self.shared.dispatch_tails.clone(),
+            generation,
+        })
+    }
+
     pub(crate) fn validate_restart_attempt(
         &self,
         attempt: &RestartAttempt,

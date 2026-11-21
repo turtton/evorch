@@ -22,6 +22,11 @@ use storage::recovery::{
 /// }
 /// ```
 pub struct DisposalReservation(ActivationReservation, String);
+impl DisposalReservation {
+    pub fn confirm_graph_observation(&self) {
+        self.0.confirm_graph_observation();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisposalThreadResult {
@@ -72,7 +77,7 @@ impl AgentRuntime {
         };
         if expected.control_revision.checked_add(1) != Some(control_revision)
             || !matches!(
-                self.owned_graph_ownership_diagnostic(expected)
+                self.reserved_owned_graph_ownership_diagnostic(expected, reservation)
                     .map_err(|_| RuntimeError::GraphControlNotApplied)?
                     .state(),
                 OwnedGraphOwnershipState::LiveSelf
