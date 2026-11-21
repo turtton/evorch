@@ -1,164 +1,126 @@
 #!/usr/bin/env bash
 # Management publication: one switch, one call site, one product hook per entrypoint.
 #
-#   1. Product code calls `enable_management` in exactly one place:
-#      crates/evorch-core/src/admin_composition/capability.rs.
-#   2. `MANAGEMENT_PUBLISHED` is declared once, in that file, as exactly
-#      `const MANAGEMENT_PUBLISHED: bool = <expected_published>;`. Only the change
-#      that publishes management edits `expected_published` together with the
-#      constant; every other change that flips the constant fails here.
-#   3. The `admin_composition` module is named only by its own tree, by lib.rs's
-#      `pub mod admin_composition;` and by the two entrypoints (main.rs,
-#      planned_entry.rs). An entrypoint calls `install` at most once, however it
-#      is imported; aliasing the import is refused.
-#   4. No environment variable names management publication.
+# This check does not parse Rust. It matches raw lines against a short allowlist
+# and treats everything outside the allowlist as a violation, so a form it does
+# not recognise is refused, never skipped.
 #
-# The check reads code, not text: comments are removed first, and the body of a
-# `#[cfg(test)] mod name { ... }` is skipped by brace depth, so production code
-# after it is still checked. Test code outside such a module (tests/ directories,
-# tests.rs, *_tests.rs, shared-test-support/) is out of scope. A file that ends
-# inside a comment, a string or a test module fails the check.
+#   1. The switch file is pinned by content (`capability_sha256`) and must hold
+#      exactly one `const MANAGEMENT_PUBLISHED: bool = <expected_published>;`.
+#      The one product call of `enable_management` lives in that file. The
+#      change that publishes management updates `expected_published` and the
+#      hash together; any other edit to the file stops here and is reviewed.
+#   2. Outside that file the word `enable_management` appears only in the single
+#      definition line of crates/workbench-host/src/admin/service.rs. Tests use
+#      `publish_for_test`, which exists only under test builds.
+#   3. `MANAGEMENT_PUBLISHED` appears nowhere else.
+#   4. `admin_composition` is named only inside its own tree, by lib.rs as
+#      `pub mod admin_composition;`, and by main.rs and planned_entry.rs. An
+#      entrypoint writes the fully qualified path (`use` and `as` are refused),
+#      calls `admin_composition::install(` at most once, and may also build
+#      `admin_composition::Inputs`.
+#   5. No environment variable names management publication.
+#
+# Only a whole line that starts with `//` and holds no `"` or `*/` is exempt.
+#
+# What this does NOT guarantee: that the switch is off at run time (the tests
+# that call the real `publish` pin that), that a macro does not build an
+# identifier, or that unsafe code does not write the flag. It catches
+# accidental and ordinary changes, not deliberate evasion.
 set -euo pipefail
 root=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$root"
-awk_bin=$(command -v gawk || command -v awk)
 
 expected_published=false
+capability_sha256=acde91be78717b1223689922308844582fd2a4a7f442330d29288a5ccbffcdf3
 
 capability=crates/evorch-core/src/admin_composition/capability.rs
+service=crates/workbench-host/src/admin/service.rs
+tree=crates/evorch-core/src/admin_composition
+entrypoints="crates/evorch-core/src/main.rs crates/evorch-core/src/planned_entry.rs"
 
-# Print `file:line:code` for production code, with comments removed.
-production_code() {
-  find crates -name '*.rs' -not -path '*/tests/*' -not -path '*/shared-test-support/*' \
-    -not -name 'tests.rs' -not -name '*_tests.rs' -print0 2>/dev/null |
-    xargs -0 -r "$awk_bin" '
-      function finish() {
-        if (name != "" && (inblock > 0 || instr || intest > 0))
-          print name ":0:@@UNPARSEABLE"
-        inblock = 0; instr = 0; intest = 0; pend = 0
-      }
-      # Sets code (comments removed, strings kept) and shape (strings blanked).
-      function scan(line,    i, n, c, d, j, k, prevc, before, h) {
-        code = ""; shape = ""; n = length(line); i = 1
-        while (i <= n) {
-          c = substr(line, i, 1); d = substr(line, i, 2)
-          if (inblock > 0) {
-            if (d == "*/") { inblock--; i += 2 } else if (d == "/*") { inblock++; i += 2 } else i++
-            continue
-          }
-          if (instr == 2) {
-            if (c == "\"" && substr(line, i + 1, rawh) == hashes) {
-              instr = 0; code = code substr(line, i, 1 + rawh); shape = shape substr(line, i, 1 + rawh); i += 1 + rawh
-            } else { code = code c; shape = shape "x"; i++ }
-            continue
-          }
-          if (instr) {
-            if (c == "\\") { code = code substr(line, i, 2); shape = shape "xx"; i += 2; continue }
-            if (c == "\"") { instr = 0; code = code c; shape = shape c } else { code = code c; shape = shape "x" }
-            i++; continue
-          }
-          if (d == "//") break
-          if (d == "/*") { inblock = 1; i += 2; continue }
-          if (c == "r") {
-            prevc = substr(code, length(code), 1); before = substr(code, length(code) - 1, 1)
-            if (prevc !~ /[A-Za-z0-9_]/ || (prevc == "b" && before !~ /[A-Za-z0-9_]/)) {
-              k = i + 1
-              while (substr(line, k, 1) == "#") k++
-              if (substr(line, k, 1) == "\"") {
-                rawh = k - i - 1; hashes = substr(line, i + 1, rawh); instr = 2
-                code = code substr(line, i, k - i + 1); shape = shape substr(line, i, k - i + 1); i = k + 1
-                continue
-              }
-            }
-          }
-          if (c == "\"") { instr = 1; code = code c; shape = shape c; i++; continue }
-          if (c == sq) {
-            if (substr(line, i + 1, 1) == "\\") {
-              j = index(substr(line, i + 3), sq)
-              if (j > 0) { code = code "x"; shape = shape "x"; i += 3 + j; continue }
-            } else if (substr(line, i + 2, 1) == sq) {
-              code = code "x"; shape = shape "x"; i += 3; continue
-            }
-          }
-          code = code c; shape = shape c; i++
-        }
-      }
-      function count(s, ch,    t) { t = s; return gsub(ch, ch, t) }
-      BEGIN { sq = "\047" }
-      FNR == 1 { finish(); name = FILENAME }
-      {
-        scan($0)
-        t = shape; sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t)
-        out = code; sub(/^[[:space:]]+/, "", out); sub(/[[:space:]]+$/, "", out)
-        if (intest > 0) {
-          intest += count(shape, "{") - count(shape, "}")
-          if (intest < 0) intest = 0
-          next
-        }
-        if (t == "") next
-        if (t ~ /^#\[cfg\(test\)\]$/) { pend = 1; next }
-        if (pend && t ~ /^#\[/) next
-        if (pend && t ~ /^(pub(\([a-z]+\))? )?mod [A-Za-z_0-9]+ *\{/) {
-          pend = 0
-          intest = count(shape, "{") - count(shape, "}")
-          if (intest < 0) intest = 0
-          next
-        }
-        pend = 0
-        print name ":" FNR ":" out
-      }
-      END { finish() }'
-}
-sources=$(production_code)
+violations=()
+violate() { violations+=("VIOLATION: $*"); }
 
-violations=$(
-  printf '%s\n' "$sources" | "$awk_bin" -v capability="$capability" -v expected="$expected_published" '
+# `file<TAB>line` for every .rs line under crates/ that matches $1, minus the
+# one exempt comment form.
+lines() {
+  { grep -rnE --include='*.rs' -e "$1" crates 2>/dev/null || true; } | awk '
     {
-      file = $0; sub(/:.*/, "", file); text = $0; sub(/^[^:]*:[0-9]+:/, "", text)
-      norm = text; gsub(/[[:space:]]+/, " ", norm)
-      if (text == "@@UNPARSEABLE") {
-        print "VIOLATION: " file " ends inside a comment, string or test module; the check cannot read it"
-        next
-      }
-      if (text ~ /enable_management/ && text !~ /fn enable_management/) {
-        if (file == capability) enable_calls++
-        else print "VIOLATION: enable_management called outside " capability ": " file ": " text
-      }
-      if (text ~ /MANAGEMENT_PUBLISHED([^A-Za-z0-9_]|$)/) {
-        if (file != capability) print "VIOLATION: MANAGEMENT_PUBLISHED used outside " capability ": " file ": " text
-        else if (text ~ /(const|static) +MANAGEMENT_PUBLISHED([^A-Za-z0-9_]|$)/) {
-          declarations++
-          want = "const MANAGEMENT_PUBLISHED: bool = " expected ";"
-          if (norm != want && norm != "pub " want && norm !~ "^pub\\([a-z]+\\) " want "$")
-            print "VIOLATION: the declaration must be exactly `" want "` (only the publishing change flips it, together with expected_published in this script): " text
-        }
-      }
-      if (text ~ /(^|[^A-Za-z0-9_])admin_composition([^A-Za-z0-9_]|$)/) {
-        inside = (file == "crates/evorch-core/src/admin_composition.rs" || index(file, "crates/evorch-core/src/admin_composition/") == 1)
-        entry = (file == "crates/evorch-core/src/main.rs" || file == "crates/evorch-core/src/planned_entry.rs")
-        if (file == "crates/evorch-core/src/lib.rs") {
-          if (norm != "pub mod admin_composition;") print "VIOLATION: lib.rs may only declare `pub mod admin_composition;`: " text
-        } else if (!inside && !entry) {
-          print "VIOLATION: admin_composition named outside its tree and the two entrypoints: " file ": " text
-        }
-        if (entry && text ~ / as /) print "VIOLATION: an entrypoint must not alias admin_composition: " file ": " text
-      }
-      if (file == "crates/evorch-core/src/main.rs" || file == "crates/evorch-core/src/planned_entry.rs") {
-        if (text ~ /(^|[^A-Za-z0-9_])install +as /) print "VIOLATION: an entrypoint must not alias install: " file ": " text
-        if (text ~ /(^|[^A-Za-z0-9_])self +as /) print "VIOLATION: an entrypoint must not alias self: " file ": " text
-        rest = text
-        while (match(rest, /admin_composition::install([^A-Za-z0-9_]|$)/)) { installs[file]++; rest = substr(rest, RSTART + RLENGTH) }
-        rest = text
-        while (match(rest, /(^|[^A-Za-z0-9_:.])install[ ]*\(/)) { installs[file]++; rest = substr(rest, RSTART + RLENGTH) }
-      }
-      if (text ~ /env::var(_os)?\(/ && toupper(text) ~ /MANAGEMENT|SAFE_RESTART|ADMIN_PUBLISH/)
-        print "VIOLATION: management publication must not read an environment variable: " file ": " text
-    }
-    END {
-      if (enable_calls != 1) print "VIOLATION: expected one enable_management call in " capability ", found " enable_calls + 0
-      if (declarations != 1) print "VIOLATION: expected one MANAGEMENT_PUBLISHED declaration, found " declarations + 0
-      for (f in installs) if (installs[f] > 1) print "VIOLATION: " f " calls install " installs[f] " times"
-    }' || true
-)
-if [[ -n $violations ]]; then printf '%s\n' "$violations"; exit 1; fi
+      file = $0; sub(/:.*/, "", file)
+      text = $0; sub(/^[^:]*:[0-9]+:/, "", text)
+      sub(/^[[:space:]]+/, "", text); sub(/[[:space:]]+$/, "", text)
+      if (text ~ /^\/\// && text !~ /\*\// && text !~ /"/) next
+      print file "\t" text
+    }'
+}
+occurrences() { { printf '%s\n' "$2" | grep -oE -e "$1" || true; } | wc -l; }
+word='(^|[^A-Za-z0-9_])'
+wordend='([^A-Za-z0-9_]|$)'
+
+# 1. the switch file
+if [[ ! -f $capability ]]; then
+  violate "$capability is missing"
+else
+  actual=$(sha256sum "$capability" | cut -d' ' -f1)
+  if [[ $actual != "$capability_sha256" ]]; then
+    violate "$capability changed (sha256 $actual). Review it; only the publishing change may flip the switch, and it updates expected_published and capability_sha256 in this script together"
+  fi
+  declared=$(grep -cxF "const MANAGEMENT_PUBLISHED: bool = $expected_published;" "$capability" || true)
+  [[ $declared == 1 ]] || violate "$capability must hold exactly one 'const MANAGEMENT_PUBLISHED: bool = $expected_published;' line, found $declared"
+fi
+
+# 2. enable_management
+definitions=0
+while IFS=$'\t' read -r file text; do
+  [[ -n $file ]] || continue
+  if [[ $file == "$capability" ]]; then
+    continue
+  elif [[ $file == "$service" && $text == 'pub fn enable_management(&self) {' ]]; then
+    definitions=$((definitions + 1))
+  else
+    violate "enable_management outside $capability: $file: $text (tests call publish_for_test)"
+  fi
+done < <(lines "${word}enable_management${wordend}")
+[[ $definitions == 1 ]] || violate "expected one 'pub fn enable_management(&self) {' line in $service, found $definitions"
+
+# 3. MANAGEMENT_PUBLISHED
+while IFS=$'\t' read -r file text; do
+  [[ -n $file ]] || continue
+  [[ $file == "$capability" ]] || violate "MANAGEMENT_PUBLISHED outside $capability: $file: $text"
+done < <(lines 'MANAGEMENT_PUBLISHED')
+
+# 4. admin_composition
+declare -A installs=()
+while IFS=$'\t' read -r file text; do
+  [[ -n $file ]] || continue
+  if [[ $file == "$tree.rs" || $file == "$tree/"* ]]; then
+    continue
+  elif [[ $file == crates/evorch-core/src/lib.rs ]]; then
+    [[ $text == 'pub mod admin_composition;' ]] || violate "lib.rs may only declare 'pub mod admin_composition;': $text"
+  elif [[ " $entrypoints " == *" $file "* ]]; then
+    all=$(occurrences "${word}admin_composition${wordend}" "$text")
+    called=$(occurrences "${word}admin_composition::install\\(" "$text")
+    built=$(occurrences "${word}admin_composition::Inputs${wordend}" "$text")
+    installs[$file]=$(( ${installs[$file]:-0} + called ))
+    if [[ $all != $((called + built)) || $text =~ (^|[^A-Za-z0-9_])use[[:space:]] ]]; then
+      violate "an entrypoint writes 'admin_composition::install(' or 'admin_composition::Inputs' fully qualified, with no use or alias: $file: $text"
+    fi
+  else
+    violate "admin_composition named outside its tree and the two entrypoints: $file: $text"
+  fi
+done < <(lines "${word}admin_composition${wordend}")
+for file in "${!installs[@]}"; do
+  [[ ${installs[$file]} -le 1 ]] || violate "$file calls admin_composition::install ${installs[$file]} times"
+done
+
+# 5. environment
+while IFS=$'\t' read -r file text; do
+  [[ -n $file ]] || continue
+  if [[ ${text^^} =~ MANAGEMENT|SAFE_RESTART|ADMIN_PUBLISH ]]; then
+    violate "management publication must not read an environment variable: $file: $text"
+  fi
+done < <(lines 'env::var(_os)?\(')
+
+if ((${#violations[@]})); then printf '%s\n' "${violations[@]}"; exit 1; fi
 echo 'Admin publication boundaries passed'

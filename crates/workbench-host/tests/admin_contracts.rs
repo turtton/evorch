@@ -352,7 +352,7 @@ impl Harness {
             InstanceEpoch(7),
         );
         if published {
-            service.enable_management();
+            service.publish_for_test();
         }
         let facade = Facade::new(intent);
         service.install_restart(facade.clone());
@@ -546,7 +546,7 @@ async fn lost_ack_readback_and_caller_disconnect_never_repeat_effect() {
         tasks.clone(),
         InstanceEpoch(7),
     );
-    service.enable_management();
+    service.publish_for_test();
     service.install_restart(h.facade.clone());
     service.install_owned_graphs(h.facade.clone());
     let a = service
@@ -605,7 +605,7 @@ async fn response_budget_never_releases_a_still_owned_writer_command() {
         tasks.clone(),
         InstanceEpoch(7),
     );
-    service.enable_management();
+    service.publish_for_test();
     let intent = request("budget");
     let facade = Facade::new(&intent);
     service.install_restart(facade.clone());
@@ -660,7 +660,7 @@ async fn operation_readback_hides_foreign_existence_and_unknown_never_reexecutes
         tasks.clone(),
         InstanceEpoch(7),
     );
-    service.enable_management();
+    service.publish_for_test();
     service.install_operation_reader(h.port.clone());
     let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
     service.register_worker(&mut services);
@@ -846,7 +846,7 @@ async fn missing_owned_collection_and_old_epoch_fail_before_audit() {
         tasks.clone(),
         InstanceEpoch(7),
     );
-    service.enable_management();
+    service.publish_for_test();
     service.install_restart(Facade::new(&request("missing")));
     let (proof, _lease) = test_support::local();
     let context = IngressContext::new(

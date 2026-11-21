@@ -223,7 +223,7 @@ impl Harness {
             tasks.clone(),
             EPOCH,
         );
-        service.enable_management();
+        service.publish_for_test();
         let hooks = Arc::new(Hooks::default());
         service.install_quarantine(QuarantineFacade::new(
             Arc::new(Store {

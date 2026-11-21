@@ -133,11 +133,15 @@ impl AdminService {
             operation_queries: Arc::new(Semaphore::new(8)),
         })
     }
-    /// Publish management. Product code reaches this only through
-    /// `evorch-core`'s `admin_composition::capability` (checked by
-    /// `scripts/check-admin-publish-boundary.sh`); tests that assemble an
-    /// in-process host call it directly.
+    /// Publish management. The one product caller is the capability module of
+    /// `evorch-core`, which `scripts/check-admin-publish-boundary.sh` pins.
     pub fn enable_management(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+    /// Publish management in a test that assembles an in-process host. It exists
+    /// only under test builds; a product build has no way to call it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_for_test(&self) {
         self.enabled.store(true, Ordering::SeqCst);
     }
     pub fn management_enabled(&self) -> bool {
