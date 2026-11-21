@@ -12,10 +12,12 @@
         "evorch-core/bootstrap-test-support",
         "evorch-core/renderer-test-helper"
       ],
-      "allow_empty_suites": []
+      "allow_empty_suites": [
+        "main-only-gui"
+      ]
     },
     "gui": {
-      "shards": 2,
+      "shards": 1,
       "packages": [
         "gui",
         "browser-cef",
@@ -30,7 +32,7 @@
       "allow_empty_suites": []
     },
     "storage-tools": {
-      "shards": 3,
+      "shards": 2,
       "packages": [
         "storage",
         "tools",
@@ -44,7 +46,9 @@
         "storage/test-support",
         "sandbox/keychain"
       ],
-      "allow_empty_suites": []
+      "allow_empty_suites": [
+        "main-only-gui"
+      ]
     },
     "support": {
       "shards": 1,
@@ -77,7 +81,8 @@
         "workbench-host/test-support"
       ],
       "allow_empty_suites": [
-        "io"
+        "io",
+        "main-only-gui"
       ]
     }
   }

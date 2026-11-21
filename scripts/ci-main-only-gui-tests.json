@@ -1,0 +1,12 @@
+{
+  "package": "gui",
+  "binaries": [
+    { "target": "attention", "reason": "former embedded GUI check: waiting badge, approvals panel and notifications through the headless workbench" },
+    { "target": "models_usage", "reason": "former embedded GUI check: telemetry, cost, model picker and model metadata through the headless workbench" },
+    { "target": "pull_requests", "reason": "former embedded GUI check: pull request panel through the headless workbench" },
+    { "target": "settings_ui", "reason": "former embedded GUI check: provider, role and window settings through the headless workbench" },
+    { "target": "size_dpi_matrix", "reason": "former embedded GUI check: size x DPI geometry matrix of the headless workbench" },
+    { "target": "transcript_cards", "reason": "former embedded GUI check: transcript, composer and card rendering through the headless workbench" },
+    { "target": "workbench_shell", "reason": "former embedded GUI check: sidebar, dock, diff, terminal and browser tab of the headless workbench" }
+  ]
+}
