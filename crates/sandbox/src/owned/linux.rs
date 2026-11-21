@@ -1,4 +1,6 @@
 use super::OwnedCommand;
+#[path = "pty_linux.rs"]
+pub(super) mod pty;
 use crate::ledger::{Admission, ChildEntry, ChildKind};
 use process_guard::GuardChild;
 use std::{
@@ -102,12 +104,14 @@ pub(super) struct Owner {
 }
 impl Owner {
     fn spawn(command: &mut OwnedCommand) -> io::Result<Self> {
-        let mut child = command.launch()?;
+        Ok(Self::from_guard(command.launch()?))
+    }
+    fn from_guard(mut child: GuardChild) -> Self {
         let pid = child.target_id();
         let stdin = child.take_stdin();
         let stdout = child.take_stdout();
         let stderr = child.take_stderr();
-        Ok(Self {
+        Self {
             group: OwnedGroup(Arc::new(Mutex::new(State {
                 child: Some(child),
                 pid: Some(pid),
@@ -118,7 +122,7 @@ impl Owner {
             stdout,
             stderr,
             entry: None,
-        })
+        }
     }
     fn reaped(&mut self) {
         if let Some(entry) = self.entry.take() {
