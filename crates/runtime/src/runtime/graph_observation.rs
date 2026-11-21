@@ -8,6 +8,8 @@ use storage::recovery::graph_control::GraphControlCas;
 pub trait GraphObserver: Send + Sync + 'static {
     fn begin_change(&self, manifest: &str) -> Result<u64, RuntimeError>;
     /// Read-only diagnostics do not reserve an effect or advance the aggregate.
+    /// Untracked graphs also receive a revision: publication validates the same
+    /// snapshot without enrolling them. None means unavailable or contended.
     fn diagnostic_revision(&self, manifest: &str) -> Option<u64>;
     fn publish_diagnostic(
         &self,

@@ -145,10 +145,7 @@ impl GraphObserver for LiveGraphCollector {
         let mut state = self.state.lock().ok()?;
         state.available().ok()?;
         state.reconcile_restart();
-        if state.restart.is_some()
-            || state.pending.contains_key(manifest)
-            || !state.graphs.contains_key(manifest)
-        {
+        if state.restart.is_some() || state.pending.contains_key(manifest) {
             return None;
         }
         Some(state.revision)
@@ -172,6 +169,12 @@ impl GraphObserver for LiveGraphCollector {
             let state = self.state.lock().map_err(|_| RuntimeError::RestartBusy)?;
             if !current(&state) {
                 return Err(RuntimeError::RestartBusy);
+            }
+            // Cold/foreign rows are diagnostic-only. They still use the same
+            // optimistic revision and restart fence, but never grow the sealed
+            // live inventory or acquire effect authority through a read.
+            if !state.graphs.contains_key(manifest) {
+                return Ok(());
             }
         }
         // Project the very ownership result returned to the diagnostic caller,

@@ -77,7 +77,7 @@ impl AgentRuntime {
         };
         if expected.control_revision.checked_add(1) != Some(control_revision)
             || !matches!(
-                self.owned_graph_ownership_diagnostic(expected)
+                self.reserved_owned_graph_ownership_diagnostic(expected, reservation)
                     .map_err(|_| RuntimeError::GraphControlNotApplied)?
                     .state(),
                 OwnedGraphOwnershipState::LiveSelf

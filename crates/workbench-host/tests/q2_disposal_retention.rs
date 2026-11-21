@@ -14,6 +14,8 @@ fn main() {
             "live-collector-effects",
             "live-collector-owner-generation",
             "live-collector-diagnostic-race",
+            "live-collector-manual-resume",
+            "cold-detail",
             "diagnostic-64",
             "diagnostic-oversize",
         ],
@@ -36,6 +38,10 @@ fn check(f: &fixture::Fixture, case: &str) {
         diagnostic_bounds(f, case);
         return;
     }
+    if case == "cold-detail" {
+        cold_detail(f);
+        return;
+    }
     for thread in fixture::THREADS {
         f.denied(thread);
     }
@@ -43,7 +49,8 @@ fn check(f: &fixture::Fixture, case: &str) {
         "planned-owner-threads"
         | "live-collector-effects"
         | "live-collector-owner-generation"
-        | "live-collector-diagnostic-race" => {
+        | "live-collector-diagnostic-race"
+        | "live-collector-manual-resume" => {
             claim_planned_owner_threads(&f.runtime, &f.owner).unwrap()
         }
         "current-authority-resolver" => {
@@ -120,6 +127,161 @@ fn check(f: &fixture::Fixture, case: &str) {
     if let Some((collector, pause)) = collector {
         live_collector(f, case, &collector, pause.as_deref());
     }
+}
+
+#[cfg(target_os = "linux")]
+fn manual_resume(
+    f: &fixture::Fixture,
+    collector: &workbench_host::bootstrap::recovery_disposal::LiveGraphCollector,
+) {
+    use runtime::{ActivationReservation, OwnedGraphOwnershipState, RuntimeError};
+    use storage::recovery::{
+        RecoveryClaimRequest, RecoveryClaimState, graph_control::GraphEffectKey,
+    };
+    use workbench_protocol::wire::Revision;
+    // Leave the same existing Prepared claim that an automatic attempt can
+    // hand to manual Resume. The original attempt owns its observation fence.
+    let automatic = f.runtime.reserve_automatic_activation("graph-a").unwrap();
+    let claim = f
+        .storage
+        .handle()
+        .claim_recovery_manifest(RecoveryClaimRequest {
+            claim_id: "resume-prepared".into(),
+            manifest_id: "graph-a".into(),
+            incarnations: vec![(fixture::run_id("a").to_string(), "manual-new".into())],
+        })
+        .unwrap();
+    automatic.confirm_graph_observation();
+    drop(automatic);
+    let cas = f.cas("a");
+    assert_eq!(cas.claim.as_ref(), Some(&claim));
+    let effect = GraphEffectKey {
+        operation_id: "manual-resume".into(),
+        attempt_nonce: "manual-resume-nonce".into(),
+    };
+    let reservation: ActivationReservation = f
+        .runtime
+        .reserve_manual_activation("graph-a", effect.clone(), cas.control_revision)
+        .unwrap()
+        .into();
+    assert!(matches!(
+        f.runtime.owned_graph_ownership_diagnostic(&cas),
+        Err(RuntimeError::RestartBusy)
+    ));
+    assert_eq!(
+        f.runtime
+            .reserved_owned_graph_ownership_diagnostic(&cas, &reservation)
+            .unwrap()
+            .state(),
+        OwnedGraphOwnershipState::LiveSelf
+    );
+    assert!(
+        collector.snapshot().is_err(),
+        "internal reads cannot settle pending"
+    );
+    let permit = f.owner.owned_permit("a").unwrap();
+    // Exercise the real Resume policy writer, not only the read-only helper.
+    let control = f
+        .runtime
+        .begin_owned_graph_resume(&cas, &[permit], &reservation)
+        .unwrap();
+    assert_eq!(control.mode, "manual_running");
+    assert!(!control.revoked);
+    assert_eq!(control.revision, cas.control_revision + 1);
+    assert_eq!(
+        f.db().recovery_graph_effect(&effect.operation_id).unwrap(),
+        Some(control.clone())
+    );
+    assert_eq!(
+        f.cas("a").claim.unwrap().state,
+        RecoveryClaimState::Prepared
+    );
+    assert!(collector.snapshot().is_err());
+    f.storage
+        .handle()
+        .finish_recovery_graph_control(control)
+        .unwrap();
+    reservation.confirm_graph_observation();
+    drop(reservation);
+    assert_eq!(collector.snapshot().unwrap().count, Revision(2));
+}
+
+#[cfg(target_os = "linux")]
+fn cold_detail(f: &fixture::Fixture) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use workbench_host::bootstrap::recovery_disposal::{LiveGraphCollector, detail};
+    use workbench_protocol::{
+        namespaces::lifecycle::owned_graphs::{ActionAvailability, OwnershipView},
+        wire::{InstanceEpoch, Revision},
+    };
+    // Reopen the persisted Adopted graph with an ordinary cold runtime: no
+    // physical proof, sealed inventory, claim migration, or fixture authority.
+    let bus = Arc::new(event_bus::EventBus::new(16));
+    let (tools, model, _) = fixture::default_factory("cold", bus.clone());
+    let runtime = runtime::AgentRuntime::new(bus, tools, model)
+        .with_run_store(runtime::RunStore::open(&f.config, f.storage.handle()).unwrap());
+    assert!(!runtime.has_planned_restart_handoff());
+    let collector = LiveGraphCollector::new(&runtime, f.config.clone());
+    collector.bind_epoch(InstanceEpoch(3)).unwrap();
+    runtime.install_graph_observer(collector.clone()).unwrap();
+    runtime.rebuild_graph_observation().unwrap();
+    let before = collector.snapshot().unwrap();
+    assert_eq!(before.count, Revision(0));
+    let graph = f.db().owned_graph_snapshots().unwrap().remove(0);
+    assert_eq!(graph.adopted_epoch, Some(graph.cas.successor_epoch));
+    for _ in 0..2 {
+        let view = detail(&runtime, &f.owner, &graph).unwrap();
+        assert_eq!(view.ownership, OwnershipView::Cold);
+        assert!(matches!(view.resume, ActionAvailability::Blocked { .. }));
+        assert!(matches!(view.release, ActionAvailability::Blocked { .. }));
+        assert_eq!(collector.snapshot().unwrap(), before);
+        assert!(
+            collector
+                .begin_change(&graph.cas.manifest.manifest_id)
+                .is_err()
+        );
+    }
+    let revision = collector
+        .diagnostic_revision(&graph.cas.manifest.manifest_id)
+        .unwrap();
+    let diagnostic = runtime
+        .owned_graph_ownership_diagnostic(&graph.cas)
+        .unwrap();
+    let returned = Arc::new(AtomicBool::new(false));
+    let predicate = returned.clone();
+    collector
+        .admit(
+            InstanceEpoch(3),
+            before.snapshot_revision,
+            &mut || Ok(()),
+            move |_| Arc::new(move || predicate.load(Ordering::Acquire)),
+        )
+        .unwrap();
+    assert!(
+        detail(&runtime, &f.owner, &graph).is_err(),
+        "restart reservation is Busy"
+    );
+    assert!(
+        collector
+            .publish_diagnostic(&graph.cas, revision, &diagnostic)
+            .is_err()
+    );
+    returned.store(true, Ordering::Release);
+    assert_eq!(
+        detail(&runtime, &f.owner, &graph).unwrap().ownership,
+        OwnershipView::Cold
+    );
+    assert_eq!(collector.snapshot().unwrap(), before);
+    // A failed cold read is not "untracked success": it permanently closes
+    // observation, just like a failed read for a live graph.
+    let mut stale = graph.cas.clone();
+    stale.control_revision += 1;
+    assert!(runtime.owned_graph_ownership_diagnostic(&stale).is_err());
+    assert!(collector.snapshot().is_err());
+    assert!(detail(&runtime, &f.owner, &graph).is_err());
 }
 
 #[cfg(target_os = "linux")]
@@ -297,6 +459,10 @@ fn live_collector(
     );
     if let Some(pause) = pause {
         diagnostic_race(f, collector, pause);
+        return;
+    }
+    if case == "live-collector-manual-resume" {
+        manual_resume(f, collector);
         return;
     }
     for _ in 0..2 {
