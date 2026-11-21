@@ -211,6 +211,12 @@ grep -q "shared/nested/child.rs" "$t/target/debug/deps/attention-0123abcd.d" \
 
 fresh; printf '// core_client is not used here\n/* nor core_client in\n   a block */\nfn f() {}\n' >> "$gui_dir/attention/panel.rs"; depinfo
 expect_ok "core_client only in comments" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; printf 'include!("body.inc");\n' >> "$gui_dir/attention/panel.rs"; printf 'fn from_inc() { let _ = gui::core_client::x; }\n' > "$gui_dir/attention/body.inc"
+source_case "core_client in a non-.rs file read by include!" "body.inc names core_client|body.inc:"
+fresh; printf 'const B: &[u8] = include_bytes!("blob.bin");\n' >> "$gui_dir/attention/panel.rs"; printf '\000\001core_client\002' > "$gui_dir/attention/blob.bin"
+source_case "core_client in a binary file read by include_bytes!" "blob.bin"
+fresh; printf 'include!("body.inc");\n' >> "$gui_dir/attention/panel.rs"; printf 'fn from_inc() {}\n' > "$gui_dir/attention/body.inc"; depinfo
+expect_ok "a non-.rs include! without core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 fresh; printf 'const SRC: &str = include_str!("../../registry.json");\n' >> "$gui_dir/attention/panel.rs"; depinfo
 expect_ok "include_str! of a file that is not Rust source" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 fresh; printf 'const SRC: &str = include_str!("../../src/lib.rs");\n' >> "$gui_dir/attention/panel.rs"
@@ -228,7 +234,7 @@ expect_fail "registering that binary is caught" "newsys/core_client_page.rs name
 fresh; depinfo; rm "$t/target/debug/deps/attention-0123abcd.d"
 expect_fail "a missing dependency-info file" "no dependency-info file" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 fresh; depinfo; printf 'not a dependency file\n' > "$t/target/debug/deps/matrix-0123abcd.d"
-expect_fail "a dependency-info file that lists nothing" "lists no .rs file" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+expect_fail "a dependency-info file that lists nothing" "lists no file" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 fresh; depinfo; jq 'del(.["rust-binaries"]["gui::matrix"])' "$t/binaries.json" > "$work/b.json"
 expect_fail "a registered binary the build metadata does not know" "has no binary gui::matrix" "$t" "$reg" --root "$t" check-depinfo "$work/b.json"
 fresh; depinfo; rm "$gui_dir/attention/panel.rs"

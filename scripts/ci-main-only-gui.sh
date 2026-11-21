@@ -29,12 +29,16 @@
 # to the test binary (cargo nextest's binaries metadata, the one the inventory
 # builds from, gives the binary's path). Module resolution is therefore the
 # compiler's, whatever the nesting, the module names or the `#[path]` and
-# `include!` in use, and no part of it is re-implemented here. Every `.rs` file in
-# the list is read with its comments dropped; one that names `core_client` fails.
-# A dependency-info file that is missing, a binary the metadata does not know, or a
-# listed `.rs` file that does not exist is a failure, never a pass. The list also
-# holds the files a binary reads with `include_str!`, so a `.rs` file read that way
-# is checked too (the check errs on the side of rejecting). This is a guard against
+# `include!` in use, and no part of it is re-implemented here. Every file in the
+# list is read, whatever its extension, because `include!` takes any file as Rust
+# source (`include!("body.inc")`) and the list does not say how a file was read. A
+# `.rs` file is read with its comments dropped and `core_client` as a whole word; any
+# other file, binaries included, is searched as it is for the plain text
+# `core_client`. One that matches fails. A dependency-info file that is missing, a
+# binary the metadata does not know, a listed file that does not exist, or a list
+# without any file is a failure, never a pass. The list also holds the files read
+# with `include_str!` and `include_bytes!`, so those are checked too: the check errs
+# on the side of rejecting. This is a guard against
 # the new core-client desktop (ADR 0045) entering a binary that a pull request no
 # longer runs; it does not prove that a registered test is not a core-client test,
 # so a test of the new system goes into a binary that is not registered.
@@ -130,7 +134,7 @@ strip_comments() {
     }' "$1"
 }
 
-# The .rs files listed in a dependency-info file (Makefile syntax: `target: dep...`,
+# The files listed in a dependency-info file (Makefile syntax: `target: dep...`,
 # a space in a name written `\ `, then one `dep:` rule per file). Only the first
 # line carries the list.
 depinfo_sources() { # <file.d>
@@ -139,7 +143,7 @@ depinfo_sources() { # <file.d>
   [[ "$line" == *": "* ]] || { echo "FAIL: $1 is not a dependency-info file" >&2; return 1; }
   line=${line#*: }
   line=${line//\\ /$'\001'}
-  printf '%s\n' "$line" | tr ' ' '\n' | tr '\001' ' ' | grep -E '\.rs$' || true
+  printf '%s\n' "$line" | tr ' ' '\n' | tr '\001' ' '
 }
 
 check_depinfo() {
@@ -163,15 +167,19 @@ check_depinfo() {
       [[ -f "$src" ]] || fail "binary $target: $dep lists $src, which does not exist"
       listed=$((listed + 1))
       files_total=$((files_total + 1))
-      strip_comments "$src" > "$stripped"
-      hits=$(grep -nE '(^|[^A-Za-z0-9_])core_client([^A-Za-z0-9_]|$)' "$stripped" || true)
+      if [[ "$src" == *.rs ]]; then
+        strip_comments "$src" > "$stripped"
+        hits=$(grep -nE '(^|[^A-Za-z0-9_])core_client([^A-Za-z0-9_]|$)' "$stripped" || true)
+      else
+        hits=$(grep -anF 'core_client' "$src" | cut -c1-200 || true)
+      fi
       if [[ -n "$hits" ]]; then
         echo "FAIL: binary $target: $src names core_client:" >&2
         sed 's/^/  /' <<< "$hits" >&2
         exit 1
       fi
     done < <(depinfo_sources "$dep")
-    ((listed > 0)) || fail "binary $target: $dep lists no .rs file"
+    ((listed > 0)) || fail "binary $target: $dep lists no file"
   done
   echo "main-only GUI sources (dependency-info): $n binaries, $files_total files read, no core_client reference"
 }
