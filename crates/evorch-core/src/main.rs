@@ -35,7 +35,7 @@ fn main() -> std::process::ExitCode {
 }
 fn run() -> Result<(), BootstrapError> {
     #[cfg(target_os = "linux")]
-    let mask = core_instance::handoff::BlockedShutdownSignals::at_entry()?;
+    let mask = Arc::new(core_instance::handoff::BlockedShutdownSignals::at_entry()?);
     #[cfg(target_os = "linux")]
     let entry = core_instance::handoff::entry::EntryOptions::parse(std::env::args_os().skip(1))?;
     // Inspect before config/DB/runtime/any new ShutdownInbox. Never fall back to Cold.
@@ -100,10 +100,10 @@ fn run() -> Result<(), BootstrapError> {
     {
         let inbox = mask.inbox()?;
         evorch_core::lifecycle::shutdown_watchdog::run_with_runtime(
-            (identity.config_dir().to_path_buf(), args.web, launch),
+            (identity.config_dir().to_path_buf(), args.web, launch, mask),
             inbox,
-            |(config_dir, web, launch), runtime, inbox, observer| {
-                runtime.block_on(serve(config_dir, web, launch, inbox, observer))
+            |(config_dir, web, launch, mask), runtime, inbox, observer| {
+                runtime.block_on(serve(config_dir, web, launch, inbox, observer, mask))
             },
         )
         .map_err(|failure| -> BootstrapError { failure.error.into() })?
@@ -120,8 +120,12 @@ async fn serve(
     launch: LaunchGuard,
     #[cfg(target_os = "linux")] inbox: core_instance::handoff::ShutdownInbox,
     #[cfg(target_os = "linux")] observer: evorch_core::lifecycle::shutdown_watchdog::Observer,
+    #[cfg(target_os = "linux")] mask: Arc<core_instance::handoff::BlockedShutdownSignals>,
 ) -> Result<(), BootstrapError> {
-    let instance = Instance::acquire_default(&launch)?;
+    let instance = Arc::new(Instance::acquire_default(&launch)?);
+    #[cfg(target_os = "linux")]
+    let options =
+        evorch_core::lifecycle::product_exit::ProductOptions::new(config_dir.clone(), web);
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::home_dir().map(|p| p.join(".local/state")))
@@ -148,6 +152,18 @@ async fn serve(
     let mut lifecycle = LifecycleDriver::new(&host);
     #[cfg(target_os = "linux")]
     lifecycle.set_shutdown_watchdog(observer)?;
+    #[cfg(target_os = "linux")]
+    let exit = evorch_core::lifecycle::product_exit::ProductExitContext::new(
+        instance.clone(),
+        mask,
+        signals.clone(),
+        lifecycle.control_drain(),
+        options,
+    );
+    let inputs = evorch_core::admin_composition::Inputs::new(&host, &backend);
+    #[cfg(target_os = "linux")]
+    let inputs = inputs.with_finalization(lifecycle.finalization(), &exit);
+    evorch_core::admin_composition::install(&inputs);
     let web_config = WebServerConfig {
         enabled: web || host.config.web.enabled,
         bind: ([127, 0, 0, 1], host.config.web.port).into(),
@@ -191,11 +207,21 @@ async fn serve(
         serde_json::json!({"status":"ready", "socket":instance.socket, "core":instance.identity, "web":server.as_ref().map(|s| s.local_addr().to_string())})
     );
     let outcome = lifecycle
-        .run_with_web(&host, backend.clone(), listener, server, signals)
+        .run_owned_with_web(
+            &mut host,
+            backend.clone(),
+            listener,
+            server,
+            signals,
+            #[cfg(target_os = "linux")]
+            &exit,
+        )
         .await;
     host.shutdown().await?;
     drop(backend);
     drop(host); // storage leases before the lifetime lock
+    #[cfg(target_os = "linux")]
+    drop(exit);
     drop(instance);
     outcome?;
     Ok(())

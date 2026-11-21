@@ -365,7 +365,28 @@ impl CommitObservers {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static REQUESTS_FORBIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl StorageHandle {
+    /// Poll a memory-only synchronous scope. The prohibition never crosses an
+    /// await or thread boundary, and unwinding restores the prior scope.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn without_blocking_requests_for_test<T>(body: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                REQUESTS_FORBIDDEN.with(|flag| flag.set(self.0));
+            }
+        }
+        let restore = Restore(REQUESTS_FORBIDDEN.with(|flag| flag.replace(true)));
+        let result = body();
+        drop(restore);
+        result
+    }
+
     /// Register a nonblocking wake-up after a successful local event-log commit.
     /// Notifications may coalesce; readers must follow their durable event ID.
     /// Retain the callback to stay subscribed; dropping it unregisters lazily.
@@ -1386,6 +1407,13 @@ impl StorageHandle {
     }
 
     fn request<T>(&self, command: impl FnOnce(ReplyTx<T>) -> Command) -> Result<T, StorageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        REQUESTS_FORBIDDEN.with(|flag| {
+            assert!(
+                !flag.get(),
+                "synchronous storage request in memory-only scope"
+            );
+        });
         let (reply, result) = mpsc::channel();
         self.0
             .send(command(reply))
@@ -1678,6 +1706,22 @@ impl StorageHandle {
             .send(Command::Index(index::IndexCommand::Tick))
             .map_err(|_| StorageError::WriterClosed)?;
         self.thread_index_job_status()
+    }
+
+    /// Pause the actual single writer after preceding commands, acknowledge
+    /// entry, and resume only on release/drop. No product build contains this.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pause_writer_for_test(
+        &self,
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    ) -> Result<(), StorageError> {
+        self.0
+            .send(Command::Index(index::IndexCommand::Pause {
+                entered,
+                release,
+            }))
+            .map_err(|_| StorageError::WriterClosed)
     }
 
     #[cfg(test)]

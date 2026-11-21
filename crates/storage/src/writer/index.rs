@@ -475,6 +475,11 @@ pub(super) enum IndexCommand {
     Extracted(Box<work::Extracted>),
     #[cfg(test)]
     Block(mpsc::Receiver<()>),
+    #[cfg(any(test, feature = "test-support"))]
+    Pause {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    },
     /// Test observer: receives the counters after every background step.
     #[cfg(any(test, feature = "test-support"))]
     Observe(Sender<ThreadIndexCounters>),
@@ -1093,6 +1098,11 @@ pub(super) fn handle(
         }
         #[cfg(test)]
         IndexCommand::Block(release) => {
+            let _ = release.recv();
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        IndexCommand::Pause { entered, release } => {
+            let _ = entered.send(());
             let _ = release.recv();
         }
         #[cfg(any(test, feature = "test-support"))]

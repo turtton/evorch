@@ -1,11 +1,16 @@
 use super::*;
-mod finalization;
+pub(crate) mod finalization;
 mod learning;
 mod preparing;
 mod shutdown;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
+#[cfg(target_os = "linux")]
+#[path = "../../shared-test-support/checked_target.rs"]
+pub(crate) mod checked_target;
+#[path = "../../shared-test-support/restart_metadata.rs"]
+pub(crate) mod restart_metadata;
 #[path = "../../shared-test-support/restart_model.rs"]
-mod restart_model;
+pub(crate) mod restart_model;
 use restart_model::{Direct, Model};
 // These fixtures explicitly reach an idle safe point before restart. PreparingDrains
 // intentionally permits provider work, so scheduling request immediately after

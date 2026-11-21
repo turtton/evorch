@@ -680,4 +680,4 @@ async fn producer_change(receivers: &mut [watch::Receiver<u64>]) {
 #[cfg(all(test, target_os = "linux"))]
 mod shutdown_watchdog_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
