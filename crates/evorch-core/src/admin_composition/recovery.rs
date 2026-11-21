@@ -1,4 +1,8 @@
-//! Quarantine and owned-graphs leaves. Registered by their own changes.
+//! Quarantine and owned-graphs leaves. Each is registered by its own module.
 use super::Inputs;
 
-pub(super) fn install(_inputs: &Inputs<'_>) {}
+mod quarantine;
+
+pub(super) fn install(inputs: &Inputs<'_>) {
+    quarantine::install(inputs);
+}

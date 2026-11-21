@@ -35,3 +35,5 @@ pub mod scratch_archive;
 pub mod subscriptions;
 
 pub use ingress::CommandHost;
+/// The Q1 leaf, built and registered by the composition root.
+pub use ingress::namespaces::lifecycle::quarantine::{QuarantineFacade, StorageQuarantineStore};

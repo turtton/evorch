@@ -1,7 +1,7 @@
 //! Q1 over the real admin service, real audit journal and real storage. Faults
 //! are injected only at the store seam, and every synchronization is an event
 //! (a reply, the admission slots joining), never a sleep.
-use super::*;
+use super::{store::QuarantineStore, *};
 use crate::{
     admin::*, areas::tasks::AreaTasks, bootstrap::restart::HostRestartGate,
     bootstrap::services::BackgroundServices,
