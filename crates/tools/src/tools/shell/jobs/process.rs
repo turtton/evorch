@@ -1,9 +1,10 @@
 //! Process and PTY supervision for shell jobs.
 use super::super::{io_failed, spawn_failed};
-use super::{Completion, Input, Job};
+use super::{Completion, Input, Job, JobGroup};
 use crate::ToolError;
 use sandbox::WrappedCommand;
 use sandbox::ledger::{ChildKind, SpawnLedger};
+use sandbox::owned::OwnedChild;
 use sandbox::process::{ProcessGroup, ProcessGroupGuard};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -25,9 +26,8 @@ pub(super) async fn run_pipe(
             error: None,
         });
     }
-    let mut command = tokio::process::Command::from(wrapped.to_command());
+    let mut command = wrapped.to_owned_command();
     command
-        .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(if job.synchronous {
@@ -35,13 +35,17 @@ pub(super) async fn run_pipe(
         } else {
             std::process::Stdio::piped()
         });
-    let mut child = {
-        let admission = SpawnLedger::admit_optional(job.ledger.as_ref()).map_err(io_failed)?;
-        admission
-            .spawn_group(ChildKind::ShellJob, Some("shell-pipe"), &mut command)
-            .map_err(|error| spawn_failed(&wrapped.program, error))?
-    };
-    job.register_process(Some(child.group().clone()));
+    // Dropping this future mid-launch leaves the child to its owner's Drop,
+    // which kills and reaps its group.
+    let mut child = OwnedChild::spawn_blocking(
+        job.ledger.clone(),
+        ChildKind::ShellJob,
+        Some("shell-pipe".to_owned()),
+        command,
+    )
+    .await
+    .map_err(|error| spawn_failed(&wrapped.program, error))?;
+    job.register_process(Some(JobGroup::Owned(child.group().clone())));
     let result = async {
         let mut stdout = child
             .take_stdout()
@@ -160,7 +164,7 @@ pub(super) async fn run_pty(
     // Cancelling the job future stops the PTY session's group; once the waiter
     // has reaped the shell, nothing is signalled.
     let _stop_on_drop = ProcessGroupGuard::new(group.clone());
-    job.register_process(Some(group.clone()));
+    job.register_process(Some(JobGroup::Pty(group.clone())));
     let output_job = Arc::clone(job);
     let reader_task = tokio::task::spawn_blocking(move || -> Result<(), ToolError> {
         let mut buffer = [0u8; 8192];

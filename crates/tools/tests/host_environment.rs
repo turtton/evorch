@@ -47,7 +47,8 @@ async fn invoke(
 fn reviewed_shell_inherits_environment_and_redacts_pipe_pty_and_job_output() {
     if std::env::var_os("EVORCH_HOST_SHELL_FIXTURE").is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let result = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
             .args([
                 "--exact",
                 "reviewed_shell_inherits_environment_and_redacts_pipe_pty_and_job_output",
@@ -64,9 +65,12 @@ fn reviewed_shell_inherits_environment_and_redacts_pipe_pty_and_job_output() {
             .env("HTTPS_PROXY", "http://fixture.invalid:8080")
             .env("EVORCH_CUSTOM_TOOL", "custom-tool-value")
             .env("EVORCH_NON_UTF8", OsStr::from_bytes(b"native-\xff"))
-            .env("GH_TOKEN", SECRET)
-            .output()
-            .unwrap();
+            .env("GH_TOKEN", SECRET);
+        // Shell pipes are guard-owned, so the cleared child still needs the bundle.
+        if let Some(bundle) = std::env::var_os("EVORCH_PROCESS_GUARD_BUNDLE") {
+            child.env("EVORCH_PROCESS_GUARD_BUNDLE", bundle);
+        }
+        let result = child.output().unwrap();
         assert!(
             result.status.success(),
             "{}\n{}",

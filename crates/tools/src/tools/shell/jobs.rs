@@ -164,7 +164,7 @@ struct State {
     artifact_notice: Option<String>,
     // Stops the job's process group from any thread; it signals nothing once
     // the job's supervisor has reaped the group leader.
-    process: Option<sandbox::process::ProcessGroup>,
+    process: Option<JobGroup>,
     sandbox: Option<Arc<dyn Sandbox>>,
     // Highest cursor any response returned; omitted control cursors resume here.
     delivered_cursor: u64,
@@ -897,6 +897,30 @@ struct LaunchGuard {
     job: Arc<Job>,
     delivered: bool,
 }
+/// The stop capability of a running job: the guard-owned group of a pipe job or
+/// the raw group of a PTY job (PTY stays on its own backend until B3).
+#[derive(Clone)]
+enum JobGroup {
+    Owned(sandbox::owned::OwnedGroup),
+    Pty(sandbox::process::ProcessGroup),
+}
+impl JobGroup {
+    fn kill(&self) {
+        match self {
+            Self::Owned(group) => drop(group.kill()),
+            Self::Pty(group) => group.kill(),
+        }
+    }
+    /// The group's leader is no longer reserved: the reap retired the handle.
+    #[cfg(test)]
+    fn retired(&self) -> bool {
+        match self {
+            Self::Owned(group) => group.id().is_none(),
+            Self::Pty(group) => group.leader().is_none(),
+        }
+    }
+}
+
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
         if !self.delivered {
@@ -911,15 +935,19 @@ impl Job {
     }
     fn cancel_now(&self) {
         self.cancel.send_replace(true);
-        let state = self
+        let group = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(group) = &state.process {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .process
+            .clone();
+        // Signalled outside the state lock: a guard-owned group's control
+        // channel has its own lock.
+        if let Some(group) = group {
             group.kill();
         }
     }
-    fn register_process(&self, group: Option<sandbox::process::ProcessGroup>) {
+    fn register_process(&self, group: Option<JobGroup>) {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

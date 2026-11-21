@@ -47,7 +47,7 @@ fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
     (job, received, cancelled)
 }
 
-fn stored_group(job: &Job) -> Option<sandbox::process::ProcessGroup> {
+fn stored_group(job: &Job) -> Option<JobGroup> {
     job.state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -138,10 +138,12 @@ async fn assert_retired_after_reap(job: &Job, dir: &Path, helper: &str) {
     // The handle stored for stop is retired by the reap, and a later stop or
     // guard drop through it signals nothing.
     let stored = stored_group(job).expect("the job stored its group");
-    assert_eq!(stored.leader(), None);
+    assert!(stored.retired());
     job.cancel_now();
-    drop(sandbox::process::ProcessGroupGuard::new(stored.clone()));
-    assert_eq!(stored.leader(), None);
+    if let JobGroup::Pty(group) = &stored {
+        drop(sandbox::process::ProcessGroupGuard::new(group.clone()));
+    }
+    assert!(stored.retired());
 }
 
 // Given: a job whose shell exits while a helper still holds its output /
@@ -170,4 +172,28 @@ async fn a_stopped_job_stops_its_group_before_reaping_and_retires_it() {
         assert_eq!(completion.status, "cancelled", "interactive: {interactive}");
         assert_retired_after_reap(&job, dir.path(), &helper).await;
     }
+}
+
+// Given: a pipe job's guard-owned group registered for stop, whose supervisor
+// is not consuming the cancel signal / When: the job is cancelled from another
+// thread / Then: the registered group is killed through its stop capability.
+#[tokio::test]
+async fn cancelling_a_job_kills_its_registered_owned_group() {
+    use std::os::unix::process::ExitStatusExt;
+    let (job, _input, _cancelled) = job();
+    let mut command = sandbox::owned::OwnedCommand::new("sleep");
+    command.arg("60");
+    let mut child = sandbox::owned::OwnedChild::spawn_blocking(
+        None,
+        sandbox::ChildKind::ShellJob,
+        None,
+        command,
+    )
+    .await
+    .unwrap();
+    job.register_process(Some(JobGroup::Owned(child.group().clone())));
+    job.cancel_now();
+    let status = child.wait().await.unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    assert!(stored_group(&job).unwrap().retired());
 }

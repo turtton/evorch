@@ -6,9 +6,9 @@
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 
+use sandbox::owned::OwnedChild;
 use sandbox::{ChildKind, CommandSpec, Sandbox, SpawnLedger};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
@@ -120,13 +120,12 @@ impl Tool for GitDiff {
         // The launch policy keeps git (and any external diff tool or textconv
         // filter it runs) off evorch's terminal and descriptors. Cancelling the
         // call kills the whole process group.
-        let mut command = Command::from(wrapped.to_command());
+        let mut command = wrapped.to_owned_command();
         command
             // git diff は標準入力を読まない。フック等が読んでも即時 EOF にする。
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
 
         let spawn_failed = |error: std::io::Error| ToolError::SpawnFailed {
             command: wrapped.program.clone(),
@@ -137,12 +136,14 @@ impl Tool for GitDiff {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let mut child = SpawnLedger::admit_optional(ledger.as_ref())
-            .map_err(std::io::Error::from)
-            .and_then(|admission| {
-                admission.spawn_group(ChildKind::Other, Some("git-diff"), &mut command)
-            })
-            .map_err(spawn_failed)?;
+        let mut child = OwnedChild::spawn_blocking(
+            ledger,
+            ChildKind::Other,
+            Some("git-diff".to_owned()),
+            command,
+        )
+        .await
+        .map_err(spawn_failed)?;
         let (stdout, stderr) = (child.take_stdout(), child.take_stderr());
         // Once git exits, waiting kills helpers that still hold its output, so
         // the reads end and no reaped group id is signalled later.

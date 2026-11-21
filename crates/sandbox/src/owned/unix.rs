@@ -31,7 +31,7 @@ pub struct OwnedChild {
 }
 impl OwnedChild {
     pub fn spawn(command: &mut OwnedCommand) -> io::Result<Self> {
-        let mut raw = command.raw();
+        let mut raw = command.raw()?;
         crate::process::apply_launch_policy(&mut raw);
         GroupChild::spawn(&mut raw.into()).map(|child| Self {
             group: OwnedGroup(child.group().clone()),
@@ -44,7 +44,7 @@ impl OwnedChild {
         label: Option<&str>,
         command: &mut OwnedCommand,
     ) -> io::Result<Self> {
-        let mut raw = command.raw();
+        let mut raw = command.raw()?;
         crate::process::apply_launch_policy(&mut raw);
         admission
             .spawn_group(kind, label, &mut raw.into())
@@ -100,7 +100,7 @@ impl OwnedSession {
         label: Option<&str>,
         command: &mut OwnedCommand,
     ) -> io::Result<Self> {
-        StdioSession::spawn_command_in(admission, kind, label, command.raw()).map(|session| Self {
+        StdioSession::spawn_command_in(admission, kind, label, command.raw()?).map(|session| Self {
             group: OwnedGroup(session.owned_group().clone()),
             session,
         })

@@ -17,15 +17,20 @@ use std::{
 pub struct OwnedCommand {
     command: Command,
     inherit_env: bool,
+    /// std replaces an argument holding a NUL with a placeholder and only fails
+    /// at spawn; the owner API keeps the failure rather than run the placeholder.
+    saw_nul: bool,
     #[cfg(target_os = "linux")]
     runtime: Option<process_guard::GuardRuntime>,
     stdio: [Option<Stdio>; 3],
 }
 impl OwnedCommand {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
+        let program = program.as_ref();
         Self {
             command: Command::new(program),
             inherit_env: true,
+            saw_nul: has_nul(program),
             #[cfg(target_os = "linux")]
             runtime: None,
             stdio: [None, None, None],
@@ -38,6 +43,7 @@ impl OwnedCommand {
         self
     }
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+        self.saw_nul |= has_nul(arg.as_ref());
         self.command.arg(arg);
         self
     }
@@ -46,10 +52,13 @@ impl OwnedCommand {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.command.args(args);
+        for arg in args {
+            self.arg(arg);
+        }
         self
     }
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
+        self.saw_nul |= has_nul(key.as_ref()) || has_nul(value.as_ref());
         self.command.env(key, value);
         self
     }
@@ -59,7 +68,9 @@ impl OwnedCommand {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
-        self.command.envs(env);
+        for (key, value) in env {
+            self.env(key, value);
+        }
         self
     }
     pub fn env_clear(&mut self) -> &mut Self {
@@ -68,10 +79,12 @@ impl OwnedCommand {
         self
     }
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+        self.saw_nul |= has_nul(key.as_ref());
         self.command.env_remove(key);
         self
     }
     pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
+        self.saw_nul |= has_nul(dir.as_ref().as_os_str());
         self.command.current_dir(dir);
         self
     }
@@ -87,9 +100,20 @@ impl OwnedCommand {
         self.stdio[2] = Some(fd.into());
         self
     }
+    /// The error std reports at spawn for a NUL in any argument, name or path.
+    pub(super) fn check_nul(&self) -> std::io::Result<()> {
+        if self.saw_nul {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "nul byte found in provided data",
+            ));
+        }
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     pub(super) fn launch(&mut self) -> std::io::Result<process_guard::GuardChild> {
         use std::{collections::BTreeMap, os::unix::ffi::OsStrExt};
+        self.check_nul()?;
         let mut env = if self.inherit_env {
             std::env::vars_os().collect::<BTreeMap<_, _>>()
         } else {
@@ -132,7 +156,8 @@ impl OwnedCommand {
         )
     }
     #[cfg(not(target_os = "linux"))]
-    pub(super) fn raw(&mut self) -> Command {
+    pub(super) fn raw(&mut self) -> std::io::Result<Command> {
+        self.check_nul()?;
         let mut command = Command::new(self.command.get_program());
         command.args(self.command.get_args());
         if !self.inherit_env {
@@ -153,6 +178,11 @@ impl OwnedCommand {
             .each_mut()
             .map(|fd| fd.take().unwrap_or_else(Stdio::inherit));
         command.stdin(input).stdout(output).stderr(error);
-        command
+        Ok(command)
     }
+}
+
+fn has_nul(value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().contains(&0)
 }

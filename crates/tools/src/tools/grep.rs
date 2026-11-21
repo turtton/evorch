@@ -9,9 +9,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use regex::Regex;
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use sandbox::{ChildKind, SpawnLedger};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
@@ -111,16 +111,18 @@ impl Tool for Grep {
                 return search_file(path, &regex).await.map(ToolResult::success);
             }
             let ledger = self.ledger();
-            let mut command = grep_command(pattern, path);
-            let mut child = SpawnLedger::admit_optional(ledger.as_ref())
-                .map_err(std::io::Error::from)
-                .and_then(|admission| {
-                    admission.spawn_group(ChildKind::Other, Some("grep"), &mut command)
-                })
-                .map_err(|error| ToolError::SpawnFailed {
-                    command: "rg (install ripgrep and make it available on PATH)".to_string(),
-                    detail: error.to_string(),
-                })?;
+            let command = grep_command(pattern, path);
+            let mut child = OwnedChild::spawn_blocking(
+                ledger,
+                ChildKind::Other,
+                Some("grep".to_owned()),
+                command,
+            )
+            .await
+            .map_err(|error| ToolError::SpawnFailed {
+                command: "rg (install ripgrep and make it available on PATH)".to_string(),
+                detail: error.to_string(),
+            })?;
             let stdout = child.take_stdout().ok_or_else(|| ToolError::Io {
                 detail: "rg stdout is unavailable".to_string(),
             })?;
@@ -156,8 +158,8 @@ fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, Too
         })
 }
 
-fn grep_command(pattern: &str, path: &str) -> Command {
-    let mut command = Command::new("rg");
+fn grep_command(pattern: &str, path: &str) -> OwnedCommand {
+    let mut command = OwnedCommand::new("rg");
     command
         .args([
             "--no-config",
@@ -180,11 +182,9 @@ fn grep_command(pattern: &str, path: &str) -> Command {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+        .stderr(Stdio::null());
     // rg runs outside the sandbox but still must not inherit evorch's
-    // terminal or descriptors.
-    sandbox::process::apply_launch_policy(command.as_std_mut());
+    // terminal or descriptors; the guard gives it its own session and group.
     command
 }
 
@@ -354,7 +354,16 @@ mod tests {
         .unwrap();
 
         let mut command = super::grep_command("pattern", ".");
-        let status = command.env("PATH", path).status().await.unwrap();
+        command.env("PATH", path);
+        let mut child = sandbox::owned::OwnedChild::spawn_blocking(
+            None,
+            sandbox::ChildKind::Other,
+            None,
+            command,
+        )
+        .await
+        .unwrap();
+        let status = child.wait().await.unwrap();
 
         assert!(status.success());
         let report = std::fs::read_to_string(report).unwrap();

@@ -5,10 +5,10 @@
 //! config are not read either, so their diff, apply and ignore settings cannot
 //! change what is rebuilt or measured.
 
+use sandbox::owned::{OwnedCommand, OwnedSession};
 use std::ffi::OsStr;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Debug, thiserror::Error)]
 #[error("git {command} failed: {detail}")]
@@ -17,8 +17,8 @@ pub struct GitError {
     detail: String,
 }
 
-fn clean_command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+fn clean_command(dir: &Path) -> OwnedCommand {
+    let mut command = OwnedCommand::new("git");
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("GIT_") {
             command.env_remove(name);
@@ -29,11 +29,18 @@ fn clean_command(dir: &Path) -> Command {
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("LC_ALL", "C")
         .current_dir(dir)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     command
 }
 
-fn hardened(dir: &Path) -> Command {
+/// Runs to completion under a guard-owned group, collecting both streams.
+fn output(command: &mut OwnedCommand) -> std::io::Result<std::process::Output> {
+    OwnedSession::spawn(command)?.output(None)
+}
+
+fn hardened(dir: &Path) -> OwnedCommand {
     let mut command = clean_command(dir);
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -83,24 +90,13 @@ pub(crate) fn run_with_env(
     for (name, value) in env {
         command.env(name, value);
     }
-    finish(arguments, command.output())
+    finish(arguments, output(&mut command))
 }
 
 pub(crate) fn run_with_input(dir: &Path, arguments: &[&str], input: &[u8]) -> Result<(), GitError> {
     let mut command = hardened(dir);
-    command
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = command.spawn().and_then(|mut child| {
-        let written = child
-            .stdin
-            .take()
-            .map_or(Ok(()), |mut stdin| stdin.write_all(input));
-        let output = child.wait_with_output();
-        written.and(output)
-    });
+    command.args(arguments).stdin(Stdio::piped());
+    let output = OwnedSession::spawn(&mut command).and_then(|session| session.output(Some(input)));
     finish(arguments, output).map(drop)
 }
 
@@ -116,10 +112,7 @@ pub(crate) fn text(dir: &Path, arguments: &[&str]) -> Result<String, GitError> {
 
 /// A value from the user's own git config, which [`run`] deliberately ignores.
 pub(crate) fn user_config(dir: &Path, key: &str) -> Option<String> {
-    let output = clean_command(dir)
-        .args(["config", "--get", key])
-        .output()
-        .ok()?;
+    let output = output(clean_command(dir).args(["config", "--get", key])).ok()?;
     let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
     (output.status.success() && !value.is_empty()).then_some(value)
 }
