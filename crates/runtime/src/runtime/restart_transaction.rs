@@ -17,6 +17,27 @@ pub struct RestartCaptureSession {
     pub(super) revision: u64,
     expected_persisted: bool,
 }
+/// Copied classification of one member of the current capture inventory.
+/// Contains no execution settings, owner capability, provider input or live handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestartRecipeMember {
+    pub run: RunId,
+    pub root: RunId,
+    pub parent: Option<RunId>,
+    pub incarnation: String,
+    pub thread: Option<String>,
+    pub role: String,
+    pub conversation: bool,
+    pub permit_matches: bool,
+    pub lane: bool,
+    pub team: bool,
+    pub goal: bool,
+    pub internal: bool,
+    /// Project/model selector and interaction flags, without exposing settings.
+    pub context_fingerprint: String,
+    pub snapshots: Vec<crate::checkpoint::SnapshotReference>,
+}
+
 /// Memory-only recipe-collection observation; never admission or capture authority.
 pub struct RestartRecipeObservation {
     runtime: Weak<Shared>,
@@ -232,6 +253,87 @@ impl AgentRuntime {
             recipes: serde_json::to_string(recipes).map_err(error)?,
         })
     }
+    /// Read-only classification against permits already retained by the host.
+    /// Matching a supplied permit is evidence only; this method cannot issue one.
+    /// Call outside the host mutex. The ordinary preflight still binds and checks
+    /// the runtime observation before any planned admission transition.
+    pub fn restart_recipe_inventory(
+        &self,
+        held: &BTreeMap<RunId, crate::ownership::OwnerPermit>,
+    ) -> Result<Vec<RestartRecipeMember>, RuntimeError> {
+        let observed = self.observe_restart_recipes();
+        let mut members = Vec::with_capacity(observed.intents.len());
+        {
+            let runs = self
+                .shared
+                .runs
+                .lock()
+                .map_err(|_| error("recipe inventory unavailable"))?;
+            for intent in observed.intents.values() {
+                let root = super::recovery_graph::root_of(intent.run_id, &observed.intents)?;
+                // A missing live member is never silently filtered out. Queued
+                // launches without a registered config remain unsupported.
+                let entry = runs
+                    .get(&intent.run_id)
+                    .ok_or_else(|| error("recipe member unavailable"))?;
+                if entry.parent != intent.parent_run_id || entry.role.name() != intent.role {
+                    return Err(error("recipe member identity changed"));
+                }
+                let config = &entry.config;
+                let permit_matches =
+                    config
+                        .ownership
+                        .as_ref()
+                        .zip(held.get(&root))
+                        .is_some_and(|(live, held)| {
+                            live.registry_path == held.registry_path
+                                && live.thread_id == held.thread_id
+                                && live.lease.owner_id == held.lease.owner_id
+                                && live.lease.generation == held.lease.generation
+                        });
+                members.push(RestartRecipeMember {
+                    run: intent.run_id,
+                    root,
+                    parent: entry.parent,
+                    incarnation: intent.incarnation.clone(),
+                    thread: None,
+                    role: intent.role.clone(),
+                    conversation: config.conversation,
+                    permit_matches,
+                    lane: config.lane_scope.is_some(),
+                    team: config.team.is_some()
+                        || config.team_task.is_some()
+                        || config.team_store.is_some()
+                        || config.topology.worker_limit().is_some(),
+                    goal: false,
+                    internal: config.learning_internal
+                        || config.purpose != crate::RunPurpose::General,
+                    context_fingerprint: restart_digest(&(
+                        &config.project_root,
+                        &config.model_preference,
+                        config.interactive,
+                        config.keep_alive,
+                    ))
+                    .map_err(error)?,
+                    snapshots: intent
+                        .checkpoint
+                        .as_ref()
+                        .map(|c| c.snapshot.clone())
+                        .into_iter()
+                        .chain(intent.snapshot.clone())
+                        .collect(),
+                });
+            }
+        }
+        for member in &mut members {
+            member.thread = self.goal_thread(member.root);
+            member.goal = self.goal_for_root(member.root).is_some()
+                || self.goal_for_root(member.run).is_some();
+        }
+        self.validate_restart_recipe_observation(&observed)?;
+        Ok(members)
+    }
+
     /// Observe before collecting host recipes. No I/O and no authority is minted.
     pub fn observe_restart_recipes(&self) -> RestartRecipeObservation {
         RestartRecipeObservation {

@@ -5,7 +5,7 @@ mod preparing;
 mod shutdown;
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
 #[path = "../../shared-test-support/restart_model.rs"]
-mod restart_model;
+pub(crate) mod restart_model;
 use restart_model::{Direct, Model};
 // These fixtures explicitly reach an idle safe point before restart. PreparingDrains
 // intentionally permits provider work, so scheduling request immediately after

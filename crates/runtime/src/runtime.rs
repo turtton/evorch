@@ -49,7 +49,7 @@ pub use recovery_activation::{
 pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
 pub use restart_transaction::{
     RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
-    RestartRecipeObservation,
+    RestartRecipeMember, RestartRecipeObservation,
 };
 mod nested_orchestrator;
 mod output;
