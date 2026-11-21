@@ -123,6 +123,13 @@ jobs:
           scripts/verify-test-inventory.sh --check-config
       - name: Harness runner and doctest coverage
         run: python3 scripts/tests/test_check_harness.py
+      # The consumer side of the product artifact: the wait for the producer job
+      # (mock GitHub API, virtual clock, no network) and how the consumer jobs and
+      # the tests matrix are wired to it and to scripts/ci-test-groups.json.
+      - name: Product artifact wait and CI workflow configuration
+        run: |
+          scripts/tests/test_wait_product_artifact.sh
+          scripts/tests/test_ci_workflow_config.sh
       # The flaky/hang reproduction wrapper, against mock systemd-run/systemctl
       # (no load, no systemd needed): argument passthrough, --repeat, start
       # failures, name collisions, timeout and interruption.
@@ -343,19 +350,28 @@ jobs:
   # contracts, then everything else.
   tests:
     name: tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     # Normal runs take a few minutes; a cold dependency cache roughly doubles that.
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { group: runtime, shard: 1, shards: 2, cef: false }
-          - { group: runtime, shard: 2, shards: 2, cef: false }
+          - { group: runtime, shard: 1, shards: 4, cef: false }
+          - { group: runtime, shard: 2, shards: 4, cef: false }
+          - { group: runtime, shard: 3, shards: 4, cef: false }
+          - { group: runtime, shard: 4, shards: 4, cef: false }
           - { group: gui, shard: 1, shards: 2, cef: true }
           - { group: gui, shard: 2, shards: 2, cef: true }
-          - { group: storage-tools, shard: 1, shards: 1, cef: false }
+          - { group: storage-tools, shard: 1, shards: 3, cef: false }
+          - { group: storage-tools, shard: 2, shards: 3, cef: false }
+          - { group: storage-tools, shard: 3, shards: 3, cef: false }
           - { group: support, shard: 1, shards: 1, cef: false }
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -402,20 +418,9 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      # Every group receives the sealed product closure: the helper bundle it carries
-      # is what the test binaries are bound to (scripts/guard-cargo.sh), and the
-      # groups that run product tests (the evorch-core placeholders and, later, the
-      # real tests, including the f4_product_cache and agent_observation_cache cache
-      # binaries of the gate below) read the core from it too. Which tests a group
-      # selects does not depend on it.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Install the sealed product artifact
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
-      # `ci` job merges these listings. The runs below reuse the binaries.
+      # `ci` job merges these listings. The runs below reuse the binaries. Listing
+      # starts no product, so it comes before the product artifact is awaited.
       - name: Build and list the test inventory
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -426,6 +431,29 @@ jobs:
             check_planned_shutdown_watchdog_inventory "$EVORCH_TEST_INVENTORY_DIR"
             check_public_restart_contracts_inventory "$EVORCH_TEST_INVENTORY_DIR"
           fi
+      # Every group receives the sealed product closure: the helper bundle it carries
+      # is what the test binaries are bound to (scripts/guard-cargo.sh), and the
+      # groups that run product tests (the evorch-core placeholders and, later, the
+      # real tests, including the f4_product_cache and agent_observation_cache cache
+      # binaries of the gate below) read the core from it too. Which tests a group
+      # selects does not depend on it.
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
       # group and shard). The mock computes cache usage from received input;
