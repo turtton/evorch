@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Fixture tests for scripts/verify-test-inventory.sh (the merge gate of the
 # per-group CI test inventories). No cargo or build is involved: the fixtures
-# are hand-written inventory directories.
+# are hand-written inventory directories. Group g is the gui group: its suites
+# split the way the real one does (ci-remaining and the registered binaries of
+# main-only-gui); the other groups have no main-only-gui tests.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 verify="$PWD/scripts/verify-test-inventory.sh"
@@ -11,11 +13,18 @@ trap 'rm -rf "$work"' EXIT
 
 cat > "$work/config.json" <<'JSON'
 {"groups": {
-  "a": {"shards": 2, "packages": ["pa1", "pa2"], "features": [], "allow_empty_suites": []},
-  "b": {"shards": 1, "packages": ["pb"], "features": [], "allow_empty_suites": ["io"]}
+  "a": {"shards": 2, "packages": ["pa1", "pa2"], "features": [], "allow_empty_suites": ["main-only-gui"]},
+  "b": {"shards": 1, "packages": ["pb"], "features": [], "allow_empty_suites": ["io", "main-only-gui"]},
+  "g": {"shards": 1, "packages": ["gui"], "features": [], "allow_empty_suites": ["io"]}
 }}
 JSON
-printf '%s\n' pa1 pa2 pb > "$work/members.txt"
+printf '%s\n' pa1 pa2 pb gui > "$work/members.txt"
+cat > "$work/manifest.json" <<'JSON'
+{"package": "gui", "binaries": [
+  {"target": "attention", "reason": "fixture"},
+  {"target": "matrix", "reason": "fixture"}
+]}
+JSON
 
 tab() { printf '%s\t%s\t%s\t%s\n' "$@"; }
 
@@ -28,7 +37,7 @@ write_meta() {
 # split_parts <dir> <shards>: shard k gets rows k, k+N, ... of each suite.
 split_parts() {
   local dir=$1 n=$2 k s
-  for s in cache io remaining; do
+  for s in cache io remaining ci-remaining main-only-gui; do
     for ((k = 1; k <= n; k++)); do
       awk -v k="$k" -v n="$n" '(NR - 1) % n == k - 1' "$dir/$s.tsv" > "$work/part-$k-$s"
     done
@@ -53,11 +62,13 @@ make_valid() {
   tab pa1 pa1 t1 false > "$d/cache.tsv"
   tab pa2 pa2 t3 false > "$d/io.tsv"
   { tab pa1 pa1 t2 false; tab pa2 pa2 t4 false; } | LC_ALL=C sort > "$d/remaining.tsv"
+  cp "$d/remaining.tsv" "$d/ci-remaining.tsv"
+  : > "$d/main-only-gui.tsv"
   split_parts "$d" 2
   mkdir -p "$root/inv-a-2"
-  for f in all default cache io remaining; do cp "$d/$f.tsv" "$root/inv-a-2/$f.tsv"; done
+  for f in all default cache io remaining ci-remaining main-only-gui; do cp "$d/$f.tsv" "$root/inv-a-2/$f.tsv"; done
   for k in 1 2; do
-    for s in cache io remaining; do cp "$work/part-$k-$s" "$root/inv-a-$k/$s.part.tsv"; done
+    for s in cache io remaining ci-remaining main-only-gui; do cp "$work/part-$k-$s" "$root/inv-a-$k/$s.part.tsv"; done
     write_meta "$root/inv-a-$k" a "$k" 2 deadbeef '["pa1","pa2"]'
   done
   # group b: one shard, io is empty and allowed
@@ -68,14 +79,35 @@ make_valid() {
   tab pb pb b1 false > "$d/cache.tsv"
   : > "$d/io.tsv"
   tab pb pb b2 false > "$d/remaining.tsv"
-  for s in cache io remaining; do cp "$d/$s.tsv" "$d/$s.part.tsv"; done
+  cp "$d/remaining.tsv" "$d/ci-remaining.tsv"
+  : > "$d/main-only-gui.tsv"
+  for s in cache io remaining ci-remaining main-only-gui; do cp "$d/$s.tsv" "$d/$s.part.tsv"; done
   write_meta "$d" b 1 1 deadbeef '["pb"]'
+  # group g: the gui package. attention and matrix are registered binaries; other
+  # is not, and holds one cache test.
+  d="$root/inv-g-1"
+  mkdir -p "$d"
+  {
+    tab gui gui::attention a1 false
+    tab gui gui::attention a2 false
+    tab gui gui::matrix m1 false
+    tab gui gui::other o1 false
+    tab gui gui::other c1 false
+  } | LC_ALL=C sort > "$d/default.tsv"
+  { cat "$d/default.tsv"; tab gui gui::other ign true; } | LC_ALL=C sort > "$d/all.tsv"
+  tab gui gui::other c1 false > "$d/cache.tsv"
+  : > "$d/io.tsv"
+  grep -v 'gui::other	c1' "$d/default.tsv" > "$d/remaining.tsv"
+  tab gui gui::other o1 false > "$d/ci-remaining.tsv"
+  grep -v 'gui::other' "$d/default.tsv" > "$d/main-only-gui.tsv"
+  for s in cache io remaining ci-remaining main-only-gui; do cp "$d/$s.tsv" "$d/$s.part.tsv"; done
+  write_meta "$d" g 1 1 deadbeef '["gui"]'
 }
 
 run_verify() { # run_verify <root> [extra args...] -> status; output in $work/out
   local root=$1
   shift
-  "$verify" --config "$work/config.json" --members-file "$work/members.txt" "$@" "$root" > "$work/out" 2>&1
+  "$verify" --config "$work/config.json" --members-file "$work/members.txt" --main-only-manifest "$work/manifest.json" "$@" "$root" > "$work/out" 2>&1
 }
 
 expect_pass() { # expect_pass <name> <root> [args...]
@@ -109,7 +141,7 @@ t="$work/t"
 
 make_valid "$t"
 expect_pass "valid inventories merge" "$t"
-cat "$t/inv-a-1/default.tsv" "$t/inv-b-1/default.tsv" > "$work/ref.tsv"
+cat "$t/inv-a-1/default.tsv" "$t/inv-b-1/default.tsv" "$t/inv-g-1/default.tsv" > "$work/ref.tsv"
 expect_pass "reference default equals the union" "$t" --reference-default "$work/ref.tsv"
 echo "$(tab pa1 pa1 extra false)" >> "$work/ref.tsv"
 expect_fail "reference default with an extra test" "differs from the reference" "$t" --reference-default "$work/ref.tsv"
@@ -224,5 +256,103 @@ expect_fail "a single shard group drops a test" "the remaining shards run 0 test
 
 make_valid "$t"; tab pa1 pa1 phantom false >> "$t/inv-a-2/cache.part.tsv"; LC_ALL=C sort -o "$t/inv-a-2/cache.part.tsv" "$t/inv-a-2/cache.part.tsv"
 expect_fail "a shard runs a test that is not in the suite" "the cache shards run 2 tests" "$t"
+
+# --- the suites that only a main push runs -------------------------------------
+# Rewrites of one suite and of its partition in the given group directories.
+rewrite() { # rewrite <suite> <grep -v pattern> <dir...>: drop the matching rows
+  local suite=$1 pattern=$2 d
+  shift 2
+  for d in "$@"; do
+    for f in "$d/$suite.tsv" "$d/$suite.part.tsv"; do
+      grep -v -- "$pattern" "$f" > "$work/rw" || true
+      mv "$work/rw" "$f"
+    done
+  done
+}
+add_row() { # add_row <suite> <row> <dir...>: add a row to the suite and its partition
+  local suite=$1 row=$2 d f
+  shift 2
+  for d in "$@"; do
+    for f in "$d/$suite.tsv" "$d/$suite.part.tsv"; do
+      printf '%s\n' "$row" >> "$f"
+      LC_ALL=C sort -o "$f" "$f"
+    done
+  done
+}
+g_o1="$(tab gui gui::other o1 false)"
+g_a1="$(tab gui gui::attention a1 false)"
+
+make_valid "$t"
+GITHUB_EVENT_NAME=pull_request expect_pass "a pull request run lists the same suites" "$t"
+GITHUB_EVENT_NAME=push expect_pass "a main push lists the same suites" "$t"
+
+make_valid "$t"; rewrite ci-remaining 'gui::other	o1' "$t/inv-g-1"
+expect_fail "ci-remaining lacks a test of remaining" "ci-remaining \(0\) \+ main-only-gui \(3\) differ from remaining \(4\)" "$t"
+
+make_valid "$t"; rewrite ci-remaining 'gui::other	o1' "$t/inv-g-1"; add_row main-only-gui "$g_o1" "$t/inv-g-1"
+expect_fail "an unregistered binary moved into main-only-gui" "main-only-gui \(4\) is not exactly the default tests of the registered binaries \(3\)" "$t"
+
+make_valid "$t"; rewrite main-only-gui 'gui::attention	a1' "$t/inv-g-1"; add_row ci-remaining "$g_a1" "$t/inv-g-1"
+expect_fail "a registered binary's test kept in ci-remaining" "main-only-gui \(2\) is not exactly the default tests of the registered binaries \(3\)" "$t"
+
+make_valid "$t"; rewrite main-only-gui 'gui::attention	a1' "$t/inv-g-1"
+expect_fail "main-only-gui lacks a test of a registered binary" "differ from remaining" "$t"
+
+make_valid "$t"; rewrite ci-remaining 'pb	pb	b2' "$t/inv-b-1"; add_row main-only-gui "$(tab pb pb b2 false)" "$t/inv-b-1"
+expect_fail "main-only-gui tests in a group without the gui package" "b: main-only-gui \(1\) is not exactly the default tests of the registered binaries \(0\)" "$t"
+
+make_valid "$t"; add_row cache "$g_a1" "$t/inv-g-1"
+expect_fail "a registered test that is also a cache test" "cache and main-only-gui share 1" "$t"
+
+make_valid "$t"; add_row io "$g_a1" "$t/inv-g-1"
+expect_fail "a registered test that is also an io test" "io and main-only-gui share 1" "$t"
+
+jq '.binaries += [{"target": "ghost", "reason": "fixture"}]' "$work/manifest.json" > "$work/manifest-ghost.json"
+make_valid "$t"
+cp "$work/manifest.json" "$work/manifest.keep"; cp "$work/manifest-ghost.json" "$work/manifest.json"
+expect_fail "a registered binary that lists no test" "the registered binary gui::ghost lists no default test" "$t"
+cp "$work/manifest.keep" "$work/manifest.json"
+
+make_valid "$t"
+for f in all default; do
+  grep -v 'gui::attention' "$t/inv-g-1/$f.tsv" > "$work/rw" && mv "$work/rw" "$t/inv-g-1/$f.tsv"
+done
+rewrite remaining 'gui::attention' "$t/inv-g-1"
+rewrite main-only-gui 'gui::attention' "$t/inv-g-1"
+expect_fail "every test of a registered binary is gone" "the registered binary gui::attention lists no default test" "$t"
+
+make_valid "$t"; add_row main-only-gui "$(tab gui gui::attention a9 false)" "$t/inv-g-1"
+expect_fail "main-only-gui lists a test that is not in default" "main-only-gui \(4\) is not exactly" "$t"
+
+make_valid "$t"; rm "$t/inv-g-1/main-only-gui.part.tsv"
+expect_fail "main-only-gui partition missing" "main-only-gui.part.tsv is missing" "$t"
+
+make_valid "$t"; rm "$t/inv-a-2/ci-remaining.tsv"
+expect_fail "ci-remaining listing missing" "ci-remaining.tsv is missing" "$t"
+
+make_valid "$t"; : > "$t/inv-g-1/main-only-gui.part.tsv"
+expect_fail "main-only-gui shard drops its tests" "the main-only-gui shards run 0 tests, the suite has 3" "$t"
+
+jq '.groups.a.allow_empty_suites = []' "$work/config.json" > "$work/config-noempty.json"
+make_valid "$t"
+cp "$work/config.json" "$work/config.keep"; cp "$work/config-noempty.json" "$work/config.json"
+expect_fail "an empty main-only-gui that the group does not allow" "a: suite main-only-gui is empty and not listed in allow_empty_suites" "$t"
+cp "$work/config.keep" "$work/config.json"
+
+# Only a gui group has main-only tests, and the registry is checked on its own.
+printf '{"package": "gui", "binaries": []}\n' > "$work/manifest-empty.json"
+if "$verify" --config "$work/config.json" --members-file "$work/members.txt" --main-only-manifest "$work/manifest-empty.json" --check-config > "$work/out" 2>&1; then
+  echo "FAIL (empty registry): expected rejection" >&2; exit 1
+fi
+grep -q "registry .* is not valid" "$work/out" || { echo "FAIL (empty registry): wrong message" >&2; cat "$work/out" >&2; exit 1; }
+echo "ok: an empty registry"
+
+jq 'del(.groups.g)' "$work/config.json" > "$work/config-nogui.json"
+printf '%s\n' pa1 pa2 pb > "$work/members-nogui.txt"
+if "$verify" --config "$work/config-nogui.json" --members-file "$work/members-nogui.txt" --main-only-manifest "$work/manifest.json" --check-config > "$work/out" 2>&1; then
+  echo "FAIL (no gui group): expected rejection" >&2; exit 1
+fi
+grep -q "no group has the gui package" "$work/out" || { echo "FAIL (no gui group): wrong message" >&2; cat "$work/out" >&2; exit 1; }
+echo "ok: a registry without a gui group"
 
 echo "all verify-test-inventory fixture tests passed"

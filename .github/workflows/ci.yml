@@ -126,6 +126,17 @@ jobs:
         run: |
           scripts/tests/test_verify_test_inventory.sh
           scripts/verify-test-inventory.sh --check-config
+      # The former GUI integration tests that only a main push runs
+      # (scripts/ci-main-only-gui-tests.json): the registry is well formed and names
+      # integration tests of the gui package. That none of their sources names the
+      # core-client desktop is checked where the binaries are built, from the
+      # compiler's dependency-info, in the gui group's inventory step below
+      # (scripts/run-test-group.sh). Reads `cargo metadata`; builds nothing.
+      - name: Main-only GUI registry
+        run: |
+          scripts/tests/test_ci_main_only_gui.sh
+          scripts/tests/test_run_contract_tests.sh
+          scripts/ci-main-only-gui.sh validate
       - name: Harness runner and doctest coverage
         run: python3 scripts/tests/test_check_harness.py
       # The consumer side of the product artifact: the wait for the producer job
@@ -204,10 +215,10 @@ jobs:
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.
   docs-schema:
-    # Behind quick-checks as well: with the CEF E2E split in two, the consumers
-    # that start next to scope-gate already fill the concurrent-job budget of 20
-    # while quick-checks runs; this job takes the slot quick-checks frees.
-    needs: [scope-gate, quick-checks]
+    # Starts after the producer instead of next to it: this job only needs the
+    # product for its doctests, and a runner that waits for the producer for minutes
+    # counts against the repository's concurrent-job budget while it does nothing.
+    needs: product-artifact
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
     permissions:
@@ -237,10 +248,11 @@ jobs:
           save-if: false
       # The doctests start owned children through the library policy: the helper
       # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
-      # The product artifact job runs beside this job (no `needs`): wait for its
-      # success, take this run's artifact, check it was built from this commit,
-      # then verify and install it. Nothing that runs a product test or a product
-      # binary comes before this.
+      # `needs: product-artifact` makes the producer's success a precondition, so
+      # the wait returns at once; it stays as the same check every consumer makes
+      # (this run's producer job succeeded, exactly one artifact), then: take this
+      # run's artifact, check it was built from this commit, then verify and install
+      # it. Nothing that runs a product test or a product binary comes before this.
       - name: Wait for the product artifact job
         timeout-minutes: 31
         env:
@@ -379,8 +391,12 @@ jobs:
   # is the single definition; the matrix below repeats its group names and shard
   # counts, and the merge gate in `ci` rejects any drift). A group's shards build
   # the same packages and features and only differ in `--partition hash:K/N`.
-  # Inside a group the tests keep their three suites: the cache and storage I/O
-  # contracts, then everything else.
+  # Inside a group the tests keep their suites: the cache and storage I/O
+  # contracts, then everything else (`ci-remaining`). The one suite that only a
+  # main push runs is `main-only-gui`: the gui integration tests that
+  # scripts/ci-main-only-gui-tests.json registers, a former embedded GUI check.
+  # Every event lists and partitions the same suites (the merge gate in `ci`
+  # checks them); only the run step of `main-only-gui` depends on the event.
   tests:
     name: tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
     needs: scope-gate
@@ -400,11 +416,9 @@ jobs:
           - { group: runtime, shard: 2, shards: 4, cef: false }
           - { group: runtime, shard: 3, shards: 4, cef: false }
           - { group: runtime, shard: 4, shards: 4, cef: false }
-          - { group: gui, shard: 1, shards: 2, cef: true }
-          - { group: gui, shard: 2, shards: 2, cef: true }
-          - { group: storage-tools, shard: 1, shards: 3, cef: false }
-          - { group: storage-tools, shard: 2, shards: 3, cef: false }
-          - { group: storage-tools, shard: 3, shards: 3, cef: false }
+          - { group: gui, shard: 1, shards: 1, cef: true }
+          - { group: storage-tools, shard: 1, shards: 2, cef: false }
+          - { group: storage-tools, shard: 2, shards: 2, cef: false }
           - { group: support, shard: 1, shards: 1, cef: false }
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -501,7 +515,8 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" io "$EVORCH_TEST_INVENTORY_DIR"
       # nextest owns parallelism and the per-test hang watchdog. Every default
-      # non-ignored test belongs to exactly one of the three suites.
+      # non-ignored test belongs to exactly one of cache, io, ci-remaining and
+      # main-only-gui.
       # Opt-in process harness: Linux only, not part of the default inventory.
       # The targeted second run fails if the fixture tests disappear entirely.
       # Built, bound to the helper and run from one nextest metadata
@@ -516,7 +531,16 @@ jobs:
       - name: Remaining tests
         env:
           CARGO_TARGET_DIR: target/ci-shared
-        run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" remaining "$EVORCH_TEST_INVENTORY_DIR"
+        run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" ci-remaining "$EVORCH_TEST_INVENTORY_DIR"
+      # Only a push to main runs the registered former-GUI integration tests (the
+      # inventory above lists and partitions them on every event). A pull request
+      # that is green therefore does not say that they passed; a failure here fails
+      # the job and so `ci`. docs/gui-verification.md says who checks main.
+      - name: Main-only GUI tests (main push)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.group == 'gui'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" main-only-gui "$EVORCH_TEST_INVENTORY_DIR"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -530,7 +554,7 @@ jobs:
 
   # The only writer of the shared dependency cache (key *-ci-workspace-v2) that
   # every cargo job restores: lint, docs-schema, otel, the test groups,
-  # offscreen-gate, gui-evidence, browser-e2e and both cef-e2e cells. It runs on
+  # offscreen-gate, gui-evidence, browser-e2e and cef-e2e. It runs on
   # main pushes only, so it is never on a PR's critical path and PRs never
   # crowd the repository's 10GB cache budget. It compiles every dependency
   # artifact the other jobs need, with each of their own package and feature
@@ -566,22 +590,32 @@ jobs:
         with:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: ./.github/actions/setup-cef
+      # An exact hit means the cache already holds this lockfile's dependency
+      # artifacts, so the recipe below would only rebuild them and the action ends
+      # with "Cache up-to-date" without saving: the steps that exist for the recipe
+      # are skipped then. Any other output (a partial restore, a miss, no value)
+      # runs every recipe step, as before.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: workspace-cache
         with:
           shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: true
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        if: steps.workspace-cache.outputs.cache-hit != 'true'
         with:
           tool: cargo-nextest
       # The doctests run (they start owned children through the library policy), so
       # they need the same sealed helper bundle as docs-schema.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.workspace-cache.outputs.cache-hit != 'true'
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
       - name: Install the sealed product artifact
+        if: steps.workspace-cache.outputs.cache-hit != 'true'
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Build the dependencies of every other job
+        if: steps.workspace-cache.outputs.cache-hit != 'true'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -605,6 +639,7 @@ jobs:
       # `prepare` builds and lists the test binaries and runs none of them; its
       # metadata goes to a directory that is dropped.
       - name: Build the dependencies of the fixture, browser and CEF test selections
+        if: steps.workspace-cache.outputs.cache-hit != 'true'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -633,7 +668,11 @@ jobs:
         if: always()
         run: |
           df -h /
-          du -sh target/ci-shared
+          if [ -d target/ci-shared ]; then
+            du -sh target/ci-shared
+          else
+            echo "target/ci-shared is absent"
+          fi
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
@@ -760,6 +799,10 @@ jobs:
   # ignored の GUI テストを実行する（ADR 0009 / issue #9 の受理基準）。
   # 証跡マトリクスと native/Wayland 検査は並列の gui-evidence job が担う。
   offscreen-gate:
+    # A push to main only: the ignored GUI tests and the evidence they write are not
+    # part of a pull request's run (docs/gui-verification.md). The job fails on main
+    # when they fail; it is not one of the jobs `ci` needs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
@@ -864,6 +907,9 @@ jobs:
   # started directly, so this job needs the gui library but none of the test
   # binaries that offscreen-gate builds.
   gui-evidence:
+    # A push to main only, like offscreen-gate. The evidence artifact stays; the
+    # pull request screenshots the GUI PR evidence workflow attached are paused.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
@@ -947,26 +993,6 @@ jobs:
         run: scripts/check-gui-wayland-idle.sh target/gui-evidence/wayland-idle
         env:
           GUI_BIN: ${{ github.workspace }}/target/ci-shared/debug/native_qa_window
-      - name: Prepare representative PR screenshots
-        if: github.event_name == 'pull_request'
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          mkdir -p target/gui-pr-preview
-          cp 'target/gui-evidence/graphite/demo-1280x720@1.0.png' target/gui-pr-preview/01-workbench.png
-          cp 'target/gui-evidence/graphite/panel-agent-main-1280x720@1.0.png' target/gui-pr-preview/02-conversation.png
-          cp 'target/gui-evidence/graphite/modal-provider-1280x720@1.0.png' target/gui-pr-preview/03-provider-settings.png
-          cp 'target/gui-evidence/graphite/pending-approvals-1280x720@1.0.png' target/gui-pr-preview/04-approvals.png
-          cp 'target/gui-evidence/high-contrast/demo-1280x720@1.0.png' target/gui-pr-preview/05-high-contrast.png
-          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PR_HEAD_SHA" --argjson run "$GITHUB_RUN_ID" \
-            '{pr: $pr, head_sha: $sha, run_id: $run}' > target/gui-pr-preview/pr.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: github.event_name == 'pull_request'
-        with:
-          name: gui-pr-preview
-          if-no-files-found: error
-          path: target/gui-pr-preview
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -976,7 +1002,10 @@ jobs:
           path: target/gui-evidence
 
   browser-e2e:
-    needs: scope-gate
+    # Behind quick-checks: it needs the product artifact for the tests it runs, and
+    # starting next to the producer made this runner wait for it. quick-checks ends
+    # well before the producer does.
+    needs: [scope-gate, quick-checks]
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
     permissions:
@@ -1089,7 +1118,6 @@ jobs:
   # job also starts it. The lint of the CEF feature is the workspace clippy in
   # the lint job, which builds gui with its default features.
   cef-e2e:
-    name: cef-e2e (${{ matrix.cell }})
     needs: scope-gate
     # The artifact wait reads this run's jobs (actions: read); nothing else is
     # granted. The workflow has no top-level permissions.
@@ -1098,15 +1126,11 @@ jobs:
       actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 75
-    # Two cells split the real-CEF invocations: `engine` runs the browser-cef
-    # isolation/recovery tests, the renderer helper and the core renderer owner;
-    # `client` runs the core-client page, the html_preview cards, the product
-    # placeholders and the GUI observation. Each cell warms, builds and runs what
-    # it needs on its own runner, and neither writes a cache (cache-save does).
-    strategy:
-      fail-fast: false
-      matrix:
-        cell: [engine, client]
+    # One job runs all seven real-CEF invocations: the browser-cef isolation and
+    # recovery tests, the renderer helper and the core renderer owner (the engine
+    # half), then the core-client page, the html_preview cards, the product
+    # tests and the GUI observation (the client half). It warms and builds both
+    # halves while the producer runs and writes no cache (cache-save does).
     # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
     # into its key. CARGO_TARGET_DIR is set on the steps that run cargo only.
     env:
@@ -1151,7 +1175,6 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Warm the target of the engine real-CEF tests (no product needed)
-        if: matrix.cell == 'engine'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1163,7 +1186,6 @@ jobs:
           cargo build -p evorch-renderer
           scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
       - name: Warm the target of the client real-CEF tests (no product needed)
-        if: matrix.cell == 'client'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1194,7 +1216,6 @@ jobs:
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: CEF offline isolation and crash recovery
-        if: matrix.cell == 'engine'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
@@ -1202,7 +1223,6 @@ jobs:
       # ignored tests are the only ones that run real CEF in the renderer
       # process; the ordinary matrix runs the fake helper instead.
       - name: Out-of-process renderer helper through real CEF
-        if: matrix.cell == 'engine'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1210,7 +1230,6 @@ jobs:
           scripts/guard-cargo.sh run -p evorch-renderer --run-ignored all --success-output immediate --no-tests fail
       # Production core owner tests replace the installation placeholder in F1.
       - name: Core renderer owner through real CEF
-        if: matrix.cell == 'engine'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1220,7 +1239,6 @@ jobs:
       # Stage 16b PR V: the core-client page against a production core and the real
       # helper (conversation -> artifact -> preview -> inspection; exit and kill).
       - name: Core-client page through real CEF
-        if: matrix.cell == 'client'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1229,7 +1247,6 @@ jobs:
           export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only --success-output immediate --no-tests fail
       - name: Card snapshots and agent artifact inspection through CEF
-        if: matrix.cell == 'client'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
@@ -1241,12 +1258,10 @@ jobs:
       # the targets are selected (--no-tests fail) and that the sealed product
       # artifact reached this job; the real tests replace them.
       - name: Product tests through real CEF
-        if: matrix.cell == 'client'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --test public_restart_product --run-ignored only --success-output immediate --no-tests fail
       - name: GUI observation through real CEF and Chromium
-        if: matrix.cell == 'client'
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail

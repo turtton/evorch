@@ -62,6 +62,9 @@ flake.lock
 # CI and boundary data
 .github/workflows/*
 scripts/ci-test-groups.json
+scripts/ci-main-only-gui-tests.json
+scripts/ci-main-only-gui.sh
+scripts/tests/test_ci_main_only_gui.sh
 scripts/contract-test-filters.sh
 scripts/workbench-boundary-allowlist.txt
 scripts/check-workbench-boundaries.sh
