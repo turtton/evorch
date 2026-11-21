@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
-use sandbox::owned::OwnedCommand;
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use sandbox::{ChildKind, CommandSpec, Sandbox, SpawnLedger};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -344,7 +344,7 @@ async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String
 }
 
 async fn supervise(
-    mut command: OwnedCommand,
+    command: OwnedCommand,
     ledger: Option<SpawnLedger>,
     payload: Vec<u8>,
     deadline: tokio::time::Instant,
@@ -360,15 +360,18 @@ async fn supervise(
             "checker deadline elapsed before launch",
         );
     }
-    let spawned = SpawnLedger::admit_optional(ledger.as_ref())
-        .map_err(io::Error::from)
-        .and_then(|admission| {
-            admission.spawn_owned(
-                ChildKind::SandboxSession,
-                Some("comment-checker"),
-                &mut command,
-            )
-        });
+    // Admission, launch and registration run together on a blocking thread, so
+    // the guard handshake never holds this async worker. The launch is awaited
+    // to its end (cancellation and the deadline are applied to the checker
+    // below, exactly as when the launch was inline), so the child is always
+    // owned here and reaped by `kill_and_wait`.
+    let spawned = OwnedChild::spawn_blocking(
+        ledger,
+        ChildKind::SandboxSession,
+        Some("comment-checker".to_owned()),
+        command,
+    )
+    .await;
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return unavailable(UnavailableReason::SpawnFailed, error),

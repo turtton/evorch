@@ -457,3 +457,67 @@ fn a_bwrap_session_survives_the_retirement_of_the_thread_that_created_it() {
             .expect("bwrap required");
     survives_its_creator_thread(&sandbox, sandboxed("echo READY; read gate; exit 0"));
 }
+
+#[test]
+fn a_nul_in_any_argument_name_or_path_is_rejected_and_nothing_starts() {
+    let ledger = SpawnLedger::new();
+    let mut cases: Vec<OwnedCommand> = Vec::new();
+    for case in 0..4 {
+        let mut c = command("exit 0");
+        match case {
+            0 => drop(c.arg("a\0b")),
+            1 => drop(c.env("K", "v\0")),
+            2 => drop(c.env_remove("K\0")),
+            _ => drop(c.current_dir("/tmp\0x")),
+        }
+        cases.push(c);
+    }
+    cases.push(OwnedCommand::new("/bin/s\0h"));
+    for mut c in cases {
+        let error = OwnedSession::spawn_owned(Some(&ledger), ChildKind::Other, None, &mut c)
+            .expect_err("a NUL must not start the command with a placeholder");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    assert_eq!(ledger.child_stats().registered, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_blocking_registers_in_the_ledger_and_reports_launch_failures() {
+    let ledger = SpawnLedger::new();
+    let mut child = OwnedChild::spawn_blocking(
+        Some(ledger.clone()),
+        ChildKind::Other,
+        Some("blocking".to_owned()),
+        command("exit 5"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(child.wait().await.unwrap().code(), Some(5));
+    drop(child);
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+
+    let missing = OwnedChild::spawn_blocking(
+        Some(ledger.clone()),
+        ChildKind::Other,
+        None,
+        OwnedCommand::new("/nonexistent/program"),
+    )
+    .await
+    .expect_err("a missing program is a launch error");
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+
+    ledger.close_fence();
+    OwnedChild::spawn_blocking(
+        Some(ledger.clone()),
+        ChildKind::Other,
+        None,
+        command("exit 0"),
+    )
+    .await
+    .expect_err("a closed fence starts nothing");
+    assert_eq!(ledger.child_stats().registered, 1);
+}

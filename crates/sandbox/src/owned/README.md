@@ -5,7 +5,7 @@ incomplete and D-7 is not complete.** Existing raw GroupChild/StdioSession/
 ProcessGroup paths remain for the callers of the later parts and still have their
 old guarantees; entry binding does **not** guard them.
 
-## B2b-i (this part): sandbox, session, LSP, js-worker
+## B2b-i: sandbox, session, LSP, js-worker
 
 Migrated to OwnedSession/OwnedCommand/OwnedChild (guard-owned on Linux, with or
 without a ledger):
@@ -24,9 +24,40 @@ without a ledger):
   with `scripts/guard-cargo.sh`; a test that clears its child's environment has to
   pass `EVORCH_PROCESS_GUARD_BUNDLE` through.
 
+## B2b-ii (this part): tools, providers, runtime and eval direct commands
+
+Migrated to the guard-owned API (guard-owned on Linux, with or without a ledger):
+
+- Shell **pipe** jobs (`run_pipe`, `ChildKind::ShellJob`). The job's stop
+  capability is a `JobGroup`: the guard-owned `OwnedGroup` of a pipe job or the
+  raw group of a PTY job (`run_pty` is B3). Cancellation signals it outside the
+  job's state lock.
+- MCP stdio (`ChildKind::McpStdio`; `ChildLease` keeps its Drop fallback on an
+  `OwnedChild`), grep (`rg`), git diff, the codex quota RPC, runtime
+  `GitReader` and snapshot git, and eval's host git (no ledger: unmanaged
+  `OwnedSession`).
+- `OwnedChild::spawn_blocking(ledger, kind, label, command)` is the async entry:
+  admission, launch and ledger registration run together on a Tokio blocking
+  thread, so the synchronous guard handshake never holds an async worker, and no
+  deadline is added or extended. The same applies to post_edit (S-a) and to MCP,
+  whose whole `spawn_session` (admission, launch and the registration of its
+  workers) runs on a blocking thread. A caller that drops the future mid-launch does
+  not cancel it: the child is dropped, which kills and reaps its group, and an MCP
+  session nobody took over is stopped.
+- `OwnedCommand` keeps std's NUL failure: std replaces an argument, name or path
+  holding a NUL with a placeholder and only fails at spawn, so the command would
+  have run something else. Linux launch (and the non-Linux adapter) now return
+  `InvalidInput` for it.
+- Closed stdio choices: grep, git diff, git read, snapshot and eval git give the
+  child `/dev/null` or pipes explicitly; none relies on an inherited closed
+  descriptor. The quota RPC pipes stdin/stdout and sends stderr to `/dev/null`.
+- A test that clears its child's environment and then reaches a migrated path has
+  to pass `EVORCH_PROCESS_GUARD_BUNDLE` through (`tools/tests/host_environment.rs`).
+
 Left raw on purpose until B2b-iii removes them: `StdioSession::spawn*` with a
-sandbox (only tests use them now), `StdioSession::spawn_command_*`,
-`WrappedCommand::to_command` and `GroupChild`.
+sandbox (only tests use them now), `StdioSession::spawn_command_*` and
+`GroupChild` (non-Linux adapter, eval groups/verify, PR source, renderer, GUI
+slash), and `WrappedCommand::to_command` (eval verify).
 
 ## New contract
 
@@ -61,12 +92,12 @@ sandbox (only tests use them now), `StdioSession::spawn_command_*`,
 | Owner | Production paths to migrate |
 |---|---|
 | Common sandbox/session | **B2b-i: minimal.rs, bwrap probe migrated**; to_command/raw session seams stay until B2b-iii |
-| Shell pipe | tools/src/tools/shell/jobs/process.rs::run_pipe (run_pty is B3) |
+| Shell pipe | **B2b-ii: migrated** tools/src/tools/shell/jobs/process.rs::run_pipe (run_pty is B3) |
 | SandboxSession, LSP, js-worker | **B2b-i: migrated** (sandbox/src/session.rs raw spawn stays for tests until B2b-iii) |
-| MCP | tools/src/mcp/transport/stdio.rs, ChildLease supervision |
+| MCP | **B2b-ii: migrated** tools/src/mcp/transport/stdio.rs, ChildLease supervision |
 | Eval | eval/src/evaluator/groups.rs and eval/src/verify.rs; remove creator-thread PDEATHSIG(TERM), retain normal Stop TERM |
 | PR source | runtime/src/pull_requests/source.rs, **both** Some(ledger) and None branches |
-| Other direct commands | tools/src/tools/{grep,git_diff}.rs; providers/src/provider/codex/quota/rpc.rs; runtime/src/{git_read,snapshot}.rs; eval/src/git.rs |
+| Other direct commands | **B2b-ii: migrated** tools/src/tools/{grep,git_diff}.rs; providers/src/provider/codex/quota/rpc.rs; runtime/src/{git_read,snapshot}.rs; eval/src/git.rs |
 | Offline renderer/CEF root | workbench-host/src/areas/browser/renderer.rs and renderer ownership test support; actual CEF E2E remains B3 |
 | GUI slash | gui/src/model/slash_process.rs and caller command builders in external_slash/external_commands |
 | Examples/test seams | sandbox/examples/ledger_latency.rs, sandbox tests/ledger fixtures; evorch-core renderer_support launch and owner/restart fixtures |
@@ -100,8 +131,10 @@ PRs must say migration is incomplete. Re-check file counts after B2a: the origin
 files alone. Register/serialize central edits before each part.
 
 B1 follow-ups: saved-fd3 dash fixture and artifact-script CI are addressed in B2a.
-The actual GuardRuntime accept-loop mutation (S3), per-caller closed-stdio choices,
-full caller matrix, and cancellation audit remain B2b work. Low-level peer helper
+The actual GuardRuntime accept-loop mutation (S3) is addressed in B2b-i
+(`accept_helper` and its rejection tests). Per-caller closed-stdio choices are
+recorded for the callers migrated so far; the remaining callers' choices, the full
+caller matrix and the cancellation audit stay B2b-iii work. Low-level peer helper
 unit tests alone are not proof of the real accept loop's rejection branch.
 core_instance::running_elf_identity hashes the running ELF separately; B2a does
 not introduce a shared cross-crate identity authority merely to avoid this read.

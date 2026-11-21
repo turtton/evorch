@@ -4,7 +4,7 @@ use crate::mcp::{McpError, McpErrorKind, types::*};
 use async_trait::async_trait;
 use sandbox::SpawnLedger;
 use sandbox::ledger::ChildKind;
-use sandbox::process::{GroupChild, apply_launch_policy};
+use sandbox::owned::{OwnedChild, OwnedCommand};
 use serde::Serialize;
 use serde_json::json;
 use std::{
@@ -164,14 +164,15 @@ impl StdioTransport {
     ) -> Result<Arc<Self>, McpError> {
         let server = Arc::new(server);
         let permit = Arc::new(permit);
-        let session = spawn_session(
+        let session = spawn_session_blocking(
             &server,
             &permit,
-            &*limiter,
+            &limiter,
             &cancel,
-            policy.clone(),
+            &policy,
             ledger.as_ref(),
-        )?;
+        )
+        .await?;
         Ok(Arc::new(Self {
             server,
             permit,
@@ -194,14 +195,15 @@ impl StdioTransport {
         }
         current.stop.cancel();
         current.reaped().await.map_err(|k| self.error(k))?;
-        *current = spawn_session(
+        *current = spawn_session_blocking(
             &self.server,
             &self.permit,
-            &*self.limiter,
+            &self.limiter,
             &cancel,
-            self.policy.clone(),
+            &self.policy,
             self.ledger.as_ref(),
-        )?;
+        )
+        .await?;
         Ok(())
     }
     fn error(&self, kind: McpErrorKind) -> McpError {
@@ -559,6 +561,56 @@ fn validate_approval(
     }
     Ok(())
 }
+/// A session nobody has taken over yet: dropping it (the caller abandoned the
+/// launch) stops the session, whose supervisor then reaps the child.
+struct Launched(Option<Arc<Session>>);
+impl Launched {
+    fn into_session(mut self) -> Arc<Session> {
+        self.0.take().expect("launched session")
+    }
+}
+impl Drop for Launched {
+    fn drop(&mut self) {
+        if let Some(session) = self.0.take() {
+            session.stop.cancel();
+        }
+    }
+}
+/// `spawn_session` on a blocking thread: the guard handshake of the launch is
+/// synchronous, and the spawn fence's admission spans the launch and the
+/// registration of the session's workers, so all of it stays together.
+async fn spawn_session_blocking(
+    server: &Arc<ResolvedMcpServer>,
+    approval: &Arc<ApprovalPermit>,
+    limiter: &Arc<dyn McpProcessLimiter>,
+    cancel: &CancelContext,
+    policy: &StdioShutdownPolicy,
+    ledger: Option<&SpawnLedger>,
+) -> Result<Arc<Session>, McpError> {
+    let (server, approval, limiter, cancel, policy, ledger) = (
+        server.clone(),
+        approval.clone(),
+        limiter.clone(),
+        cancel.clone(),
+        policy.clone(),
+        ledger.cloned(),
+    );
+    let failed = safe_error(&server, McpErrorKind::Transport);
+    tokio::task::spawn_blocking(move || {
+        spawn_session(
+            &server,
+            &approval,
+            &*limiter,
+            &cancel,
+            policy,
+            ledger.as_ref(),
+        )
+        .map(|session| Launched(Some(session)))
+    })
+    .await
+    .map_err(|_| failed)?
+    .map(Launched::into_session)
+}
 fn spawn_session(
     server: &ResolvedMcpServer,
     approval: &ApprovalPermit,
@@ -587,7 +639,7 @@ fn spawn_session(
     let permit = limiter
         .try_acquire(&server.scope.canonical_root)
         .map_err(error)?;
-    let mut command = std::process::Command::new(executable);
+    let mut command = OwnedCommand::new(executable);
     command
         .args(args.iter().map(sandbox::Secret::expose))
         .current_dir(cwd)
@@ -604,9 +656,6 @@ fn spawn_session(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    apply_launch_policy(&mut command);
-    let mut command = tokio::process::Command::from(command);
-    command.kill_on_drop(true);
     // The final spawn fence waits for this launch until the child and its
     // supervisor are registered; after it, nothing starts.
     let admission =
@@ -616,7 +665,7 @@ fn spawn_session(
     if cancel.is_cancelled() {
         return Err(error(McpErrorKind::Cancelled));
     }
-    let child = admission.spawn_group(ChildKind::McpStdio, Some(&server.scope.server_id), &mut command).map_err(|_| {
+    let child = OwnedChild::spawn_in(&admission, ChildKind::McpStdio, Some(&server.scope.server_id), &mut command).map_err(|_| {
         // Never emit the OS error: command paths or env values can be secrets.
         let keys: Vec<String> = std::env::vars_os().filter_map(|(key, _)| key.into_string().ok())
             .filter(|key| !INHERITED_ENVIRONMENT.contains(&key.as_str()) && !env.contains_key(key))
@@ -669,7 +718,7 @@ fn spawn_session(
 /// Unwinding/runtime teardown fallback: retain the admission permit until an OS
 /// wait has completed, even when no async executor remains to run cleanup.
 struct ChildLease {
-    child: Option<GroupChild>,
+    child: Option<OwnedChild>,
     permit: Option<Box<dyn McpProcessPermit>>,
     /// Tracks the fallback cleanup thread, so that joining the ledger's
     /// workers waits for it.
@@ -678,7 +727,7 @@ struct ChildLease {
 impl Drop for ChildLease {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            child.kill();
+            let _ = child.kill();
             let permit = self.permit.take();
             let cleanup = move || {
                 let _ = child.kill_and_reap_blocking();
@@ -723,14 +772,14 @@ async fn supervise(
     };
     if !exited {
         tracing::debug!("MCP stdio stdin grace expired; sending SIGTERM");
-        child.group().terminate();
+        let _ = child.group().terminate();
         let exited = tokio::select! {
             result = child.exited() => result.is_ok(),
             () = policy.clock.expired(policy.term_grace) => false,
         };
         if !exited {
             tracing::warn!("MCP stdio termination grace expired; sending SIGKILL");
-            child.kill();
+            let _ = child.kill();
         }
     }
     let result = child

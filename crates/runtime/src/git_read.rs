@@ -9,10 +9,11 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use sandbox::{ChildKind, SpawnLedger, StdioSession};
+use sandbox::owned::{OwnedCommand, OwnedSession};
+use sandbox::{ChildKind, SpawnLedger};
 
 /// The most stderr bytes read from a git command.
 pub(crate) const STDERR_LIMIT: usize = 64 * 1024;
@@ -112,7 +113,7 @@ impl GitReader {
         limit: usize,
     ) -> Result<GitOutput, GitReadError> {
         let deadline = self.deadline;
-        let mut command = Command::new("git");
+        let mut command = OwnedCommand::new("git");
         // Inherited GIT_DIR/GIT_INDEX_FILE must not point the read at another repository.
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("GIT_") {
@@ -147,11 +148,11 @@ impl GitReader {
         }
         // The session kills the command's whole group and reaps it when dropped,
         // so a timeout leaves neither the command nor a helper of it behind.
-        let mut child = StdioSession::spawn_command_owned(
+        let mut child = OwnedSession::spawn_owned(
             self.ledger.as_ref(),
             ChildKind::Other,
             Some("git-read"),
-            command,
+            &mut command,
         )
         .map_err(|_| GitReadError::Failed)?;
         let (sender, streams) = std::sync::mpsc::channel();

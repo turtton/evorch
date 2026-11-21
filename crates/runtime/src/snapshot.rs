@@ -1,9 +1,10 @@
 //! Benchmark workspace snapshots stored outside the user's repository metadata.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
-use sandbox::{ChildKind, SpawnLedger, StdioSession};
+use sandbox::owned::{OwnedCommand, OwnedSession};
+use sandbox::{ChildKind, SpawnLedger};
 
 mod benchmark;
 
@@ -132,7 +133,7 @@ impl SnapshotStore {
         input: Option<&[u8]>,
         benchmark: bool,
     ) -> Result<Output, SnapshotError> {
-        let mut command = Command::new("git");
+        let mut command = OwnedCommand::new("git");
         // Inherited GIT_INDEX_FILE/GIT_COMMON_DIR must never redirect writes to user metadata.
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("GIT_") {
@@ -161,11 +162,11 @@ impl SnapshotStore {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = StdioSession::spawn_command_owned(
+        let output = OwnedSession::spawn_owned(
             self.ledger.as_ref(),
             ChildKind::Other,
             Some("snapshot-git"),
-            command,
+            &mut command,
         )?
         .output(input)?;
         if output.status.success() {

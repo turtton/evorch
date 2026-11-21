@@ -1,11 +1,14 @@
 use super::{CodexQuota, QuotaConfig, QuotaError, wire::RpcLimits};
-use sandbox::{ChildKind, SpawnLedger};
+use sandbox::{
+    ChildKind, SpawnLedger,
+    owned::{OwnedChild, OwnedCommand},
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, ChildStdout, Command},
+    process::{ChildStdin, ChildStdout},
 };
 
 fn io(error: std::io::Error) -> QuotaError {
@@ -131,20 +134,20 @@ async fn supervise(
     config: &QuotaConfig,
     sender: &mut tokio::sync::oneshot::Sender<Result<CodexQuota, QuotaError>>,
 ) -> Result<CodexQuota, QuotaError> {
-    let mut command = Command::new(&config.app_server_program);
+    let mut command = OwnedCommand::new(&config.app_server_program);
     command
         .args(&config.app_server_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    sandbox::process::apply_launch_policy(command.as_std_mut());
-    let mut child = SpawnLedger::admit_optional(config.ledger.as_ref())
-        .map_err(std::io::Error::from)
-        .and_then(|admission| {
-            admission.spawn_group(ChildKind::Other, Some("codex-quota"), &mut command)
-        })
-        .map_err(io)?;
+        .stderr(Stdio::null());
+    let mut child = OwnedChild::spawn_blocking(
+        config.ledger.clone(),
+        ChildKind::Other,
+        Some("codex-quota".to_owned()),
+        command,
+    )
+    .await
+    .map_err(io)?;
     let exchange = async {
         let mut connection = Connection {
             input: child
