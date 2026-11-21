@@ -360,6 +360,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/evorch-product
+      # PROBE ONLY (never merged): the producer fails after its upload on attempt 1.
+      - name: Probe fault after upload
+        if: github.run_attempt == 1
+        run: exit 1
 
   # The workspace test suite, one job per crate group (scripts/ci-test-groups.json
   # is the single definition; the matrix below repeats its group names and shard
@@ -473,6 +477,23 @@ jobs:
         run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
+      # PROBE ONLY (never merged): the same listing again with the product environment.
+      - name: Probe inventory with and without the product environment
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          env | grep -c '^EVORCH_PROCESS_GUARD' || true
+          scripts/run-test-group.sh inventory "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" "$RUNNER_TEMP/inv-post"
+          bad=0
+          for f in all default cache io remaining cache.part io.part remaining.part; do
+            a=$(LC_ALL=C sort "$EVORCH_TEST_INVENTORY_DIR/$f.tsv" | sha256sum | cut -c1-16)
+            b=$(LC_ALL=C sort "$RUNNER_TEMP/inv-post/$f.tsv" | sha256sum | cut -c1-16)
+            n=$(wc -l < "$EVORCH_TEST_INVENTORY_DIR/$f.tsv")
+            m=$(wc -l < "$RUNNER_TEMP/inv-post/$f.tsv")
+            if [[ "$a" == "$b" && "$n" == "$m" ]]; then s=SAME; else s=DIFFERENT; bad=1; fi
+            echo "INVENTORY-EQ ${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }} $f pre=$n/$a post=$m/$b $s"
+          done
+          exit "$bad"
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
       # group and shard). The mock computes cache usage from received input;
