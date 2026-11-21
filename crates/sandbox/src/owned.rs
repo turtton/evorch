@@ -1,6 +1,12 @@
-//! Non-PTY ownership API (D-3a2 B2a; every non-PTY caller migrated by B2b-i..iii; the PTY backend is B3).
+//! Typed process ownership, including shell PTY (D-3a2 B3-03).
 //! Linux uses an authenticated process guard, regardless of ledger presence.
 mod command;
+mod pty;
+#[cfg(target_os = "linux")]
+pub use linux::pty::{OwnedPtyChild, OwnedPtyMaster};
+pub use pty::OwnedPtyCommand;
+#[cfg(not(target_os = "linux"))]
+mod pty_unix;
 use crate::{
     CommandSpec, Sandbox, SessionError,
     ledger::{Admission, ChildKind, SpawnLedger},
@@ -8,6 +14,8 @@ use crate::{
 pub use command::OwnedCommand;
 #[cfg(target_os = "linux")]
 pub use process_guard::GuardRuntime;
+#[cfg(not(target_os = "linux"))]
+pub use pty_unix::{OwnedPtyChild, OwnedPtyMaster};
 use std::{io, process::Stdio};
 #[cfg(target_os = "linux")]
 mod linux;

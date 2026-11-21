@@ -111,7 +111,7 @@ impl OwnedCommand {
         Ok(())
     }
     #[cfg(target_os = "linux")]
-    pub(super) fn launch(&mut self) -> std::io::Result<process_guard::GuardChild> {
+    pub(super) fn launch_spec(&self) -> std::io::Result<process_guard::LaunchSpec> {
         use std::{collections::BTreeMap, os::unix::ffi::OsStrExt};
         self.check_nul()?;
         let mut env = if self.inherit_env {
@@ -137,7 +137,7 @@ impl OwnedCommand {
         } else {
             std::env::current_dir()?.join(cwd)
         };
-        let spec = process_guard::LaunchSpec {
+        Ok(process_guard::LaunchSpec {
             argv: std::iter::once(self.command.get_program())
                 .chain(self.command.get_args())
                 .map(|v| v.as_bytes().to_vec())
@@ -147,13 +147,49 @@ impl OwnedCommand {
                 .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
                 .collect(),
             cwd: cwd.as_os_str().as_bytes().to_vec(),
-        };
+        })
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn launch(&mut self) -> std::io::Result<process_guard::GuardChild> {
+        let spec = self.launch_spec()?;
         process_guard::GuardRuntime::for_library(self.runtime.as_ref())?.spawn(
             &spec,
             self.stdio
                 .each_mut()
                 .map(|fd| fd.take().unwrap_or_else(Stdio::inherit)),
         )
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn launch_pty(
+        &self,
+        size: portable_pty::PtySize,
+    ) -> std::io::Result<(process_guard::GuardChild, process_guard::PtyMaster)> {
+        let spec = self.launch_spec()?;
+        process_guard::GuardRuntime::for_library(self.runtime.as_ref())?.spawn_pty(&spec, size)
+    }
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn pty(&self) -> std::io::Result<portable_pty::CommandBuilder> {
+        self.check_nul()?;
+        let mut command = portable_pty::CommandBuilder::new(self.command.get_program());
+        command.args(self.command.get_args());
+        if !self.inherit_env {
+            command.env_clear();
+        }
+        for (key, value) in self.command.get_envs() {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        command.cwd(
+            self.command
+                .get_current_dir()
+                .map(Path::to_path_buf)
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)?,
+        );
+        Ok(command)
     }
     #[cfg(not(target_os = "linux"))]
     pub(super) fn raw(&mut self) -> std::io::Result<Command> {

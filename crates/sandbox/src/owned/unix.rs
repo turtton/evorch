@@ -1,7 +1,7 @@
 //! Non-Linux adapter: the existing ownership backend, with no new D-7 claim.
 use super::OwnedCommand;
 #[derive(Clone, Debug)]
-pub struct OwnedGroup(crate::process::ProcessGroup);
+pub struct OwnedGroup(pub(super) crate::process::ProcessGroup);
 impl OwnedGroup {
     pub fn id(&self) -> Option<u32> {
         self.0.leader().map(|pid| pid.as_raw_nonzero().get() as u32)

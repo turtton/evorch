@@ -897,18 +897,17 @@ struct LaunchGuard {
     job: Arc<Job>,
     delivered: bool,
 }
-/// The stop capability of a running job: the guard-owned group of a pipe job or
-/// the raw group of a PTY job (PTY stays on its own backend until B3).
+/// Typed stop capabilities for pipe and PTY jobs.
 #[derive(Clone)]
 enum JobGroup {
     Owned(sandbox::owned::OwnedGroup),
-    Pty(sandbox::process::ProcessGroup),
+    Pty(sandbox::owned::OwnedGroup),
 }
 impl JobGroup {
     fn kill(&self) {
         match self {
             Self::Owned(group) => drop(group.kill()),
-            Self::Pty(group) => group.kill(),
+            Self::Pty(group) => drop(group.kill()),
         }
     }
     /// The group's leader is no longer reserved: the reap retired the handle.
@@ -916,7 +915,7 @@ impl JobGroup {
     fn retired(&self) -> bool {
         match self {
             Self::Owned(group) => group.id().is_none(),
-            Self::Pty(group) => group.leader().is_none(),
+            Self::Pty(group) => group.id().is_none(),
         }
     }
 }

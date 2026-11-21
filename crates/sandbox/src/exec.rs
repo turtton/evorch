@@ -51,6 +51,11 @@ impl WrappedCommand {
         command
     }
 
+    /// Target-only PTY launch; no raw command, slave or numeric group owner.
+    pub fn to_owned_pty_command(&self) -> crate::owned::OwnedPtyCommand {
+        crate::owned::OwnedPtyCommand::from_target(self.to_owned_command())
+    }
+
     /// Diagnose deterministic launch failures before entering a model/tool retry
     /// loop. This does not execute a probe or disable sandboxing.
     pub fn preflight(&self) -> Result<(), SandboxError> {
