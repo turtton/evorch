@@ -115,6 +115,10 @@ pub struct AdminService {
     operation_queries: Arc<Semaphore>,
 }
 impl AdminService {
+    /// Fixed management CAS epoch, not the invalidatable hello epoch.
+    pub fn epoch(&self) -> InstanceEpoch {
+        self.epoch
+    }
     pub fn new(audit: AdminAudit, tasks: AreaTasks, epoch: InstanceEpoch) -> Arc<Self> {
         Arc::new(Self {
             enabled: AtomicBool::new(false),

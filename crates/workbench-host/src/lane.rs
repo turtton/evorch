@@ -31,8 +31,14 @@ pub struct BindingTable(
 pub struct BindingObservation {
     generation: Arc<std::sync::atomic::AtomicU64>,
     expected: u64,
+    bindings: Arc<Mutex<BTreeMap<String, ThreadBinding>>>,
 }
 impl BindingObservation {
+    /// Hold the publication exclusion through a memory-only admission boundary.
+    pub fn with_current<T>(&self, transition: impl FnOnce() -> T) -> Option<T> {
+        let _guard = self.bindings.lock().ok()?;
+        self.is_current().then(transition)
+    }
     pub fn is_current(&self) -> bool {
         self.expected != u64::MAX
             && self.generation.load(std::sync::atomic::Ordering::Acquire) == self.expected
@@ -43,6 +49,7 @@ impl BindingTable {
     pub fn observe(&self) -> BindingObservation {
         BindingObservation {
             generation: self.1.clone(),
+            bindings: self.0.clone(),
             expected: self.1.load(std::sync::atomic::Ordering::Acquire),
         }
     }

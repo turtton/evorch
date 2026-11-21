@@ -55,49 +55,93 @@ impl RestartCoordinator {
             }
             state.recipes.clone()
         };
+        #[cfg(target_os = "linux")]
+        let source = self.0.state.lock().unwrap().recipe_source.clone();
+        #[cfg(target_os = "linux")]
+        let mut binding_observation = None;
+        #[cfg(target_os = "linux")]
+        let mut recipe_observation = None;
+        #[cfg(target_os = "linux")]
+        if let Some(source) = &source {
+            let observation = self.0.runtime.observe_restart_recipes();
+            // This is still reversible: no host Preparing gate, park or tx.
+            // Reject the whole request, not only the newly unsupported member.
+            let observed = match source.collect().await {
+                Ok(observed) => observed,
+                Err(_) => return Ok(None),
+            };
+            let current = serde_json::to_string(&Some(observed.recipes));
+            let requested = serde_json::to_string(&recipes);
+            if !observed.bindings.is_current()
+                || !matches!((current, requested), (Ok(current), Ok(requested)) if current == requested)
+            {
+                return Ok(None);
+            }
+            binding_observation = Some(observed.bindings);
+            recipe_observation = Some(observation);
+        }
         let preflight = if let Some(recipes) = recipes {
             let runtime = self.0.runtime.clone();
             #[cfg(test)]
             let hook = self.0.preflight_hook.lock().unwrap().clone();
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    #[cfg(test)]
-                    if let Some(hook) = hook {
-                        hook(id);
-                    }
-                    runtime.prepare_restart_quiesce(&recipes)
-                })
-                .await
-                .map_err(|e| RuntimeError::Model {
-                    reason: e.to_string(),
-                })??,
-            )
+            let result = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    hook(id);
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(observation) = recipe_observation {
+                    return runtime.prepare_restart_quiesce_observed(&recipes, observation);
+                }
+                runtime.prepare_restart_quiesce(&recipes)
+            })
+            .await
+            .map_err(|e| RuntimeError::Model {
+                reason: e.to_string(),
+            })?;
+            #[cfg(target_os = "linux")]
+            if source.is_some() && result.is_err() {
+                return Ok(None);
+            }
+            Some(result?)
         } else {
             None
         };
-        let mut state = self.0.state.lock().unwrap();
-        if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
-            return Err(RuntimeError::RestartBusy);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(None);
-        }
-        // Cancellation, the final health check, attempt creation and host Preparing
-        // share this mutex. No await leaves a reservation/attempt gap.
-        let attempt = if let Some(preflight) = preflight {
+        let begin = || {
+            // Binding -> coordinator -> runtime registration locks use the same
+            // order as commit. No I/O/await lies inside this final transition.
+            let mut state = self.0.state.lock().unwrap();
+            if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
+                return Err(RuntimeError::RestartBusy);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            let attempt = if let Some(preflight) = preflight {
+                self.0.runtime.begin_preflighted_restart_quiesce(preflight)
+            } else {
+                self.0.runtime.begin_restart_quiesce()
+            };
+            #[cfg(target_os = "linux")]
+            if source.is_some() && attempt.is_err() {
+                return Ok(None);
+            }
+            let attempt = attempt?;
+            state.attempt = Some(attempt.clone());
+            state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
             self.0
-                .runtime
-                .begin_preflighted_restart_quiesce(preflight)?
-        } else {
-            self.0.runtime.begin_restart_quiesce()?
+                .gate
+                .transition(id.generation, HostRestartPhase::Preparing);
+            self.publish(&mut state, RestartPhase::Requested);
+            Ok(Some(attempt))
         };
-        state.attempt = Some(attempt.clone());
-        state.pauses = self.0.producers.iter().map(ProducerGate::pause).collect();
-        self.0
-            .gate
-            .transition(id.generation, HostRestartPhase::Preparing);
-        self.publish(&mut state, RestartPhase::Requested);
-        Ok(Some(attempt))
+        #[cfg(target_os = "linux")]
+        if let Some(bindings) = binding_observation {
+            // Runtime's existing registration exclusion covers new live members;
+            // this guard independently excludes host binding publication.
+            return bindings.with_current(begin).unwrap_or(Ok(None));
+        }
+        begin()
     }
 
     pub(super) async fn drive_preparing(&self, id: RestartId) {

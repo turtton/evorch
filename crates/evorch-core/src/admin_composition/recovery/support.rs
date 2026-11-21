@@ -29,17 +29,21 @@ use workbench_protocol::{
     namespaces::lifecycle::AdminId,
 };
 
-pub(super) const TX: &str = "restart";
-pub(super) const MANIFEST: &str = "component";
+pub(in crate::admin_composition) const TX: &str = "restart";
+pub(in crate::admin_composition) const MANIFEST: &str = "component";
 const MAX_FRAME: u32 = 1024 * 1024;
 
-pub(super) fn id(s: &str) -> AdminId {
+pub(in crate::admin_composition) fn id(s: &str) -> AdminId {
     AdminId::new(s).unwrap()
 }
 
 /// A committed two-member manifest and a restart transaction, then the
 /// production cold-boot transition that quarantines them.
-pub(super) fn seed(boot: &BootstrappedHost, config: &StorageConfig, threads: bool) {
+pub(in crate::admin_composition) fn seed(
+    boot: &BootstrappedHost,
+    config: &StorageConfig,
+    threads: bool,
+) {
     let handle = boot.storage_writer();
     let mut members = Vec::new();
     for run in ["run-a", "run-b"] {
@@ -152,12 +156,12 @@ pub(super) fn seed(boot: &BootstrappedHost, config: &StorageConfig, threads: boo
 }
 
 /// One raw verified-local connection.
-pub(super) struct Conn {
+pub(in crate::admin_composition) struct Conn {
     stream: UnixStream,
-    pub(super) hello: ServerHello,
+    pub(in crate::admin_composition) hello: ServerHello,
 }
 impl Conn {
-    pub(super) async fn open(socket: &std::path::Path, name: &str) -> Self {
+    pub(in crate::admin_composition) async fn open(socket: &std::path::Path, name: &str) -> Self {
         let mut stream = UnixStream::connect(socket).await.unwrap();
         let hello = ClientHello {
             supported_versions: vec![ProtocolVersion::CURRENT],
@@ -181,7 +185,10 @@ impl Conn {
             rejected => panic!("handshake refused: {rejected:?}"),
         }
     }
-    pub(super) async fn call(&mut self, request: &RequestEnvelope) -> ReplyEnvelope {
+    pub(in crate::admin_composition) async fn call(
+        &mut self,
+        request: &RequestEnvelope,
+    ) -> ReplyEnvelope {
         write(&mut self.stream, request).await;
         match serde_json::from_slice(&read(&mut self.stream).await).unwrap() {
             ServerFrame::Reply(reply) => {
@@ -207,7 +214,7 @@ async fn read(stream: &mut UnixStream) -> Vec<u8> {
 }
 
 /// Serve `backend` on `listener` with the real `unix::connection`.
-pub(super) fn serve(
+pub(in crate::admin_composition) fn serve(
     listener: tokio::net::UnixListener,
     backend: Arc<HostBackend>,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
@@ -224,7 +231,7 @@ pub(super) fn serve(
     (stop, server)
 }
 
-pub(super) fn error_of(reply: &ReplyEnvelope) -> (ErrorCode, &str) {
+pub(in crate::admin_composition) fn error_of(reply: &ReplyEnvelope) -> (ErrorCode, &str) {
     match &reply.result {
         ReplyResult::Error(error) => (error.code, error.message.as_str()),
         other => panic!("the request was accepted: {other:?}"),

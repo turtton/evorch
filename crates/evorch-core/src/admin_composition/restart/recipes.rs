@@ -21,13 +21,6 @@ use workbench_host::{
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 
 /// Reads only this host's current conversation bindings and capture inventory.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 pub struct HostRecipeSource {
     runtime: AgentRuntime,
     host: Arc<Mutex<CommandHost>>,
@@ -35,13 +28,6 @@ pub struct HostRecipeSource {
     storage: storage::StorageConfig,
     reader: Arc<AdminReader>,
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 struct Bindings {
     observed: BindingObservation,
     chats: BTreeMap<String, RunId>,
@@ -50,13 +36,6 @@ struct Bindings {
     permits: BTreeMap<String, OwnerPermit>,
 }
 impl HostRecipeSource {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Only until V1b-2b connects this leaf; remove then"
-        )
-    )]
     pub fn new(host: &BootstrappedHost) -> Self {
         Self {
             runtime: host.runtime.clone(),
@@ -66,13 +45,6 @@ impl HostRecipeSource {
             reader: host.admin.reader().clone(),
         }
     }
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Only until V1b-2b connects this leaf; remove then"
-        )
-    )]
     fn bindings(&self) -> Result<Bindings, AdminFailure> {
         let host = self.host.lock().map_err(|_| unavailable())?;
         let service = host.service();
@@ -87,13 +59,6 @@ impl HostRecipeSource {
             permits: service.bindings.chat_permits.clone(),
         })
     }
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Only until V1b-2b connects this leaf; remove then"
-        )
-    )]
     async fn collect_current(&self) -> Result<ObservedRecipes, AdminFailure> {
         let bindings = self.bindings()?;
         let held: BTreeMap<_, _> = bindings
@@ -172,26 +137,12 @@ impl RecipeSource for HostRecipeSource {
         Box::pin(self.collect_current())
     }
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 fn same_permit(left: &OwnerPermit, right: &OwnerPermit) -> bool {
     left.registry_path == right.registry_path
         && left.thread_id == right.thread_id
         && left.lease.owner_id == right.lease.owner_id
         && left.lease.generation == right.lease.generation
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 fn read_recipes(
     storage: &storage::StorageConfig,
     owner: &OwnerHost,
@@ -296,13 +247,6 @@ fn read_recipes(
         bindings: bindings.observed.clone(),
     })
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 fn unsupported(kind: &str) -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::UnsupportedCapability,
@@ -310,13 +254,6 @@ fn unsupported(kind: &str) -> AdminFailure {
         RetryAdvice::Never,
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 fn unavailable() -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::Busy,
@@ -324,13 +261,6 @@ fn unavailable() -> AdminFailure {
         RetryAdvice::Never,
     )
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only until V1b-2b connects this leaf; remove then"
-    )
-)]
 fn conflict() -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::Conflict,

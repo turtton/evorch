@@ -251,17 +251,19 @@ impl PublicRestartCoordinator {
         let timeout = prepared.target.timeout();
         let id = self.graphs.admit(revision, &mut || {
             let recipes = recipes.take().ok_or_else(conflict)?;
-            if !prepared.bindings.is_current() {
-                return Err(conflict());
-            }
-            self.core
-                .0
-                .runtime
-                .validate_restart_preflight(&prepared.preflight, &recipes)
-                .map_err(|_| conflict())?;
-            self.core
-                .request_inner(Some(recipes), timeout)
-                .map_err(|_| conflict())
+            prepared
+                .bindings
+                .with_current(|| {
+                    self.core
+                        .0
+                        .runtime
+                        .validate_restart_preflight(&prepared.preflight, &recipes)
+                        .map_err(|_| conflict())?;
+                    self.core
+                        .request_with_source(Some(recipes), timeout, Some(self.recipes.clone()))
+                        .map_err(|_| conflict())
+                })
+                .ok_or_else(conflict)?
         })?;
         state.active = Some(Active { binding, id });
         state.cancelled = None;
