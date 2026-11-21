@@ -17,15 +17,20 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 image = { workspace = true, default-features = false, features = ["jpeg"] }
+sandbox = { path = "../sandbox" }
+dunce = "1"
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "sync", "net", "io-util", "time"] }
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "net", "io-util", "time", "process"] }
 url.workspace = true
 
 [dev-dependencies]
+futures-util = { workspace = true, features = ["io"] }
+libc = "0.2"
 async-trait.workspace = true
 storage = { path = "../storage" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "test-util"] }

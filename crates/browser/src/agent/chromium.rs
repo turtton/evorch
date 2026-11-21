@@ -7,8 +7,11 @@ use std::sync::{Arc, Mutex, Weak};
 mod observation_source;
 use std::time::Duration;
 
-use chromiumoxide::{Browser, BrowserConfig};
+use chromiumoxide::Browser;
+#[path = "launch/mod.rs"]
+mod launch;
 use futures_util::StreamExt;
+use launch::{AbortTask, Chromium};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
@@ -56,11 +59,10 @@ pub struct AgentBrowser {
 
 struct Running {
     _browser: Browser,
-    handler: tokio::task::JoinHandle<()>,
-    gate: tokio::task::JoinHandle<()>,
+    handler: AbortTask,
+    gate: AbortTask,
     connection: Arc<Connection>,
-    _profile: tempfile::TempDir,
-    _proxy: Proxy,
+    _child: Chromium,
 }
 
 impl Running {
@@ -203,53 +205,16 @@ impl AgentBrowser {
         let executable = Self::detect(&self.options)?;
         let profile = tempfile::tempdir().map_err(|error| AgentError::Launch(error.to_string()))?;
         let proxy = Proxy::start(Arc::clone(&self.options.policy)).await?;
-        let config = BrowserConfig::builder()
-            .new_headless_mode()
-            .chrome_executable(executable)
-            .user_data_dir(profile.path())
-            .window_size(WINDOW[0], WINDOW[1])
-            // chromiumoxide also attaches to every tab and would otherwise
-            // emulate its own viewport and touch input on it at a moment of
-            // its choosing, and accept invalid certificates.
-            .viewport(None)
-            .respect_https_errors()
-            .launch_timeout(Duration::from_secs(20))
-            .request_timeout(super::REQUEST_TIMEOUT)
-            // chromiumoxide adds the leading `--` and merges repeated keys
-            // such as `disable-features`, so switches are bare keys here.
-            .arg((
-                "proxy-server",
-                format!("http://{}", proxy.address()).as_str(),
-            ))
-            .args([
-                "no-first-run",
-                "no-default-browser-check",
-                "disable-background-networking",
-                "disable-component-update",
-                "disable-sync",
-                "disable-extensions",
-                "mute-audio",
-                // QUIC and direct WebRTC UDP would bypass the proxy.
-                "disable-quic",
-            ])
-            .args([
-                // Keep cross-origin frames in the page session so its Fetch
-                // interception covers them.
-                ("disable-features", "IsolateOrigins,site-per-process"),
-                // Back and forward then always load the page again, which
-                // they wait for like any other navigation.
-                ("disable-features", "BackForwardCache"),
-                // Loopback is otherwise bypassed implicitly; every connection
-                // has to meet the policy at the proxy.
-                ("proxy-bypass-list", "<-loopback>"),
-                ("force-webrtc-ip-handling-policy", "disable_non_proxied_udp"),
-            ])
-            .build()
-            .map_err(AgentError::Launch)?;
-        let (browser, mut events) = Browser::launch(config)
-            .await
-            .map_err(|error| AgentError::Launch(error.to_string()))?;
-        let handler = tokio::spawn(async move { while events.next().await.is_some() {} });
+        // Own the child AND its resources before awaiting endpoint/CDP setup.
+        // Cancellation during the blocking handshake keeps that same owner.
+        let (child, endpoint) = Chromium::launch(executable, profile, proxy).await?;
+        let (browser, mut events) =
+            Browser::connect_with_config(endpoint, launch::handler_config())
+                .await
+                .map_err(|error| AgentError::Launch(error.to_string()))?;
+        let handler = AbortTask::new(tokio::spawn(async move {
+            while events.next().await.is_some() {}
+        }));
         let shared = Arc::clone(&self.shared);
         let (connection, gate) =
             Connection::open(browser.websocket_address(), move |connection, event| {
@@ -260,10 +225,9 @@ impl AgentBrowser {
         let running = Running {
             _browser: browser,
             handler,
-            gate,
+            gate: AbortTask::new(gate),
             connection,
-            _profile: profile,
-            _proxy: proxy,
+            _child: child,
         };
         // Every page, including popups, attaches here paused, so Fetch is
         // on before its first request.
@@ -865,13 +829,6 @@ impl Screencast {
 impl Drop for Screencast {
     fn drop(&mut self) {
         self.task.abort();
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.handler.abort();
-        self.gate.abort();
     }
 }
 
