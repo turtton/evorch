@@ -6,10 +6,13 @@ on:
       - main
   pull_request:
 
-# 同一 ref への連続 push / PR 更新で古い実行を中断し、runner を無駄遣いしないようにする。
+# 同一 PR への連続 push / 更新では古い実行を中断し、runner を無駄遣いしないようにする。
+# main の実行は後続 push で中断しない: cache-save (共有依存 cache の唯一の writer)
+# が保存まで進めるようにするため。待機中の run が後続の run に置き換わることは
+# 残る (すべての main push が実行される保証ではない)。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Aggregate gate, usable as a required check: it succeeds only when every job
