@@ -22,6 +22,7 @@ fn transition(run_id: &str, to: AgentRunPhase) -> Event {
         from: AgentRunPhase::Pending,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

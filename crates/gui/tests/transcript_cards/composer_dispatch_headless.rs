@@ -338,6 +338,7 @@ fn stop_chat_dispatches_active_thread_command() {
             from: event_bus::AgentRunPhase::Pending,
             to: event_bus::AgentRunPhase::Running,
             reason: None,
+            waiting: None,
         }),
     ]);
     harness.step();
@@ -377,6 +378,7 @@ fn stopped_parent_with_live_child_keeps_banner_and_stops_subagents_without_disca
             from: event_bus::AgentRunPhase::Pending,
             to: event_bus::AgentRunPhase::Running,
             reason: None,
+            waiting: None,
         }),
     ]);
     harness

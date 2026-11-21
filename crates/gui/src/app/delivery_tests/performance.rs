@@ -75,6 +75,7 @@ fn event_batch_queries_only_unsettled_ids_once_and_never_probes_empty_ids() {
             from: event_bus::AgentRunPhase::Running,
             to: event_bus::AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         })
     }));
     state.reconcile_follow_ups(); // render's second entry point must not query again

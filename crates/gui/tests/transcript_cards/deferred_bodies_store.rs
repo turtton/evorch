@@ -118,6 +118,7 @@ fn tokenized_log() -> Log {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         }),
     ];
     for event in &events {

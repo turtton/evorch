@@ -1,4 +1,6 @@
 use super::*;
+use event_bus::WaitingCause;
+use std::time::SystemTime;
 
 fn request_started(run_id: Option<&str>) -> Event {
     Event::new(ProviderEvent::RequestStarted {
@@ -153,6 +155,7 @@ fn agent_run_changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Ev
         from,
         to,
         reason: None,
+        waiting: None,
     })
 }
 
@@ -455,5 +458,111 @@ fn history_completion_preserves_context_but_never_revives_live_activity() {
             .thread_metrics_at(&["run-1".into()], start + Duration::from_secs(3600))
             .wall_time,
         Duration::ZERO
+    );
+}
+
+fn waiting_event(run_id: &str, waiting: Option<WaitingCause>, at: SystemTime) -> Event {
+    let mut event = Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run_id.into(),
+        from: AgentRunPhase::Running,
+        to: AgentRunPhase::Waiting,
+        reason: None,
+        waiting,
+    });
+    event.meta.wall_clock = at;
+    event
+}
+
+#[test]
+fn waiting_reason_is_replaced_by_each_wait_and_cleared_by_any_other_state() {
+    // Given: a run that waits for input, resumes, and waits again for a question.
+    let mut overlay = TelemetryOverlay::new();
+    let first = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let second = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+    overlay.apply_event(&agent_run_started("run-1"));
+    overlay.apply_event(&agent_run_changed(
+        "run-1",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+
+    // When/Then: the Waiting event's cause and its own time are kept.
+    overlay.apply_event(&waiting_event(
+        "run-1",
+        Some(WaitingCause::TurnCompleted),
+        first,
+    ));
+    assert_eq!(
+        overlay.row("run-1").unwrap().waiting,
+        Some(WaitingState {
+            cause: Some(WaitingCause::TurnCompleted),
+            since: first
+        })
+    );
+
+    // When/Then: leaving Waiting leaves no stale reason.
+    overlay.apply_event(&agent_run_changed(
+        "run-1",
+        AgentRunPhase::Waiting,
+        AgentRunPhase::Running,
+    ));
+    assert_eq!(overlay.row("run-1").unwrap().waiting, None);
+
+    // When/Then: the next wait carries its own cause and time.
+    overlay.apply_event(&waiting_event(
+        "run-1",
+        Some(WaitingCause::BlockingQuestions),
+        second,
+    ));
+    assert_eq!(
+        overlay.row("run-1").unwrap().waiting,
+        Some(WaitingState {
+            cause: Some(WaitingCause::BlockingQuestions),
+            since: second
+        })
+    );
+
+    // When/Then: a registration (restart) clears it even without a state change.
+    overlay.apply_event(&agent_run_started("run-1"));
+    assert_eq!(overlay.row("run-1").unwrap().waiting, None);
+}
+
+#[test]
+fn waiting_reasons_do_not_cross_runs_and_old_rows_have_no_cause() {
+    // Given: two waiting runs, one of them recorded without a cause.
+    let mut overlay = TelemetryOverlay::new();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+    overlay.apply_event(&waiting_event(
+        "run-1",
+        Some(WaitingCause::InputBoundary),
+        at,
+    ));
+    overlay.apply_event(&waiting_event("run-2", None, at));
+
+    // When: only run-1 resumes.
+    overlay.apply_event(&agent_run_changed(
+        "run-1",
+        AgentRunPhase::Waiting,
+        AgentRunPhase::Running,
+    ));
+
+    // Then: run-2 keeps its own (unrecorded) wait, and run-1 shows none.
+    assert_eq!(overlay.row("run-1").unwrap().waiting, None);
+    assert_eq!(
+        overlay.row("run-2").unwrap().waiting,
+        Some(WaitingState {
+            cause: None,
+            since: at
+        })
+    );
+    assert_eq!(
+        overlay
+            .row("run-2")
+            .unwrap()
+            .waiting
+            .as_ref()
+            .unwrap()
+            .label(),
+        "reason not recorded"
     );
 }

@@ -1135,6 +1135,7 @@ mod tests {
                 from: event_bus::AgentRunPhase::Running,
                 to: event_bus::AgentRunPhase::Error,
                 reason: Some("cancelled".into()),
+                waiting: None,
             },
         ));
         assert!(
@@ -1158,6 +1159,7 @@ mod tests {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some("profile=x http error 401".into()),
+            waiting: None,
         }));
         // Then: the failure becomes a distinct visible entry.
         assert_eq!(

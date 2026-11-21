@@ -844,6 +844,7 @@ async fn run_errors_are_collected_deduplicated_and_gated_on_the_bus() {
                 from: AgentRunPhase::Running,
                 to: phase,
                 reason: reason.map(str::to_owned),
+                waiting: None,
             });
             if run_id == "run-1" {
                 observed = Some(event.meta.wall_clock);
@@ -907,6 +908,7 @@ async fn panicked_run_error_is_not_a_second_candidate() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Error,
         reason: Some("panicked: boom".into()),
+        waiting: None,
     }));
     let _ = tokio::time::timeout(Duration::from_millis(300), f.collector().run(receiver)).await;
     let rows = f.candidates();

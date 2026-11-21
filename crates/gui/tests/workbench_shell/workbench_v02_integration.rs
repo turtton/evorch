@@ -396,6 +396,7 @@ fn v02_end_to_end_chained_scenario() {
         from: AgentRunPhase::Pending,
         to: AgentRunPhase::Running,
         reason: None,
+        waiting: None,
     }));
     fixture.emit(request_started("run-2", "anthropic", "claude"));
     fixture.emit(request_completed("run-2", 120, 34));

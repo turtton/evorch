@@ -1,6 +1,6 @@
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
-use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
+use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics, WaitingState};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::icons;
 use crate::theme::text::{muted, semibold};
@@ -144,7 +144,8 @@ fn column_widths<S: AgentRunSource>(
         let run_id = row.run_id.to_string();
         natural[2] = natural[2].max(text_width(&row.name) + 2.0 * button_pad_x);
         natural[3] = natural[3].max(text_width(&row.role) + CELL_PAD_X);
-        natural[4] = natural[4].max(text_width(status_label(row)) + DOT_SIZE + SP_1);
+        natural[4] =
+            natural[4].max(text_width(&status_text(row, telemetry.row(&run_id))) + DOT_SIZE + SP_1);
 
         if let Some(value) = telemetry.row(&run_id) {
             natural[5] = natural[5]
@@ -203,7 +204,10 @@ fn render_data_row(
             Layout::left_to_right(Align::Center),
             |ui| {
                 status_dot(ui, status_color(row));
-                ui.add(Label::new(status_label(row)).truncate());
+                let response = ui.add(Label::new(status_text(row, row_telemetry)).truncate());
+                if let Some(waiting) = waiting_state(row, row_telemetry) {
+                    response.on_hover_text(waiting.detail());
+                }
             },
         );
         ui.allocate_ui_with_layout(
@@ -293,11 +297,14 @@ pub fn subagents_pane<S: AgentRunSource>(
                                     action = Some(AgentsAction::DrillDown(run_id.clone()));
                                 }
                                 copy_id_button(ui, "Copy run ID", &run_id);
-                                ui.label(muted(format!(
+                                let status = ui.label(muted(format!(
                                     "{} · {}",
                                     role_label(row),
-                                    status_label(row)
+                                    status_text(row, telemetry.row(&run_id))
                                 )));
+                                if let Some(waiting) = waiting_state(row, telemetry.row(&run_id)) {
+                                    status.on_hover_text(waiting.detail());
+                                }
                                 let value = telemetry.row(&run_id);
                                 let model = value
                                     .and_then(|value| value.model.as_deref())
@@ -429,6 +436,29 @@ fn status_label(row: &TaskRow) -> &'static str {
     } else {
         agent_phase_label(row.status)
     }
+}
+
+/// The phase wording, with the recorded reason appended while the run is Waiting. A
+/// Waiting event without a recorded reason keeps the plain phase wording; its tooltip
+/// says the reason was not recorded.
+fn status_text(row: &TaskRow, telemetry: Option<&TelemetryRow>) -> String {
+    match waiting_state(row, telemetry) {
+        Some(waiting) if waiting.cause.is_some() => {
+            format!("{} — {}", status_label(row), waiting.label())
+        }
+        _ => status_label(row).into(),
+    }
+}
+
+/// The recorded reason, only while the run reads Waiting.
+fn waiting_state<'a>(
+    row: &TaskRow,
+    telemetry: Option<&'a TelemetryRow>,
+) -> Option<&'a WaitingState> {
+    if row.cancelled || row.status != event_bus::AgentRunPhase::Waiting {
+        return None;
+    }
+    telemetry?.waiting.as_ref()
 }
 
 fn status_color(row: &TaskRow) -> egui::Color32 {
@@ -634,6 +664,7 @@ mod stop_tests {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Stopped,
                 reason: None,
+                waiting: None,
             }));
         frame_at(&mut h, 2.5);
         assert!(h.query_by_label("Stop").is_none());
@@ -645,6 +676,7 @@ mod stop_tests {
                 from: AgentRunPhase::Stopped,
                 to: AgentRunPhase::Running,
                 reason: None,
+                waiting: None,
             }));
         frame_at(&mut h, 2.5);
         h.get_by_label("Stop");
@@ -684,6 +716,7 @@ mod stop_tests {
                     from: AgentRunPhase::Running,
                     to: AgentRunPhase::Error,
                     reason: Some(reason.into()),
+                    waiting: None,
                 }));
         }
         frame_at(&mut h, 1.0);
@@ -770,3 +803,7 @@ mod team_task_label_tests {
         assert!(harness.state().1.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "agents_waiting_tests.rs"]
+mod waiting_tests;

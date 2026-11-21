@@ -236,6 +236,7 @@ fn start_chat(gui: &mut HeadlessWorkbench<EmptySource>, thread: &str) {
             from: AgentRunPhase::Pending,
             to: AgentRunPhase::Running,
             reason: None,
+            waiting: None,
         }),
     ]);
     gui.run();

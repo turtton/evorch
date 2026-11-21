@@ -64,6 +64,7 @@ fn run_done(run_id: &str, seconds: u64) -> Event {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         },
         seconds,
     )

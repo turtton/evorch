@@ -162,6 +162,7 @@ fn completed(run: &str) -> Event {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     })
 }
 

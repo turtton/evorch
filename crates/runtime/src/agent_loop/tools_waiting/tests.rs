@@ -224,7 +224,21 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
     runtime.cancel(child).unwrap();
     let _ = runtime.wait(child).await;
     let endpoints_before: Vec<_> = runtime.list_agents().iter().map(|run| run.run_id).collect();
+    let mut events = state.shared.bus.subscribe();
     assert!(state.resume_recovery_waits().await);
+    // The resumed waits record their original call IDs on fresh Waiting events.
+    let recorded_calls: Vec<_> = events
+        .drain_pending_snapshot()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                waiting: Some(event_bus::WaitingCause::WaitTool { call_id, .. }),
+                ..
+            }) => call_id,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded_calls, ["wait-all", "wait-legacy", "wait-own"]);
     assert!(state.recovery_waits.is_empty());
     assert_eq!(&state.context.messages[..prefix.len()], prefix);
     let ids: Vec<_> = state

@@ -83,6 +83,7 @@ fn terminal_notices_are_metadata_only() {
             from: AgentRunPhase::Running,
             to: phase,
             reason: reason.map(str::to_owned),
+            waiting: None,
         }));
         // Then: neither stream nor failure reason leaks into the thread.
         assert_eq!(

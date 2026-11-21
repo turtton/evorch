@@ -149,6 +149,7 @@ fn thinking_collapses_when_run_finishes_without_answer() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }));
     pane.run_steps(3);
     // Then: only the header remains.
@@ -208,6 +209,7 @@ fn thinking_completion_is_scoped_to_its_run_through_registry() {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     }));
     // Then: the non-root completion leaves the root's reasoning live.
     assert!(registry.thread().thinking_is_streaming(0));

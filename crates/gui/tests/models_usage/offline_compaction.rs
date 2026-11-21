@@ -82,6 +82,7 @@ fn child_terminal_notification_is_a_root_delta_boundary_in_both_run_and_thread()
                 from: event_bus::AgentRunPhase::Running,
                 to: event_bus::AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             }),
             message("a", "after ", reasoning),
             message("a", "notification", reasoning),

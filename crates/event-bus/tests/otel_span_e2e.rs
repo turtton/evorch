@@ -227,6 +227,7 @@ fn event_sequence() -> Vec<Event> {
                 from: AgentRunPhase::Running,
                 to: AgentRunPhase::Done,
                 reason: None,
+                waiting: None,
             },
         ),
         event(

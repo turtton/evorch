@@ -790,6 +790,7 @@ mod attribution_tests {
                         from: AgentRunPhase::Running,
                         to: phase,
                         reason: None,
+                        waiting: None,
                     }),
                 )
                 .await;

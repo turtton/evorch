@@ -113,6 +113,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if let Some(row) = self.telemetry.row(&self.diagnostics_run) {
                     ui.label(format!("Current: {}", row.activity_label()));
                     ui.label(row.diagnostics_label());
+                    if let Some(waiting) = &row.waiting {
+                        ui.label(format!("Waiting: {}", waiting.label()));
+                        ui.label(waiting.detail());
+                    }
                 }
                 match &self.restore_status {
                     Some(Ok(Some(status))) => {
@@ -227,8 +231,68 @@ mod tests {
                 from: event_bus::AgentRunPhase::Running,
                 to: event_bus::AgentRunPhase::Error,
                 reason: Some("cancelled".into()),
+                waiting: None,
             },
         )]);
         assert!(state.restore_status.is_none());
+    }
+
+    #[test]
+    fn run_diagnostics_shows_the_recorded_waiting_reason_for_a_root_run() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        use workspace_ui::{ProjectId, SidebarState, ThreadId};
+        // Given: a thread whose root run waits for a required answer.
+        let dir = tempfile::tempdir().unwrap();
+        let mut sidebar = SidebarState::default();
+        let project = ProjectId::new("project");
+        sidebar
+            .add_project(project.clone(), "project", dir.path())
+            .unwrap();
+        sidebar.select_project(&project).unwrap();
+        sidebar
+            .create_thread(ThreadId::new("thread"), project, "thread")
+            .unwrap();
+        sidebar
+            .threads
+            .last_mut()
+            .unwrap()
+            .run_ids
+            .push("run-1".into());
+        sidebar.switch_thread(&ThreadId::new("thread")).unwrap();
+        let mut state =
+            WorkbenchState::new(DemoSource(vec![]), &workspace_ui::UiSettings::default())
+                .unwrap()
+                .with_sidebar(sidebar);
+        state.diagnostics_open = true;
+        state.diagnostics_run = "run-1".into();
+        let waiting = |to, waiting| {
+            Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-1".into(),
+                from: event_bus::AgentRunPhase::Running,
+                to,
+                reason: None,
+                waiting,
+            })
+        };
+        state.apply_events([waiting(
+            event_bus::AgentRunPhase::Waiting,
+            Some(event_bus::WaitingCause::BlockingQuestions),
+        )]);
+        let mut harness = Harness::builder().build_ui_state(
+            |ui, state: &mut WorkbenchState<DemoSource>| state.render_restore_diagnostics(ui.ctx()),
+            state,
+        );
+
+        // When/Then: the window names the reason and what the event recorded.
+        harness.run();
+        harness.get_by_label("Waiting: required question");
+        harness.get_by_label_contains("Waiting for an answer to a required question.");
+
+        // When/Then: once the run resumes the reason is gone.
+        harness
+            .state_mut()
+            .apply_events([waiting(event_bus::AgentRunPhase::Running, None)]);
+        harness.run();
+        assert!(harness.query_by_label_contains("Waiting:").is_none());
     }
 }

@@ -65,6 +65,7 @@ fn persist_unfinished_call(storage: &storage::Storage, record: Record) {
         from: AgentRunPhase::Pending,
         to: AgentRunPhase::Running,
         reason: None,
+        waiting: None,
     });
     let call = Event::new(ToolEvent::ToolStarted {
         tool_name: "shell".into(),

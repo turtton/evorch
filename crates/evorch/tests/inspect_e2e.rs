@@ -809,3 +809,82 @@ fn storage_reports_the_bodies_section() {
     assert_eq!(storage["bodies"]["by_codec"][0]["codec"], "plain");
     assert_eq!(storage["bodies"]["unreferenced"]["unregistered_orphans"], 1);
 }
+
+fn phase_change(
+    run: &str,
+    to: event_bus::AgentRunPhase,
+    waiting: Option<event_bus::WaitingCause>,
+) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from: event_bus::AgentRunPhase::Running,
+        to,
+        reason: None,
+        waiting,
+    })
+}
+
+#[test]
+fn run_shows_the_recorded_waiting_cause_in_every_view_and_drops_it_when_the_run_resumes() {
+    use event_bus::{AgentRunPhase, WaitingCause};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("evorch-events.db");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    let waiting = phase_change(
+        "run-7",
+        AgentRunPhase::Waiting,
+        Some(WaitingCause::TurnCompleted),
+    );
+    handle.append_event(Some("evorch-gui"), &waiting).unwrap();
+    handle
+        .upsert_run_context(&context(
+            "run-7",
+            None,
+            r#"[{"role":"user","content":"go"}]"#,
+        ))
+        .unwrap();
+    storage.close();
+
+    for args in [
+        vec!["run", "run-7"],
+        vec!["run", "run-7", "--full"],
+        vec!["run", "run-7", "--messages", "0..1"],
+    ] {
+        let recorded = &inspect(&path, &args).unwrap()["recorded_state"];
+        assert_eq!(recorded["phase"], "Waiting", "{args:?}");
+        assert!(recorded["reason"].is_null(), "{args:?}");
+        assert_eq!(
+            recorded["waiting"],
+            serde_json::to_value(WaitingCause::TurnCompleted).unwrap(),
+            "{args:?}"
+        );
+        // The wait began when its event was recorded.
+        assert_eq!(
+            recorded["recorded_at_ns"],
+            inspect(&path, &["events", "--run", "run-7"]).unwrap()["events"][0]["wall_clock_ns"],
+            "{args:?}"
+        );
+    }
+
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    storage
+        .handle()
+        .append_event(
+            Some("evorch-gui"),
+            &phase_change("run-7", AgentRunPhase::Running, None),
+        )
+        .unwrap();
+    storage.close();
+    let recorded = &inspect(&path, &["run", "run-7"]).unwrap()["recorded_state"];
+    assert_eq!(recorded["phase"], "Running");
+    assert!(recorded["waiting"].is_null());
+}

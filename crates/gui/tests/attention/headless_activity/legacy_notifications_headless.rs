@@ -108,6 +108,7 @@ fn assert_notification_opens_transcript(legacy: Workspace) {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         })]);
     harness.run_steps(3);
     assert_eq!(harness.state().notifications().unread_count(), 1);

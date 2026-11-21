@@ -301,6 +301,7 @@ fn thread_state_follows_lifecycle_events() {
             from,
             to,
             reason: None,
+            waiting: None,
         }));
         repaint_rx.recv().expect("state repaint");
         harness.run();
@@ -505,6 +506,7 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ]);
     harness.run();
@@ -540,6 +542,7 @@ fn finished_background_thread_shows_unread_report_until_opened() {
             from,
             to,
             reason: None,
+            waiting: None,
         })
     };
     harness.state_mut().apply_events(vec![transition(

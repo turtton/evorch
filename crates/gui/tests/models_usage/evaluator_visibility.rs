@@ -352,6 +352,7 @@ fn delegated_evaluator_is_readable_in_local_shared_and_restored_windows() {
                         from,
                         to,
                         reason: None,
+                        waiting: None,
                     })],
                 );
                 assert!(b.state_mut().poll_shared_feed() > 0);
@@ -452,12 +453,14 @@ fn history_restores_latest_child_phase_without_inventing_an_owner() {
             from: AgentRunPhase::Pending,
             to: AgentRunPhase::Running,
             reason: None,
+            waiting: None,
         }));
         events.push(Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id,
             from: AgentRunPhase::Running,
             to: phase,
             reason: None,
+            waiting: None,
         }));
     }
     for event in &events {

@@ -196,6 +196,7 @@ fn terminal_run_state_closes_agent_before_run_for_success_and_error() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         },
         3,
     ));
@@ -205,6 +206,7 @@ fn terminal_run_state_closes_agent_before_run_for_success_and_error() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some("raw run reason".to_owned()),
+            waiting: None,
         },
         4,
     ));
@@ -294,6 +296,7 @@ fn background_task_id_is_added_to_run_final_attributes() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         },
         3,
     ));

@@ -79,6 +79,7 @@ fn phase(run: &str, to: AgentRunPhase, reason: Option<&str>) -> Event {
         from: AgentRunPhase::Running,
         to,
         reason: reason.map(str::to_owned),
+        waiting: None,
     })
 }
 

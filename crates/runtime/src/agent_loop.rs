@@ -41,6 +41,8 @@ mod team;
 mod tool_calls;
 pub(crate) mod tool_catalog;
 pub(crate) mod tools_waiting;
+#[cfg(test)]
+mod waiting_cause_tests;
 mod wake_adoption;
 
 use std::sync::atomic::AtomicBool;
@@ -48,7 +50,9 @@ use std::sync::{Arc, Weak};
 
 use agents::Role;
 use event_bus::event::diagnostic_codes;
-use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
+use event_bus::{
+    AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent, WaitingCause,
+};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::watch;
 use tools::ToolExecutor;
@@ -90,6 +94,14 @@ pub(crate) struct RunTask {
     pub(crate) turn: providers::RequestTurnContext,
     /// Receipt ID of `prompt` when it is host input whose delivery is tracked.
     pub(crate) initial_prompt_id: Option<String>,
+}
+
+/// Which existing decision led to the input boundary; it only picks the
+/// recorded `WaitingCause` and never re-reads question state.
+#[derive(Clone, Copy)]
+enum InputWait {
+    BlockingQuestions,
+    Turn,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1750,19 +1762,32 @@ impl LoopState {
         }
     }
 
+    /// Waiting because `user_question_readiness` reported blocking questions.
     async fn wait_for_input(&mut self) -> bool {
-        self.wait_for_input_boundary(false).await
+        self.wait_for_input_boundary_as(false, InputWait::BlockingQuestions)
+            .await
     }
 
     async fn wait_for_input_boundary(&mut self, completed_turn: bool) -> bool {
-        let resumed = self.wait_for_input_boundary_inner(completed_turn).await;
+        self.wait_for_input_boundary_as(completed_turn, InputWait::Turn)
+            .await
+    }
+
+    async fn wait_for_input_boundary_as(&mut self, completed_turn: bool, wait: InputWait) -> bool {
+        let resumed = self
+            .wait_for_input_boundary_inner(completed_turn, wait)
+            .await;
         if resumed && let Err(error) = self.resume_scratch() {
             self.finish_error(format!("scratch resume failed: {error}"));
             return false;
         }
         resumed
     }
-    async fn wait_for_input_boundary_inner(&mut self, completed_turn: bool) -> bool {
+    async fn wait_for_input_boundary_inner(
+        &mut self,
+        completed_turn: bool,
+        wait: InputWait,
+    ) -> bool {
         if let Some(kind) = self.interrupted() {
             self.finish_interrupted(kind);
             return false;
@@ -1814,8 +1839,13 @@ impl LoopState {
             && !runtime.has_unanswered_questions(self.task.run_id))
         .then(|| self.final_assistant_text());
         let scratch_idle = completed_turn.is_some();
+        let cause = match (wait, completed_turn.is_some()) {
+            (InputWait::BlockingQuestions, _) => WaitingCause::BlockingQuestions,
+            (InputWait::Turn, true) => WaitingCause::TurnCompleted,
+            (InputWait::Turn, false) => WaitingCause::InputBoundary,
+        };
         if self
-            .transition_with_turn(AgentRunPhase::Waiting, None, completed_turn)
+            .transition_with_turn(AgentRunPhase::Waiting, None, Some(cause), completed_turn)
             .is_err()
         {
             return false;
@@ -1925,20 +1955,30 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
-        self.transition_with_turn(phase, reason, None)
+        self.transition_with_turn(phase, reason, None, None)
+    }
+
+    /// The only way into `Waiting`: a typed cause is required, and the string
+    /// reason stays `None` so failure/terminal reasons keep their meaning.
+    pub(crate) fn enter_waiting(&mut self, cause: WaitingCause) -> Result<(), ()> {
+        self.transition_with_turn(AgentRunPhase::Waiting, None, Some(cause), None)
     }
 
     fn transition_with_turn(
         &mut self,
         phase: AgentRunPhase,
         reason: Option<String>,
+        waiting: Option<WaitingCause>,
         completed_turn: Option<Option<String>>,
     ) -> Result<(), ()> {
         let previous = self.run_state;
-        let event = self
-            .run_state
-            .transition(self.task.run_id, phase, reason.clone())
-            .map_err(|_| ())?;
+        let event = match waiting {
+            Some(cause) => self.run_state.transition_waiting(self.task.run_id, cause),
+            None => self
+                .run_state
+                .transition(self.task.run_id, phase, reason.clone()),
+        }
+        .map_err(|_| ())?;
         // Waiting 位相の時間は max_elapsed に計上しない (ユーザ回答待ちなど)。
         // 遷移失敗時は位相が変わっていないため時計も触らない。
         if phase == AgentRunPhase::Waiting {

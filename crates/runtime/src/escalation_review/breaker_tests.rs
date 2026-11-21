@@ -690,6 +690,7 @@ async fn run_termination_clears_the_streak() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         },
     );
     assert_eq!(fixture.denials(&fixture.ctx), 0);

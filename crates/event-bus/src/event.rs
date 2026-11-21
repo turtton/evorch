@@ -653,6 +653,77 @@ pub enum AgentRunPhase {
     Error,
 }
 
+/// `wait` の完了条件。ツール入力の `mode` の写し。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingMode {
+    /// いずれかの対象が条件を満たしたら戻る。
+    Any,
+    /// 全対象が条件を満たしたら戻る。
+    All,
+}
+
+/// `wait` の開始時点で待ち相手候補だった run と、待機する run から見た関係。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingRelation {
+    /// 待機する run を委譲した親 run。
+    Parent,
+    /// 待機する run が委譲した子 run (承認待ちの委譲を含む)。
+    Child,
+}
+
+/// `wait` の開始時点で記録した run 1 件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingRun {
+    /// 対象 run の ID。
+    pub run_id: String,
+    /// 待機する run から見た関係。
+    pub relation: WaitingRelation,
+}
+
+/// 同期 delegate の呼び出しと、その結果を待つ子 run の対応。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingDelegate {
+    /// `delegate` ツール呼び出しの ID。
+    pub call_id: String,
+    /// その呼び出しが起動した子 run の ID。
+    pub run_id: String,
+}
+
+/// run が [`AgentRunPhase::Waiting`] に入った型付き理由。
+///
+/// `AgentRunStateChanged::waiting` に入った時点の値だけを保持し、待機中は更新しない。
+/// 開始時刻は、この値を運ぶイベントの `meta.wall_clock` である。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WaitingCause {
+    /// モデルが呼んだ `wait` ツール (再開した `wait` を含む)。
+    WaitTool {
+        /// `wait` ツール呼び出しの ID。ツール経由では常にあり、直接呼び出しだけ `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// 待ち相手を `run_id` / `run_ids` で明示したか。`false` は自動探索。
+        explicit: bool,
+        /// 完了条件。
+        mode: WaitingMode,
+        /// 開始時点で見えた run。run 以外 (質問・lane・shell) の待機元は含まない。
+        /// 空は「待ち相手が一切ない」ではなく、開始時点で run 対象がなかったことを表す。
+        runs: Vec<WaitingRun>,
+    },
+    /// 同期 `delegate` が子 run の結果を待っている。
+    Delegates {
+        /// 呼び出し ID と子 run の対応。
+        delegates: Vec<WaitingDelegate>,
+    },
+    /// 回答必須の質問への回答待ち。
+    BlockingQuestions,
+    /// interactive ターンを終え、次の入力を待っている。
+    TurnCompleted,
+    /// ターン完了の通知を伴わないその他の入力境界。
+    InputBoundary,
+}
+
 /// `AgentRunStateChanged::reason` of a run its owner cancelled; the run ends in `Error`.
 pub const CANCELLED_REASON: &str = "cancelled";
 
@@ -823,7 +894,12 @@ pub enum LifecycleEvent {
         /// 遷移後の位相。
         to: AgentRunPhase,
         /// 遷移理由。異常終了やオペレーターによる停止などの理由を保持します。
+        /// `Waiting` への遷移では常に `None` で、型付き理由は `waiting` が持つ。
         reason: Option<String>,
+        /// `Waiting` に入った型付き理由。runtime が発行する `to == Waiting` では常に `Some`、
+        /// それ以外では `None`。欠落している旧イベントは `None` (理由未記録) として読む。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waiting: Option<WaitingCause>,
     },
     /// 対話 run が 1 ターンを終えて入力待ちになった。fork / rewind の境界になる。
     ///
@@ -2029,6 +2105,7 @@ mod tests {
                     from: AgentRunPhase::Running,
                     to: AgentRunPhase::Error,
                     reason: Some("boom".into()),
+                    waiting: None,
                 }
                 .into(),
             ),
@@ -2275,6 +2352,7 @@ mod tests {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Error,
             reason: Some("boom".to_string()),
+            waiting: None,
         });
 
         let json = serde_json::to_string(&event).expect("serialize Event");
@@ -2286,6 +2364,97 @@ mod tests {
             value["kind"]["payload"]["kind"], "AgentRunStateChanged",
             "inner tag mismatch"
         );
+    }
+
+    // Given: 5 種の待機理由を持つ Waiting 遷移イベント。
+    // When: Event を JSON にして復元する。
+    // Then: 理由ごとに元と等しく、`reason` は空のまま型付き理由だけが運ばれる。
+    #[test]
+    fn waiting_transition_round_trips_every_cause() {
+        let causes = [
+            WaitingCause::WaitTool {
+                call_id: Some("call-1".into()),
+                explicit: true,
+                mode: WaitingMode::All,
+                runs: vec![
+                    WaitingRun {
+                        run_id: "run-1".into(),
+                        relation: WaitingRelation::Parent,
+                    },
+                    WaitingRun {
+                        run_id: "run-3".into(),
+                        relation: WaitingRelation::Child,
+                    },
+                ],
+            },
+            WaitingCause::WaitTool {
+                call_id: None,
+                explicit: false,
+                mode: WaitingMode::Any,
+                runs: Vec::new(),
+            },
+            WaitingCause::Delegates {
+                delegates: vec![WaitingDelegate {
+                    call_id: "call-2".into(),
+                    run_id: "run-4".into(),
+                }],
+            },
+            WaitingCause::BlockingQuestions,
+            WaitingCause::TurnCompleted,
+            WaitingCause::InputBoundary,
+        ];
+        for cause in causes {
+            let event = Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Waiting,
+                reason: None,
+                waiting: Some(cause.clone()),
+            });
+
+            let json = serde_json::to_string(&event).expect("serialize Event");
+            let restored: Event = serde_json::from_str(&json).expect("deserialize Event");
+
+            assert_eq!(event, restored, "{cause:?}");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+            let payload = &value["kind"]["payload"]["payload"];
+            assert!(payload["reason"].is_null());
+            assert!(payload["waiting"]["kind"].is_string());
+        }
+    }
+
+    // Given: 型付き理由を持たない遷移 (Waiting 以外) と、理由導入前に保存された Waiting。
+    // When: シリアライズ/デシリアライズする。
+    // Then: `waiting` は出力に現れず、欠落した旧イベントは `None` (未記録) として読める。
+    #[test]
+    fn missing_waiting_field_reads_as_unrecorded_and_none_is_not_written() {
+        let event = Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-1".into(),
+            from: AgentRunPhase::Waiting,
+            to: AgentRunPhase::Running,
+            reason: None,
+            waiting: None,
+        });
+        let json = serde_json::to_string(&event).expect("serialize Event");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            value["kind"]["payload"]["payload"]
+                .as_object()
+                .expect("fields")
+                .get("waiting")
+                .is_none()
+        );
+
+        value["kind"]["payload"]["payload"]["to"] = serde_json::json!("Waiting");
+        let restored: Event = serde_json::from_value(value).expect("old Waiting event");
+        match restored.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Waiting,
+                waiting: None,
+                ..
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     // Given: 理由を持たないバックグラウンドタスクのキャンセルイベント。

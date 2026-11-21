@@ -1481,6 +1481,7 @@ mod tests {
                 from: event_bus::AgentRunPhase::Running,
                 to: event_bus::AgentRunPhase::Stopped,
                 reason: None,
+                waiting: None,
             },
         ));
         assert_eq!(

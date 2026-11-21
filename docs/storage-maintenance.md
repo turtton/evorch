@@ -249,6 +249,12 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   `--messages <from>..<to>` は保存順の番号（System メッセージを含む。provenance の番号とは別）で
   範囲だけを復元する。`evorch inspect check-bodies [--verify]` は、参照表と token の一致に加え、
   メッセージの連番・件数・長さ・hash と header の射影列を検査する。
+- **待機理由。** `evorch inspect run` の `recorded_state` は、その run の最新の `AgentRunStarted` /
+  `AgentRunStateChanged` イベントが記録した位相を `events.id` の降順で返す。位相が Waiting のとき
+  `waiting` に型付きの理由（wait tool / delegate / blocking 質問 / ターン完了後 / その他の入力境界）が
+  入り、`recorded_at_ns` はそのイベントの時刻（待機の開始）。Waiting の `reason` は常に null。
+  理由が記録される前の Waiting は `waiting_unrecorded: true` になる。ログが記録した値であり、
+  プロセスの現在状態の問い合わせではない。
 - **削除。** アーカイブ削除の回収は `run_messages` を header より先に消す。1 回の transaction は
   最大 500 行・skeleton 4 MiB・参照 2,000 行で、超える 1 件は排他フェーズへ送り、その run の
   header も排他フェーズで子の後に消す。

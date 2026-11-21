@@ -179,6 +179,7 @@ fn run_state(run_id: &str, to: event_bus::AgentRunPhase) -> Event {
         from: event_bus::AgentRunPhase::Running,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

@@ -10,6 +10,7 @@ fn done() -> Event {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     })
 }
 

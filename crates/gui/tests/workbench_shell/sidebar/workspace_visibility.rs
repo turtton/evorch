@@ -52,6 +52,7 @@ fn changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
         from,
         to,
         reason: None,
+        waiting: None,
     })
 }
 

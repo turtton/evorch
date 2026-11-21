@@ -48,6 +48,7 @@ fn sole_running_state() -> WorkbenchState<MockSource> {
         from: AgentRunPhase::Pending,
         to: AgentRunPhase::Running,
         reason: None,
+        waiting: None,
     })]);
     state
 }

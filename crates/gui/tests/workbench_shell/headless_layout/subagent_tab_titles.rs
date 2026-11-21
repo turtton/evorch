@@ -45,6 +45,7 @@ fn completed() -> Event {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Done,
         reason: None,
+        waiting: None,
     })
 }
 
@@ -196,6 +197,7 @@ fn completed_subagent_count_survives_history_restore_without_transcript_panels()
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ];
     let source = DemoSource(vec![runtime::AgentSummary {

@@ -2287,6 +2287,7 @@ impl AgentRuntime {
                 from: AgentRunPhase::Pending,
                 to: AgentRunPhase::Pending,
                 reason: Some("registered".to_string()),
+                waiting: None,
             }));
         self.shared
             .bus
@@ -2371,7 +2372,7 @@ impl AgentRuntime {
                                 run_id: task.run_id.to_string(),
                                 from: AgentRunPhase::Pending,
                                 to: AgentRunPhase::Error,
-                                reason: Some(reason),
+                                reason: Some(reason), waiting: None,
                             },
                         );
                     }

@@ -200,6 +200,7 @@ impl AgentRuntime {
                 from: AgentRunPhase::Pending,
                 to: AgentRunPhase::Pending,
                 reason: Some("registered".into()),
+                waiting: None,
             }));
         let join = tokio::spawn(Self::run_guarded(
             Arc::downgrade(&self.shared),

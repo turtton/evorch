@@ -260,6 +260,7 @@ fn burst_pump_path_matches_apply_events_path() {
                 from: AgentRunPhase::Pending,
                 to: AgentRunPhase::Running,
                 reason: None,
+                waiting: None,
             })
         })
         .collect();

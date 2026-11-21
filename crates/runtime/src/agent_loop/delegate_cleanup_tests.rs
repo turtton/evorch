@@ -93,6 +93,28 @@ fn fixture_with_model(
         Arc::new(ToolExecutor::new(bus)),
         Arc::new(model),
     );
+    fixture_for_runtime(cancel_rx, runtime)
+}
+
+/// The parent fixture on a runtime that has a durable run store, as question tools need.
+pub(super) fn store_fixture(
+    cancel_rx: watch::Receiver<RunInterrupt>,
+    store: crate::RunStore,
+) -> (AgentRuntime, LoopState) {
+    let bus = Arc::new(EventBus::new(128));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(BlockedModel::default()),
+    )
+    .with_run_store(store);
+    fixture_for_runtime(cancel_rx, runtime)
+}
+
+fn fixture_for_runtime(
+    cancel_rx: watch::Receiver<RunInterrupt>,
+    runtime: AgentRuntime,
+) -> (AgentRuntime, LoopState) {
     let parent =
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());

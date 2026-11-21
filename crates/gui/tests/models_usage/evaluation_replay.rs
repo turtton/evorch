@@ -99,6 +99,7 @@ fn record_trial_database(path: &Path) {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
+            waiting: None,
         }),
     ];
     for event in &events {

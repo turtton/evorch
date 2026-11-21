@@ -69,6 +69,7 @@ fn waiting(run_id: &str) -> Event {
         from: AgentRunPhase::Running,
         to: AgentRunPhase::Waiting,
         reason: None,
+        waiting: None,
     })
 }
 

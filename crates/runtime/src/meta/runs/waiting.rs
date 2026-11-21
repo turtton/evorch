@@ -9,7 +9,9 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 
-use event_bus::AgentRunPhase;
+use event_bus::{
+    AgentRunPhase, WaitingCause, WaitingDelegate, WaitingMode, WaitingRelation, WaitingRun,
+};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -192,6 +194,40 @@ pub(in crate::meta) async fn wait_for_delegates(
     wait_with(state, runtime, input, false).await
 }
 
+/// Copies already-computed facts of this wait into the recorded cause: the call
+/// IDs the loop holds and the run targets `wait_runs` returned at the start.
+fn waiting_cause(state: &LoopState, request: &WaitRequest, runs: Vec<WaitingRun>) -> WaitingCause {
+    if request.delegate {
+        let mut delegates = state
+            .delegate_wait_calls
+            .iter()
+            .filter(|call| request.runs.contains(&call.child))
+            .map(|call| WaitingDelegate {
+                call_id: call.tool_call_id.clone(),
+                run_id: call.child.to_string(),
+            })
+            .collect::<Vec<_>>();
+        if delegates.is_empty()
+            && let (Some(call_id), [child]) = (state.meta_call_id.as_ref(), request.runs.as_slice())
+        {
+            delegates.push(WaitingDelegate {
+                call_id: call_id.clone(),
+                run_id: child.to_string(),
+            });
+        }
+        return WaitingCause::Delegates { delegates };
+    }
+    WaitingCause::WaitTool {
+        call_id: state.meta_call_id.clone(),
+        explicit: !request.runs.is_empty(),
+        mode: match request.mode {
+            WaitMode::Any => WaitingMode::Any,
+            WaitMode::All => WaitingMode::All,
+        },
+        runs,
+    }
+}
+
 async fn wait_with(
     state: &mut LoopState,
     runtime: &AgentRuntime,
@@ -203,9 +239,21 @@ async fn wait_with(
         Err(message) => return error(message),
     };
     // Validate every target before suspending the parent or observing any output.
-    if let Err(message) = runtime.wait_runs(state.caller_run_id(), &request.runs) {
-        return error(message);
-    }
+    // The result is copied into the recorded Waiting cause, never re-derived.
+    let targets = match runtime.wait_runs(state.caller_run_id(), &request.runs) {
+        Ok(targets) => targets
+            .iter()
+            .map(|run| WaitingRun {
+                run_id: run.id.to_string(),
+                relation: if run.parent {
+                    WaitingRelation::Parent
+                } else {
+                    WaitingRelation::Child
+                },
+            })
+            .collect::<Vec<_>>(),
+        Err(message) => return error(message),
+    };
     request.reported.clone_from(&state.reported_questions);
     request.observed = state
         .budget
@@ -230,7 +278,8 @@ async fn wait_with(
             .delivered
             .extend(saved.answers.iter().map(|g| g.id.clone()));
     }
-    if state.transition(AgentRunPhase::Waiting, None).is_err() {
+    let cause = waiting_cause(state, &request, targets);
+    if state.enter_waiting(cause).is_err() {
         return error("parent run could not enter Waiting");
     }
     let caller = state.caller_run_id();
@@ -277,6 +326,9 @@ async fn wait_with(
         observations.questions = result.question_ids.clone();
         if deliver_messages {
             if let Err(message) = events::deliver(runtime, caller, result, &mut observations) {
+                // Never leave the run Waiting behind an error result. A failed
+                // resume cannot be reported better than the delivery error.
+                let _ = state.transition(AgentRunPhase::Running, None);
                 return error(message);
             }
         } else {

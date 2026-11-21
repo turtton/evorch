@@ -451,6 +451,7 @@ mod tests {
                     from: event_bus::AgentRunPhase::Running,
                     to: event_bus::AgentRunPhase::Error,
                     reason: Some(format!("die {KNOWN_VALUE}")),
+                    waiting: None,
                 }
                 .into(),
             ),
@@ -539,6 +540,7 @@ mod tests {
                 from: event_bus::AgentRunPhase::Running,
                 to: event_bus::AgentRunPhase::Running,
                 reason: None,
+                waiting: None,
             }
             .into(),
         ];

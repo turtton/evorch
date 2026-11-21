@@ -60,7 +60,12 @@ async fn every_boundary_wake_is_adopted_until_running_publication() {
         let run = state.caller_run_id();
         state.transition(AgentRunPhase::Running, None).unwrap();
         state
-            .transition_with_turn(AgentRunPhase::Waiting, None, Some(None))
+            .transition_with_turn(
+                AgentRunPhase::Waiting,
+                None,
+                Some(event_bus::WaitingCause::TurnCompleted),
+                Some(None),
+            )
             .unwrap();
         let wake = ready_wake(&mut state, source, &cancel).await;
         assert!(matches!(
@@ -101,7 +106,11 @@ async fn failed_publication_error_cancel_and_abandonment_release_the_common_guar
             InputWake::Mailbox(Ok(()))
         ));
         // Pending -> Waiting is invalid: retain the bridge until teardown.
-        assert!(state.transition(AgentRunPhase::Waiting, None).is_err());
+        assert!(
+            state
+                .enter_waiting(event_bus::WaitingCause::InputBoundary)
+                .is_err()
+        );
         match terminal {
             Finish::Error => state.finish_error("wake failed".into()),
             Finish::Cancel => state.finish_interrupted(InterruptKind::Cancel),

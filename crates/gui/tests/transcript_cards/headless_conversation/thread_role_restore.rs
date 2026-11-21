@@ -193,6 +193,7 @@ fn legacy_checkpoint_repairs_missing_stream_chunks_in_display_history() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         }),
     ] {
         storage.handle().append_event(Some("gui"), &event).unwrap();
@@ -263,6 +264,7 @@ fn persisted_completion_is_not_replayed_twice_from_checkpoint() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         }),
     ] {
         storage.handle().append_event(Some("gui"), &event).unwrap();
@@ -326,6 +328,7 @@ fn stopped_history_replays_as_resumable_with_role_and_partial_output_intact() {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Stopped,
             reason: None,
+            waiting: None,
         }),
     ] {
         storage.handle().append_event(Some("gui"), &event).unwrap();
@@ -420,6 +423,7 @@ fn restored_after_retention(retention_days: u32) -> (Vec<String>, Vec<String>) {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Waiting,
             reason: None,
+            waiting: None,
         })
     };
     // Request A answers and waits; request B loses its answer and waits.

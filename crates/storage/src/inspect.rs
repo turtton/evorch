@@ -21,6 +21,7 @@ use crate::{Database, StorageError};
 mod bodies;
 mod lanes;
 mod open;
+mod recorded_state;
 mod storage_summary;
 pub use bodies::{
     BLOB_PREVIEW_BYTES, BlobOptions, BodyCheckScope, DEFAULT_REFERENCES_LISTED,
@@ -376,10 +377,12 @@ impl Database {
             }
         }
         let review_manifests = self.review_manifests_json(&manifest_events)?;
+        let recorded_state = self.inspect_recorded_state(run_id)?;
         let candidate_pattern = format!("%{}%", Value::String(run_id.into()));
         Ok(json!({
             "run_id": run_id,
             "context": context,
+            "recorded_state": recorded_state,
             "children": children,
             "ledger": self.json_rows(
                 "SELECT * FROM run_ledger WHERE run_id = ?1 \
