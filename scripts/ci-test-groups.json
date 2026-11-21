@@ -1,7 +1,7 @@
 {
   "groups": {
     "runtime": {
-      "shards": 2,
+      "shards": 4,
       "packages": [
         "runtime",
         "evorch",
@@ -30,7 +30,7 @@
       "allow_empty_suites": []
     },
     "storage-tools": {
-      "shards": 1,
+      "shards": 3,
       "packages": [
         "storage",
         "tools",

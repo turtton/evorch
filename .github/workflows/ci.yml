@@ -125,6 +125,13 @@ jobs:
           scripts/verify-test-inventory.sh --check-config
       - name: Harness runner and doctest coverage
         run: python3 scripts/tests/test_check_harness.py
+      # The consumer side of the product artifact: the wait for the producer job
+      # (mock GitHub API, virtual clock, no network) and how the consumer jobs and
+      # the tests matrix are wired to it and to scripts/ci-test-groups.json.
+      - name: Product artifact wait and CI workflow configuration
+        run: |
+          scripts/tests/test_wait_product_artifact.sh
+          scripts/tests/test_ci_workflow_config.sh
       # The flaky/hang reproduction wrapper, against mock systemd-run/systemctl
       # (no load, no systemd needed): argument passthrough, --repeat, start
       # failures, name collisions, timeout and interruption.
@@ -194,9 +201,14 @@ jobs:
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.
   docs-schema:
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -219,10 +231,21 @@ jobs:
           save-if: false
       # The doctests start owned children through the library policy: the helper
       # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # workbench-authority is excluded: other packages' dev-dependencies enable its
@@ -339,6 +362,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: product-core
+          # A re-run of a failed producer replaces an older same-name artifact
+          # instead of leaving two for the consumers to pick from.
+          overwrite: true
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/evorch-product
@@ -351,19 +377,28 @@ jobs:
   # contracts, then everything else.
   tests:
     name: tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     # Normal runs take a few minutes; a cold dependency cache roughly doubles that.
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { group: runtime, shard: 1, shards: 2, cef: false }
-          - { group: runtime, shard: 2, shards: 2, cef: false }
+          - { group: runtime, shard: 1, shards: 4, cef: false }
+          - { group: runtime, shard: 2, shards: 4, cef: false }
+          - { group: runtime, shard: 3, shards: 4, cef: false }
+          - { group: runtime, shard: 4, shards: 4, cef: false }
           - { group: gui, shard: 1, shards: 2, cef: true }
           - { group: gui, shard: 2, shards: 2, cef: true }
-          - { group: storage-tools, shard: 1, shards: 1, cef: false }
+          - { group: storage-tools, shard: 1, shards: 3, cef: false }
+          - { group: storage-tools, shard: 2, shards: 3, cef: false }
+          - { group: storage-tools, shard: 3, shards: 3, cef: false }
           - { group: support, shard: 1, shards: 1, cef: false }
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -410,20 +445,9 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
-      # Every group receives the sealed product closure: the helper bundle it carries
-      # is what the test binaries are bound to (scripts/guard-cargo.sh), and the
-      # groups that run product tests (the evorch-core placeholders and, later, the
-      # real tests, including the f4_product_cache and agent_observation_cache cache
-      # binaries of the gate below) read the core from it too. Which tests a group
-      # selects does not depend on it.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Install the sealed product artifact
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
-      # `ci` job merges these listings. The runs below reuse the binaries.
+      # `ci` job merges these listings. The runs below reuse the binaries. Listing
+      # starts no product, so it comes before the product artifact is awaited.
       - name: Build and list the test inventory
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -434,6 +458,29 @@ jobs:
             check_planned_shutdown_watchdog_inventory "$EVORCH_TEST_INVENTORY_DIR"
             check_public_restart_contracts_inventory "$EVORCH_TEST_INVENTORY_DIR"
           fi
+      # Every group receives the sealed product closure: the helper bundle it carries
+      # is what the test binaries are bound to (scripts/guard-cargo.sh), and the
+      # groups that run product tests (the evorch-core placeholders and, later, the
+      # real tests, including the f4_product_cache and agent_observation_cache cache
+      # binaries of the gate below) read the core from it too. Which tests a group
+      # selects does not depend on it.
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # CI enforces cost-sensitive invariants with this offline gate
       # (scripts/check-cache-contracts.sh, called by run-test-group.sh with the
       # group and shard). The mock computes cache usage from received input;
@@ -666,9 +713,14 @@ jobs:
   # ignored の GUI テストを実行する（ADR 0009 / issue #9 の受理基準）。
   # 証跡マトリクスと native/Wayland 検査は並列の gui-evidence job が担う。
   offscreen-gate:
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -703,10 +755,34 @@ jobs:
           tool: cargo-nextest
       # The ignored GUI tests start owned children: the helper bundle of the sealed
       # product is bound to the test binaries by scripts/guard-cargo.sh below.
+      # The test binaries of the ignored GUI run are built while the product
+      # artifact job is still running (`prepare` compiles and lists, it runs no
+      # test). The listing is dropped: the run below prepares again after the
+      # install, so what it executes is bound to the sealed helper bundle.
+      - name: Warm the target of the ignored GUI tests (no product needed)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
+          trap 'rm -rf "$warm"' EXIT
+          sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
+          # shellcheck disable=SC2086 # the selection is a list of words
+          scripts/guard-cargo.sh prepare "$warm" --locked $sel
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       # The ignored html_preview tests start a real CEF; the cef-e2e job runs them.
@@ -741,9 +817,14 @@ jobs:
   # started directly, so this job needs the gui library but none of the test
   # binaries that offscreen-gate builds.
   gui-evidence:
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     # The same job-level env as cache-save: rust-cache hashes CARGO_* and RUSTFLAGS
     # into its key, so a different set restores nothing. CARGO_TARGET_DIR is set on
     # the steps that run cargo only.
@@ -776,15 +857,6 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence
-      # headless_capture and native_qa_window are started directly and are not
-      # applications that scripts/guard-artifact.sh binds; the library policy
-      # reads the sealed product's helper bundle from EVORCH_PROCESS_GUARD_BUNDLE.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: product-core
-          path: ${{ runner.temp }}/product-download
-      - name: Install the sealed product artifact
-        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Build the evidence binaries
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -795,6 +867,26 @@ jobs:
         run: |
           sel=$(jq -r '.groups.gui | [(.packages[] | "-p " + .), (.features[]? | "-F " + .)] | join(" ")' scripts/ci-test-groups.json)
           cargo build --locked $sel --bin headless_capture --bin native_qa_window --test evidence_policy
+      # headless_capture and native_qa_window are started directly and are not
+      # applications that scripts/guard-artifact.sh binds; the library policy
+      # reads the sealed product's helper bundle from EVORCH_PROCESS_GUARD_BUNDLE.
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-core
+          path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
+      - name: Install the sealed product artifact
+        run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Capture size and DPI evidence matrix
         run: scripts/gui-evidence-matrix.sh
         env:
@@ -837,9 +929,14 @@ jobs:
           path: target/gui-evidence
 
   browser-e2e:
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
       # The host source lifecycle test of O-V1 (crates/workbench-host/tests/<name>.rs,
@@ -867,15 +964,39 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      # The five test selections below are compiled while the product artifact job
+      # is still running (`prepare` compiles and lists, it runs no test). The
+      # listings are dropped: every run after the install prepares again, so what
+      # it executes is bound to the sealed helper bundle.
+      - name: Warm the target of the browser tests (no product needed)
+        run: |
+          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
+          trap 'rm -rf "$warm"' EXIT
+          scripts/guard-cargo.sh prepare "$warm/1" -p browser --test agent_chromium --test agent_observation
+          scripts/guard-cargo.sh prepare "$warm/2" -p workbench-host --test "$HOST_LIFECYCLE_TEST"
+          scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --test agent_observation_chromium
+          scripts/guard-cargo.sh prepare "$warm/4" -p workbench-web --test web_ui_chromium
+          scripts/guard-cargo.sh prepare "$warm/5" -p workbench-web --test public_restart_chromium
       # The sealed product closure comes before the first browser test: every run
       # below is bound to its helper bundle by scripts/guard-cargo.sh. I0 registered
       # the O-V1 and O-V2 targets; the placeholders only prove the targets are
       # selected (--no-tests fail), and the second one checks the sealed product
       # artifact the job downloaded.
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
       - name: Run agent browser test
@@ -905,9 +1026,14 @@ jobs:
   # job also starts it. The lint of the CEF feature is the workspace clippy in
   # the lint job, which builds gui with its default features.
   cef-e2e:
-    needs: product-artifact
+    needs: scope-gate
+    # The artifact wait reads this run's jobs (actions: read); nothing else is
+    # granted. The workflow has no top-level permissions.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -940,15 +1066,47 @@ jobs:
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
           echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
+      # The real-CEF selections below are compiled, in their own order and with
+      # their own helper/renderer builds, while the product artifact job is still
+      # running (`prepare` compiles and lists, it runs no test). The listings are
+      # dropped: every run after the install builds and prepares again, so what it
+      # executes is bound to the sealed helper bundle.
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      - name: Warm the target of the real-CEF tests (no product needed)
+        run: |
+          warm=$(mktemp -d "$RUNNER_TEMP/warm.XXXXXX")
+          trap 'rm -rf "$warm"' EXIT
+          scripts/guard-cargo.sh prepare "$warm/1" -p browser-cef --features cef
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          scripts/guard-cargo.sh prepare "$warm/2" -p evorch-renderer
+          cargo build -p evorch-renderer
+          scripts/guard-cargo.sh prepare "$warm/3" -p evorch-core --features renderer-test-helper --test renderer_owner_cef
+          cargo build -p evorch-renderer
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          scripts/guard-cargo.sh prepare "$warm/4" -p core-client-e2e --features gui/cef --test preview_cef
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          scripts/guard-cargo.sh prepare "$warm/5" -p gui --lib
+          scripts/guard-cargo.sh prepare "$warm/6" -p evorch-core --test f4_product_cef --test agent_observation_restart
+          scripts/guard-cargo.sh prepare "$warm/7" -p core-client-e2e --features gui/cef --test agent_observation_gui
+      # The product artifact job runs beside this job (no `needs`): wait for its
+      # success, take this run's artifact, check it was built from this commit,
+      # then verify and install it. Nothing that runs a product test or a product
+      # binary comes before this.
+      - name: Wait for the product artifact job
+        timeout-minutes: 31
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/wait-product-artifact.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: product-core
           path: ${{ runner.temp }}/product-download
+      - name: Check the product artifact was built from this commit
+        run: scripts/wait-product-artifact.sh check-source "$RUNNER_TEMP/product-download"
       - name: Install the sealed product artifact
         run: scripts/product-artifact.sh install "$RUNNER_TEMP/product-download" "$RUNNER_TEMP/evorch-product" >> "$GITHUB_ENV"
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: cargo-nextest
       - name: CEF offline isolation and crash recovery
         run: scripts/guard-cargo.sh run -p browser-cef --features cef --run-ignored all --success-output immediate --no-tests fail
       # The real renderer binary beside the CEF helper it starts (16a-2). The

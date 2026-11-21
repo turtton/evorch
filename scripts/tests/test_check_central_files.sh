@@ -368,9 +368,30 @@ expect fail "another feature cannot enable the watchdog target" watchdog_manifes
 # installs it; the artifact job builds it.
 ci_job() { awk -v job="$1" '$0 ~ "^  " job ":$" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$ci"; }
 job_has() { ci_job "$1" | grep -q -e "$2"; }
+# A job that runs a product test is not ordered after the artifact job by `needs`:
+# it waits for that job's success and installs the artifact before its first
+# guard-cargo.sh / run-test-group.sh run (comment lines are ignored).
+product_gate_in() { # <ci.yml> <job>
+  awk -v job="$2" '
+    $0 ~ "^  " job ":$" { on = 1; next }
+    on && /^  [a-z0-9-]+:$/ { exit }
+    on && $0 !~ /^[[:space:]]*#/ {
+      n++
+      if ($0 ~ /scripts\/wait-product-artifact\.sh$/ && !wait) wait = n
+      if ($0 ~ /scripts\/product-artifact\.sh install/ && !install) install = n
+      if ($0 ~ /(guard-cargo\.sh|run-test-group\.sh) run( |$)/ && !first) first = n
+    }
+    END { exit !(wait && install && first && wait < install && install < first) }
+  ' "$1"
+}
+sed '/scripts\/wait-product-artifact\.sh$/d' "$ci" > "$work/ci-no-wait"
+sed '/scripts\/product-artifact\.sh install/d' "$ci" > "$work/ci-no-install"
+sed '/- name: Wait for the product artifact job/i\      - run: scripts/guard-cargo.sh run -p early' "$ci" > "$work/ci-run-first"
 for product_job in tests browser-e2e cef-e2e; do
-  expect ok "$product_job needs the product artifact" job_has "$product_job" '^    needs: product-artifact$'
-  expect ok "$product_job installs the sealed product artifact" job_has "$product_job" 'scripts/product-artifact.sh install'
+  expect ok "$product_job waits for the producer and installs the sealed product artifact before its first test run" product_gate_in "$ci" "$product_job"
+  expect fail "$product_job without the wait for the producer" product_gate_in "$work/ci-no-wait" "$product_job"
+  expect fail "$product_job without the install" product_gate_in "$work/ci-no-install" "$product_job"
+  expect fail "$product_job running a test before the wait and install" product_gate_in "$work/ci-run-first" "$product_job"
 done
 expect ok "the product artifact job builds and seals it" job_has product-artifact 'scripts/product-artifact.sh build'
 expect ok "the aggregate gate requires the product artifact job" bash -c "grep -q 'otel, product-artifact, tests\]' $ci"
