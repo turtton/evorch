@@ -542,8 +542,8 @@ for shared_root in \
   for scope in "${v_scope_keys[@]}"; do
     expect fail "$scope cannot edit the shared 5a-V root or registration $shared_root" "$central" --scope "$scope" --files-from "$work/files"
   done
+  expect ok "the integration PR owns the shared 5a-V root or registration $shared_root" "$central" --scope integration --files-from "$work/files"
 done
-expect ok "the integration PR owns the 5a-V shared roots and registrations" "$central" --scope integration --files-from "$work/files"
 expect ok "evorch-core remains in the runtime test group" bash -c "jq -e '.groups.runtime.packages | index(\"evorch-core\")' scripts/ci-test-groups.json"
 expect ok "core-client-e2e remains in the GUI test group" bash -c "jq -e '.groups.gui.packages | index(\"core-client-e2e\")' scripts/ci-test-groups.json"
 expect ok "the admin publish boundary test and gate run in CI" bash -c "grep -q 'bash scripts/tests/test_check_admin_publish_boundary.sh' '$ci' && grep -q 'bash scripts/check-admin-publish-boundary.sh' '$ci'"
