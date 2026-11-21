@@ -670,7 +670,11 @@ fn core_fixture() {
         let mut spec = LaunchSpec::new(shell()).unwrap();
         spec.argv
             .extend([b"-c".to_vec(), b"kill -STOP $$".to_vec()]);
-        let data = serde_json::to_vec(&spec).unwrap();
+        let data = serde_json::to_vec(&wire::LaunchRequest {
+            mode: wire::LaunchMode::Direct,
+            spec,
+        })
+        .unwrap();
         if mode == "launch" {
             // Incomplete Launch: no Ready, no target and no Commit yet.
             wire::send(&mut socket, wire::Kind::LaunchChunk, &data[..8], None).unwrap();

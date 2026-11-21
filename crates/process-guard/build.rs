@@ -20,6 +20,8 @@ fn main() {
         "src/image.rs",
         "src/wire.rs",
         "src/guard.rs",
+        "src/helper.rs",
+        "src/pty.rs",
     ] {
         println!("cargo:rerun-if-changed={file}");
         let bytes = std::fs::read(file).expect("package source");

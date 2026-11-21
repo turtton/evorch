@@ -7,10 +7,11 @@ publish = false
 # build.rs never reads the workspace lock. The build/CI gate compares this
 # package-local normal+build dependency receipt against the locked graph.
 [package.metadata.process-guard]
-dependency-receipt = "block-buffer@0.10.4 cfg-if@1.0.4 cpufeatures@0.2.17 crypto-common@0.1.7 digest@0.10.7 generic-array@0.14.7 itoa@1.0.18 libc@0.2.189 memchr@2.8.3 proc-macro2@1.0.107 quote@1.0.47 serde@1.0.229 serde_core@1.0.229 serde_derive@1.0.229 serde_json@1.0.151 sha2@0.10.9 syn@3.0.4 typenum@1.20.1 unicode-ident@1.0.24 version_check@0.9.5 zmij@1.0.23"
+dependency-receipt = "anyhow@1.0.104 bitflags@1.3.2 bitflags@2.13.1 block-buffer@0.10.4 cfg-if@1.0.4 cfg_aliases@0.1.1 cpufeatures@0.2.17 crypto-common@0.1.7 digest@0.10.7 downcast-rs@1.2.1 filedescriptor@0.8.3 generic-array@0.14.7 itoa@1.0.18 lazy_static@1.5.0 libc@0.2.189 log@0.4.34 memchr@2.8.3 nix@0.28.0 portable-pty@0.9.0 proc-macro2@1.0.107 quote@1.0.47 serde@1.0.229 serde_core@1.0.229 serde_derive@1.0.229 serde_json@1.0.151 serial2@0.2.38 sha2@0.10.9 shared_library@0.1.9 shell-words@1.1.1 syn@2.0.119 syn@3.0.4 thiserror-impl@1.0.69 thiserror@1.0.69 typenum@1.20.1 unicode-ident@1.0.24 version_check@0.9.5 winapi-i686-pc-windows-gnu@0.4.0 winapi-x86_64-pc-windows-gnu@0.4.0 winapi@0.3.9 windows-link@0.2.1 windows-sys@0.61.2 winreg@0.10.1 zmij@1.0.23"
 
 [dependencies]
 libc = "=0.2.189"
+portable-pty = { workspace = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
@@ -20,7 +21,6 @@ sha2 = "=0.10.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-portable-pty = { workspace = true }
 
 [[bin]]
 name = "evorch-process-guard"

@@ -282,7 +282,7 @@ impl GuardImage {
     pub fn inherited_exec_path(&self) -> PathBuf {
         format!("/proc/self/fd/{}", self.file.as_raw_fd()).into()
     }
-    /// PTY-only locator: portable-pty closes inherited fd >2 before exec.
+    /// Approved PTY-only locator, independent of the helper stdio setup.
     /// Caller must retain this image and share its PID namespace until exec.
     /// Missing proc access fails closed; this never reopens the distribution path.
     pub fn pty_exec_path(&self) -> PathBuf {

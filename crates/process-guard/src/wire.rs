@@ -8,6 +8,18 @@ pub const ABI: u16 = 1;
 pub const FRAME_LIMIT: usize = 64 * 1024;
 pub const LAUNCH_LIMIT: usize = 16 * 1024 * 1024;
 pub const QUEUE_LIMIT: usize = 256 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchMode {
+    Direct,
+    Pty,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LaunchRequest {
+    pub mode: LaunchMode,
+    pub spec: crate::LaunchSpec,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Kind {
