@@ -20,7 +20,7 @@ make_tree() {
   printf 'mod panel;\n#[test]\nfn it_works() {}\n' > "$root/crates/gui/tests/attention/main.rs"
   printf '#[test]\nfn panel() {}\n' > "$root/crates/gui/tests/attention/panel.rs"
   printf '#[path = "support/mod.rs"]\nmod support;\nmod geometry;\n' > "$root/crates/gui/tests/matrix.rs"
-  printf '#[test]\nfn geometry() {}\n' > "$root/crates/gui/tests/matrix/geometry.rs"
+  printf '#[test]\nfn geometry() {}\n' > "$root/crates/gui/tests/geometry.rs"
   printf 'pub fn helper() {}\n' > "$root/crates/gui/tests/support/mod.rs"
   printf 'mod core_client_page;\n' > "$root/crates/gui/tests/newsys/main.rs"
   printf 'use gui::core_client::Page;\n' > "$root/crates/gui/tests/newsys/core_client_page.rs"
@@ -76,7 +76,6 @@ make_tree "$t"
 reg="$t/registry.json"
 
 expect_ok "a valid registry" "$t" "$reg" validate
-expect_ok "sources without core_client" "$t" "$reg" check-sources
 run "$t" "$reg" filter
 [[ "$(cat "$work/out")" == 'package(=gui) & kind(test) & (binary(=attention) | binary(=matrix))' ]] \
   || { echo "FAIL: unexpected filter: $(cat "$work/out")" >&2; fails=$((fails + 1)); }
@@ -137,65 +136,104 @@ else
   grep -q "has kind 'bench'" "$work/out" && echo "ok: a bench target" || { echo "FAIL: wrong message for a bench" >&2; cat "$work/out" >&2; fails=$((fails + 1)); }
 fi
 
-# --- the sources ----------------------------------------------------------------
+# --- the sources -------------------------------------------------------------
+# check-depinfo reads the dependency-info file rustc writes for each registered
+# binary. The fixtures below are compiled by the real rustc (dependency-info only,
+# so an unresolved `gui` crate is an error rustc reports but still lists the files
+# it read), so module resolution is the compiler's, not this script's.
+command -v rustc > /dev/null || { echo "FAIL: rustc is required to produce dependency-info" >&2; exit 1; }
+depinfo() { # compile the dependency-info of every fixture binary under $t, write $t/binaries.json
+  local deps="$t/target/debug/deps" name src
+  rm -rf "$t/target"
+  mkdir -p "$deps"
+  for pair in attention:tests/attention/main.rs matrix:tests/matrix.rs newsys:tests/newsys/main.rs; do
+    name=${pair%%:*}
+    src=crates/gui/${pair#*:}
+    (cd "$t" && rustc --edition 2021 --test --crate-name "$name" -C extra-filename=-0123abcd \
+      --emit=dep-info --out-dir target/debug/deps "$src") > /dev/null 2>&1 || true
+    : > "$deps/$name-0123abcd"
+  done
+  jq -n --arg d "$deps" '{"rust-build-meta": {"target-directory": ($d | sub("/debug/deps$"; ""))},
+    "rust-binaries": ([["attention"], ["matrix"], ["newsys"]] | map({key: ("gui::" + .[0]),
+      value: {"binary-path": ($d + "/" + .[0] + "-0123abcd")}}) | from_entries)}' > "$t/binaries.json"
+}
 fresh() { rm -rf "$t"; make_tree "$t"; }
+gui_dir="$t/crates/gui/tests"
 
-fresh; printf 'use gui::core_client::Page;\n' >> "$t/crates/gui/tests/attention/main.rs"
-expect_fail "core_client in the root file" "attention.*main.rs names core_client" "$t" "$reg" check-sources
-fresh; printf 'fn f() { crate::core_client::x(); }\n' >> "$t/crates/gui/tests/attention/panel.rs"
-expect_fail "core_client in a child module" "panel.rs names core_client" "$t" "$reg" check-sources
-fresh; printf 'fn f() { core_client::x(); }\n' >> "$t/crates/gui/tests/matrix/geometry.rs"
-expect_fail "core_client in the module directory of a file-root binary" "geometry.rs names core_client" "$t" "$reg" check-sources
-fresh; printf 'pub use gui::core_client;\n' >> "$t/crates/gui/tests/support/mod.rs"
-expect_fail "core_client in a shared support file reached by #[path]" "support/mod.rs names core_client" "$t" "$reg" check-sources
-fresh; printf 'include!("../shared.rs");\n' >> "$t/crates/gui/tests/matrix/geometry.rs"; printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared.rs"
-expect_fail "core_client in a file reached by include!" "shared.rs names core_client" "$t" "$reg" check-sources
-# A shared source reached by #[path] is followed through its own mod child;
-# declarations (mod.rs directory rule, then the <stem>/ directory rule), several levels deep.
-fresh; mkdir -p "$t/crates/gui/tests/shared/child" "$t/crates/gui/tests/shared/inline"
-printf '#[path = "../shared/mod.rs"]\nmod shared;\n' >> "$t/crates/gui/tests/attention/main.rs"
-printf 'mod child;\n' > "$t/crates/gui/tests/shared/mod.rs"
-printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"
-printf "pub fn g() {}\n" > "$t/crates/gui/tests/shared/child/grand.rs"
-expect_ok "a multi-level shared module tree without core_client" "$t" "$reg" check-sources
-printf 'use gui::core_client;\n' > "$t/crates/gui/tests/shared/child.rs"
-expect_fail "core_client in a shared mod child; (mod.rs rule)" "shared/child.rs names core_client" "$t" "$reg" check-sources
-printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"; printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared/child/grand.rs"
-expect_fail "core_client two levels below the shared root (<stem>/ rule)" "shared/child/grand.rs names core_client" "$t" "$reg" check-sources
-printf 'pub fn g() {}\n' > "$t/crates/gui/tests/shared/child/grand.rs"; printf 'pub mod ghost;\n' >> "$t/crates/gui/tests/shared/child.rs"
-expect_fail "a shared mod ghost; that resolves to no file" "mod ghost;.*which does not resolve" "$t" "$reg" check-sources
-printf 'mod grand;\n' > "$t/crates/gui/tests/shared/child.rs"; printf 'pub mod inline { mod nested; }\n' >> "$t/crates/gui/tests/shared/mod.rs"
-printf 'use gui::core_client::P;\n' > "$t/crates/gui/tests/shared/inline/nested.rs"
-expect_fail "a mod x; nested in an inline module of a shared file" "inline/nested.rs names core_client" "$t" "$reg" check-sources
-fresh; mkdir -p "$t/crates/gui/tests/shared"
-printf '#[path = "../shared/mod.rs"]\nmod shared;\n' >> "$t/crates/gui/tests/attention/main.rs"
-printf '#[cfg(test)]\n#[path = "other.rs"]\npub mod renamed;\nconst S: &str = "mod notreal;";\n// mod commented;\n' > "$t/crates/gui/tests/shared/mod.rs"
-printf 'pub fn o() {}\n' > "$t/crates/gui/tests/shared/other.rs"
-expect_ok "a path-attributed mod, a string and a comment are not module declarations" "$t" "$reg" check-sources
+fresh; depinfo
+expect_ok "sources without core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+grep -q "2 binaries" "$work/out" || { echo "FAIL: expected 2 registered binaries read" >&2; cat "$work/out" >&2; fails=$((fails + 1)); }
 
-fresh; printf 'use r#core_client::P;\n' >> "$t/crates/gui/tests/attention/panel.rs"
-expect_fail "a raw identifier" "names core_client" "$t" "$reg" check-sources
-fresh; printf '#[path = "../missing.rs"]\nmod missing;\n' >> "$t/crates/gui/tests/attention/main.rs"
-expect_fail "a #[path] to a file that does not exist" "missing.rs, which does not exist" "$t" "$reg" check-sources
-fresh; printf 'include!("../absent.rs");\n' >> "$t/crates/gui/tests/attention/main.rs"
-expect_fail "an include! of a file that does not exist" "absent.rs, which does not exist" "$t" "$reg" check-sources
-fresh; printf 'include!(concat!(env!("OUT_DIR"), "/x.rs"));\n' >> "$t/crates/gui/tests/attention/main.rs"
-expect_fail "an include! that is not a literal" "include! that is not a string literal" "$t" "$reg" check-sources
-fresh; printf '#[path = concat!("a", "b")]\nmod x;\n' >> "$t/crates/gui/tests/attention/main.rs"
-expect_fail "a #[path] that is not a literal" "#\\[path\\] that is not a string literal" "$t" "$reg" check-sources
+source_case() { # source_case <name> <regexp> : the tree is as the caller left it
+  depinfo
+  expect_fail "$1" "$2" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+}
+shared() { # a registered binary that reaches shared sources outside its directory
+  printf '#[path = "../shared/mod.rs"]\nmod shared;\n' >> "$gui_dir/attention/main.rs"
+  mkdir -p "$gui_dir/shared/nested" "$gui_dir/shared/child"
+}
 
-fresh; printf '// core_client is not used here\n/* nor core_client in\n   a block */\nfn f() {}\n' >> "$t/crates/gui/tests/attention/panel.rs"
-expect_ok "core_client only in comments" "$t" "$reg" check-sources
-fresh; printf 'const SRC: &str = include_str!("../../src/lib.rs");\n' >> "$t/crates/gui/tests/attention/panel.rs"
-expect_ok "include_str! of a file that names core_client is not followed" "$t" "$reg" check-sources
-fresh; printf '#[test]\nfn added_later() {}\n' >> "$t/crates/gui/tests/attention/panel.rs"; printf '#[test]\nfn renamed() {}\n' >> "$t/crates/gui/tests/matrix/geometry.rs"
-expect_ok "a test added to a registered binary needs no registry change" "$t" "$reg" check-sources
-fresh; printf 'fn core_client_like() {}\nconst CORE_CLIENT: u8 = 0;\nuse gui::core_client_e2e::X;\n' >> "$t/crates/gui/tests/attention/panel.rs"
-expect_ok "identifiers that only contain the word are not a reference" "$t" "$reg" check-sources
-fresh
-expect_ok "an unregistered binary may use core_client" "$t" "$reg" check-sources
+fresh; printf 'use gui::core_client::Page;\n' >> "$gui_dir/attention/main.rs"
+source_case "core_client in the root file" "attention/main.rs names core_client"
+fresh; printf 'fn f() { crate::core_client::x(); }\n' >> "$gui_dir/attention/panel.rs"
+source_case "core_client in a child module" "panel.rs names core_client"
+fresh; printf 'fn f() { core_client::x(); }\n' >> "$gui_dir/geometry.rs"
+source_case "core_client in a module of a file-root binary" "geometry.rs names core_client"
+fresh; printf 'pub use gui::core_client;\n' >> "$gui_dir/support/mod.rs"
+source_case "core_client in a shared file reached by #[path]" "support/mod.rs names core_client"
+fresh; printf 'include!("../shared.rs");\n' >> "$gui_dir/attention/panel.rs"; printf 'use gui::core_client::P;\n' > "$gui_dir/shared.rs"
+source_case "core_client in a file reached by include!" "shared.rs names core_client"
+fresh; printf 'use r#core_client::P;\n' >> "$gui_dir/attention/panel.rs"
+source_case "a raw identifier" "names core_client"
+
+# The cases module resolution gets wrong when it is re-implemented: a shared tree
+# reached by #[path] that continues with ordinary `mod` declarations.
+fresh; shared
+printf 'mod child;\n' > "$gui_dir/shared/mod.rs"; printf 'mod grand;\n' > "$gui_dir/shared/child.rs"
+printf 'use gui::core_client::P;\n' > "$gui_dir/shared/child/grand.rs"
+source_case "core_client two levels into a shared tree (child.rs and child/)" "shared/child/grand.rs names core_client"
+fresh; shared
+printf 'mod child;\npub mod nested { mod child; }\n' > "$gui_dir/shared/mod.rs"
+printf 'pub fn a() {}\n' > "$gui_dir/shared/child.rs"; printf 'use gui::core_client;\n' > "$gui_dir/shared/nested/child.rs"
+source_case "a child module with the same name as one outside the inline module" "shared/nested/child.rs names core_client"
+fresh; shared
+printf 'pub mod a { mod child; }\npub mod b { mod child; }\n' > "$gui_dir/shared/mod.rs"
+mkdir -p "$gui_dir/shared/a" "$gui_dir/shared/b"
+printf 'pub fn a() {}\n' > "$gui_dir/shared/a/child.rs"; printf 'use gui::core_client;\n' > "$gui_dir/shared/b/child.rs"
+source_case "sibling inline modules that both declare child" "shared/b/child.rs names core_client"
+fresh; shared
+printf 'mod child;\npub mod nested { mod child; }\n' > "$gui_dir/shared/mod.rs"
+printf 'pub fn a() {}\n' > "$gui_dir/shared/child.rs"; printf 'pub fn b() {}\n' > "$gui_dir/shared/nested/child.rs"
+depinfo
+expect_ok "the same shapes without core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+grep -q "shared/nested/child.rs" "$t/target/debug/deps/attention-0123abcd.d" \
+  || { echo "FAIL: the compiler's list does not include the nested child module" >&2; fails=$((fails + 1)); }
+
+fresh; printf '// core_client is not used here\n/* nor core_client in\n   a block */\nfn f() {}\n' >> "$gui_dir/attention/panel.rs"; depinfo
+expect_ok "core_client only in comments" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; printf 'const SRC: &str = include_str!("../../registry.json");\n' >> "$gui_dir/attention/panel.rs"; depinfo
+expect_ok "include_str! of a file that is not Rust source" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; printf 'const SRC: &str = include_str!("../../src/lib.rs");\n' >> "$gui_dir/attention/panel.rs"
+source_case "a .rs file read with include_str! is checked too (the check errs on rejecting)" "src/lib.rs names core_client"
+fresh; printf '#[test]\nfn added_later() {}\n' >> "$gui_dir/attention/panel.rs"; printf '#[test]\nfn renamed() {}\n' >> "$gui_dir/geometry.rs"; depinfo
+expect_ok "a test added to a registered binary needs no registry change" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; printf 'fn core_client_like() {}\nconst CORE_CLIENT: u8 = 0;\nuse gui::core_client_e2e::X;\n' >> "$gui_dir/attention/panel.rs"; depinfo
+expect_ok "identifiers that only contain the word are not a reference" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; depinfo
+expect_ok "an unregistered binary may use core_client" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
 variant with-newsys '.binaries += [{"target": "newsys", "reason": "x"}]'
-expect_fail "registering that binary is caught" "core_client" "$t" "$work/with-newsys.json" check-sources
+expect_fail "registering that binary is caught" "newsys/core_client_page.rs names core_client" "$t" "$work/with-newsys.json" --root "$t" check-depinfo "$t/binaries.json"
+
+# Fail closed: nothing that cannot be read is a pass.
+fresh; depinfo; rm "$t/target/debug/deps/attention-0123abcd.d"
+expect_fail "a missing dependency-info file" "no dependency-info file" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; depinfo; printf 'not a dependency file\n' > "$t/target/debug/deps/matrix-0123abcd.d"
+expect_fail "a dependency-info file that lists nothing" "lists no .rs file" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+fresh; depinfo; jq 'del(.["rust-binaries"]["gui::matrix"])' "$t/binaries.json" > "$work/b.json"
+expect_fail "a registered binary the build metadata does not know" "has no binary gui::matrix" "$t" "$reg" --root "$t" check-depinfo "$work/b.json"
+fresh; depinfo; rm "$gui_dir/attention/panel.rs"
+expect_fail "a listed source that no longer exists" "panel.rs, which does not exist" "$t" "$reg" --root "$t" check-depinfo "$t/binaries.json"
+expect_fail "no metadata file" "does not exist" "$t" "$reg" --root "$t" check-depinfo "$work/absent.json"
 
 if ((fails > 0)); then
   echo "$fails failure(s)" >&2

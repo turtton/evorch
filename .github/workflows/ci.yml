@@ -128,14 +128,15 @@ jobs:
           scripts/verify-test-inventory.sh --check-config
       # The former GUI integration tests that only a main push runs
       # (scripts/ci-main-only-gui-tests.json): the registry is well formed and names
-      # integration tests of the gui package, and none of their sources reaches the
-      # core-client desktop. Reads `cargo metadata` and the sources; builds nothing.
-      - name: Main-only GUI registry and sources
+      # integration tests of the gui package. That none of their sources names the
+      # core-client desktop is checked where the binaries are built, from the
+      # compiler's dependency-info, in the gui group's inventory step below
+      # (scripts/run-test-group.sh). Reads `cargo metadata`; builds nothing.
+      - name: Main-only GUI registry
         run: |
           scripts/tests/test_ci_main_only_gui.sh
           scripts/tests/test_run_contract_tests.sh
           scripts/ci-main-only-gui.sh validate
-          scripts/ci-main-only-gui.sh check-sources
       - name: Harness runner and doctest coverage
         run: python3 scripts/tests/test_check_harness.py
       # The consumer side of the product artifact: the wait for the producer job

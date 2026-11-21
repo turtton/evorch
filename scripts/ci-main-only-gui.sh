@@ -10,9 +10,12 @@
 #   validate       the registry is well formed, and every registered binary is an
 #                  integration test of the gui package that cargo discovered
 #                  (tests/<name>.rs or tests/<name>/main.rs)
-#   check-sources  validate, then require that no source of a registered binary
-#                  names `core_client`
+#   check-depinfo BINARIES_METADATA
+#                  require that no source file the compiler read for a registered
+#                  binary names `core_client` (see below)
 # --metadata FILE is a `cargo metadata --no-deps` document (default: run cargo).
+# --root DIR is the directory the paths in a dependency-info file are relative to
+# (default: the repository root, where cargo runs rustc).
 #
 # What a registration is. Only a binary: never a test name, a module selector or a
 # filter expression, so a test added to, renamed in or removed from a registered
@@ -21,29 +24,38 @@
 # Cargo, not repeated in the registry. Registering anything but an integration test
 # of the gui package is rejected.
 #
-# What check-sources reads. The root file of the binary, every .rs file under its
-# directory (`tests/<name>/`), and every file that code of those names with
-# `#[path = "..."]` or `include!("...")`, transitively. A reference that cannot be
-# resolved to an existing file is a failure, not a pass. Comments are dropped
-# first. `include_str!` and `include_bytes!` read text, not code, and are not
-# followed. This is a guard against the new core-client desktop (ADR 0045) entering
-# a binary that a pull request no longer runs; it does not prove that a registered
-# test is not a core-client test, so a test of the new system goes into a binary
-# that is not registered.
+# What check-depinfo reads. The compiler's own list of the files it read for each
+# registered binary: the `<binary>.d` dependency-info file that rustc writes next
+# to the test binary (cargo nextest's binaries metadata, the one the inventory
+# builds from, gives the binary's path). Module resolution is therefore the
+# compiler's, whatever the nesting, the module names or the `#[path]` and
+# `include!` in use, and no part of it is re-implemented here. Every `.rs` file in
+# the list is read with its comments dropped; one that names `core_client` fails.
+# A dependency-info file that is missing, a binary the metadata does not know, or a
+# listed `.rs` file that does not exist is a failure, never a pass. The list also
+# holds the files a binary reads with `include_str!`, so a `.rs` file read that way
+# is checked too (the check errs on the side of rejecting). This is a guard against
+# the new core-client desktop (ADR 0045) entering a binary that a pull request no
+# longer runs; it does not prove that a registered test is not a core-client test,
+# so a test of the new system goes into a binary that is not registered.
+# scripts/run-test-group.sh runs it in the gui group's inventory, right after the
+# build that produced the dependency-info.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 manifest=scripts/ci-main-only-gui-tests.json
 metadata=""
+root=$PWD
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --manifest) manifest="${2:?--manifest needs a file}"; shift 2 ;;
     --metadata) metadata="${2:?--metadata needs a file}"; shift 2 ;;
+    --root) root="${2:?--root needs a directory}"; shift 2 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) break ;;
   esac
 done
-command_name="${1:?expected filter, binaries, validate or check-sources}"
+command_name="${1:?expected filter, binaries, validate or check-depinfo}"
 command -v jq > /dev/null || { echo "ci-main-only-gui: jq is required" >&2; exit 2; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -118,105 +130,50 @@ strip_comments() {
     }' "$1"
 }
 
-# Names of the `mod name;` declarations of a comment-stripped source that are
-# not given a `#[path]` (those are followed through the path attribute).
-mod_declarations() {
-  tr '\n' ' ' < "$1" \
-    | sed -E 's/#\[ *path *= *"[^"]*" *\]( *#\[[^]]*\])* *(pub( *\([^)]*\))? +)?mod +[A-Za-z_][A-Za-z0-9_]* *;/ /g' \
-    | sed -E 's/"([^"\\]|\\.)*"/""/g' \
-    | { grep -oE '(^|[^A-Za-z0-9_])mod +[A-Za-z_][A-Za-z0-9_]* *;' || true; } \
-    | sed -E 's/^[^m]*mod +([A-Za-z_][A-Za-z0-9_]*) *;$/\1/'
+# The .rs files listed in a dependency-info file (Makefile syntax: `target: dep...`,
+# a space in a name written `\ `, then one `dep:` rule per file). Only the first
+# line carries the list.
+depinfo_sources() { # <file.d>
+  local line
+  IFS= read -r line < "$1" || true
+  [[ "$line" == *": "* ]] || { echo "FAIL: $1 is not a dependency-info file" >&2; return 1; }
+  line=${line#*: }
+  line=${line//\\ /$'\001'}
+  printf '%s\n' "$line" | tr ' ' '\n' | tr '\001' ' ' | grep -E '\.rs$' || true
 }
 
-# The file of module `$2` declared as `mod $2;` in a file whose child modules
-# live in directory $1: <dir>/<name>.rs or <dir>/<name>/mod.rs. A declaration
-# nested in an inline `mod { }` block looks in a deeper directory, so when the
-# direct candidates do not exist the subtree of $1 is searched before failing.
-resolve_module() {
-  local dir=$1 name=$2 found
-  if [[ -f "$dir/$name.rs" ]]; then echo "$dir/$name.rs"; return 0; fi
-  if [[ -f "$dir/$name/mod.rs" ]]; then echo "$dir/$name/mod.rs"; return 0; fi
-  found=$(find "$dir" -type f \( -name "$name.rs" -o -path "*/$name/mod.rs" \) -print 2>/dev/null | LC_ALL=C sort | head -n 1)
-  [[ -n "$found" ]] || return 1
-  echo "$found"
-}
-
-# The directory in which the child modules of a module file live: the file's
-# own directory for mod.rs, <dir>/<stem> for any other module file.
-child_moddir() {
-  local f
-  f=$(canonical "$1")
-  if [[ "${f##*/}" == mod.rs ]]; then echo "${f%/*}"; else echo "${f%.rs}"; fi
-}
-
-canonical() { echo "$(cd "${1%/*}" && pwd -P)/${1##*/}"; }
-
-check_sources() {
-  local target src base file ref resolved dir stripped hits n_path n_path_ok n_inc n_inc_ok name modfile files_total=0
-  local -a queue
-  declare -A seen moddir
+check_depinfo() {
+  local binaries_metadata=$1 target id bin dep src stripped hits files_total=0 n=0
+  [[ -f "$binaries_metadata" ]] || fail "$binaries_metadata does not exist"
+  stripped="$work/stripped.rs"
   for target in $(targets); do
-    source_of "$target"
-    queue=()
-    seen=()
-    moddir=()
-    # add FILE [MODDIR]: a file with a MODDIR is followed through its `mod x;`
-    # declarations; the files found by scanning the binary directory are not.
-    add() {
-      local f
-      f=$(canonical "$1")
-      if [[ -z "${seen[$f]:-}" ]]; then seen[$f]=1; queue+=("$f"); fi
-      if [[ -n "${2:-}" && -z "${moddir[$f]:-}" ]]; then moddir[$f]=$2; fi
-    }
-    add "$src" "$(canonical "$src" | sed 's|/[^/]*$||')"
-    if [[ "${src##*/}" == main.rs ]]; then base=${src%/*}; else base=${src%.rs}; fi
-    if [[ -d "$base" ]]; then
-      while IFS= read -r -d '' file; do add "$file"; done < <(find "$base" -type f -name '*.rs' -print0 | LC_ALL=C sort -z)
+    id="gui::$target"
+    bin=$(jq -er --arg id "$id" '.["rust-binaries"][$id]["binary-path"]' "$binaries_metadata") \
+      || fail "$binaries_metadata has no binary $id: cannot find its dependency-info"
+    if [[ "$bin" != /* ]]; then
+      bin="$(jq -er '.["rust-build-meta"]["target-directory"]' "$binaries_metadata")/$bin"
     fi
-    while ((${#queue[@]} > 0)); do
-      file=${queue[0]}
-      queue=("${queue[@]:1}")
+    dep="$bin.d"
+    [[ -f "$dep" ]] || fail "binary $target: no dependency-info file $dep"
+    n=$((n + 1))
+    local listed=0
+    while IFS= read -r src; do
+      [[ -n "$src" ]] || continue
+      [[ "$src" == /* ]] || src="$root/$src"
+      [[ -f "$src" ]] || fail "binary $target: $dep lists $src, which does not exist"
+      listed=$((listed + 1))
       files_total=$((files_total + 1))
-      stripped="$work/stripped.rs"
-      strip_comments "$file" > "$stripped"
+      strip_comments "$src" > "$stripped"
       hits=$(grep -nE '(^|[^A-Za-z0-9_])core_client([^A-Za-z0-9_]|$)' "$stripped" || true)
       if [[ -n "$hits" ]]; then
-        echo "FAIL: binary $target: $file names core_client:" >&2
+        echo "FAIL: binary $target: $src names core_client:" >&2
         sed 's/^/  /' <<< "$hits" >&2
         exit 1
       fi
-      dir=${file%/*}
-      n_path=$(grep -cE '#\[path' "$stripped" || true)
-      n_path_ok=$({ grep -oE '#\[path *= *"[^"]*" *\]' "$stripped" || true; } | wc -l | tr -d ' ')
-      n_inc=$({ grep -oE '(^|[^A-Za-z0-9_])include!' "$stripped" || true; } | wc -l | tr -d ' ')
-      n_inc_ok=$({ grep -oE '(^|[^A-Za-z0-9_])include! *\( *"[^"]*" *\)' "$stripped" || true; } | wc -l | tr -d ' ')
-      if [[ "$n_path" != "$n_path_ok" ]]; then
-        fail "binary $target: $file has a #[path] that is not a string literal; its target cannot be checked"
-      fi
-      if [[ "$n_inc" != "$n_inc_ok" ]]; then
-        fail "binary $target: $file has an include! that is not a string literal; its target cannot be checked"
-      fi
-      while IFS= read -r ref; do
-        [[ -n "$ref" ]] || continue
-        resolved="$dir/$ref"
-        [[ -f "$resolved" ]] || fail "binary $target: $file refers to $ref, which does not exist"
-        resolved=$(cd "${resolved%/*}" && pwd -P)/${resolved##*/}
-        add "$resolved" "$(canonical "$resolved" | sed 's|/[^/]*$||')"
-      done < <({
-        { grep -oE '#\[path *= *"[^"]*" *\]' "$stripped" || true; } | sed -E 's/^#\[path *= *"([^"]*)" *\]$/\1/'
-        { grep -oE '(^|[^A-Za-z0-9_])include! *\( *"[^"]*" *\)' "$stripped" || true; } | sed -E 's/^.*include! *\( *"([^"]*)" *\)$/\1/'
-      })
-      if [[ -n "${moddir[$file]:-}" ]]; then
-        while IFS= read -r name; do
-          [[ -n "$name" ]] || continue
-          modfile=$(resolve_module "${moddir[$file]}" "$name") \
-            || fail "binary $target: $file declares 'mod $name;', which does not resolve under ${moddir[$file]}"
-          add "$modfile" "$(child_moddir "$modfile")"
-        done < <(mod_declarations "$stripped")
-      fi
-    done
+    done < <(depinfo_sources "$dep")
+    ((listed > 0)) || fail "binary $target: $dep lists no .rs file"
   done
-  echo "main-only GUI sources: $(targets | wc -l | tr -d ' ') binaries, $files_total files read, no core_client reference"
+  echo "main-only GUI sources (dependency-info): $n binaries, $files_total files read, no core_client reference"
 }
 
 check_manifest
@@ -232,9 +189,8 @@ case "$command_name" in
     for t in $(targets); do source_of "$t"; n=$((n + 1)); done
     echo "main-only GUI registry ok: $n integration-test binaries of the gui package"
     ;;
-  check-sources)
-    load_metadata
-    check_sources
+  check-depinfo)
+    check_depinfo "${2:?check-depinfo needs the nextest binaries metadata file}"
     ;;
   *) echo "unknown command: $command_name" >&2; exit 2 ;;
 esac

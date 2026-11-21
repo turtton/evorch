@@ -18,9 +18,12 @@
 #            main-only-gui is left to the workflow.
 #            Rows are `package<TAB>binary-id<TAB>test<TAB>ignored`, sorted.
 #            The first listing also builds the group's test binaries.
-#            A failing listing fails the job; meta.json is only written when
-#            every listing succeeded, and the merge gate rejects a shard
-#            without it.
+#            For the group with the gui package it also checks, from the
+#            compiler's dependency-info, that no source of a main-only binary
+#            names core_client (scripts/ci-main-only-gui.sh check-depinfo).
+#            A failing listing or check fails the job; meta.json is only
+#            written when every one succeeded, and the merge gate rejects a
+#            shard without it.
 # run        Runs the shard's part of one suite. A suite that is empty for the
 #            whole group is skipped only when ci-test-groups.json lists it in
 #            allow_empty_suites; a shard whose partition happens to be empty is
@@ -76,6 +79,12 @@ case "$mode" in
     for suite in cache io remaining ci-remaining main-only-gui; do
       list_to "$out/$suite.part.tsv" --group "$group" --shard "$shard" --list "$suite"
     done
+    # The registered main-only binaries are built now; the compiler's list of the
+    # files each read must not name core_client (scripts/ci-main-only-gui.sh).
+    # A failure leaves meta.json unwritten, so the merge gate rejects the shard.
+    if jq -e --arg g "$group" '.groups[$g].packages | index("gui")' "$groups_file" > /dev/null; then
+      scripts/ci-main-only-gui.sh check-depinfo "$EVORCH_CI_METADATA_DIR/default-binaries.json"
+    fi
     config_hash=$(
       {
         cat "$groups_file" scripts/contract-test-filters.sh .config/nextest.toml \

@@ -18,9 +18,13 @@ L1 から L7 のうち、下表の検証は **main への push でだけ** CI �
 - **登録の単位**は integration test の binary だけである。テスト名や module の一覧は持たない。
   登録済み binary の中でテストを追加・改名・削除しても登録は変わらず、登録していない binary
   (新設の binary を含む) は自動的に PR 側に残る。
-- **新システムのテストは登録済み binary に入れない。** `scripts/ci-main-only-gui.sh check-sources`
-  (quick-checks) が、登録した binary のテスト側ソース (binary のディレクトリ、`#[path]` と
-  `include!` で読み込まれるファイル) に `core_client` が現れたら失敗させる。これは直接の
+- **新システムのテストは登録済み binary に入れない。** gui group の inventory step
+  (`scripts/run-test-group.sh inventory`、PR でも main でも実行) が、登録した各 binary の
+  コンパイラの dependency-info (rustc が test binary の隣に書く `<binary>.d`) に列挙された
+  `.rs` ファイルを読み、`core_client` が現れたら失敗させる (`scripts/ci-main-only-gui.sh check-depinfo`)。
+  module の解決はコンパイラのもので、入れ子、同名の子 module、inline module、`#[path]`、`include!` を
+  すべて網羅する。dependency-info が見つからない、対応付けられない、列挙されたファイルが無い場合も失敗する。
+  `include_str!` で読む `.rs` も列挙されるため検査対象になる (過剰に拒否する側)。これは直接の
   混入を見つける検査であり、テストの意味上の分類を証明するものではない。レビューで移動範囲を確認する。
 - 一覧・分割 (`scripts/verify-test-inventory.sh`、`ci` job) は event に依存せず、PR でも main でも
   同じ suite を列挙する。`default = cache + io + ci-remaining + main-only-gui`、
