@@ -1,7 +1,10 @@
 use super::*;
 use std::os::{
     fd::{FromRawFd, OwnedFd},
-    unix::net::{UnixListener, UnixStream},
+    unix::{
+        fs::MetadataExt,
+        net::{UnixListener, UnixStream},
+    },
 };
 
 pub(super) fn controller(test: &str, scenario: &str) -> bool {
@@ -172,6 +175,79 @@ fn receive(socket: &UnixStream) -> OwnedFd {
         OwnedFd::from_raw_fd(std::ptr::read(libc::CMSG_DATA(header).cast::<i32>()))
     }
 }
+
+fn master_for(slave: &std::fs::Metadata) -> OwnedFd {
+    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+        let fd = entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .parse::<i32>()
+            .unwrap();
+        // Own the probe before inspecting it: an enumerated descriptor may
+        // disappear/reuse its number, but the duplicated file stays stable.
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicate < 0 {
+            continue;
+        }
+        let master = unsafe { OwnedFd::from_raw_fd(duplicate) };
+        let peer = unsafe {
+            libc::ioctl(
+                master.as_raw_fd(),
+                libc::TIOCGPTPEER,
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        if peer < 0 {
+            continue;
+        }
+        let peer = unsafe { std::fs::File::from_raw_fd(peer) };
+        let actual = peer.metadata().unwrap();
+        if (actual.dev(), actual.ino(), actual.rdev()) == (slave.dev(), slave.ino(), slave.rdev()) {
+            return master;
+        }
+    }
+    panic!("PTY master matching the target slave was not found");
+}
+
+#[test]
+fn master_discovery_matches_slave_identity_not_another_pty() {
+    let system = portable_pty::native_pty_system();
+    let first = system.openpty(size()).unwrap();
+    let second = system.openpty(size()).unwrap();
+    let mut first_number = 0u32;
+    let mut expected = 0u32;
+    let second_fd = second.master.as_raw_fd().unwrap();
+    unsafe {
+        assert_eq!(
+            libc::ioctl(
+                first.master.as_raw_fd().unwrap(),
+                libc::TIOCGPTN,
+                &mut first_number
+            ),
+            0
+        );
+        assert_eq!(libc::ioctl(second_fd, libc::TIOCGPTN, &mut expected), 0);
+    }
+    assert_ne!(first_number, expected);
+    let peer = unsafe {
+        libc::ioctl(
+            second_fd,
+            libc::TIOCGPTPEER,
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    assert!(peer >= 0);
+    let peer = unsafe { std::fs::File::from_raw_fd(peer) };
+    let master = master_for(&peer.metadata().unwrap());
+    let mut actual = 0u32;
+    assert_eq!(
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGPTN, &mut actual) },
+        0
+    );
+    assert_eq!(actual, expected, "must retain this PTY, not another master");
+}
+
 #[test]
 fn core_fixture() {
     let Some(socket) = std::env::var_os("PTY_CORE_SOCKET") else {
@@ -186,20 +262,11 @@ fn core_fixture() {
     transfer(&controller, child.control().as_raw_fd());
     // Keep the real master open in the outer controller. Otherwise core death
     // would pass from terminal HUP, independently of the owner pidfd monitor.
+    // Match the kernel slave identity, not a /dev/ptmx vs /dev/pts/ptmx alias.
     // This test-only inspection is not a new raw-fd owner API.
-    let master_fd = std::fs::read_dir("/proc/self/fd")
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| {
-            std::fs::read_link(entry.path())
-                .is_ok_and(|p| p == std::path::Path::new("/dev/pts/ptmx"))
-        })
-        .expect("PTY master")
-        .file_name()
-        .to_string_lossy()
-        .parse::<i32>()
-        .unwrap();
-    transfer(&controller, master_fd);
+    let slave = std::fs::metadata(format!("/proc/{}/fd/0", child.target_id())).unwrap();
+    let retained_master = master_for(&slave);
+    transfer(&controller, retained_master.as_raw_fd());
     writeln!(
         controller,
         "{} {} {descendant}",

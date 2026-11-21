@@ -86,7 +86,13 @@ same-group descendant cleanup and GuardLost.
 
 The core-death controller retains both the control endpoint and the actual
 master via test-only SCM_RIGHTS. Thus neither control EOF nor terminal HUP can
-masquerade as owner-pidfd monitoring. Outer isolated subreapers use pidfds and
+masquerade as owner-pidfd monitoring. Master discovery matches the kernel slave
+identity through `TIOCGPTPEER`, not the `/dev/ptmx` or `/dev/pts/ptmx` pathname;
+a two-PTY regression rejects retaining an unrelated master. The former pathname
+assumption was reproduced as FAIL with a private `/dev/ptmx` bind mount and
+the corrected controller passed in the same namespace. Removing the owner-pidfd
+monitor still failed after READY and core SIGKILL, with control and master held.
+Outer isolated subreapers use pidfds and
 reap observed descendants even on assertion/mutation failure. Synchronization
 uses READY, ExecOk, root exit, FinalStatus and pidfds, with no sleeps or test
 completion timeouts; nextest supplies the existing 180-second hang limit.
