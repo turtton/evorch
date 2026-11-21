@@ -73,6 +73,12 @@ pub(crate) fn unavailable() -> AdminFailure {
         "management leaf is not installed",
     )
 }
+pub(crate) fn unpublished() -> AdminFailure {
+    failure(
+        ErrorCode::UnsupportedCapability,
+        "management is not published",
+    )
+}
 pub(crate) fn conflict() -> AdminFailure {
     failure(ErrorCode::Conflict, "management binding changed")
 }

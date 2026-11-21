@@ -8,7 +8,10 @@ use crate::ingress::namespaces::lifecycle::{owned_graphs, quarantine, restart};
 use futures_util::FutureExt;
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use storage::admin_audit::*;
 use tokio::sync::{Semaphore, oneshot};
@@ -74,6 +77,18 @@ impl CommitAdmission {
         }
     }
 }
+/// Registration state of the three management leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstalledFacades {
+    pub restart: bool,
+    pub quarantine: bool,
+    pub owned_graphs: bool,
+}
+impl InstalledFacades {
+    pub fn all(self) -> bool {
+        self.restart && self.quarantine && self.owned_graphs
+    }
+}
 #[derive(Default)]
 struct Facades {
     restart: restart::Registry,
@@ -81,6 +96,10 @@ struct Facades {
     owned_graphs: owned_graphs::Registry,
 }
 pub struct AdminService {
+    /// The one publication switch (off by default). While off, every entry point
+    /// refuses before it reads a facade, writes an audit row or touches a gate,
+    /// transaction or owner, even for a verified local human.
+    enabled: AtomicBool,
     facades: Facades,
     audit: Arc<AdminAudit>,
     denials: Arc<Denials>,
@@ -98,6 +117,7 @@ pub struct AdminService {
 impl AdminService {
     pub fn new(audit: AdminAudit, tasks: AreaTasks, epoch: InstanceEpoch) -> Arc<Self> {
         Arc::new(Self {
+            enabled: AtomicBool::new(false),
             facades: Facades::default(),
             audit: Arc::new(audit),
             denials: Arc::default(),
@@ -112,6 +132,35 @@ impl AdminService {
             active_released: Arc::default(),
             operation_queries: Arc::new(Semaphore::new(8)),
         })
+    }
+    /// Publish management. The one product caller is the capability module of
+    /// `evorch-core`, which `scripts/check-admin-publish-boundary.sh` pins.
+    pub fn enable_management(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+    /// Publish management in a test that assembles an in-process host. It exists
+    /// only under test builds; a product build has no way to call it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_for_test(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+    pub fn management_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+    /// Which leaves are registered. Registration is independent of the switch.
+    pub fn installed_facades(&self) -> InstalledFacades {
+        InstalledFacades {
+            restart: self.facades.restart.get().is_some(),
+            quarantine: self.facades.quarantine.get().is_some(),
+            owned_graphs: self.facades.owned_graphs.get().is_some(),
+        }
+    }
+    fn ensure_published(&self) -> Result<(), AdminFailure> {
+        if self.management_enabled() {
+            Ok(())
+        } else {
+            Err(unpublished())
+        }
     }
     pub fn install_restart(&self, facade: Arc<dyn AdminFacade>) {
         self.facades.restart.install(facade);
@@ -154,6 +203,7 @@ impl AdminService {
         context: &IngressContext,
         action: AdminAction,
     ) -> Result<(), AdminFailure> {
+        self.ensure_published()?;
         context.authorize().map(|_| ()).map_err(|reason| {
             self.denials.record(context, action, reason);
             failure(
@@ -184,6 +234,7 @@ impl AdminService {
         context: IngressContext,
         intent: AdminIntent,
     ) -> Result<AuthorizedAdminRequest, AdminFailure> {
+        self.ensure_published()?;
         self.authorize(&context, intent.action())?;
         intent.validate().map_err(|_| {
             self.refusal(
@@ -206,6 +257,7 @@ impl AdminService {
         context: IngressContext,
         query: AdminQuery,
     ) -> Result<AuthorizedAdminQuery, AdminFailure> {
+        self.ensure_published()?;
         self.authorize(&context, query.action().ok_or_else(unavailable)?)?;
         Ok(AuthorizedAdminQuery { query, context })
     }
@@ -227,6 +279,7 @@ impl AdminService {
         self: &Arc<Self>,
         request: AuthorizedAdminRequest,
     ) -> Result<AdminReplyReceiver, AdminFailure> {
+        self.ensure_published()?;
         self.authorize(&request.context, request.intent.action())?;
         let facade = self
             .facade(request.intent.action(), false)
@@ -516,6 +569,7 @@ impl AdminService {
         self: &Arc<Self>,
         request: AuthorizedAdminQuery,
     ) -> Result<AdminViewReceiver, AdminFailure> {
+        self.ensure_published()?;
         self.authorize(
             &request.context,
             request.query.action().ok_or_else(unavailable)?,
