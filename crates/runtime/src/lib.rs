@@ -151,7 +151,7 @@ pub use runtime::{
 };
 pub use runtime::{
     RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
-    RestartRecipeObservation,
+    RestartRecipeMember, RestartRecipeObservation,
 };
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
