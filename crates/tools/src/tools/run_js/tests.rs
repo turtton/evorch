@@ -691,7 +691,8 @@ impl StandInListing {
         let release = std::sync::Mutex::new(release);
         WorkerLauncher::preparing(move |cancel| {
             let sandbox = DirectSandbox::new_unchecked();
-            let mut session = sandbox::StdioSession::spawn(
+            let mut session = sandbox::owned::OwnedSession::spawn_sandboxed(
+                None,
                 &sandbox,
                 sandbox::CommandSpec {
                     program: "sh".into(),

@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
-use sandbox::{CommandSpec, MinimalSandbox, Sandbox, SpawnLedger, StdioSession};
+use sandbox::owned::OwnedSession;
+use sandbox::{CommandSpec, MinimalSandbox, Sandbox, SpawnLedger};
 use tokio::io::BufReader;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::time::Instant;
@@ -287,7 +288,7 @@ pub struct WorkerConnection {
     writer: Option<ChildStdin>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
-    session: Option<StdioSession>,
+    session: Option<OwnedSession>,
     _keep_alive: Vec<Box<dyn std::any::Any + Send + Sync>>,
 }
 
@@ -332,7 +333,7 @@ impl Drop for WorkerConnection {
 
 /// A started process whose pipes are still blocking std handles.
 struct Spawned {
-    session: StdioSession,
+    session: OwnedSession,
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
     stderr: std::process::ChildStderr,
@@ -440,7 +441,7 @@ fn start(
     keep_alive: Vec<Box<dyn std::any::Any + Send + Sync>>,
     ledger: Option<&SpawnLedger>,
 ) -> Result<Spawned, String> {
-    let mut session = StdioSession::spawn_owned(ledger, sandbox, spec)
+    let mut session = OwnedSession::spawn_sandboxed(ledger, sandbox, spec)
         .map_err(|error| format!("cannot start the JS worker: {error}"))?;
     let (Some(stdin), Some(stdout), Some(stderr)) = (
         session.take_stdin(),

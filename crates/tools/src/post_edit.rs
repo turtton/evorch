@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use config::CommentCheckerConfig;
+use sandbox::owned::OwnedCommand;
 use sandbox::{ChildKind, CommandSpec, Sandbox, SpawnLedger};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -343,7 +344,7 @@ async fn capture_stderr(mut reader: impl AsyncRead + Unpin) -> io::Result<String
 }
 
 async fn supervise(
-    mut command: tokio::process::Command,
+    mut command: OwnedCommand,
     ledger: Option<SpawnLedger>,
     payload: Vec<u8>,
     deadline: tokio::time::Instant,
@@ -362,7 +363,7 @@ async fn supervise(
     let spawned = SpawnLedger::admit_optional(ledger.as_ref())
         .map_err(io::Error::from)
         .and_then(|admission| {
-            admission.spawn_group(
+            admission.spawn_owned(
                 ChildKind::SandboxSession,
                 Some("comment-checker"),
                 &mut command,
@@ -444,14 +445,13 @@ impl PostEditHook for CommentChecker {
             Ok(wrapped) => wrapped,
             Err(error) => return unavailable(UnavailableReason::Io, error),
         };
-        // The launch policy gives the checker its own session and process group,
-        // which the supervisor kills with any descendants.
-        let mut command = tokio::process::Command::from(wrapped.to_command());
+        // The guard gives the checker its own session and process group, which
+        // it kills with any descendants.
+        let mut command = wrapped.to_owned_command();
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         let ledger = self
             .ledger
             .read()

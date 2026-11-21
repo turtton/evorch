@@ -123,32 +123,13 @@ mod client {
             let mut committed = false;
             let result = (|| {
                 let pidfd = pidfd_open(helper.id() as i32)?;
-                let mut wrong = 0;
-                let mut stream = loop {
-                    let mut fds = [
-                        wire::fd(listener.as_raw_fd(), libc::POLLIN),
-                        wire::fd(pidfd.as_raw_fd(), libc::POLLIN),
-                    ];
-                    wire::poll(&mut fds, Some(deadline))?;
-                    if fds[1].revents != 0 {
-                        return Err(wire::invalid("GuardLost before authentication"));
-                    }
-                    match listener.accept() {
-                        Ok((s, _)) => {
-                            if let Some(s) =
-                                authenticate(s, helper.id() as i32, unsafe { libc::getuid() })?
-                            {
-                                break s;
-                            }
-                            wrong += 1;
-                            if wrong >= 16 {
-                                return Err(wire::invalid("too many wrong guard peers"));
-                            }
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(e) => return Err(e),
-                    }
-                };
+                let mut stream = accept_helper(
+                    &listener,
+                    &pidfd,
+                    helper.id() as i32,
+                    unsafe { libc::getuid() },
+                    deadline,
+                )?;
                 stream.set_nonblocking(true)?;
                 let mut decoder = Decoder::default();
                 let (kind, hello) =
@@ -234,6 +215,41 @@ mod client {
             return Err(io::Error::last_os_error());
         }
         non_stdio(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    /// Accepts connections until one comes from the expected helper (`pid`, `uid`).
+    /// Any other peer is dropped unread; the 16th wrong peer, the helper's death
+    /// (`pidfd` readable) or the deadline ends the wait with an error.
+    pub(crate) fn accept_helper(
+        listener: &UnixListener,
+        pidfd: &OwnedFd,
+        pid: i32,
+        uid: u32,
+        deadline: Instant,
+    ) -> io::Result<UnixStream> {
+        let mut wrong = 0;
+        loop {
+            let mut fds = [
+                wire::fd(listener.as_raw_fd(), libc::POLLIN),
+                wire::fd(pidfd.as_raw_fd(), libc::POLLIN),
+            ];
+            wire::poll(&mut fds, Some(deadline))?;
+            if fds[1].revents != 0 {
+                return Err(wire::invalid("GuardLost before authentication"));
+            }
+            match listener.accept() {
+                Ok((s, _)) => {
+                    if let Some(s) = authenticate(s, pid, uid)? {
+                        return Ok(s);
+                    }
+                    wrong += 1;
+                    if wrong >= 16 {
+                        return Err(wire::invalid("too many wrong guard peers"));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
     /// Keeps an accepted connection only when its peer is the expected helper.
     pub fn authenticate(s: UnixStream, pid: i32, uid: u32) -> io::Result<Option<UnixStream>> {
@@ -441,6 +457,122 @@ mod client {
                 let _ = self.stream.shutdown(Shutdown::Write);
                 let _ = self.helper.wait();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod accept_tests {
+        use super::*;
+        use std::io::Read;
+
+        // A connection from this process is never the helper unless the expected
+        // pid is this process, so a live bystander stands in for the helper.
+        struct Fixture {
+            _dir: tempfile::TempDir,
+            path: PathBuf,
+            listener: UnixListener,
+            bystander: Child,
+            pidfd: OwnedFd,
+        }
+        fn fixture() -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("accept.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let bystander = Command::new("sleep")
+                .arg("600")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pidfd = pidfd_open(bystander.id() as i32).unwrap();
+            Fixture {
+                _dir: dir,
+                path,
+                listener,
+                bystander,
+                pidfd,
+            }
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self.bystander.kill();
+                let _ = self.bystander.wait();
+            }
+        }
+        fn far() -> Instant {
+            // Readiness, not time, ends these waits; the deadline only has to be
+            // out of the way.
+            Instant::now() + Duration::from_secs(3600)
+        }
+
+        #[test]
+        fn the_sixteenth_wrong_peer_fails_the_accept_loop() {
+            let f = fixture();
+            let mut clients: Vec<UnixStream> = (0..16)
+                .map(|_| UnixStream::connect(&f.path).unwrap())
+                .collect();
+            let error = accept_helper(
+                &f.listener,
+                &f.pidfd,
+                f.bystander.id() as i32,
+                unsafe { libc::getuid() },
+                far(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("too many wrong guard peers"));
+            // Every wrong peer was dropped without a byte being sent to it.
+            for client in &mut clients {
+                let mut byte = [0u8; 1];
+                assert_eq!(client.read(&mut byte).unwrap(), 0);
+            }
+        }
+
+        #[test]
+        fn wrong_peers_are_rejected_until_the_helper_is_lost() {
+            let f = fixture();
+            let clients: Vec<UnixStream> = (0..3)
+                .map(|_| UnixStream::connect(&f.path).unwrap())
+                .collect();
+            let pid = f.bystander.id() as i32;
+            let uid = unsafe { libc::getuid() };
+            let (listener, pidfd) = (&f.listener, &f.pidfd);
+            let (mut done, finished) = UnixStream::pair().unwrap();
+            std::thread::scope(|scope| {
+                let accepting = scope.spawn(move || {
+                    let _finished = finished;
+                    accept_helper(listener, pidfd, pid, uid, far())
+                });
+                for client in &clients {
+                    // Either the client is rejected (EOF) or the loop ended early
+                    // (the done pair closes), which is the failure.
+                    let mut fds = [
+                        wire::fd(client.as_raw_fd(), libc::POLLIN),
+                        wire::fd(done.as_raw_fd(), libc::POLLIN),
+                    ];
+                    wire::poll(&mut fds, None).unwrap();
+                    assert_eq!(fds[1].revents, 0, "the accept loop ended early");
+                }
+                // All three were rejected and the loop still waits: only the
+                // helper's death (its pidfd) can end it now.
+                assert!(!accepting.is_finished());
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let error = accepting.join().unwrap().unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("GuardLost before authentication")
+                );
+                let mut byte = [0u8; 1];
+                assert_eq!(std::io::Read::read(&mut done, &mut byte).unwrap(), 0);
+            });
+        }
+
+        #[test]
+        fn the_expected_peer_is_accepted() {
+            let f = fixture();
+            let _client = UnixStream::connect(&f.path).unwrap();
+            let (pid, uid) = unsafe { (libc::getpid(), libc::getuid()) };
+            accept_helper(&f.listener, &f.pidfd, pid, uid, far()).unwrap();
         }
     }
 }

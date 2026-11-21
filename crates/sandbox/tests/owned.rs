@@ -323,3 +323,137 @@ async fn final_drained_by_control_clone_still_confirms_ledger_on_drop() {
     drop(child);
     assert!(ledger.reap_child(id).await.is_ok());
 }
+
+fn sandboxed(script: &str) -> sandbox::CommandSpec {
+    sandbox::CommandSpec {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: None,
+        extra_env: vec![("SANDBOXED_ONLY".into(), "yes".into())],
+    }
+}
+#[test]
+fn spawn_sandboxed_pipes_all_streams_registers_a_session_and_confirms_the_reap() {
+    let ledger = SpawnLedger::new();
+    let session = OwnedSession::spawn_sandboxed(
+        Some(&ledger),
+        &sandbox::DirectSandbox::new_unchecked(),
+        sandboxed(
+            r#"read value; printf '%s:%s' "$value" "$SANDBOXED_ONLY"; printf err >&2; exit 5"#,
+        ),
+    )
+    .unwrap();
+    let children = ledger.children();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].kind, ChildKind::SandboxSession);
+    let result = session.output(Some(b"in\n")).unwrap();
+    assert_eq!(result.status.code(), Some(5));
+    assert_eq!(result.stdout, b"in:yes");
+    assert_eq!(result.stderr, b"err");
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+}
+#[test]
+fn spawn_sandboxed_starts_nothing_when_wrapping_is_denied_or_the_fence_is_closed() {
+    struct Denied;
+    impl sandbox::Sandbox for Denied {
+        fn wrap(
+            &self,
+            _: sandbox::CommandSpec,
+        ) -> Result<sandbox::WrappedCommand, sandbox::SandboxError> {
+            Err(sandbox::SandboxError::InvalidSpec {
+                detail: "denied".into(),
+            })
+        }
+    }
+    let ledger = SpawnLedger::new();
+    let denied = OwnedSession::spawn_sandboxed(Some(&ledger), &Denied, sandboxed("true"));
+    assert!(matches!(
+        denied,
+        Err(sandbox::SessionError::Sandbox(
+            sandbox::SandboxError::InvalidSpec { .. }
+        ))
+    ));
+    ledger.close_fence();
+    let fenced = OwnedSession::spawn_sandboxed(
+        Some(&ledger),
+        &sandbox::DirectSandbox::new_unchecked(),
+        sandboxed("true"),
+    );
+    assert!(matches!(fenced, Err(sandbox::SessionError::Io(_))));
+    assert_eq!(ledger.child_stats().registered, 0);
+}
+#[test]
+fn spawn_sandboxed_reports_a_missing_program_as_not_found_and_drop_stops_the_group() {
+    let missing = OwnedSession::spawn_sandboxed(
+        None,
+        &sandbox::DirectSandbox::new_unchecked(),
+        sandbox::CommandSpec {
+            program: "/nonexistent/session-command".into(),
+            args: vec![],
+            cwd: None,
+            extra_env: vec![],
+        },
+    );
+    assert!(matches!(
+        missing,
+        Err(sandbox::SessionError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    let mut session = OwnedSession::spawn_sandboxed(
+        None,
+        &sandbox::DirectSandbox::new_unchecked(),
+        sandboxed("sleep 600 & echo $!; wait"),
+    )
+    .unwrap();
+    let helper = line(&mut BufReader::new(session.take_stdout().unwrap()));
+    let pid: u32 = helper.parse().unwrap();
+    let watch = process_guard::pidfd_open(pid as i32).unwrap();
+    drop(session);
+    {
+        use std::os::fd::AsRawFd;
+        process_guard::wire::poll(
+            &mut [process_guard::wire::fd(watch.as_raw_fd(), libc::POLLIN)],
+            None,
+        )
+        .unwrap();
+    }
+}
+
+fn survives_its_creator_thread(sandbox: &dyn sandbox::Sandbox, spec: sandbox::CommandSpec) {
+    let ledger = SpawnLedger::new();
+    let mut session = std::thread::scope(|scope| {
+        scope
+            .spawn(|| OwnedSession::spawn_sandboxed(Some(&ledger), sandbox, spec).unwrap())
+            .join()
+            .unwrap()
+    });
+    let mut stdout = BufReader::new(session.take_stdout().unwrap());
+    assert_eq!(line(&mut stdout), "READY");
+    assert!(session.try_wait().unwrap().is_none());
+    session.take_stdin().unwrap().write_all(b"GO\n").unwrap();
+    assert_eq!(session.wait().unwrap().code(), Some(0));
+    let stats = ledger.child_stats();
+    assert_eq!(
+        (stats.registered, stats.reaped, stats.unconfirmed),
+        (1, 1, 0)
+    );
+}
+#[test]
+fn a_direct_session_survives_the_retirement_of_the_thread_that_created_it() {
+    survives_its_creator_thread(
+        &sandbox::DirectSandbox::new_unchecked(),
+        sandboxed("echo READY; read gate; exit 0"),
+    );
+}
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn a_bwrap_session_survives_the_retirement_of_the_thread_that_created_it() {
+    let workspace = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
+    let sandbox =
+        sandbox::BwrapSandbox::detect(sandbox::BwrapConfig::new(workspace.path().to_path_buf()))
+            .expect("bwrap required");
+    survives_its_creator_thread(&sandbox, sandboxed("echo READY; read gate; exit 0"));
+}
