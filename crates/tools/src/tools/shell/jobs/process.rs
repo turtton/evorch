@@ -146,12 +146,9 @@ pub(super) async fn run_pty(
         let writer = Arc::new(Mutex::new(Some(
             pair.master.take_writer().map_err(io_failed)?,
         )));
-        let child = pair
-            .slave
-            .spawn_command(command)
+        let (child, group) = ProcessGroup::spawn_pty(&*pair.slave, command)
             .map_err(|error| spawn_failed(&wrapped.program, error))?;
-        let group = ProcessGroup::new(child.process_id());
-        let entry = admission.register_group(ChildKind::ShellJob, Some("shell-pty"), &group);
+        let entry = admission.register_pty_group(ChildKind::ShellJob, Some("shell-pty"), &group);
         (pair, reader, writer, child, group, entry)
     };
     drop(pair.slave);

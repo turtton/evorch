@@ -184,7 +184,6 @@ async fn a_missing_program_is_reported_as_not_found() {
 mod linux {
     use std::io::{BufRead, BufReader};
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::os::unix::process::CommandExt;
     use std::time::Duration;
 
     use rustix::process::Pid;
@@ -370,34 +369,51 @@ mod linux {
         assert!(!running(leader));
     }
 
-    // Given: a raw leader (the pseudo-terminal shell jobs keep this until B3) and
-    // a guard of its group / When: the guard is dropped / Then: the group stops.
+    /// A shell on a pseudo-terminal (its own session, so its pid is its group id):
+    /// the only kind of child the raw `ProcessGroup` accepts. The pair must outlive
+    /// the child.
+    fn pty_sh(
+        script: &str,
+    ) -> (
+        portable_pty::PtyPair,
+        Box<dyn portable_pty::Child + Send + Sync>,
+        ProcessGroup,
+    ) {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open a pseudo-terminal");
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.args(["-c", script]);
+        let (child, group) =
+            ProcessGroup::spawn_pty(&*pair.slave, command).expect("start the child");
+        (pair, child, group)
+    }
+
+    // Given: a pseudo-terminal leader (the shell jobs keep this raw path until
+    // B3) and a guard of its group / When: the guard is dropped / Then: the group
+    // stops.
     #[test]
     fn dropping_a_raw_group_guard_stops_descendants() {
-        let mut command = sh("sleep 60 & echo $!; wait");
-        let mut child = command
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("start the child");
-        let group = ProcessGroup::new(Some(child.id()));
+        let (pair, mut child, group) = pty_sh("sleep 60 & echo $!; wait");
         let leader = group.leader().expect("the child's pid");
-        let grandchild = read_pid(child.stdout.take().expect("child stdout"));
+        let grandchild = read_pid(pair.master.try_clone_reader().expect("pty reader"));
         assert_eq!(rustix::process::getpgid(Some(grandchild)), Ok(leader));
         drop(ProcessGroupGuard::new(group));
         child.wait().expect("reap the child");
         assert_stops(grandchild);
     }
 
-    // Given: a live raw leader / When: a handle to its group is released (or
-    // retired by a reap) and then asked to kill / Then: nothing is signalled, so
-    // a reaped and reused id could not be reached either.
+    // Given: a live pseudo-terminal leader / When: a handle to its group is
+    // released (or retired by a reap) and then asked to kill / Then: nothing is
+    // signalled, so a reaped and reused id could not be reached either.
     #[test]
     fn a_retired_group_signals_nothing() {
-        let mut command = sh("exec sleep 60");
-        let mut child = command.process_group(0).spawn().expect("start the child");
-        let group = ProcessGroup::new(Some(child.id()));
+        let (_pair, mut child, group) = pty_sh("exec sleep 60");
         let leader = group.leader().expect("the child's pid");
         let clone = group.clone();
         group.release();
@@ -407,7 +423,12 @@ mod linux {
         assert!(running(leader), "a released group was signalled");
         assert!(!has_exited(leader).expect("an unreaped child"));
 
-        let reaping = ProcessGroup::new(Some(child.id()));
+        // The released group could not stop its leader; stop it directly.
+        child.kill().expect("stop the first child");
+        child.wait().expect("reap the first child");
+
+        // A live group kills what is left of the group, reaps, and retires.
+        let (_second, mut child, reaping) = pty_sh("exec sleep 60");
         let status = reaping
             .kill_and_reap(|| child.wait().map(Some))
             .expect("reap the child")

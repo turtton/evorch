@@ -88,9 +88,14 @@ backend; it makes no new D-7 claim and its code is only compile-checked by CI.
 Nothing a non-PTY caller can reach. What stays, and who uses it:
 
 - `process::ProcessGroup`, `ProcessGroupGuard`, `wait_for_exit`, `has_exited` and
-  `Admission::register_group` (ledger `ChildGroup::Raw`): the shell **PTY** jobs
-  (`run_pty`, started by `portable-pty`) and the restart test that registers a raw
-  group. They take a numeric group handle and a raw child; they start nothing.
+  `Admission::register_pty_group` (ledger `ChildGroup::Raw`): the shell **PTY** jobs
+  (`run_pty`). A live `ProcessGroup` exists only from `ProcessGroup::spawn_pty`, which
+  starts a command on a `portable_pty::SlavePty`; there is no constructor from a
+  bare pid and no way to hand it a std or Tokio child (the `compile_fail` doctests on
+  `ProcessGroup` pin that: `new` is crate-private, and a std/Tokio child is not a slave).
+  `ProcessGroup::retired()` signals nothing and exists for the restart test that
+  registers a synthetic receipt. `portable_pty::Child` itself would prove nothing, as
+  it is implemented for `std::process::Child`.
 - `process::close_inherited_fds_on_exec`: a descriptor-hygiene hook for the std
   command an evorch-core fixture (`product_exec`) starts and supervises itself. It
   owns nothing and is no way to start a product child.
@@ -128,19 +133,37 @@ no caller relies on that.
 ### Death matrix and cleanup evidence
 
 `sandbox/tests/owner_death.rs` kills (SIGKILL) a separate owner process that holds
-eleven roots, each with a same-group grandchild: the eight `ChildKind`s through
-`OwnedChild::spawn_blocking` with a ledger, a ledger `SandboxSession`
-`OwnedSession`, and a child and a session with no ledger. All roots and grandchildren
-end (awaited on pidfds, no sleeps), and an unrelated process in its own group
-survives. It covers the typed owners every caller goes through, not the real release
-core running its callers (B3's "real core expiry"). Real-caller coverage that exists
-today: the renderer owner's abrupt core exit (`renderer_owner`), MCP and ledger stop
-(`mcp_stdio`), eval groups (`groups` unit tests).
+thirteen roots, each with a same-group grandchild. Every root and grandchild ends
+(awaited on pidfds, no sleeps), and an unrelated process in its own group survives.
+Each production entry point of the two owners is one root:
+
+| Root (label) | Entry | Production callers |
+|---|---|---|
+| `mcp-stdio`, `sandbox-session`, `pull-request-source`, `shell-job`, `eval`, `probe`, `renderer`, `other` (the eight `ChildKind`s) | `OwnedChild::spawn_blocking(Some(ledger), kind, …)` | MCP, PR source and shell pipe jobs use their own kind; the rest cover the remaining kinds |
+| `blocking-no-ledger` | `OwnedChild::spawn_blocking(None, …)` | eval verify, GUI slash, the PR source without a ledger |
+| `admission-spawn-owned` | `Admission::spawn_owned` | eval groups, the renderer, `ledger_latency` |
+| `session-spawn-owned` | `OwnedSession::spawn_owned(Some(ledger), …)` | ledger-registered sync sessions |
+| `session-spawn-sandboxed` | `OwnedSession::spawn_sandboxed(Some(ledger), …)` | LSP, js-worker, sandbox sessions |
+| `session-no-ledger` | `OwnedSession::spawn` | eval's host git |
+
+It covers the typed entries every caller goes through, not the callers themselves.
+**The SIGKILL matrix with the real release core running its real callers, and the
+real core's expiry, are B3.** Real-caller coverage that exists today: the renderer
+owner's abrupt core exit (`renderer_owner`), MCP and ledger stop (`mcp_stdio`),
+eval groups (`groups` unit tests).
 
 Mid-launch abandonment (#744 S1): `mcp_stdio::a_launch_abandoned_mid_way_...` parks
 the launch on its blocking thread, drops the caller, releases it, and shows the
 server and its descendant end, the ledger confirm the reap and the permit release.
-A guard lost *after* a KILL (#744 S2): `owned::a_guard_lost_after_a_kill_stays_unconfirmed_...`.
+The eval start path has the same shape: its launch holds the producer permit on the
+blocking thread (`evaluator::tests::start::an_abandoned_launch_keeps_its_producer_permit_until_it_returns`),
+so a restart cannot see the producers drained before the launch registers its
+evaluations. A guard lost *after* a KILL (#744 S2):
+`owned::a_guard_lost_after_a_kill_stays_unconfirmed_...`.
+
+Closed stdio is exercised by `sandbox/tests/closed_stdio.rs`: a launcher with
+descriptors 0, 1 and 2 closed starts the representative selections (all pipes,
+`/dev/null` stdin, files, an IPC-shaped pair with `/dev/null` stderr).
 
 ## New contract
 
@@ -218,8 +241,8 @@ files alone. Register/serialize central edits before each part.
 B1 follow-ups: saved-fd3 dash fixture and artifact-script CI are addressed in B2a.
 The actual GuardRuntime accept-loop mutation (S3) is addressed in B2b-i
 (`accept_helper` and its rejection tests). Per-caller closed-stdio choices are
-recorded for the callers migrated so far; the remaining callers' choices, the full
-caller matrix and the cancellation audit stay B2b-iii work. Low-level peer helper
+recorded for every migrated caller ("Closed stdio, per path"); the death matrix and
+the cancellation audit are in "Death matrix and cleanup evidence". Low-level peer helper
 unit tests alone are not proof of the real accept loop's rejection branch.
 core_instance::running_elf_identity hashes the running ELF separately; B2a does
 not introduce a shared cross-crate identity authority merely to avoid this read.

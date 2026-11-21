@@ -15,6 +15,8 @@ event-bus = { path = "../event-bus" }
 keyring = { workspace = true, optional = true }
 # close_range(2) on Linux and the pre-exec signal/session hooks on every Unix.
 libc = "0.2"
+# A pseudo-terminal child is the only raw process group the crate accepts.
+portable-pty = { workspace = true }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,6 +35,4 @@ secret-service = { version = "5.2", default-features = false, features = ["rt-to
 security-framework = { version = "3.7", optional = true }
 
 [dev-dependencies]
-# The launch policy tests run themselves on a pseudo-terminal.
-portable-pty = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time", "test-util"] }

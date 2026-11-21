@@ -11,7 +11,7 @@ binding for CLI/core/GUI. B2b migrated the non-PTY callers in three parts (see
   snapshots, eval's host git, eval groups/verify, the PR source (with or without a
   ledger), the offline renderer, GUI slash commands and the test/example seams.
 - Still unprotected by B (B3): the shell **PTY** jobs (raw `ProcessGroup`, registered
-  through `Admission::register_group`) and agent Chromium. The std spawns outside
+  through `Admission::register_pty_group`) and agent Chromium. The std spawns outside
   the audited inventory (GUI git/`fc-match`) are listed in the owned README.
 
 B3 migrates PTY/Chromium and supplies release-core expiry, real Chromium/CEF and

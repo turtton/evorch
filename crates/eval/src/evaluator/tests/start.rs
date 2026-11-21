@@ -573,3 +573,41 @@ async fn groups_from_other_processes_are_judged_by_their_files_not_assumed_runni
     assert_eq!(killed["evaluations"][0]["stderr_tail"], "boom");
     assert_eq!(killed["evaluations"][0]["progress"]["finished_runs"], 0);
 }
+
+// Given: an evaluation launch parked on its blocking thread / When: the caller
+// is dropped and a restart waits for the producers to drain / Then: the launch's
+// producer permit is still held, so the restart cannot see the producers drained
+// before the launch registers its evaluations, and it is released only once the
+// launch returns.
+#[tokio::test]
+async fn an_abandoned_launch_keeps_its_producer_permit_until_it_returns() {
+    let gate = runtime::producer::ProducerGate::default();
+    let permit = gate.try_enter().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let caller = tokio::spawn(crate::evaluator::start::launch_holding(permit, move || {
+        entered_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        Ok(7)
+    }));
+    tokio::task::spawn_blocking(move || entered_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(gate.active(), 1, "the permit left with the caller");
+    let mut drained = std::pin::pin!(gate.drained());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(
+            std::future::Future::poll(drained.as_mut(), cx).is_pending()
+        ))
+        .await,
+        "the producers drained while a launch was still running"
+    );
+
+    release_tx.send(()).unwrap();
+    drained.await;
+    assert_eq!(gate.active(), 0);
+}

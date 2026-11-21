@@ -6,7 +6,7 @@
 //! [`wait_for_exit`] / [`has_exited`] for a pseudo-terminal child (the shell's PTY
 //! jobs, started by `portable-pty`, which already starts its own session and closes
 //! inherited descriptors), registered through
-//! [`crate::ledger::Admission::register_group`], and
+//! [`crate::ledger::Admission::register_pty_group`], and
 //! [`close_inherited_fds_on_exec`], a descriptor-hygiene hook for a std command that
 //! a test fixture starts and supervises itself (it owns nothing).
 //!
@@ -128,15 +128,76 @@ pub(crate) fn apply_launch_policy(command: &mut Command) {
 /// leader left to another reaper is first stopped and retired with
 /// [`kill_and_release`](Self::kill_and_release). After that,
 /// [`kill`](Self::kill) on any clone sends nothing.
+///
+/// # Only a pseudo-terminal child can lead one
+///
+/// Linux children that are not on a pseudo-terminal are owned by
+/// [`crate::owned`]; this raw handle is the PTY boundary B3 replaces. A live
+/// group comes only from a command started on a pseudo-terminal slave:
+///
+/// ```no_run
+/// fn start(
+///     slave: &dyn portable_pty::SlavePty,
+/// ) -> std::io::Result<sandbox::process::ProcessGroup> {
+///     let command = portable_pty::CommandBuilder::new("true");
+///     sandbox::process::ProcessGroup::spawn_pty(slave, command).map(|(_child, group)| group)
+/// }
+/// ```
+///
+/// A bare pid has no constructor:
+///
+/// ```compile_fail,E0624
+/// let child = std::process::Command::new("true").spawn().unwrap();
+/// let _ = sandbox::process::ProcessGroup::new(Some(child.id()));
+/// ```
+///
+/// and a std or Tokio child is not a pseudo-terminal slave:
+///
+/// ```compile_fail,E0277
+/// let child = std::process::Command::new("true").spawn().unwrap();
+/// let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
+/// ```
+///
+/// ```compile_fail,E0277
+/// async fn start() {
+///     let child = tokio::process::Command::new("true").spawn().unwrap();
+///     let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ProcessGroup {
     leader: Arc<Mutex<Option<Pid>>>,
 }
 
 impl ProcessGroup {
+    /// Start `command` on the pseudo-terminal `slave` and take the group it
+    /// leads. portable-pty starts the child in a session of its own, so its pid
+    /// is the group id.
+    ///
+    /// The only way to obtain a live group: there is no constructor from a bare
+    /// pid, and a std or Tokio child cannot be passed (`portable_pty::Child` is
+    /// implemented for `std::process::Child`, so the child itself would prove
+    /// nothing; the pseudo-terminal slave that starts it does).
+    ///
+    /// # Errors
+    /// The error of the pseudo-terminal's spawn.
+    pub fn spawn_pty(
+        slave: &dyn portable_pty::SlavePty,
+        command: portable_pty::CommandBuilder,
+    ) -> io::Result<(Box<dyn portable_pty::Child + Send + Sync>, Self)> {
+        let child = slave.spawn_command(command).map_err(io::Error::other)?;
+        let group = Self::new(child.process_id());
+        Ok((child, group))
+    }
+
+    /// A group with no leader: it signals nothing and is already retired.
+    pub fn retired() -> Self {
+        Self::new(None)
+    }
+
     /// The group led by the child with this pid (`Child::id`). `None`, as
     /// reported by an already reaped Tokio child, is a retired group.
-    pub fn new(leader: Option<u32>) -> Self {
+    pub(crate) fn new(leader: Option<u32>) -> Self {
         let leader = leader
             .and_then(|pid| i32::try_from(pid).ok())
             .and_then(Pid::from_raw);

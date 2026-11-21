@@ -190,6 +190,25 @@ impl StartEvaluation {
     }
 }
 
+/// Runs a launch on a blocking thread (each child waits for the process guard's
+/// handshake, so it must hold no async worker) with the producer permit moved
+/// into it. A caller that drops this future does not cancel the launch: it still
+/// starts and registers its evaluations, so the permit must stay held until it
+/// returns, or a restart could see the producers drained and then have an
+/// evaluation appear.
+pub(super) async fn launch_holding<T: Send + 'static>(
+    producer: runtime::producer::ProducerPermit,
+    launch: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(move || {
+        let launched = launch();
+        drop(producer);
+        launched
+    })
+    .await
+    .unwrap_or_else(|error| Err(error.to_string()))
+}
+
 #[async_trait::async_trait]
 impl Tool for StartEvaluation {
     fn name(&self) -> &'static str {
@@ -286,17 +305,12 @@ impl Tool for StartEvaluation {
         let Some(producer) = self.0.lifecycle.producers.try_enter() else {
             return Ok(ToolResult::error("evaluation host is busy or stopping"));
         };
-        // Each launch waits for the process guard's handshake, so the whole
-        // launch runs on a blocking thread and holds no async worker. A caller
-        // that drops this future does not cancel it: the evaluations it
-        // started stay owned by their watchers and the ledger.
         let shared = Arc::clone(&self.0);
         let (run_id, candidate) = (ctx.run_id.clone(), args.candidate.clone());
-        let launched = tokio::task::spawn_blocking(move || {
+        let launched = launch_holding(producer, move || {
             groups::launch(&shared, &run_id, &candidate, launches)
         })
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()));
+        .await;
         let record = match launched {
             Ok(record) => record,
             Err(message) => {
@@ -305,7 +319,6 @@ impl Tool for StartEvaluation {
                 )));
             }
         };
-        drop(producer);
         let evaluations: Vec<Value> = record
             .members
             .iter()

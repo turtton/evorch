@@ -68,7 +68,7 @@ mod raw {
             process::apply_launch_policy(&mut command);
             let child = command.spawn()?;
             let group = ProcessGroup::new(Some(child.id()));
-            let entry = admission.register_group(kind, label, &group);
+            let entry = admission.register_pty_group(kind, label, &group);
             Ok(Self {
                 child,
                 group,
