@@ -243,6 +243,17 @@ async fn live_parent_alone_is_not_a_source_but_own_sources_and_events_remain() {
         .unwrap();
     assert_eq!(waiting.await.unwrap()["status"], "ready");
     assert!(!runtime.question_reported(&question.id));
+    runtime.take_inbox(child).unwrap();
+    runtime
+        .answer_user_question(&question.id, "resolved")
+        .unwrap();
+    let mut request = own_request(json!({}));
+    request.delivered.insert(question.id);
+    assert_eq!(
+        events::poll(&runtime, child, &request).unwrap().1["status"],
+        "no_wait_sources",
+        "the grandchild below must be the only remaining wait source"
+    );
     let grandchild = runtime
         .delegate_background_as_child(child, Role::Worker, "blocked", RunConfig::default())
         .unwrap();
