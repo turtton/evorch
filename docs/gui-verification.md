@@ -30,6 +30,10 @@ L1 から L7 のうち、下表の検証は **main への push でだけ** CI �
   見つからない、対応付けられない、列挙されたファイルが無い場合も失敗する。登録 binary に `core_client` を
   含む文章を書きたい場合は、その binary を登録から外す (PR 側に残す) 判断になる。
   これは直接の混入を見つける検査であり、テストの意味上の分類を証明するものではない。レビューで移動範囲を確認する。
+- **この検査の対象外 (残余リスク)**: 登録 binary のテスト側ソースに `core_client` という文字列が現れない経路は
+  検出しない。例えば gui ライブラリが `pub use core_client as x;` のような再エクスポート別名を公開し、
+  テストが `gui::x` として使う場合である。ライブラリ側の変更は、その PR のレビューとテストで扱う
+  (登録 binary を増やす・ライブラリの公開面を変える PR では、移動範囲に新システムが入らないことを確認する)。
 - 一覧・分割 (`scripts/verify-test-inventory.sh`、`ci` job) は event に依存せず、PR でも main でも
   同じ suite を列挙する。`default = cache + io + ci-remaining + main-only-gui`、
   `remaining = ci-remaining + main-only-gui`。ローカルの `scripts/run-contract-tests.sh remaining` は
