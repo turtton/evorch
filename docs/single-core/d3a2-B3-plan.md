@@ -526,3 +526,42 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
    CEF等が実行できなければ「未実施」として残す。fake rendererやskipだけで実CEF要件を閉じない。
 
 最終提出物は、**PR一覧、spawn対応表、各負例・mutationの証拠、実artifact識別子、性能の条件と生データ、対象外一覧**です。これをもって独立Reviewerと親がB3／D-7の受け入れを判断し、その後に5a-V公開列車へ進みます。
+---
+
+## 親の判断
+
+計画レビュー（`d3a2-B3-plan-review.md`。承認、must なし）を受けた親の判断です。§7 の A〜D に対応します。
+着手前作業の成果は `d3a2-B3-prework.md`（契約・対象表、spawn 台帳）と
+`d3a2-B-design-v3-excerpt.md`（設計 v3 の §6.1、§8.2 などの復元）にあります。
+
+### A. expiry に使う artifact：**未決定**
+
+- まだ決めていません。まず、**既存の入口だけで**、不可逆 capture と実時間 10 秒の満了を起こせるかを調べます。
+- **製品への hook の追加と、時計の短縮は禁止**です（計画 §1、C-6）。
+- 調べた結果（到達できる入口、到達できない境界のコード位置、必要な変更量）を見てから、親が §7A の
+  選択肢 1（release production-composition の試験 binary）と 2（sealed 製品 ELF を必須）のどちらにするかを決めます。
+- **決まるまで、expiry（B3-07 の実 10 秒満了と exit 74 の結合）は未完の扱い**です。調査前にどちらかへ読み替えません。
+
+### B. 11 root と実 caller の対応：推奨案を採る
+
+- **API 網羅表と実 caller 表を分けます**（`d3a2-B3-prework.md` の表 2 と表 3）。13 の合成経路を、実 core・実 caller の
+  証明として数えません。11 root の定義は、8 種の `ChildKind`、StdioSession、PTY、js-worker の 11 個です。
+  実 Chrome と CEF は別の追加セルです（レビュー S1）。
+- **spawn 台帳は、親が承認します。** 台帳の各行に「artifact 種別」と「到達する入口」を書きます（レビュー S2）。
+  製品 ELF で既存の入口から起動できない実 caller は、expiry と同じ扱いで、親に返します。
+- **B3-06 は、spawn 台帳の承認が済むまで着手しません。**
+- caller のない `Probe` に、架空の製品経路を作りません。11 root との対応と欠落は、親が台帳の承認の時に決めます。
+
+### C. 監査対象外の std spawn：推奨案を採る
+
+- **既存の core の ownership 境界を保ちます。** GUI の短命な git、`fc-match`、GUI の埋め込み terminal の PTY などは、
+  台帳に載せ（`d3a2-B3-prework.md` の 6-C）、**別の follow-up** とします。
+- ただし、新たに見つかった **core 所有の長寿命の spawn** は、理由なく除外しません。
+- 全アプリの spawn の統一を求める場合は、9 本の PR に押し込まず、追加の PR を設けます。
+
+### D. 測定環境・期限：推奨案を採る
+
+- **既存の性能閾値（計画 §5）を保ちます。**
+- 条件を変える場合は、**結果を見る前に**親が承認します。測定条件の細部（A/B の source SHA と無関係差分の扱い、
+  kernel・Chromium・CEF・bwrap・display の環境、SIGKILL 後の観測期限、10 秒満了の観測許容幅、CEF 各段階の timeout、
+  追加の起動時間 gate の要否）は、測定の前に親が固定します（§7D）。
