@@ -13,6 +13,7 @@ pub mod keychain;
 pub mod ledger;
 pub mod minimal;
 pub mod network;
+pub mod owned;
 pub mod policy;
 pub mod process;
 pub mod scratch;

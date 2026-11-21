@@ -274,6 +274,32 @@ mod client {
         pub fn id(&self) -> u32 {
             self.helper.id()
         }
+        pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+            self.helper.stdin.take()
+        }
+        pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+            self.helper.stdout.take()
+        }
+        pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+            self.helper.stderr.take()
+        }
+        /// Drain only immediately available frames. Never sends a request or waits.
+        pub fn poll_status(&mut self) -> io::Result<Option<ExitStatus>> {
+            if let Some(s) = self.final_status {
+                return Ok(Some(ExitStatus::from_raw(s)));
+            }
+            self.available_status()
+        }
+        pub fn poll_exit(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.poll_status()?;
+            Ok(self.root.map(ExitStatus::from_raw))
+        }
+        pub fn is_reaped(&self) -> bool {
+            self.final_status.is_some()
+        }
+        pub fn monitor(&self) -> io::Result<OwnedFd> {
+            self.pidfd.try_clone()
+        }
         pub fn target_id(&self) -> u32 {
             self.target as u32
         }

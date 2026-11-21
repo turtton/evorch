@@ -1,16 +1,7 @@
 #![cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 fn shell() -> std::ffi::OsString {
-    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| {
-        // The background-list fixtures were written for bash; under dash (the CI /bin/sh) the wnowait fixture fails.
-        let bash = std::path::Path::new("/bin/bash");
-        if bash.exists() {
-            bash
-        } else {
-            std::path::Path::new("/bin/sh")
-        }
-        .into()
-    })
+    std::env::var_os("EVORCH_TEST_SHELL").unwrap_or_else(|| "/bin/sh".into())
 }
 use process_guard::{GuardChild, GuardRuntime, LaunchSpec, pidfd_open, wire};
 use std::{
@@ -217,9 +208,10 @@ fn wnowait_anchor_then_group_kill_not_root_exit() {
     let rt = runtime();
     let (mut child, mut input, mut output) = run(
         &rt,
-        "(echo DESC:$BASHPID; read gate; echo TAIL) <&0 & echo ROOT:$!:$$; exit 37",
+        "exec 3<&0; (echo DESC; read gate; echo TAIL) <&3 & echo ROOT:$!:$$; exit 37",
     );
-    // /bin/sh may not expose BASHPID; root's $! is the authoritative child PID.
+    // Capture stdin before dash redirects an asynchronous list's fd 0 to
+    // /dev/null. The parent's $! is the portable descendant identity.
     let mut desc = 0;
     let mut root = 0;
     for _ in 0..2 {
@@ -251,7 +243,7 @@ fn wnowait_anchor_then_group_kill_not_root_exit() {
     assert!(!std::path::Path::new(&format!("/proc/{root}")).exists());
     let (mut child, _input, mut output) = run(
         &rt,
-        "(trap '' TERM INT HUP; echo DESC; read gate) <&0 & echo ROOT:$!; exit 37",
+        "exec 3<&0; (trap '' TERM INT HUP; echo DESC; read gate) <&3 & echo ROOT:$!; exit 37",
     );
     let mut descendant = 0;
     for _ in 0..2 {
@@ -634,7 +626,7 @@ fn core_fixture() {
         let spawn = move || {
             run(
                 &rt,
-                "sh -c 'echo DESC:$$; kill -STOP $$' <&0 & echo ROOT:$!:$$; kill -STOP $$",
+                "exec 3<&0; sh -c 'echo DESC:$$; kill -STOP $$' <&3 & echo ROOT:$!:$$; kill -STOP $$",
             )
         };
         let (child, input, mut output) = if mode == "thread" {

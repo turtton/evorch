@@ -7,6 +7,14 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("js-worker") {
         return evorch::js_worker::main();
     }
+    let diagnostic_only = matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--help" | "-h" | "--version" | "-V")
+    ) && std::env::args_os().len() == 2;
+    if !diagnostic_only && sandbox::owned::bind_installed("cli").is_err() {
+        eprintln!("evorch: process guard bundle validation failed");
+        return ExitCode::FAILURE;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)

@@ -737,6 +737,7 @@ fn write_measurement_manifest_for_built_artifact() {
     std::fs::create_dir_all(&out).unwrap();
     let copy = out.join("evorch-core");
     std::fs::copy(&elf, &copy).unwrap();
+    test_support::guard_bundle::bind_copy(&copy, "core").unwrap();
     let args = var(ENV_BUILD_ARGS);
     let args: Vec<&str> = args.split_whitespace().collect();
     let manifest = product_exec::artifact::describe_build(

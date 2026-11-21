@@ -26,6 +26,7 @@ uuid = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # close_range(2), which rustix 1 does not wrap, for the child launch policy.
 libc = "0.2"
+process-guard = { path = "../process-guard" }
 secret-service = { version = "5.2", default-features = false, features = ["rt-tokio-crypto-rust"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

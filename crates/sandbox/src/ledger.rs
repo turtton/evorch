@@ -270,7 +270,39 @@ impl Admission<'_> {
         group: &ProcessGroup,
     ) -> Option<ChildEntry> {
         let ledger = self.ledger()?;
-        Some(children::register(&ledger.inner, kind, label, group))
+        Some(children::register(
+            &ledger.inner,
+            kind,
+            label,
+            children::ChildGroup::Raw(group.clone()),
+        ))
+    }
+
+    /// Register a guard-backed child only after authenticated ExecOk.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn register_owned(
+        &self,
+        kind: ChildKind,
+        label: Option<&str>,
+        group: &crate::owned::OwnedGroup,
+    ) -> Option<ChildEntry> {
+        let ledger = self.ledger()?;
+        Some(children::register(
+            &ledger.inner,
+            kind,
+            label,
+            children::ChildGroup::Owned(group.clone()),
+        ))
+    }
+
+    /// Typed non-PTY spawn under this admission. No raw Command conversion.
+    pub fn spawn_owned(
+        &self,
+        kind: ChildKind,
+        label: Option<&str>,
+        command: &mut crate::owned::OwnedCommand,
+    ) -> io::Result<crate::owned::OwnedChild> {
+        crate::owned::OwnedChild::spawn_in(self, kind, label, command)
     }
 
     /// Spawn a monitoring task the ledger can join.

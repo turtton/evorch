@@ -48,8 +48,10 @@ pub fn stripped_copy(source: &Path, destination: &Path) -> PathBuf {
     destination.to_path_buf()
 }
 pub fn product_copy(directory: &Path) -> PathBuf {
-    stripped_copy(
+    let product = stripped_copy(
         Path::new(&std::env::var("CARGO_BIN_EXE_evorch-core").unwrap()),
         &directory.join("product-core"),
-    )
+    );
+    test_support::guard_bundle::bind_copy(&product, "core").unwrap();
+    product
 }
