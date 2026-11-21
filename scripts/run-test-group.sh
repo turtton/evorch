@@ -2,18 +2,28 @@
 # Build, list and run one shard of a CI test group (scripts/ci-test-groups.json).
 #
 # Usage: scripts/run-test-group.sh inventory <group> <K/N> <outdir>
-#        scripts/run-test-group.sh run <group> <K/N> <cache|io|remaining> <outdir>
+#        scripts/run-test-group.sh run <group> <K/N> <suite> <outdir>
+#        (suite: cache, io, ci-remaining or main-only-gui; remaining is the
+#        local suite that is the last two together and CI does not run it)
 #
 # inventory  Lists the group's tests with the exact arguments the run uses
 #            (scripts/run-contract-tests.sh --list) and writes, into <outdir>:
-#              all.tsv default.tsv cache.tsv io.tsv remaining.tsv   (whole group)
-#              cache.part.tsv io.part.tsv remaining.part.tsv        (this shard)
+#              all.tsv default.tsv cache.tsv io.tsv remaining.tsv
+#              ci-remaining.tsv main-only-gui.tsv                    (whole group)
+#              cache.part.tsv io.part.tsv remaining.part.tsv
+#              ci-remaining.part.tsv main-only-gui.part.tsv          (this shard)
 #              meta.json                                            (written last)
+#            The listing does not depend on the event: a pull request and a main
+#            push list and partition the same suites, and only the run of
+#            main-only-gui is left to the workflow.
 #            Rows are `package<TAB>binary-id<TAB>test<TAB>ignored`, sorted.
 #            The first listing also builds the group's test binaries.
-#            A failing listing fails the job; meta.json is only written when
-#            every listing succeeded, and the merge gate rejects a shard
-#            without it.
+#            For the group with the gui package it also checks, from the
+#            compiler's dependency-info, that no source of a main-only binary
+#            names core_client (scripts/ci-main-only-gui.sh check-depinfo).
+#            A failing listing or check fails the job; meta.json is only
+#            written when every one succeeded, and the merge gate rejects a
+#            shard without it.
 # run        Runs the shard's part of one suite. A suite that is empty for the
 #            whole group is skipped only when ci-test-groups.json lists it in
 #            allow_empty_suites; a shard whose partition happens to be empty is
@@ -63,15 +73,22 @@ case "$mode" in
       select_tests < "$work/list.json" > "$file"
       echo "listed $(count "$file") tests -> ${file##*/}"
     }
-    for set_name in all default cache io remaining; do
+    for set_name in all default cache io remaining ci-remaining main-only-gui; do
       list_to "$out/$set_name.tsv" --group "$group" --list "$set_name"
     done
-    for suite in cache io remaining; do
+    for suite in cache io remaining ci-remaining main-only-gui; do
       list_to "$out/$suite.part.tsv" --group "$group" --shard "$shard" --list "$suite"
     done
+    # The registered main-only binaries are built now; the compiler's list of the
+    # files each read must not name core_client (scripts/ci-main-only-gui.sh).
+    # A failure leaves meta.json unwritten, so the merge gate rejects the shard.
+    if jq -e --arg g "$group" '.groups[$g].packages | index("gui")' "$groups_file" > /dev/null; then
+      scripts/ci-main-only-gui.sh check-depinfo "$EVORCH_CI_METADATA_DIR/default-binaries.json"
+    fi
     config_hash=$(
       {
-        cat "$groups_file" scripts/contract-test-filters.sh .config/nextest.toml
+        cat "$groups_file" scripts/contract-test-filters.sh .config/nextest.toml \
+          scripts/ci-main-only-gui-tests.json scripts/ci-main-only-gui.sh scripts/run-contract-tests.sh
         env | LC_ALL=C sort | grep -E '^(RUSTFLAGS|CARGO_PROFILE_[A-Z_]+|CARGO_BUILD_[A-Z_]+|RUSTDOCFLAGS)=' || true
       } | sha256sum | cut -d' ' -f1
     )
@@ -87,8 +104,8 @@ case "$mode" in
       echo
       echo "| set | tests |"
       echo "| --- | ---: |"
-      for f in all default cache io remaining; do echo "| $f | $(count "$out/$f.tsv") |"; done
-      for f in cache io remaining; do echo "| $f (this shard) | $(count "$out/$f.part.tsv") |"; done
+      for f in all default cache io remaining ci-remaining main-only-gui; do echo "| $f | $(count "$out/$f.tsv") |"; done
+      for f in cache io remaining ci-remaining main-only-gui; do echo "| $f (this shard) | $(count "$out/$f.part.tsv") |"; done
     } > "$out/summary.md"
     cat "$out/summary.md"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -96,10 +113,10 @@ case "$mode" in
     fi
     ;;
   run)
-    suite="${4:?expected cache, io or remaining}"
+    suite="${4:?expected cache, io, ci-remaining or main-only-gui}"
     out="${5:?expected the inventory directory}"
     [[ -f "$out/meta.json" ]] || { echo "no inventory in $out: run the inventory phase first" >&2; exit 2; }
-    case "$suite" in cache | io | remaining) ;; *) echo "unknown suite: $suite" >&2; exit 2 ;; esac
+    case "$suite" in cache | io | remaining | ci-remaining | main-only-gui) ;; *) echo "unknown suite: $suite" >&2; exit 2 ;; esac
     if [[ "$(count "$out/$suite.tsv")" == 0 ]]; then
       if jq -e --arg g "$group" --arg s "$suite" '.groups[$g].allow_empty_suites | index($s)' "$groups_file" > /dev/null; then
         echo "group $group has no $suite tests (listed in allow_empty_suites); skipping"

@@ -14,9 +14,16 @@ permissions:
 
 jobs:
   publish:
-    if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+    # Paused. The `ci` workflow no longer produces the `gui-pr-preview` artifact
+    # (the GUI evidence jobs run on main pushes only), so this job would fail on
+    # the missing artifact, and it must not post an image from any other run. The
+    # job never gets a runner: it does not read the token secret or download
+    # anything. To resume, first restore a producer that uploads `gui-pr-preview`
+    # from the same pull request run, then restore the original condition (the
+    # run's event is `pull_request` and its conclusion is `success`);
+    # docs/gui-verification.md has the order. An image from a main run is not
+    # evidence for a pull request.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

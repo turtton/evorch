@@ -3,6 +3,54 @@
 evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1 から L7 は
 コマンドで再現可能で、L8 はオペレータの実ディスプレイ上で確認する。
 
+## CI での実行範囲 (PR と main)
+
+L1 から L7 のうち、下表の検証は **main への push でだけ** CI が実行する。PR の `ci` が緑でも、
+これらが成功したことは意味しない。
+
+| 検証 | PR | main push |
+| --- | --- | --- |
+| `scripts/ci-main-only-gui-tests.json` に登録した gui 統合テスト 7 binary (`attention`、`models_usage`、`pull_requests`、`settings_ui`、`size_dpi_matrix`、`transcript_cards`、`workbench_shell`。L1〜L3、L5 の大半) | 実行しない (一覧と分割の検証だけ行う) | `tests (gui 1/1)` の `Main-only GUI tests` step |
+| ignored テスト一括と画像証跡 (L4)、native / Wayland 検査 (L7) | 実行しない | `offscreen-gate`、`gui-evidence` |
+| gui ライブラリの通常テスト、`runtime_threads`、`theme_*`、`evidence_policy`、gui の bin テスト、`workspace-ui`、`workspace-state`、`core-client-e2e`、cache / io 契約 | 実行する | 実行する |
+| 新システム (core-client) のテスト、browser E2E (5 invocation)、CEF E2E (7 invocation)、`html_preview` の ignored テスト | 実行する | 実行する |
+
+- **登録の単位**は integration test の binary だけである。テスト名や module の一覧は持たない。
+  登録済み binary の中でテストを追加・改名・削除しても登録は変わらず、登録していない binary
+  (新設の binary を含む) は自動的に PR 側に残る。
+- **新システムのテストは登録済み binary に入れない。** gui group の inventory step
+  (`scripts/run-test-group.sh inventory`、PR でも main でも実行) が、登録した各 binary の
+  コンパイラの dependency-info (rustc が test binary の隣に書く `<binary>.d`) に列挙された
+  **すべてのファイル**を、拡張子を問わず、構文解析せずにそのまま読み、文字列 `core_client` を含めば失敗させる
+  (`scripts/ci-main-only-gui.sh check-depinfo`)。コメントの除去も単語境界の判定もしないため、
+  コメントや文字列、`core_client_e2e` のような長い識別子の中の出現も拒否する (過剰に拒否する側。例外の仕組みは無い)。
+  `include!("body.inc")` で Rust として取り込まれるファイルやバイナリも対象で、`include_str!` や
+  `include_bytes!` で読むファイルも列挙されるため検査対象になる。module の解決はコンパイラのもので、
+  入れ子、同名の子 module、inline module、`#[path]`、`include!` をすべて網羅する。dependency-info が
+  見つからない、対応付けられない、列挙されたファイルが無い場合も失敗する。登録 binary に `core_client` を
+  含む文章を書きたい場合は、その binary を登録から外す (PR 側に残す) 判断になる。
+  これは直接の混入を見つける検査であり、テストの意味上の分類を証明するものではない。レビューで移動範囲を確認する。
+- 一覧・分割 (`scripts/verify-test-inventory.sh`、`ci` job) は event に依存せず、PR でも main でも
+  同じ suite を列挙する。`default = cache + io + ci-remaining + main-only-gui`、
+  `remaining = ci-remaining + main-only-gui`。ローカルの `scripts/run-contract-tests.sh remaining` は
+  従来どおり (cache と io を除く) すべてのテストを実行する。CI は `remaining` を実行せず、
+  `ci-remaining` と、main では `main-only-gui` を実行する。
+- 登録の変更 (`scripts/ci-main-only-gui-tests.json`、`scripts/ci-main-only-gui.sh`) は central file であり、
+  integration PR だけが変更できる。
+- main の `main-only-gui` が失敗すれば `tests (gui 1/1)` と `ci` が失敗する。`offscreen-gate` と
+  `gui-evidence` の失敗はその job と workflow を失敗させるが、`ci` の `needs` には含まれない。
+  成功への変換 (`continue-on-error` など) は行わない。
+
+### main の失敗の確認責任
+
+- **確認責任者は、当該変更を main にマージした担当者**とする。代理が必要なら、マージ時に明示する。
+- マージ後、その変更を含んで完走した main の run で `tests (gui 1/1)`、`offscreen-gate`、
+  `gui-evidence` を確認する。作業の終了時点で run が完走していなければ、対象の SHA と run、確認担当を
+  引き継ぐ。確認していない状態で完了扱いにしない。
+- 失敗は同じ作業セッション、遅くとも次の作業の開始時に切り分け、修正の担当を決める。
+- 待機中の main の run は後続の push に置き換えられることがある。未検証のコミットが複数ある場合は、
+  最後に成功した SHA 以降を原因の候補として扱う。
+
 ## 検証レイヤー
 
 ### L1: モデル単体テスト
@@ -12,7 +60,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 例: `crates/gui/tests/transcript_cards/transcript.rs`、`crates/gui/tests/evidence_policy.rs`、
   `crates/gui/tests/models_usage/model_metadata.rs::config_roundtrip_with_preset_keeps_fields`
 - 環境変数: なし
-- CI ジョブ: `tests (gui …)`
+- CI ジョブ: `tests (gui …)` (登録 binary は main の `Main-only GUI tests` step のみ。上の表を参照)
 
 ### L2: ヘッドレス kittest 振る舞いテスト
 
@@ -25,7 +73,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   `crates/gui/tests/transcript_cards/composer_dispatch_headless.rs`、
   `crates/gui/tests/settings_ui/provider_settings_headless.rs`
 - 環境変数: なし
-- CI ジョブ: `tests (gui …)`
+- CI ジョブ: `tests (gui …)` (登録 binary は main の `Main-only GUI tests` step のみ)
 
 ### L3: サイズ x DPI ジオメトリマトリクス
 
@@ -37,7 +85,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 例: `crates/gui/tests/size_dpi_matrix.rs::demo_geometry_matrix`、
   `crates/gui/tests/size_dpi_matrix.rs::min_size_matches_real_app_viewport`
 - 環境変数: なし
-- CI ジョブ: `tests (gui …)` (ワークスペーステストに含まれる)
+- CI ジョブ: `tests (gui …)` (`size_dpi_matrix` は登録 binary なので main の `Main-only GUI tests` step のみ)
 
 ### L4: オフスクリーンレンダ証跡
 
@@ -59,8 +107,9 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
-- CI ジョブ: ignored テスト一括は `offscreen-gate` (アーティファクト `gui-test-evidence`)、
-  証跡マトリクスは並列の `gui-evidence` (アーティファクト `gui-evidence`)。
+- CI ジョブ (main への push のみ): ignored テスト一括は `offscreen-gate` (アーティファクト
+  `gui-test-evidence`)、証跡マトリクスは並列の `gui-evidence` (アーティファクト `gui-evidence`)。
+  PR では実行しない。アーティファクトの名前と取得先は変わらない。
   マトリクスは `headless_capture` を 1 回だけビルドして直接起動し、
   `GUI_EVIDENCE_JOBS` (既定は CPU 数、最大 4) 並列で撮影する
 
@@ -72,7 +121,7 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - コマンド: `cargo test -j 1 -p gui --test workbench_shell -- browser:: agent_browser_workbench:: --test-threads=1`
 - 例: `crates/gui/tests/workbench_shell/browser.rs::a_closed_page_keeps_its_last_frame_and_says_so`
 - 環境変数: なし
-- CI ジョブ: `tests (gui …)` (`cef` と `browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`gui` は CEF なしのビルドを `compile_error!` で拒否し、`lint` ジョブは `--no-default-features` が拒否されることを確認する)
+- CI ジョブ: `tests (gui …)` (`workbench_shell` は登録 binary なので main の `Main-only GUI tests` step のみ。`cef` と `browser` は `gui` の既定 feature なので既定のワークスペーステストで実行される。`gui` は CEF なしのビルドを `compile_error!` で拒否し、`lint` ジョブは `--no-default-features` が拒否されることを確認する)
 
 ### L6: 実 Chromium E2E
 
@@ -101,26 +150,25 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 - 環境変数: `GUI_QA_MODE` (`fixture` / `runtime`、既定 `fixture`)、
   `GUI_BIN` (モードに応じた既定バイナリを上書き)、
   `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
-- CI ジョブ: `gui-evidence` (`gui-evidence` artifact の `native/`)
+- CI ジョブ: `gui-evidence` (main への push のみ。`gui-evidence` artifact の `native/`)
 
-### PR の代表画面プレビュー
+### PR の代表画面プレビュー (休止中)
 
-`pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、
-Provider 設定、承認待ち、高コントラストの 5 枚を `gui-pr-preview` artifact に保存する。
-既定ブランチの `GUI PR evidence` workflow がその artifact と PR の head SHA を検証し、
-`gh pr comment --attach` で PR に画像を投稿する。証跡は 2 つの artifact に分かれて残る。
-`gui-evidence` (`gui-evidence` job) は証跡マトリクス全件と native / Wayland 検査の証跡、
-`gui-test-evidence` (`offscreen-gate` job) は ignored テストが書き出す PNG と
-model_metadata の証跡である。成功した PR の更新ごとに新しいコメントを投稿する。
+PR への画像の自動添付は**休止している**。`ci` workflow は `gui-pr-preview` artifact を作らず、
+既定ブランチの `GUI PR evidence` workflow の publisher job は `if: ${{ false }}` で runner を取得しない。
+そのため **`GUI_EVIDENCE_TOKEN` の設定は現在は不要**である (設定済みでも読まれない)。
+`ci` workflow の名前は変えていない。
 
-画像添付には、対象リポジトリへの書き込み権限があるユーザーの OAuth token または
-personal access token を Actions secret `GUI_EVIDENCE_TOKEN` に設定する必要がある。
-GitHub Actions 標準の `GITHUB_TOKEN` はこの添付 API に対応しない。トークンを
-PR コードが動く `ci` workflow には渡さず、CI 完了後の既定ブランチ workflow だけで使う。
-fine-grained PAT はこのリポジトリのみに限定し、アカウントの書き込み権限に加えて
-`Contents: Read and write` と `Pull requests: Read and write` を付ける。
-secret の設定例: `gh secret set GUI_EVIDENCE_TOKEN -R turtton/evorch`。
-secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画面証跡は残る。
+- 画面証跡は main の `gui-evidence` (`gui-evidence` artifact) と `offscreen-gate`
+  (`gui-test-evidence` artifact) に残る。これは PR の証跡ではない。main の画像で PR の代替としない。
+- 再開は別の変更で行い、**先に producer を戻す**。同じ PR の run が `gui-pr-preview` (5 枚と
+  `pr.json`) を作って upload する契約を復元し、その後で publisher の条件
+  (run の event が `pull_request` で結論が `success`) を戻す。再開時には token の設定
+  (対象リポジトリの書き込み権限を持つ OAuth token または PAT を Actions secret
+  `GUI_EVIDENCE_TOKEN` に設定する。標準の `GITHUB_TOKEN` は添付 API に対応しない。
+  PR コードが動く `ci` には渡さない) が再び必要になる。
+- 休止への移行中は、この変更の PR head から起動した `GUI PR evidence` が、存在しない preview の取得で
+  失敗することがある。休止の変更が main に入った後の PR では、publisher は skipped になる。
 
 ### L8: 実機起動スモーク (手動)
 
