@@ -277,25 +277,30 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ParkedRecovery
         })
     }
 }
+mod lease_observation;
+pub use lease_observation::{State, finish_renewals, wait_for_renewal};
+
 pub fn state(
     host: &workbench_host::bootstrap::BootstrappedHost,
     driver: &crate::lifecycle::LifecycleDriver,
-) -> String {
-    format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}",
-        storage::Database::open(host.storage_config())
-            .unwrap()
-            .restart_transactions()
-            .unwrap(),
+) -> State {
+    State::new(
+        format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            storage::Database::open(host.storage_config())
+                .unwrap()
+                .restart_transactions()
+                .unwrap(),
+            driver.restart.snapshot(),
+            host.runtime.quiesce_state(),
+            host.host
+                .lock()
+                .unwrap()
+                .service()
+                .lane_bindings()
+                .observe()
+                .is_current()
+        ),
         host.owner.restart_inventory().unwrap(),
-        driver.restart.snapshot(),
-        host.runtime.quiesce_state(),
-        host.host
-            .lock()
-            .unwrap()
-            .service()
-            .lane_bindings()
-            .observe()
-            .is_current()
     )
 }
