@@ -36,6 +36,34 @@ path = "tests/planned_shutdown_watchdog_composition/main.rs"
 harness = false
 required-features = ["bootstrap-test-support"]
 
+[[test]]
+name = "recovery_admin_install"
+path = "tests/recovery_admin_install/main.rs"
+
+[[test]]
+name = "recovery_admission"
+path = "tests/recovery_admission.rs"
+
+[[test]]
+name = "public_restart_compose"
+path = "tests/public_restart_compose/main.rs"
+
+[[test]]
+name = "public_restart_exec"
+path = "tests/public_restart_exec.rs"
+
+[[test]]
+name = "public_restart_deny"
+path = "tests/public_restart_deny.rs"
+
+[[test]]
+name = "public_restart_safe"
+path = "tests/public_restart_safe.rs"
+
+[[test]]
+name = "public_restart_product"
+path = "tests/public_restart_product.rs"
+
 [dependencies]
 sandbox = { path = "../sandbox" }
 workbench-authority = { path = "../workbench-authority" }

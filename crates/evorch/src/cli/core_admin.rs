@@ -15,8 +15,8 @@
 //! Exit codes: 0 done, 1 failure (including "no core is running"), 130 the
 //! person pressed Ctrl-C: only the wait ended; nothing was cancelled or stopped.
 //!
-//! [`main`] is wired to a route by the integration PR; [`run`] is what the
-//! end-to-end tests call.
+//! [`main`] is wired to the `core` route; [`run`] is what the end-to-end tests
+//! call.
 mod args;
 #[cfg(target_os = "linux")]
 mod flow;

@@ -13,6 +13,10 @@ path = "../evorch-core/tests/support/mcp_peer.rs"
 test = false
 bench = false
 
+[[test]]
+name = "public_restart_native"
+path = "tests/public_restart_native.rs"
+
 [dependencies]
 serde_json = { workspace = true }
 
