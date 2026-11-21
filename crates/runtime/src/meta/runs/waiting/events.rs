@@ -137,12 +137,7 @@ pub(super) fn poll_with(
             || !j.teardown_confirmed
             || (!j.observed && !request.shown_shell.contains(j.identity.id()))
     });
-    let empty = !explicit
-        && !live_parent
-        && !children
-        && !pending_question
-        && !managed_lanes
-        && !shell_source;
+    let empty = !explicit && !children && !pending_question && !managed_lanes && !shell_source;
     // No run_output/continuation (storage-backed) read on a partial all
     // predicate, including every unrelated global version wake.
     if !ready && !empty && !force_return {
@@ -193,16 +188,21 @@ pub(super) fn poll_with(
         "ready"
     });
     if !ready && empty {
-        result["reasons"] = json!([
-            "no_live_parent",
+        let mut reasons = vec![
             "no_active_or_unread_children",
             "no_pending_questions",
             "no_managed_lanes",
-            "no_running_or_unread_shell_jobs"
-        ]);
-        result["note"] = json!(
+            "no_running_or_unread_shell_jobs",
+        ];
+        if !live_parent {
+            reasons.insert(0, "no_live_parent");
+        }
+        result["reasons"] = json!(reasons);
+        result["note"] = json!(if live_parent {
+            "No event sources remain. Report completion and end this turn, or ask your parent if a decision is needed; do not repeat wait."
+        } else {
             "No event sources remain. Report completion instead of repeating wait; ordinary user-input idle is handled after the final response."
-        );
+        });
     }
     Ok((ready || empty, result))
 }

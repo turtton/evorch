@@ -6,12 +6,15 @@ use std::collections::BTreeMap;
 
 mod output_attachment_schema;
 mod plan_schema;
+mod wait_liveness;
 mod wait_schema;
 
 #[derive(Clone, Copy)]
 enum SchemaCase {
     None,
     Wait,
+    WaitLiveness,
+    WaitLivenessUnchanged,
     Plan,
     PlanUnchanged,
     PlanRetry,
@@ -196,13 +199,15 @@ async fn recover_case(
     schema_case: SchemaCase,
 ) {
     let wait_schema = matches!(schema_case, SchemaCase::Wait);
+    let wait_liveness = matches!(schema_case, SchemaCase::WaitLiveness);
     let output_attachments = matches!(schema_case, SchemaCase::OutputAttachments);
     let plan_schema = matches!(
         schema_case,
         SchemaCase::Plan | SchemaCase::PlanUnchanged | SchemaCase::PlanRetry
     );
     let retry_boundary = matches!(schema_case, SchemaCase::PlanRetry);
-    let schema_change = wait_schema
+    let schema_change = wait_liveness
+        || wait_schema
         || output_attachments
         || matches!(schema_case, SchemaCase::Plan | SchemaCase::PlanRetry);
     let mut script = if tools_case {
@@ -222,6 +227,9 @@ async fn recover_case(
         text_response("attachment read"),
         text_response("reuse after read"),
     ]);
+    if wait_liveness {
+        script.insert(0, wait_liveness::legacy_call());
+    }
     if output_attachments {
         script.insert(0, output_attachment_schema::legacy_call());
     }
@@ -274,6 +282,7 @@ async fn recover_case(
         Arc::new(wait_schema::PredecessorCatalog {
             plan: plan_schema,
             output_attachments,
+            wait_liveness,
             ..Default::default()
         })
     });
@@ -488,7 +497,7 @@ async fn recover_case(
         }
         let evidence = comparison.unwrap();
         assert_eq!(evidence.boundary, changed_tool || schema_change);
-        if wait_schema {
+        if wait_schema || wait_liveness {
             wait_schema::assert_evidence(&evidence);
         }
         if plan_schema && schema_change {
@@ -537,7 +546,7 @@ async fn recover_case(
                 .restart_tools_evidence("routed-wire", &run.to_string(), incarnation)
                 .unwrap()
                 .unwrap();
-            if wait_schema {
+            if wait_schema || wait_liveness {
                 wait_schema::assert_evidence(&saved);
             }
             if plan_schema {
@@ -780,6 +789,20 @@ async fn recover_case(
     }
     if wait_schema {
         wait_schema::assert_transition(
+            h.wire,
+            &requests,
+            after_index,
+            &old_input.request.tools,
+            &predecessor
+                .as_ref()
+                .unwrap()
+                .successor_tools
+                .lock()
+                .unwrap(),
+        );
+    }
+    if wait_liveness {
+        wait_liveness::assert_transition(
             h.wire,
             &requests,
             after_index,
