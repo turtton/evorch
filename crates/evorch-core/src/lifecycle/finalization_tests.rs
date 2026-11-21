@@ -1,4 +1,5 @@
 use super::*;
+use crate::restart::tests::{checked_target, restart_metadata, restart_model};
 use crate::{
     backend::HostBackend,
     lifecycle::{
@@ -7,12 +8,6 @@ use crate::{
 };
 use std::{future::Future, task::Poll};
 use workbench_host::bootstrap::{BootstrapOptions, TestSeams};
-#[path = "../../shared-test-support/checked_target.rs"]
-mod checked_target;
-#[path = "../../shared-test-support/restart_metadata.rs"]
-mod restart_metadata;
-#[path = "../../shared-test-support/restart_model.rs"]
-mod restart_model;
 
 async fn boot(dir: &test_socket_dir::SplitDir) -> BootstrappedHost {
     BootstrappedHost::open_for_core_with_test_seams(

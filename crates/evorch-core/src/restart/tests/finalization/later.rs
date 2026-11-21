@@ -3,8 +3,7 @@ mod last;
 mod latch;
 use std::{path::Path, sync::atomic::Ordering};
 
-#[path = "../../../../shared-test-support/checked_target.rs"]
-mod checked_target;
+use crate::restart::tests::checked_target;
 async fn target(dir: &Path) -> (FinalizationTarget, RestartMetadata) {
     let (current, checked) = checked_target::checked_target(dir).await;
     let mut metadata = metadata();

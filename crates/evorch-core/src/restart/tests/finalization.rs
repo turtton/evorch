@@ -3,6 +3,7 @@ mod audit_sealing;
 #[cfg(target_os = "linux")]
 mod later;
 mod m2;
+use super::restart_metadata::metadata;
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::collections::BTreeSet;
@@ -10,9 +11,6 @@ use std::collections::BTreeSet;
 use storage::recovery::restart::RestartMetadata;
 use storage::recovery::restart::{RestartMutation, RestartTransaction};
 use workbench_host::bootstrap::planned_exit::ExitStage;
-#[path = "../../../shared-test-support/restart_metadata.rs"]
-mod restart_metadata;
-use restart_metadata::metadata;
 
 #[cfg(target_os = "linux")]
 pub(crate) fn assert_workers_joined(core: &RestartCoordinator) {
