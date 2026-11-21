@@ -182,6 +182,12 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/tests/test_gui_requires_cef.sh
+      - name: Non-Linux sandbox adapter compiles (aarch64-apple-darwin)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo check --target aarch64-apple-darwin -p sandbox --lib --locked
 
   # Doctests and the generated config schema artifact: both build the library
   # crates of the whole workspace.

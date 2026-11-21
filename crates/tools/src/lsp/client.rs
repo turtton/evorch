@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use sandbox::{CommandSpec, Sandbox, SpawnLedger, StdioSession};
+use sandbox::owned::OwnedSession;
+use sandbox::{CommandSpec, Sandbox, SpawnLedger};
 use serde_json::json;
 use tokio::{
     io::BufReader,
@@ -15,7 +16,7 @@ use super::{
 };
 
 pub(super) struct Connection {
-    session: StdioSession,
+    session: OwnedSession,
     stdin: ChildStdin,
     incoming: mpsc::Receiver<Result<Message, LspError>>,
     _tasks: JoinSet<()>,
@@ -30,7 +31,7 @@ impl Connection {
         ledger: Option<SpawnLedger>,
     ) -> Result<Self, LspError> {
         let mut session = tokio::task::spawn_blocking(move || {
-            StdioSession::spawn_owned(ledger.as_ref(), sandbox.as_ref(), command)
+            OwnedSession::spawn_sandboxed(ledger.as_ref(), sandbox.as_ref(), command)
         })
         .await
         .map_err(|_| LspError::Worker)??;

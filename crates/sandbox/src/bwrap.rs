@@ -10,7 +10,6 @@ mod home_tests;
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
 
@@ -278,7 +277,7 @@ pub(crate) fn probe_owned(
     ledger: Option<&crate::SpawnLedger>,
 ) -> Result<(), SandboxError> {
     let unavailable = |detail: String| SandboxError::BwrapUnavailable { detail };
-    let mut command = Command::new(program);
+    let mut command = crate::owned::OwnedCommand::new(program);
     command
         .args([
             "--ro-bind",
@@ -291,11 +290,11 @@ pub(crate) fn probe_owned(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::StdioSession::spawn_command_owned(
+    let output = crate::owned::OwnedSession::spawn_owned(
         ledger,
         crate::ChildKind::Other,
         Some("bwrap-probe"),
-        command,
+        &mut command,
     )
     .and_then(|session| session.output(None))
     .map_err(|error| unavailable(error.to_string()))?;

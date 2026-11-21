@@ -1,8 +1,32 @@
 # D-3a2 B2a / B2b handoff
 
-B2a is additive. Existing raw GroupChild/StdioSession/ProcessGroup paths remain
-and still have their old guarantees. Entry binding does **not** guard them.
-Only the new API tests use OwnedCommand/OwnedChild/OwnedSession. D-7 is incomplete.
+B2a added the typed API; B2b migrates its callers in parts. **Migration is
+incomplete and D-7 is not complete.** Existing raw GroupChild/StdioSession/
+ProcessGroup paths remain for the callers of the later parts and still have their
+old guarantees; entry binding does **not** guard them.
+
+## B2b-i (this part): sandbox, session, LSP, js-worker
+
+Migrated to OwnedSession/OwnedCommand/OwnedChild (guard-owned on Linux, with or
+without a ledger):
+
+- `OwnedSession::spawn_sandboxed(ledger, sandbox, spec)` (piped stdio,
+  `ChildKind::SandboxSession`, never a direct-exec fallback) and
+  `OwnedSession::spawn_owned(ledger, kind, label, command)` are the typed helpers.
+- LSP (`tools/src/lsp/client.rs`), js-worker owner (`run_js/worker.rs`), the
+  `MinimalSandbox` library listing (`minimal.rs`), the bwrap probe (`bwrap.rs`)
+  and the comment-checker (`post_edit.rs`, `OwnedChild` through
+  `Admission::spawn_owned`).
+- Closed stdio choices: the listing and the probe pass `/dev/null` as stdin; every
+  other migrated caller pipes all three streams, so none depends on an inherited
+  closed descriptor.
+- A caller that has no bound bundle (a test binary, an example) must be given one
+  with `scripts/guard-cargo.sh`; a test that clears its child's environment has to
+  pass `EVORCH_PROCESS_GUARD_BUNDLE` through.
+
+Left raw on purpose until B2b-iii removes them: `StdioSession::spawn*` with a
+sandbox (only tests use them now), `StdioSession::spawn_command_*`,
+`WrappedCommand::to_command` and `GroupChild`.
 
 ## New contract
 
@@ -36,9 +60,9 @@ Only the new API tests use OwnedCommand/OwnedChild/OwnedSession. D-7 is incomple
 
 | Owner | Production paths to migrate |
 |---|---|
-| Common sandbox/session | sandbox/src/{exec,session,bwrap}.rs; to_command/raw session seams, bwrap probe |
+| Common sandbox/session | **B2b-i: minimal.rs, bwrap probe migrated**; to_command/raw session seams stay until B2b-iii |
 | Shell pipe | tools/src/tools/shell/jobs/process.rs::run_pipe (run_pty is B3) |
-| SandboxSession, LSP, js-worker | sandbox/src/session.rs; tools/src/lsp/client.rs; tools/src/post_edit.rs; tools/src/tools/run_js/worker.rs (via StdioSession) |
+| SandboxSession, LSP, js-worker | **B2b-i: migrated** (sandbox/src/session.rs raw spawn stays for tests until B2b-iii) |
 | MCP | tools/src/mcp/transport/stdio.rs, ChildLease supervision |
 | Eval | eval/src/evaluator/groups.rs and eval/src/verify.rs; remove creator-thread PDEATHSIG(TERM), retain normal Stop TERM |
 | PR source | runtime/src/pull_requests/source.rs, **both** Some(ledger) and None branches |

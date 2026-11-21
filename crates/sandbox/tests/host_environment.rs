@@ -67,6 +67,10 @@ fn host_environment_policy_preserves_native_values_and_explicit_overrides() {
                 "native-name-value",
             )
             .envs(VARIABLES.iter().copied());
+        // The bwrap probe is guard-owned, so the cleared child still needs the bundle.
+        if let Some(bundle) = std::env::var_os(process_guard::BUNDLE_ENV) {
+            child.env(process_guard::BUNDLE_ENV, bundle);
+        }
         let result = child.output().unwrap();
         assert!(
             result.status.success(),

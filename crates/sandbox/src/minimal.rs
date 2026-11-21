@@ -29,8 +29,8 @@ use std::time::Duration;
 use crate::bwrap::{locate_bwrap, probe_owned};
 use crate::error::SandboxError;
 use crate::exec::{CommandSpec, Sandbox, WrappedCommand};
-use crate::ledger::SpawnLedger;
-use crate::session::StdioSession;
+use crate::ledger::{ChildKind, SpawnLedger};
+use crate::owned::OwnedSession;
 
 /// Longest the library listing may take.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -395,24 +395,14 @@ fn run_bounded_owned(
     cancel: &AtomicBool,
     ledger: Option<&SpawnLedger>,
 ) -> Result<String, String> {
-    struct Prepared(WrappedCommand);
-    impl Sandbox for Prepared {
-        fn wrap(&self, _: CommandSpec) -> Result<WrappedCommand, SandboxError> {
-            Ok(self.0.clone())
-        }
-    }
-    let mut session = StdioSession::spawn_owned(
-        ledger,
-        &Prepared(command),
-        CommandSpec {
-            program: String::new(),
-            args: Vec::new(),
-            cwd: None,
-            extra_env: Vec::new(),
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    drop(session.take_stdin());
+    let mut owned = command.to_owned_command();
+    owned
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut session =
+        OwnedSession::spawn_owned(ledger, ChildKind::SandboxSession, None, &mut owned)
+            .map_err(|error| error.to_string())?;
     let (Some(mut stdout), Some(mut stderr)) = (session.take_stdout(), session.take_stderr())
     else {
         return Err("output pipes are unavailable".to_owned());
