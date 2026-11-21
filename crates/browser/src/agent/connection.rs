@@ -57,6 +57,22 @@ pub(super) struct Connection {
     frames: Mutex<HashMap<String, watch::Sender<Option<Value>>>>,
 }
 
+// The same close notification must run on driver abort during partial launch,
+// not only on a WebSocket EOF; otherwise pending replies/session pumps retain
+// their Connection and can never finish.
+struct Driver<F: FnMut(&Arc<Connection>, Option<Event>)> {
+    connection: Arc<Connection>,
+    on_event: F,
+}
+impl<F: FnMut(&Arc<Connection>, Option<Event>)> Drop for Driver<F> {
+    fn drop(&mut self) {
+        lock(&self.connection.pending).clear();
+        lock(&self.connection.sessions).clear();
+        lock(&self.connection.frames).clear();
+        (self.on_event)(&self.connection, None);
+    }
+}
+
 impl Connection {
     #[cfg(test)]
     pub(super) fn test_pair() -> (Arc<Self>, mpsc::UnboundedReceiver<String>) {
@@ -82,7 +98,7 @@ impl Connection {
     /// session before that session's first event; `None` follows the last.
     pub async fn open(
         url: &str,
-        mut on_event: impl FnMut(&Arc<Self>, Option<Event>) + Send + 'static,
+        on_event: impl FnMut(&Arc<Self>, Option<Event>) + Send + 'static,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), AgentError> {
         let config = WebSocketConfig::default()
             .max_message_size(None)
@@ -100,11 +116,15 @@ impl Connection {
             frames: Mutex::default(),
         });
         let reader = Arc::clone(&connection);
+        let mut driver = Driver {
+            connection: reader,
+            on_event,
+        };
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     message = socket.next() => match message {
-                        Some(Ok(Message::Text(text))) => reader.dispatch(text.as_str(), &mut on_event),
+                        Some(Ok(Message::Text(text))) => driver.connection.dispatch(text.as_str(), &mut driver.on_event),
                         Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                         Some(Ok(_)) => {}
                     },
@@ -115,10 +135,6 @@ impl Connection {
                     }
                 }
             }
-            lock(&reader.pending).clear();
-            lock(&reader.sessions).clear();
-            lock(&reader.frames).clear();
-            on_event(&reader, None);
         });
         Ok((connection, task))
     }
@@ -378,5 +394,50 @@ mod tests {
         assert!(lock(&connection.pending).is_empty());
         connection.forget("page");
         assert!(frames.changed().await.is_err());
+    }
+    #[tokio::test]
+    async fn abort_before_first_driver_poll_closes_pending_sessions_and_frames() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, hold) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let socket = async_tungstenite::tokio::accept_async(socket)
+                .await
+                .unwrap();
+            let _ = hold.await;
+            drop(socket);
+        });
+        let (closed, mut closure) = oneshot::channel();
+        let mut closed = Some(closed);
+        let (connection, task) = Connection::open(&format!("ws://{address}"), move |_, event| {
+            if event.is_none() {
+                let _ = closed.take().unwrap().send(());
+            }
+        })
+        .await
+        .unwrap();
+        let pending = connection.call(None, "Test.pending", json!({}));
+        tokio::pin!(pending);
+        let mut session = connection.subscribe("test");
+        let frames = connection.frames("test");
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            matches!(
+                futures_util::poll!(&mut pending),
+                std::task::Poll::Ready(Err(_))
+            ),
+            "abort must not strand a pending call"
+        );
+        assert!(matches!(
+            session.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(frames.has_changed().is_err());
+        assert_eq!(closure.try_recv(), Ok(()));
+        let _ = release.send(());
+        server.await.unwrap();
     }
 }

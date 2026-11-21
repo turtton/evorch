@@ -212,7 +212,7 @@ descriptors 0, 1 and 2 closed starts the representative selections (all pipes,
 
 Audit external crates separately rather than assuming the Rust API can control
 an internal spawn. The private core-launcher preflight supervisor and bwrap
---die-with-parent stay unchanged. Agent Chromium and all PTY owners belong to B3.
+--die-with-parent stay unchanged. Agent Chromium is migrated in B3-04 (below); all PTY owners belong to B3.
 
 ## B2b completion and optional further split
 
@@ -246,3 +246,47 @@ the cancellation audit are in "Death matrix and cleanup evidence". Low-level pee
 unit tests alone are not proof of the real accept loop's rejection branch.
 core_instance::running_elf_identity hashes the running ELF separately; B2a does
 not introduce a shared cross-crate identity authority merely to avoid this read.
+
+## B3-04 agent Chromium: owned launch + connect
+
+Agent Chromium now uses unmanaged/no-ledger `OwnedCommand` / `OwnedChild`
+(`ChildKind::Other`), then `Browser::connect_with_config`. It no longer calls
+chromiumoxide's hidden `Browser::launch`. The launch adapter preserves C-13's
+argv (including duplicates), full environment, cwd and inherited stdin / null
+stdout / piped stderr. All seven HandlerConfig fields are explicit; notably
+`ignore_https_errors = false`, not HandlerConfig's insecure default.
+
+Endpoint collection has one absolute 20-second post-ExecOk deadline, a total
+256-KiB budget (including the endpoint) and a 16-KiB line budget. EOF, invalid
+UTF-8/URL, non-loopback endpoint and either overflow fail closed. Success closes
+stderr; no drain/logging task survives it. Cancellation, initialization errors,
+handler-ended reset and Drop keep the child, profile and proxy in one owner.
+A dedicated reaper removes the profile only after confirmed reap. GuardLost or
+failure to start that reaper retains the profile with a diagnostic, never a
+cleanup-success claim. A typed-spawn error without reap evidence is conservatively
+unconfirmed too. Proxy accept/connection/tunnel/upstream tasks and CDP
+handler/gate tasks are scoped and cancelled rather than detached.
+
+Linux `browser/tests/agent_chromium.rs` includes a real agent navigation followed
+by test-owner exit 74, test-owner SIGKILL, normal Drop and repeated relaunch after
+handler termination. The external subreaper observes the actual tree and awaits
+pidfds for **every observed same-PGID member**; it separately reclaims escapees
+on success or failure. Exit 74 here is a fixture owner using the production
+AgentBrowser path, **not the release core's real 10-second expiry** (B3-07/08).
+`agent_observation_restart` is currently a registration-only placeholder; its
+success is not evidence of a planned-exec Chromium connection. Planned exec's
+CLOEXEC control loss kills the old browser group; reuse/reconnection is not
+promised. Profile cleanup cannot run when the owner dies without destructors.
+
+**Known remaining leak / outside the same-PGID guarantee:** Chrome
+157.0.8103.78's preflight navigation produced two `chrome_crashpad_handler`
+processes in separate SIDs/PGIDs (browser root 3029375 in PGID 3029066;
+Crashpad 3029384 in SID/PGID 3029383, and 3029386 in SID/PGID 3029385).
+The owned-launch trace likewise records Crashpad leaving the browser's new
+SID/PGID while renderer/zygote/GPU/utility descendants stay in it. Abrupt owner
+death therefore does **not** guarantee these Crashpad helpers terminate. Tests
+record that fact separately; their outer pidfd cleanup must not mask or weaken
+the same-group death assertion. Do not add disable-crash-reporter flags or a
+cgroup here: either needs a separate argv/C-13 design review. Carry this into
+B3-09's excluded-spawn audit/follow-up list. PTY migration, real loaded-core
+expiry, real CEF and performance gates remain B3; this is **not D-7 completion**.

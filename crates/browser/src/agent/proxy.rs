@@ -18,6 +18,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{AgentError, RequestPolicy};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+#[derive(Clone, Default)]
+struct Scope {
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+}
+impl Scope {
+    fn spawn(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        let cancel = self.cancel.clone();
+        self.tasks.spawn(async move {
+            let _ = cancel.run_until_cancelled(work).await;
+        });
+    }
+}
 
 const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 const HOP_BY_HOP: &[&str] = &["proxy-connection", "proxy-authorization", "keep-alive"];
@@ -27,7 +42,7 @@ type Refusal = (StatusCode, String);
 
 pub(super) struct Proxy {
     address: SocketAddr,
-    accept: tokio::task::JoinHandle<()>,
+    scope: Scope,
 }
 
 impl Proxy {
@@ -37,7 +52,9 @@ impl Proxy {
             .await
             .map_err(launch)?;
         let address = listener.local_addr().map_err(launch)?;
-        let accept = tokio::spawn(async move {
+        let scope = Scope::default();
+        let connections = scope.clone();
+        scope.spawn(async move {
             loop {
                 let stream = match listener.accept().await {
                     Ok((stream, _)) => stream,
@@ -47,9 +64,10 @@ impl Proxy {
                     }
                 };
                 let policy = Arc::clone(&policy);
-                tokio::spawn(async move {
+                let requests = connections.clone();
+                connections.spawn(async move {
                     let service = hyper::service::service_fn(move |request| {
-                        handle(Arc::clone(&policy), request)
+                        handle(Arc::clone(&policy), request, requests.clone())
                     });
                     if let Err(error) = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
@@ -61,7 +79,12 @@ impl Proxy {
                 });
             }
         });
-        Ok(Self { address, accept })
+        Ok(Self { address, scope })
+    }
+
+    #[cfg(test)]
+    pub(super) fn completion(&self) -> TaskTracker {
+        self.scope.tasks.clone()
     }
 
     pub(super) fn address(&self) -> SocketAddr {
@@ -71,18 +94,20 @@ impl Proxy {
 
 impl Drop for Proxy {
     fn drop(&mut self) {
-        self.accept.abort();
+        self.scope.cancel.cancel();
+        self.scope.tasks.close();
     }
 }
 
 async fn handle(
     policy: Arc<dyn RequestPolicy>,
     request: Request<Incoming>,
+    scope: Scope,
 ) -> Result<Response<Body>, Infallible> {
     let outcome = if request.method() == Method::CONNECT {
-        tunnel(policy, request).await
+        tunnel(policy, request, scope).await
     } else {
-        forward(policy.as_ref(), request).await
+        forward(policy.as_ref(), request, scope).await
     };
     Ok(outcome.unwrap_or_else(|(status, reason)| {
         tracing::debug!(%status, %reason, "agent proxy refused a connection");
@@ -98,6 +123,7 @@ async fn handle(
 async fn tunnel(
     policy: Arc<dyn RequestPolicy>,
     mut request: Request<Incoming>,
+    scope: Scope,
 ) -> Result<Response<Body>, Refusal> {
     let authority = request
         .uri()
@@ -111,7 +137,7 @@ async fn tunnel(
         .await
         .map_err(|reason| (StatusCode::FORBIDDEN, reason))?;
     let upgrade = hyper::upgrade::on(&mut request);
-    tokio::spawn(async move {
+    scope.spawn(async move {
         let mut client = match upgrade.await {
             Ok(upgraded) => TokioIo::new(upgraded),
             Err(error) => {
@@ -147,6 +173,7 @@ async fn tunnel(
 async fn forward(
     policy: &dyn RequestPolicy,
     request: Request<Incoming>,
+    scope: Scope,
 ) -> Result<Response<Body>, Refusal> {
     if request.headers().contains_key(header::UPGRADE) {
         return Err((
@@ -170,7 +197,7 @@ async fn forward(
         hyper::client::conn::http1::handshake::<_, Incoming>(TokioIo::new(upstream))
             .await
             .map_err(bad_gateway)?;
-    tokio::spawn(async move {
+    scope.spawn(async move {
         if let Err(error) = connection.await {
             tracing::debug!(%error, "agent proxy upstream connection ended");
         }
@@ -376,5 +403,27 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
             "the proxy must not dial a refused plain tunnel"
         );
+    }
+    #[tokio::test]
+    async fn dropping_proxy_stops_active_tunnels_and_all_drivers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = proxy(&[("pinned.test", address)], true).await;
+        let done = proxy.completion();
+        let mut client = send(
+            &proxy,
+            "CONNECT pinned.test:80 HTTP/1.1\r\nHost: pinned.test:80\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status_line(&mut client).await, "HTTP/1.1 200 OK");
+        client.write_all(b"G").await.unwrap();
+        let (mut upstream, _) = listener.accept().await.unwrap();
+        let mut first = [0; 1];
+        upstream.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"G");
+        drop(proxy);
+        done.wait().await;
+        assert_eq!(upstream.read(&mut first).await.unwrap(), 0);
+        assert_eq!(client.read(&mut first).await.unwrap(), 0);
     }
 }
