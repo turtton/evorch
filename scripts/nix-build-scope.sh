@@ -21,11 +21,15 @@
 #   crates/browser-cef/                  the CEF helper and libcef linkage that
 #                                        the CEF install check inspects
 #   scripts/push-attic.sh                what the PR and main steps upload with
-#   this script and its test             the decision itself
+#   this script and its test,            the decision itself and the verdict
+#   scripts/nix-build-verdict.sh and     over the Nix jobs
+#   its test
 #   .github/workflows/ci.yml             only the top-level keys other than
 #                                        `jobs` (`on`, `concurrency`, `env`,
-#                                        wherever placed) and the nix-build
-#                                        job; the other jobs do not reach Nix
+#                                        wherever placed) and the four Nix
+#                                        jobs (nix-scope-check, nix-full-default,
+#                                        nix-full-core, nix-build); the other
+#                                        jobs do not reach Nix
 # Rust sources of the crates are deliberately not listed: the ci job tests them
 # and the non-test cargo check of the same -p/--bin selection (the nix-build
 # job's substitute) compiles them as the Nix build does.
@@ -67,13 +71,13 @@ changed=$(git diff --name-only --no-renames "$base" "$head") || full "git diff f
 
 # The workflow compared without comments and blank lines: every top-level key
 # other than `jobs` (`on`, `concurrency`, and an `env` or `defaults` placed
-# before or after the jobs) and the nix-build job's block.
+# before or after the jobs) and the blocks of the four Nix jobs.
 nix_workflow_scope() {
   awk '
     /^[[:space:]]*(#|$)/ { next }
     /^[^[:space:]]/ { in_jobs = ($1 == "jobs:"); current = 0; print; next }
     !in_jobs { print; next }
-    /^  [A-Za-z0-9_-]+:/ { current = ($1 == "nix-build:") }
+    /^  [A-Za-z0-9_-]+:/ { current = ($1 == "nix-scope-check:" || $1 == "nix-full-default:" || $1 == "nix-full-core:" || $1 == "nix-build:") }
     current { print }
   '
 }
@@ -94,12 +98,13 @@ while IFS= read -r path; do
     flake.nix | flake.lock | *.nix | nix/* | rust-toolchain.toml | \
       Cargo.toml | Cargo.lock | crates/*/Cargo.toml | \
       crates/*/build.rs | .cargo/* | vendor/* | crates/browser-cef/* | \
-      scripts/push-attic.sh | scripts/nix-build-scope.sh | scripts/tests/test_nix_build_scope.sh)
+      scripts/push-attic.sh | scripts/nix-build-scope.sh | scripts/tests/test_nix_build_scope.sh | \
+      scripts/nix-build-verdict.sh | scripts/tests/test_nix_build_verdict.sh)
       matched+=("$path")
       ;;
     "$workflow")
       if nix_workflow_changed; then
-        matched+=("$path (header or nix-build job)")
+        matched+=("$path (header or a Nix job)")
       fi
       ;;
   esac
