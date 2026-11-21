@@ -136,6 +136,8 @@ fn wait_schema_and_argument_validation_agree() {
         jsonschema::validator_for(&crate::meta::tool_spec("wait").input_schema).unwrap();
     for input in [
         json!({}),
+        json!({"mode":"any"}),
+        json!({"mode":"all"}),
         json!({"run_id":"run-1"}),
         json!({"run_ids":["run-1","run-2"],"mode":"all"}),
         json!({"run_ids":["run-1"],"mode":"any"}),
@@ -144,7 +146,8 @@ fn wait_schema_and_argument_validation_agree() {
         assert!(parse::<WaitArgs>(input).unwrap().validate().is_ok());
     }
     for input in [
-        json!({"mode":"all"}),
+        json!({"mode":"some"}),
+        json!({"mode":"all","unknown":true}),
         json!({"run_id":"run-1","run_ids":["run-2"]}),
         json!({"run_ids":[]}),
         json!({"run_ids":["run-1","run-1"]}),
@@ -163,6 +166,106 @@ fn wait_schema_and_argument_validation_agree() {
             "handler accepted {input}"
         );
     }
+}
+
+#[test]
+fn targetless_modes_normalize_without_hiding_invalid_arguments() {
+    for input in [json!({}), json!({"mode":"any"}), json!({"mode":"all"})] {
+        let original = input.clone();
+        let request = own_request(input.clone());
+        assert!(request.runs.is_empty());
+        assert!(matches!(request.mode, WaitMode::Any));
+        assert_eq!(
+            durable_contract(&input).unwrap(),
+            (vec![], crate::quiesce::DurableWaitMode::Any, false)
+        );
+        let mut executable = input.clone();
+        drop_ignored_arguments("wait", &mut executable);
+        assert_eq!(executable, json!({}));
+        assert_eq!(input, original);
+    }
+    for input in [
+        json!({"mode":"bad"}),
+        json!({"run_id":null,"mode":"all"}),
+        json!({"run_ids":[],"mode":"all"}),
+        json!({"run_id":"run-1","run_ids":["run-2"],"mode":"all"}),
+        json!({"unknown":true,"mode":"all"}),
+    ] {
+        let mut executable = input.clone();
+        drop_ignored_arguments("wait", &mut executable);
+        if input.get("unknown").is_some() {
+            assert!(executable.get("unknown").is_some());
+        } else {
+            assert_eq!(executable, input);
+        }
+        let validator =
+            jsonschema::validator_for(&crate::meta::tool_spec("wait").input_schema).unwrap();
+        assert!(!validator.is_valid(&executable));
+    }
+    let mut explicit = json!({"run_ids":["run-1"],"mode":"all","timeout_ms":42});
+    drop_ignored_arguments("wait", &mut explicit);
+    assert_eq!(explicit, json!({"run_ids":["run-1"],"mode":"all"}));
+}
+
+#[tokio::test]
+async fn live_parent_alone_is_not_a_source_but_own_sources_and_events_remain() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("own-sources.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (runtime, _) = fixture(None);
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    for input in [json!({}), json!({"mode":"any"}), json!({"mode":"all"})] {
+        let request = own_request(input);
+        let (ready, result) = events::poll(&runtime, child, &request).unwrap();
+        assert!(ready);
+        assert_eq!(result["status"], "no_wait_sources");
+        assert_eq!(result["reasons"].as_array().unwrap().len(), 4);
+        assert!(result["note"].as_str().unwrap().contains("parent"));
+    }
+    let request = own_request(json!({}));
+    let question = runtime
+        .request_user_question(child, "own source".into(), vec![], false)
+        .unwrap();
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let waiting = observe(&runtime, child, &request, receiver);
+    tokio::pin!(waiting);
+    assert!(poll!(&mut waiting).is_pending());
+    runtime
+        .send_agent_message(parent, child, AgentMessageKind::Send, "interrupt", None)
+        .unwrap();
+    assert_eq!(waiting.await.unwrap()["status"], "ready");
+    assert!(!runtime.question_reported(&question.id));
+    runtime.take_inbox(child).unwrap();
+    runtime
+        .answer_user_question(&question.id, "resolved")
+        .unwrap();
+    let mut request = own_request(json!({}));
+    request.delivered.insert(question.id);
+    assert_eq!(
+        events::poll(&runtime, child, &request).unwrap().1["status"],
+        "no_wait_sources",
+        "the grandchild below must be the only remaining wait source"
+    );
+    let grandchild = runtime
+        .delegate_background_as_child(child, Role::Worker, "blocked", RunConfig::default())
+        .unwrap();
+    runtime.take_inbox(child).unwrap();
+    assert!(!events::poll(&runtime, child, &request).unwrap().0);
+    runtime.cancel(grandchild).unwrap();
+    runtime.wait(grandchild).await.unwrap();
+    assert_eq!(
+        events::poll(&runtime, child, &request).unwrap().1["status"],
+        "ready"
+    );
+    cleanup(&runtime).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1289,7 +1392,22 @@ async fn parent_idle_and_questions_are_neither_readiness_nor_observations() {
         let request = own_request(input);
         snapshot_reads();
         let (ready, result) = events::poll(&runtime, child, &request).unwrap();
-        assert!(!ready);
+        if request.runs.is_empty() {
+            assert!(ready);
+            assert_eq!(result["status"], "no_wait_sources");
+            assert_eq!(
+                result["reasons"],
+                json!([
+                    "no_active_or_unread_children",
+                    "no_pending_questions",
+                    "no_managed_lanes",
+                    "no_running_or_unread_shell_jobs"
+                ])
+            );
+            assert!(result["note"].as_str().unwrap().contains("parent"));
+        } else {
+            assert!(!ready);
+        }
         assert_eq!(snapshot_reads(), []);
         assert_eq!(result["runs"], json!([]));
         assert!(!runtime.question_reported(&question.id));

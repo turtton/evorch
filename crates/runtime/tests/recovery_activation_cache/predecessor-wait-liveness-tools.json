@@ -1,0 +1,80 @@
+[
+  {
+    "name": "wait",
+    "description": "Wait without a deadline. Explicit targets are direct parent/children only; terminal targets return immediately. Waiting alone isn't completion; status=turn_completed means an interactive turn finished. With no targets, discovers parent/children, reviews/admissions, questions, lanes and own shells. any/all applies only to run completion; messages/replies, questions/answers, host input, lanes, parent termination and shell teardown interrupt either. Returns event runs and bounded correlated messages; presentation ACKs returned child output/messages only. Parent questions/idle/output excluded. Lane bodies/answers/input follow tools. Running shells stay sources; completion cites original call ID, no duplicate ToolResult. Non-error no_wait_sources explains absence: report status, don't poll. Lone run_id may return phase-only status with no output ACK.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+          "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5."
+        },
+        "run_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^run-([0-9]+|[0-9a-hjkmnp-tv-z]{26})$",
+            "description": "Runtime run ID exactly as reported, such as run-01k6z3x2q4w8e9r0t1y2u3i4o5."
+          },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "any",
+            "all"
+          ],
+          "default": "any"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "run_id"
+          ],
+          "not": {
+            "required": [
+              "run_ids"
+            ]
+          }
+        },
+        {
+          "required": [
+            "run_ids"
+          ],
+          "not": {
+            "required": [
+              "run_id"
+            ]
+          }
+        },
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "run_id"
+                ]
+              },
+              {
+                "required": [
+                  "run_ids"
+                ]
+              },
+              {
+                "required": [
+                  "mode"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+]

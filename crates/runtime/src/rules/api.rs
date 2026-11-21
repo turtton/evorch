@@ -8,8 +8,9 @@ use providers::Usage;
 use super::budget::injection_budget_bytes;
 use super::discovery::{chain_for_target, union_targets};
 use super::frontmatter::{body_without_frontmatter, parse_frontmatter};
+use super::injections::{self, PreparedRuleInjection, ProjectRuleInjections};
 use super::matcher::matches;
-use super::render::{render_under, render_with_markers};
+use super::render::render_under;
 use super::session::RulesSession;
 use super::source::RulesSource;
 use super::types::{
@@ -23,6 +24,15 @@ pub fn startup_snapshot(
     last_usage: Option<&Usage>,
     estimated_history_bytes: u64,
 ) -> Option<String> {
+    prepare_startup(source, active_root, last_usage, estimated_history_bytes).map(|p| p.text)
+}
+
+pub(crate) fn prepare_startup(
+    source: &RulesSource,
+    active_root: Option<&Path>,
+    last_usage: Option<&Usage>,
+    estimated_history_bytes: u64,
+) -> Option<PreparedRuleInjection> {
     let mut markers = Vec::new();
     let mut rules = user_startup_rules(source, &mut markers);
     if source.trust == ProjectTrust::Approved
@@ -34,10 +44,11 @@ pub fn startup_snapshot(
     if let Some(rule) = user_agents_rule(source, &mut markers) {
         rules.push(rule);
     }
-    render_snapshot(
+    injections::prepare(
         rules,
         markers,
         injection_budget_bytes(&source.settings, last_usage, estimated_history_bytes),
+        &ProjectRuleInjections::default(),
     )
 }
 
@@ -100,6 +111,15 @@ pub fn startup_rule_files(
 
 /// 成功したツール呼び出しの対象パスに適用されるルールを再読して生成する。
 pub fn after_successful_tools(session: &mut RulesSession, targets: &[PathBuf]) -> Option<String> {
+    prepare_after_successful_tools(session, targets, &ProjectRuleInjections::default())
+        .map(|p| p.text)
+}
+
+pub(crate) fn prepare_after_successful_tools(
+    session: &RulesSession,
+    targets: &[PathBuf],
+    injected: &ProjectRuleInjections,
+) -> Option<PreparedRuleInjection> {
     if session.source.trust != ProjectTrust::Approved || targets.is_empty() {
         return None;
     }
@@ -125,10 +145,11 @@ pub fn after_successful_tools(session: &mut RulesSession, targets: &[PathBuf]) -
             Err(error) => disable(&error, &mut markers),
         }
     }
-    render_snapshot(
+    injections::prepare(
         resolved,
         markers,
         injection_budget_bytes(&session.source.settings, session.last_usage.as_ref(), 0),
+        injected,
     )
 }
 
@@ -400,17 +421,4 @@ fn disable(error: &RulesError, markers: &mut Vec<String>) {
     markers.push(tools::escape_control_markers(&format!(
         "- [rules disabled: {error}]"
     )));
-}
-
-fn render_snapshot(
-    rules: Vec<ResolvedRule>,
-    mut markers: Vec<String>,
-    budget: u64,
-) -> Option<String> {
-    if rules.is_empty() && markers.is_empty() {
-        return None;
-    }
-    let mut seen = HashSet::new();
-    markers.retain(|marker| seen.insert(marker.clone()));
-    Some(render_with_markers(rules, budget, &markers))
 }

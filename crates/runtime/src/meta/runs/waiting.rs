@@ -50,12 +50,22 @@ pub(in crate::meta) struct WaitArgs {
 
 /// Removes arguments that older transcripts taught models to send and that a
 /// wait now ignores, before schema validation: `timeout_ms`, from the time a
-/// wait had a deadline. The recorded tool call keeps the original input.
+/// wait had a deadline. Valid targetless modes also normalize to the implicit
+/// Any contract. The recorded tool call keeps the original input.
 pub(crate) fn drop_ignored_arguments(name: &str, input: &mut Value) {
     if name == "wait"
         && let Some(object) = input.as_object_mut()
     {
         object.remove("timeout_ms");
+        if !object.contains_key("run_id")
+            && !object.contains_key("run_ids")
+            && matches!(
+                object.get("mode").and_then(Value::as_str),
+                Some("any" | "all")
+            )
+        {
+            object.remove("mode");
+        }
     }
 }
 
@@ -114,8 +124,7 @@ impl WaitArgs {
         let runs = match (self.run_id, self.run_ids) {
             (Some(run), None) => vec![run],
             (None, Some(runs)) if (1..=MAX_WAIT_RUNS).contains(&runs.len()) => runs,
-            (None, None) if self.mode.is_none() => Vec::new(),
-            (None, None) => return Err("mode requires run_id or run_ids".into()),
+            (None, None) => Vec::new(),
             (None, Some(_)) => return Err("run_ids must contain 1 to 8 runs".into()),
             _ => return Err("provide exactly one of run_id or run_ids".into()),
         };
@@ -126,13 +135,18 @@ impl WaitArgs {
         if runs.iter().copied().collect::<HashSet<_>>().len() != runs.len() {
             return Err("run_ids must not contain duplicates".into());
         }
+        let mode = if runs.is_empty() {
+            WaitMode::Any
+        } else {
+            self.mode.unwrap_or_default()
+        };
         Ok(WaitRequest {
             runs,
             observed: HashSet::new(),
             shown_shell: HashSet::new(),
             executor: None,
             delegate: false,
-            mode: self.mode.unwrap_or_default(),
+            mode,
             deadline: None,
             legacy,
             reported: HashSet::new(),

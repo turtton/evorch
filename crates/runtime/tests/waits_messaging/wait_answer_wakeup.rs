@@ -104,7 +104,11 @@ async fn own_event_wait_scenario(answer_before_wait_starts: bool) {
                     json!({"title": "Which implementation?", "blocking": false}),
                 )),
                 Ok(tool_response("first-wait", "wait", json!({}))),
-                Ok(tool_response("second-wait", "wait", json!({}))),
+                Ok(tool_response(
+                    "second-wait",
+                    "wait",
+                    json!({"run_id":"run-1"}),
+                )),
                 Ok(text_response("child done", FinishReason::Stop)),
             ],
         )
@@ -293,6 +297,12 @@ async fn waiting_child(
     fixture.model.wait_for_request(1).await;
     gate.notify_one();
     fixture.model.wait_for_request(2).await;
+    // A nonblocking own question is a real wait source, independent of the
+    // parent's liveness or the preceding send. It remains pending until cleanup.
+    fixture
+        .runtime
+        .request_user_question(child, "fixture wait source".into(), vec![], false)
+        .unwrap();
     gate.notify_one();
     until_waiting(&fixture, child).await;
     (fixture, gate, parent, child)
@@ -506,6 +516,146 @@ async fn repeated_no_source_waits_still_reach_the_identical_call_guard() {
         assert_eq!(result["status"], "no_wait_sources");
         assert_eq!(result["events"], json!([]));
     }
+}
+
+#[tokio::test]
+async fn alternating_targetless_forms_have_the_same_guard_with_a_live_parent() {
+    for alternating in [false, true] {
+        let model = Arc::new(ScriptedModel::new([]));
+        model.gate_key("PARENT", Arc::new(Notify::new())).await;
+        model
+            .add_keyed(
+                "CHILD",
+                (0..12).map(|n| {
+                    let input = match (alternating, n % 3) {
+                        (true, 1) => json!({"mode":"any"}),
+                        (true, 2) => json!({"mode":"all"}),
+                        _ => json!({}),
+                    };
+                    Ok(tool_response(&format!("empty-{n}"), "wait", input))
+                }),
+            )
+            .await;
+        let fixture = fixture(model);
+        let parent = fixture.runtime.delegate_background(
+            Role::Orchestrator,
+            "PARENT".into(),
+            RunConfig::default(),
+        );
+        fixture.model.wait_for_request(0).await;
+        let mut events = fixture.bus.subscribe();
+        let child = fixture
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+            .unwrap();
+        assert_eq!(
+            fixture.runtime.wait(child).await.unwrap(),
+            AgentRunPhase::Error
+        );
+        let requests = fixture.model.observed().await;
+        assert_eq!(
+            requests.len(),
+            11,
+            "one parent request plus ten stalled child calls"
+        );
+        for n in 0..9 {
+            let result = tool_json(&requests[n + 2], &format!("empty-{n}"));
+            assert_eq!(result["status"], "no_wait_sources");
+            assert_eq!(result["events"], json!([]));
+            assert!(
+                !result["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("no_live_parent"))
+            );
+        }
+        let reason = events
+            .drain_pending_snapshot()
+            .into_iter()
+            .find_map(|event| match event.kind {
+                event_bus::EventKind::Lifecycle(
+                    event_bus::LifecycleEvent::AgentRunStateChanged {
+                        run_id,
+                        to: AgentRunPhase::Error,
+                        reason,
+                        ..
+                    },
+                ) if run_id == child.to_string() => reason,
+                _ => None,
+            })
+            .expect("terminal reason");
+        assert!(reason.contains("consecutive identical tool calls without progress reached max_identical_tool_call_repeats=10"), "{reason}");
+        fixture.runtime.cancel(parent).unwrap();
+        fixture.runtime.wait(parent).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn worker_can_finish_after_successful_tool_while_parent_waits() {
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::new([]));
+    model.gate_key("CHILD", gate.clone()).await;
+    model
+        .add_keyed(
+            "PARENT",
+            [
+                Ok(tool_response(
+                    "child",
+                    "delegate",
+                    json!({"target":{"role":"worker"},"background":true,"prompt":"CHILD"}),
+                )),
+                Ok(tool_response("join", "wait", json!({}))),
+                Ok(text_response("parent done", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    model
+        .add_keyed(
+            "CHILD",
+            [
+                Ok(tool_response("successful-tool", "inbox", json!({}))),
+                Ok(tool_response("no-sources", "wait", json!({}))),
+                Ok(text_response("worker done", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    let fixture = fixture(model);
+    let parent = fixture.runtime.delegate_background(
+        Role::Orchestrator,
+        "PARENT".into(),
+        RunConfig::default(),
+    );
+    until_waiting(&fixture, parent).await;
+    // The worker is gated at each provider request; its parent's implicit join
+    // remains pending until the worker completes, not merely until its wait ends.
+    for index in 0..3 {
+        let requests = fixture.model.observed().await;
+        if index == 0 {
+            assert!(
+                requests
+                    .iter()
+                    .any(|messages| occurrences(messages, "CHILD") > 0)
+            );
+        }
+        gate.notify_one();
+        if index < 2 {
+            let _ = fixture.model.wait_for_request(3 + index).await;
+        }
+    }
+    assert_eq!(
+        fixture.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let requests = fixture.model.observed().await;
+    let child_final = requests
+        .iter()
+        .find(|messages| tool_result(messages, "no-sources").is_some())
+        .unwrap();
+    assert_eq!(
+        tool_json(child_final, "no-sources")["status"],
+        "no_wait_sources"
+    );
+    assert!(!tool_result(child_final, "successful-tool").unwrap().1);
 }
 
 #[tokio::test]

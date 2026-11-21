@@ -114,6 +114,7 @@ mod tests {
             turn_completed: true,
             allowed_directories: Default::default(),
             allowed_instructions: Default::default(),
+            project_rule_injections: Default::default(),
             plan_notice: Default::default(),
             loaded_skills: Vec::new(),
             host_inputs: Vec::new(),

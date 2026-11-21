@@ -128,11 +128,14 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   targets (`run_id` or up to 8 `run_ids`, with `mode: "any" | "all"`) are
   restricted to direct parent and direct children only; terminal targets return
   immediately. With no targets (`wait()`), it discovers active wait sources:
-  direct parent and children (including reviews and in-flight admissions),
-  unanswered child questions, managed lanes, and the caller's own running
+  direct children (including reviews and in-flight admissions),
+  the caller's unanswered questions, managed lanes, and the caller's own running
   background shell jobs. When no sources exist and no unread events are ready,
   it returns a non-error `no_wait_sources` result immediately without advancing
-  progress; report status rather than polling. `any`/`all` applies only to run
+  progress; report status rather than polling. A live parent alone is not a
+  source; explicit parent waits remain supported, and parent termination still
+  interrupts implicit waits. Targetless `mode: "any"` / `"all"` are equivalent
+  to `wait()`. `any`/`all` applies only to run
   completion; ordinary messages and replies, questions and answers, host input,
   managed lanes, direct-parent termination, and shell teardown interrupt either
   mode. Parent questions, idle turns, and output are not observed. A waking

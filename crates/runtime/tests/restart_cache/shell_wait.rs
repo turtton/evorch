@@ -111,7 +111,8 @@ async fn waiting_shell(wire: Wire, form: usize) -> WaitingShell {
             |p| match form {
                 1 => json!({"run_id":p.to_string()}),
                 2 => json!({"run_ids":[p.to_string()],"mode":"any"}),
-                _ => json!({"run_ids":[p.to_string()],"mode":"all"}),
+                3 => json!({"run_ids":[p.to_string()],"mode":"all"}),
+                _ => json!({}),
             },
         ),
     )]);
@@ -362,6 +363,7 @@ fn assert_wire_at(f: &WaitingShell, shell_call: &str) {
     .unwrap();
     let again: Value = serde_json::from_str(output).unwrap();
     assert!(again["shell_jobs"].as_array().unwrap().is_empty());
+    assert_eq!(again["status"], "no_wait_sources");
     assert!(f.shell.shell_job_snapshots(&f.run.to_string())[0].observed);
 }
 
@@ -373,15 +375,10 @@ fn followups(f: &WaitingShell) {
 }
 
 async fn finish(f: &mut WaitingShell) {
-    // A parent is a live source, so explicitly terminate this second wait with
-    // host input rather than assuming an event will never arrive.
+    // The first Waiting transition is the second tool wait, the next is the
+    // completed interactive turn. A live parent alone must not hold that tool.
     f.events
         .extend(through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting).await);
-    if f.parent.is_some() {
-        f.h.runtime
-            .send_message(f.run, "finish second wait".into())
-            .unwrap();
-    }
     f.events
         .extend(through_phase(&mut f.h.receiver, f.run, AgentRunPhase::Waiting).await);
     assert_wire(f);
@@ -400,7 +397,7 @@ async fn finish(f: &mut WaitingShell) {
 #[tokio::test]
 async fn running_shell_wait_quiesces_only_after_its_tool_result_on_every_wire() {
     for wire in [Wire::ChatCompletions, Wire::Responses, Wire::Codex] {
-        for form in 0..4 {
+        for form in 0..5 {
             let mut f = waiting_shell(wire, form).await;
             let attempt = f.h.runtime.begin_restart_quiesce().unwrap();
             blocker(&f.h, f.run, RestartBlockerKind::ShellRunning).await;

@@ -52,7 +52,7 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait without a deadline. Explicit targets are direct parent/children only; terminal targets return immediately. Waiting alone isn't completion; status=turn_completed means an interactive turn finished. With no targets, discovers parent/children, reviews/admissions, questions, lanes and own shells. any/all applies only to run completion; messages/replies, questions/answers, host input, lanes, parent termination and shell teardown interrupt either. Returns event runs and bounded correlated messages; presentation ACKs returned child output/messages only. Parent questions/idle/output excluded. Lane bodies/answers/input follow tools. Running shells stay sources; completion cites original call ID, no duplicate ToolResult. Non-error no_wait_sources explains absence: report status, don't poll. Lone run_id may return phase-only status with no output ACK.",
+        "Wait without a deadline. Explicit targets are direct parent/children only; terminal targets return immediately. Waiting alone isn't completion; status=turn_completed means an interactive turn finished. With no targets (mode any/all is ignored), discovers children, reviews/admissions, own questions, lanes and own shells; a live parent alone is not a source. any/all applies only to run completion; messages/replies, questions/answers, host input, lanes, parent termination and shell teardown interrupt either. Returns event runs and bounded correlated messages; presentation ACKs returned child output/messages only. Parent questions/idle/output excluded. Lane bodies/answers/input follow tools. Running shells stay sources; completion cites original call ID, no duplicate ToolResult. Non-error no_wait_sources explains absence: report status, don't poll. Lone run_id may return phase-only status with no output ACK.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
@@ -64,7 +64,7 @@ pub(super) fn wait(name: &str) -> ToolSpec {
     spec.input_schema["oneOf"] = json!([
         {"required":["run_id"], "not":{"required":["run_ids"]}},
         {"required":["run_ids"], "not":{"required":["run_id"]}},
-        {"not":{"anyOf":[{"required":["run_id"]},{"required":["run_ids"]},{"required":["mode"]}]}}
+        {"not":{"anyOf":[{"required":["run_id"]},{"required":["run_ids"]}]}}
     ]);
     spec
 }

@@ -4,6 +4,7 @@ mod api;
 mod budget;
 mod discovery;
 mod frontmatter;
+mod injections;
 mod matcher;
 mod path;
 mod render;
@@ -15,7 +16,10 @@ pub use api::{
     StartupRuleExclusion, StartupRuleFile, after_successful_tools, startup_rule_files,
     startup_snapshot,
 };
-pub(crate) use api::{allowed_directory_rules, injection_budget};
+pub(crate) use api::{
+    allowed_directory_rules, injection_budget, prepare_after_successful_tools, prepare_startup,
+};
+pub(crate) use injections::ProjectRuleInjections;
 pub use session::RulesSession;
 pub use source::RulesSource;
 pub use types::{ProjectTrust, RulesError, RulesSettings};

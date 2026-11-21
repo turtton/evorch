@@ -143,6 +143,7 @@ async fn unobserved_shell_job_prevents_tools_waiting_persistence() {
 async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_resume() {
     let (_dir, storage, runtime, mut state) =
         crate::agent_loop::continuity_tests::stored_fixture_in("tools-waiting.db", false).await;
+    super::super::project_rule_tests::seed(&mut state, _dir.path());
     let (_cancel, cancel_rx) = tokio::sync::watch::channel(crate::RunInterrupt::None);
     state.channels.cancel_rx = cancel_rx;
     state
@@ -164,6 +165,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
                 json!({"run_ids":[child.to_string()],"mode":"all","timeout_ms":1234}),
             ),
             call("wait-legacy", "wait", json!({"run_id":child.to_string()})),
+            call("wait-own", "wait", json!({"mode":"all"})),
         ],
     });
     state
@@ -177,7 +179,18 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
         }
     ));
     state.recovery_waits = state.pending_waits().unwrap();
-    assert_eq!(state.recovery_waits.len(), 2);
+    assert_eq!(state.recovery_waits.len(), 3);
+    let own = state
+        .recovery_waits
+        .iter()
+        .find(|wait| wait.tool_call_id == "wait-own")
+        .unwrap();
+    assert_eq!(own.targets, vec![child]);
+    assert!(matches!(
+        own.continuation.payload.as_ref().unwrap().kind,
+        WaitKind::Events
+    ));
+    assert_eq!(own.mode, DurableWaitMode::Any);
     crate::restore::persist_tools_waiting(&state).unwrap();
     let store = runtime.shared.run_store.get().unwrap();
     let bundle = store.restore_bundle(parent).unwrap().unwrap();
@@ -188,6 +201,11 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
     let restored =
         crate::restore::RestoredState::from_recovery_bundle(&bundle, &descriptor.recovery_waits)
             .unwrap();
+    assert_eq!(
+        restored.project_rule_injections,
+        state.project_rule_injections
+    );
+    assert!(!restored.project_rule_injections.is_empty());
     // Independent serialized input-prefix assertion: do not only trust a cache
     // counter or compare continuation structs.
     assert_eq!(
@@ -222,7 +240,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
             }
         })
         .collect();
-    assert_eq!(ids, ["read", "wait-all", "wait-legacy"]);
+    assert_eq!(ids, ["read", "wait-all", "wait-legacy", "wait-own"]);
     assert_eq!(
         runtime
             .list_agents()
@@ -232,7 +250,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
         endpoints_before
     );
     assert!(state.resume_recovery_waits().await);
-    assert_eq!(state.context.messages.len(), prefix.len() + 2);
+    assert_eq!(state.context.messages.len(), prefix.len() + 3);
     let request = |messages: &[Message]| providers::ChatRequest {
         model: "mock-model".into(),
         messages: messages.to_vec(),
@@ -260,7 +278,7 @@ async fn tools_waiting_cache_prefix_and_batch_order_survive_persist_load_and_res
     crate::recovery_cache_test_support::assert_wait_cache(
         &request(&provider_prefix),
         &request(&state.context.messages),
-        &["read", "wait-all", "wait-legacy"],
+        &["read", "wait-all", "wait-legacy", "wait-own"],
     )
     .await;
     drop(storage);

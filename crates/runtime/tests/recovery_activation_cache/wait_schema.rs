@@ -16,10 +16,14 @@ pub(super) struct PredecessorCatalog {
     pub successor_tools: Mutex<Vec<ToolSpec>>,
     pub plan: bool,
     pub output_attachments: bool,
+    pub wait_liveness: bool,
 }
 impl PredecessorCatalog {
     fn tools(&self, successor: &[ToolSpec]) -> Vec<ToolSpec> {
         *self.successor_tools.lock().unwrap() = successor.to_vec();
+        if self.wait_liveness {
+            return super::wait_liveness::old_tools(successor);
+        }
         if self.output_attachments {
             return super::output_attachment_schema::old_tools(successor);
         }

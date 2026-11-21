@@ -44,6 +44,7 @@ pub(crate) struct RestoredState {
     /// Boxed so the restore continuations stay small.
     pub(crate) allowed_directories: Box<crate::allowed_directories::ToldDirectories>,
     pub(crate) allowed_instructions: Box<crate::allowed_instructions::AllowedInstructions>,
+    pub(crate) project_rule_injections: crate::rules::ProjectRuleInjections,
     pub(crate) plan_notice: crate::conversation_plan::notice::PlanNotice,
     /// Skills the run had handed its escalation reviewer; read again on restore.
     pub(crate) loaded_skills: Vec<crate::escalation_review::LoadedSkillRef>,
@@ -132,6 +133,7 @@ impl RestoredState {
             turn_completed,
             allowed_directories: Box::new(descriptor.allowed_directories),
             allowed_instructions: Box::new(descriptor.allowed_instructions),
+            project_rule_injections: descriptor.project_rule_injections,
             plan_notice: descriptor.plan_notice,
             loaded_skills: descriptor.loaded_skills,
             host_inputs: serde_json::from_str(&record.host_inputs_json).unwrap_or_default(),
@@ -256,6 +258,11 @@ pub struct RunRestoreDescriptor {
         skip_serializing_if = "crate::allowed_instructions::AllowedInstructions::is_empty"
     )]
     pub allowed_instructions: crate::allowed_instructions::AllowedInstructions,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::rules::ProjectRuleInjections::is_empty"
+    )]
+    pub(crate) project_rule_injections: crate::rules::ProjectRuleInjections,
     /// Whether the one-time plan notice is still owed. A record saved before the
     /// plan tools replaced the retired todo tool lacks it and owes the notice.
     #[serde(default = "crate::conversation_plan::notice::PlanNotice::pending")]
@@ -686,6 +693,7 @@ fn write_snapshot_with_context(
             .route_pins(&state.caller_run_id().to_string()),
         allowed_directories: state.told_directories.clone(),
         allowed_instructions: state.allowed_instructions.clone(),
+        project_rule_injections: state.project_rule_injections.clone(),
         plan_notice: state.plan_notice,
         loaded_skills: state.review_skill_refs(),
     };

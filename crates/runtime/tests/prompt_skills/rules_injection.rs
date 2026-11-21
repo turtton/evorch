@@ -11,12 +11,12 @@ use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolRe
 use runtime::{AgentRuntime, ProjectTrust, RulesSettings, RulesSource, RunConfig};
 use sandbox::DirectSandbox;
 use serde_json::json;
-use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
 use support::{ScriptedModel, text_response, tool_response, tool_responses};
 
 const RULE_MARKER: &str = "RULES-INJECTION-UNIQUE-MARKER";
+const NESTED_MARKER: &str = "NEW-NESTED-RULE";
 const TARGET_CONTENT: &str = "fn wave_two_target() {}\n";
 
 fn settings(max_injection_bytes: u64) -> RulesSettings {
@@ -89,6 +89,7 @@ async fn read_success_injects_single_user_rules_message() {
     std::fs::create_dir_all(target.parent().expect("対象ファイルは親を持つ"))
         .expect("対象ディレクトリを作成できる");
     std::fs::write(tmp.path().join("AGENTS.md"), RULE_MARKER).expect("project rules を書き込める");
+    std::fs::write(target.parent().unwrap().join("AGENTS.md"), NESTED_MARKER).unwrap();
     std::fs::write(&target, TARGET_CONTENT).expect("read 対象を書き込める");
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
@@ -141,6 +142,23 @@ async fn read_success_injects_single_user_rules_message() {
             })
         })
         .expect("成功した read の ToolResult が元のファイル内容を保持する");
+    let root_texts: Vec<_> = last_call
+        .iter()
+        .filter_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text } if text.contains(RULE_MARKER) => {
+                    Some((message.role, text))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(
+        root_texts.len(),
+        1,
+        "startup root is not appended after the read"
+    );
+    assert_eq!(root_texts[0].0, MessageRole::System);
     let injected: Vec<_> = last_call
         .iter()
         .enumerate()
@@ -150,7 +168,7 @@ async fn read_success_injects_single_user_rules_message() {
                     matches!(
                         block,
                         ContentBlock::Text { text }
-                            if text.contains("[project-rules]") && text.contains(RULE_MARKER)
+                            if text.contains("[project-rules]") && text.contains(NESTED_MARKER)
                     )
                 })
         })
@@ -196,10 +214,22 @@ async fn nested_chain_injected_root_to_deep_caps_at_root_excludes_siblings() {
     let injected = rules_texts(last_call);
     assert_eq!(injected.len(), 1);
     let text = injected[0];
-    let root_pos = text.find("MARKER-ROOT").expect("root rule が注入される");
+    let system = last_call
+        .iter()
+        .find(|message| message.role == MessageRole::System)
+        .unwrap();
+    assert!(
+        system.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text.contains("MARKER-ROOT"))
+        )
+    );
+    assert!(
+        !text.contains("MARKER-ROOT"),
+        "startup root is not repeated"
+    );
     let mid_pos = text.find("MARKER-MID").expect("mid rule が注入される");
     let deep_pos = text.find("MARKER-DEEP").expect("deep rule が注入される");
-    assert!(root_pos < mid_pos && mid_pos < deep_pos);
+    assert!(mid_pos < deep_pos);
     assert!(!text.contains("MARKER-SIBLING"));
     assert!(!text.contains("MARKER-ABOVE"));
 }
@@ -233,7 +263,19 @@ async fn two_targets_one_batch_single_deduped_injection() {
     let observed = model.observed().await;
     let injected = rules_texts(observed.last().expect("最後の complete を観測できる"));
     assert_eq!(injected.len(), 1);
-    assert_eq!(injected[0].matches("MARKER-ROOT").count(), 1);
+    assert_eq!(injected[0].matches("MARKER-ROOT").count(), 0);
+    assert_eq!(
+        observed
+            .last()
+            .unwrap()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(
+                |block| matches!(block, ContentBlock::Text { text } if text.contains("MARKER-ROOT"))
+            )
+            .count(),
+        1
+    );
     assert!(injected[0].contains("MARKER-A"));
     assert!(injected[0].contains("MARKER-B"));
 }
@@ -274,7 +316,11 @@ async fn scoped_rules_dirs_always_apply_and_glob_fail_closed() {
     let injected = rules_texts(observed.last().expect("最後の complete を観測できる"));
     assert_eq!(injected.len(), 1);
     let text = injected[0];
-    assert!(text.contains("MARKED-OMO-ALWAYS"));
+    assert!(
+        text.contains("MARKED-OMO-ALWAYS"),
+        "project scoped rules are first selected after the tool, not at startup"
+    );
+    assert_eq!(observed.last().unwrap().iter().flat_map(|message| &message.content).filter(|block| matches!(block, ContentBlock::Text { text } if text.contains("MARKED-OMO-ALWAYS"))).count(), 1);
     assert!(text.contains("MARKED-CLAUDE-GLOB"));
     assert!(!text.contains("MARKED-NOMATCH"));
     assert!(!text.contains("MARKED-INVALID"));
@@ -346,10 +392,7 @@ async fn run_read_fixture(
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let mut tool_events = Vec::new();
     while tool_events.len() < 2 {
-        let event = timeout(Duration::from_secs(2), receiver.recv())
-            .await
-            .expect("tool event を待機できる")
-            .expect("event receiver は開いている");
+        let event = receiver.recv().await.expect("event receiver は開いている");
         if let EventKind::Tool(
             event @ (ToolEvent::ToolStarted { .. } | ToolEvent::ToolCompleted { .. }),
         ) = event.kind

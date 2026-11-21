@@ -193,6 +193,14 @@ pub(crate) fn compose_system_sections(
     shared: &LoopShared,
     inputs: &SystemInputs<'_>,
 ) -> Result<Vec<ContextSection>, InitialSystemPromptError> {
+    prepare_system_sections(shared, inputs).map(|(sections, _)| sections)
+}
+
+pub(crate) fn prepare_system_sections(
+    shared: &LoopShared,
+    inputs: &SystemInputs<'_>,
+) -> Result<(Vec<ContextSection>, rules::ProjectRuleInjections), InitialSystemPromptError> {
+    let mut injections = rules::ProjectRuleInjections::default();
     let model_id = shared.model.selected_model(inputs.role, inputs.category);
     let mut sections = Vec::new();
     if let Some(preamble) = &shared.system_prompt_preamble {
@@ -256,8 +264,8 @@ pub(crate) fn compose_system_sections(
     )
     .unwrap_or(u64::MAX);
     if let Some(source) = shared.rules.as_ref()
-        && let Some(text) =
-            rules::startup_snapshot(source, inputs.active_root, None, estimated_history_bytes)
+        && let Some(prepared) =
+            rules::prepare_startup(source, inputs.active_root, None, estimated_history_bytes)
     {
         let paths = rules::startup_rule_files(source, inputs.active_root)
             .into_iter()
@@ -267,8 +275,9 @@ pub(crate) fn compose_system_sections(
         sections.push(ContextSection::new(
             ContextSectionKind::Rules,
             ContextSource::Files { paths },
-            text,
+            prepared.text.clone(),
         ));
+        injections.commit(prepared);
     }
     if let Some(text) = compaction {
         sections.push(ContextSection::new(
@@ -285,7 +294,7 @@ pub(crate) fn compose_system_sections(
         ));
     }
     sections.retain(|section| !section.text.is_empty());
-    Ok(sections)
+    Ok((sections, injections))
 }
 
 /// Join system sections exactly as the initial system message does.

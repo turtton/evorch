@@ -264,7 +264,10 @@ async fn tiny_budget_keeps_closest_rule_and_marks_omissions() {
     let second_call_rules = rules_texts(&observed[1]);
     let third_call_rules = rules_texts(&observed[2]);
     assert_eq!(second_call_rules.len(), 1);
-    assert_eq!(third_call_rules.len(), 2);
+    assert_eq!(
+        third_call_rules, second_call_rules,
+        "unchanged Full and Truncated rules are both suppressed"
+    );
     for text in third_call_rules {
         assert!(text.contains("DEEP-CLOSEST"));
         assert!(!text.contains("ROOT-LONG-CONTENT"));
@@ -307,13 +310,37 @@ async fn edited_rules_file_reflected_in_next_injection() {
     write(&target, "target");
 
     let first = run_once_and_observe(tmp.path(), &target).await;
-    let first_rules = rules_texts(first.last().expect("first run の最後の complete"));
+    assert!(rules_texts(first.last().unwrap()).is_empty());
+    let first_rules: Vec<_> = first
+        .last()
+        .unwrap()
+        .iter()
+        .filter(|m| m.role == MessageRole::System)
+        .filter_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } if text.contains("[project-rules]") => Some(text),
+                _ => None,
+            })
+        })
+        .collect();
     assert_eq!(first_rules.len(), 1);
     assert!(first_rules[0].contains("RULE-V1"));
 
     write(&rule, "RULE-V2");
     let second = run_once_and_observe(tmp.path(), &target).await;
-    let second_rules = rules_texts(second.last().expect("second run の最後の complete"));
+    assert!(rules_texts(second.last().unwrap()).is_empty());
+    let second_rules: Vec<_> = second
+        .last()
+        .unwrap()
+        .iter()
+        .filter(|m| m.role == MessageRole::System)
+        .filter_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } if text.contains("[project-rules]") => Some(text),
+                _ => None,
+            })
+        })
+        .collect();
     assert_eq!(second_rules.len(), 1);
     assert!(second_rules[0].contains("RULE-V2"));
     assert!(!second_rules[0].contains("RULE-V1"));
