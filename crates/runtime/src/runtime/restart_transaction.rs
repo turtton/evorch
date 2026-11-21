@@ -856,10 +856,11 @@ mod admission_observation_tests {
             recipes: serde_json::to_string(&recipes).unwrap(),
         };
         rt.validate_restart_preflight(&proof, &recipes).unwrap();
-        let mut runs = rt.shared.runs.lock().unwrap();
-        let config = &mut runs.get_mut(&run).unwrap().config;
-        config.conversation = !config.conversation;
-        drop(runs);
+        {
+            let mut runs = rt.shared.runs.lock().unwrap();
+            let config = &mut runs.get_mut(&run).unwrap().config;
+            config.conversation = !config.conversation;
+        }
         assert_eq!(proof.intents, rt.shared.quiesce.live_capture_intents());
         assert!(rt.validate_restart_preflight(&proof, &recipes).is_err());
         rt.cancel(run).unwrap();
