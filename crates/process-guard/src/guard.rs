@@ -3,7 +3,7 @@ use crate::{
     COMPAT_ID, LaunchSpec, TARGET,
     image::verify_running_identity,
     peer, pidfd_open,
-    wire::{self, Decoder, Kind, invalid},
+    wire::{self, Decoder, Kind, LaunchMode, LaunchRequest, invalid},
 };
 use std::{
     ffi::CString,
@@ -114,7 +114,7 @@ impl Prepared {
             cwd: CString::new(spec.cwd).unwrap(),
         })
     }
-    unsafe fn exec(&self, guard: i32, error: i32) -> ! {
+    unsafe fn exec(&self, guard: i32, error: i32, mode: LaunchMode) -> ! {
         // The child path performs no allocation, locking, PATH lookup or Rust IO.
         unsafe {
             if libc::syscall(
@@ -126,7 +126,11 @@ impl Prepared {
             {
                 child_error(error);
             }
-            if libc::setsid() < 0 || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
+            let group_ok = match mode {
+                LaunchMode::Direct => libc::setsid() >= 0,
+                LaunchMode::Pty => crate::pty::prepare_target().is_ok(),
+            };
+            if !group_ok || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
                 child_error(error);
             }
             if libc::getppid() != guard {
@@ -281,9 +285,14 @@ pub fn entry() -> io::Result<()> {
         }
         return Ok(());
     }
-    if args.len() != 8 || args[1] != "--launch" {
+    if args.len() != 8 || !["--launch", "--launch-pty"].contains(&args[1].as_str()) {
         return Err(invalid("guard arguments"));
     }
+    let mode = if args[1] == "--launch-pty" {
+        LaunchMode::Pty
+    } else {
+        LaunchMode::Direct
+    };
     let parse = |n: usize| {
         args[n]
             .parse::<u64>()
@@ -323,9 +332,17 @@ pub fn entry() -> io::Result<()> {
             _ => return Err(invalid("LaunchSpec expected")),
         }
     }
-    let spec: LaunchSpec =
-        serde_json::from_slice(&spec).map_err(|_| invalid("LaunchSpec invalid"))?;
-    let prepared = match Prepared::new(spec) {
+    let request: LaunchRequest =
+        serde_json::from_slice(&spec).map_err(|_| invalid("LaunchRequest invalid"))?;
+    if request.mode != mode {
+        return Err(invalid("launch backend mismatch"));
+    }
+    let prepared = match Prepared::new(request.spec).and_then(|prepared| {
+        if mode == LaunchMode::Pty {
+            crate::pty::prepare_helper()?;
+        }
+        Ok(prepared)
+    }) {
         Ok(p) => p,
         Err(e) => {
             wire::send(
@@ -365,7 +382,7 @@ pub fn entry() -> io::Result<()> {
         return Ok(());
     }
     if root == 0 {
-        unsafe { prepared.exec(guard, error_write.as_raw_fd()) }
+        unsafe { prepared.exec(guard, error_write.as_raw_fd(), mode) }
     }
     drop(error_write);
     for fd in 0..3 {

@@ -6,15 +6,22 @@ pub const BUNDLE_ENV: &str = "EVORCH_PROCESS_GUARD_BUNDLE";
 #[cfg(target_os = "linux")]
 pub mod guard;
 #[cfg(target_os = "linux")]
+mod helper;
+#[cfg(target_os = "linux")]
 pub mod image;
 #[cfg(target_os = "linux")]
+mod pty;
+#[cfg(target_os = "linux")]
 pub mod wire;
+#[cfg(target_os = "linux")]
+pub use pty::{PtyMaster, PtySize};
 #[cfg(target_os = "linux")]
 mod client {
     use super::{
         BUNDLE_ENV, COMPAT_ID,
+        helper::HelperProcess,
         image::GuardImage,
-        wire::{self, Decoder, Kind},
+        wire::{self, Decoder, Kind, LaunchMode, LaunchRequest},
     };
     use serde::{Deserialize, Serialize};
     use std::os::unix::process::ExitStatusExt;
@@ -30,7 +37,7 @@ mod client {
             },
         },
         path::{Path, PathBuf},
-        process::{Child, Command, ExitStatus, Stdio},
+        process::{ExitStatus, Stdio},
         sync::{Arc, OnceLock},
         time::{Duration, Instant},
     };
@@ -85,6 +92,26 @@ mod client {
             &self.image
         }
         pub fn spawn(&self, spec: &LaunchSpec, stdio: [Stdio; 3]) -> io::Result<GuardChild> {
+            self.spawn_inner(spec, stdio, LaunchMode::Direct)
+        }
+        /// Allocate and launch atomically. All process ownership operations stay
+        /// on GuardChild; the master exposes only reader, writer and resize.
+        pub fn spawn_pty(
+            &self,
+            spec: &LaunchSpec,
+            size: super::PtySize,
+        ) -> io::Result<(GuardChild, super::PtyMaster)> {
+            super::guard::validate(spec)?;
+            let (master, stdio) = super::pty::open(size)?;
+            let child = self.spawn_inner(spec, stdio, LaunchMode::Pty)?;
+            Ok((child, master))
+        }
+        fn spawn_inner(
+            &self,
+            spec: &LaunchSpec,
+            stdio: [Stdio; 3],
+            mode: LaunchMode,
+        ) -> io::Result<GuardChild> {
             // Validate before creating a helper, including kernel argv/env budget.
             super::guard::validate(spec)?;
             let start = Instant::now();
@@ -102,24 +129,9 @@ mod client {
             let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
             let listener = non_stdio(UnixListener::bind_addr(&addr)?)?;
             listener.set_nonblocking(true)?;
-            let [stdin, stdout, stderr] = stdio;
-            let [dev, ino] = self.image.identity_args();
-            let mut helper = Command::new(self.image.inherited_exec_path())
-                .args([
-                    "--launch",
-                    &dev,
-                    &ino,
-                    &std::process::id().to_string(),
-                    &unsafe { libc::getuid() }.to_string(),
-                    &name,
-                    &nonce,
-                ])
-                .env_clear()
-                .current_dir("/")
-                .stdin(stdin)
-                .stdout(stdout)
-                .stderr(stderr)
-                .spawn()?;
+            // Retain the pinned image through exec, authentication and ExecOk.
+            let image = Arc::clone(&self.image);
+            let mut helper = HelperProcess::spawn(&image, mode, &name, &nonce, stdio)?;
             let mut committed = false;
             let result = (|| {
                 let pidfd = pidfd_open(helper.id() as i32)?;
@@ -137,7 +149,10 @@ mod client {
                 if kind != Kind::Hello || hello != format!("{COMPAT_ID}:{nonce}").as_bytes() {
                     return Err(wire::invalid("guard Hello ABI/compat/nonce mismatch"));
                 }
-                let bytes = serde_json::to_vec(spec)?;
+                let bytes = serde_json::to_vec(&LaunchRequest {
+                    mode,
+                    spec: spec.clone(),
+                })?;
                 if bytes.len() > wire::LAUNCH_LIMIT {
                     return Err(io::Error::from_raw_os_error(libc::E2BIG));
                 }
@@ -276,7 +291,7 @@ mod client {
     /// The decoder and status live in the owner, not in any one wait invocation.
     #[derive(Debug)]
     pub struct GuardChild {
-        helper: Child,
+        helper: HelperProcess,
         stream: UnixStream,
         decoder: Decoder,
         pidfd: OwnedFd,
@@ -291,13 +306,13 @@ mod client {
             self.helper.id()
         }
         pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
-            self.helper.stdin.take()
+            self.helper.take_stdin()
         }
         pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
-            self.helper.stdout.take()
+            self.helper.take_stdout()
         }
         pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
-            self.helper.stderr.take()
+            self.helper.take_stderr()
         }
         /// Drain only immediately available frames. Never sends a request or waits.
         pub fn poll_status(&mut self) -> io::Result<Option<ExitStatus>> {
@@ -337,7 +352,7 @@ mod client {
                 Kind::RootExited => self.root = Some(wire::integer(&p)?),
                 Kind::FinalStatus => {
                     let s = wire::integer(&p)?;
-                    if !self.helper.wait()?.success() {
+                    if !self.helper.wait()? {
                         return Err(wire::invalid("GuardLost: abnormal helper status"));
                     }
                     self.root = Some(s);
@@ -464,6 +479,7 @@ mod client {
     mod accept_tests {
         use super::*;
         use std::io::Read;
+        use std::process::{Child, Command};
 
         // A connection from this process is never the helper unless the expected
         // pid is this process, so a live bystander stands in for the helper.
