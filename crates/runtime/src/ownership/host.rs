@@ -797,6 +797,8 @@ fn heartbeat_tick(
         match result {
             Ok((super::registry::HeartbeatChange::Kept, _)) => {}
             Ok((super::registry::HeartbeatChange::Renewed, owner)) => {
+                #[cfg(feature = "recovery-test-support")]
+                super::heartbeat_observation::record(bus, &owner);
                 emit(bus, &owner, OwnershipAction::Heartbeat);
             }
             Ok((super::registry::HeartbeatChange::Released, owner)) => {

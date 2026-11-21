@@ -13,9 +13,19 @@ impl State {
         Self { other, owners }
     }
 
-    pub fn assert_unchanged_except_lease_renewal(&self, after: &Self, renewals: &[OwnershipEvent]) {
+    pub fn assert_unchanged_except_lease_renewal(
+        &self,
+        after: &Self,
+        renewals: &[OwnershipEvent],
+        heartbeat_rows: &[ThreadOwner],
+    ) {
         assert_eq!(after.other, self.other);
-        assert_owners_unchanged_except_lease_renewal(&self.owners, &after.owners, renewals);
+        assert_owners_unchanged_except_lease_renewal(
+            &self.owners,
+            &after.owners,
+            renewals,
+            heartbeat_rows,
+        );
     }
 }
 
@@ -36,6 +46,7 @@ fn assert_owners_unchanged_except_lease_renewal(
     before: &[ThreadOwner],
     after: &[ThreadOwner],
     renewals: &[OwnershipEvent],
+    heartbeat_rows: &[ThreadOwner],
 ) {
     assert_eq!(without_lease_renewal(after), without_lease_renewal(before));
     for event in renewals {
@@ -66,16 +77,13 @@ fn assert_owners_unchanged_except_lease_renewal(
                     .any(|event| event.thread_id == previous.thread_id),
                 "lease renewal without a matching heartbeat"
             );
-            // Check that the exact observed row is a legal heartbeat transition,
-            // not just that some unrelated ownership event was delivered.
-            let renewed_at = current
-                .lease
-                .expires_at
-                .checked_sub(previous.settings.lease_ms.get())
-                .expect("expiry cannot result from a heartbeat");
-            let mut renewed = previous.clone();
-            renewed.heartbeat(&previous.lease, renewed_at).unwrap();
-            assert_eq!(&renewed, current);
+            // A matching event alone cannot justify an arbitrary extension.
+            // These rows come from actual worker results, before event emit,
+            // independently of the registry row under test.
+            assert!(
+                heartbeat_rows.contains(current),
+                "lease expiry does not match a witnessed heartbeat"
+            );
         }
     }
 }
@@ -168,12 +176,28 @@ mod tests {
         let previous = owner();
         let mut current = previous.clone();
         current.lease.expires_at = expires_at;
-        assert_owners_unchanged_except_lease_renewal(&[previous], &[current], events);
+        let mut witnessed = previous.clone();
+        witnessed.lease.expires_at = 21_000;
+        assert_owners_unchanged_except_lease_renewal(&[previous], &[current], events, &[witnessed]);
     }
     #[test]
     fn accepts_only_a_witnessed_monotonic_heartbeat() {
         check(20_000, &[]);
         check(21_000, &[heartbeat()]);
+    }
+    #[test]
+    fn accepts_a_snapshot_before_a_later_recorded_heartbeat() {
+        let previous = owner();
+        let mut current = previous.clone();
+        current.lease.expires_at = 21_000;
+        let mut later = current.clone();
+        later.lease.expires_at = 22_000;
+        assert_owners_unchanged_except_lease_renewal(
+            &[previous],
+            std::slice::from_ref(&current),
+            &[heartbeat(), heartbeat()],
+            &[current.clone(), later],
+        );
     }
     #[test]
     #[should_panic(expected = "lease expiration regressed")]
@@ -184,6 +208,21 @@ mod tests {
     #[should_panic(expected = "lease renewal without a matching heartbeat")]
     fn rejects_unwitnessed_expiry_change() {
         check(21_000, &[]);
+    }
+    #[test]
+    #[should_panic(expected = "lease expiry does not match a witnessed heartbeat")]
+    fn rejects_extra_expiry_extension_after_a_matching_heartbeat() {
+        // The real heartbeat renewed to 21_000. A subsequent non-heartbeat
+        // mutation must not borrow that event to justify one extra day.
+        check(21_000 + 86_400_000, &[heartbeat()]);
+    }
+    #[test]
+    #[should_panic(expected = "lease expiry does not match a witnessed heartbeat")]
+    fn rejects_heartbeat_without_an_independent_result_row() {
+        let previous = owner();
+        let mut current = previous.clone();
+        current.lease.expires_at = 21_000;
+        assert_owners_unchanged_except_lease_renewal(&[previous], &[current], &[heartbeat()], &[]);
     }
     #[test]
     #[should_panic(expected = "heartbeat holder changed")]

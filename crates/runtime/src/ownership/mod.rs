@@ -22,6 +22,10 @@ pub use retry::RetryPolicy;
 #[cfg(test)]
 pub(crate) use retry::virtual_time::VirtualClock;
 pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
+#[cfg(feature = "recovery-test-support")]
+mod heartbeat_observation;
+#[cfg(feature = "recovery-test-support")]
+pub use heartbeat_observation::HeartbeatObservations;
 pub(crate) mod disposal;
 pub(crate) mod disposal_support;
 mod registry;

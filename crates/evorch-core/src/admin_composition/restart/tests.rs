@@ -441,6 +441,8 @@ async fn live_undisposed_in_the_composed_physical_host_refuses_before_gate_or_tr
     host.admin.publish_for_test();
     let collector = host.graph_collector().clone();
     assert_eq!(collector.snapshot().unwrap().count, Revision(1));
+    let heartbeat_rows =
+        runtime::ownership::HeartbeatObservations::install_for_test(&host.runtime.event_bus());
     let mut owner_events = host.runtime.event_bus().subscribe();
     let before = physical_bootstrap::state(&host, &driver);
     let renewals = physical_bootstrap::wait_for_renewal(&host, &before, &mut owner_events).await;
@@ -465,7 +467,7 @@ async fn live_undisposed_in_the_composed_physical_host_refuses_before_gate_or_tr
     let after = physical_bootstrap::state(&host, &driver);
     let renewals =
         physical_bootstrap::finish_renewals(&sockets, &before, &mut owner_events, renewals).await;
-    before.assert_unchanged_except_lease_renewal(&after, &renewals);
+    before.assert_unchanged_except_lease_renewal(&after, &renewals, &heartbeat_rows.drain());
     assert_eq!(collector.snapshot().unwrap().count, Revision(1));
     stop.send(true).unwrap();
     server.abort();
