@@ -1,9 +1,11 @@
-# D-3a2 owned process handoff (through B3-05)
+# D-3a2 owned process handoff (through B3-08b; B3-09 first stage)
 
 B2a added the typed API; B2b migrated its non-PTY callers in three parts
 (B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: shell PTY (B3-03) and agent Chromium (B3-04)
-are now migrated. B3-05 removes the Linux raw ownership surface. Combined evidence remains pending;
-entry binding alone does **not** prove owner-death cleanup.
+are now migrated. B3-05 removes the Linux raw ownership surface. The real-caller SIGKILL matrix
+(B3-06, #769/#771/#774), the release expiry test binary (B3-07, #773) and the real Chromium/CEF
+cells (B3-08/08b, #772/#775) are merged; see "B3-09 first stage" at the end. The performance check
+(reduced scope, see below) is recorded in the B3-09 PR. Entry binding alone does **not** prove owner-death cleanup.
 
 ## B2b-i: sandbox, session, LSP, js-worker
 
@@ -131,9 +133,8 @@ none is an unclassified Linux product-core owner entry.
 | L33 tests/support/examples/harness and cfg(test) code | Test controllers/fixtures only, including core `product_exec`, restart GuardLost, lifecycle/idle, storage tests and js-worker summary tests. Not product ownership. |
 | L34 `scripts/measure-renderer/src/helper.rs` | Measurement-only raw spawn, outside product core. |
 
-No newly discovered long-lived core-owned caller was excluded. GUI follow-ups,
-B3-06–08 combined evidence and B3-09 performance/final audit remain open;
-**D-7 is not complete**.
+No newly discovered long-lived core-owned caller was excluded. GUI follow-ups and the B3-09
+performance check/final audit are tracked in B3-09 (B3-06–08 evidence is merged: index below).
 
 ### Closed stdio, per path
 
@@ -426,3 +427,47 @@ produces reset after peer death: the old oracle failed at its read unwrap
 oracle, fresh source-only root-only and omitted-retirement-KILL mutations still
 failed on a post-retirement ACK (0.067 s and 0.062 s); both were restored.
 These checks use neither sleeps, retries nor load, and change no product code.
+
+## B3-09: evidence index and performance check
+
+This section changes no behavior. It states what exists and where the remaining work is. The
+performance check's result is in the B3-09 PR description; **whether D-7 is complete is decided
+by the independent review and acceptance, not by this README.**
+
+### Evidence index (merged)
+
+| PR (merge) | Cell | Claim it supports | Not claimed |
+|---|---|---|---|
+| #754 (2cdc33f1) | B3-01 closed-fd boundary | Started role closes fd 0/1/2, `EBADF` before launch, all masks, exec failure | A new "target always sees EBADF" contract |
+| #758 (ff03eb9d) | B3-02 typed PTY backend | PTY child under the same guard ownership; helper outside target PGID | Real release core acceptance |
+| #763 (956d2ffe) | B3-03 shell PTY | Product shell PTY through typed guard | GUI embedded terminal (L21, follow-up) |
+| #756 (656be97f) | B3-04 agent Chromium | Owned launch before CDP connect, golden argv, limits | Crashpad helpers (outside same-PGID guarantee, see B3-04) |
+| #770 (908fe00f) | B3-05 raw API removal | Linux raw ownership surface gone | Callers' runtime behavior |
+| #769, #771, #774 | B3-06 real caller matrix | Sealed release core SIGKILLed with real callers L01–L16 (P/P\* cells); eval CLI cell | T cells are API owners, not product reachability |
+| #773 (976b3696) | B3-07 expiry | Real ten-second expiry, exit 74, owned-child reaping in a **release test binary** | Product ELF expiry (5a-V T3) |
+| #772, #775 | B3-08/08b real Chromium/CEF | Real core SIGKILL and expiry after real navigation, Chromium and CEF separately | Escaped Crashpad helpers |
+
+Per-PR mutation tables (target, mutation, observed failure) are in each PR body. This section is
+only an index to those PR bodies: **an aggregated record of the mutations (with target commits and
+failure evidence) has not been created.**
+
+### Residual spawns and out-of-scope list
+
+Unchanged from "Remaining spawn audit (B3-05)": GUI short-lived git/`fc-match`/demo commands (L22–25),
+GUI PTY (L21) and in-process CEF (L26) are separate follow-ups; `core-launcher` preflight supervisor
+(L28) and `core-instance` self-exec (L29) are intentional exclusions; processes that leave the
+root's PGID/SID (`setsid`, Chromium Crashpad) are outside the guarantee and are recorded, then
+reaped by the test controller.
+
+### Performance check (reduced scope)
+
+Runner, fixtures, aggregator and the frozen spec live in `crates/evorch-core/perf-gate/` (see its
+README), `examples/perf_gate/`, `shared-test-support/perf_gate/` and `scripts/perf-gate.sh`.
+Measurement code is outside every product path. After a dry run showed the original CPU-limited
+scope gate could not run (a round did not fit 600 s and the A-versus-A noise was hundreds of
+milliseconds), the user reduced it to an **order-of-magnitude check** on a fixed host with no
+artificial load (the host was a desktop, not idle; what ran alongside is recorded in conditions.json):
+shell RTT `p50(B*) <= 1.5 * p50(A)` per workload (50 ABAB pairs, one round), ForceKill p99 < 1 s
+(200 samples) and guard PSS (100 guards, 180 s, median ≤ 4 MiB, p95 ≤ 8 MiB). It supports no
+millisecond-level claim. The measured result, its conditions and the raw-data paths are recorded
+in the PR description. CI runs only the aggregator's unit tests; speed is never a CI assertion.

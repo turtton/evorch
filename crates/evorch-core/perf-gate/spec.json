@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "source": "Reduced scope approved by the user (question-41eda9b4579b24b09e86a96a7e751928): an order-of-magnitude check on a fixed host with no artificial load (no cgroup scope, no stress-ng, no C arm); whatever else ran at the same time and the load average are recorded in conditions.json. Values are fixed before any measurement; changing one needs the parent's approval before results are seen.",
+  "rounds": 1,
+  "round_timeout_secs": 900,
+  "warmup_per_arm": 5,
+  "pairs": 50,
+  "workloads": [
+    { "name": "grep_fixed", "command": "grep -F -- D-7 fixture.txt" },
+    { "name": "git_diff_quiet", "command": "git diff --quiet -- tracked.txt" },
+    { "name": "colon", "command": ":" }
+  ],
+  "latency_limits": { "p50_ratio_milli": 1500 },
+  "force_kill": { "samples_min": 200, "p99_limit_ns": 1000000000, "observe_budget_ns": 10000000000 },
+  "pss": { "guards": 100, "hold_secs": 180, "median_limit_kib": 4096, "p95_limit_kib": 8192 },
+  "state": {
+    "idle_threads": 20,
+    "messages_per_thread": 50,
+    "message_bytes": 8192,
+    "repo_files": 1000,
+    "repo_file_bytes": 16384,
+    "active_agents": 2,
+    "tick_ms": 100,
+    "fixture_txt_bytes": 1048576
+  }
+}

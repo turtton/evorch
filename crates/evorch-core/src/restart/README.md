@@ -145,6 +145,12 @@ residual boundary, not a safety claim for arbitrary ELF execution.
 
 ## B3 performance conditions scaffold (not B1 measurements)
 
+> B3-09 did not implement this scaffold as written. A dry run showed the CPU-limited scope, stress-ng
+> and 2/5 ms deltas could not run, and the user reduced the check to an order-of-magnitude one on
+> a fixed host with no artificial load (`perf-gate/spec.json`, `perf-gate/README.md`): `p50(B*) <= 1.5 * p50(A)`,
+> ForceKill p99 < 1 s and guard PSS. The JSON below stays a B1-era template and its limits and
+> delta gates are **not** claims.
+
 Freeze filled conditions and SHA-256 **before** collecting samples; retain raw
 data including slow samples. This template makes no B1 performance verdict:
 
@@ -459,7 +465,9 @@ explicitly select Edit; no selection is guessed from captured input.
 - **5b:** CLI invocation/token continuity and its distinct reconnect deadlines;
   ordinary conversation follow-up routing here is not CLI invocation resumption.
 - **D-3a2-B:** owned-child/group termination. A alone does not meet D-7 or
-  complete D-3a2; completion requires both separately reviewed changes.
+  complete D-3a2; completion requires both separately reviewed changes. B3-02–08 are merged
+  (index in `crates/sandbox/src/owned/README.md`); the B3-09 order-of-magnitude performance check
+  is recorded in its PR, and product-ELF expiry remains the 5a-V T3 requirement.
 - **F4:** same-build product-to-product real exec remains separate. The raw
   cache fixtures use different predecessor/successor images.
 - **MCP evidence:** no-I/O is structural with no server configured; the MCP
