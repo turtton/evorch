@@ -4,8 +4,8 @@ B2a added the typed API; B2b migrated its non-PTY callers in three parts
 (B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: shell PTY (B3-03) and agent Chromium (B3-04)
 are now migrated. B3-05 removes the Linux raw ownership surface. The real-caller SIGKILL matrix
 (B3-06, #769/#771/#774), the release expiry test binary (B3-07, #773) and the real Chromium/CEF
-cells (B3-08/08b, #772/#775) are merged; see "B3-09 first stage" at the end. The performance gate
-is implemented but **has not been measured**. Entry binding alone does **not** prove owner-death cleanup.
+cells (B3-08/08b, #772/#775) are merged; see "B3-09 first stage" at the end. The performance check
+(reduced scope, see below) is recorded in the B3-09 PR. Entry binding alone does **not** prove owner-death cleanup.
 
 ## B2b-i: sandbox, session, LSP, js-worker
 
@@ -134,8 +134,7 @@ none is an unclassified Linux product-core owner entry.
 | L34 `scripts/measure-renderer/src/helper.rs` | Measurement-only raw spawn, outside product core. |
 
 No newly discovered long-lived core-owned caller was excluded. GUI follow-ups and the B3-09
-performance gate/final audit remain open (B3-06–08 evidence is merged: index below);
-**D-7 is not complete**.
+performance check/final audit are tracked in B3-09 (B3-06–08 evidence is merged: index below).
 
 ### Closed stdio, per path
 
@@ -429,11 +428,11 @@ oracle, fresh source-only root-only and omitted-retirement-KILL mutations still
 failed on a post-retirement ACK (0.067 s and 0.062 s); both were restored.
 These checks use neither sleeps, retries nor load, and change no product code.
 
-## B3-09 first stage: evidence index and gate status
+## B3-09: evidence index and performance check
 
-This section changes no behavior. It states what exists, what does not, and where the remaining
-work is. **D-7 is not complete**: the performance gate has not been measured and the independent
-review/acceptance has not happened.
+This section changes no behavior. It states what exists and where the remaining work is. The
+performance check's result is in the B3-09 PR description; **whether D-7 is complete is decided
+by the independent review and acceptance, not by this README.**
 
 ### Evidence index (merged)
 
@@ -460,11 +459,14 @@ GUI PTY (L21) and in-process CEF (L26) are separate follow-ups; `core-launcher` 
 root's PGID/SID (`setsid`, Chromium Crashpad) are outside the guarantee and are recorded, then
 reaped by the test controller.
 
-### Performance gate
+### Performance check (reduced scope)
 
 Runner, fixtures, aggregator and the frozen spec live in `crates/evorch-core/perf-gate/` (see its
 README), `examples/perf_gate/`, `shared-test-support/perf_gate/` and `scripts/perf-gate.sh`.
-Measurement code is outside every product path. The aggregator judges each round alone with
-nearest-rank quantiles, removes no outlier and rejects missing, failed or timed-out rounds
-(`tests/perf_gate_aggregate.rs`). CI runs only those unit tests; speed numbers are never a CI
-assertion. Samples are collected only after the parent fixes the conditions.
+Measurement code is outside every product path. After a dry run showed the original CPU-limited
+scope gate could not run (a round did not fit 600 s and the A-versus-A noise was hundreds of
+milliseconds), the user reduced it to an **order-of-magnitude check** on an idle fixed host:
+shell RTT `p50(B*) <= 1.5 * p50(A)` per workload (50 ABAB pairs, one round), ForceKill p99 < 1 s
+(200 samples) and guard PSS (100 guards, 180 s, median ≤ 4 MiB, p95 ≤ 8 MiB). It supports no
+millisecond-level claim. The measured result, its conditions and the raw-data paths are recorded
+in the PR description. CI runs only the aggregator's unit tests; speed is never a CI assertion.

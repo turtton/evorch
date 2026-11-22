@@ -1,49 +1,41 @@
-//! D-3a2 B3-09 performance gate: result schema and aggregator.
+//! D-3a2 B3-09 performance check: result schema and aggregator.
 //!
 //! Pure data and arithmetic. No process, clock, file or product code, so the
 //! rules that decide pass/fail are unit-tested apart from the runner
 //! (tests/perf_gate_aggregate.rs) and the runner cannot soften them.
 //!
-//! Rules (the plan, section 5; design v3 section 8.2):
-//! - nearest-rank quantiles on integers (per-mille, no float rounding);
-//! - every round is judged alone; rounds are never pooled and an invalid,
-//!   missing, duplicated or failed round fails the gate;
+//! This is an order-of-magnitude check on an otherwise idle fixed host, not a
+//! latency gate (the parent's reduced scope, question-41eda9b4579b24b09e86a96a7e751928):
+//! - shell RTT per workload: `p50(B*) <= 1.5 * p50(A)` on integers; the paired
+//!   differences and both delta definitions are recorded and never decide;
+//! - ForceKill p99 < 1 s over at least 200 samples (B only);
+//! - guard PSS median and p95 over 100 guards held 180 s (B only);
+//! - nearest-rank quantiles (per-mille, no float rounding);
 //! - no outlier is removed: every sample the runner recorded is used;
-//! - the A/B order of every pair must equal the sequence derived from the
-//!   spec seed, so a result cannot be re-ordered after the fact;
-//! - a sample that timed out (no exit observed) is a failure, not a skip.
+//! - a missing, duplicated, failed or timed-out round fails the check, and a
+//!   sample that timed out (no exit observed) is a failure, not a skip.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The frozen thresholds and counts. Read by the runner and the aggregator.
 pub const SPEC_JSON: &str = include_str!("../../perf-gate/spec.json");
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spec {
     pub schema: u32,
     pub rounds: u32,
+    /// A round that has not finished within this is recorded as timed out.
+    pub round_timeout_secs: u32,
     pub warmup_per_arm: u32,
     pub pairs: u32,
-    pub seed: u64,
-    pub delta_definition: DeltaDefinition,
     pub workloads: Vec<Workload>,
     pub latency_limits: LatencyLimits,
     pub force_kill: ForceKillSpec,
     pub pss: PssSpec,
-    pub scope: ScopeSpec,
     pub state: StateSpec,
     #[serde(default)]
     pub source: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeltaDefinition {
-    /// pXX(B) - pXX(A) of the two marginal distributions.
-    QuantileDifference,
-    /// pXX of the per-pair differences B - A.
-    PairedDifferenceQuantile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,8 +45,8 @@ pub struct Workload {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyLimits {
-    pub p50_delta_ns: i64,
-    pub p95_delta_ns: i64,
+    /// `p50(B*) * 1000 <= p50(A) * p50_ratio_milli`, per workload and round.
+    pub p50_ratio_milli: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForceKillSpec {
@@ -70,14 +62,6 @@ pub struct PssSpec {
     pub hold_secs: u32,
     pub median_limit_kib: u64,
     pub p95_limit_kib: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScopeSpec {
-    pub cpus: u32,
-    pub memory_bytes: u64,
-    pub tasks: u64,
-    pub timeout_secs: u32,
-    pub stress_cpus: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSpec {
@@ -122,45 +106,11 @@ pub fn nearest_rank<T: Copy + Ord>(values: &[T], per_mille: u32) -> Option<T> {
     Some(sorted[(rank - 1) as usize])
 }
 
-// -------------------------------------------------------------------- order
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Arm {
-    A,
-    B,
-}
-fn splitmix(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
-}
-/// The arm measured first in pair `index` of `workload` in `round`: ABBA
-/// alternation (A B | B A | A B | ...) whose starting arm is derived from the
-/// frozen seed per (round, workload).
-pub fn expected_first(seed: u64, round: u32, workload: usize, index: u32) -> Arm {
-    let start = splitmix(seed ^ (u64::from(round) << 32) ^ ((workload as u64) << 8)) & 1;
-    let phase = (u64::from(index) % 4 == 1 || u64::from(index) % 4 == 2) as u64;
-    if (start ^ phase) == 0 { Arm::A } else { Arm::B }
-}
-
-/// The A/B order of one (round, workload) as the string stored in conditions.json.
-pub fn order_string(spec: &Spec, round: u32, workload: usize) -> String {
-    (0..spec.pairs)
-        .map(|i| {
-            if expected_first(spec.seed, round, workload, i) == Arm::A {
-                'A'
-            } else {
-                'B'
-            }
-        })
-        .collect()
-}
-
 /// What conditions.json must carry before any sample is taken: host, toolchain,
-/// both arms' source and artifact identities, the fixture, the runner, the
-/// stress tool and the frozen order. Returns every problem found.
+/// both arms' source and artifact identities, the fixture and the runner.
+/// Returns every problem found.
 pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
+    let _ = spec;
     let mut problems = Vec::new();
     let text = |pointer: &str| {
         c.pointer(pointer)
@@ -177,6 +127,7 @@ pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
         "/host/cpu_model",
         "/host/governor",
         "/host/loadavg",
+        "/host/top_cpu",
         "/toolchain/rustc",
         "/toolchain/cargo",
         "/toolchain/profile",
@@ -184,7 +135,6 @@ pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
         "/tools/sh",
         "/tools/grep",
         "/tools/git",
-        "/stress_ng",
         "/arms/a/build_recipe",
         "/arms/b/build_recipe",
         "/arms/a/exe_path",
@@ -198,7 +148,6 @@ pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
         "/host/cpu_count",
         "/host/mem_total_kib",
         "/toolchain/rustflags_set",
-        "/seed",
     ] {
         if c.pointer(pointer).is_none() {
             problems.push(format!("{pointer}: missing"));
@@ -226,28 +175,6 @@ pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
     ] {
         hex(pointer, 64, &mut problems);
     }
-    // Arm C (the current main) is report-only: optional, but well-formed when named.
-    if c.pointer("/arms/c").is_some() {
-        hex("/arms/c/source_sha", 40, &mut problems);
-        hex("/arms/c/tree_sha", 40, &mut problems);
-        hex("/arms/c/exe_sha256", 64, &mut problems);
-        if text("/arms/c/build_recipe").is_none() {
-            problems.push("/arms/c/build_recipe: missing or empty".into());
-        }
-    }
-    if c.pointer("/seed").and_then(|v| v.as_u64()) != Some(spec.seed) {
-        problems.push("/seed: differs from the spec seed".into());
-    }
-    for round in 1..=spec.rounds {
-        for (w, workload) in spec.workloads.iter().enumerate() {
-            let pointer = format!("/order/{round}/{}", workload.name);
-            if text(&pointer) != Some(order_string(spec, round, w).as_str()) {
-                problems.push(format!(
-                    "{pointer}: missing or not the frozen ABBA sequence"
-                ));
-            }
-        }
-    }
     problems
 }
 
@@ -261,34 +188,13 @@ pub enum CellStatus {
     TimedOut { reason: String },
 }
 
-/// What the runner read back from the cgroup of the process that measured.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScopeReadback {
-    pub cpu_max: String,
-    pub memory_max: u64,
-    pub swap_max: u64,
-    pub pids_max: u64,
-    /// `stress-ng --version` plus its resolved path, or `None`.
-    pub stress_ng: Option<String>,
-}
-
+/// One pair: arm A is measured first, then B (the fixed ABAB order).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairSample {
     pub workload: String,
     pub index: u32,
-    pub first: Arm,
     pub a_ns: u64,
     pub b_ns: u64,
-}
-/// Report-only probe of arm C (the current main) taken inside pair `index` of the
-/// same workload: it never decides the gate. `slot` (0..3) is where C ran among
-/// the pair's three probes, rotated so no arm owns a position.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CSample {
-    pub workload: String,
-    pub index: u32,
-    pub slot: u8,
-    pub c_ns: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillSample {
@@ -299,17 +205,13 @@ pub struct KillSample {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyRound {
     pub schema: u32,
-    /// `false` for a smoke run. A smoke file can never pass the gate.
+    /// `false` for a smoke run. A smoke file can never pass the check.
     pub evidence: bool,
     pub round: u32,
     pub conditions_sha256: String,
     pub spec_sha256: String,
     pub status: CellStatus,
-    pub scope: ScopeReadback,
     pub samples: Vec<PairSample>,
-    /// Empty when no C arm was run.
-    #[serde(default)]
-    pub c_samples: Vec<CSample>,
     pub force_kill: Vec<KillSample>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,14 +228,13 @@ pub struct PssRound {
     pub conditions_sha256: String,
     pub spec_sha256: String,
     pub status: CellStatus,
-    pub scope: ScopeReadback,
     pub hold_secs: u32,
     pub guards: Vec<GuardPss>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     pub conditions_sha256: String,
-    /// Findings of [`check_conditions`] on conditions.json; any makes the gate fail.
+    /// Findings of [`check_conditions`] on conditions.json; any makes the check fail.
     #[serde(default)]
     pub conditions_problems: Vec<String>,
     pub latency: Vec<LatencyRound>,
@@ -349,17 +250,14 @@ pub enum FailureKind {
     SchemaMismatch,
     SpecMismatch,
     ConditionsMismatch,
-    ScopeMismatch,
     MissingRound,
     DuplicateRound,
     UnexpectedRound,
     RoundFailed,
     SampleCount,
     UnknownWorkload,
-    OrderMismatch,
     InvalidSample,
-    LatencyP50,
-    LatencyP95,
+    LatencyRatio,
     ForceKillTimeout,
     ForceKillP99,
     PssGuardCount,
@@ -385,25 +283,14 @@ pub struct WorkloadVerdict {
     pub a_p95_ns: u64,
     pub b_p50_ns: u64,
     pub b_p95_ns: u64,
-    pub delta_p50_ns: i64,
-    pub delta_p95_ns: i64,
-    /// Reported for the definition the spec did not choose; never gates.
-    pub other_delta_p50_ns: i64,
-    pub other_delta_p95_ns: i64,
+    /// `p50(B) * 1000 / p50(A)`, rounded down. This decides.
+    pub ratio_p50_milli: u64,
+    /// Recorded only: quantiles of the per-pair B - A (Q1) and pXX(B) - pXX(A) (Q2).
+    pub paired_delta_p50_ns: i64,
+    pub paired_delta_p95_ns: i64,
+    pub marginal_delta_p50_ns: i64,
+    pub marginal_delta_p95_ns: i64,
     pub pass: bool,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CReport {
-    pub round: u32,
-    pub workload: String,
-    pub pairs: u32,
-    pub b_p50_ns: u64,
-    pub b_p95_ns: u64,
-    pub c_p50_ns: u64,
-    pub c_p95_ns: u64,
-    /// Quantiles of the per-pair C - B differences. Report only.
-    pub delta_p50_ns: i64,
-    pub delta_p95_ns: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillVerdict {
@@ -427,9 +314,6 @@ pub struct Summary {
     pub conditions_sha256: String,
     pub pass: bool,
     pub latency: Vec<WorkloadVerdict>,
-    /// Arm C against B. Never part of `pass` and never produces a failure.
-    #[serde(default)]
-    pub c_report: Vec<CReport>,
     pub force_kill: Vec<KillVerdict>,
     pub pss: Vec<PssVerdict>,
     pub failures: Vec<Failure>,
@@ -460,10 +344,10 @@ impl Ctx<'_> {
         &mut self,
         cell: &'static str,
         round: u32,
-        meta: (u32, bool, &str, &str, &CellStatus, &ScopeReadback),
+        meta: (u32, bool, &str, &str, &CellStatus),
         conditions: &str,
     ) -> bool {
-        let (schema, evidence, spec_sha, cond_sha, status, scope) = meta;
+        let (schema, evidence, spec_sha, cond_sha, status) = meta;
         let before = self.failures.len();
         if !evidence {
             self.fail(
@@ -522,22 +406,6 @@ impl Ctx<'_> {
                 );
             }
         }
-        let s = &self.spec.scope;
-        let want_cpu = format!("{} 100000", u64::from(s.cpus) * 100_000);
-        if scope.cpu_max != want_cpu
-            || scope.memory_max != s.memory_bytes
-            || scope.swap_max != 0
-            || scope.pids_max != s.tasks
-            || scope.stress_ng.is_none()
-        {
-            self.fail(
-                FailureKind::ScopeMismatch,
-                cell,
-                round,
-                None,
-                format!("scope readback {scope:?}"),
-            );
-        }
         self.failures.len() == before
     }
 }
@@ -589,14 +457,13 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
             &round.spec_sha256,
             &round.conditions_sha256,
             &round.status,
-            &round.scope,
         ),
         conditions,
     );
     if !ok {
         return;
     }
-    for (w_idx, workload) in spec.workloads.iter().enumerate() {
+    for workload in &spec.workloads {
         let samples: Vec<&PairSample> = round
             .samples
             .iter()
@@ -613,21 +480,13 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
             );
             continue;
         }
-        let mut order_bad = None;
         let mut invalid = None;
         for (i, s) in samples.iter().enumerate() {
             if s.index as usize != i {
-                order_bad = Some(format!("pair {i} carries index {}", s.index));
-            } else if s.first != expected_first(spec.seed, r, w_idx, s.index) {
-                order_bad = Some(format!("pair {i} measured {:?} first", s.first));
-            }
-            if s.a_ns == 0 || s.b_ns == 0 {
+                invalid = Some(format!("pair {i} carries index {}", s.index));
+            } else if s.a_ns == 0 || s.b_ns == 0 {
                 invalid = Some(format!("pair {i} has a zero duration"));
             }
-        }
-        if let Some(detail) = order_bad {
-            ctx.fail(FailureKind::OrderMismatch, "latency", r, name, detail);
-            continue;
         }
         if let Some(detail) = invalid {
             ctx.fail(FailureKind::InvalidSample, "latency", r, name, detail);
@@ -641,35 +500,19 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
             .collect();
         let q = |v: &[u64], p| nearest_rank(v, p).expect("non-empty");
         let (a50, a95, b50, b95) = (q(&a, 500), q(&a, 950), q(&b, 500), q(&b, 950));
-        let marginal = (b50 as i64 - a50 as i64, b95 as i64 - a95 as i64);
-        let paired = (
-            nearest_rank(&diffs, 500).expect("non-empty"),
-            nearest_rank(&diffs, 950).expect("non-empty"),
-        );
-        let (d50, d95, o50, o95) = match spec.delta_definition {
-            DeltaDefinition::QuantileDifference => (marginal.0, marginal.1, paired.0, paired.1),
-            DeltaDefinition::PairedDifferenceQuantile => {
-                (paired.0, paired.1, marginal.0, marginal.1)
-            }
-        };
-        let p50_ok = d50 <= spec.latency_limits.p50_delta_ns;
-        let p95_ok = d95 <= spec.latency_limits.p95_delta_ns;
-        if !p50_ok {
+        let ratio = u128::from(b50) * 1000 / u128::from(a50);
+        let pass = u128::from(b50) * 1000
+            <= u128::from(a50) * u128::from(spec.latency_limits.p50_ratio_milli);
+        if !pass {
             ctx.fail(
-                FailureKind::LatencyP50,
+                FailureKind::LatencyRatio,
                 "latency",
                 r,
                 name,
-                format!("delta p50 {d50} ns"),
-            );
-        }
-        if !p95_ok {
-            ctx.fail(
-                FailureKind::LatencyP95,
-                "latency",
-                r,
-                name,
-                format!("delta p95 {d95} ns"),
+                format!(
+                    "p50(B) {b50} ns is {ratio}/1000 of p50(A) {a50} ns, limit {}/1000",
+                    spec.latency_limits.p50_ratio_milli
+                ),
             );
         }
         out.latency.push(WorkloadVerdict {
@@ -680,14 +523,14 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
             a_p95_ns: a95,
             b_p50_ns: b50,
             b_p95_ns: b95,
-            delta_p50_ns: d50,
-            delta_p95_ns: d95,
-            other_delta_p50_ns: o50,
-            other_delta_p95_ns: o95,
-            pass: p50_ok && p95_ok,
+            ratio_p50_milli: ratio as u64,
+            paired_delta_p50_ns: nearest_rank(&diffs, 500).expect("non-empty"),
+            paired_delta_p95_ns: nearest_rank(&diffs, 950).expect("non-empty"),
+            marginal_delta_p50_ns: b50 as i64 - a50 as i64,
+            marginal_delta_p95_ns: b95 as i64 - a95 as i64,
+            pass,
         });
     }
-    c_report(spec, round, out);
     for s in &round.samples {
         if !spec.workloads.iter().any(|w| w.name == s.workload) {
             ctx.fail(
@@ -702,51 +545,6 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
     kill(ctx, round, out);
 }
 
-/// Arm C against B, for the record only. A workload whose C samples do not line up
-/// with its pairs is left out of the report: C can neither fail nor rescue the gate.
-fn c_report(spec: &Spec, round: &LatencyRound, out: &mut Summary) {
-    for workload in &spec.workloads {
-        let pairs: Vec<&PairSample> = round
-            .samples
-            .iter()
-            .filter(|s| s.workload == workload.name)
-            .collect();
-        let mut c: Vec<&CSample> = round
-            .c_samples
-            .iter()
-            .filter(|s| s.workload == workload.name)
-            .collect();
-        c.sort_by_key(|s| s.index);
-        let aligned = !c.is_empty()
-            && c.len() == pairs.len()
-            && c.iter()
-                .zip(&pairs)
-                .all(|(c, p)| c.index == p.index && c.c_ns > 0);
-        if !aligned {
-            continue;
-        }
-        let b: Vec<u64> = pairs.iter().map(|p| p.b_ns).collect();
-        let cs: Vec<u64> = c.iter().map(|s| s.c_ns).collect();
-        let diffs: Vec<i64> = c
-            .iter()
-            .zip(&pairs)
-            .map(|(c, p)| c.c_ns as i64 - p.b_ns as i64)
-            .collect();
-        let q = |v: &[u64], p| nearest_rank(v, p).expect("non-empty");
-        out.c_report.push(CReport {
-            round: round.round,
-            workload: workload.name.clone(),
-            pairs: pairs.len() as u32,
-            b_p50_ns: q(&b, 500),
-            b_p95_ns: q(&b, 950),
-            c_p50_ns: q(&cs, 500),
-            c_p95_ns: q(&cs, 950),
-            delta_p50_ns: nearest_rank(&diffs, 500).expect("non-empty"),
-            delta_p95_ns: nearest_rank(&diffs, 950).expect("non-empty"),
-        });
-    }
-}
-
 fn kill(ctx: &mut Ctx<'_>, round: &LatencyRound, out: &mut Summary) {
     let r = round.round;
     let spec = &ctx.spec.force_kill;
@@ -754,13 +552,12 @@ fn kill(ctx: &mut Ctx<'_>, round: &LatencyRound, out: &mut Summary) {
     let mut pass = true;
     if n < spec.samples_min {
         ctx.fail(
-            FailureKind::ForceKillTimeout,
+            FailureKind::SampleCount,
             "force_kill",
             r,
             None,
             format!("{n} samples, at least {} required", spec.samples_min),
         );
-        ctx.failures.last_mut().expect("just pushed").kind = FailureKind::SampleCount;
         pass = false;
     }
     let lost = round.force_kill.iter().filter(|k| k.ns.is_none()).count();
@@ -779,8 +576,7 @@ fn kill(ctx: &mut Ctx<'_>, round: &LatencyRound, out: &mut Summary) {
         );
         pass = false;
     }
-    let zero = round.force_kill.iter().any(|k| k.ns == Some(0));
-    if zero {
+    if round.force_kill.iter().any(|k| k.ns == Some(0)) {
         ctx.fail(
             FailureKind::InvalidSample,
             "force_kill",
@@ -829,7 +625,6 @@ fn pss(ctx: &mut Ctx<'_>, conditions: &str, round: &PssRound, out: &mut Summary)
             &round.spec_sha256,
             &round.conditions_sha256,
             &round.status,
-            &round.scope,
         ),
         conditions,
     );
@@ -903,7 +698,7 @@ fn pss(ctx: &mut Ctx<'_>, conditions: &str, round: &PssRound, out: &mut Summary)
     });
 }
 
-/// Judge the evidence of a whole gate run. Passes only when no failure was
+/// Judge the evidence of a whole check run. Passes only when no failure was
 /// recorded: every expected round of both cells present, valid and inside the
 /// limits on its own.
 pub fn evaluate(spec: &Spec, evidence: &Evidence) -> Summary {
@@ -917,7 +712,6 @@ pub fn evaluate(spec: &Spec, evidence: &Evidence) -> Summary {
         conditions_sha256: evidence.conditions_sha256.clone(),
         pass: false,
         latency: Vec::new(),
-        c_report: Vec::new(),
         force_kill: Vec::new(),
         pss: Vec::new(),
         failures: Vec::new(),

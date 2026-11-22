@@ -2,7 +2,7 @@
 //! are driven through their public entrances and nothing is added to them.
 use super::{
     arm::{CoreArm, parent_of},
-    gate::{Arm, CSample, GuardPss, KillSample, PairSample, ScopeReadback, Spec, expected_first},
+    gate::{GuardPss, KillSample, PairSample, Spec},
 };
 use sandbox::owned::{GuardRuntime, OwnedChild, OwnedCommand};
 use serde_json::{Value, json};
@@ -17,54 +17,6 @@ use std::{
 fn read(path: &str) -> io::Result<String> {
     std::fs::read_to_string(path).map(|s| s.trim().to_owned())
 }
-
-fn limit(text: &str) -> u64 {
-    text.parse().unwrap_or(u64::MAX)
-}
-
-fn command_line(exe: &str, arg: &str) -> Option<String> {
-    let out = std::process::Command::new(exe).arg(arg).output().ok()?;
-    let text = [out.stdout, out.stderr].concat();
-    String::from_utf8_lossy(&text)
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_owned())
-}
-
-/// What the kernel enforces on the cgroup this process runs in, and the
-/// stress-ng that runs next to it (the scope script starts it inside).
-pub fn scope_readback() -> io::Result<ScopeReadback> {
-    let own = read("/proc/self/cgroup")?;
-    let path = own
-        .lines()
-        .find_map(|l| l.strip_prefix("0::"))
-        .ok_or_else(|| io::Error::other("not in a cgroup v2 hierarchy"))?;
-    let dir = format!("/sys/fs/cgroup{path}");
-    let mut stress_ng = None;
-    for pid in read(&format!("{dir}/cgroup.procs"))
-        .unwrap_or_default()
-        .lines()
-    {
-        let comm = read(&format!("/proc/{pid}/comm")).unwrap_or_default();
-        if comm.contains("stress-ng")
-            && let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe"))
-        {
-            let exe = exe.display().to_string();
-            let version = command_line(&exe, "--version").unwrap_or_default();
-            stress_ng = Some(format!("{exe} | {version}"));
-            break;
-        }
-    }
-    Ok(ScopeReadback {
-        cpu_max: read(&format!("{dir}/cpu.max"))?,
-        memory_max: limit(&read(&format!("{dir}/memory.max"))?),
-        swap_max: limit(&read(&format!("{dir}/memory.swap.max"))?),
-        pids_max: limit(&read(&format!("{dir}/pids.max"))?),
-        stress_ng,
-    })
-}
-
-// ------------------------------------------------------------------ latency
 
 /// One probe: a user message whose reply is a shell tool call. The RTT is the
 /// controller clock from "tool call written to the core" to "request that
@@ -93,67 +45,25 @@ async fn probe(arm: &CoreArm, workload: usize, kind: char, n: u32) -> io::Result
     }
 }
 
-/// Warm-up, then `pairs` paired samples per workload in the frozen ABBA order.
+/// Warm-up, then `pairs` paired samples per workload, always A then B (ABAB).
 /// Samples are appended as they are taken, so a failure keeps what was measured.
-///
-/// `c` is the report-only arm (current main). Inside every pair it takes one extra
-/// probe whose slot rotates before / between / after the pair's A and B probes; the
-/// relative A/B order stays the frozen one.
 pub async fn latency(
     spec: &Spec,
-    round: u32,
     a: &Arc<CoreArm>,
     b: &Arc<CoreArm>,
-    c: Option<&Arc<CoreArm>>,
     out: &mut Vec<PairSample>,
-    c_out: &mut Vec<CSample>,
 ) -> io::Result<()> {
     for (w, workload) in spec.workloads.iter().enumerate() {
         for i in 0..spec.warmup_per_arm {
             probe(a, w, 'w', i).await?;
             probe(b, w, 'w', i).await?;
-            if let Some(c) = c {
-                probe(c, w, 'w', i).await?;
-            }
         }
         for index in 0..spec.pairs {
-            let first = expected_first(spec.seed, round, w, index);
-            let (mut a_ns, mut b_ns) = (0, 0);
-            let slot = ((index as usize + w) % 3) as u8;
-            for position in 0..3u8 {
-                if position == slot {
-                    if let Some(c) = c {
-                        c_out.push(CSample {
-                            workload: workload.name.clone(),
-                            index,
-                            slot,
-                            c_ns: probe(c, w, 'm', index).await?,
-                        });
-                    }
-                    continue;
-                }
-                let turn = if position < slot {
-                    position
-                } else {
-                    position - 1
-                };
-                let arm = if turn == 0 {
-                    first
-                } else if first == Arm::A {
-                    Arm::B
-                } else {
-                    Arm::A
-                };
-                if arm == Arm::A {
-                    a_ns = probe(a, w, 'm', index).await?;
-                } else {
-                    b_ns = probe(b, w, 'm', index).await?;
-                }
-            }
+            let a_ns = probe(a, w, 'm', index).await?;
+            let b_ns = probe(b, w, 'm', index).await?;
             out.push(PairSample {
                 workload: workload.name.clone(),
                 index,
-                first,
                 a_ns,
                 b_ns,
             });

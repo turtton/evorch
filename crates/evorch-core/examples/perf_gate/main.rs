@@ -2,11 +2,10 @@
 //!
 //! Subcommands (see crates/evorch-core/perf-gate/README.md):
 //!   conditions   write conditions.json before any sample
-//!   latency      one round: shell RTT of A and B, then ForceKill (runs in the scope)
-//!   pss          one round: 100 guards held, PSS read (runs in the scope)
-//!   stub         record a round the scope killed or that could not start
+//!   latency      one round: shell RTT of A and B (ABAB), then ForceKill (B only)
+//!   pss          one round: 100 guards held, PSS read (B only)
+//!   stub         record a round that produced no record of its own
 //!   aggregate    judge a result directory (nearest-rank, per round, no trimming)
-//!   print-order  the frozen A/B order of one (round, workload)
 //!
 //! `--smoke` shrinks every count and marks the output `evidence: false`; such
 //! a file can never pass the aggregator.
@@ -51,30 +50,22 @@ mod linux {
     struct Opts {
         values: HashMap<String, String>,
         smoke: bool,
-        /// Full counts under the scope, but never evidence: noise floor and timing only.
-        dry_run: bool,
     }
     impl Opts {
         fn parse(args: &[String]) -> Opts {
             let mut values = HashMap::new();
             let mut smoke = false;
-            let mut dry_run = false;
             let mut iter = args.iter();
             while let Some(arg) = iter.next() {
                 match arg.strip_prefix("--") {
                     Some("smoke") => smoke = true,
-                    Some("dry-run") => dry_run = true,
                     Some(key) => {
                         values.insert(key.to_owned(), iter.next().cloned().unwrap_or_default());
                     }
                     None => {}
                 }
             }
-            Opts {
-                values,
-                smoke,
-                dry_run,
-            }
+            Opts { values, smoke }
         }
         fn need(&self, key: &str) -> io::Result<&str> {
             self.values
@@ -126,22 +117,7 @@ mod linux {
         match opts.values.get("conditions") {
             Some(path) => conditions::sha256_file(Path::new(path)),
             None if opts.smoke => Ok("smoke".into()),
-            None if opts.dry_run => Ok("dry-run".into()),
             None => Err(io::Error::other("--conditions is required")),
-        }
-    }
-
-    fn scope(opts: &Opts) -> io::Result<ScopeReadback> {
-        match cells::scope_readback() {
-            Ok(scope) => Ok(scope),
-            Err(_) if opts.smoke => Ok(ScopeReadback {
-                cpu_max: "unreadable".into(),
-                memory_max: 0,
-                swap_max: 0,
-                pids_max: 0,
-                stress_ng: None,
-            }),
-            Err(error) => Err(error),
         }
     }
 
@@ -158,7 +134,7 @@ mod linux {
     }
 
     fn budget(spec: &Spec) -> Duration {
-        Duration::from_secs(u64::from(spec.scope.timeout_secs).saturating_sub(25))
+        Duration::from_secs(u64::from(spec.round_timeout_secs))
     }
 
     /// Diagnostic, not a measurement: one thread, `--turns` turns, no rotation; prints where the
@@ -208,7 +184,6 @@ mod linux {
         let round = opts.round()?;
         let out = opts.path("out")?;
         let (a_exe, b_exe) = (opts.path("a-exe")?, opts.path("b-exe")?);
-        let c_exe = opts.values.get("c-exe").map(PathBuf::from);
         let started = std::time::Instant::now();
         let conditions_sha256 = conditions_sha(opts)?;
         let fixture_commit = opts
@@ -221,25 +196,20 @@ mod linux {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
-        let scope_start = scope(opts)?;
         let mut samples = Vec::new();
-        let mut c_samples = Vec::new();
         let mut kills = Vec::new();
-        let mut observations: Vec<Value> = Vec::new();
+        let mut observations: Vec<Value> = vec![json!({
+            "at": "start",
+            "loadavg": std::fs::read_to_string("/proc/loadavg").unwrap_or_default(),
+        })];
         let bundle = b_exe.with_file_name("guard-bundle.json");
         let body = async {
             let (a, b) = tokio::try_join!(
                 arm::CoreArm::start("A", &a_exe, &spec),
                 arm::CoreArm::start("B", &b_exe, &spec)
             )?;
-            let c = match &c_exe {
-                Some(exe) => Some(arm::CoreArm::start("C", exe, &spec).await?),
-                None => None,
-            };
             let run = async {
-                if a.commit != b.commit
-                    || c.as_ref().is_some_and(|c| c.commit != a.commit)
-                    || fixture_commit.as_deref().is_some_and(|c| c != a.commit)
+                if a.commit != b.commit || fixture_commit.as_deref().is_some_and(|c| c != a.commit)
                 {
                     return Err(io::Error::other(format!(
                         "fixture repositories differ: A {} B {} conditions {fixture_commit:?}",
@@ -250,19 +220,12 @@ mod linux {
                     arm::populate(&a, &spec.state),
                     arm::populate(&b, &spec.state)
                 )?;
-                if let Some(c) = &c {
-                    arm::populate(c, &spec.state).await?;
-                }
                 let agents = (
                     arm::Agents::start(&a, &spec.state),
                     arm::Agents::start(&b, &spec.state),
                 );
-                let agent_c = c.as_ref().map(|c| arm::Agents::start(c, &spec.state));
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                if agents.0.failed()
-                    || agents.1.failed()
-                    || agent_c.as_ref().is_some_and(|a| a.failed())
-                {
+                if agents.0.failed() || agents.1.failed() {
                     return Err(io::Error::other(
                         "an active agent stopped before LOAD_READY",
                     ));
@@ -270,39 +233,26 @@ mod linux {
                 observations.push(json!({
                     "at": "load_ready",
                     "t_ms": started.elapsed().as_millis() as u64,
+                    "loadavg": std::fs::read_to_string("/proc/loadavg").unwrap_or_default(),
                     "a": a.observe(), "b": b.observe(),
-                    "c": c.as_ref().map(|c| c.observe()),
                 }));
-                let measured = cells::latency(
-                    &spec,
-                    round,
-                    &a,
-                    &b,
-                    c.as_ref(),
-                    &mut samples,
-                    &mut c_samples,
-                )
-                .await;
+                let measured = cells::latency(&spec, &a, &b, &mut samples).await;
                 observations.push(json!({
                     "at": "latency_done",
                     "t_ms": started.elapsed().as_millis() as u64,
+                    "loadavg": std::fs::read_to_string("/proc/loadavg").unwrap_or_default(),
                 }));
-                let killed =
-                    if measured.is_ok() && !opts.dry_run && (bundle.exists() || !opts.smoke) {
-                        cells::force_kill(&spec, &bundle, &mut kills).await
-                    } else {
-                        measured
-                    };
+                let killed = if measured.is_ok() && (bundle.exists() || !opts.smoke) {
+                    cells::force_kill(&spec, &bundle, &mut kills).await
+                } else {
+                    measured
+                };
                 observations.push(json!({
                     "at": "end",
                     "t_ms": started.elapsed().as_millis() as u64,
                     "a": a.observe(), "b": b.observe(),
-                    "c": c.as_ref().map(|c| c.observe()),
                 }));
                 let ticks = (agents.0.stop().await, agents.1.stop().await);
-                if let Some(agent) = agent_c {
-                    agent.stop().await?;
-                }
                 observations.push(json!({"agent_ticks": format!("{ticks:?}")}));
                 killed?;
                 ticks.0?;
@@ -311,36 +261,21 @@ mod linux {
             };
             let result = run.await;
             tokio::join!(a.shutdown(), b.shutdown());
-            if let Some(c) = c {
-                c.shutdown().await;
-            }
             result
         };
         let result = tokio::time::timeout(budget(&spec), body).await;
-        let mut status = status_of(result);
-        let scope_end = scope(opts)?;
-        if matches!(status, CellStatus::Ok)
-            && (scope_end != scope_start || (scope_end.stress_ng.is_none() && !opts.smoke))
-        {
-            status = CellStatus::Failed {
-                reason: format!(
-                    "scope changed or stress stopped: {scope_start:?} -> {scope_end:?}"
-                ),
-            };
-        }
+        let status = status_of(result);
         let ok = matches!(status, CellStatus::Ok);
         write_json(
             &out,
             &LatencyRound {
                 schema: SCHEMA,
-                evidence: !opts.smoke && !opts.dry_run,
+                evidence: !opts.smoke,
                 round,
                 conditions_sha256,
                 spec_sha256: Spec::sha256(),
                 status,
-                scope: scope_start,
                 samples,
-                c_samples,
                 force_kill: kills,
             },
         )?;
@@ -359,7 +294,6 @@ mod linux {
         let out = opts.path("out")?;
         let bundle = opts.path("b-exe")?.with_file_name("guard-bundle.json");
         let conditions_sha256 = conditions_sha(opts)?;
-        let scope_start = scope(opts)?;
         let mut guards = Vec::new();
         let mut held = 0;
         let mut observations = Value::Null;
@@ -385,7 +319,6 @@ mod linux {
                 conditions_sha256,
                 spec_sha256: Spec::sha256(),
                 status,
-                scope: scope_start,
                 hold_secs: held,
                 guards,
             },
@@ -398,8 +331,8 @@ mod linux {
         })
     }
 
-    /// A round that produced no record of its own (the scope killed it, or it
-    /// could not start) is still recorded, as failed, and fails the gate.
+    /// A round that produced no record of its own (killed, or it could not start)
+    /// is still recorded, as failed, and fails the check.
     fn stub(opts: &Opts) -> io::Result<ExitCode> {
         let round = opts.round()?;
         let out = opts.path("out")?;
@@ -408,13 +341,6 @@ mod linux {
             CellStatus::TimedOut { reason }
         } else {
             CellStatus::Failed { reason }
-        };
-        let scope = ScopeReadback {
-            cpu_max: "unrecorded".into(),
-            memory_max: 0,
-            swap_max: 0,
-            pids_max: 0,
-            stress_ng: None,
         };
         let (conditions_sha256, spec_sha256) = (conditions_sha(opts)?, Spec::sha256());
         match opts.need("kind")? {
@@ -427,9 +353,7 @@ mod linux {
                     conditions_sha256,
                     spec_sha256,
                     status,
-                    scope,
                     samples: vec![],
-                    c_samples: vec![],
                     force_kill: vec![],
                 },
             )?,
@@ -442,7 +366,6 @@ mod linux {
                     conditions_sha256,
                     spec_sha256,
                     status,
-                    scope,
                     hold_secs: 0,
                     guards: vec![],
                 },
@@ -487,14 +410,14 @@ mod linux {
         evidence.pss.sort_by_key(|r: &PssRound| r.round);
         let summary = evaluate(&spec, &evidence);
         write_json(&dir.join("summary.json"), &summary)?;
-        let mut samples = String::from("round,workload,index,first,a_ns,b_ns\n");
+        let mut samples = String::from("round,workload,index,a_ns,b_ns\n");
         let mut kills = String::from("round,index,ns\n");
         let mut pss = String::from("round,guard_pid,pss_kib\n");
         for r in &evidence.latency {
             for s in &r.samples {
                 samples += &format!(
-                    "{},{},{},{:?},{},{}\n",
-                    r.round, s.workload, s.index, s.first, s.a_ns, s.b_ns
+                    "{},{},{},{},{}\n",
+                    r.round, s.workload, s.index, s.a_ns, s.b_ns
                 );
             }
             for k in &r.force_kill {
@@ -521,11 +444,16 @@ mod linux {
         std::fs::write(dir.join("pss.csv"), pss)?;
         for v in &summary.latency {
             println!(
-                "latency r{} {:<15} dp50={:>9} ns dp95={:>9} ns {}",
+                "latency r{} {:<15} p50 A={} ns B={} ns ratio={}/1000 (paired dp50={} dp95={}, marginal dp50={} dp95={}) {}",
                 v.round,
                 v.workload,
-                v.delta_p50_ns,
-                v.delta_p95_ns,
+                v.a_p50_ns,
+                v.b_p50_ns,
+                v.ratio_p50_milli,
+                v.paired_delta_p50_ns,
+                v.paired_delta_p95_ns,
+                v.marginal_delta_p50_ns,
+                v.marginal_delta_p95_ns,
                 if v.pass { "pass" } else { "FAIL" }
             );
         }
@@ -566,7 +494,7 @@ mod linux {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let Some((command, rest)) = args.split_first() else {
             eprintln!(
-                "usage: perf_gate conditions|latency|pss|stub|aggregate|print-order [--key value ...] [--smoke]"
+                "usage: perf_gate conditions|latency|pss|stub|aggregate [--key value ...] [--smoke]"
             );
             return ExitCode::from(2);
         };
@@ -594,12 +522,6 @@ mod linux {
                     } else {
                         ExitCode::FAILURE
                     })
-                }
-                "print-order" => {
-                    let spec = Spec::frozen();
-                    let w: usize = opts.need("workload")?.parse().map_err(io::Error::other)?;
-                    println!("{}", order_string(&spec, opts.round()?, w));
-                    Ok(ExitCode::SUCCESS)
                 }
                 other => Err(io::Error::other(format!("unknown subcommand {other}"))),
             }

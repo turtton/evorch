@@ -2,7 +2,7 @@
 //! that is recorded before the first sample is taken.
 use super::{
     fixture,
-    gate::{Spec, check_conditions, hex, order_string},
+    gate::{Spec, check_conditions, hex},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -118,14 +118,6 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
     let spec = Spec::frozen();
     let scratch = tempfile::tempdir()?;
     let repo_commit = fixture::repository(&scratch.path().join("repo"), &spec.state)?;
-    let mut order = serde_json::Map::new();
-    for round in 1..=spec.rounds {
-        let mut per = serde_json::Map::new();
-        for (w, workload) in spec.workloads.iter().enumerate() {
-            per.insert(workload.name.clone(), order_string(&spec, round, w).into());
-        }
-        order.insert(round.to_string(), per.into());
-    }
     let meminfo = read("/proc/meminfo");
     let mem = meminfo
         .lines()
@@ -134,17 +126,12 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
     let cpuinfo = read("/proc/cpuinfo");
     let get = |name: &str| opts.get(name).cloned().unwrap_or_default();
     let runner = std::env::current_exe()?;
-    let mut arms = json!({"a": arm(opts, "a", false)?, "b": arm(opts, "b", true)?});
-    if opts.contains_key("c-exe") {
-        arms["c"] = arm(opts, "c", true)?;
-    }
+    let arms = json!({"a": arm(opts, "a", false)?, "b": arm(opts, "b", true)?});
     Ok(json!({
         "schema": 1,
         "created_unix": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
         "spec_sha256": Spec::sha256(),
-        "seed": spec.seed,
-        "order": order,
         "host": {
             "uname": run("uname", &["-a"]),
             "kernel": read("/proc/sys/kernel/osrelease"),
@@ -153,6 +140,8 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
             "governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
             "mem_total_kib": mem,
             "loadavg": read("/proc/loadavg"),
+            "top_cpu": run("ps", &["-eo", "pcpu,comm", "--sort=-pcpu", "--no-headers"])
+                .lines().take(8).collect::<Vec<_>>().join("; "),
         },
         "toolchain": {
             "rustc": get("rustc"),
@@ -168,7 +157,6 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
             "git": tool("git", "--version"),
             "bwrap": tool("bwrap", "--version"),
         },
-        "stress_ng": get("stress-ng"),
         "fixtures": fixture::describe(&spec.state, &repo_commit),
         "thread_rotation": {"turns_per_thread": super::arm::TURNS_PER_THREAD, "same_for_every_arm": true},
         "runner": {
