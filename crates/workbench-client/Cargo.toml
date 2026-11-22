@@ -10,10 +10,10 @@ description = "Client side of the evorch workbench protocol (ADR 0045)."
 [dependencies]
 workbench-protocol = { path = "../workbench-protocol" }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "io-util", "net", "macros"] }
 
 [dev-dependencies]
 test-socket-dir = { path = "../test-socket-dir" }
+serde_json = { workspace = true }
 tempfile = { workspace = true }

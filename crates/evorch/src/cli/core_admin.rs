@@ -24,6 +24,8 @@
 //! call.
 mod args;
 #[cfg(target_os = "linux")]
+mod describe;
+#[cfg(target_os = "linux")]
 mod flow;
 #[cfg(target_os = "linux")]
 mod interrupt;

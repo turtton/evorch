@@ -6,14 +6,14 @@
 //! and only when the core offers management at all, goes out once, and a lost
 //! reply is settled by reading the same operation id, never by sending again.
 use super::super::args::{GraphsOp, QuarantineOp};
+use super::super::describe::{
+    describe_graph, describe_graph_operation, describe_quarantine, describe_undisposed,
+};
 use super::{AdminError, ClientError, Flow, exit, operation_id};
 use workbench_client::{
     WorkbenchClient,
     restart::{
-        recovery::{
-            GraphAction, describe_graph, describe_graph_operation, describe_quarantine,
-            describe_undisposed, discard_quarantined, dispose_graph,
-        },
+        recovery::{GraphAction, discard_quarantined, dispose_graph},
         session::RestartAdmin,
         view::describe_receipt,
     },
