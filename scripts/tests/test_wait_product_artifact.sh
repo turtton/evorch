@@ -275,9 +275,48 @@ respond last 200 "$(jobs completed success)" 'Link: <https://api.github.com/x?pa
 run_wait
 failed "a next page exists"
 new_case
+respond last 200 "$(jobs completed success | jq -c '.total_count = 7')" 'Link: <https://api.github.com/x?page=2>; rel="next"'
+run_wait
+failed "a next page exists next to a count mismatch"
+eq "a next page exists next to a count mismatch: not retried" "$(requests)" 1
+
+# --- total_count and the array disagree without a second page ----------------
+# The two come from separate reads (run 45010801038: 22 against 21 listed, then
+# 24 and 24). Such a response is polled again and decides nothing by itself.
+new_case
+respond 1 200 "$(jobs completed success | jq -c '.total_count = 22')"
+respond 2 200 "$(jobs completed success)"
+run_wait
+eq "a transient count mismatch: exit" "$rc" 0
+eq "a transient count mismatch: asked again after the normal gap" "$(sleeps)" 45
+eq "a transient count mismatch: two jobs polls and the artifact check" "$(requests)" 3
+check "a transient count mismatch is logged" grep -q 'count mismatch, 4 of 22 jobs listed' "$d/out"
+new_case
+respond 1 200 "$(jobs completed success | jq -c '.total_count = 3')"
+respond 2 200 "$(jobs completed success)"
+run_wait
+eq "more jobs listed than total_count: exit" "$rc" 0
+eq "more jobs listed than total_count: asked again" "$(requests)" 3
+# A mismatching listing is no evidence about the producer, whichever state it shows.
+new_case
+respond 1 200 "$(jobs completed failure | jq -c '.total_count = 22')"
+respond 2 200 "$(jobs completed success)"
+run_wait
+eq "a failed producer in a mismatching listing is not believed: exit" "$rc" 0
+new_case
 respond last 200 "$(jobs completed success | jq -c '.total_count = 7')"
 run_wait
-failed "listing shorter than total_count"
+failed "a count mismatch that never settles"
+eq "a count mismatch that never settles: uses the request budget" "$(requests)" 24
+check "a count mismatch that never settles: says it was a count mismatch" grep -q 'count mismatch, never a consistent listing: 4 of 7 jobs listed' "$d/out"
+check "a mismatching listing never starts the artifact check" absent '/artifacts?' "$d/urls.log"
+new_case
+respond 1 200 "$(jobs completed success | jq -c '.total_count = 7')"
+respond 2 200 "$(jobs queued null)"
+respond last 200 "$(jobs queued null)"
+run_wait
+failed "a producer that never finishes after a count mismatch"
+check "a consistent listing clears the count mismatch from the final message" absent 'count mismatch, never' "$d/out"
 
 # --- permanent HTTP errors ---------------------------------------------------
 for status in 401 404 403 418 302; do
@@ -432,6 +471,31 @@ respond 1 200 "$(jobs completed success)"
 respond_art last 200 "$(art_list "$(art_entry product-core false)")" 'Link: <https://api.github.com/x?page=2>; rel="next"'
 run_wait
 failed "a next page of artifacts"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)" | jq -c '.total_count = 2')" 'Link: <https://api.github.com/x?page=2>; rel="next"'
+run_wait
+failed "a next page of artifacts next to a count mismatch"
+eq "a next page of artifacts next to a count mismatch: not retried" "$(requests)" 2
+# The artifacts listing has the same two reads: a mismatch is polled again, and
+# neither "missing" nor "found" is concluded from it.
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art 1 200 "$(art_list | jq -c '.total_count = 1')"
+respond_art 2 200 "$(art_list "$(art_entry product-core false)")"
+run_wait
+eq "artifacts: a transient count mismatch: exit" "$rc" 0
+eq "artifacts: a transient count mismatch: asked again after the normal gap" "$(sleeps)" 45
+eq "artifacts: a transient count mismatch: requests" "$(requests)" 3
+check "artifacts: an empty listing that promises one is no 'missing' verdict" absent 'holds 0 artifacts' "$d/out"
+new_case
+respond 1 200 "$(jobs completed success)"
+respond_art last 200 "$(art_list "$(art_entry product-core false)" | jq -c '.total_count = 2')"
+run_wait
+failed "artifacts: a count mismatch that never settles"
+eq "artifacts: a count mismatch that never settles: shares the 24-request budget" "$(requests)" 24
+check "artifacts: a count mismatch that never settles: says so" grep -q 'count mismatch, never a consistent listing: 1 of 2 artifacts listed' "$d/out"
+check "artifacts: a mismatching listing is not taken for the artifact" absent 'finished\|succeeded' "$d/out"
 new_case
 respond 1 200 "$(jobs completed success)"
 respond_art last 403 '{"message":"Resource not accessible by integration"}'
