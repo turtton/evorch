@@ -13,15 +13,18 @@
 //!   readability for death. The 30 s limits below only bound how long a *failing*
 //!   run may take; they never decide success. READY has one absolute deadline for
 //!   the whole report, and each death observation has one absolute deadline for
-//!   all processes. The probe's own 60 s deadline is longer than either, and the
-//!   rows assert the error they expect (a deadline would be `TimedOut`).
+//!   all processes. The probe's own 60 s deadline would also end the supervisor
+//!   (with a status that looks like any other failure), so a row additionally
+//!   checks that it finished before that deadline could have expired.
 //! - Every process under observation is held through a pidfd opened while the
 //!   target was alive and re-validated against `/proc`. No signal is sent to a
 //!   bare numeric PID.
 //! - This test process is a child subreaper. Whatever a row leaves behind,
 //!   including processes that are not registered yet when the row fails, ends up
 //!   as a child of this process, where `Cleanup` kills and reaps it without any
-//!   help from the supervisor under test.
+//!   help from the supervisor under test. `Cleanup` is bounded, and `Backstop`
+//!   kills whatever registered process is still alive after it, so a failing run
+//!   always ends.
 use core_launcher::handoff::{HandoffTarget, ProbeLimits};
 use std::{
     fs, io,
@@ -33,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -69,16 +72,46 @@ fn runtime() -> tokio::runtime::Runtime {
         .build()
         .unwrap()
 }
-/// Runs a row. The cleanup guard lives inside the future that `block_on` polls,
-/// so it runs when the row fails, before the runtime is dropped (dropping the
-/// runtime drops a probe future, which waits for its supervisor).
+
+/// Every process a row registered with `Processes::hold`, as an independent
+/// pidfd. Rows run one at a time (`SERIAL`), so one registry serves them all.
+type Registered = Vec<(&'static str, OwnedFd)>;
+static REGISTRY: Mutex<Registered> = Mutex::new(Vec::new());
+static LEFT_ALIVE: AtomicBool = AtomicBool::new(false);
+fn registry() -> std::sync::MutexGuard<'static, Registered> {
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs a row under the cleanup guards. Both live inside the future that
+/// `block_on` polls, so they run when the row fails, before the runtime is
+/// dropped. The runtime is then shut down in the background: dropping it would
+/// wait for a probe future that waits for its supervisor.
 fn run(test: impl std::future::Future<Output = ()>) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    runtime().block_on(async {
-        let cleanup = Cleanup;
-        test.await;
-        cleanup.assert_nothing_left();
-    });
+    run_locked(test);
+}
+fn run_locked(test: impl std::future::Future<Output = ()>) {
+    registry().clear();
+    LEFT_ALIVE.store(false, Ordering::SeqCst);
+    let runtime = runtime();
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            let _backstop = Backstop;
+            let cleanup = Cleanup;
+            test.await;
+            cleanup.assert_nothing_left();
+        })
+    }));
+    runtime.shutdown_background();
+    if LEFT_ALIVE.load(Ordering::SeqCst) {
+        eprintln!("the cleanup left registered processes alive (killed by the backstop)");
+        if result.is_ok() {
+            panic!("the cleanup left registered processes alive");
+        }
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 fn fixture() -> PathBuf {
@@ -162,8 +195,34 @@ async fn pidfd_wait_exit(fd: &OwnedFd, until: Instant) -> bool {
         Ok(Ok(_))
     )
 }
-/// Reaps a terminated child through its pidfd. `Ok(false)`: not our child any
-/// more (somebody else reaped it).
+/// Blocks until the pidfd is readable or `until` passes. The remaining time is
+/// recomputed after every interruption.
+fn pidfd_wait_exit_blocking(fd: &OwnedFd, until: std::time::Instant) -> bool {
+    loop {
+        let remaining = until.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return pidfd_exited(fd);
+        }
+        let mut poll = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = remaining.as_millis().min(1000) as i32 + 1;
+        let rc = unsafe { libc::poll(&mut poll, 1, millis) };
+        if rc > 0 {
+            return true;
+        }
+        if rc < 0 {
+            assert_eq!(
+                io::Error::last_os_error().kind(),
+                io::ErrorKind::Interrupted
+            );
+        }
+    }
+}
+/// Reaps a terminated child through its pidfd without blocking. `Ok(false)`:
+/// not our child any more (somebody else reaped it).
 fn pidfd_reap_child(fd: &OwnedFd) -> io::Result<bool> {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     loop {
@@ -172,7 +231,7 @@ fn pidfd_reap_child(fd: &OwnedFd) -> io::Result<bool> {
                 P_PIDFD,
                 fd.as_raw_fd() as libc::id_t,
                 &mut info,
-                libc::WEXITED,
+                libc::WEXITED | libc::WNOHANG,
             )
         };
         if rc == 0 {
@@ -210,7 +269,9 @@ fn children() -> Vec<i32> {
 /// Kills and reaps every child of this process, repeatedly: killing a parent
 /// hands its children to this subreaper, which the next pass then finds. The
 /// listed number is only a candidate. The pidfd is opened first and the parent
-/// is re-read, so a number reused by a stranger is never signalled.
+/// is re-read, so a number reused by a stranger is never signalled. The whole
+/// cleanup has one absolute deadline: a child that survives SIGKILL is reported
+/// and left to `Backstop`, never waited for forever.
 struct Cleanup;
 impl Cleanup {
     fn assert_nothing_left(&self) {
@@ -221,11 +282,14 @@ impl Cleanup {
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let me = std::process::id() as i32;
-        // Every pass reaps at least one child or finds none; the bound only
-        // guards against a process that can not be reaped at all.
-        for _ in 0..256 {
+        let until = std::time::Instant::now() + BOUND;
+        loop {
             let candidates = children();
             if candidates.is_empty() {
+                return;
+            }
+            if std::time::Instant::now() >= until {
+                eprintln!("cleanup gave up on children {candidates:?}");
                 return;
             }
             for pid in candidates {
@@ -233,8 +297,33 @@ impl Drop for Cleanup {
                 if proc_ppid(pid).ok() != Some(me) {
                     continue;
                 }
-                let _ = pidfd_send(&fd, libc::SIGKILL);
-                let _ = pidfd_reap_child(&fd);
+                match pidfd_send(&fd, libc::SIGKILL) {
+                    Ok(()) => {}
+                    Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+                    Err(e) => eprintln!("cleanup: SIGKILL of {pid} failed: {e}"),
+                }
+                if pidfd_wait_exit_blocking(&fd, until) {
+                    let _ = pidfd_reap_child(&fd);
+                } else {
+                    eprintln!("cleanup: {pid} did not terminate");
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// Independent of `Cleanup`: after it, kills every registered process that is
+/// still alive, through the pidfd taken at registration, and remembers that it
+/// had to.
+struct Backstop;
+impl Drop for Backstop {
+    fn drop(&mut self) {
+        for (name, fd) in registry().iter() {
+            if !pidfd_exited(fd) {
+                eprintln!("backstop: {name} still alive after the cleanup");
+                LEFT_ALIVE.store(true, Ordering::SeqCst);
+                let _ = pidfd_send(fd, libc::SIGKILL);
             }
         }
     }
@@ -262,6 +351,9 @@ impl Processes {
             parent, expected_parent,
             "{name} ({pid}) has the wrong owner"
         );
+        let again = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(again >= 0, "dup pidfd: {}", io::Error::last_os_error());
+        registry().push((name, unsafe { OwnedFd::from_raw_fd(again) }));
         self.0.push(Held { name, fd });
     }
     fn get(&self, name: &str) -> &OwnedFd {
@@ -353,6 +445,15 @@ impl Env {
 }
 
 type ProbeTask = JoinHandle<io::Result<HandoffTarget>>;
+/// A death that came after the probe's own deadline could have been caused by
+/// it, so it proves nothing. Not a success criterion: only a guard against a
+/// false positive in a run that was already pathologically slow.
+fn assert_before_probe_deadline(started: std::time::Instant) {
+    assert!(
+        started.elapsed() < limits().timeout,
+        "the probe's own deadline may have ended the run"
+    );
+}
 fn limits() -> ProbeLimits {
     // The probe's own deadline is its maximum, far beyond BOUND: a row that
     // ends before BOUND was ended by its trigger, not by the deadline.
@@ -366,8 +467,9 @@ fn limits() -> ProbeLimits {
 async fn spawn_probe(
     env: &Env,
     cancel: impl std::future::Future<Output = ()> + Send + 'static,
-) -> (ProbeTask, [i32; 4]) {
+) -> (ProbeTask, [i32; 4], std::time::Instant) {
     let entry = env.entry.clone();
+    let started = std::time::Instant::now();
     let mut task: ProbeTask =
         tokio::spawn(
             async move { HandoffTarget::probe_cancellable(&entry, limits(), cancel).await },
@@ -376,15 +478,15 @@ async fn spawn_probe(
         pids = env.ready() => pids,
         done = &mut task => panic!("probe ended before READY: {:?}", done.map(|r| r.err())),
     };
-    (task, pids)
+    (task, pids, started)
 }
 async fn start_probe(
     env: &Env,
     cancel: impl std::future::Future<Output = ()> + Send + 'static,
-) -> (ProbeTask, Processes) {
-    let (task, pids) = spawn_probe(env, cancel).await;
+) -> (ProbeTask, Processes, std::time::Instant) {
+    let (task, pids, started) = spawn_probe(env, cancel).await;
     let held = env.hold_tree(pids, std::process::id() as i32);
-    (task, held)
+    (task, held, started)
 }
 
 // ---- rows ------------------------------------------------------------------
@@ -511,9 +613,10 @@ fn control_eof_on_drop_stops_supervisor_probe_and_escaped_descendants() {
     run(async {
         for behavior in BEHAVIORS {
             let env = Env::new(behavior);
-            let (task, held) = start_probe(&env, std::future::pending()).await;
+            let (task, held, started) = start_probe(&env, std::future::pending()).await;
             task.abort();
             held.assert_all_terminated().await;
+            assert_before_probe_deadline(started);
             // Joining the aborted task waits for the future's Drop, which joins
             // the supervisor's waiter thread.
             assert!(task.await.err().unwrap().is_cancelled(), "{behavior}");
@@ -527,12 +630,13 @@ fn control_eof_on_cancel_stops_supervisor_probe_and_escaped_descendants() {
         for behavior in BEHAVIORS {
             let env = Env::new(behavior);
             let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
-            let (task, held) = start_probe(&env, async move {
+            let (task, held, started) = start_probe(&env, async move {
                 let _ = cancelled.await;
             })
             .await;
             cancel.send(()).unwrap();
             held.assert_all_terminated().await;
+            assert_before_probe_deadline(started);
             let error = task.await.unwrap().err().unwrap();
             assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{behavior}");
             held.assert_reaped();
@@ -542,15 +646,17 @@ fn control_eof_on_cancel_stops_supervisor_probe_and_escaped_descendants() {
 
 /// TERM: SIGTERM sent to the live supervisor through its pidfd. It must kill
 /// and reap its tree and the probe must report failure (a TERMed probe is never
-/// a successful description), and not through the deadline or a cancel.
+/// a successful description). It is not a cancel (that is `Interrupted`), and
+/// the elapsed-time guard rules out the deadline.
 #[test]
 fn term_stops_supervisor_probe_and_escaped_descendants_and_fails_the_probe() {
     run(async {
         for behavior in BEHAVIORS {
             let env = Env::new(behavior);
-            let (task, held) = start_probe(&env, std::future::pending()).await;
+            let (task, held, started) = start_probe(&env, std::future::pending()).await;
             pidfd_signal(held.get("supervisor"), libc::SIGTERM);
             held.assert_all_terminated().await;
+            assert_before_probe_deadline(started);
             let error = task.await.unwrap().err().unwrap();
             assert_eq!(error.kind(), io::ErrorKind::Other, "{behavior}: {error}");
             assert!(
@@ -594,55 +700,25 @@ fn exec_failure_fails_the_probe_and_leaves_no_process() {
 
 // ---- the cleanup itself ----------------------------------------------------
 
-/// Negative test of the row cleanup. A row fails while only the supervisor is
-/// registered, and the supervisor is stopped (SIGSTOP), so it can neither react
-/// to EOF nor reap anything: the rest of the tree is alive and unregistered. The
-/// cleanup must still kill and reap the whole tree, descendants included.
-/// `Backstop` only exists to keep this test finite and to tell whether the
-/// cleanup was needed; it runs after `Cleanup` and fails the test if it found
-/// anything alive.
-struct Backstop {
-    witnesses: Arc<Mutex<Processes>>,
-    found_alive: Arc<AtomicBool>,
-}
-impl Drop for Backstop {
-    fn drop(&mut self) {
-        let witnesses = self.witnesses.lock().unwrap_or_else(|e| e.into_inner());
-        for held in &witnesses.0 {
-            if !pidfd_exited(&held.fd) {
-                self.found_alive.store(true, Ordering::SeqCst);
-                let _ = pidfd_send(&held.fd, libc::SIGKILL);
-            }
-        }
-    }
-}
+/// Negative test of the row cleanup. A row fails after the supervisor was
+/// stopped (SIGSTOP), so it can neither react to EOF nor reap anything: the
+/// rest of the tree is alive, and the failing row itself only holds the
+/// supervisor. The cleanup must still kill and reap the whole tree, descendants
+/// included. The registry (the independent witnesses) must find nothing alive
+/// after it, and every witness must be reaped.
 #[test]
 fn a_row_failing_midway_leaves_no_descendant_behind() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let runtime = runtime();
-    let witnesses = Arc::new(Mutex::new(Processes::default()));
-    let found_alive = Arc::new(AtomicBool::new(false));
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(async {
-            let _backstop = Backstop {
-                witnesses: witnesses.clone(),
-                found_alive: found_alive.clone(),
-            };
-            let _cleanup = Cleanup;
+        run_locked(async {
             let env = Env::new("escape");
-            let (_task, [supervisor, leader, child, grandchild]) =
-                spawn_probe(&env, std::future::pending()).await;
+            let (_task, pids, _started) = spawn_probe(&env, std::future::pending()).await;
             let me = std::process::id() as i32;
-            {
-                let mut witnesses = witnesses.lock().unwrap();
-                witnesses.hold("supervisor", supervisor, me);
-                witnesses.hold("leader", leader, supervisor);
-                witnesses.hold("child", child, leader);
-                witnesses.hold("grandchild", grandchild, child);
-            }
+            let tree = env.hold_tree(pids, me);
             let mut held = Processes::default();
-            held.hold("supervisor", supervisor, me);
+            held.hold("supervisor", pids[0], me);
             pidfd_signal(held.get("supervisor"), libc::SIGSTOP);
+            drop(tree);
             panic!("simulated failure before the rest of the tree is registered");
         })
     }));
@@ -652,10 +728,13 @@ fn a_row_failing_midway_leaves_no_descendant_behind() {
         .unwrap();
     assert!(message.starts_with("simulated failure"), "{message}");
     assert!(
-        !found_alive.load(Ordering::SeqCst),
+        !LEFT_ALIVE.load(Ordering::SeqCst),
         "the cleanup left part of the tree alive"
     );
-    witnesses.lock().unwrap().assert_reaped();
-    drop(runtime);
+    let witnesses = registry();
+    assert_eq!(witnesses.len(), 5, "the witnesses were not all registered");
+    for (name, fd) in witnesses.iter() {
+        assert!(pidfd_reaped(fd), "{name} was not reaped by the cleanup");
+    }
     assert!(children().is_empty(), "children left behind");
 }
