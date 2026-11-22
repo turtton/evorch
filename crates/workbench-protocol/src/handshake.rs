@@ -210,6 +210,9 @@ pub enum RetentionReason {
     ConnectedClients,
     /// Web delivery is enabled even when no browser is connected.
     WebServing,
+    /// A CLI invocation (`evorch run`) is running; it retains the core even
+    /// while its own connection is the only sign of it.
+    CliInvocation,
     /// A CLIENT preview has a finite control-reconnection grace period.
     /// This is not a live client, helper watcher, or executing tool.
     RendererReconnectGrace,

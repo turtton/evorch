@@ -1,7 +1,11 @@
 //! Local cold-start coordination. This is deliberately separate from the wire
-//! client: GUI/CLI integration and shared restart budgets belong to later PRs.
+//! client: GUI/CLI integration belongs to later PRs. The shared crash budget
+//! (`budget`) gates every cold start.
+pub mod budget;
 #[cfg(target_os = "linux")]
 pub mod handoff;
+
+pub use budget::{BudgetError, CRASH_BUDGET_LIMIT, CRASH_BUDGET_WINDOW, CrashBudget};
 
 use core_instance::{ConfigIdentity, InstanceError, LaunchGuard, validate_socket};
 use std::{
@@ -12,7 +16,10 @@ use std::{
     time::Duration,
 };
 use workbench_client::{ClientConfig, ClientError, TransportError, UnixTransport, WorkbenchClient};
-use workbench_protocol::{handshake::CoreState, ids::CoreIdentity};
+use workbench_protocol::{
+    handshake::{CoreState, RecommendedAction, RejectReason},
+    ids::CoreIdentity,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -20,12 +27,37 @@ pub enum LaunchError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Instance(#[from] InstanceError),
+    /// Budget exhausted or ledger untrusted: needs a person, never retry.
+    #[error(transparent)]
+    Budget(#[from] BudgetError),
+    /// The running core speaks another version, identity or capability set.
+    /// It is left running: only a person may restart it at a safe point.
+    #[error(
+        "the running core cannot be used by this client ({detail}); the running core was NOT stopped. {advice}"
+    )]
+    Incompatible {
+        detail: String,
+        advice: &'static str,
+    },
     #[error("core readiness/handshake rejected: {0}")]
     Readiness(String),
     #[error("core exited before ready: {0}")]
     Exited(std::process::ExitStatus),
     #[error("core not ready before diagnostic deadline; no lock was stolen and no core was killed")]
     NotReady,
+}
+
+impl LaunchError {
+    /// The crash budget refused the start. Retrying cannot help until the
+    /// reason (shown by Display) is dealt with.
+    pub fn is_budget_blocked(&self) -> bool {
+        matches!(self, Self::Budget(_))
+    }
+    /// A running core with a version, identity or capability mismatch. Retrying
+    /// cannot help, and nothing stops that core.
+    pub fn is_incompatible(&self) -> bool {
+        matches!(self, Self::Incompatible { .. })
+    }
 }
 
 /// A sibling distribution binary or explicitly configured absolute executable.
@@ -188,6 +220,33 @@ impl Launcher {
                 // The owner can exit after accept, before replying to hello.
                 // Reenter launch arbitration and reread discovery under it.
                 Err(ClientError::Transport(TransportError::Disconnected)) => return Ok(None),
+                Err(ClientError::HandshakeRejected(r))
+                    if matches!(
+                        r.reason,
+                        RejectReason::UnsupportedVersion
+                            | RejectReason::MissingCapabilities
+                            | RejectReason::CoreMismatch
+                    ) =>
+                {
+                    return Err(LaunchError::Incompatible {
+                        detail: format!("{:?}: {}", r.reason, r.message),
+                        advice: match r.recommended_action {
+                            RecommendedAction::UpgradeClient => {
+                                "Update this client to the core's version."
+                            }
+                            RecommendedAction::UpgradeCore | RecommendedAction::RestartCore => {
+                                "Finish the running work, then restart the core at a safe point (or update it)."
+                            }
+                            _ => "Use a client of the same build as the core.",
+                        },
+                    });
+                }
+                Err(e @ ClientError::UnsupportedCapability(_)) => {
+                    return Err(LaunchError::Incompatible {
+                        detail: e.to_string(),
+                        advice: "Use a client of the same build as the core.",
+                    });
+                }
                 Err(e) => return Err(LaunchError::Readiness(e.to_string())),
             };
             // Version, identity and required capabilities are checked by the wire
@@ -209,6 +268,29 @@ impl Launcher {
             }));
         }
         Ok(None)
+    }
+    /// Sockets left by a core that died without dropping its `Instance`.
+    /// Only meaningful while the launch guard is held and the lifetime lock is
+    /// free: then no live owner can exist.
+    fn stale_sockets(&self) -> Result<Vec<PathBuf>, LaunchError> {
+        let mut candidates = vec![self.standard_socket.clone()];
+        if let Some(record) = self.config.read_record()?
+            && record.socket != self.standard_socket
+        {
+            candidates.push(record.socket);
+        }
+        let mut stale = Vec::new();
+        for socket in candidates {
+            match fs::symlink_metadata(&socket) {
+                Ok(_) => {
+                    validate_socket(&socket)?;
+                    stale.push(socket);
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(stale)
     }
     async fn run(&self, observe: &impl Fn(LaunchStage)) -> Result<ConnectedCore, LaunchError> {
         if let Some(client) = self.connect().await? {
@@ -241,6 +323,20 @@ impl Launcher {
                     observe(LaunchStage::BeforeSpawn);
                     // Revalidate immediately before spawn, including directory permissions.
                     let binary = CoreBinary::explicit(&self.binary.0)?;
+                    // The crash is recorded before its evidence is removed, so a
+                    // death in between can only over-count, never hide a crash.
+                    let stale = self.stale_sockets()?;
+                    let admitted = CrashBudget::admit_start(&launch, !stale.is_empty());
+                    if !matches!(admitted, Err(BudgetError::Ledger { .. })) {
+                        for socket in &stale {
+                            match fs::remove_file(socket) {
+                                Ok(()) => (),
+                                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                    }
+                    admitted?;
                     let mut command = Command::new(binary.0);
                     command
                         .arg("--config-dir")
@@ -262,10 +358,21 @@ impl Launcher {
                 && let Some(status) = c.0.as_mut().expect("owned child").try_wait()?
             {
                 if status.code() != Some(2) {
+                    // Persist the crash first. If that fails, say so (a record that
+                    // cannot be written must not read as "no crash"), and keep the
+                    // socket evidence for the next decision.
+                    CrashBudget::record_failed_start(&launch)?;
+                    for socket in self.stale_sockets()? {
+                        match fs::remove_file(socket) {
+                            Ok(()) => (),
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
                     return Err(LaunchError::Exited(status));
                 }
-                // Another owner won: reconnect, never blindly respawn. A shared
-                // restart budget can wrap this single cold-start attempt later.
+                // Another owner won (not a crash, not counted): reconnect, never
+                // blindly respawn.
                 child = None;
                 observe(LaunchStage::AlreadyRunning);
             }

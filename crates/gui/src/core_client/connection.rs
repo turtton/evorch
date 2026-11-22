@@ -2,6 +2,7 @@
 //! schedules a stop. Only explicit human actions can issue state-changing wire
 //! commands, and a command with a lost reply is reconciled, never replayed.
 mod data;
+use super::auto_reconnect::{self, AutoReconnect};
 use super::features::data::DataAction;
 use data::DataReaders;
 
@@ -124,6 +125,38 @@ pub async fn snapshot(
     snapshot_delivering(client, subscription)
         .await
         .map(|(cache, _)| cache)
+        .map_err(|fault| fault.to_string())
+}
+
+/// Why a snapshot was not read.
+enum SnapshotFault {
+    /// It did not settle; a resync may.
+    Failed(String),
+    /// The core ended the subscription while it was paged: what had arrived so
+    /// far, the ending last. It is the core's own word (its goodbye, the evidence
+    /// of a restart) and must reach the caller, not be dropped as a snapshot error.
+    Ended(Vec<EventEnvelope>),
+}
+
+impl std::fmt::Display for SnapshotFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => f.write_str(error),
+            Self::Ended(_) => f.write_str("snapshot stream requires resync"),
+        }
+    }
+}
+
+impl From<String> for SnapshotFault {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for SnapshotFault {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.into())
+    }
 }
 
 /// [`snapshot`], and the events that arrived while it was being read and apply
@@ -131,7 +164,7 @@ pub async fn snapshot(
 async fn snapshot_delivering(
     client: &WorkbenchClient,
     subscription: &mut Subscription,
-) -> Result<(Cache, Vec<UiEvent>), String> {
+) -> Result<(Cache, Vec<UiEvent>), SnapshotFault> {
     let started = subscription.started().clone();
     let mut cache = Cache::default();
     let Some(id) = started.snapshot_id else {
@@ -163,10 +196,30 @@ async fn snapshot_delivering(
         tokio::pin!(next);
         let reply = loop {
             tokio::select! {
-                reply = &mut next => break reply.map_err(|e| e.to_string())?,
+                reply = &mut next => match reply {
+                    Ok(reply) => break reply,
+                    Err(error) => {
+                        // The query fails when the connection closes, and the core's
+                        // goodbye was queued before that: read it before reporting
+                        // the failure, as the select may have chosen this branch.
+                        while let Ok(Some(event)) =
+                            tokio::time::timeout(std::time::Duration::ZERO, subscription.next()).await
+                        {
+                            let ends = event.event.ends_subscription();
+                            buffered.push(event);
+                            if ends {
+                                return Err(SnapshotFault::Ended(buffered));
+                            }
+                        }
+                        return Err(SnapshotFault::Failed(error.to_string()));
+                    }
+                },
                 event = subscription.next() => {
                     let event = event.ok_or("subscription ended while paging snapshot")?;
-                    if event.event.ends_subscription() { return Err("snapshot stream requires resync".into()); }
+                    if event.event.ends_subscription() {
+                        buffered.push(event);
+                        return Err(SnapshotFault::Ended(buffered));
+                    }
                     bytes += serde_json::to_vec(&event).map_err(|e| e.to_string())?.len();
                     if buffered.len() >= SNAPSHOT_BUFFER_EVENTS || bytes > SNAPSHOT_BUFFER_BYTES {
                         return Err("snapshot event buffer overflow; resync required".into());
@@ -201,6 +254,7 @@ pub async fn serve(
     ctx: egui::Context,
 ) {
     let mut uncertain = Vec::<(RequestId, Pending)>::new();
+    let mut auto = AutoReconnect::default();
     // Resolved outcomes for features, held until the next snapshot has replaced
     // the projection and reset the features (see `features`).
     let mut held = Vec::<HeldReply>::new();
@@ -227,7 +281,7 @@ pub async fn serve(
             Ok(connected) => (connected.client, connected.endpoint),
             Err(e) => {
                 update(&shared, &ctx, |s| {
-                    s.status = format!("接続失敗（fallback しません）: {e}")
+                    s.status = auto_reconnect::launch_failure(&e)
                 });
                 if !wait_reconnect(&mut actions, &shared, &ctx).await {
                     return;
@@ -239,6 +293,7 @@ pub async fn serve(
         let mut data = DataReaders::default();
         let mut resync = true;
         let mut reconnect_requested = false;
+        let mut orderly = false;
         'session: while resync {
             data.stop(&shared, &ctx).await;
             resync = false;
@@ -260,6 +315,18 @@ pub async fn serve(
                 }
                 Err(OpenFailed::Subscribe(error)) => {
                     update(&shared, &ctx, |s| s.status = error);
+                    break;
+                }
+                Err(OpenFailed::Ended(events)) => {
+                    // The core spoke while the snapshot was paged: its goodbye
+                    // and the evidence of a restart count as if they had come
+                    // through the session loop, and the session is over.
+                    for event in events {
+                        orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
+                        update(&shared, &ctx, |s| {
+                            let _ = s.cache.event_delivering(event, |e| s.features.event(e));
+                        });
+                    }
                     break;
                 }
                 Err(OpenFailed::Snapshot(error)) => {
@@ -284,6 +351,7 @@ pub async fn serve(
                     }
                     event = stream.next() => {
                         let Some(event) = event else { break };
+                        orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
                         let mut valid = false;
                         update(&shared, &ctx, |s| valid = s.cache.event_delivering(event, |e| s.features.event(e)));
                         if !valid { resync = true; break; }
@@ -355,6 +423,20 @@ pub async fn serve(
                     }
                 }
             }
+            // `closed()` and what the core queued before it closed (its goodbye,
+            // the evidence of a restart) can both be ready, and the select may pick
+            // the close. Read what already arrived before deciding how the core
+            // was lost.
+            if !resync {
+                while let Ok(Some(event)) =
+                    tokio::time::timeout(std::time::Duration::ZERO, stream.next()).await
+                {
+                    orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
+                    update(&shared, &ctx, |s| {
+                        let _ = s.cache.event_delivering(event, |e| s.features.event(e));
+                    });
+                }
+            }
         }
         // Read before the features are disconnected: only the core's own evidence
         // of a restart counts, never the loss of the connection alone.
@@ -370,6 +452,19 @@ pub async fn serve(
                     .planned_restart(epoch, now)
             })
             .flatten();
+        #[cfg(target_os = "linux")]
+        let planned = evidence.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let planned = false;
+        // Lost for real, with neither the core's goodbye nor restart evidence:
+        // EOF alone is not a restart, but it is not an orderly stop either.
+        let abnormal = !reconnect_requested
+            && !planned
+            && !orderly
+            && matches!(
+                client.connection_state(),
+                workbench_client::ConnectionState::Closed(_)
+            );
         data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| s.disconnect());
         if reconnect_requested {
@@ -386,6 +481,19 @@ pub async fn serve(
                 Waited::Stop => return,
                 Waited::Failed => {}
             }
+        }
+        if abnormal {
+            match auto.attempt(std::time::Instant::now()) {
+                Some(attempt) => {
+                    update(&shared, &ctx, |s| {
+                        s.status = auto_reconnect::retrying(attempt)
+                    });
+                    continue;
+                }
+                None => update(&shared, &ctx, |s| s.status = auto_reconnect::gave_up()),
+            }
+        } else if orderly && !planned {
+            update(&shared, &ctx, |s| s.status = auto_reconnect::orderly_stop());
         }
         if !wait_reconnect(&mut actions, &shared, &ctx).await {
             return;
@@ -407,6 +515,9 @@ enum OpenFailed {
     Subscribe(String),
     /// The snapshot did not settle; a resync may.
     Snapshot(String),
+    /// The core ended the subscription while the snapshot was paged; what it
+    /// sent first, its ending last.
+    Ended(Vec<EventEnvelope>),
 }
 
 async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
@@ -420,7 +531,10 @@ async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
     let capabilities = client.server_hello().capabilities.clone();
     let (cache, delivered) = snapshot_delivering(client, &mut stream)
         .await
-        .map_err(OpenFailed::Snapshot)?;
+        .map_err(|fault| match fault {
+            SnapshotFault::Failed(error) => OpenFailed::Snapshot(error),
+            SnapshotFault::Ended(events) => OpenFailed::Ended(events),
+        })?;
     Ok(Opened {
         stream,
         capabilities,
@@ -475,6 +589,7 @@ async fn wait_for_successor(
             match open_session(&client).await {
                 Ok(opened) => Ok((core_launcher::ConnectedCore { client, endpoint }, opened)),
                 Err(OpenFailed::Subscribe(error) | OpenFailed::Snapshot(error)) => Err(error),
+                Err(OpenFailed::Ended(_)) => Err("the core ended the subscription".into()),
             }
         },
     );

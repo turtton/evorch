@@ -122,6 +122,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None => LaunchGuard::acquire(&config)?,
     };
     control.point("adopted", 0);
+    if config.config_dir().join("fail-before-ready").exists() {
+        return Err("injected startup failure".into());
+    }
     let instance = Instance::acquire(&launch, &runtime)?;
     let mut scan = std::process::Command::new(std::env::current_exe()?);
     scan.arg("--scan")
@@ -179,6 +182,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 drop(listener);
                 drop(socket);
                 control.point("hello-disconnected", 0);
+                return Ok(());
+            }
+            if config.config_dir().join("exit-after-first-hello").exists() {
+                // A clean exit such as idle exit: answer once, then drop the
+                // listener and `Instance` (which removes the socket) and return.
+                let len = socket.read_u32().await?;
+                let mut bytes = vec![0; len as usize];
+                socket.read_exact(&mut bytes).await?;
+                let reply = workbench_protocol::framing::encode_frame(
+                    &HandshakeReply::Accepted(hello),
+                    1024 * 1024,
+                )?;
+                socket.write_all(&reply).await?;
+                socket.flush().await?;
                 return Ok(());
             }
             let hello = hello.clone();

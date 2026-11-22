@@ -464,7 +464,10 @@ pub async fn execute_reindex(
 /// control failure of the reindex.
 pub fn failure_of(error: &CliError) -> ReindexFailure {
     match error {
-        CliError::Unavailable(_) | CliError::Disconnected => ReindexFailure::DatabaseUnavailable,
+        CliError::Unavailable(_)
+        | CliError::StartRefused(_)
+        | CliError::Incompatible(_)
+        | CliError::Disconnected => ReindexFailure::DatabaseUnavailable,
         _ => ReindexFailure::UnrecoverableControlFailure,
     }
 }

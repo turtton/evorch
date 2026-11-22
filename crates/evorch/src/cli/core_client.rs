@@ -71,6 +71,12 @@ pub mod exit {
 pub enum CliError {
     /// No core could be reached or started. There is no embedded fallback.
     Unavailable(String),
+    /// The crash budget (or its record) forbids starting a core. Nothing was
+    /// started and nothing is retried; the text says how a person recovers.
+    StartRefused(String),
+    /// A running core of another version, identity or capability set. It was
+    /// not stopped.
+    Incompatible(String),
     /// The core understood the request and refused it.
     Refused(String),
     /// The connection ended before the answer: the request may or may not have
@@ -107,6 +113,8 @@ impl fmt::Display for CliError {
                 f,
                 "cannot reach the evorch core ({detail}); evorch never works without it"
             ),
+            Self::StartRefused(detail) => write!(f, "no core was started: {detail}"),
+            Self::Incompatible(detail) => f.write_str(detail),
             Self::Refused(detail) => write!(f, "the core refused the request: {detail}"),
             Self::OutcomeUnknown { request, detail } => {
                 write!(f, "outcome unknown: {detail}")?;
@@ -194,7 +202,15 @@ pub async fn connect_core<C: CoreConnector + ?Sized>(connector: &C) -> Result<Co
             LaunchStage::BeforeSpawn => {}
         })
         .await
-        .map_err(|error| CliError::Unavailable(error.to_string()))?;
+        .map_err(|error| {
+            if error.is_budget_blocked() {
+                CliError::StartRefused(error.to_string())
+            } else if error.is_incompatible() {
+                CliError::Incompatible(error.to_string())
+            } else {
+                CliError::Unavailable(error.to_string())
+            }
+        })?;
     let attach = if met_other.load(Ordering::Relaxed) {
         Attach::Joined
     } else if spawned.load(Ordering::Relaxed) {
@@ -657,6 +673,33 @@ mod tests {
         assert!(error.to_string().contains("never works without it"));
     }
 
+    #[tokio::test]
+    async fn a_refused_start_and_an_incompatible_core_are_told_apart_from_an_unreachable_one() {
+        let budget = LaunchError::Budget(core_launcher::BudgetError::Ledger {
+            path: "/c/.evorch-core.crash-budget".into(),
+            reason: "not parseable".into(),
+        });
+        let incompatible = LaunchError::Incompatible {
+            detail: "UnsupportedVersion".into(),
+            advice: "Update this client.",
+        };
+        for (launch, expected) in [
+            (budget, "no core was started"),
+            (incompatible, "NOT stopped"),
+        ] {
+            let connector = Scripted {
+                stages: vec![LaunchStage::BeforeSpawn],
+                outcome: Mutex::new(Some(Err(launch))),
+            };
+            let Err(error) = connect_core(&connector).await else {
+                panic!("a refused launch must not connect");
+            };
+            assert!(!matches!(error, CliError::Unavailable(_)), "{error:?}");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(error.exit_code(), ExitCode::from(1));
+        }
+    }
+
     #[test]
     fn the_client_introduces_itself_as_the_cli_and_asks_for_what_the_command_needs() {
         let config = client_config(&[Capability::Commands, Capability::Conversation]);
@@ -680,6 +723,8 @@ mod tests {
     fn every_failure_is_exit_one() {
         for error in [
             CliError::Unavailable(String::new()),
+            CliError::StartRefused(String::new()),
+            CliError::Incompatible(String::new()),
             CliError::Refused(String::new()),
             CliError::unknown(""),
             CliError::Disconnected,

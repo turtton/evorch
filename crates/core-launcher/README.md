@@ -3,7 +3,7 @@
 ## 境界
 
 - `core-instance`: config identity、private socket path、endpoint record、ロック。runtime / storage / GUI / protocol に依存しない。
-- `core-launcher`: `workbench-client` のhandshakeとプロセス起動を合成する。GUI / CLIにはまだ組み込まない。
+- `core-launcher`: `workbench-client` のhandshakeとプロセス起動を合成する。GUI actor と CLI（`evorch run` ほか）がこれを使う。
 - ローカルFS・Linux対象。継承FDのロック所有検証に Linux `/proc/self/fdinfo` を使う。ネットワークFSの排他は保証しない。
 
 ## APIと順序
@@ -24,7 +24,7 @@ endpoint recordはconfig内のatomicな発見ヒントであり生存証明で�
 
 - **07**: planned exec / adopt_handoffは別経路。production への配線は 4b。cold launchの採用と混同しない。
 - **08 / 17**: GUI / CLIはこのLauncherを使い、embedded runtimeへのfallbackを作らない。client configは再接続時も同じrequest counterを再利用する。
-- **18b**: config単位の永続restart budgetを起動決定箇所へ追加する。現在は単一cold-start試行だけでクラッシュ再試行をしない。AlreadyRunningは予算消費対象にしない（`LaunchStage::AlreadyRunning`）。単なるpollingや接続を試行回数として数えない。
+- **18b（実装済み。GUI/CLI への結合は末尾「障害時の再接続」）**: config単位の共有・永続crash予算（`budget.rs`、`.evorch-core.crash-budget`、5分に3回）を起動決定箇所に置いた。数えるのは起動回数ではなく**異常終了の証拠**だけ。(1) lifetime lock が空いているのに endpoint socket が残っている（正常終了は `Instance` の drop で socket を消す。SIGKILL/abort/OOM は消さない）、(2) launcher が起動した core が ready 前に exit 2 以外で終了。正常な起動・終了（idle exit 含む）、予定restart（exec handoff は lifetime lock を保持し launcher の spawn を通らない）、AlreadyRunning合流（exit 2）、polling、接続は数えない。判定・記録は `LaunchGuard` 保持下だけで行い、複数clientが同時に再接続しても二重起動・二重計上しない。窓内3件で次の自動起動を `LaunchError::Budget` で拒否し、再試行も自動リセットもしない（理由文に手動復旧手順を含む）。台帳の破損・不正（所有者/mode/hardlink/symlink/version）も同様に拒否し、台帳は変更しない。記録→証拠socket削除の順なので、間で死んでも過大計上側にしか倒れない。時計逆行で未来になった記録は現在時刻へ補正して永続化する。version mismatch で稼働中coreを停止する経路はlauncherに存在しない。
 
 ## 検証
 
@@ -158,3 +158,10 @@ not constraint IDs D1/D2/D3. A has no migration; C reserves v65, 5b v66, paralle
 work v67+. The revised plan overrides the previous version. Production main,
 bootstrap staging, full failure-matrix/Ready races and real product-binary e2e
 belong to D and 5a, not this package's fixture.
+
+## 障害時の再接続（PR C 第2段階）
+
+- core は正常終了（signal・idle exit・管理 stop）のとき、接続を閉じる前に各 subscription へ `CoreShuttingDown` を送り切る（待ちは2秒で打ち切る）。GUI actor は、その通知も予定 restart の証拠もなく接続が閉じた場合（異常切断）に限り、窓（5分）あたり最大3回まで `connect_or_start` を自動で呼ぶ。起動してよいかは上記の共有予算が決める。正常終了の通知後・予算超過・台帳異常・version不一致のあとは自動では何もせず、理由を表示して人の「再接続」だけを受け付ける。予定restartの後継待ちは connect-only で、予算を消費しない。
+- 稼働中coreが version / identity / capability で拒否した場合は `LaunchError::Incompatible`（coreは停止しない）。
+- CLI は core を失ったら自分の invocation を失敗（exit 1）で終え、再接続も再送もしない。予算拒否は `CliError::StartRefused`、非互換は `CliError::Incompatible` として区別して表示する。
+- 実行中のCLI invocation は idle-exit を止め、status に `cli_invocation` として現れる。
