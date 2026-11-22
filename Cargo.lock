@@ -2495,6 +2495,7 @@ dependencies = [
  "core-instance",
  "core-launcher",
  "event-bus",
+ "libc",
  "mock-openai",
  "model",
  "providers",

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{Inner, SpawnLedger, UnknownChild, locked};
+#[cfg(not(target_os = "linux"))]
 use crate::process::ProcessGroup;
 
 /// What a registered child is for.
@@ -85,6 +86,7 @@ pub struct ChildActivity {
 
 #[derive(Debug, Clone)]
 pub(super) enum ChildGroup {
+    #[cfg(not(target_os = "linux"))]
     Raw(ProcessGroup),
     #[cfg(target_os = "linux")]
     Owned(crate::owned::OwnedGroup),
@@ -92,6 +94,7 @@ pub(super) enum ChildGroup {
 impl ChildGroup {
     fn leader(&self) -> Option<rustix::process::Pid> {
         match self {
+            #[cfg(not(target_os = "linux"))]
             Self::Raw(group) => group.leader(),
             #[cfg(target_os = "linux")]
             Self::Owned(group) => group
@@ -101,6 +104,7 @@ impl ChildGroup {
     }
     fn kill(&self) {
         match self {
+            #[cfg(not(target_os = "linux"))]
             Self::Raw(group) => group.kill(),
             #[cfg(target_os = "linux")]
             Self::Owned(group) => {
@@ -110,6 +114,7 @@ impl ChildGroup {
     }
     fn terminate(&self) {
         match self {
+            #[cfg(not(target_os = "linux"))]
             Self::Raw(group) => group.terminate(),
             #[cfg(target_os = "linux")]
             Self::Owned(group) => {

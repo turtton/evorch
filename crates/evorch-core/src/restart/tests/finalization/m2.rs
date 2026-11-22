@@ -44,19 +44,21 @@ async fn failed(
     assert!(host.shutdown().await.is_err());
 }
 
-#[tokio::test(start_paused = true)]
+#[cfg(target_os = "linux")]
+#[path = "guard_lost.rs"]
+mod guard_lost;
+
+// Real process I/O uses the real clock; never start_paused here.
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn unconfirmed_reap_blocks_worker_join_and_storage_drain() {
+    if !guard_lost::controller() {
+        return;
+    }
     let (_dir, mut host) = boot().await;
     let core = RestartCoordinator::new(&host);
-    // No pid: this synthetic receipt cannot signal any real process.
-    let group = sandbox::process::ProcessGroup::retired();
-    let entry = host
-        .spawn_ledger
-        .admit()
-        .unwrap()
-        .register_pty_group(sandbox::ledger::ChildKind::Other, None, &group)
-        .unwrap();
-    drop(entry); // Lose the owner's reap confirmation, not an actual child.
+    let _family = guard_lost::lose_guard(&host.spawn_ledger).await;
+    assert_eq!(host.spawn_ledger.child_stats().unconfirmed, 1);
     let id = start(&mut host, &core).await;
     failed(&mut host, &core, id, Some(ExitStage::StopRequested)).await;
     assert!(

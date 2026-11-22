@@ -1,5 +1,32 @@
-//! Typed process ownership, including shell PTY (D-3a2 B3-03).
+//! Typed process ownership, including shell PTY (D-3a2 B3-05).
 //! Linux uses an authenticated process guard, regardless of ledger presence.
+//! Raw group ownership is private to the non-Linux backend; none of these
+//! legacy capabilities can be imported by callers (including on Linux):
+//!
+//! ```compile_fail
+//! use sandbox::process::ProcessGroup;
+//! ```
+//! ```compile_fail
+//! use sandbox::process::ProcessGroupGuard;
+//! ```
+//! ```compile_fail
+//! use sandbox::process::wait_for_exit;
+//! ```
+//! ```compile_fail
+//! use sandbox::process::has_exited;
+//! ```
+//! ```compile_fail
+//! use sandbox::process::close_inherited_fds_on_exec;
+//! ```
+//! ```compile_fail
+//! let _ = sandbox::process::ProcessGroup::spawn_pty;
+//! ```
+//! ```compile_fail
+//! let _ = sandbox::process::ProcessGroup::retired();
+//! ```
+//! ```compile_fail
+//! let _ = sandbox::ledger::Admission::register_pty_group;
+//! ```
 mod command;
 mod pty;
 #[cfg(target_os = "linux")]

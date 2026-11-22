@@ -184,13 +184,9 @@ async fn a_missing_program_is_reported_as_not_found() {
 mod linux {
     use std::io::{BufRead, BufReader};
     use std::os::fd::{AsRawFd, OwnedFd};
-    use std::time::Duration;
 
     use rustix::process::Pid;
     use sandbox::owned::{OwnedChild, OwnedSession};
-    use sandbox::process::{
-        ProcessGroup, ProcessGroupGuard, close_inherited_fds_on_exec, has_exited,
-    };
     use sandbox::{BwrapConfig, BwrapSandbox, DirectSandbox, Sandbox};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
@@ -289,21 +285,6 @@ mod linux {
         );
     }
 
-    // The hygiene hook for a std command a fixture supervises itself: it keeps
-    // the standard streams and nothing else.
-    #[test]
-    fn the_hygiene_hook_closes_descriptors_beyond_the_standard_streams() {
-        let (_file, fd, name) = inheritable_descriptor();
-        let probe = format!("readlink /proc/self/fd/{} || true", fd.as_raw_fd());
-        let mut command = sh(&probe);
-        close_inherited_fds_on_exec(&mut command);
-        let seen = stdout_of(command);
-        assert!(
-            !seen.contains(&name),
-            "the hook leaked the descriptor: {seen}"
-        );
-    }
-
     // Given: evorch holds a descriptor without O_CLOEXEC / When: a command runs
     // inside bubblewrap / Then: bubblewrap hands the descriptor on to a command
     // started without the policy, but the owned command sees neither it nor
@@ -367,75 +348,6 @@ mod linux {
         drop(session);
         assert_stops(grandchild);
         assert!(!running(leader));
-    }
-
-    /// A shell on a pseudo-terminal (its own session, so its pid is its group id):
-    /// the only kind of child the raw `ProcessGroup` accepts. The pair must outlive
-    /// the child.
-    fn pty_sh(
-        script: &str,
-    ) -> (
-        portable_pty::PtyPair,
-        Box<dyn portable_pty::Child + Send + Sync>,
-        ProcessGroup,
-    ) {
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open a pseudo-terminal");
-        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
-        command.args(["-c", script]);
-        let (child, group) =
-            ProcessGroup::spawn_pty(&*pair.slave, command).expect("start the child");
-        (pair, child, group)
-    }
-
-    // Given: a pseudo-terminal leader (the shell jobs keep this raw path until
-    // B3) and a guard of its group / When: the guard is dropped / Then: the group
-    // stops.
-    #[test]
-    fn dropping_a_raw_group_guard_stops_descendants() {
-        let (pair, mut child, group) = pty_sh("sleep 60 & echo $!; wait");
-        let leader = group.leader().expect("the child's pid");
-        let grandchild = read_pid(pair.master.try_clone_reader().expect("pty reader"));
-        assert_eq!(rustix::process::getpgid(Some(grandchild)), Ok(leader));
-        drop(ProcessGroupGuard::new(group));
-        child.wait().expect("reap the child");
-        assert_stops(grandchild);
-    }
-
-    // Given: a live pseudo-terminal leader / When: a handle to its group is
-    // released (or retired by a reap) and then asked to kill / Then: nothing is
-    // signalled, so a reaped and reused id could not be reached either.
-    #[test]
-    fn a_retired_group_signals_nothing() {
-        let (_pair, mut child, group) = pty_sh("exec sleep 60");
-        let leader = group.leader().expect("the child's pid");
-        let clone = group.clone();
-        group.release();
-        clone.kill();
-        drop(ProcessGroupGuard::new(clone));
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(running(leader), "a released group was signalled");
-        assert!(!has_exited(leader).expect("an unreaped child"));
-
-        // The released group could not stop its leader; stop it directly.
-        child.kill().expect("stop the first child");
-        child.wait().expect("reap the first child");
-
-        // A live group kills what is left of the group, reaps, and retires.
-        let (_second, mut child, reaping) = pty_sh("exec sleep 60");
-        let status = reaping
-            .kill_and_reap(|| child.wait().map(Some))
-            .expect("reap the child")
-            .expect("a status");
-        assert!(!status.success());
-        assert_eq!(reaping.leader(), None);
-        assert!(child.try_wait().expect("reaped status").is_some());
     }
 
     // Given: a leader that exits while a background helper keeps its stdout

@@ -249,7 +249,7 @@ impl ManagedProcess {
             .process_group(0);
         // Only the target child is stopped from inheriting descriptors; this
         // process's own descriptor flags are left alone.
-        sandbox::process::close_inherited_fds_on_exec(&mut starter);
+        close_inherited_fds_on_exec(&mut starter);
         let mut reaper = starter.spawn()?;
         let reaper_pid = reaper.id() as i32;
         let control = reaper.stdin.take().expect("piped stdin");
@@ -790,5 +790,50 @@ impl Drop for ManagedProcess {
         if !self.finished {
             let _ = self.reclaim();
         }
+    }
+}
+
+/// Close every descriptor above stderr when the child executes its program.
+///
+/// Test-only hygiene for the family reaper. It is not a product ownership API.
+///
+/// The child keeps the standard streams configured on `command`; nothing else
+/// evorch has open reaches the executed program. The descriptors are marked
+/// close-on-exec rather than closed, which keeps the pipe the standard library
+/// uses to report a failed exec (a missing program) working until the exec
+/// succeeds.
+///
+/// Linux needs 5.11 or later (`close_range` with `CLOSE_RANGE_CLOEXEC`); on an
+/// older kernel the spawn fails instead of leaking the descriptors. Other Unix
+/// systems keep the standard inheritance.
+fn close_inherited_fds_on_exec(command: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: between fork and exec the hook makes one async-signal-safe
+    // system call and allocates nothing.
+    unsafe {
+        command.pre_exec(mark_inherited_fds_close_on_exec);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
+}
+
+#[cfg(target_os = "linux")]
+fn mark_inherited_fds_close_on_exec() -> std::io::Result<()> {
+    const FIRST_INHERITED: libc::c_uint = 3;
+    // SAFETY: close_range takes plain integers and only changes descriptor
+    // flags of the calling process. rustix 1 does not wrap it.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            FIRST_INHERITED,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        // Reading errno neither allocates nor takes a lock.
+        Err(std::io::Error::last_os_error())
     }
 }
