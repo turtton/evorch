@@ -165,8 +165,16 @@ pub fn client_config() -> ClientConfig {
 }
 
 pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
-    let identity = core_instance::ConfigIdentity::new(&config_dir).map_err(|e| e.to_string())?;
-    let binary = core_launcher::CoreBinary::sibling().map_err(|e| e.to_string())?;
+    let identity = core_instance::ConfigIdentity::new(&config_dir)
+        .map_err(|e| format!("configuration directory {}: {e}", config_dir.display()))?;
+    // The launcher starts only the evorch-core installed beside this executable. Without
+    // one there is nothing to connect to or start, and no other runtime takes its place.
+    let binary = core_launcher::CoreBinary::sibling().map_err(|e| {
+        format!(
+            "evorch-core is not available beside evorch-gui ({e}); \
+             evorch-gui does not run its own runtime in its place"
+        )
+    })?;
     let launcher = core_launcher::Launcher::new(identity, binary, client_config())
         .map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

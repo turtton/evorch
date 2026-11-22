@@ -241,6 +241,10 @@ fn unsafe_paths_are_refused_and_lock_inodes_are_preserved() {
     fs::set_permissions(&malicious, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(CoreBinary::explicit(&malicious).is_err());
     fs::set_permissions(&malicious, fs::Permissions::from_mode(0o700)).unwrap();
+    // A distribution that cannot copy the core places a wrapper script in the GUI's
+    // directory (flake.nix, libexec/evorch-gui-cef/evorch-core): a regular executable
+    // is accepted, a link to it is not (the next lines).
+    assert!(CoreBinary::explicit(&malicious).is_ok());
     let link = r.root.path().join("bin-link");
     symlink(&malicious, &link).unwrap();
     assert!(CoreBinary::explicit(&link).is_err());

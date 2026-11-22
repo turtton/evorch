@@ -1,8 +1,9 @@
 # Conversation index and reindexing
 
 The explicitly started core owns one resident thread-index worker, from bootstrap
-activation through shutdown. The legacy GUI also starts an owner until stage 19a;
-the two processes compete for the same fenced SQLite lease, never for concurrent
+activation through shutdown. The embedded GUI (`evorch-gui --legacy-embedded`, kept
+until stage 20; the default GUI is a core client) also starts an owner; the two
+processes compete for the same fenced SQLite lease, never for concurrent
 index steps. Merely opening a `Storage` does not start indexing. Core, GUI and CLI
 use the same durable request, lease, and step APIs; there is no separate CLI engine.
 

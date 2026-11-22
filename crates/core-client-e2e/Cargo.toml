@@ -17,6 +17,10 @@ bench = false
 name = "public_restart_native"
 path = "tests/public_restart_native.rs"
 
+[[test]]
+name = "default_gui_cache"
+path = "tests/default_gui_cache.rs"
+
 [dependencies]
 serde_json = { workspace = true }
 
@@ -48,6 +52,9 @@ reqwest = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
+mock-openai = { path = "../mock-openai" }
+config = { path = "../config" }
+routing = { path = "../routing" }
 egui = { workspace = true }
 egui-wgpu = "0.36"
 base64 = { workspace = true }
