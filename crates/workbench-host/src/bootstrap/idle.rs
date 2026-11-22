@@ -11,6 +11,9 @@ impl BootstrappedHost {
     }
     pub fn busy(&self) -> bool {
         self.host.lock().unwrap().service().restart_gate().busy()
+            // A CLI invocation keeps the core up even when nothing else shows it
+            // (between its admission and the first run, or an input-only one).
+            || self.host.lock().unwrap().service().restart_gate().running_invocations() != 0
             || self.evaluations.is_busy()
             // A live external owner's lease may outlast idle grace. Keep the
             // managed retry alive even before it can publish any local RunEntry.

@@ -198,3 +198,48 @@ fn an_untrusted_record_stops_automatic_starts_and_is_left_untouched() {
         nothing_is_running(&r);
     }
 }
+
+#[test]
+fn a_core_that_rejects_the_version_is_reported_as_incompatible_and_left_running() {
+    use std::io::{Read, Write};
+    use std::os::unix::{fs::PermissionsExt as _, net::UnixListener};
+    use workbench_protocol::handshake::{
+        HandshakeRejected, HandshakeReply, ProtocolVersion, RecommendedAction, RejectReason,
+    };
+    let r = Rig::new();
+    let path = r.identity().socket(&r.runtime).unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut len = [0; 4];
+        stream.read_exact(&mut len).unwrap();
+        let mut hello = vec![0; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut hello).unwrap();
+        let reply = HandshakeReply::Rejected(HandshakeRejected {
+            reason: RejectReason::UnsupportedVersion,
+            message: "protocol 1 is not supported".into(),
+            supported_versions: vec![ProtocolVersion::CURRENT],
+            missing_capabilities: vec![],
+            recommended_action: RecommendedAction::UpgradeClient,
+        });
+        stream
+            .write_all(&workbench_protocol::framing::encode_frame(&reply, 1024 * 1024).unwrap())
+            .unwrap();
+        // Still serving after the rejection: it must not have been stopped.
+        let mut rest = [0; 16];
+        let _ = stream.read(&mut rest);
+        listener
+    });
+    let (error, spawned) = launch_in_process(&r);
+    assert!(error.is_incompatible(), "{error}");
+    assert!(!spawned);
+    let text = error.to_string();
+    assert!(
+        text.contains("NOT stopped") && text.contains("UnsupportedVersion"),
+        "{text}"
+    );
+    assert_eq!(recent(&r), 0, "an incompatible core is not a crash");
+    let _listener = server.join().unwrap();
+    assert!(path.exists(), "the socket of the running core is untouched");
+}

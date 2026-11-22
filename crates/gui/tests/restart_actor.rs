@@ -1,7 +1,8 @@
 //! The desktop actor against a core over a real Unix socket: after the core's
 //! own evidence of a planned restart the lost connection is waited out
 //! connect-only and the successor's session is rebuilt; a lost connection
-//! without that evidence is not, and nothing is ever started or resent.
+//! without that evidence (and without the core's goodbye) asks the launcher once,
+//! within the shared crash budget, and nothing is ever resent.
 //!
 //! Real sockets and real time throughout: no paused clock. Every wait is on an
 //! event (the state the actor published), and the whole scenario is bounded.
@@ -61,7 +62,7 @@ fn world() -> World {
     let binary = std::fs::canonicalize(sockets.path()).unwrap().join("core");
     std::fs::write(
         &binary,
-        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        format!("#!/bin/sh\necho started >> '{}'\n", marker.display()),
     )
     .unwrap();
     std::fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
@@ -238,18 +239,33 @@ async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no
     .expect("the scenario finishes");
 }
 
+/// How many times the core binary was started: it appends a line when run.
+fn starts(world: &World) -> usize {
+    std::fs::read_to_string(&world.marker).map_or(0, |text| text.lines().count())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lost_connection_without_that_evidence_is_not_a_restart_and_waits_for_the_person() {
+async fn an_abnormal_loss_starts_a_core_once_within_the_budget_and_then_waits_for_the_person() {
     tokio::time::timeout(BOUND, async {
         let world = world();
         let first = world.core(7);
         let gui = Gui::start(world.launcher());
         gui.until(|s| Gui::epoch(s) == Some(7)).await;
+        // Gone with no goodbye and no restart evidence: not a planned restart, so
+        // nothing is waited for connect-only; the launcher is asked once. The test
+        // binary exits at once without a core, which the launcher reports.
         first.stop();
-        gui.until(|s| !s.connected).await;
-        let second = world.core(8);
+        gui.until(|s| s.status.contains("接続失敗")).await;
+        assert_eq!(starts(&world), 1, "one automatic start, no more");
+        let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
+        assert_eq!(
+            core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
+            1,
+            "the start that never became a core is a counted crash"
+        );
         // A request now is refused as for any lost connection; that it is, is
         // the proof the actor is waiting for the person and not reconnecting.
+        let second = world.core(8);
         gui.pass().await;
         gui.actions
             .send(Action::Feature(gui::core_client::features::FeatureAction {
@@ -267,13 +283,77 @@ async fn a_lost_connection_without_that_evidence_is_not_a_restart_and_waits_for_
             .unwrap();
         gui.until(|s| s.status.contains("明示的に再接続")).await;
         assert!(second.state().seen.is_empty(), "no one connected to it");
-        assert!(!world.marker.exists());
         gui.actions.send(Action::Reconnect).await.unwrap();
         gui.until(|s| Gui::epoch(s) == Some(8)).await;
-        assert!(!world.marker.exists());
+        assert_eq!(starts(&world), 1, "joining a running core starts nothing");
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();
         second.stop();
+    })
+    .await
+    .expect("the scenario finishes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exhausted_budget_is_shown_with_its_reason_and_nothing_is_started_or_retried() {
+    tokio::time::timeout(BOUND, async {
+        let world = world();
+        // Three crashes already on record for this config directory.
+        let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
+        let ledger = world.config.path().join(".evorch-core.crash-budget");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        std::fs::write(
+            &ledger,
+            format!(r#"{{"version":1,"crashes_ms":[{now},{now},{now}]}}"#),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ledger, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let first = world.core(7);
+        let gui = Gui::start(world.launcher());
+        gui.until(|s| Gui::epoch(s) == Some(7)).await;
+        first.stop();
+        gui.until(|s| s.status.contains("再試行しません")).await;
+        let shown = gui.shared.lock().unwrap().status.clone();
+        assert!(
+            shown.contains("3 core crashes"),
+            "the reason is shown: {shown}"
+        );
+        assert!(shown.contains("再接続"), "and what to do next: {shown}");
+        assert_eq!(starts(&world), 0, "nothing was started");
+        assert_eq!(
+            core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
+            3
+        );
+        gui.actions.send(Action::Shutdown).await.unwrap();
+        gui.actor.await.unwrap();
+    })
+    .await
+    .expect("the scenario finishes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_core_that_said_goodbye_is_not_started_again() {
+    tokio::time::timeout(BOUND, async {
+        let world = world();
+        let first = world.core(7);
+        let gui = Gui::start(world.launcher());
+        gui.until(|s| Gui::epoch(s) == Some(7)).await;
+        first.push(workbench_protocol::events::UiEvent::Projection(
+            workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
+                reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
+            },
+        ));
+        // The actor resyncs on the notice: its second subscribe proves it was read.
+        first.wait_for(|s| s.subscribes.len() >= 2).await;
+        first.stop_by_ref();
+        gui.until(|s| s.status.contains("終了の通知あり")).await;
+        assert_eq!(starts(&world), 0, "an orderly stop is not restarted");
+        gui.actions.send(Action::Shutdown).await.unwrap();
+        gui.actor.await.unwrap();
     })
     .await
     .expect("the scenario finishes");

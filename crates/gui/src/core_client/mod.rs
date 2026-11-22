@@ -1,6 +1,7 @@
 //! Opt-in conversation-only desktop. This module does not open a database,
 //! construct a runtime, read a sidebar, or own an agent lifecycle.
 pub mod attachments;
+pub mod auto_reconnect;
 pub mod cache;
 pub mod restart;
 use crate::attachments::{AttachmentFile, AttachmentIo, Intake};

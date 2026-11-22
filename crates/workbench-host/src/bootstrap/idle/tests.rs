@@ -302,3 +302,19 @@ async fn recovery_retry_and_restart_gate_retain_without_registered_runs() {
     assert!(!host.busy());
     host.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_cli_invocation_retains_until_it_is_released_and_only_then() {
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = open(&dir, Arc::new(Model::default())).await;
+    let gate = host.host.lock().unwrap().service().restart_gate();
+    assert!(!host.busy());
+    let first = gate.enter_invocation().unwrap();
+    let second = gate.enter_invocation().unwrap();
+    assert!(host.busy(), "a running invocation retains the process");
+    drop(first);
+    assert!(host.busy(), "one released, one still running");
+    drop(second);
+    assert!(!host.busy(), "nothing left: the idle grace may start");
+    host.shutdown().await.unwrap();
+}

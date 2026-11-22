@@ -16,7 +16,10 @@ use std::{
     time::Duration,
 };
 use workbench_client::{ClientConfig, ClientError, TransportError, UnixTransport, WorkbenchClient};
-use workbench_protocol::{handshake::CoreState, ids::CoreIdentity};
+use workbench_protocol::{
+    handshake::{CoreState, RecommendedAction, RejectReason},
+    ids::CoreIdentity,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -27,6 +30,15 @@ pub enum LaunchError {
     /// Budget exhausted or ledger untrusted: needs a person, never retry.
     #[error(transparent)]
     Budget(#[from] BudgetError),
+    /// The running core speaks another version, identity or capability set.
+    /// It is left running: only a person may restart it at a safe point.
+    #[error(
+        "the running core cannot be used by this client ({detail}); the running core was NOT stopped. {advice}"
+    )]
+    Incompatible {
+        detail: String,
+        advice: &'static str,
+    },
     #[error("core readiness/handshake rejected: {0}")]
     Readiness(String),
     #[error("core exited before ready: {0}")]
@@ -40,6 +52,11 @@ impl LaunchError {
     /// reason (shown by Display) is dealt with.
     pub fn is_budget_blocked(&self) -> bool {
         matches!(self, Self::Budget(_))
+    }
+    /// A running core with a version, identity or capability mismatch. Retrying
+    /// cannot help, and nothing stops that core.
+    pub fn is_incompatible(&self) -> bool {
+        matches!(self, Self::Incompatible { .. })
     }
 }
 
@@ -203,6 +220,33 @@ impl Launcher {
                 // The owner can exit after accept, before replying to hello.
                 // Reenter launch arbitration and reread discovery under it.
                 Err(ClientError::Transport(TransportError::Disconnected)) => return Ok(None),
+                Err(ClientError::HandshakeRejected(r))
+                    if matches!(
+                        r.reason,
+                        RejectReason::UnsupportedVersion
+                            | RejectReason::MissingCapabilities
+                            | RejectReason::CoreMismatch
+                    ) =>
+                {
+                    return Err(LaunchError::Incompatible {
+                        detail: format!("{:?}: {}", r.reason, r.message),
+                        advice: match r.recommended_action {
+                            RecommendedAction::UpgradeClient => {
+                                "Update this client to the core's version."
+                            }
+                            RecommendedAction::UpgradeCore | RecommendedAction::RestartCore => {
+                                "Finish the running work, then restart the core at a safe point (or update it)."
+                            }
+                            _ => "Use a client of the same build as the core.",
+                        },
+                    });
+                }
+                Err(e @ ClientError::UnsupportedCapability(_)) => {
+                    return Err(LaunchError::Incompatible {
+                        detail: e.to_string(),
+                        advice: "Use a client of the same build as the core.",
+                    });
+                }
                 Err(e) => return Err(LaunchError::Readiness(e.to_string())),
             };
             // Version, identity and required capabilities are checked by the wire

@@ -158,3 +158,10 @@ not constraint IDs D1/D2/D3. A has no migration; C reserves v65, 5b v66, paralle
 work v67+. The revised plan overrides the previous version. Production main,
 bootstrap staging, full failure-matrix/Ready races and real product-binary e2e
 belong to D and 5a, not this package's fixture.
+
+## 障害時の再接続（PR C 第2段階）
+
+- GUI actor は、`CoreShuttingDown` の通知も予定 restart の証拠もなく接続が閉じた場合（異常切断）に限り、窓（5分）あたり最大3回まで `connect_or_start` を自動で呼ぶ。起動してよいかは上記の共有予算が決める。正常終了の通知後・予算超過・台帳異常・version不一致のあとは自動では何もせず、理由を表示して人の「再接続」だけを受け付ける。予定restartの後継待ちは connect-only で、予算を消費しない。
+- 稼働中coreが version / identity / capability で拒否した場合は `LaunchError::Incompatible`（coreは停止しない）。
+- CLI は core を失ったら自分の invocation を失敗（exit 1）で終え、再接続も再送もしない。予算拒否は `CliError::StartRefused`、非互換は `CliError::Incompatible` として区別して表示する。
+- 実行中のCLI invocation は idle-exit を止め、status に `cli_invocation` として現れる。

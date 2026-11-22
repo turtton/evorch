@@ -154,6 +154,55 @@ async fn no_clients_and_no_work_exit_after_the_idle_grace() {
 }
 
 #[tokio::test]
+async fn a_cli_invocation_retains_the_core_and_is_in_the_status_until_it_ends() {
+    use workbench_protocol::handshake::RetentionReason;
+    if masked_child().await {
+        return;
+    }
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = open(&dir).await;
+    let listener = tokio::net::UnixListener::bind(dir.sockets().join("idle.sock")).unwrap();
+    let backend = Arc::new(crate::backend::HostBackend::new(
+        host.host.clone(),
+        "idle-core".into(),
+    ));
+    let gate = host.host.lock().unwrap().service().restart_gate();
+    let invocation = gate.enter_invocation().unwrap();
+    let mut driver = LifecycleDriver::new(&host);
+    tokio::time::pause();
+    {
+        let running = driver.run_with_web(&host, backend.clone(), listener, None, signals());
+        tokio::pin!(running);
+        assert_pending(running.as_mut()).await;
+        // Far beyond the grace, with no client and no run: only the invocation holds.
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert_pending(running.as_mut()).await;
+        assert!(
+            backend
+                .hello()
+                .status
+                .retention_reasons
+                .contains(&RetentionReason::CliInvocation)
+        );
+        drop(invocation);
+        assert!(
+            !backend
+                .hello()
+                .status
+                .retention_reasons
+                .contains(&RetentionReason::CliInvocation)
+        );
+        // Its end starts the full grace, never an immediate exit.
+        assert_pending(running.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(60) - Duration::from_nanos(1)).await;
+        assert_pending(running.as_mut()).await;
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        running.await.unwrap();
+    }
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn gui_and_cli_connections_each_retain_until_the_last_disconnect() {
     if masked_child().await {
         return;
