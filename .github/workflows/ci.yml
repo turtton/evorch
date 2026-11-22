@@ -696,6 +696,7 @@ jobs:
           scripts/guard-cargo.sh prepare "$warm/cef-6" -p evorch-core --test f4_product_cef --test agent_observation_restart
           scripts/guard-cargo.sh prepare "$warm/cef-7" -p core-client-e2e --features gui/cef --test agent_observation_gui
           scripts/guard-cargo.sh prepare "$warm/expiry-1" -p evorch-core --release --features bootstrap-test-support --test core_expiry --locked
+          scripts/guard-cargo.sh prepare "$warm/expiry-2" -p evorch-core --release --features bootstrap-test-support --test core_browser_expiry --locked
       - name: Report disk usage
         if: always()
         run: |
@@ -1221,6 +1222,18 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
           scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p) | test(=chromium_stopped_p) | test(=chromium_navigating_p) | test(=classify_control_t) | test(=harness_timeout_control_t) | test(=harness_panic_control_t)' --run-ignored only --success-output immediate --no-tests fail
+      # D-3a2 B3-08b (class T, not a product-ELF expiry): the composition worker
+      # owns a real Chromium through the product's AgentBrowser, the navigation
+      # completes, then the real 10 s planned-shutdown expiry ends the worker with
+      # exit 74 and every owned process must be dead by pidfd. Release test binary.
+      - name: Real Chromium navigation then ten-second expiry (release test binary)
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
+          scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_browser_expiry -E 'test(=expiry_chromium_t) | test(=expiry_chromium_stopped_t)' --run-ignored only --test-threads 1 --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1398,6 +1411,18 @@ jobs:
           export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
           scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p) | test(=cef_stopped_p) | test(=cef_navigating_p) | test(=renderer_launch_failure_p) | test(=cef_init_failure_p)' --run-ignored only --success-output immediate --no-tests fail
+      # D-3a2 B3-08b (class T, not a product-ELF expiry): the composition worker
+      # owns the real renderer and CEF through RuntimePages, the page is read
+      # back, then the real 10 s planned-shutdown expiry ends the worker with
+      # exit 74 and every owned process must be dead by pidfd. Release test binary.
+      - name: Real CEF navigation then ten-second expiry (release test binary)
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
+          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
+          scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_browser_expiry -E 'test(=expiry_cef_t) | test(=expiry_cef_stopped_t)' --run-ignored only --test-threads 1 --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

@@ -53,6 +53,12 @@ path = "tests/core_browser_sigkill/main.rs"
 harness = false
 
 [[test]]
+name = "core_browser_expiry"
+path = "tests/core_browser_expiry/main.rs"
+harness = false
+required-features = ["bootstrap-test-support"]
+
+[[test]]
 name = "recovery_admin_install"
 path = "tests/recovery_admin_install/main.rs"
 
