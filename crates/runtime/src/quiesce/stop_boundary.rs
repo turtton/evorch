@@ -14,6 +14,7 @@ pub struct StopDelivery<'a> {
     runtime: &'a AgentRuntime,
     run: RunId,
     scope: StopScope,
+    expected_incarnation: Option<String>,
 }
 impl<'a> StopDelivery<'a> {
     pub(crate) fn new(runtime: &'a AgentRuntime, run: RunId, scope: StopScope) -> Self {
@@ -21,7 +22,13 @@ impl<'a> StopDelivery<'a> {
             runtime,
             run,
             scope,
+            expected_incarnation: None,
         }
+    }
+    /// Deliver only while the run's execution is still this incarnation.
+    pub(crate) fn expecting_incarnation(mut self, incarnation: String) -> Self {
+        self.expected_incarnation = Some(incarnation);
+        self
     }
     /// After the lifecycle owner chooses shutdown, commit terminal-only runtime
     /// admission before Stop. This cannot cancel/replay the pending restart.
@@ -30,8 +37,13 @@ impl<'a> StopDelivery<'a> {
         self.deliver()
     }
     pub fn deliver(self) -> Result<(), RuntimeError> {
-        self.runtime
-            .with_terminal_dispatch(|| self.runtime.stop_with_dispatch(self.run, self.scope))
+        self.runtime.with_terminal_dispatch(|| {
+            self.runtime.stop_with_dispatch(
+                self.run,
+                self.scope,
+                self.expected_incarnation.as_deref(),
+            )
+        })
     }
 }
 impl AgentRuntime {

@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use event_bus::AgentRunPhase;
 use evorch::cli::core_client::connect_core;
-use evorch::cli::run::{Outcome, Prompter, RunArgs, execute, run_client_config};
+use evorch::cli::run::{Decision, Outcome, Prompter, RunArgs, execute, run_client_config};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as ProviderRole, ToolSpec,
 };
@@ -23,11 +23,19 @@ use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
 use workbench_host::CommandHost;
 use workbench_host::commands::CommandService;
 use workbench_host::projects::StaticProjects;
-use workbench_protocol::commands::{Command, ComposerRole, SendChat};
+use workbench_protocol::commands::{
+    AnswerUserQuestion, Command, CommandResult, ComposerRole, SendChat,
+};
 use workbench_protocol::handshake::BuildInfo;
-use workbench_protocol::ids::{ClientId, ProjectId, SubmissionId, ThreadId};
-use workbench_protocol::namespaces::ConversationCommand;
-use workbench_protocol::namespaces::execution::invocation::InvocationRole;
+use workbench_protocol::ids::{ClientId, InvocationId, ProjectId, SubmissionId, ThreadId};
+use workbench_protocol::namespaces::execution::ExecutionResult;
+use workbench_protocol::namespaces::execution::invocation::{
+    EndInvocation, EndReason, InvocationRole, StartInvocation,
+};
+use workbench_protocol::namespaces::{
+    ConversationCommand, ExecutionCommand, QuestionsCommand, QuestionsQuery, QuestionsReply,
+};
+use workbench_protocol::queries::{PendingQuery, Query, QueryReply};
 use workbench_protocol::views::{ApprovalView, QuestionView};
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -118,8 +126,58 @@ impl Prompter for Typed {
         self.answers.lock().unwrap().push(question.title.clone());
         Some("YAML".into())
     }
-    async fn approve(&self, _: &ApprovalView) -> bool {
-        false
+    async fn approve(&self, _: &ApprovalView, _: Option<&str>) -> Decision {
+        Decision::Deny
+    }
+}
+
+/// Waits for an answer that never comes from the terminal.
+#[derive(Default)]
+struct Stuck {
+    asked: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Prompter for Stuck {
+    async fn answer(&self, _: &QuestionView) -> Option<String> {
+        self.asked.notify_one();
+        std::future::pending().await
+    }
+    async fn approve(&self, _: &ApprovalView, _: Option<&str>) -> Decision {
+        std::future::pending().await
+    }
+}
+
+/// Says `decision` to every approval, and records what it was shown.
+struct Approver {
+    decision: Decision,
+    /// (summary cut short, length of the complete input shown, if any)
+    seen: Mutex<Vec<(bool, Option<usize>)>>,
+    shown: tokio::sync::Notify,
+}
+
+impl Approver {
+    fn new(decision: Decision) -> Self {
+        Self {
+            decision,
+            seen: Mutex::default(),
+            shown: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Prompter for Approver {
+    async fn answer(&self, _: &QuestionView) -> Option<String> {
+        None
+    }
+    async fn approve(&self, approval: &ApprovalView, input: Option<&str>) -> Decision {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((approval.summary_truncated, input.map(str::len)));
+        self.shown.notify_one();
+        self.decision
     }
 }
 
@@ -466,4 +524,226 @@ async fn a_restart_is_refused_while_a_cli_invocation_runs_and_not_for_a_screen_a
         .unwrap();
     gate.claim_restart_admission()
         .expect("nothing runs any more");
+}
+
+fn started_of(
+    reply: workbench_protocol::commands::CommandReply,
+) -> workbench_protocol::namespaces::execution::invocation::InvocationStarted {
+    match reply.result.map(|result| *result) {
+        Some(CommandResult::Execution(ExecutionResult::InvocationStarted(started))) => started,
+        other => panic!("not an invocation start: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invocation_that_ended_does_not_stop_the_run_a_screen_resumed() {
+    let core = Core::start().await;
+    let cli = core.cli().await;
+    let screen = core.screen().await;
+    let id = InvocationId::new("inv-natural").unwrap();
+    let started = started_of(
+        cli.command(Command::Execution(ExecutionCommand::StartInvocation(
+            StartInvocation {
+                invocation: id.clone(),
+                project_root: core.root.to_string_lossy().into_owned(),
+                role: InvocationRole::Orchestrator,
+                prompt: "say it".into(),
+                thread: None,
+            },
+        )))
+        .await
+        .unwrap(),
+    );
+    let run: RunId = started.run.as_str().parse().unwrap();
+    // The run ends by itself; the invocation has not been ended yet.
+    let phase = tokio::time::timeout(WAIT, core.runtime.wait(run))
+        .await
+        .expect("the run settles")
+        .unwrap();
+    assert_eq!(phase, AgentRunPhase::Done);
+
+    // A screen continues the same conversation: the same run id, a new execution.
+    let resumed = screen
+        .command(Command::Conversation(ConversationCommand::SendChat(
+            SendChat {
+                project: ProjectId::new("project-1").unwrap(),
+                thread: started.thread.clone(),
+                submission_id: SubmissionId::new("screen-resume").unwrap(),
+                composer_role: ComposerRole::Worker,
+                text: "hold the screen".into(),
+                skills: vec![],
+                attachments: vec![],
+                model_preference: None,
+                fork_seed: None,
+            },
+        )))
+        .await
+        .unwrap();
+    core.reached().await;
+    assert_eq!(resumed.run_id.as_ref(), Some(&started.run));
+    assert!(core.live(run));
+
+    // The old invocation ends now: it must not stop what it did not start.
+    let ended = match cli
+        .command(Command::Execution(ExecutionCommand::EndInvocation(
+            EndInvocation {
+                invocation: id,
+                reason: EndReason::Interrupted,
+            },
+        )))
+        .await
+        .unwrap()
+        .result
+        .map(|result| *result)
+    {
+        Some(CommandResult::Execution(ExecutionResult::InvocationEnded(ended))) => ended,
+        other => panic!("not an invocation end: {other:?}"),
+    };
+
+    assert_eq!(ended.stopped_runs, 0);
+    assert!(
+        core.live(run),
+        "the resumed execution is not the invocation's"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_answered_on_a_screen_ends_the_wait_for_the_terminal() {
+    let core = Core::start().await;
+    let client = core.cli().await;
+    let screen = core.screen().await;
+    let terminal = Arc::new(Stuck::default());
+    let args = core.args("ask me", false);
+    let waiting = terminal.clone();
+    let task = tokio::spawn(async move { execute(&client, &args, &*waiting, never()).await });
+    tokio::time::timeout(WAIT, terminal.asked.notified())
+        .await
+        .expect("the terminal was asked");
+
+    // The terminal is still waiting when a screen answers.
+    let QueryReply::Questions(QuestionsReply::Questions(page)) = screen
+        .query(Query::Questions(QuestionsQuery::ListQuestions(
+            PendingQuery {
+                thread: None,
+                pending_only: true,
+                page: Default::default(),
+            },
+        )))
+        .await
+        .unwrap()
+    else {
+        panic!("not a question list");
+    };
+    let question = page.items.first().expect("the run asked");
+    screen
+        .command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
+            AnswerUserQuestion {
+                thread: question.requester.thread.clone(),
+                question_id: question.id.clone(),
+                answer: "YAML".into(),
+                question_revision: question.revision,
+            },
+        )))
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("the command ends although the terminal never answered")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, Outcome::Succeeded(Some("all done".into())));
+}
+
+async fn approval_core(
+    thread: &str,
+    input: serde_json::Value,
+) -> (
+    Core,
+    sandbox::approval::PendingApproval,
+    Arc<sandbox::approval::ApprovalRegistry>,
+    RunArgs,
+) {
+    let core = Core::start().await;
+    let registry = sandbox::approval::ApprovalRegistry::for_bus(&core.runtime.event_bus());
+    let mut args = core.args("hold the cli", false);
+    args.thread = Some(ThreadId::new(thread).unwrap());
+    let ticket = registry.register(
+        sandbox::approval::ApprovalRequest {
+            run_id: "run-1",
+            thread_id: Some(thread),
+            tool_name: "shell",
+            call_id: "call-1",
+            input: Some(input),
+        },
+        Duration::from_secs(3600),
+    );
+    (core, ticket, registry, args)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_cut_short_is_approved_only_after_its_complete_input_was_shown() {
+    let input = serde_json::json!({"command": "あ".repeat(35_000)});
+    let (core, ticket, _registry, args) = approval_core("approval-whole", input.clone()).await;
+    let client = core.cli().await;
+    let terminal = Arc::new(Approver::new(Decision::Approve));
+    let running = terminal.clone();
+    let (interrupt, interrupted) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        execute(&client, &args, &*running, async {
+            let _ = interrupted.await;
+        })
+        .await
+    });
+
+    let state = tokio::time::timeout(WAIT, ticket.wait())
+        .await
+        .expect("the approval is decided");
+
+    assert_eq!(state, sandbox::approval::ApprovalState::Approved);
+    assert_eq!(
+        *terminal.seen.lock().unwrap(),
+        [(true, Some(input.to_string().len()))],
+        "the terminal was shown the whole input"
+    );
+    interrupt.send(()).unwrap();
+    let _ = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("the command ends");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_whose_complete_input_cannot_be_shown_is_not_approved_from_the_terminal() {
+    // Larger than the terminal shows: it can only be read, and approved, on a screen.
+    let input = serde_json::json!({"command": "a".repeat(300_000)});
+    let (core, ticket, registry, args) = approval_core("approval-large", input).await;
+    let client = core.cli().await;
+    // The person types "y".
+    let terminal = Arc::new(Approver::new(Decision::Approve));
+    let running = terminal.clone();
+    let (interrupt, interrupted) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        execute(&client, &args, &*running, async {
+            let _ = interrupted.await;
+        })
+        .await
+    });
+    tokio::time::timeout(WAIT, terminal.shown.notified())
+        .await
+        .expect("the terminal was asked");
+
+    interrupt.send(()).unwrap();
+    let outcome = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("the command ends")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(outcome, Outcome::Interrupted);
+    assert_eq!(*terminal.seen.lock().unwrap(), [(true, None)]);
+    assert_eq!(
+        registry.get(ticket.id()).unwrap().state,
+        sandbox::approval::ApprovalState::Pending,
+        "nothing was approved"
+    );
 }

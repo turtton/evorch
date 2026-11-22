@@ -106,6 +106,9 @@ struct Record {
     epoch: ConnectionEpoch,
     thread: String,
     owned: Option<RunId>,
+    /// The execution of `owned` this invocation started. A resume of the same
+    /// run id is another incarnation and is not ours to stop.
+    incarnation: Option<String>,
     input: Option<SentInput>,
     lease: Option<HostInvocationLease>,
     ended: Option<InvocationEnded>,
@@ -123,7 +126,6 @@ pub struct InvocationRegistry {
     state: Mutex<State>,
     runtime: AgentRuntime,
     handle: tokio::runtime::Handle,
-    stop: StopSlot,
     gate: HostRestartGate,
     hook_installed: AtomicBool,
 }
@@ -136,14 +138,12 @@ impl InvocationRegistry {
     pub fn new(
         runtime: AgentRuntime,
         handle: tokio::runtime::Handle,
-        stop: StopSlot,
         gate: HostRestartGate,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
             runtime,
             handle,
-            stop,
             gate,
             hook_installed: AtomicBool::new(false),
         })
@@ -197,6 +197,7 @@ impl InvocationRegistry {
         let client = new.client.clone();
         let epoch = new.epoch;
         let owned = new.owned;
+        let incarnation = owned.and_then(|run| self.runtime.run_incarnation(run).ok());
         {
             let mut state = lock(&self.state);
             state.records.insert(
@@ -207,6 +208,7 @@ impl InvocationRegistry {
                     epoch: new.epoch,
                     thread: new.thread,
                     owned: new.owned,
+                    incarnation,
                     input: new.input,
                     lease: Some(new.lease),
                     ended: None,
@@ -268,10 +270,27 @@ impl InvocationRegistry {
         }
     }
 
-    fn stop_run(&self, run: RunId) -> Result<(), runtime::RuntimeError> {
-        match self.stop.get() {
-            Some(handler) => handler.stop(run, StopScope::Subtree),
-            None => self.runtime.stop(run, StopScope::Subtree),
+    /// Stop the run with its subtree, but only while it is still the execution
+    /// this invocation started. The check and the stop are one step in the
+    /// runtime, taken under the run's restore gate that a resume also takes, so
+    /// a run resumed since (another incarnation) and its children are left alone.
+    /// `Ok(false)` means nothing was stopped for that reason. The stop goes
+    /// through the boundary the lifecycle owner installed in the runtime.
+    fn stop_run(
+        &self,
+        run: RunId,
+        incarnation: Option<&str>,
+    ) -> Result<bool, runtime::RuntimeError> {
+        let Some(incarnation) = incarnation else {
+            return Ok(false);
+        };
+        match self
+            .runtime
+            .stop_incarnation(run, incarnation, StopScope::Subtree)
+        {
+            Ok(()) => Ok(true),
+            Err(runtime::RuntimeError::RunTerminated { .. }) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -318,8 +337,9 @@ impl InvocationRegistry {
                 Ok(AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped)
             );
             if own_live || !live.is_empty() {
-                match self.stop_run(run) {
-                    Ok(()) => {
+                match self.stop_run(run, record.incarnation.as_deref()) {
+                    Ok(false) => {}
+                    Ok(true) => {
                         stopped =
                             u32::from(own_live) + u32::try_from(live.len()).unwrap_or(u32::MAX);
                     }

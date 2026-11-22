@@ -16,6 +16,7 @@
 //! was given (or no answer could be read), 130 interrupted.
 use std::collections::HashSet;
 use std::future::Future;
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -40,8 +41,9 @@ use workbench_protocol::{
             },
         },
     },
-    queries::{PendingQuery, Query, QueryReply},
+    queries::{GetApprovalInput, PendingQuery, Query, QueryReply},
     views::{ApprovalState, ApprovalView, QuestionTarget, QuestionView},
+    wire::ByteOffset,
 };
 
 use crate::cli::core_client::{self, CliError, Step, exit};
@@ -54,6 +56,11 @@ const POLL: Duration = Duration::from_secs(1);
 
 /// How long Ctrl-C waits for the core to confirm that the invocation ended.
 const END_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The largest complete input of a tool call that is shown on the terminal to
+/// be approved. A larger one is read on a screen; the terminal cannot approve it.
+const TERMINAL_INPUT_LIMIT: u64 = 256 * 1024;
+const INPUT_CHUNK: u32 = 32 * 1024;
 
 /// `evorch run`, as typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,27 +181,111 @@ impl Outcome {
     }
 }
 
-/// Where answers come from. `None` / `false` mean that none could be read.
+/// What the person decided about a tool approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Approve,
+    Deny,
+    /// No decision here: the approval stays pending for a screen.
+    Leave,
+}
+
+/// Where answers come from. `None` / `Leave` mean that none could be given.
 #[async_trait]
 pub trait Prompter: Send + Sync {
     async fn answer(&self, question: &QuestionView) -> Option<String>;
-    async fn approve(&self, approval: &ApprovalView) -> bool;
+    /// `input` is the complete input of the call (secrets masked) when it was
+    /// fetched. A call whose summary was cut short and whose complete input is
+    /// not at hand is never approved from here, whatever is answered.
+    async fn approve(&self, approval: &ApprovalView, input: Option<&str>) -> Decision;
 }
 
 /// The terminal: prompts on stderr, answers from stdin.
 pub struct Terminal;
 
-async fn read_line() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line.trim().to_owned()),
-        }
+/// stdin is read by one thread for the whole process, so that a prompt that is
+/// given up (answered on a screen) leaves nothing blocking behind it but that
+/// thread, which does not keep the process from ending.
+fn stdin_lines() -> &'static tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<String>>>
+{
+    static LINES: std::sync::OnceLock<
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<String>>>,
+    > = std::sync::OnceLock::new();
+    LINES.get_or_init(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = std::thread::Builder::new()
+            .name("evorch-stdin".into())
+            .spawn(move || {
+                let stdin = std::io::stdin();
+                loop {
+                    let mut line = String::new();
+                    match stdin.lock().read_line(&mut line) {
+                        Ok(0) | Err(_) => {
+                            let _ = tx.send(None);
+                            break;
+                        }
+                        Ok(_) => {
+                            if tx.send(Some(line.trim().to_owned())).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        tokio::sync::Mutex::new(rx)
     })
-    .await
-    .ok()
-    .flatten()
+}
+
+/// Set when a prompt was given up: what was typed for it is not an answer to
+/// the next one.
+static PROMPT_GIVEN_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct GiveUp(bool);
+
+impl Drop for GiveUp {
+    fn drop(&mut self) {
+        if self.0 {
+            PROMPT_GIVEN_UP.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+async fn read_line() -> Option<String> {
+    let mut lines = stdin_lines().lock().await;
+    if PROMPT_GIVEN_UP.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        while let Ok(Some(_)) = lines.try_recv() {}
+    }
+    let mut guard = GiveUp(true);
+    let line = lines.recv().await.flatten();
+    guard.0 = false;
+    line
+}
+
+/// What the terminal shows for an approval, and whether it may be approved there.
+fn approval_text(approval: &ApprovalView, input: Option<&str>) -> (String, bool) {
+    match (approval.summary_truncated, input) {
+        (false, _) => (approval.summary.clone(), true),
+        (true, Some(input)) => (input.to_owned(), true),
+        (true, None) => (
+            format!(
+                "{}\n[the summary is cut short and the complete input could not be shown: it cannot be approved from this terminal; use a screen]",
+                approval.summary
+            ),
+            false,
+        ),
+    }
+}
+
+/// The decision a typed line stands for. Only an approval whose complete input
+/// was shown can be approved; the rest can be denied or left for a screen.
+fn decision_of(approvable: bool, line: Option<&str>) -> Decision {
+    let line = line.map(str::to_ascii_lowercase);
+    match (approvable, line.as_deref()) {
+        (true, Some("y" | "yes")) => Decision::Approve,
+        (true, _) => Decision::Deny,
+        (false, Some("d" | "deny")) => Decision::Deny,
+        (false, _) => Decision::Leave,
+    }
 }
 
 #[async_trait]
@@ -216,16 +307,18 @@ impl Prompter for Terminal {
         )
     }
 
-    async fn approve(&self, approval: &ApprovalView) -> bool {
-        eprintln!("{}", approval.summary);
-        eprint!("Approve {} [{}]? [y/N] ", approval.tool_name, approval.id);
-        matches!(
-            read_line()
-                .await
-                .map(|line| line.to_ascii_lowercase())
-                .as_deref(),
-            Some("y" | "yes")
-        )
+    async fn approve(&self, approval: &ApprovalView, input: Option<&str>) -> Decision {
+        let (text, approvable) = approval_text(approval, input);
+        eprintln!("{text}");
+        if approvable {
+            eprint!("Approve {} [{}]? [y/N] ", approval.tool_name, approval.id);
+        } else {
+            eprint!(
+                "Deny {} [{}] here? [d = deny, Enter = leave it for a screen] ",
+                approval.tool_name, approval.id
+            );
+        }
+        decision_of(approvable, read_line().await.as_deref())
     }
 }
 
@@ -303,102 +396,245 @@ fn refused(error: &ClientError) -> bool {
     matches!(error, ClientError::Server(e) if e.code != ErrorCode::StorageUnavailable)
 }
 
-/// Asks what waits for the person, once each. `Some` ends the wait.
+/// The complete input of a call whose summary was cut short, read in chunks
+/// and checked to be whole. `None` when it cannot be had (too large for the
+/// terminal, changed or decided meanwhile, or not consistent).
+async fn complete_input(
+    client: &WorkbenchClient,
+    approval: &ApprovalView,
+) -> Result<Option<String>, ClientError> {
+    let mut text = String::new();
+    loop {
+        let reply = client
+            .query(Query::Approvals(ApprovalsQuery::GetApprovalInput(
+                GetApprovalInput {
+                    approval_id: approval.id.clone(),
+                    core_epoch: approval.core_epoch,
+                    approval_revision: approval.revision,
+                    offset: ByteOffset(text.len() as u64),
+                    max_bytes: INPUT_CHUNK,
+                },
+            )))
+            .await;
+        let chunk = match reply {
+            Ok(QueryReply::Approvals(ApprovalsReply::ApprovalInput(chunk))) => chunk,
+            Ok(_) => return Ok(None),
+            Err(error) if refused(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if chunk.approval_id != approval.id
+            || chunk.core_epoch != approval.core_epoch
+            || chunk.approval_revision != approval.revision
+            || chunk.offset.get() != text.len() as u64
+            || chunk.total_bytes.get() > TERMINAL_INPUT_LIMIT
+        {
+            return Ok(None);
+        }
+        text.push_str(&chunk.text);
+        match chunk.next_offset {
+            None => {
+                return Ok((text.len() as u64 == chunk.total_bytes.get()).then_some(text));
+            }
+            Some(next) if next.get() == text.len() as u64 && !chunk.text.is_empty() => {}
+            Some(_) => return Ok(None),
+        }
+    }
+}
+
+/// One thing that waits for the person.
+enum Waiting {
+    Question(QuestionView),
+    Approval(ApprovalView),
+}
+
+impl Waiting {
+    fn key(&self) -> String {
+        match self {
+            Self::Question(q) => format!("q:{}:{:?}", q.id, q.revision),
+            Self::Approval(a) => format!("a:{}:{:?}", a.id, a.revision),
+        }
+    }
+}
+
+/// What waits for the person. Reading it ([`Asking::observe`]) never waits for
+/// the person: what is new is handed to [`Asking::serve`], which prompts while
+/// the invocation keeps being followed, and gives a prompt up as soon as its
+/// question or approval is no longer pending (answered on a screen).
 struct Asking<'a> {
     client: &'a WorkbenchClient,
     prompter: &'a dyn Prompter,
     no_wait: bool,
-    /// What was shown already, by id and revision: never asked twice.
+    /// What was handed over already, by id and revision: never asked twice.
     shown: Mutex<HashSet<String>>,
+    /// What is pending now.
+    live: tokio::sync::watch::Sender<HashSet<String>>,
+    work: tokio::sync::mpsc::UnboundedSender<Waiting>,
 }
 
-impl Asking<'_> {
+impl<'a> Asking<'a> {
+    fn new(
+        client: &'a WorkbenchClient,
+        prompter: &'a dyn Prompter,
+        no_wait: bool,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<Waiting>) {
+        let (work, queue) = tokio::sync::mpsc::unbounded_channel();
+        let (live, _) = tokio::sync::watch::channel(HashSet::new());
+        (
+            Self {
+                client,
+                prompter,
+                no_wait,
+                shown: Mutex::default(),
+                live,
+                work,
+            },
+            queue,
+        )
+    }
+
     fn first_time(&self, key: String) -> bool {
         self.shown.lock().unwrap().insert(key)
     }
 
-    async fn ask(
+    /// Read what is pending. `Some` ends the wait.
+    async fn observe(
         &self,
         view: &InvocationView,
         run: &workbench_protocol::ids::RunId,
     ) -> Result<Option<Outcome>, ClientError> {
         let (questions, approvals) = pending(self.client, &view.thread, run).await?;
-        if questions.is_empty() && approvals.is_empty() {
+        let waiting: Vec<Waiting> = questions
+            .into_iter()
+            .map(Waiting::Question)
+            .chain(approvals.into_iter().map(Waiting::Approval))
+            .collect();
+        self.live
+            .send_replace(waiting.iter().map(Waiting::key).collect());
+        if waiting.is_empty() {
             return Ok(None);
         }
         if self.no_wait {
-            let what = questions
-                .first()
-                .map(|q| format!("question: {}", q.title))
-                .or_else(|| {
-                    approvals
-                        .first()
-                        .map(|a| format!("approval of {}", a.tool_name))
-                })
-                .unwrap_or_default();
+            let what = match &waiting[0] {
+                Waiting::Question(q) => format!("question: {}", q.title),
+                Waiting::Approval(a) => format!("approval of {}", a.tool_name),
+            };
             return Ok(Some(Outcome::NeedsInput(what)));
         }
-        for question in questions {
-            if !self.first_time(format!("q:{}:{:?}", question.id, question.revision)) {
-                continue;
-            }
-            let Some(answer) = self.prompter.answer(&question).await else {
-                return Ok(Some(Outcome::NeedsInput(format!(
-                    "question: {} (no answer could be read)",
-                    question.title
-                ))));
-            };
-            let sent = self
-                .client
-                .command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
-                    AnswerUserQuestion {
-                        thread: question.requester.thread.clone(),
-                        question_id: question.id.clone(),
-                        answer,
-                        question_revision: question.revision,
-                    },
-                )))
-                .await;
-            if let Err(error) = sent {
-                // Answered elsewhere, or changed: the next read tells which.
-                if !refused(&error) {
-                    return Err(error);
-                }
-                return Ok(Some(Outcome::Failed(format!(
-                    "the core refused the answer: {error}"
-                ))));
-            }
-        }
-        for approval in approvals {
-            if !self.first_time(format!("a:{}:{:?}", approval.id, approval.revision)) {
-                continue;
-            }
-            let approved = self.prompter.approve(&approval).await;
-            let sent = self
-                .client
-                .command(Command::Approvals(ApprovalsCommand::DecideToolApproval(
-                    DecideToolApproval {
-                        approval_id: approval.id.clone(),
-                        core_epoch: approval.core_epoch,
-                        approval_revision: approval.revision,
-                        decision: if approved {
-                            ApprovalDecision::Approve
-                        } else {
-                            ApprovalDecision::Deny
-                        },
-                    },
-                )))
-                .await;
-            if let Err(error) = sent {
-                if !refused(&error) {
-                    return Err(error);
-                }
-                return Ok(Some(Outcome::Failed(format!(
-                    "the core refused the decision: {error}"
-                ))));
+        for item in waiting {
+            if self.first_time(item.key()) {
+                let _ = self.work.send(item);
             }
         }
         Ok(None)
+    }
+
+    /// Prompt for what [`Self::observe`] hands over. Ends with `Some` outcome
+    /// when the command cannot go on; otherwise it never ends by itself.
+    async fn serve(
+        &self,
+        mut queue: tokio::sync::mpsc::UnboundedReceiver<Waiting>,
+    ) -> Result<Outcome, ClientError> {
+        while let Some(item) = queue.recv().await {
+            let key = item.key();
+            let mut live = self.live.subscribe();
+            let gone = async {
+                let _ = live.wait_for(|pending| !pending.contains(&key)).await;
+            };
+            let outcome = tokio::select! {
+                () = gone => None,
+                outcome = self.prompt(&item) => outcome?,
+            };
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
+        std::future::pending().await
+    }
+
+    async fn prompt(&self, item: &Waiting) -> Result<Option<Outcome>, ClientError> {
+        match item {
+            Waiting::Question(question) => self.ask_question(question).await,
+            Waiting::Approval(approval) => self.ask_approval(approval).await,
+        }
+    }
+
+    async fn ask_question(&self, question: &QuestionView) -> Result<Option<Outcome>, ClientError> {
+        let Some(answer) = self.prompter.answer(question).await else {
+            return Ok(Some(Outcome::NeedsInput(format!(
+                "question: {} (no answer could be read)",
+                question.title
+            ))));
+        };
+        let sent = self
+            .client
+            .command(Command::Questions(QuestionsCommand::AnswerUserQuestion(
+                AnswerUserQuestion {
+                    thread: question.requester.thread.clone(),
+                    question_id: question.id.clone(),
+                    answer,
+                    question_revision: question.revision,
+                },
+            )))
+            .await;
+        self.sent("answer", sent)
+    }
+
+    async fn ask_approval(&self, approval: &ApprovalView) -> Result<Option<Outcome>, ClientError> {
+        let input = if approval.summary_truncated {
+            complete_input(self.client, approval).await?
+        } else {
+            None
+        };
+        let mut decision = self.prompter.approve(approval, input.as_deref()).await;
+        if decision == Decision::Approve && approval.summary_truncated && input.is_none() {
+            // Whatever the prompter says: what was not shown is not approved.
+            eprintln!(
+                "the complete input of {} could not be shown; it is not approved from this terminal",
+                approval.tool_name
+            );
+            decision = Decision::Leave;
+        }
+        let decision = match decision {
+            Decision::Approve => ApprovalDecision::Approve,
+            Decision::Deny => ApprovalDecision::Deny,
+            Decision::Leave => return Ok(None),
+        };
+        let sent = self
+            .client
+            .command(Command::Approvals(ApprovalsCommand::DecideToolApproval(
+                DecideToolApproval {
+                    approval_id: approval.id.clone(),
+                    core_epoch: approval.core_epoch,
+                    approval_revision: approval.revision,
+                    decision,
+                },
+            )))
+            .await;
+        self.sent("decision", sent)
+    }
+
+    /// A refusal because it was decided or changed elsewhere in the meantime is
+    /// not a failure: the next read tells what became of it.
+    fn sent<T>(
+        &self,
+        what: &str,
+        sent: Result<T, ClientError>,
+    ) -> Result<Option<Outcome>, ClientError> {
+        match sent {
+            Ok(_) => Ok(None),
+            Err(ClientError::Server(e))
+                if matches!(
+                    e.code,
+                    ErrorCode::AlreadyResolved | ErrorCode::StaleRevision | ErrorCode::StaleEpoch
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) if refused(&error) => Ok(Some(Outcome::Failed(format!(
+                "the core refused the {what}: {error}"
+            )))),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -458,14 +694,9 @@ async fn follow(
             "protocol violation: the core did not answer with an invocation".into(),
         ));
     };
-    let asking = Asking {
-        client,
-        prompter,
-        no_wait: args.no_wait,
-        shown: Mutex::default(),
-    };
+    let (asking, queue) = Asking::new(client, prompter, args.no_wait);
     let owns = started.ownership == InvocationOwnership::OwnsRun;
-    core_client::wait_settled_every(
+    let waiting = core_client::wait_settled_every(
         client,
         SubscriptionScope::All,
         |_| true,
@@ -479,14 +710,19 @@ async fn follow(
             }
             if owns
                 && let Some(run) = &view.owned_run
-                && let Some(outcome) = asking.ask(&view, run).await?
+                && let Some(outcome) = asking.observe(&view, run).await?
             {
                 return Ok(Step::Settled(outcome));
             }
             Ok(Step::Pending)
         },
-    )
-    .await
+    );
+    // The person is asked while the invocation is followed: an end, a loss of
+    // the connection or an answer given elsewhere ends the wait for the terminal.
+    tokio::select! {
+        result = waiting => result,
+        served = asking.serve(queue) => served.map_err(CliError::from),
+    }
 }
 
 /// Run one invocation to its end. `interrupt` completes when the person asks to
@@ -676,6 +912,19 @@ mod tests {
             parse(&["run", "--project", "/p", "--role", "worker", "--prompt"]),
             Err(USAGE.into())
         );
+    }
+
+    #[test]
+    fn y_approves_only_what_was_shown_whole() {
+        assert_eq!(decision_of(true, Some("y")), Decision::Approve);
+        assert_eq!(decision_of(true, Some("YES")), Decision::Approve);
+        assert_eq!(decision_of(true, Some("n")), Decision::Deny);
+        assert_eq!(decision_of(true, None), Decision::Deny);
+        // The summary was cut short and the complete input is not at hand.
+        assert_eq!(decision_of(false, Some("y")), Decision::Leave);
+        assert_eq!(decision_of(false, Some("yes")), Decision::Leave);
+        assert_eq!(decision_of(false, None), Decision::Leave);
+        assert_eq!(decision_of(false, Some("d")), Decision::Deny);
     }
 
     #[test]

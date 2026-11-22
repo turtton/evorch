@@ -107,7 +107,6 @@ impl CommandService {
         let invocations = crate::invocations::InvocationRegistry::new(
             runtime.clone(),
             handle.clone(),
-            restart_stop.clone(),
             restart_gate.clone(),
         );
         Self {
