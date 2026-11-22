@@ -5,6 +5,17 @@ use runtime::learning_suspend::LearningSuspendWait;
 // observed-max margin. See measurements/4b-d-2b/README.md for methods/limits.
 pub(super) const LEARNING_COHORT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How many times one request may observe the recipes again after a run changed
+/// state under it. Past this the request is cancelled, as it always was.
+pub(super) const OBSERVATION_ATTEMPTS: usize = 16;
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum Observed {
+    Begun(RestartAttempt),
+    Cancel,
+    Again,
+}
+
 impl RestartCoordinator {
     async fn prepare_drains(&self, id: RestartId) -> Result<Option<RestartAttempt>, RuntimeError> {
         self.0.preparing.evaluations.producers.drained().await;
@@ -48,10 +59,34 @@ impl RestartCoordinator {
             LearningSuspendWait::DeadlineExceeded => return Ok(None),
             LearningSuspendWait::Complete => {}
         }
-        let recipes = {
+        // A run changing state while the recipes are observed is ordinary: the
+        // whole observation starts again from the same checks (no gate, park,
+        // capture or transaction exists yet). It is bounded in count and by the
+        // request's own deadline; past either the request is cancelled.
+        for _ in 0..OBSERVATION_ATTEMPTS {
+            match self.observe_and_begin(id, deadline).await? {
+                Observed::Begun(attempt) => return Ok(Some(attempt)),
+                Observed::Cancel => return Ok(None),
+                Observed::Again => tokio::task::yield_now().await,
+            }
+        }
+        Ok(None)
+    }
+
+    /// One pass of recipe observation, DB preflight and the begin of the
+    /// quiesce. Nothing here is carried over to the next pass.
+    async fn observe_and_begin(
+        &self,
+        id: RestartId,
+        deadline: tokio::time::Instant,
+    ) -> Result<Observed, RuntimeError> {
+        let mut recipes = {
             let state = self.0.state.lock().unwrap();
             if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
                 return Err(RuntimeError::RestartBusy);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(Observed::Cancel);
             }
             state.recipes.clone()
         };
@@ -68,14 +103,30 @@ impl RestartCoordinator {
             // Reject the whole request, not only the newly unsupported member.
             let observed = match source.collect().await {
                 Ok(observed) => observed,
-                Err(_) => return Ok(None),
+                Err(e) if e.code == workbench_protocol::errors::ErrorCode::Conflict => {
+                    return Ok(Observed::Again);
+                }
+                Err(_) => return Ok(Observed::Cancel),
             };
-            let current = serde_json::to_string(&Some(observed.recipes));
-            let requested = serde_json::to_string(&recipes);
-            if !observed.bindings.is_current()
-                || !matches!((current, requested), (Ok(current), Ok(requested)) if current == requested)
-            {
-                return Ok(None);
+            if !observed.bindings.is_current() {
+                return Ok(Observed::Again);
+            }
+            // The members and what is done with each are fixed by the request. A
+            // member's restore descriptor is not: it moves on whenever the run
+            // finishes a turn, and the capture must restore the run as it is now.
+            let Some(requested) = recipes.as_mut() else {
+                return Ok(Observed::Cancel);
+            };
+            if !same_members(requested, &observed.recipes) {
+                return Ok(Observed::Cancel);
+            }
+            if *requested != observed.recipes {
+                let mut state = self.0.state.lock().unwrap();
+                if state.id != Some(id) || state.phase != RestartPhase::PreparingDrains {
+                    return Err(RuntimeError::RestartBusy);
+                }
+                state.recipes = Some(observed.recipes.clone());
+                *requested = observed.recipes;
             }
             binding_observation = Some(observed.bindings);
             recipe_observation = Some(observation);
@@ -100,8 +151,12 @@ impl RestartCoordinator {
                 reason: e.to_string(),
             })?;
             #[cfg(target_os = "linux")]
-            if source.is_some() && result.is_err() {
-                return Ok(None);
+            if source.is_some() {
+                match &result {
+                    Err(RuntimeError::RestartObservationChanged) => return Ok(Observed::Again),
+                    Err(_) => return Ok(Observed::Cancel),
+                    Ok(_) => {}
+                }
             }
             Some(result?)
         } else {
@@ -115,7 +170,7 @@ impl RestartCoordinator {
                 return Err(RuntimeError::RestartBusy);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Ok(None);
+                return Ok(Observed::Cancel);
             }
             let attempt = if let Some(preflight) = preflight {
                 self.0.runtime.begin_preflighted_restart_quiesce(preflight)
@@ -123,8 +178,12 @@ impl RestartCoordinator {
                 self.0.runtime.begin_restart_quiesce()
             };
             #[cfg(target_os = "linux")]
-            if source.is_some() && attempt.is_err() {
-                return Ok(None);
+            if source.is_some() {
+                match &attempt {
+                    Err(RuntimeError::RestartObservationChanged) => return Ok(Observed::Again),
+                    Err(_) => return Ok(Observed::Cancel),
+                    Ok(_) => {}
+                }
             }
             let attempt = attempt?;
             state.attempt = Some(attempt.clone());
@@ -133,13 +192,13 @@ impl RestartCoordinator {
                 .gate
                 .transition(id.generation, HostRestartPhase::Preparing);
             self.publish(&mut state, RestartPhase::Requested);
-            Ok(Some(attempt))
+            Ok(Observed::Begun(attempt))
         };
         #[cfg(target_os = "linux")]
         if let Some(bindings) = binding_observation {
             // Runtime's existing registration exclusion covers new live members;
             // this guard independently excludes host binding publication.
-            return bindings.with_current(begin).unwrap_or(Ok(None));
+            return bindings.with_current(begin).unwrap_or(Ok(Observed::Again));
         }
         begin()
     }
@@ -170,4 +229,18 @@ impl RestartCoordinator {
             }
         }
     }
+}
+
+/// Same runs with the same policy, goal, team and lane; descriptors may differ.
+#[cfg(target_os = "linux")]
+fn same_members(left: &public::Recipes, right: &public::Recipes) -> bool {
+    let stripped = |recipes: &public::Recipes| {
+        let mut recipes = recipes.clone();
+        recipes
+            .values_mut()
+            .for_each(|recipe| recipe.descriptor = None);
+        serde_json::to_string(&recipes).ok()
+    };
+    let left = stripped(left);
+    left.is_some() && left == stripped(right)
 }

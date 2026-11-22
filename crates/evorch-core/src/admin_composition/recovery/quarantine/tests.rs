@@ -140,13 +140,16 @@ async fn only_item(conn: &mut Conn, request_id: &str) -> QuarantineItem {
     items.remove(0)
 }
 
-/// Registered is not published: every Q1 request from a verified local client
+/// Registered is not published: while a leaf is missing, every Q1 request from a verified local client
 /// is refused before the facade, the audit journal or the store is reached,
 /// and the hello offers nothing new.
 #[tokio::test]
-async fn an_installed_leaf_refuses_every_request_while_management_is_off() {
+async fn an_installed_leaf_refuses_every_request_while_the_composition_is_incomplete() {
     let (core, publication) = Installed::start().await;
-    assert_eq!(publication, Publication::Off);
+    assert!(
+        matches!(publication, Publication::Blocked(_)),
+        "{publication:?}"
+    );
     let installed = core.boot.admin.installed_facades();
     assert!(installed.quarantine && !installed.all());
     assert!(!core.backend.hello().has(Capability::SafeRestart));

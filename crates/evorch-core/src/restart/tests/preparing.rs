@@ -383,3 +383,131 @@ async fn deadline_cancels_while_db_preflight_is_pending_without_starting_an_atte
     assert!(host.runtime.learning_gate().is_open());
     host.shutdown().await.unwrap();
 }
+
+#[cfg(target_os = "linux")]
+mod observation_retry {
+    use super::*;
+    use crate::restart::public::{ObservedRecipes, RecipeSource};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use workbench_host::{admin::AdminIo, lane::BindingTable};
+
+    struct Source {
+        table: BindingTable,
+        recipes: std::collections::BTreeMap<runtime::RunId, runtime::quiesce::RecoveryRecipe>,
+        collected: AtomicUsize,
+    }
+    impl RecipeSource for Source {
+        fn collect(&self) -> AdminIo<'_, ObservedRecipes> {
+            Box::pin(async move {
+                self.collected.fetch_add(1, Ordering::SeqCst);
+                Ok(ObservedRecipes {
+                    recipes: self.recipes.clone(),
+                    bindings: self.table.observe(),
+                })
+            })
+        }
+    }
+
+    async fn waiting_run(
+        host: &BootstrappedHost,
+    ) -> (
+        runtime::RunId,
+        std::collections::BTreeMap<runtime::RunId, runtime::quiesce::RecoveryRecipe>,
+    ) {
+        let events = host.runtime.event_bus().subscribe();
+        let run = host
+            .runtime
+            .delegate_chat(
+                "observed",
+                runtime::Role::Orchestrator,
+                "observe".into(),
+                runtime::RunConfig {
+                    ownership: Some(host.owner.start("observed").unwrap()),
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        waiting(run, events).await;
+        let recipes = std::collections::BTreeMap::from([(
+            run,
+            runtime::quiesce::RecoveryRecipe {
+                settings_reference: runtime::quiesce::CORE_RECOVERY_SETTINGS_REFERENCE.into(),
+                policy: runtime::quiesce::ResumePolicy::CoreOwned,
+                goal_id: None,
+                team: None,
+                lane: None,
+                descriptor: None,
+            },
+        )]);
+        (run, recipes)
+    }
+
+    /// The recipe observation is taken again each time something changed under
+    /// it (here: the binding generation moves while the DB preflight runs), and
+    /// the restart then goes on from a clean pass.
+    #[tokio::test]
+    async fn a_change_during_observation_is_observed_again_and_the_restart_goes_on() {
+        let (_dir, mut host) = boot().await;
+        let core = RestartCoordinator::new(&host);
+        let (_run, recipes) = waiting_run(&host).await;
+        let table = BindingTable::default();
+        let source = Arc::new(Source {
+            table: table.clone(),
+            recipes: recipes.clone(),
+            collected: AtomicUsize::new(0),
+        });
+        let disturbed = Arc::new(AtomicUsize::new(0));
+        *core.0.preflight_hook.lock().unwrap() = Some(Arc::new({
+            let disturbed = disturbed.clone();
+            move |_| {
+                if disturbed.fetch_add(1, Ordering::SeqCst) < 2 {
+                    table.replace(Default::default());
+                }
+            }
+        }));
+        let id = core
+            .request_with_source(Some(recipes), PREPARATION_LIMIT, Some(source.clone()))
+            .unwrap();
+        core.wait_sealed(id).await.unwrap();
+        assert_eq!(
+            source.collected.load(Ordering::SeqCst),
+            3,
+            "two disturbed passes, then a clean one"
+        );
+        assert!(core.0.state.lock().unwrap().attempt.is_some());
+        core.cancel(id).unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    /// A run set that never settles does not keep the request alive: after the
+    /// bounded number of observations it is cancelled, with no attempt begun.
+    #[tokio::test]
+    async fn an_observation_that_never_settles_cancels_after_the_bound() {
+        let (_dir, mut host) = boot().await;
+        let core = RestartCoordinator::new(&host);
+        let (_run, recipes) = waiting_run(&host).await;
+        let table = BindingTable::default();
+        let source = Arc::new(Source {
+            table: table.clone(),
+            recipes: recipes.clone(),
+            collected: AtomicUsize::new(0),
+        });
+        *core.0.preflight_hook.lock().unwrap() = Some(Arc::new(move |_| {
+            table.replace(Default::default());
+        }));
+        let id = core
+            .request_with_source(Some(recipes), PREPARATION_LIMIT, Some(source.clone()))
+            .unwrap();
+        phase(&core, RestartPhase::Running).await;
+        assert!(core.wait_sealed(id).await.is_err());
+        assert_eq!(
+            source.collected.load(Ordering::SeqCst),
+            crate::restart::preparing::OBSERVATION_ATTEMPTS
+        );
+        assert!(core.0.state.lock().unwrap().attempt.is_none());
+        assert_eq!(host.runtime.quiesce_state(), QuiesceState::Running);
+        host.shutdown().await.unwrap();
+    }
+}

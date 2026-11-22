@@ -157,48 +157,36 @@ async fn chat(core: &ComposedCore) -> runtime::RunId {
 }
 
 #[tokio::test]
-async fn installed_restart_is_off_and_unauthenticated_changes_never_reach_effects() {
+async fn installed_restart_is_published_and_unauthenticated_changes_never_reach_effects() {
     if masked_child().await {
         return;
     }
     let mut core = ComposedCore::new().await;
     target(&core).await;
     support::seed(&core.host, core.host.storage_config(), true);
-    assert_eq!(compose(&core), Publication::Off);
+    assert_eq!(compose(&core), Publication::Published);
     assert!(core.host.admin.installed_facades().all());
     let socket = core.dir.sockets().join("wire");
     let (stop, server) = serve(
         tokio::net::UnixListener::bind(&socket).unwrap(),
         core.backend.clone(),
     );
-    let mut conn = Conn::open(&socket, "restart-install").await;
-    assert!(!conn.hello.has(Capability::SafeRestart));
+    let conn = Conn::open(&socket, "restart-install").await;
+    assert!(conn.hello.has(Capability::SafeRestart));
     let before = untouched(&core);
     let binding = RestartBinding {
         target_id: id("target"),
         expected_core_epoch: core.host.admin.epoch(),
         target_revision: Revision(1),
-        operation_id: id("off"),
+        operation_id: id("published"),
     };
     let request = command(
-        "off",
+        "published",
         RestartCommand::Request(RequestRestart {
             binding,
             confirmed: true,
         }),
     );
-    for req in [
-        query("targets", RestartQuery::Targets),
-        query("status", RestartQuery::Status),
-        request.clone(),
-    ] {
-        assert_eq!(
-            error_of(&conn.call(&req).await).0,
-            ErrorCode::UnsupportedCapability
-        );
-    }
-    assert_eq!(untouched(&core), before);
-    core.host.admin.publish_for_test();
     let session = WebSession {
         session_id: SessionId::new("session").unwrap(),
         client_id: ClientId::new("web-human").unwrap(),

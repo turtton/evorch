@@ -31,8 +31,8 @@ set -euo pipefail
 root=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$root"
 
-expected_published=false
-capability_sha256=acde91be78717b1223689922308844582fd2a4a7f442330d29288a5ccbffcdf3
+expected_published=true
+capability_sha256=b6a57e124963fd1818d373b95de7bdbec345d931c5bd346028351a3be3ce9335
 
 capability=crates/evorch-core/src/admin_composition/capability.rs
 service=crates/workbench-host/src/admin/service.rs

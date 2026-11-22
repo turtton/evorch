@@ -6,8 +6,12 @@
 use crate::backend::HostBackend;
 use workbench_host::admin::{AdminService, InstalledFacades};
 
-/// Flipped to `true` only by the change that publishes management.
-const MANAGEMENT_PUBLISHED: bool = false;
+/// `true` since the change that published management. Publication still needs
+/// every leaf registered and a Linux build (`publish_with`), so a platform that
+/// cannot run the effects stays refused and unadvertised. Reverting is this one
+/// line plus `expected_published` and the hash in
+/// `scripts/check-admin-publish-boundary.sh`.
+const MANAGEMENT_PUBLISHED: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Publication {

@@ -117,7 +117,24 @@ impl HostRecipeSource {
         let recipes = self
             .reader
             .read(move || read_recipes(&storage, &owner, &bindings, &checked))
-            .await?;
+            .await;
+        let recipes = match recipes {
+            Ok(recipes) => recipes,
+            // A run that finished a turn between the inventory and the read has a
+            // newer snapshot than the one the inventory carries. That is a change
+            // of the observation (observe again), not an unsupported run: only an
+            // inventory that is still the same keeps the refusal.
+            Err(failure) => {
+                return Err(
+                    if self.runtime.restart_recipe_inventory(&held).ok().as_ref() != Some(&members)
+                    {
+                        conflict()
+                    } else {
+                        failure
+                    },
+                );
+            }
+        };
         // Evidence, not an admission reservation. Public preflight independently
         // binds this inventory to its opaque runtime observation.
         if self

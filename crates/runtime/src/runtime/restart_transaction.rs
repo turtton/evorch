@@ -350,7 +350,7 @@ impl AgentRuntime {
             || observed.intents != self.shared.quiesce.live_capture_intents()
             || observed.metadata != self.restart_recipe_metadata()
         {
-            return Err(error("recipe collection observation changed"));
+            return Err(RuntimeError::RestartObservationChanged);
         }
         Ok(())
     }
@@ -441,7 +441,13 @@ impl AgentRuntime {
             || preflight.intents != self.shared.quiesce.live_capture_intents()
             || preflight.metadata != self.restart_recipe_metadata()
         {
-            return Err(error("stale or foreign restart preflight"));
+            return Err(
+                if Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared)) {
+                    RuntimeError::RestartObservationChanged
+                } else {
+                    error("stale or foreign restart preflight")
+                },
+            );
         }
         self.check_restart_preparation()?;
         self.begin_restart_quiesce_guarded(true, &_registration)

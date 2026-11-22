@@ -169,7 +169,7 @@ impl Conn {
                 CapabilityName::new("commands.v1").unwrap(),
                 CapabilityName::new("queries.v1").unwrap(),
             ],
-            optional_capabilities: Vec::new(),
+            optional_capabilities: vec![CapabilityName::new("safe_restart.v1").unwrap()],
             client_build: BuildInfo {
                 name: name.into(),
                 version: "1".into(),
