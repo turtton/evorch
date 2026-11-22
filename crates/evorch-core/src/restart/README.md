@@ -145,6 +145,11 @@ residual boundary, not a safety claim for arbitrary ELF execution.
 
 ## B3 performance conditions scaffold (not B1 measurements)
 
+> B3-09 implements this scaffold: the frozen values are `perf-gate/spec.json`, the conditions
+> checked before sampling are `check_conditions` in `shared-test-support/perf_gate/mod.rs`, and
+> the runner is `examples/perf_gate/` (driver `scripts/perf-gate.sh`; see `perf-gate/README.md`).
+> No gate sample has been collected; the JSON below stays a B1-era template.
+
 Freeze filled conditions and SHA-256 **before** collecting samples; retain raw
 data including slow samples. This template makes no B1 performance verdict:
 
@@ -459,7 +464,9 @@ explicitly select Edit; no selection is guessed from captured input.
 - **5b:** CLI invocation/token continuity and its distinct reconnect deadlines;
   ordinary conversation follow-up routing here is not CLI invocation resumption.
 - **D-3a2-B:** owned-child/group termination. A alone does not meet D-7 or
-  complete D-3a2; completion requires both separately reviewed changes.
+  complete D-3a2; completion requires both separately reviewed changes. B3-02–08 are merged
+  (index in `crates/sandbox/src/owned/README.md`); the B3-09 performance gate is implemented but
+  unmeasured, and product-ELF expiry remains the 5a-V T3 requirement.
 - **F4:** same-build product-to-product real exec remains separate. The raw
   cache fixtures use different predecessor/successor images.
 - **MCP evidence:** no-I/O is structural with no server configured; the MCP

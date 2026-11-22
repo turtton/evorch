@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "source": "docs/single-core/d3a2-B3-plan.md section 5 / d3a2-B-design-v3-excerpt.md section 8.2. Values are fixed before any measurement; changing one needs the parent's approval before results are seen.",
+  "rounds": 3,
+  "warmup_per_arm": 20,
+  "pairs": 200,
+  "seed": 20261122,
+  "delta_definition": "quantile_difference",
+  "workloads": [
+    { "name": "grep_fixed", "command": "grep -F -- D-7 fixture.txt" },
+    { "name": "git_diff_quiet", "command": "git diff --quiet -- tracked.txt" },
+    { "name": "colon", "command": ":" }
+  ],
+  "latency_limits": { "p50_delta_ns": 2000000, "p95_delta_ns": 5000000 },
+  "force_kill": { "samples_min": 200, "p99_limit_ns": 1000000000, "observe_budget_ns": 10000000000 },
+  "pss": { "guards": 100, "hold_secs": 180, "median_limit_kib": 4096, "p95_limit_kib": 8192 },
+  "scope": { "cpus": 2, "memory_bytes": 2147483648, "tasks": 512, "timeout_secs": 600, "stress_cpus": 1 },
+  "state": {
+    "idle_threads": 20,
+    "messages_per_thread": 50,
+    "message_bytes": 8192,
+    "repo_files": 1000,
+    "repo_file_bytes": 16384,
+    "active_agents": 2,
+    "tick_ms": 100,
+    "fixture_txt_bytes": 1048576
+  }
+}
