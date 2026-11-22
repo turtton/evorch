@@ -278,6 +278,15 @@ impl RestartPanel {
         Some(PanelRequest::Command(command))
     }
 
+    /// The core refused the restart request for good, or it never left: nothing
+    /// was accepted, so the button is offered again and a later disconnect is
+    /// not a planned restart. A lost reply is not this: it stays until read back.
+    pub fn restart_not_accepted(&mut self) {
+        if let Some(id) = self.own_restart.take() {
+            self.uncertain.retain(|u| u != &id);
+        }
+    }
+
     /// Cancel needs no confirmation but is only offered before capture.
     pub fn cancel(&mut self, operation_id: AdminId) -> Option<PanelRequest> {
         let status = self.status.as_ref()?;

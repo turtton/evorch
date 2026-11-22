@@ -456,6 +456,7 @@ pub trait Feature: Send {
         Vec::new()
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// The planned restart this feature knows the core is performing, from the
     /// core's own evidence only; `epoch` is the core the connection was to.
     fn planned_restart(
@@ -661,6 +662,7 @@ impl Features {
 
     /// The planned restart to wait for when the connection ends (see
     /// [`Feature::planned_restart`]).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn planned_restart(
         &self,
         epoch: workbench_protocol::wire::InstanceEpoch,

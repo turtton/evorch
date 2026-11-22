@@ -327,3 +327,27 @@ fn a_lost_reply_is_shown_as_unknown_and_not_as_a_failure_to_retry() {
     assert!(panel.notices().iter().any(|n| n.contains("結果が不明")));
     assert!(panel.take_undisposed_query().is_none());
 }
+
+#[test]
+fn a_refused_restart_can_be_asked_again_and_a_lost_reply_cannot() {
+    let mut panel = ready_panel();
+    panel.begin_restart(id("first")).unwrap();
+    panel.accept(id("unused")).unwrap();
+    assert!(panel.restart_in_flight());
+    assert!(panel.has_uncertain());
+    // The core said no: nothing was accepted, so the button comes back and a
+    // later disconnect is not taken for a planned restart.
+    panel.restart_not_accepted();
+    assert!(!panel.restart_in_flight());
+    assert!(!panel.has_uncertain());
+    assert!(
+        panel
+            .planned_restart(InstanceEpoch(7), Instant::now())
+            .is_none()
+    );
+    panel.begin_restart(id("second")).unwrap();
+    assert!(panel.accept(id("unused")).is_some(), "asking again works");
+    // A lost reply keeps the request until it is read back.
+    assert!(panel.restart_in_flight());
+    assert!(panel.has_uncertain());
+}

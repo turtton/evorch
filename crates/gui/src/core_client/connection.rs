@@ -206,6 +206,7 @@ pub async fn serve(
     let mut held = Vec::<HeldReply>::new();
     // The successor of a planned restart, already connected and with its session
     // read, found by a connect-only wait (see `wait_for_successor`).
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut successor: Option<(core_launcher::ConnectedCore, Opened)> = None;
     loop {
         let mut prebuilt = None;
@@ -357,6 +358,7 @@ pub async fn serve(
         }
         // Read before the features are disconnected: only the core's own evidence
         // of a restart counts, never the loss of the connection alone.
+        #[cfg(target_os = "linux")]
         let evidence = (!reconnect_requested)
             .then(|| {
                 let epoch = client.server_hello().instance_epoch;
@@ -373,6 +375,7 @@ pub async fn serve(
         if reconnect_requested {
             continue;
         }
+        #[cfg(target_os = "linux")]
         if let Some(evidence) = evidence {
             match wait_for_successor(&launcher, &evidence, &mut actions, &shared, &ctx).await {
                 Waited::Next(next) => {
@@ -426,6 +429,7 @@ async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
     })
 }
 
+#[cfg(target_os = "linux")]
 enum Waited {
     Next(Box<(core_launcher::ConnectedCore, Opened)>),
     /// The person asked to reconnect by hand.
@@ -440,6 +444,7 @@ enum Waited {
 /// windows (120 s for the successor to be ready, 30 s to rebuild this session)
 /// are the pure machine's; the session is read inside the second one. Whatever
 /// the person does meanwhile is refused as for any lost connection.
+#[cfg(target_os = "linux")]
 async fn wait_for_successor(
     launcher: &core_launcher::Launcher,
     evidence: &workbench_client::restart::reconnect::PlannedEvidence,

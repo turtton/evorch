@@ -32,9 +32,10 @@ use workbench_client::{
 };
 use workbench_protocol::{
     ErrorCode, RetryAdvice, WorkbenchError,
+    commands::Command,
     events::UiEvent,
     handshake::Capability,
-    namespaces::lifecycle::{AdminId, LifecycleEvent},
+    namespaces::lifecycle::{AdminId, LifecycleCommand, LifecycleEvent, restart::RestartCommand},
     queries::QueryReply,
     wire::InstanceEpoch,
 };
@@ -49,6 +50,8 @@ pub struct RestartFeature {
     next_tag: u64,
     /// Tags of commands in flight; everything else is a read.
     commands: BTreeSet<u64>,
+    /// The subset of `commands` that are the restart request itself.
+    restart_requests: BTreeSet<u64>,
     refresh_due: bool,
     reconcile_due: bool,
     last_poll: Option<Instant>,
@@ -78,6 +81,12 @@ impl RestartFeature {
         match request {
             PanelRequest::Query(query) => ctx.query(tag, query),
             PanelRequest::Command(command) => {
+                if matches!(
+                    command,
+                    Command::Lifecycle(LifecycleCommand::Restart(RestartCommand::Request(_)))
+                ) {
+                    self.restart_requests.insert(tag);
+                }
                 self.commands.insert(tag);
                 ctx.command(tag, command);
             }
@@ -113,6 +122,7 @@ impl Feature for RestartFeature {
     fn reset(&mut self) {
         self.panel.on_new_session();
         self.commands.clear();
+        self.restart_requests.clear();
         self.read_error = None;
         self.refresh_due = true;
         self.reconcile_due = self.panel.has_uncertain();
@@ -154,6 +164,7 @@ impl Feature for RestartFeature {
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
         let command = self.commands.remove(&tag);
+        let restart_request = self.restart_requests.remove(&tag);
         match reply {
             FeatureReply::Query(Ok(QueryReply::Lifecycle(lifecycle))) => {
                 self.read_error = None;
@@ -174,6 +185,9 @@ impl Feature for RestartFeature {
                 self.refresh_due = true;
             }
             FeatureReply::Command(Err(error)) => {
+                if restart_request && !error.outcome_unknown {
+                    self.panel.restart_not_accepted();
+                }
                 self.panel.on_request_failure(
                     command || self.commands.is_empty(),
                     &client_error(&error),

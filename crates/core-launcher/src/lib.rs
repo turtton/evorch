@@ -122,6 +122,7 @@ impl Launcher {
             diagnostic_after: Duration::from_secs(30),
         })
     }
+    #[cfg(target_os = "linux")]
     /// Where this launcher connects, for a connect-only wait (a planned restart):
     /// the same configuration and socket, and nothing that can start a core.
     pub fn connect_target(&self) -> handoff::diagnostics::connect::ConnectTarget {

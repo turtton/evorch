@@ -244,7 +244,7 @@ impl AgentRuntime {
         if intents != self.shared.quiesce.live_capture_intents()
             || metadata != self.restart_recipe_metadata()
         {
-            return Err(error("restart preflight live set changed"));
+            return Err(RuntimeError::RestartObservationChanged);
         }
         Ok(RestartPreflight {
             runtime: Arc::downgrade(&self.shared),
@@ -277,7 +277,7 @@ impl AgentRuntime {
                     .get(&intent.run_id)
                     .ok_or_else(|| error("recipe member unavailable"))?;
                 if entry.parent != intent.parent_run_id || entry.role.name() != intent.role {
-                    return Err(error("recipe member identity changed"));
+                    return Err(RuntimeError::RestartObservationChanged);
                 }
                 let config = &entry.config;
                 let permit_matches =

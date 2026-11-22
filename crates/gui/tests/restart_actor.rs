@@ -191,7 +191,12 @@ async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no
         predecessor.state().restart_id = Some(RestartId::new("restart-1").unwrap());
         predecessor.set_phase(RestartPhase::Capturing);
         // The status the core serves is what makes it evidence; read it as the window does.
+        let changed = gui.shared.lock().unwrap().changed.clone();
         loop {
+            // Registered before the check, so a change in between is not missed.
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             gui.pass().await;
             let seen = gui
                 .shared
@@ -203,8 +208,7 @@ async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no
             if seen {
                 break;
             }
-            let changed = gui.shared.lock().unwrap().changed.clone();
-            changed.notified().await;
+            notified.await;
         }
         predecessor.stop();
         gui.until(|s| s.status.contains("再起動中")).await;
