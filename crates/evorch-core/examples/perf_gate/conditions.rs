@@ -39,6 +39,59 @@ fn run(program: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// CPU time per process over one second from /proc (no `ps` needed): the eight busiest as
+/// `comm=percent-of-one-core`, so a host that is not idle shows who was running.
+fn top_cpu() -> String {
+    let ticks = || -> HashMap<u32, (String, u64)> {
+        let mut map = HashMap::new();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+                continue;
+            };
+            let fields: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+            let time = fields
+                .get(11)
+                .zip(fields.get(12))
+                .and_then(|(u, s)| Some(u.parse::<u64>().ok()? + s.parse::<u64>().ok()?));
+            if let Some(time) = time {
+                map.insert(pid, (stat[open + 1..close].to_owned(), time));
+            }
+        }
+        map
+    };
+    let before = ticks();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut busiest: Vec<(u64, String)> = ticks()
+        .into_iter()
+        .filter_map(|(pid, (comm, now))| {
+            let used = now.saturating_sub(before.get(&pid)?.1);
+            (used > 0).then_some((used, format!("{comm}[{pid}]")))
+        })
+        .collect();
+    busiest.sort_by(|a, b| b.cmp(a));
+    let text = busiest
+        .iter()
+        .take(8)
+        .map(|(used, name)| format!("{name}={used}%"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if text.is_empty() {
+        "idle: no process used CPU".into()
+    } else {
+        text
+    }
+}
+
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().trim().to_owned()
 }
@@ -140,8 +193,7 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
             "governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
             "mem_total_kib": mem,
             "loadavg": read("/proc/loadavg"),
-            "top_cpu": run("ps", &["-eo", "pcpu,comm", "--sort=-pcpu", "--no-headers"])
-                .lines().take(8).collect::<Vec<_>>().join("; "),
+            "top_cpu": top_cpu(),
         },
         "toolchain": {
             "rustc": get("rustc"),
