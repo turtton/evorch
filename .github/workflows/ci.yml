@@ -451,7 +451,7 @@ jobs:
         with:
           # strace: the process-guard lifecycle cells need it, and they run in
           # the support and runtime groups.
-          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git${{ (matrix.group == 'support' || matrix.group == 'runtime') && ' strace' || '' }}
+          packages: mold ripgrep cmake clang libclang-dev ninja-build perl git${{ (matrix.group == 'support' || matrix.group == 'runtime') && ' strace' || '' }}${{ matrix.group == 'runtime' && ' bubblewrap' || '' }}
       # `gui` enables CEF by default, so only the gui group (and lint/docs-schema,
       # which build the whole workspace) links libcef.so. None of the tests starts
       # CEF (the cef-e2e job does), so only a libcef.so link goes on the loader path.
@@ -465,6 +465,19 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest
+      - name: Prepare real caller SIGKILL matrix dependencies
+        if: matrix.group == 'runtime'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout -k 5s 20s strace -f -qq -e trace=process -o "$RUNNER_TEMP/ptrace-check" true
+          test -s "$RUNNER_TEMP/ptrace-check"
+          test -c /dev/ptmx
+          cargo build --locked -p evorch --bin evorch
+          echo "EVORCH_B3_CLI_EXE=$PWD/target/ci-shared/debug/evorch" >> "$GITHUB_ENV"
+          echo "EVORCH_B3_BWRAP_EXE=$(command -v bwrap)" >> "$GITHUB_ENV"
+          echo "EVORCH_B3_EVIDENCE_DIR=$RUNNER_TEMP/core-sigkill" >> "$GITHUB_ENV"
       # Builds the group's test binaries once and lists every test set; the
       # `ci` job merges these listings. The runs below reuse the binaries. Listing
       # starts no product, so it comes before the product artifact is awaited.
@@ -541,6 +554,12 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" main-only-gui "$EVORCH_TEST_INVENTORY_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && matrix.group == 'runtime'
+        with:
+          name: core-sigkill-evidence-${{ matrix.shard }}
+          path: ${{ runner.temp }}/core-sigkill
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

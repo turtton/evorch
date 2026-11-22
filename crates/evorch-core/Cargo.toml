@@ -37,6 +37,11 @@ harness = false
 required-features = ["bootstrap-test-support"]
 
 [[test]]
+name = "core_sigkill"
+path = "tests/core_sigkill/main.rs"
+harness = false
+
+[[test]]
 name = "recovery_admin_install"
 path = "tests/recovery_admin_install/main.rs"
 
@@ -88,6 +93,7 @@ rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 libc = "0.2"
+browser = { path = "../browser" }
 test-socket-dir = { path = "../test-socket-dir" }
 model = { path = "../model" }
 storage = { path = "../storage", features = ["test-support"] }
