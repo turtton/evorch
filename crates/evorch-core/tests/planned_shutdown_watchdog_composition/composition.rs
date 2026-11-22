@@ -88,6 +88,15 @@ pub(super) fn run(
     let config = root.join("config");
     let project = root.join("project");
     let case = std::env::var("EVORCH_WATCHDOG_CASE")?;
+    // B3-07 (tests/core_expiry) drives unchanged cold stalls from its own controller:
+    // stopped-join (stage 11, no storage-drain deadline) for the cells that need a
+    // long capture-only window, flush for the pending-signal gate. The original
+    // name selects the owned-child fixture and the gate.
+    let case = match case.as_str() {
+        "expiry_signal_first" => "cold_flush".to_owned(),
+        other if other.starts_with("expiry_") => "cold_stopped_join".to_owned(),
+        _ => case,
+    };
     let product_case = case.starts_with("product_");
     let options = BootstrapOptions {
         config_dir: config.clone(),
@@ -238,6 +247,32 @@ async fn operate(
     let marker = scratch_path.join("watchdog-retained");
     std::fs::write(&marker, b"watchdog-retained")?;
     say(&format!("SCRATCH {}", marker.display()));
+    let expiry = std::env::var("EVORCH_WATCHDOG_CASE")
+        .ok()
+        .filter(|name| name.starts_with("expiry_"));
+    if let Some(socket) = std::env::var_os("EVORCH_EXPIRY_PEER_SOCKET") {
+        // Owned through the typed owner API (guard-supervised, same PGID root +
+        // grandchild) but in no ledger the host cleanup drains: they model owned
+        // children that a stalled cleanup never reached. The session is
+        // forgotten, never dropped: Drop would kill the group itself, while only
+        // the guard may reap it after this process exits.
+        let session = tokio::task::spawn_blocking(move || {
+            let mut command = sandbox::owned::OwnedCommand::new(std::env::current_exe()?);
+            command
+                .args(["--peer".into(), "root".into(), socket])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            sandbox::owned::OwnedSession::spawn_owned(
+                None,
+                sandbox::ChildKind::Other,
+                Some("expiry-fixture"),
+                &mut command,
+            )
+        })
+        .await??;
+        std::mem::forget(session);
+    }
     let _archive_hold = if case == "cold_stopped_join" {
         let (entered, seen) = tokio::sync::oneshot::channel();
         let entered = Mutex::new(Some(entered));
@@ -358,7 +393,7 @@ async fn operate(
         RestartMutation::Create(Box::new(metadata)),
     )?;
     block.active.store(expires, Ordering::Release);
-    if product_exec {
+    if product_exec || expiry.as_deref() == Some("expiry_signal_first") {
         say("PREEXEC");
         tokio::task::spawn_blocking(|| {
             use std::io::BufRead;
