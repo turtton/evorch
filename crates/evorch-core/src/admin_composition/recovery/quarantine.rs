@@ -1,6 +1,7 @@
 //! Q1: the quarantine leaf, built from the host's own storage and registered
 //! with the common admin service. Registering is not publishing: the service
-//! refuses every operation until the switch in `capability` is on.
+//! refuses every operation until `capability` publishes a complete composition
+//! (the switch is on, on Linux, with every leaf installed).
 use super::super::Inputs;
 use std::sync::Arc;
 use workbench_host::{QuarantineFacade, StorageQuarantineStore};

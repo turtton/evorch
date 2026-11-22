@@ -63,6 +63,7 @@ impl ClientConfig {
                 Capability::Approvals,
                 Capability::Questions,
                 Capability::CommittedBodies,
+                Capability::SafeRestart,
             ],
             desired_core: None,
             local_surface: None,

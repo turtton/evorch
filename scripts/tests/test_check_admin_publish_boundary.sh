@@ -57,10 +57,10 @@ reset; : > "$service"
 rejects 'no definition'
 
 # The switch file is pinned by content.
-reset; sed -i 's/= false;/= true;/' "$cap"
+reset; sed -i 's/= true;/= false;/' "$cap"
 rejects 'the switch flipped without the pin'
-reset; sed -i 's|^const MANAGEMENT_PUBLISHED.*|const MANAGEMENT_PUBLISHED: bool = true; // const MANAGEMENT_PUBLISHED: bool = false;|' "$cap"
-rejects 'a true declaration behind a commented false one'
+reset; sed -i 's|^const MANAGEMENT_PUBLISHED.*|const MANAGEMENT_PUBLISHED: bool = false; // const MANAGEMENT_PUBLISHED: bool = true;|' "$cap"
+rejects 'a false declaration behind a commented true one'
 reset; printf '#[cfg(test)]\nmod tests;\nfn later(a: \&AdminService) { a.enable_management(); }\n' >> "$cap"
 rejects 'production code after the test module'
 reset

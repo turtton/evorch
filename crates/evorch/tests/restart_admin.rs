@@ -10,3 +10,5 @@ mod fake_core;
 mod flows;
 #[path = "restart_admin/harness.rs"]
 mod harness;
+#[path = "restart_admin/recovery_flows.rs"]
+mod recovery_flows;

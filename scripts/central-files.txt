@@ -31,8 +31,6 @@ crates/workbench-protocol/tests/shared_dto.rs
 crates/workbench-web/tests/namespaces.rs
 crates/evorch-core/tests/namespaces.rs
 # 5a-V targets whose submodules are split among later PR owners.
-crates/evorch-core/tests/recovery_admin_install/main.rs
-crates/evorch-core/tests/public_restart_compose/main.rs
 
 # host: composition, the area registry, the shared router and restart classification
 crates/workbench-host/src/areas/mod.rs

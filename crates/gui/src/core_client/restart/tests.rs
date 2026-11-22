@@ -240,3 +240,114 @@ fn a_conflict_reads_as_a_changed_target_and_the_banner_shows_stage_and_deadline(
     assert!(expired.text().unwrap().contains("30秒以内"));
     assert_eq!(panel.banner(None, None).text(), None);
 }
+
+#[test]
+fn only_an_accepted_request_that_has_not_ended_is_a_planned_restart() {
+    let now = Instant::now();
+    let epoch = InstanceEpoch(7);
+    let mut panel = ready_panel();
+    assert!(
+        panel.planned_restart(epoch, now).is_none(),
+        "EOF alone is no evidence"
+    );
+    panel.begin_restart(id("op-1")).unwrap();
+    assert!(
+        panel.planned_restart(epoch, now).is_none(),
+        "an open dialog is not a request"
+    );
+    panel.accept(id("i-1")).unwrap();
+    let evidence = panel
+        .planned_restart(epoch, now)
+        .expect("the core was asked to restart");
+    assert_eq!(evidence.predecessor_epoch, epoch);
+    panel.on_reply(
+        &QueryReply::Lifecycle(LifecycleReply::OperationStatus(AdminReceipt {
+            operation_id: id("op-1"),
+            state: AdminOperationState::Completed,
+            outcome: AdminOutcome::Cancelled,
+            audit_warning: false,
+        })),
+        now,
+    );
+    assert!(
+        panel.planned_restart(epoch, now).is_none(),
+        "a restart seen to end is no longer one that is under way"
+    );
+}
+
+#[test]
+fn a_refused_restart_asks_once_which_graphs_are_undisposed_and_says_what_to_do() {
+    use workbench_protocol::namespaces::lifecycle::owned_graphs::{
+        IncompleteDisposals, UndisposedGraphs,
+    };
+    let mut panel = ready_panel();
+    let conflict = ClientError::Server(WorkbenchError::new(
+        ErrorCode::Conflict,
+        "undisposed",
+        RetryAdvice::Never,
+    ));
+    panel.on_request_failure(true, &conflict, false);
+    assert!(panel.take_undisposed_query().is_some());
+    assert!(panel.take_undisposed_query().is_none(), "asked once");
+    panel.on_reply(
+        &QueryReply::Lifecycle(LifecycleReply::OwnedGraphs(
+            workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsReply::Undisposed(
+                UndisposedGraphs {
+                    count: Revision(2),
+                    references: vec![],
+                    snapshot_revision: Revision(1),
+                    truncated: true,
+                    over_limit_count: Revision(0),
+                    incomplete_disposals: IncompleteDisposals::empty(),
+                },
+            ),
+        )),
+        Instant::now(),
+    );
+    assert_eq!(panel.undisposed(), Some(2));
+    assert!(
+        panel
+            .notices()
+            .iter()
+            .any(|n| n.contains("2 件") && n.contains("evorch core graphs list")),
+        "{:?}",
+        panel.notices()
+    );
+}
+
+#[test]
+fn a_lost_reply_is_shown_as_unknown_and_not_as_a_failure_to_retry() {
+    let mut panel = ready_panel();
+    let unknown = ClientError::Server(WorkbenchError::new(
+        ErrorCode::Internal,
+        "x",
+        RetryAdvice::Never,
+    ));
+    panel.on_request_failure(true, &unknown, true);
+    assert!(panel.notices().iter().any(|n| n.contains("結果が不明")));
+    assert!(panel.take_undisposed_query().is_none());
+}
+
+#[test]
+fn a_refused_restart_can_be_asked_again_and_a_lost_reply_cannot() {
+    let mut panel = ready_panel();
+    panel.begin_restart(id("first")).unwrap();
+    panel.accept(id("unused")).unwrap();
+    assert!(panel.restart_in_flight());
+    assert!(panel.has_uncertain());
+    // The core said no: nothing was accepted, so the button comes back and a
+    // later disconnect is not taken for a planned restart.
+    panel.restart_not_accepted();
+    assert!(!panel.restart_in_flight());
+    assert!(!panel.has_uncertain());
+    assert!(
+        panel
+            .planned_restart(InstanceEpoch(7), Instant::now())
+            .is_none()
+    );
+    panel.begin_restart(id("second")).unwrap();
+    assert!(panel.accept(id("unused")).is_some(), "asking again works");
+    // A lost reply keeps the request until it is read back.
+    assert!(panel.restart_in_flight());
+    assert!(panel.has_uncertain());
+}

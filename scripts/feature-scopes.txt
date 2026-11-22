@@ -122,24 +122,10 @@ pr16bov3 crates/evorch-core/tests/agent_observation_cache.rs
 # V1b-2a and V1b-2b have separate scopes for their disjoint composition leaves.
 # The remaining scopes follow the plan's test owners. None includes a shared root,
 # test registration, manifest, cache filter, CI group, or CI workflow.
-pr07b5aq1 crates/evorch-core/tests/recovery_admin_install/q1.rs
-pr07b5aq1 crates/evorch-core/tests/recovery_admin_install/q1/*
-pr07b5aq2 crates/evorch-core/tests/recovery_admin_install/q2.rs
-pr07b5aq2 crates/evorch-core/tests/recovery_admin_install/q2/*
-pr5avadmission crates/evorch-core/tests/recovery_admission.rs
-pr5avadmission crates/evorch-core/tests/recovery_admission/*
-pr5av1b2a crates/evorch-core/tests/public_restart_compose/targets.rs
-pr5av1b2a crates/evorch-core/tests/public_restart_compose/targets/*
-pr5av1b2a crates/evorch-core/tests/public_restart_compose/recipes.rs
-pr5av1b2a crates/evorch-core/tests/public_restart_compose/recipes/*
-pr5av1b2b crates/evorch-core/tests/public_restart_compose/finalization.rs
-pr5av1b2b crates/evorch-core/tests/public_restart_compose/finalization/*
 pr5avexec crates/evorch-core/tests/public_restart_exec.rs
 pr5avexec crates/evorch-core/tests/public_restart_exec/*
 pr5avdeny crates/evorch-core/tests/public_restart_deny.rs
 pr5avdeny crates/evorch-core/tests/public_restart_deny/*
-pr5avsafe crates/evorch-core/tests/public_restart_safe.rs
-pr5avsafe crates/evorch-core/tests/public_restart_safe/*
 pr5avprod crates/evorch-core/tests/public_restart_product.rs
 pr5avprod crates/evorch-core/tests/public_restart_product/*
 pr07b5acn crates/core-client-e2e/tests/public_restart_native.rs

@@ -102,7 +102,7 @@ impl RestartCoordinator {
     }
 }
 
-/// Internal wiring only. Product restart remains unregistered/unadvertised.
+/// Wiring owned by the product entries: `admin_composition` registers the coordinator that uses it.
 /// Instance, entry mask, sole signal reader and actual control-drain owner are
 /// retained, never replaced by serializable booleans.
 pub struct FinalizationEnvironment {

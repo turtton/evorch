@@ -12,6 +12,11 @@
 //! * `restart interrupt (--blocker N | --run ID) [--yes]` – interrupt one
 //!   shell that holds the restart up, after confirming exactly it.
 //!
+//! * `quarantine list|show ID|discard ID [--yes]` and `graphs list|show ID|release ID
+//!   [--yes]|resume ID [--yes]` – recover what a restart left behind (Q1/Q2). A
+//!   change is bound to the detail the core just gave, needs a confirmation and
+//!   goes out once. A refused `restart request` names the undisposed graphs.
+//!
 //! Exit codes: 0 done, 1 failure (including "no core is running"), 130 the
 //! person pressed Ctrl-C: only the wait ended; nothing was cancelled or stopped.
 //!
@@ -19,11 +24,13 @@
 //! call.
 mod args;
 #[cfg(target_os = "linux")]
+mod describe;
+#[cfg(target_os = "linux")]
 mod flow;
 #[cfg(target_os = "linux")]
 mod interrupt;
 
-pub use args::{AdminCommand, ParseError, parse};
+pub use args::{AdminCommand, GraphsOp, ParseError, QuarantineOp, parse};
 #[cfg(target_os = "linux")]
 pub use flow::{AdminEnv, run};
 

@@ -313,10 +313,9 @@ impl HostBackend {
                 context,
                 workbench_protocol::namespaces::lifecycle::AdminAction::Status,
             )?;
-            return Err(error(
-                ErrorCode::UnsupportedCapability,
-                "management subscription not registered",
-            ));
+            // The management stream is the core-status stream: it carries the
+            // core state changes (including `Restarting`) and no thread, run or
+            // project data, behind the same authorization as every management read.
         }
         self.projection.subscribe_with_snapshot(subscribe)
     }

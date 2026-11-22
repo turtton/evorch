@@ -244,7 +244,7 @@ impl AgentRuntime {
         if intents != self.shared.quiesce.live_capture_intents()
             || metadata != self.restart_recipe_metadata()
         {
-            return Err(error("restart preflight live set changed"));
+            return Err(RuntimeError::RestartObservationChanged);
         }
         Ok(RestartPreflight {
             runtime: Arc::downgrade(&self.shared),
@@ -277,7 +277,7 @@ impl AgentRuntime {
                     .get(&intent.run_id)
                     .ok_or_else(|| error("recipe member unavailable"))?;
                 if entry.parent != intent.parent_run_id || entry.role.name() != intent.role {
-                    return Err(error("recipe member identity changed"));
+                    return Err(RuntimeError::RestartObservationChanged);
                 }
                 let config = &entry.config;
                 let permit_matches =
@@ -350,7 +350,7 @@ impl AgentRuntime {
             || observed.intents != self.shared.quiesce.live_capture_intents()
             || observed.metadata != self.restart_recipe_metadata()
         {
-            return Err(error("recipe collection observation changed"));
+            return Err(RuntimeError::RestartObservationChanged);
         }
         Ok(())
     }
@@ -441,7 +441,13 @@ impl AgentRuntime {
             || preflight.intents != self.shared.quiesce.live_capture_intents()
             || preflight.metadata != self.restart_recipe_metadata()
         {
-            return Err(error("stale or foreign restart preflight"));
+            return Err(
+                if Weak::ptr_eq(&preflight.runtime, &Arc::downgrade(&self.shared)) {
+                    RuntimeError::RestartObservationChanged
+                } else {
+                    error("stale or foreign restart preflight")
+                },
+            );
         }
         self.check_restart_preparation()?;
         self.begin_restart_quiesce_guarded(true, &_registration)

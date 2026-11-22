@@ -31,6 +31,8 @@ use workbench_protocol::{
     namespaces::lifecycle::{
         AdminId, AdminOperationState, AdminOutcome, AdminReceipt, LifecycleCommand, LifecycleEvent,
         LifecycleQuery, LifecycleReply, LifecycleResult, RestartPhase,
+        owned_graphs::{OwnedGraphView, OwnedGraphsQuery, OwnedGraphsReply, UndisposedGraphs},
+        quarantine::{QuarantineDetail, QuarantineQuery, QuarantineReply},
         restart::{
             AdminAuditDiagnostics, RestartCommand, RestartManagementStatus, RestartQuery,
             RestartReply, RestartStatus, RestartTarget, RestartTargets, ShellBlockers,
@@ -76,6 +78,9 @@ pub struct State {
     /// Read operation queries but never answer them.
     pub hold_operation_status: bool,
     pub blockers: Option<ShellBlockers>,
+    pub quarantine: Option<QuarantineDetail>,
+    pub graph: Option<OwnedGraphView>,
+    pub undisposed: Option<UndisposedGraphs>,
     pub operations: HashMap<String, AdminReceipt>,
     pub seen: Vec<Seen>,
     pub served_status: Vec<RestartPhase>,
@@ -93,6 +98,7 @@ type Connection = (usize, mpsc::UnboundedSender<Vec<u8>>, JoinHandle<()>);
 
 struct Shared {
     epoch: u64,
+    identity: String,
     capabilities: Vec<Capability>,
     state: Mutex<State>,
     changed: Notify,
@@ -122,12 +128,23 @@ pub fn cursor(epoch: u64, sequence: u64) -> EventCursor {
 
 impl FakeCore {
     pub fn start(path: &Path, epoch: u64, capabilities: Vec<Capability>) -> Self {
+        Self::start_as(path, epoch, capabilities, "fake-core")
+    }
+
+    /// A core of the given identity, as a launcher that names the core it wants requires.
+    pub fn start_as(
+        path: &Path,
+        epoch: u64,
+        capabilities: Vec<Capability>,
+        identity: &str,
+    ) -> Self {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path).expect("bind the fake core socket");
         std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
         let shared = Arc::new(Shared {
             epoch,
+            identity: identity.to_owned(),
             capabilities,
             state: Mutex::new(State {
                 phase: RestartPhase::Running,
@@ -139,6 +156,9 @@ impl FakeCore {
                 hold_subscribe: false,
                 hold_operation_status: false,
                 blockers: None,
+                quarantine: None,
+                graph: None,
+                undisposed: None,
                 operations: HashMap::new(),
                 seen: Vec::new(),
                 served_status: Vec::new(),
@@ -282,7 +302,7 @@ fn hello(shared: &Shared) -> ServerHello {
         protocol_version: ProtocolVersion::CURRENT,
         capabilities: shared.capabilities.clone(),
         server_build: build(),
-        core: CoreIdentity::new("fake-core").unwrap(),
+        core: CoreIdentity::new(shared.identity.as_str()).unwrap(),
         instance_epoch: InstanceEpoch(shared.epoch),
         limits: WireLimits::default(),
         status: CoreStatus {
@@ -351,7 +371,11 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
                     subscription_id: sid,
                     snapshot_id: (!replay).then(|| SnapshotId::new("snap").unwrap()),
                     high_water: cursor(shared.epoch, 1),
-                    initial_page: None,
+                    initial_page: (!replay).then(|| workbench_protocol::views::Page {
+                        items: vec![],
+                        next_cursor: None,
+                        snapshot_revision: Revision(0),
+                    }),
                 },
             )))
         }
@@ -389,6 +413,45 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
                 omitted: Revision(0),
             })),
         ))),
+        RequestBody::Query(Query::Lifecycle(LifecycleQuery::Quarantine(query))) => {
+            match (query, state.quarantine.clone()) {
+                (QuarantineQuery::Detail { .. }, Some(detail)) => Reaction::Reply(lifecycle_reply(
+                    LifecycleReply::Quarantine(QuarantineReply::Detail(detail)),
+                )),
+                (QuarantineQuery::List, Some(detail)) => Reaction::Reply(lifecycle_reply(
+                    LifecycleReply::Quarantine(QuarantineReply::List {
+                        items: vec![detail.item],
+                        revision: Revision(1),
+                        truncated: false,
+                    }),
+                )),
+                _ => Reaction::Reply(ReplyResult::Error(WorkbenchError::new(
+                    ErrorCode::NotFound,
+                    "unknown graph",
+                    RetryAdvice::Never,
+                ))),
+            }
+        }
+        RequestBody::Query(Query::Lifecycle(LifecycleQuery::OwnedGraphs(query))) => match query {
+            OwnedGraphsQuery::Undisposed => {
+                state.undisposed.clone().map(OwnedGraphsReply::Undisposed)
+            }
+            OwnedGraphsQuery::Detail { .. } => state
+                .graph
+                .clone()
+                .map(|view| OwnedGraphsReply::Detail(Box::new(view))),
+            OwnedGraphsQuery::Operation { .. } => None,
+        }
+        .map_or_else(
+            || {
+                Reaction::Reply(ReplyResult::Error(WorkbenchError::new(
+                    ErrorCode::NotFound,
+                    "unknown graph",
+                    RetryAdvice::Never,
+                )))
+            },
+            |reply| Reaction::Reply(lifecycle_reply(LifecycleReply::OwnedGraphs(reply))),
+        ),
         RequestBody::Query(Query::Lifecycle(LifecycleQuery::OperationStatus { operation_id })) => {
             match state.operations.get(operation_id.as_str()) {
                 Some(receipt) => Reaction::Reply(lifecycle_reply(LifecycleReply::OperationStatus(

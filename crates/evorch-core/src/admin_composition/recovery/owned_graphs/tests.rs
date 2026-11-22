@@ -218,13 +218,16 @@ async fn quarantined(conn: &mut Conn, request_id: &str) -> QuarantineItem {
     items.remove(0)
 }
 
-/// Registered is not published: every Q2 request from a verified local client
+/// Registered is not published: while a leaf is missing, every Q2 request from a verified local client
 /// is refused before the facade, the audit journal or the store is reached,
 /// and the hello offers nothing new.
 #[tokio::test]
-async fn an_installed_leaf_refuses_every_request_while_management_is_off() {
+async fn an_installed_leaf_refuses_every_request_while_the_composition_is_incomplete() {
     let (core, publication) = Installed::start(true).await;
-    assert_eq!(publication, Publication::Off);
+    assert!(
+        matches!(publication, Publication::Blocked(_)),
+        "{publication:?}"
+    );
     let installed = core.boot.admin.installed_facades();
     assert!(installed.owned_graphs && installed.quarantine);
     assert_eq!(installed.restart, cfg!(not(target_os = "linux")));
@@ -357,7 +360,10 @@ async fn the_installed_leaf_serves_a_verified_local_client_and_refuses_web_and_a
 #[tokio::test]
 async fn a_host_that_has_not_run_recovery_leaves_the_leaf_unregistered() {
     let (core, publication) = Installed::start(false).await;
-    assert_eq!(publication, Publication::Off);
+    assert!(
+        matches!(publication, Publication::Blocked(_)),
+        "{publication:?}"
+    );
     let installed = core.boot.admin.installed_facades();
     assert!(!installed.owned_graphs && installed.quarantine);
     core.boot.admin.publish_for_test();

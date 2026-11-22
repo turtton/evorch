@@ -204,12 +204,25 @@ pub async fn serve(
     // Resolved outcomes for features, held until the next snapshot has replaced
     // the projection and reset the features (see `features`).
     let mut held = Vec::<HeldReply>::new();
+    // The successor of a planned restart, already connected and with its session
+    // read, found by a connect-only wait (see `wait_for_successor`).
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut successor: Option<(core_launcher::ConnectedCore, Opened)> = None;
     loop {
-        update(&shared, &ctx, |s| {
-            s.disconnect();
-            s.status = "コアへ接続中…".into();
-        });
-        let connected = launcher.connect_or_start_with_endpoint().await;
+        let mut prebuilt = None;
+        let connected = match successor.take() {
+            Some((core, opened)) => {
+                prebuilt = Some(opened);
+                Ok(core)
+            }
+            None => {
+                update(&shared, &ctx, |s| {
+                    s.disconnect();
+                    s.status = "コアへ接続中…".into();
+                });
+                launcher.connect_or_start_with_endpoint().await
+            }
+        };
         let (client, endpoint) = match connected {
             Ok(connected) => (connected.client, connected.endpoint),
             Err(e) => {
@@ -229,25 +242,27 @@ pub async fn serve(
         'session: while resync {
             data.stop(&shared, &ctx).await;
             resync = false;
-            let mut stream = match client
-                .subscribe(Subscribe {
-                    scope: SubscriptionScope::All,
-                    after: None,
-                })
-                .await
-            {
-                Ok(stream) => stream,
-                Err(e) => {
-                    update(&shared, &ctx, |s| s.status = e.to_string());
+            let opened = match prebuilt.take() {
+                Some(opened) => Ok(opened),
+                None => open_session(&client).await,
+            };
+            let mut stream = match opened {
+                Ok(Opened {
+                    stream,
+                    capabilities,
+                    cache,
+                    delivered,
+                }) => {
+                    update(&shared, &ctx, |s| {
+                        s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
+                    });
+                    stream
+                }
+                Err(OpenFailed::Subscribe(error)) => {
+                    update(&shared, &ctx, |s| s.status = error);
                     break;
                 }
-            };
-            let capabilities = client.server_hello().capabilities.clone();
-            match snapshot_delivering(&client, &mut stream).await {
-                Ok((cache, delivered)) => update(&shared, &ctx, |s| {
-                    s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
-                }),
-                Err(error) => {
+                Err(OpenFailed::Snapshot(error)) => {
                     update(&shared, &ctx, |s| s.status = error);
                     if matches!(
                         client.connection_state(),
@@ -258,7 +273,7 @@ pub async fn serve(
                     }
                     continue;
                 }
-            }
+            };
             loop {
                 let upload = next_upload(&shared, &uncertain);
                 tokio::select! {
@@ -341,13 +356,151 @@ pub async fn serve(
                 }
             }
         }
+        // Read before the features are disconnected: only the core's own evidence
+        // of a restart counts, never the loss of the connection alone.
+        #[cfg(target_os = "linux")]
+        let evidence = (!reconnect_requested)
+            .then(|| {
+                let epoch = client.server_hello().instance_epoch;
+                let now = core_launcher::handoff::diagnostics::reconnect::clock_now();
+                shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .features
+                    .planned_restart(epoch, now)
+            })
+            .flatten();
         data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| s.disconnect());
         if reconnect_requested {
             continue;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(evidence) = evidence {
+            match wait_for_successor(&launcher, &evidence, &mut actions, &shared, &ctx).await {
+                Waited::Next(next) => {
+                    successor = Some(*next);
+                    continue;
+                }
+                Waited::Reconnect => continue,
+                Waited::Stop => return,
+                Waited::Failed => {}
+            }
+        }
         if !wait_reconnect(&mut actions, &shared, &ctx).await {
             return;
+        }
+    }
+}
+
+/// A session read from a core: the subscription, what the core offers and the
+/// snapshot the projection is rebuilt from.
+struct Opened {
+    stream: Subscription,
+    capabilities: Vec<workbench_protocol::handshake::Capability>,
+    cache: Cache,
+    delivered: Vec<UiEvent>,
+}
+
+enum OpenFailed {
+    /// No subscription: the connection is of no use.
+    Subscribe(String),
+    /// The snapshot did not settle; a resync may.
+    Snapshot(String),
+}
+
+async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
+    let mut stream = client
+        .subscribe(Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .await
+        .map_err(|e| OpenFailed::Subscribe(e.to_string()))?;
+    let capabilities = client.server_hello().capabilities.clone();
+    let (cache, delivered) = snapshot_delivering(client, &mut stream)
+        .await
+        .map_err(OpenFailed::Snapshot)?;
+    Ok(Opened {
+        stream,
+        capabilities,
+        cache,
+        delivered,
+    })
+}
+
+#[cfg(target_os = "linux")]
+enum Waited {
+    Next(Box<(core_launcher::ConnectedCore, Opened)>),
+    /// The person asked to reconnect by hand.
+    Reconnect,
+    /// The wait ended with the reason shown; nothing was started.
+    Failed,
+    Stop,
+}
+
+/// After a planned restart: wait for its successor, connect-only. Nothing here
+/// starts a core, so the restart can neither be raced nor duplicated. The two
+/// windows (120 s for the successor to be ready, 30 s to rebuild this session)
+/// are the pure machine's; the session is read inside the second one. Whatever
+/// the person does meanwhile is refused as for any lost connection.
+#[cfg(target_os = "linux")]
+async fn wait_for_successor(
+    launcher: &core_launcher::Launcher,
+    evidence: &workbench_client::restart::reconnect::PlannedEvidence,
+    actions: &mut mpsc::Receiver<Action>,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+) -> Waited {
+    use super::restart::text;
+    use core_launcher::handoff::diagnostics::reconnect::{
+        ReconnectError, ReconnectPolicy, Reconnected, Target, reconnect_after_planned_restart,
+    };
+    let target = launcher.connect_target();
+    let connector = Target {
+        target: &target,
+        client: launcher.client_config(),
+    };
+    let waiting = reconnect_after_planned_restart(
+        &connector,
+        evidence,
+        ReconnectPolicy::default(),
+        |view| {
+            update(shared, ctx, |s| {
+                s.status = text::reconnect(view.stage, view.remaining);
+            });
+        },
+        |core| async move {
+            let core_launcher::ConnectedCore { client, endpoint } = core;
+            match open_session(&client).await {
+                Ok(opened) => Ok((core_launcher::ConnectedCore { client, endpoint }, opened)),
+                Err(OpenFailed::Subscribe(error) | OpenFailed::Snapshot(error)) => Err(error),
+            }
+        },
+    );
+    tokio::pin!(waiting);
+    let result = loop {
+        tokio::select! {
+            result = &mut waiting => break result,
+            action = actions.recv() => match action {
+                None | Some(Action::Shutdown) => return Waited::Stop,
+                Some(Action::Reconnect) => return Waited::Reconnect,
+                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+            },
+        }
+    };
+    match result {
+        Ok(Reconnected::Successor { value, .. } | Reconnected::Predecessor { value }) => {
+            Waited::Next(Box::new(value))
+        }
+        Err(error) => {
+            update(shared, ctx, |s| {
+                s.status = match &error {
+                    ReconnectError::Expired(stage) => text::expired(*stage).to_owned(),
+                    other => format!("再起動の完了を確認できませんでした: {other}"),
+                };
+            });
+            Waited::Failed
         }
     }
 }
@@ -635,39 +788,50 @@ async fn wait_reconnect(
         if matches!(action, Action::Shutdown) {
             return false;
         }
-        update(shared, ctx, |s| {
-            match action {
-                Action::Command {
-                    draft: Some((thread, _)),
-                    ..
-                } => {
-                    s.sending.remove(&thread);
-                }
-                Action::Upload {
-                    project,
-                    thread,
-                    file,
-                    ..
-                } => {
-                    s.attachment_draft(project, thread.as_str(), file).uploading = false;
-                }
-                Action::Feature(action) => s.features.refuse(&action, "disconnected"),
-                Action::Data(action) if s.features.data.current(&action) => {
-                    s.features.data_notice(
-                        action.feature,
-                        action.tag,
-                        super::features::data::DataNotice::Failed(FeatureError::new(
-                            "disconnected",
-                        )),
-                    );
-                }
-                _ => (),
-            }
-            s.status =
-                "切断中のため未送信です。入力を保持しました。明示的に再接続してください。".into();
-        });
+        refuse_while_disconnected(shared, ctx, action, true);
     }
     false
+}
+
+/// Nothing is sent while there is no session: the action is refused and the
+/// human input it came from is kept.
+fn refuse_while_disconnected(
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+    action: Action,
+    say: bool,
+) {
+    update(shared, ctx, |s| {
+        match action {
+            Action::Command {
+                draft: Some((thread, _)),
+                ..
+            } => {
+                s.sending.remove(&thread);
+            }
+            Action::Upload {
+                project,
+                thread,
+                file,
+                ..
+            } => {
+                s.attachment_draft(project, thread.as_str(), file).uploading = false;
+            }
+            Action::Feature(action) => s.features.refuse(&action, "disconnected"),
+            Action::Data(action) if s.features.data.current(&action) => {
+                s.features.data_notice(
+                    action.feature,
+                    action.tag,
+                    super::features::data::DataNotice::Failed(FeatureError::new("disconnected")),
+                );
+            }
+            _ => (),
+        }
+        if say {
+            s.status =
+                "切断中のため未送信です。入力を保持しました。明示的に再接続してください。".into();
+        }
+    });
 }
 
 async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {

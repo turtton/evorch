@@ -449,3 +449,53 @@ fn a_feature_error_carries_the_advice_only_when_one_is_set() {
     assert_eq!(refused.code, Some(ErrorCode::LimitExceeded));
     assert_eq!(refused.retry, Some(RetryAdvice::Never));
 }
+
+#[test]
+fn the_restart_feature_is_shown_only_for_a_core_that_advertises_safe_restart() {
+    let features = Features::default();
+    assert!(
+        !features
+            .available(true, &Capability::IMPLEMENTED)
+            .contains(&FeatureId::Restart),
+        "a core that does not advertise it gets no restart screen"
+    );
+    assert!(
+        features
+            .available(true, &[Capability::SafeRestart])
+            .contains(&FeatureId::Restart)
+    );
+    assert!(
+        !features
+            .available(false, &[Capability::SafeRestart])
+            .contains(&FeatureId::Restart),
+        "nothing is offered while disconnected"
+    );
+}
+
+#[test]
+fn the_restart_screen_renders_and_only_reads_until_a_person_confirms() {
+    let mut features = Features::default();
+    let cache = Cache::default();
+    let selection = Selection::default();
+    let capabilities = [Capability::SafeRestart];
+    features.begin_session(&[], vec![]);
+    let mut asked = Vec::new();
+    run_ui(|ui| {
+        let frame = features.render(ui, view(true, &capabilities, &cache, &selection));
+        asked = frame
+            .actions
+            .into_iter()
+            .filter(|action| action.feature == FeatureId::Restart)
+            .collect();
+    });
+    assert!(
+        !asked.is_empty(),
+        "the screen reads the restart state when it opens"
+    );
+    assert!(
+        asked
+            .iter()
+            .all(|action| matches!(action.request, FeatureRequest::Query(_))),
+        "opening the screen sends no command: {asked:?}"
+    );
+}

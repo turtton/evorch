@@ -1,4 +1,5 @@
 use super::args::AdminCommand;
+mod recovery;
 use core_launcher::{
     ConnectedCore,
     handoff::diagnostics::{
@@ -153,6 +154,8 @@ impl Flow<'_> {
             AdminCommand::Interrupt { blocker, yes } => {
                 self.interrupt_shell(&client, blocker, yes).await
             }
+            AdminCommand::Quarantine(op) => self.quarantine(&client, op).await,
+            AdminCommand::Graphs(op) => self.graphs(&client, op).await,
         }
     }
 
@@ -249,7 +252,14 @@ impl Flow<'_> {
                 ));
                 self.settle_unknown(op).await
             }
-            Err(error) => self.fail(&error),
+            Err(error) => {
+                let code = self.fail(&error);
+                if matches!(&error, AdminError::Client(ClientError::Server(e)) if e.code == workbench_protocol::ErrorCode::Conflict)
+                {
+                    self.hint_undisposed(&admin).await;
+                }
+                code
+            }
         }
     }
 

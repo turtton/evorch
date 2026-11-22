@@ -112,7 +112,17 @@ async fn storage_accessors_do_not_open_management() {
     assert_eq!(*inputs.storage_config(), boot.composition.storage);
     inputs.storage_writer().barrier().unwrap();
     let _shared = inputs.storage_writer().clone();
-    assert_eq!(crate::admin_composition::install(&inputs), Publication::Off);
+    // No finalization handed in: the restart leaf is missing, so nothing opens.
+    #[cfg(target_os = "linux")]
+    assert!(matches!(
+        crate::admin_composition::install(&inputs),
+        Publication::Blocked(installed) if !installed.restart
+    ));
+    #[cfg(not(target_os = "linux"))]
+    assert!(matches!(
+        crate::admin_composition::install(&inputs),
+        Publication::Blocked(_)
+    ));
     assert!(!boot.admin.management_enabled());
     assert!(!offered(&backend.hello()));
     let forged = Provenance::human(Surface::Cli, ClientId::new("claimed-human").unwrap());
@@ -152,9 +162,10 @@ async fn the_advertisement_follows_the_service_switch() {
     boot.shutdown().await.unwrap();
 }
 
-/// The real switch publishes nothing, even with every leaf registered.
+/// The real switch publishes exactly when every leaf is registered and the
+/// platform can run the effects; elsewhere it stays refused and unadvertised.
 #[tokio::test]
-async fn the_product_switch_stays_off_with_every_leaf_registered() {
+async fn the_product_switch_publishes_only_a_complete_linux_composition() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     let mut boot = BootstrappedHost::open(BootstrapOptions {
@@ -167,10 +178,29 @@ async fn the_product_switch_stays_off_with_every_leaf_registered() {
     let backend = HostBackend::new(boot.host.clone(), "core-product-switch".into());
     boot.admin.install_restart(Arc::new(Leaf));
     boot.admin.install_quarantine(Arc::new(Leaf));
-    boot.admin.install_owned_graphs(Arc::new(Leaf));
-    assert!(boot.admin.installed_facades().all());
-    assert_eq!(publish(&boot.admin, &backend), Publication::Off);
+    // One leaf is still missing: not published.
+    assert!(matches!(
+        publish(&boot.admin, &backend),
+        Publication::Blocked(installed) if !installed.all()
+    ));
     assert!(!boot.admin.management_enabled());
     assert!(!offered(&backend.hello()));
+    boot.admin.install_owned_graphs(Arc::new(Leaf));
+    assert!(boot.admin.installed_facades().all());
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(publish(&boot.admin, &backend), Publication::Published);
+        assert!(boot.admin.management_enabled());
+        assert!(offered(&backend.hello()));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(matches!(
+            publish(&boot.admin, &backend),
+            Publication::Blocked(installed) if installed.all()
+        ));
+        assert!(!boot.admin.management_enabled());
+        assert!(!offered(&backend.hello()));
+    }
     boot.shutdown().await.unwrap();
 }
