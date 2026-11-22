@@ -371,3 +371,18 @@ All reproduction commands have a 300-second outer bound, use capture, and do not
 add a product fault hook. A grep survey also found existing mixed real-child /
 virtual model-wait tests in shell/job_tests.rs; those out-of-scope tests were
 left unchanged.
+
+Independent review follow-up: the cancellation controller captures root/helper
+pidfds at READY, while the registration gate still keeps both alive, and retains
+those identities for Drop (no late numeric-PID reopen). A related grep survey
+found /proc-child discovery in the integration reaper; it now validates the
+opened fd with P_PIDFD / WNOWAIT before signalling, and rejects the isolated
+controller itself as a non-child. Existing process-guard controller fallbacks
+were reported separately, not edited here. The timeout case no longer requires
+READY (or a live numeric PID) before a valid 200 ms deadline: it checks typed
+Pty/OwnedGroup registration, one ledger entry, its receipt/reap, zero unconfirmed
+entries and retirement. A temporary PATH sh shim sleeps 400 ms before execing
+dash: the previous test failed with `supervisor ended before READY: timed_out`
+(1.866 s), while the corrected test passed (2.240 s). The corrected sandbox
+PTY/cancellation controllers (2 selected tests), 6 normal shell regressions and
+scoped sandbox/tools all-target clippy also passed. The shim is not product code.

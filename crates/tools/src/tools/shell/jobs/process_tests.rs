@@ -129,10 +129,18 @@ async fn pty_supervision_preserves_status_cancel_timeout_and_abandonment() {
         // observation bound is failure-only (explicitly requested for this
         // regression); it is not a readiness delay or product grace period.
         tokio::time::timeout(Duration::from_secs(5), async {
-            ready(&job, &mut task).await;
-            let root = ledger.children()[0].leader.unwrap();
-            eprintln!("PTY_SUPERVISION {action}: READY root={root}");
-            let death = process_guard_pidfd(root);
+            // The real job deadline starts before output is observed. Timeout
+            // is valid even if launch / READY delivery takes longer than 200ms;
+            // prove typed registration and the receipt below, not READY order
+            // or a pidfd opened after the root might already have been reaped.
+            let death = if action == "timeout" {
+                None
+            } else {
+                ready(&job, &mut task).await;
+                let root = ledger.children()[0].leader.unwrap();
+                eprintln!("PTY_SUPERVISION {action}: READY root={root}");
+                Some(process_guard_pidfd(root))
+            };
             match action {
                 "exit" | "signal" | "eof" => {
                     let (result, received) = oneshot::channel();
@@ -183,26 +191,30 @@ async fn pty_supervision_preserves_status_cancel_timeout_and_abandonment() {
                 }
             }
             eprintln!("PTY_SUPERVISION {action}: supervisor finished");
-            tokio::task::spawn_blocking(move || {
-                use std::os::fd::AsRawFd;
-                let mut fds = [libc::pollfd {
-                    fd: death.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                }];
-                loop {
-                    let result = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
-                    if result > 0 {
-                        break;
+            if let Some(death) = death {
+                tokio::task::spawn_blocking(move || {
+                    use std::os::fd::AsRawFd;
+                    let mut fds = [libc::pollfd {
+                        fd: death.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
+                    loop {
+                        let result = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+                        if result > 0 {
+                            break;
+                        }
+                        assert_eq!(
+                            std::io::Error::last_os_error().kind(),
+                            std::io::ErrorKind::Interrupted
+                        );
                     }
-                    assert_eq!(
-                        std::io::Error::last_os_error().kind(),
-                        std::io::ErrorKind::Interrupted
-                    );
-                }
-            })
-            .await
-            .unwrap();
+                })
+                .await
+                .unwrap();
+            }
+            assert_eq!(ledger.child_stats().registered, 1);
+            assert!(matches!(stored_group(&job), Some(JobGroup::Pty(_))));
             ledger.reap_all_children().await.unwrap();
             assert_eq!(ledger.child_stats().reaped, 1);
             assert_eq!(ledger.child_stats().unconfirmed, 0);

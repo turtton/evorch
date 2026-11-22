@@ -71,9 +71,35 @@ fn dead(fd: &impl AsRawFd) {
     .unwrap();
 }
 struct Reaper(Vec<(i32, OwnedFd)>);
+// A /proc children snapshot can race another owner reaping its child. Validate
+// the opened identity, not its numeric PID, before signalling a discovered peer.
+fn signal_adopted_child(fd: &OwnedFd) -> bool {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    loop {
+        if unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                fd.as_raw_fd() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            signal(fd);
+            return true;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
 impl Reaper {
     fn new() -> Self {
         assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        // This isolated controller is not its own child. A broken ownership
+        // check kills only this controller and makes the outer test fail.
+        let own = process_guard::pidfd_open(std::process::id() as i32).unwrap();
+        assert!(!signal_adopted_child(&own));
         Self(Vec::new())
     }
     fn add(&mut self, pid: i32) {
@@ -97,8 +123,11 @@ impl Drop for Reaper {
                 break;
             }
             for pid in pids {
-                if let Ok(fd) = process_guard::pidfd_open(pid) {
-                    signal(&fd);
+                let Ok(fd) = process_guard::pidfd_open(pid) else {
+                    continue;
+                };
+                if !signal_adopted_child(&fd) {
+                    continue;
                 }
                 loop {
                     if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } >= 0
