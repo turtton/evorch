@@ -545,6 +545,18 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/run-test-group.sh run "${{ matrix.group }}" "${{ matrix.shard }}/${{ matrix.shards }}" ci-remaining "$EVORCH_TEST_INVENTORY_DIR"
+      # B3-07: real ten-second planned-shutdown expiry (exit 74 and reaping of
+      # owned children) in a RELEASE test binary of the product components. The
+      # cells are ignored tests, so no debug inventory run selects them; this is
+      # their only run. Once per event (runtime shard 1). Real elapsed time
+      # (~1 min); nextest's runner timeout owns hang detection, and each cell
+      # has its own failure backstops. Not a product-ELF check (5a-V T3).
+      - name: Real planned-shutdown expiry (release test binary)
+        if: matrix.group == 'runtime' && matrix.shard == 1
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/guard-cargo.sh run -p evorch-core --release --features bootstrap-test-support --locked --test core_expiry --run-ignored only --test-threads 1 --no-tests fail
       # Only a push to main runs the registered former-GUI integration tests (the
       # inventory above lists and partitions them on every event). A pull request
       # that is green therefore does not say that they passed; a failure here fails
@@ -683,6 +695,7 @@ jobs:
           scripts/guard-cargo.sh prepare "$warm/cef-5" -p gui --lib
           scripts/guard-cargo.sh prepare "$warm/cef-6" -p evorch-core --test f4_product_cef --test agent_observation_restart
           scripts/guard-cargo.sh prepare "$warm/cef-7" -p core-client-e2e --features gui/cef --test agent_observation_gui
+          scripts/guard-cargo.sh prepare "$warm/expiry-1" -p evorch-core --release --features bootstrap-test-support --test core_expiry --locked
       - name: Report disk usage
         if: always()
         run: |

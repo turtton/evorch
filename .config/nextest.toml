@@ -8,6 +8,13 @@ test-threads = 4
 # period を大きく取り、その後の terminate のみを担う。
 slow-timeout = { period = "180s", terminate-after = 1, grace-period = "30s" }
 
+# crates/evorch-core/tests/core_expiry: a cell's own failure backstops end at 180s
+# and its controller then cleans up for up to 30s, so the runner must not
+# terminate before that (it would cut cleanup short). Only this binary.
+[[profile.default.overrides]]
+filter = 'binary(=core_expiry)'
+slow-timeout = { period = "240s", terminate-after = 1, grace-period = "30s" }
+
 # The ignored display measurements (crates/core-client-e2e/tests/display_measure.rs) include a
 # 30-minute soak; run them with `-P measure`. Hang detection stays with the runner.
 [profile.measure]
