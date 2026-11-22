@@ -7,6 +7,9 @@ use rustix::process::Signal;
 use std::{io, path::Path, process::Stdio};
 use tokio::{net::UnixListener, process::Command};
 pub async fn run(cell: &str, own: &Path, socket: &Path, listener: &UnixListener) -> io::Result<()> {
+    if cell == "observer_trace_thread" {
+        return super::trace::thread_spawn_control(own).await;
+    }
     let mut command = Command::new(own);
     command.args(["--peer", "root", socket.to_str().unwrap()]);
     if cell == "observer_escaped" {

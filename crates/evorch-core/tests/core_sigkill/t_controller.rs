@@ -58,7 +58,7 @@ pub async fn run(
                 fs::read(format!("/proc/{}/cmdline", p.identity.pid)).is_ok_and(|c|
                     c.split(|b| *b == 0).any(|a| a == b"js-worker")))
                 .ok_or_else(|| io::Error::other("actual DirectSandbox js-worker missing"))?;
-            super::trace::assert_no_process_spawn(&trace, worker.identity.pid)?;
+            super::trace::assert_no_process_spawn(&trace, worker.identity.pid, false)?;
             super::evidence::emit(cell, "worker", &json!({
                 "worker":worker.identity,
                 "sha256":super::evidence::digest(Path::new(&format!("/proc/{}/exe", worker.identity.pid)))?,

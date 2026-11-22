@@ -121,7 +121,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
                     .any(|p| p.identity.parent == worker),
                 "js-worker spawned another process",
             )?;
-            super::trace::assert_no_process_spawn(&trace, worker)?;
+            super::trace::assert_no_process_spawn(&trace, worker, false)?;
             check(
                 !root.join("bin/guard-bundle.json").exists(),
                 "worker test accidentally supplies installed guard bundle",

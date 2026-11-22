@@ -27,6 +27,7 @@ const CELLS: &[&str] = &[
     "observer",
     "observer_escaped",
     "observer_stale_ancestor",
+    "observer_trace_thread",
     "shell",
     "shell_pty",
     "grep",
@@ -64,6 +65,9 @@ fn run() -> std::io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--peer") {
         return peer::run(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "--thread-fixture") {
+        return trace::thread_fixture(&args[1]);
     }
     if args.first().is_some_and(|arg| arg == "--t-owner") {
         return tokio::runtime::Builder::new_multi_thread()

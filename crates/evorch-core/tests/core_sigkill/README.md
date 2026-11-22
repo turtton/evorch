@@ -80,7 +80,7 @@ The copied CLI directory has no installed guard bundle: successful worker
 entry also proves the bind-before-logging exclusion. CLI is an actual build
 from this source; its SHA256 is recorded separately from release core.
 
-Daemonized strace (-D -ff) is independent evidence and never kills tracees.
+Daemonized strace (-D -ff --decode-pids=pidns) is independent evidence and never kills tracees. -ff writes one log per TID, so the no-spawn check follows every thread of the worker (thread ids are mapped from the tracee namespace to the host by --decode-pids=pidns, followed through nested CLONE_THREAD clones, exited threads included): thread-creating clones are allowed, process-creating clone/fork/vfork or any execve is a violation wherever it happens. The negative control observer_trace_thread runs a real strace of a process whose only thread forks a short-lived child and requires rejection; a thread-only process is accepted.
 It records group SIGKILL before root wait4 and rejects later group signals.
 CI installs strace/bubblewrap, checks ptrace and /dev/ptmx, enables Ubuntu
 user namespaces and explicitly builds the actual CLI. Missing support fails,
