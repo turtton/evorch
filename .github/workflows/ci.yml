@@ -527,7 +527,7 @@ jobs:
           CARGO_TARGET_DIR: target/ci-shared
         run: |
           scripts/guard-cargo.sh run -p core-instance --features recovery-test-support --locked --no-tests fail
-          scripts/guard-cargo.sh run -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked --no-tests fail
+          scripts/guard-cargo.sh run -p core-launcher --test handoff --test preflight_regression --features handoff-test-support,core-instance/recovery-test-support --locked --no-tests fail
       - name: Remaining tests
         env:
           CARGO_TARGET_DIR: target/ci-shared
@@ -649,7 +649,7 @@ jobs:
           HOST_LIFECYCLE_TEST=$(sed -n 's/^ *HOST_LIFECYCLE_TEST: *//p' .github/workflows/ci.yml)
           test -n "$HOST_LIFECYCLE_TEST"
           scripts/guard-cargo.sh prepare "$warm/support-1" -p core-instance --features recovery-test-support --locked
-          scripts/guard-cargo.sh prepare "$warm/support-2" -p core-launcher --test handoff --features handoff-test-support,core-instance/recovery-test-support --locked
+          scripts/guard-cargo.sh prepare "$warm/support-2" -p core-launcher --test handoff --test preflight_regression --features handoff-test-support,core-instance/recovery-test-support --locked
           scripts/guard-cargo.sh prepare "$warm/browser-1" -p browser --test agent_chromium --test agent_observation
           scripts/guard-cargo.sh prepare "$warm/browser-2" -p workbench-host --test "$HOST_LIFECYCLE_TEST"
           scripts/guard-cargo.sh prepare "$warm/browser-3" -p evorch-core --test agent_observation_chromium
