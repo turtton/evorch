@@ -26,6 +26,45 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// The core is stopping on purpose (signal, idle exit, management stop): tell
+/// every subscription so before the connection closes, so a client can tell this
+/// from a crash. Bounded: a client that does not read cannot hold the shutdown.
+const GOODBYE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+async fn say_goodbye(
+    backend: &HostBackend,
+    output: &mpsc::Sender<ServerFrame>,
+    finish: tokio::sync::oneshot::Sender<()>,
+    flushed: tokio::sync::oneshot::Receiver<()>,
+    subscriptions: &BTreeMap<String, tokio::task::AbortHandle>,
+    subscribed: &BTreeMap<String, workbench_protocol::ids::SubscriptionId>,
+) {
+    // No more events of these subscriptions may follow the goodbye.
+    for task in subscriptions.values() {
+        task.abort();
+    }
+    let _ = tokio::time::timeout(GOODBYE_BOUND, async {
+        for (key, id) in subscribed {
+            if !subscriptions.contains_key(key) {
+                continue;
+            }
+            let notice = backend.projection.shutdown_notice(id);
+            let Ok(notice) = backend.mask(notice) else {
+                continue;
+            };
+            if output
+                .send(ServerFrame::Event(Box::new(notice)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = finish.send(());
+        let _ = flushed.await;
+    })
+    .await;
+}
+
 pub async fn connection(
     stream: UnixStream,
     backend: Arc<HostBackend>,
@@ -68,13 +107,33 @@ pub async fn connection(
     let (output, mut frames) = mpsc::channel::<ServerFrame>(64);
     let max = hello.limits.max_frame_bytes;
     let writer_backend = backend.clone();
+    // `finish` asks the writer to write what is queued and stop; `flushed`
+    // says it did. An orderly shutdown sends its goodbye through the same queue
+    // and closes only after that.
+    let (finish, mut finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let (flushed_tx, flushed) = tokio::sync::oneshot::channel::<()>();
     tasks.spawn(async move {
-        while let Some(frame) = frames.recv().await {
+        let mut finishing = false;
+        loop {
+            let frame = tokio::select! {
+                biased;
+                frame = frames.recv() => frame,
+                _ = &mut finish_rx, if !finishing => {
+                    finishing = true;
+                    frames.close();
+                    continue;
+                }
+            };
+            let Some(frame) = frame else { break };
             // Includes early Subscribe replies and connection-generated errors.
             let frame =
                 writer_backend.protect_output(serde_json::to_value(frame).map_err(invalid)?);
             let bytes = encode_frame(&frame, max).map_err(invalid)?;
             write.write_all(&bytes).await?;
+        }
+        if finishing {
+            write.flush().await?;
+            let _ = flushed_tx.send(());
         }
         Ok::<_, io::Error>(true)
     });
@@ -99,6 +158,7 @@ pub async fn connection(
     let admin_slots = Arc::new(tokio::sync::Semaphore::new(32));
     let mut session = None;
     let mut subscriptions = BTreeMap::new();
+    let mut subscribed = BTreeMap::<String, workbench_protocol::ids::SubscriptionId>::new();
     loop {
         let bytes = tokio::select! {
             _ = shutdown.changed() => break,
@@ -152,6 +212,7 @@ pub async fn connection(
                             Err(e) => ReplyResult::Error(e),
                             Ok(mut sub) => {
                                 let sub_id = sub.started.subscription_id.to_string();
+                                let sub_started_id = sub.started.subscription_id.clone();
                                 let started = backend.mask(sub.started.clone()).map_err(invalid)?;
                                 // Reply is enqueued before any event from this subscription.
                                 tokio::select! {
@@ -179,6 +240,7 @@ pub async fn connection(
                                     // A subscription ending must not close other subscriptions.
                                     Ok(false)
                                 });
+                                subscribed.insert(sub_id.clone(), sub_started_id);
                                 subscriptions.insert(sub_id, task);
                                 continue;
                             }
@@ -187,6 +249,7 @@ pub async fn connection(
                 }
                 RequestBody::Control(Control::Unsubscribe { subscription_id }) => {
                     backend.projection.unsubscribe(&subscription_id);
+                    subscribed.remove(subscription_id.as_str());
                     if let Some(task) = subscriptions.remove(subscription_id.as_str()) {
                         task.abort();
                     }
@@ -249,6 +312,17 @@ pub async fn connection(
             .mask(ReplyEnvelope { request_id, result })
             .map_err(invalid)?;
         tokio::select! { _ = shutdown.changed() => break, r = output.send(ServerFrame::Reply(reply)) => { r.map_err(invalid)?; } }
+    }
+    if *shutdown.borrow() {
+        say_goodbye(
+            &backend,
+            &output,
+            finish,
+            flushed,
+            &subscriptions,
+            &subscribed,
+        )
+        .await;
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}

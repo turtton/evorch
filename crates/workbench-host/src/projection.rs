@@ -957,6 +957,22 @@ impl Projection {
             page,
         })
     }
+    /// The goodbye of a core that is stopping on purpose, for a subscription a
+    /// connection still serves. The connection sends it *before* it closes (see
+    /// `evorch-core::unix`): the notice made by dropping the projection comes too
+    /// late, when the connection tasks are already gone.
+    pub fn shutdown_notice(&self, id: &SubscriptionId) -> EventEnvelope {
+        let mut state = self.state.lock().unwrap();
+        let cursor = state.next_cursor();
+        EventEnvelope {
+            subscription_id: id.clone(),
+            cursor,
+            caused_by_request_id: None,
+            event: UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
+                reason: CloseReason::CoreShuttingDown,
+            }),
+        }
+    }
     pub fn unsubscribe(&self, id: &SubscriptionId) {
         let mut state = self.state.lock().unwrap();
         if let Some(index) = state.subscribers.iter().position(|s| &s.id == id) {

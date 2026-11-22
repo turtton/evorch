@@ -358,12 +358,15 @@ impl Launcher {
                 && let Some(status) = c.0.as_mut().expect("owned child").try_wait()?
             {
                 if status.code() != Some(2) {
-                    // A ledger fault here resurfaces at the next admit_start,
-                    // the decision point; this error is the more specific one.
-                    let _ = CrashBudget::record_failed_start(&launch);
-                    if let Ok(stale) = self.stale_sockets() {
-                        for socket in stale {
-                            let _ = fs::remove_file(socket);
+                    // Persist the crash first. If that fails, say so (a record that
+                    // cannot be written must not read as "no crash"), and keep the
+                    // socket evidence for the next decision.
+                    CrashBudget::record_failed_start(&launch)?;
+                    for socket in self.stale_sockets()? {
+                        match fs::remove_file(socket) {
+                            Ok(()) => (),
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                            Err(e) => return Err(e.into()),
                         }
                     }
                     return Err(LaunchError::Exited(status));

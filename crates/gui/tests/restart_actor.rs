@@ -336,6 +336,32 @@ async fn an_exhausted_budget_is_shown_with_its_reason_and_nothing_is_started_or_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_goodbye_and_the_end_of_the_stream_arriving_together_is_still_a_goodbye() {
+    // The actor's select may see the close first; the goodbye is already queued.
+    // Repeated so that either order is taken, each time against a new core.
+    for _ in 0..24 {
+        tokio::time::timeout(BOUND, async {
+            let world = world();
+            let core = world.core(7);
+            let gui = Gui::start(world.launcher());
+            gui.until(|s| Gui::epoch(s) == Some(7)).await;
+            core.push(workbench_protocol::events::UiEvent::Projection(
+                workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
+                    reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
+                },
+            ));
+            core.stop_after_flush();
+            gui.until(|s| s.status.contains("終了の通知あり")).await;
+            assert_eq!(starts(&world), 0, "a goodbye is not a crash");
+            gui.actions.send(Action::Shutdown).await.unwrap();
+            gui.actor.await.unwrap();
+        })
+        .await
+        .expect("the scenario finishes");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_core_that_said_goodbye_is_not_started_again() {
     tokio::time::timeout(BOUND, async {
         let world = world();

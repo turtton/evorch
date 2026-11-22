@@ -359,6 +359,20 @@ pub async fn serve(
                     }
                 }
             }
+            // `closed()` and what the core queued before it closed (its goodbye,
+            // the evidence of a restart) can both be ready, and the select may pick
+            // the close. Read what already arrived before deciding how the core
+            // was lost.
+            if !resync {
+                while let Ok(Some(event)) =
+                    tokio::time::timeout(std::time::Duration::ZERO, stream.next()).await
+                {
+                    orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
+                    update(&shared, &ctx, |s| {
+                        let _ = s.cache.event_delivering(event, |e| s.features.event(e));
+                    });
+                }
+            }
         }
         // Read before the features are disconnected: only the core's own evidence
         // of a restart counts, never the loss of the connection alone.
@@ -414,7 +428,7 @@ pub async fn serve(
                 }
                 None => update(&shared, &ctx, |s| s.status = auto_reconnect::gave_up()),
             }
-        } else if orderly {
+        } else if orderly && !planned {
             update(&shared, &ctx, |s| s.status = auto_reconnect::orderly_stop());
         }
         if !wait_reconnect(&mut actions, &shared, &ctx).await {

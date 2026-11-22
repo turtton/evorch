@@ -351,7 +351,9 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         assert!(!state.can_send("t"));
     }
     release_upload.send(()).unwrap();
-    changed(&shared, |s| !s.connected).await;
+    // The cut is an abnormal loss: the actor reconnects by itself (connection 1).
+    // Wait on what the loss leaves behind, not on the instant it is disconnected.
+    changed(&shared, |s| !s.outcome_unknown.is_empty()).await;
     assert!(
         !shared.lock().unwrap().outcome_unknown.is_empty(),
         "lost UploadImage must be retained for receipt reconciliation"
@@ -364,8 +366,15 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         .next()
         .unwrap()
         .clone();
-    actions.send(Action::Reconnect).await.unwrap();
-    changed(&shared, |s| s.connected).await;
+    // Connection 1 is the automatic reconnection: its session asks the core about
+    // the exact lost request, which the proxy answers as unknown.
+    changed(&shared, |s| {
+        s.connected
+            && observed.lock().unwrap().iter().any(|r| {
+                matches!(&r.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == upload_request)
+            })
+    })
+    .await;
     {
         let mut state = shared.lock().unwrap();
         assert!(state.outcome_unknown.contains(&upload_request));
@@ -457,17 +466,8 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     let attached_path: String =
         serde_json::from_str(attached_text.lines().last().unwrap()).unwrap();
     assert_eq!(std::fs::read(attached_path).unwrap(), png_data);
-    changed(&shared, |s| !s.connected && !s.outcome_unknown.is_empty()).await;
-    assert_eq!(shared.lock().unwrap().drafts["t"].text, "desktop initial");
-    let unknown = shared
-        .lock()
-        .unwrap()
-        .outcome_unknown
-        .iter()
-        .next()
-        .unwrap()
-        .clone();
-    actions.send(Action::Reconnect).await.unwrap();
+    // The lost CreateExecution reply is an abnormal loss too: the actor reconnects
+    // (connection 3) and reconciles by asking, never by sending again.
     changed(&shared, |s| {
         s.connected
             && s.outcome_unknown.is_empty()
@@ -496,7 +496,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
         let receipt = trace
             .iter()
             .find(|request| {
-                matches!(&request.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == unknown)
+                matches!(&request.body, RequestBody::Query(Query::Projection(ProjectionQuery::GetCommandReceipt { request_id })) if request_id.as_str() == creations[0].request_id.as_str())
             })
             .expect("desktop must query the exact lost request");
         assert_eq!(receipt.session_id, creations[0].session_id);

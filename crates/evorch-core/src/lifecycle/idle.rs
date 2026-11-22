@@ -154,6 +154,78 @@ async fn no_clients_and_no_work_exit_after_the_idle_grace() {
 }
 
 #[tokio::test]
+async fn an_orderly_shutdown_says_goodbye_on_every_subscription_before_the_connection_closes() {
+    use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
+    use workbench_protocol::{
+        events::{CloseReason, Subscribe, SubscriptionScope, UiEvent},
+        namespaces::ProjectionEvent,
+    };
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = open(&dir).await;
+    let socket = dir.sockets().join("goodbye.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let backend = Arc::new(crate::backend::HostBackend::new(
+        host.host.clone(),
+        "goodbye-core".into(),
+    ));
+    let (shutdown, rx) = tokio::sync::watch::channel(false);
+    let serving = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            crate::unix::connection(stream, backend, rx).await
+        }
+    });
+    let transport = UnixTransport::connect(&socket).await.unwrap();
+    let client = WorkbenchClient::connect(
+        transport,
+        ClientConfig::new(
+            ClientId::new("goodbye").unwrap(),
+            BuildInfo {
+                name: "test".into(),
+                version: "1".into(),
+                revision: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let mut subscriptions = Vec::new();
+    for _ in 0..2 {
+        subscriptions.push(
+            client
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: None,
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    shutdown.send(true).unwrap();
+    // Each subscription is told, then the stream ends: the goodbye is read
+    // before the connection is gone, never instead of it.
+    for subscription in &mut subscriptions {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(30), subscription.next())
+                .await
+                .expect("the goodbye arrives")
+                .expect("the stream does not end before the goodbye");
+            if matches!(
+                event.event,
+                UiEvent::Projection(ProjectionEvent::SubscriptionClosed {
+                    reason: CloseReason::CoreShuttingDown
+                })
+            ) {
+                break;
+            }
+        }
+    }
+    serving.await.unwrap().unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_cli_invocation_retains_the_core_and_is_in_the_status_until_it_ends() {
     use workbench_protocol::handshake::RetentionReason;
     if masked_child().await {

@@ -288,6 +288,17 @@ impl FakeCore {
         let _ = std::fs::remove_file(&self.path);
     }
 
+    /// The core goes away *after* what it queued has been written: the peer reads
+    /// those frames and then the end of the stream, nearly at once.
+    pub fn stop_after_flush(&self) {
+        self.accept.abort();
+        let connections: Vec<_> = self.shared.connections.lock().unwrap().drain(..).collect();
+        for (_, tx, _task) in connections {
+            drop(tx);
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+
     pub fn stop(self) {
         self.accept.abort();
         for (_, _, task) in self.shared.connections.lock().unwrap().drain(..) {

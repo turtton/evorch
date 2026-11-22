@@ -10,6 +10,15 @@ use std::{cell::Cell, fs, os::unix::fs::PermissionsExt, path::Path};
 mod support;
 use support::*;
 
+/// A child forked by another test holds a copy of a lock's open file description
+/// until it execs, so a lock that was just released can look busy. The tests of
+/// this file therefore run one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 fn recent(r: &Rig) -> u32 {
     CrashBudget::recent_crashes(r.identity().config_dir()).unwrap()
 }
@@ -63,6 +72,7 @@ fn nothing_is_running(r: &Rig) {
 
 #[test]
 fn normal_start_and_clean_exit_cycles_are_never_refused_or_counted() {
+    let _serial = serial();
     let r = Rig::new();
     flag(&r, "exit-after-first-hello");
     let socket = r.identity().socket(&r.runtime).unwrap();
@@ -79,6 +89,7 @@ fn normal_start_and_clean_exit_cycles_are_never_refused_or_counted() {
 
 #[test]
 fn three_crashes_refuse_the_next_start_and_the_refusal_is_persistent() {
+    let _serial = serial();
     let r = Rig::new();
     let mut core = start_core(&r);
     for crashed_so_far in 1..=2 {
@@ -112,6 +123,7 @@ fn three_crashes_refuse_the_next_start_and_the_refusal_is_persistent() {
 
 #[test]
 fn cores_that_die_before_ready_are_counted_so_a_startup_loop_stops() {
+    let _serial = serial();
     let r = Rig::new();
     flag(&r, "fail-before-ready");
     for failed in 1..=3 {
@@ -131,6 +143,7 @@ fn cores_that_die_before_ready_are_counted_so_a_startup_loop_stops() {
 
 #[test]
 fn simultaneous_reconnects_after_one_crash_start_one_core_and_count_one_crash() {
+    let _serial = serial();
     let r = Rig::new();
     let mut crashed = start_core(&r);
     crashed.kill();
@@ -164,6 +177,7 @@ fn simultaneous_reconnects_after_one_crash_start_one_core_and_count_one_crash() 
 
 #[test]
 fn an_untrusted_record_stops_automatic_starts_and_is_left_untouched() {
+    let _serial = serial();
     let r = Rig::new();
     let record = r.config.join(".evorch-core.crash-budget");
     let other = r.config.join("elsewhere");
@@ -201,6 +215,7 @@ fn an_untrusted_record_stops_automatic_starts_and_is_left_untouched() {
 
 #[test]
 fn a_core_that_rejects_the_version_is_reported_as_incompatible_and_left_running() {
+    let _serial = serial();
     use std::io::{Read, Write};
     use std::os::unix::{fs::PermissionsExt as _, net::UnixListener};
     use workbench_protocol::handshake::{
@@ -242,4 +257,74 @@ fn a_core_that_rejects_the_version_is_reported_as_incompatible_and_left_running(
     assert_eq!(recent(&r), 0, "an incompatible core is not a crash");
     let _listener = server.join().unwrap();
     assert!(path.exists(), "the socket of the running core is untouched");
+}
+
+/// Restores the config directory so the temporary directory can be removed.
+struct Writable(std::path::PathBuf);
+impl Drop for Writable {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+    }
+}
+fn make_unwritable(r: &Rig) -> Writable {
+    fs::set_permissions(&r.config, fs::Permissions::from_mode(0o500)).unwrap();
+    Writable(r.config.clone())
+}
+fn is_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+#[test]
+fn a_crash_that_cannot_be_recorded_is_refused_and_its_evidence_is_kept() {
+    let _serial = serial();
+    if is_root() {
+        return;
+    }
+    let r = Rig::new();
+    let socket = r.identity().socket(&r.runtime).unwrap();
+    let mut core = start_core(&r);
+    core.kill();
+    assert!(socket.exists(), "a killed core leaves its socket");
+    let _restore = make_unwritable(&r);
+    let (error, spawned) = launch_in_process(&r);
+    assert!(error.is_budget_blocked(), "{error}");
+    assert!(!spawned, "no core is started on an unrecorded crash");
+    assert!(
+        error.to_string().contains("cannot be trusted"),
+        "the reason names the record: {error}"
+    );
+    assert!(socket.exists(), "the evidence stays until it is recorded");
+    assert_eq!(recent(&r), 0, "nothing was written");
+}
+
+#[test]
+fn a_failed_start_that_cannot_be_recorded_is_reported_as_a_record_fault() {
+    let _serial = serial();
+    if is_root() {
+        return;
+    }
+    let r = Rig::new();
+    flag(&r, "fail-before-ready");
+    // The lock files exist before the directory stops accepting new files.
+    let launch = core_instance::LaunchGuard::acquire(&r.identity()).unwrap();
+    assert!(launch.lifetime_available().unwrap());
+    drop(launch);
+    let _restore = make_unwritable(&r);
+    let (error, spawned) = std::thread::scope(|scope| {
+        // The core announces itself, is released, and exits before ready.
+        scope.spawn(|| {
+            let mut core = r.accept("inherited");
+            core.ack();
+            core.next("adopted");
+            core.ack();
+            wait_exit(&mut core);
+        });
+        launch_in_process(&r)
+    });
+    assert!(spawned);
+    assert!(
+        error.is_budget_blocked(),
+        "the exit is reported with the record fault, not as a plain exit: {error}"
+    );
+    assert_eq!(recent(&r), 0);
 }
