@@ -368,9 +368,22 @@ async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
         let core = world.core(7);
         core.state().hold_snapshot_page = true;
         let gui = Gui::start(world.launcher());
-        // The subscription is answered and the second page is awaited: the actor
-        // is inside the snapshot paging.
-        core.wait_for(|s| !s.subscribes.is_empty()).await;
+        // The actor has asked for the second page, so it holds its subscription and
+        // is inside the snapshot paging. (The subscribe being recorded is not
+        // enough: its reply may not have been read yet.)
+        core.wait_for(|s| {
+            s.seen.iter().any(|seen| {
+                matches!(
+                    seen.body,
+                    workbench_protocol::envelope::RequestBody::Query(
+                        workbench_protocol::queries::Query::Projection(
+                            workbench_protocol::namespaces::projection::ProjectionQuery::ReadSnapshot(_)
+                        )
+                    )
+                )
+            })
+        })
+        .await;
         core.push(workbench_protocol::events::UiEvent::Projection(
             workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
                 reason: workbench_protocol::events::CloseReason::CoreShuttingDown,

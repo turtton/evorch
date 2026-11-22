@@ -196,7 +196,24 @@ async fn snapshot_delivering(
         tokio::pin!(next);
         let reply = loop {
             tokio::select! {
-                reply = &mut next => break reply.map_err(|e| e.to_string())?,
+                reply = &mut next => match reply {
+                    Ok(reply) => break reply,
+                    Err(error) => {
+                        // The query fails when the connection closes, and the core's
+                        // goodbye was queued before that: read it before reporting
+                        // the failure, as the select may have chosen this branch.
+                        while let Ok(Some(event)) =
+                            tokio::time::timeout(std::time::Duration::ZERO, subscription.next()).await
+                        {
+                            let ends = event.event.ends_subscription();
+                            buffered.push(event);
+                            if ends {
+                                return Err(SnapshotFault::Ended(buffered));
+                            }
+                        }
+                        return Err(SnapshotFault::Failed(error.to_string()));
+                    }
+                },
                 event = subscription.next() => {
                     let event = event.ok_or("subscription ended while paging snapshot")?;
                     if event.event.ends_subscription() {
