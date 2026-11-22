@@ -11,10 +11,17 @@
 //! - Real time only. Real child I/O is never mixed with a paused/advanced clock.
 //! - Success is decided by events: READY on the notify socket, and pidfd
 //!   readability for death. The 30 s limits below only bound how long a *failing*
-//!   run may take (READY wait, death observation); they never decide success.
+//!   run may take; they never decide success. READY has one absolute deadline for
+//!   the whole report, and each death observation has one absolute deadline for
+//!   all processes. The probe's own 60 s deadline is longer than either, and the
+//!   rows assert the error they expect (a deadline would be `TimedOut`).
 //! - Every process under observation is held through a pidfd opened while the
 //!   target was alive and re-validated against `/proc`. No signal is sent to a
 //!   bare numeric PID.
+//! - This test process is a child subreaper. Whatever a row leaves behind,
+//!   including processes that are not registered yet when the row fails, ends up
+//!   as a child of this process, where `Cleanup` kills and reaps it without any
+//!   help from the supervisor under test.
 use core_launcher::handoff::{HandoffTarget, ProbeLimits};
 use std::{
     fs, io,
@@ -22,30 +29,56 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, process::ExitStatusExt},
     },
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, task::JoinHandle};
+use tokio::{io::AsyncReadExt, io::unix::AsyncFd, task::JoinHandle, time::Instant};
 
 /// Upper bound for a failing run: waiting for READY, and observing deaths.
 const BOUND: Duration = Duration::from_secs(30);
 const BEHAVIORS: [&str; 2] = ["hang", "escape"];
+/// `P_PIDFD` of waitid(2) (Linux 5.4).
+const P_PIDFD: libc::idtype_t = 3;
 
 /// Tests share one process under `cargo test`. Serialising them keeps the
 /// ETXTBSY window of freshly written wrapper scripts closed and makes the
-/// "no child left" check of the exec-failure rows exact.
+/// "no child left" checks exact.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn run(test: impl std::future::Future<Output = ()>) {
-    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+fn deadline() -> Instant {
+    Instant::now() + BOUND
+}
+fn runtime() -> tokio::runtime::Runtime {
+    // This process adopts orphans (see `Cleanup`).
+    let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    assert_eq!(
+        rc,
+        0,
+        "PR_SET_CHILD_SUBREAPER: {}",
+        io::Error::last_os_error()
+    );
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap()
-        .block_on(test);
+}
+/// Runs a row. The cleanup guard lives inside the future that `block_on` polls,
+/// so it runs when the row fails, before the runtime is dropped (dropping the
+/// runtime drops a probe future, which waits for its supervisor).
+fn run(test: impl std::future::Future<Output = ()>) {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    runtime().block_on(async {
+        let cleanup = Cleanup;
+        test.await;
+        cleanup.assert_nothing_left();
+    });
 }
 
 fn fixture() -> PathBuf {
@@ -77,7 +110,7 @@ fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
-fn pidfd_signal(fd: &OwnedFd, signal: i32) {
+fn pidfd_send(fd: &OwnedFd, signal: i32) -> io::Result<()> {
     let rc = unsafe {
         libc::syscall(
             libc::SYS_pidfd_send_signal,
@@ -87,17 +120,24 @@ fn pidfd_signal(fd: &OwnedFd, signal: i32) {
             0 as libc::c_uint,
         )
     };
-    assert_eq!(rc, 0, "pidfd_send_signal: {}", io::Error::last_os_error());
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
-/// Block until the pidfd is readable (the process terminated) or `millis` pass.
-fn pidfd_terminated(fd: i32, millis: i32) -> bool {
+fn pidfd_signal(fd: &OwnedFd, signal: i32) {
+    pidfd_send(fd, signal).unwrap_or_else(|e| panic!("pidfd_send_signal({signal}): {e}"));
+}
+/// Non-blocking: has the process terminated (a zombie counts)?
+fn pidfd_exited(fd: &OwnedFd) -> bool {
     let mut poll = libc::pollfd {
-        fd,
+        fd: fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
     loop {
-        let rc = unsafe { libc::poll(&mut poll, 1, millis) };
+        let rc = unsafe { libc::poll(&mut poll, 1, 0) };
         if rc >= 0 {
             return rc > 0;
         }
@@ -105,6 +145,45 @@ fn pidfd_terminated(fd: i32, millis: i32) -> bool {
             io::Error::last_os_error().kind(),
             io::ErrorKind::Interrupted
         );
+    }
+}
+/// Reaped: signal 0 still succeeds for a zombie, and fails with ESRCH only once
+/// the process was reaped.
+fn pidfd_reaped(fd: &OwnedFd) -> bool {
+    matches!(pidfd_send(fd, 0), Err(e) if e.raw_os_error() == Some(libc::ESRCH))
+}
+/// Waits (event-driven) until the pidfd is readable, bounded by `until`.
+async fn pidfd_wait_exit(fd: &OwnedFd, until: Instant) -> bool {
+    let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    assert!(dup >= 0, "dup pidfd: {}", io::Error::last_os_error());
+    let ready = AsyncFd::new(unsafe { OwnedFd::from_raw_fd(dup) }).unwrap();
+    matches!(
+        tokio::time::timeout_at(until, ready.readable()).await,
+        Ok(Ok(_))
+    )
+}
+/// Reaps a terminated child through its pidfd. `Ok(false)`: not our child any
+/// more (somebody else reaped it).
+fn pidfd_reap_child(fd: &OwnedFd) -> io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let rc = unsafe {
+            libc::waitid(
+                P_PIDFD,
+                fd.as_raw_fd() as libc::id_t,
+                &mut info,
+                libc::WEXITED,
+            )
+        };
+        if rc == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return Ok(false),
+            _ => return Err(error),
+        }
     }
 }
 fn proc_ppid(pid: i32) -> io::Result<i32> {
@@ -115,13 +194,57 @@ fn proc_ppid(pid: i32) -> io::Result<i32> {
         .and_then(|v| v.trim().parse().ok())
         .ok_or_else(|| io::Error::other("no PPid"))
 }
+/// Direct children of any thread of this process (zombies included). Orphans
+/// adopted by this subreaper are listed as well.
+fn children() -> Vec<i32> {
+    let mut children = Vec::new();
+    for task in fs::read_dir("/proc/self/task").unwrap() {
+        let path = task.unwrap().path().join("children");
+        if let Ok(list) = fs::read_to_string(path) {
+            children.extend(list.split_whitespace().map(|p| p.parse::<i32>().unwrap()));
+        }
+    }
+    children
+}
+
+/// Kills and reaps every child of this process, repeatedly: killing a parent
+/// hands its children to this subreaper, which the next pass then finds. The
+/// listed number is only a candidate. The pidfd is opened first and the parent
+/// is re-read, so a number reused by a stranger is never signalled.
+struct Cleanup;
+impl Cleanup {
+    fn assert_nothing_left(&self) {
+        let left = children();
+        assert!(left.is_empty(), "children left behind: {left:?}");
+    }
+}
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let me = std::process::id() as i32;
+        // Every pass reaps at least one child or finds none; the bound only
+        // guards against a process that can not be reaped at all.
+        for _ in 0..256 {
+            let candidates = children();
+            if candidates.is_empty() {
+                return;
+            }
+            for pid in candidates {
+                let Ok(fd) = pidfd_open(pid) else { continue };
+                if proc_ppid(pid).ok() != Some(me) {
+                    continue;
+                }
+                let _ = pidfd_send(&fd, libc::SIGKILL);
+                let _ = pidfd_reap_child(&fd);
+            }
+        }
+    }
+}
 
 struct Held {
     name: &'static str,
     fd: OwnedFd,
 }
-/// Holds pidfds for the processes of one row. On drop (including a failing run)
-/// anything still alive is killed through its pidfd, never through a number.
+#[derive(Default)]
 struct Processes(Vec<Held>);
 impl Processes {
     /// `pid` was reported by the fixture while it was alive. The pidfd is taken
@@ -132,7 +255,7 @@ impl Processes {
         let fd = pidfd_open(pid).unwrap_or_else(|e| panic!("pidfd_open {name} ({pid}): {e}"));
         let parent = proc_ppid(pid).unwrap_or_else(|e| panic!("/proc of {name} ({pid}): {e}"));
         assert!(
-            !pidfd_terminated(fd.as_raw_fd(), 0),
+            !pidfd_exited(&fd),
             "{name} died before it could be validated"
         );
         assert_eq!(
@@ -144,44 +267,22 @@ impl Processes {
     fn get(&self, name: &str) -> &OwnedFd {
         &self.0.iter().find(|h| h.name == name).unwrap().fd
     }
-    /// Every held process terminates. Each wait is bounded by `BOUND` in
-    /// parallel; reaching the bound is the failure.
+    /// Every held process terminates within one absolute deadline.
     async fn assert_all_terminated(&self) {
-        let waits: Vec<_> = self
-            .0
-            .iter()
-            .map(|h| {
-                let raw = h.fd.as_raw_fd();
-                (
-                    h.name,
-                    tokio::task::spawn_blocking(move || {
-                        pidfd_terminated(raw, BOUND.as_millis() as i32)
-                    }),
-                )
-            })
-            .collect();
-        for (name, wait) in waits {
+        let until = deadline();
+        for held in &self.0 {
             assert!(
-                wait.await.unwrap(),
-                "{name} still alive {BOUND:?} after the trigger"
+                pidfd_wait_exit(&held.fd, until).await,
+                "{} still alive {BOUND:?} after the trigger",
+                held.name
             );
         }
     }
-}
-impl Drop for Processes {
-    fn drop(&mut self) {
+    /// Every held process is gone, not merely a zombie. Callers reap the
+    /// supervisor first; it reaps its own descendants before it exits.
+    fn assert_reaped(&self) {
         for held in &self.0 {
-            if !pidfd_terminated(held.fd.as_raw_fd(), 0) {
-                let _ = unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        held.fd.as_raw_fd(),
-                        libc::SIGKILL,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0 as libc::c_uint,
-                    )
-                };
-            }
+            assert!(pidfd_reaped(&held.fd), "{} was not reaped", held.name);
         }
     }
 }
@@ -220,14 +321,16 @@ impl Env {
         }
     }
     /// READY: the fixture reports `supervisor leader child grandchild` once the
-    /// whole tree (including the escaped one) is established.
+    /// whole tree (including the escaped one) is established. One absolute
+    /// deadline covers the connection and the report.
     async fn ready(&self) -> [i32; 4] {
-        let (mut stream, _) = tokio::time::timeout(BOUND, self.listener.accept())
+        let until = deadline();
+        let (mut stream, _) = tokio::time::timeout_at(until, self.listener.accept())
             .await
             .unwrap_or_else(|_| panic!("READY not seen within {BOUND:?}"))
             .unwrap();
         let mut text = String::new();
-        tokio::time::timeout(BOUND, stream.read_to_string(&mut text))
+        tokio::time::timeout_at(until, stream.read_to_string(&mut text))
             .await
             .unwrap_or_else(|_| panic!("READY report not completed within {BOUND:?}"))
             .unwrap();
@@ -240,7 +343,7 @@ impl Env {
     }
     fn hold_tree(&self, pids: [i32; 4], owner: i32) -> Processes {
         let [supervisor, leader, child, grandchild] = pids;
-        let mut held = Processes(Vec::new());
+        let mut held = Processes::default();
         held.hold("supervisor", supervisor, owner);
         held.hold("leader", leader, supervisor);
         held.hold("child", child, leader);
@@ -259,11 +362,11 @@ fn limits() -> ProbeLimits {
     }
 }
 /// Starts the in-process probe (the test process is the "core") and returns
-/// the held tree after READY. A probe that ends before READY is a failure.
-async fn start_probe(
+/// once READY was reported. A probe that ends before READY is a failure.
+async fn spawn_probe(
     env: &Env,
     cancel: impl std::future::Future<Output = ()> + Send + 'static,
-) -> (ProbeTask, Processes) {
+) -> (ProbeTask, [i32; 4]) {
     let entry = env.entry.clone();
     let mut task: ProbeTask =
         tokio::spawn(
@@ -273,6 +376,13 @@ async fn start_probe(
         pids = env.ready() => pids,
         done = &mut task => panic!("probe ended before READY: {:?}", done.map(|r| r.err())),
     };
+    (task, pids)
+}
+async fn start_probe(
+    env: &Env,
+    cancel: impl std::future::Future<Output = ()> + Send + 'static,
+) -> (ProbeTask, Processes) {
+    let (task, pids) = spawn_probe(env, cancel).await;
     let held = env.hold_tree(pids, std::process::id() as i32);
     (task, held)
 }
@@ -329,9 +439,9 @@ fn hold_control_write_end(
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) }, 0);
-    assert_eq!(stat.st_ino as u64, inode, "duplicated the wrong descriptor");
+    assert_eq!(stat.st_ino, inode, "duplicated the wrong descriptor");
     assert!(
-        !pidfd_terminated(supervisor.as_raw_fd(), 0) && !pidfd_terminated(core.as_raw_fd(), 0),
+        !pidfd_exited(supervisor) && !pidfd_exited(core),
         "the pair changed while the control end was identified"
     );
     fd
@@ -344,32 +454,43 @@ fn hold_control_write_end(
 async fn core_death(control_stays_open: bool) {
     for behavior in BEHAVIORS {
         let env = Env::new(behavior);
-        let mut host = Command::new(fixture())
+        // Not tokio's Command: no kill-by-number on drop. `Cleanup` owns failures.
+        let host = std::process::Command::new(fixture())
             .args(["--probe-host", "--target"])
             .arg(&env.entry)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
             .spawn()
             .unwrap();
         // Still unreaped child of this test: its number is ours until wait().
-        let host_pid = host.id().unwrap() as i32;
-        let mut held = Processes(Vec::new());
-        held.hold("core", host_pid, std::process::id() as i32);
+        let host_pid = host.id() as i32;
+        let mut core = Processes::default();
+        core.hold("core", host_pid, std::process::id() as i32);
         let pids = tokio::select! {
             pids = env.ready() => pids,
-            status = host.wait() => panic!("core ended before READY: {status:?}"),
+            _ = pidfd_wait_exit(core.get("core"), deadline()) => panic!("core ended before READY"),
         };
         let tree = env.hold_tree(pids, host_pid);
         let control = control_stays_open.then(|| {
-            hold_control_write_end(held.get("core"), host_pid, tree.get("supervisor"), pids[0])
+            hold_control_write_end(core.get("core"), host_pid, tree.get("supervisor"), pids[0])
         });
         // Only the core is killed. The supervisor's owner is that core.
-        pidfd_signal(held.get("core"), libc::SIGKILL);
-        let status = host.wait().await.unwrap();
+        pidfd_signal(core.get("core"), libc::SIGKILL);
+        let status = tokio::task::spawn_blocking(move || {
+            let mut host = host;
+            host.wait()
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{behavior}");
         tree.assert_all_terminated().await;
+        // The orphaned supervisor is ours now (or the dead core's waiter thread
+        // reaped it first). It reaps its own descendants before it exits.
+        pidfd_reap_child(tree.get("supervisor")).unwrap();
+        core.assert_reaped();
+        tree.assert_reaped();
         drop(control);
     }
 }
@@ -393,7 +514,10 @@ fn control_eof_on_drop_stops_supervisor_probe_and_escaped_descendants() {
             let (task, held) = start_probe(&env, std::future::pending()).await;
             task.abort();
             held.assert_all_terminated().await;
+            // Joining the aborted task waits for the future's Drop, which joins
+            // the supervisor's waiter thread.
             assert!(task.await.err().unwrap().is_cancelled(), "{behavior}");
+            held.assert_reaped();
         }
     });
 }
@@ -411,6 +535,7 @@ fn control_eof_on_cancel_stops_supervisor_probe_and_escaped_descendants() {
             held.assert_all_terminated().await;
             let error = task.await.unwrap().err().unwrap();
             assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{behavior}");
+            held.assert_reaped();
         }
     });
 }
@@ -432,20 +557,9 @@ fn term_stops_supervisor_probe_and_escaped_descendants_and_fails_the_probe() {
                 error.to_string().contains("supervisor status"),
                 "{behavior}: not a supervisor failure: {error}"
             );
+            held.assert_reaped();
         }
     });
-}
-
-/// Direct children of any thread of this process (zombies included).
-fn unreaped_children() -> Vec<String> {
-    let mut children = Vec::new();
-    for task in fs::read_dir("/proc/self/task").unwrap() {
-        let path = task.unwrap().path().join("children");
-        if let Ok(list) = fs::read_to_string(path) {
-            children.extend(list.split_whitespace().map(str::to_owned));
-        }
-    }
-    children
 }
 
 /// exec failure: the probe's `execve` fails in the supervisor's child. That is
@@ -462,7 +576,7 @@ fn exec_failure_fails_the_probe_and_leaves_no_process() {
         ] {
             let entry = dist.path().join(name);
             write_executable(&entry, content);
-            assert!(unreaped_children().is_empty(), "{name}: stray child before");
+            assert!(children().is_empty(), "{name}: stray child before");
             let error = HandoffTarget::probe(&entry, limits())
                 .await
                 .err()
@@ -473,7 +587,75 @@ fn exec_failure_fails_the_probe_and_leaves_no_process() {
                 "{name}: not the exec failure status: {error}"
             );
             // The probe returns only after its supervisor was reaped.
-            assert!(unreaped_children().is_empty(), "{name}: stray child after");
+            assert!(children().is_empty(), "{name}: stray child after");
         }
     });
+}
+
+// ---- the cleanup itself ----------------------------------------------------
+
+/// Negative test of the row cleanup. A row fails while only the supervisor is
+/// registered, and the supervisor is stopped (SIGSTOP), so it can neither react
+/// to EOF nor reap anything: the rest of the tree is alive and unregistered. The
+/// cleanup must still kill and reap the whole tree, descendants included.
+/// `Backstop` only exists to keep this test finite and to tell whether the
+/// cleanup was needed; it runs after `Cleanup` and fails the test if it found
+/// anything alive.
+struct Backstop {
+    witnesses: Arc<Mutex<Processes>>,
+    found_alive: Arc<AtomicBool>,
+}
+impl Drop for Backstop {
+    fn drop(&mut self) {
+        let witnesses = self.witnesses.lock().unwrap_or_else(|e| e.into_inner());
+        for held in &witnesses.0 {
+            if !pidfd_exited(&held.fd) {
+                self.found_alive.store(true, Ordering::SeqCst);
+                let _ = pidfd_send(&held.fd, libc::SIGKILL);
+            }
+        }
+    }
+}
+#[test]
+fn a_row_failing_midway_leaves_no_descendant_behind() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let runtime = runtime();
+    let witnesses = Arc::new(Mutex::new(Processes::default()));
+    let found_alive = Arc::new(AtomicBool::new(false));
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            let _backstop = Backstop {
+                witnesses: witnesses.clone(),
+                found_alive: found_alive.clone(),
+            };
+            let _cleanup = Cleanup;
+            let env = Env::new("escape");
+            let (_task, [supervisor, leader, child, grandchild]) =
+                spawn_probe(&env, std::future::pending()).await;
+            let me = std::process::id() as i32;
+            {
+                let mut witnesses = witnesses.lock().unwrap();
+                witnesses.hold("supervisor", supervisor, me);
+                witnesses.hold("leader", leader, supervisor);
+                witnesses.hold("child", child, leader);
+                witnesses.hold("grandchild", grandchild, child);
+            }
+            let mut held = Processes::default();
+            held.hold("supervisor", supervisor, me);
+            pidfd_signal(held.get("supervisor"), libc::SIGSTOP);
+            panic!("simulated failure before the rest of the tree is registered");
+        })
+    }));
+    let message = *result
+        .expect_err("the simulated failure must propagate")
+        .downcast::<&str>()
+        .unwrap();
+    assert!(message.starts_with("simulated failure"), "{message}");
+    assert!(
+        !found_alive.load(Ordering::SeqCst),
+        "the cleanup left part of the tree alive"
+    );
+    witnesses.lock().unwrap().assert_reaped();
+    drop(runtime);
+    assert!(children().is_empty(), "children left behind");
 }
