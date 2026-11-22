@@ -1,7 +1,7 @@
 出典: planner run-01m7ypc53z68p1xzpktc5dwrat
 # D-3a2 B3 分割計画
 
-**推奨は9 PRです。PTY、agent Chromium、実プロセス結合試験を分離し、最後に性能・監査を閉じます。** 各PRは概算30ファイル以内とし、超える場合はテスト基盤と利用側を分割します。
+**推奨は9 PRです。PTY、agent Chromium、実プロセス結合試験を分離し、最後に性能・監査を閉じます。** ファイル数は見積もりであり、分割上限にはしません。
 
 読み取りだけで調査しました。ファイル編集、ビルド、テスト、GitHubの最新状態の再取得はしていません。#750は既存の本文・レビュー・最終報告を参照しています。
 
@@ -11,7 +11,7 @@
 
 指定された全体計画の最終assistantメッセージと、`docs/single-core/5a-v-plan.md` を確認しました。
 
-- **J8：5a-Vの公開列車は、B2(a)(b)とB3の完了後。**
+- 5a-Vの旧公開列車は単一のPR Aに統合する。B3-09の縮小した性能確認はPR Aの前提にしない。
 - V1b-2bなど、公開前の実装はB3と並行可能です。
 - B3の個別PRがmergeされただけではD-7完了としません。Aを含む証拠を揃え、独立Reviewerと親の受け入れが必要です。
 - B3を通すために管理機能を先行公開することは、現計画の範囲外です。
@@ -21,7 +21,7 @@
 現行の `planned_shutdown_watchdog_composition` は、**テスト実行ファイルのコピー**を子として使います。これを、そのまま製品ELF自身のexpiry証拠とは扱えません。
 
 親の判断 A により、B3-07 は製品と同じ部品で組んだ **release 版の試験 binary** で、不可逆 capture 後の実時間10秒、exit 74、所有する子の回収を確認します。これは製品 ELF での expiry の確認ではありません。
-製品 ELF での同じ確認は、5a-V 公開列車の T3（実 restart）で行い、公開完了条件に加えます。試験時だけ管理機能を公開する特別な build は採用しません（出典は末尾の親の判断 A）。
+製品 ELF での同じ確認は、5a-VのPR A（実restart）で行います。試験時だけ管理機能を公開する特別なbuildは採用しません（出典は末尾の親の判断 A）。
 
 ---
 
@@ -51,10 +51,12 @@
 ### 試験
 
 - READY／ExecOk／root終了／FinalStatus／pidfd等で同期する。sleepや`kill(pid, 0)`だけを死亡証拠にしない。
-- mutationはテスト用変更として実施し、製品用fault環境変数・設定を増やさない。
-- mutationは「起動できなかった」ではなく、**対象が起動した後、期待した所有保証が破れて失敗すること**を確認する。
+- mutationは必須にしない。実施する場合は、効果のある代表的な境界だけをテスト用変更で確認し、製品用fault環境変数・設定を増やさない。
+- mutationを行う場合は「起動できなかった」だけでなく、**対象が起動した後、期待した所有保証が破れて失敗すること**を確認する。
 - 外側controllerが観測済み子孫をpidfd等で管理し、失敗・mutation・escaped-PGIDを含め必ず回収する。必要なsubreaperはcontroller側だけ。
 - 性能gate以外の観測timeoutは、環境とともに試験前に固定する。死亡の観測timeoutを製品の終了時間保証と混同しない。
+
+各PR節に記載したmutationは候補であり、実施を受け入れ条件にしない。mustは製品の誤動作、データ破損、セキュリティ、hang／flaky、事実と異なる記載に限る。レビューは2往復までとし、それを超えた場合は親が裁定する。出典：`question-41eda9b4579b24b09e86a96a7e751928`。
 
 ---
 
@@ -64,7 +66,7 @@
 
 1. **baseline固定**
    - #750 mergeを含むmain、V1b-2b、並行harness修正の各SHAを記録する。
-   - workerは編集前に更新し、実際の差分からファイル数を見積もり直す。
+   - workerは編集前に更新し、実際の差分から作業範囲を確認する。ファイル数でPRを分割しない。
 2. **spawn台帳を作成**
    - 行ごとに「実caller／owner process／ChildKind／ledger有無／起動API／子孫／正常・異常時の終了証拠」を記載。
    - 次の三つを別表にする。
@@ -75,9 +77,9 @@
    - `Probe`には現在の製品callerがないため、数合わせの製品経路を作らない。旧11枠との対応・欠落は親に提示する。
 3. **expiry試験の実現性確認と製品 ELF での後続確認**
    - B3-07 は、製品と同じ部品で組んだ release 版の試験 binary で、capture、signal、cleanup停止、実時間10秒、exit 74、所有する子の回収を確認する（末尾の親判断 A）。
-   - 製品 ELF での同じ確認は5a-V公開列車T3（実 restart）で行う。ここで確認できなければ公開完了としない。製品hook・時計短縮・試験時だけ管理機能を公開する特別なbuildは使わない。
+   - 製品 ELF での同じ確認は5a-VのPR A（実restart）で行う。ここで確認できなければ検証完了としない。製品hook・時計短縮・試験時だけ管理機能を公開する特別なbuildは使わない。
 4. **測定条件固定**
-   - 性能baseline、製品artifact、環境、観測期限、反復数を先に決定する。
+   - 性能baseline、製品artifact、環境、観測期限を先に決定する。B3-09は負荷なし、1 round、50組とする。
 
 ---
 
@@ -103,7 +105,7 @@
 - 既存の「Rust起動時に閉じたstdioが正規化される」試験と区別する。
 - targetで必ず`EBADF`を維持する、という新契約は導入しない。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - 0/1/2の単独・複数close、早期起動失敗、繰り返し起動。
 - 非stdio FDを3以上に退避する処理の無効化など、関連するFD衝突mutationを検出する。
@@ -139,7 +141,7 @@
 - helperはtarget PGID外に残り、Ctrl-C等でhelper自身を殺さない。
 - image pinはexec/auth完了まで保持する。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - 認証不一致、Ready遅延、Commit前後の切断、exec失敗、owner死亡、guard喪失。
 - `/proc`アクセス不可、image取り違えでfail closed。
@@ -178,7 +180,7 @@
 - tty、foreground、resize、Ctrl-C、EOF、cancel、timeoutが既存と同等。
 - ledger fence、登録失敗、起動キャンセルのどれでも孤児・偽のreap確認を作らない。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - admission拒否、PTY生成失敗、exec失敗、起動中cancel、reader/writer失敗、root先行終了＋残存孫。
 - 明示的にPGIDから逃げた子を観測し、保証対象外と記録した上でcontrollerが回収。
@@ -220,7 +222,7 @@
 - envは順序ではなく全key/valueで比較する。fixtureは秘密を含まない制御環境で動かす。
 - init途中、CDP接続失敗、cancel、drop、resetでchild・task・profile・proxyが残らない。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - endpointの遅延・洪水・長行・EOF・不正値、CDP失敗、handler終了、reset反復。
 - 所有を旧`Browser::launch`へ戻す、RAII cleanup省略、parser上限・絶対期限除去、default引数変更のmutation。
@@ -254,7 +256,7 @@
 - 残る`std`／tokio spawnを台帳で全分類する。
 - GUIの短命git／`fc-match`、launcherのcore起動、private preflight supervisorを「未移行」と「意図的対象外」に分ける。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - raw所有APIへアクセスするcompile-failまたは同等の境界検査。
 - `GuardLost`／未確認reapでworker join・storage drainへ進まない。
@@ -287,14 +289,14 @@
 - js-workerのbind-before-logging除外と、初期exec後に新しいprocessを作らない性質も確認する。
 - preflight supervisorは二重guard化せず、core死亡・EOF・TERM・exec失敗の既存保証を回帰確認する。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - 実MinimalSandbox/bwrap経路と、テスト注入DirectSandbox経路の両方。
 - guard除去時にもbwrapの`--die-with-parent`が成功を装わないこと。
 - root-only kill、owner pidfd監視除去、早すぎるreap、raw spawnへ戻すmutation。
 - 各実callerのguard bypassで期待通り失敗すること。コード経路を通らないmutationは証拠にしない。
 
-**期限・性能：** core死亡後の観測期限、反復数、負荷条件は親が実行前に固定。速度のCI合否判定は設けない。
+**期限・性能：** core死亡後の観測期限は親が実行前に固定。速度のCI合否判定は設けない。
 
 ---
 
@@ -313,11 +315,11 @@
 - 製品と同じ部品で組んだ release 版の試験 binary を使う。製品 ELF 自身の expiry 確認とは区別する。
 - このincarnationでの不可逆captureとexplicit shutdown signalを成立させ、cleanupを停止させたまま**実時間10秒**を経過させる。
 - **exit 74**の後、所有する子の回収を確認する。
-- 製品 ELF での同じ確認は5a-V公開列車T3の実restartで行い、公開完了条件に含める。
+- 製品 ELF での同じ確認は5a-VのPR Aの実restartで行い、検証完了条件に含める。
 - Aの短い終了tailにcleanup、logger、allocation、lock等を足さない。
 - 11 rootとの対応表、実caller表、未対応事項を提出する。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - capture前、別incarnation、captureのみ、signalのみでは誤発火しない。
 - capture→signal／signal→captureの順序を確認する。
@@ -344,10 +346,10 @@
 - agent Chromiumの実起動、navigation、reset、drop、init失敗が通る。
 - 実rendererとCEFを初期化し、navigation完了後にcore SIGKILL／74を発生させる。
 - ChromiumとCEFを別経路として証明する。片方の成功で他方を代替しない。
-- O-V1／O-V2／#714 browser-e2eを回帰実行する。
+- O-V1／#714 browser-e2eを回帰実行する。O-V2は19a後の後続作業とし、B3-08の完了条件に含めない。
 - 実process tree、SID／PGIDを記録し、同一groupとescaped groupを区別する。
 
-**必須負例・mutation**
+**代表的な負例・mutation候補（mutationは任意）**
 
 - renderer起動失敗、CEF初期化失敗、navigation中のcore死亡。
 - agent Chromium、rendererそれぞれのguard bypass。
@@ -372,43 +374,38 @@
 
 **完了条件**
 
-- 条件・source SHA・artifact digest・生データ・集計方法・失敗roundを揃える。
+- 条件・source SHA・artifact digest・生データ・集計方法を揃える。
 - 下記性能gateを満たす。超過時は測定条件を後付けで緩めず再レビューへ戻す。
 - 残存spawnと保証対象外を説明し、B3の未完項目を隠さない。
 - `scripts/check-cache-contracts.sh`を含む関連回帰が通る。cache契約を弱めない。
 
-**必須負例・mutation**
+**任意のmutation候補**
 
-- 集計器が遅延増大・PSS超過・欠損round・timeoutを正しく拒否する。
-- 外れ値除去やroundの合算で超過を隠せない。
-- B3-02〜08のmutation一覧を、対象commitと失敗証拠付きで集約する。
+- 実施する場合は、集計器が遅延増大・PSS超過・欠損sample・timeoutを正しく拒否する代表セルを選ぶ。
+- mutationを実施した場合は、対象commitと結果を記録する。mutation一覧の網羅・集約を必須にしない。
 
 ---
 
 ## 5. 性能gate
 
-承認済み条件を基準とし、**実測前に親が測定対象と具体値を確定**します。
+測定方針は `question-41eda9b4579b24b09e86a96a7e751928` に基づく。負荷を加えず、1 round・50組で測る。閾値は実測前に固定し、結果を見て変更しない。
 
 | 項目 | 基準 |
 |---|---|
-| A/B比較 | AはA実装済み・B未導入、BはB3最終版。同一toolchain・flags・features |
+| A/B*比較 | AはA実装済み・B3未導入、B*はB3最終版。同一toolchain・flags・features |
 | shell workload | `grep -F -- D-7 fixture.txt`、`git diff --quiet -- tracked.txt`、`:` |
 | 測定 | 実shell入口のrequest→response RTT |
-| 反復 | 各arm warmup 20、各workload 200 paired samples ×3 rounds |
-| 順序・集計 | ABBA、seed固定、nearest-rank。round別判定、恣意的な外れ値除去なし |
-| latency | B−A：p50 ≤2 ms、p95 ≤5 ms |
-| force kill | request→root exit：p99 <1,000 ms |
+| 条件 | 外部負荷なし。各workload 50 paired samples、1 round |
+| 順序・集計 | ABBA、seed固定、nearest-rank。恣意的な外れ値除去なし |
+| latency | p50(B*) ≤ 1.5×p50(A) |
+| ForceKill | request→root exit：p99 <1,000 ms |
 | guard PSS | 100 guardsを180秒保持：median ≤4 MiB、p95 ≤8 MiB |
-| scope基準 | CPU 2、memory 2 GiB、TasksMax 512、timeout 600秒、stress CPU 1 |
-| core状態 | 20 threads ×50 messages ×8 KiB、repo 1,000 files ×16 KiB、active mock agents 2 |
 
 補足：
 
-- core状態は通常APIから作り、storage schema直書きや人工的heap膨張で代替しない。
 - historical Aと現在mainの無関係な変更が大きい場合、比較の分離方法を**先に**親が判断する。製品にunguarded切替flagを追加してbaselineを作らない。
-- buildは負荷scope外。負荷試験は `scripts/reproduce-under-limits.sh` を使う。
-- rendererの同期handshake、Chromium cold start、CI所要時間は別途記録する。追加の合否閾値が必要なら測定前に決める。
-- 性能gateは固定環境の証拠で判定し、通常CIの揺れる時間assertionにはしない。
+- rendererの同期handshake、Chromium cold start、CI所要時間は別途記録し、B3-09の合否閾値に追加しない。
+- ForceKillとguard PSSの閾値は従来どおり維持する。性能gateは測定結果で判定し、通常CIの揺れる時間assertionにはしない。
 
 ---
 
@@ -427,8 +424,9 @@
                           （expiry部分は07に依存）
 
 05＋07＋08 ─09 性能・監査 ─ 独立レビュー／親受け入れ
-                                   └─5a-V公開列車
 ```
+
+B3-09は5a-V PR Aと独立し、PR Aの前提にしない。
 
 - 事前の対象表・expiry実現性調査・測定条件作成は並行可能。
 - 02と04は並行可能。06のfixture準備も先行可能。
@@ -468,12 +466,12 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
 
 判断前に比較した選択肢：
 
-| 選択肢 | 証拠の強さ | 公開列車への影響 | 規模 |
+| 選択肢 | 証拠の強さ | PR Aへの影響 | 規模 |
 |---|---|---|---|
-| release production-composition **test binary** | production部品・実10秒・74は証明。製品ELF入口は未証明 | J8維持可能。ただし受け入れ条件の明示判断が必要 | 主に07内 |
-| sealed製品ELFを必須 | 実製品入口からの最も強い証拠 | J8／公開順序の再設計が必要 | 追加の統合・計画変更が発生し得る |
+| release production-composition **test binary** | production部品・実10秒・74は証明。製品ELF入口は未証明 | PR A内に製品ELFの確認が必要 | 主に07内 |
+| sealed製品ELFを必須 | 実製品入口からの最も強い証拠 | PR Aの公開・検証に含める | 追加の統合・計画変更が発生し得る |
 
-**当時の推奨：** 調査前にどちらかへ読み替えない。到達不能の根拠、実callerの到達範囲、必要変更量を揃えて判断する。採用結果は末尾の親判断 A を参照。
+この比較は親判断Aで決定済み。採用結果は末尾の親判断Aを参照。
 
 ### B. 「11 root」と現在の実callerの対応
 
@@ -498,7 +496,7 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
 - 追加起動時間gateの要否。
 - 最古対応kernelの実測範囲と、未検証環境の扱い。
 
-**推奨：既存性能閾値は維持し、条件変更は結果を見る前に承認する。**
+**更新済みの測定方針：** B3-09は負荷なし、1 round、50組、p50(B*) ≤ 1.5×p50(A)とする。ForceKillとPSSの既存閾値は維持する。出典：`question-41eda9b4579b24b09e86a96a7e751928`。
 
 ---
 
@@ -525,7 +523,7 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
 7. **試験環境不足**  
    CEF等が実行できなければ「未実施」として残す。fake rendererやskipだけで実CEF要件を閉じない。
 
-最終提出物は、**PR一覧、spawn対応表、各負例・mutationの証拠、実artifact識別子、性能の条件と生データ、対象外一覧**です。これをもって独立Reviewerと親がB3／D-7の受け入れを判断し、その後に5a-V公開列車へ進みます。
+最終提出物は、**PR一覧、spawn対応表、実artifact識別子、性能の条件と生データ、対象外一覧**です。mutationを行った場合のみ、その対象と結果を記録します。独立Reviewerと親がB3／D-7を確認し、5a-VのPR Aとは独立に扱います。
 ---
 
 ## 親の判断
@@ -537,7 +535,7 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
 ### A. expiry に使う artifact：**決定**
 
 - B3-07 では、製品と同じ部品で組んだ **release 版の試験 binary** で確認します。不可逆 capture 後に実時間 10 秒を経過させ、exit 74 と所有する子の回収を確認します。
-- これは製品 ELF での expiry 確認ではありません。製品 ELF でも同じ確認を、5a-V 公開列車の **T3（実 restart）** で行い、公開完了の条件に加えます。
+- これは製品 ELF での expiry 確認ではありません。製品 ELF でも同じ確認を、5a-Vの**PR A（実restart）**で行い、検証完了の条件に加えます。
 - 試験の時だけ管理機能を公開する特別な build（案 3）は採用しません。
 - 製品フックの追加や時計の短縮で証拠を代替しません（計画 §1、C-6）。
 - 出典：ユーザーの回答 `question-fa99dc79f403e3adadcd0e946dd5c838`。
@@ -561,7 +559,7 @@ B3試験は既存公開入口と外側fixtureから組みます。変更が不�
 
 ### D. 測定環境・期限：推奨案を採る
 
-- **既存の性能閾値（計画 §5）を保ちます。**
-- 条件を変える場合は、**結果を見る前に**親が承認します。測定条件の細部（A/B の source SHA と無関係差分の扱い、
+- **測定方針（計画 §5）は、出典 `question-41eda9b4579b24b09e86a96a7e751928` に基づく縮小条件に更新します。** ForceKill／PSSの既存閾値は維持します。
+- 測定条件の細部（A/B の source SHA と無関係差分の扱い、
   kernel・Chromium・CEF・bwrap・display の環境、SIGKILL 後の観測期限、10 秒満了の観測許容幅、CEF 各段階の timeout、
   追加の起動時間 gate の要否）は、測定の前に親が固定します（§7D）。

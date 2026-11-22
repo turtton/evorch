@@ -227,15 +227,23 @@ default:
   gate driven directly, not the coordinator. The coordinator's order (producers
   drain, Sealing, host gate drain) is covered by the M2 drain tests.
 
-Gaps of the `core_client` screen against the old GUI, to close before 19a:
-sidebar badge and CI glyph; inline candidate chips by tool call; the harness
-card; notifications pane and OS notifications; CI summary with a check list;
-mismatch warnings (local checkout against the pull request); stale and
-cooldown status lines (the cooldown time is read but not shown); hover reasons
-on disabled controls; fork/rewind link inheritance display; a dialog for
-linking (the screen has an inline field). Link, unlink, refresh, candidate
-confirm/dismiss, the auto-fix toggle, budget reset, destination change with
-confirmation, the manual notice and the limit notice from the event are present.
+The remaining GUI differences are not all 19a blockers:
+
+- **Management update operations:** retain the existing link, unlink, refresh,
+  candidate confirm/dismiss, auto-fix toggle, budget reset, destination change
+  with confirmation, manual notice and limit notice from the event. Any
+  missing update operation needed by the existing management workflow is in
+  scope for 19a.
+- **Incorrect or misleading display:** stale/cooldown information, mismatch
+  state, disabled-action reasons, or outcome text must not claim facts that are
+  false. Correcting a false or misleading claim is in scope; adding full
+  read-only parity is not.
+- **Deferred read-only parity:** sidebar badge and CI glyph; inline candidate
+  chips by tool call; harness card; notifications pane and OS notifications;
+  CI summary checklist; additional mismatch warnings; stale/cooldown status
+  lines where their absence is not misleading; hover reasons where they do
+  not hide a false claim; fork/rewind link-inheritance display; and a linking
+  dialog (the screen has an inline field). These may follow 19a.
 
 ## CLI to core: the shared client (integration PR before 17c and 17d-2)
 
@@ -581,7 +589,8 @@ whose core runs the reindex.
   `ReindexGap`), which serialize as the storage's own result does; the golden file
   of the area holds them.
 - The `--db` of `inspect` and of the offline maintenance commands stays (17e).
-- **17d-3 must be finished before 19a.**
+- 17d-3 is part of the main-recorded maintenance work; it is not a new
+  prerequisite PR for 19a.
 
 ## Before 17d-3: resident thread-index owner in the core
 
@@ -604,6 +613,61 @@ as specified in ADR 0041 R5; `--wait` still waits for terminal results. The core
 the explicit resident process allowed by ADR 0045, not a hidden index daemon.
 Owner step/finalization boundedness and #683 registration changes remain outside
 this predecessor.
+
+## 17–19a plan and later work
+
+Decision sources:
+
+- `question-41eda9b4579b24b09e86a96a7e751928`
+- `question-0d0be08211df9f38f725636e5a62affa`
+
+The 17 CLI migration has no dependency on 5b-R. Until 5b-R provides CLI
+continuity, PR B rejects a restart before admission/capture, with a reason, when
+there is an active CLI invocation. The rejection and invocation admission are
+serialized; the management CLI connection itself is not an active invocation.
+This is the provisional behavior selected in
+`question-0d0be08211df9f38f725636e5a62affa`.
+
+Current migration status and 19a boundary:
+
+| Work | Status / 19a handling |
+|---|---|
+| 17c eval | Main-recorded core path; regression check only |
+| 17d maintenance | Main-recorded backfill and reindex core paths; no reimplementation PR before 19a |
+| 17e offline / inspect / benchmark boundary | Merged; regression check only |
+| 18a idle | Base is main-recorded; add only invocation retention/status differences |
+| 18b crash / reconnect | Partial; shared persistent crash budget and client integration are PR C |
+| 19a | Requires PR A, B and C, then default GUI startup and preservation of management update operations |
+
+PR A combines the old public-restart work and the T1–T4 product/native checks
+into one PR. It includes the one-restart product-to-successor check; CEF and
+two consecutive restarts remain in F4-E. PR B is the ordinary CLI core-client
+migration and does not wait for 5b-R. PR C completes shared crash budgeting and
+reconnection. PR D makes the core-client GUI the default. Read-only GUI parity
+does not gate 19a; false or misleading status remains in scope.
+
+The following are later work, not placeholders to register ahead of their
+implementation:
+
+| Follow-up | Boundary |
+|---|---|
+| **5b-R / CLI continuity** | After 19a, replace the temporary active-invocation restart refusal before offering CLI continuity across restart |
+| **F4-E** | After 19a: CEF restart and two consecutive restarts; recommended before 20 |
+| **O-V2** | After 19a: integrated real-browser/GUI agent observation |
+| **O-V3** | After O-V2 and the basic restart check: observation plus Stop/restart/cache |
+| **20** | After 19a: remove old ownership such as owners.db, claim and shared_feed |
+| **19b** | After 20: reduce the client-crate internal-dependency allowlist to zero |
+| **Q1/Q2 GUI and read-only parity** | After 19a; management recovery remains available through the admin CLI |
+
+## Review and acceptance policy for this migration
+
+- A must finding is limited to product malfunction, data corruption, security,
+  hang/flaky behavior, or a factually incorrect statement.
+- Review is limited to two exchanges; after that the parent adjudicates.
+- Mutation is optional and limited to effective representative cases. It is
+  not a required acceptance condition.
+- One PR per theme; there is no file-count cap. Do not create placeholder-only
+  registration PRs.
 
 ## Reserved migration numbers
 
