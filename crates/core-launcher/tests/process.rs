@@ -1,171 +1,21 @@
 //! Real exec/kill tests. Every transition is acknowledged over an IPC barrier;
 //! pidfds provide terminal events even when a launcher dies and orphans its core.
-use core_instance::{ConfigIdentity, Instance, InstanceError, LaunchGuard};
+use core_instance::{Instance, InstanceError, LaunchGuard};
 use core_launcher::{CoreBinary, LaunchError, Launcher};
-use rustix::{
-    event::{PollFd, PollFlags, poll},
-    process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
-};
+use rustix::event::{PollFd, PollFlags, poll};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
-    os::{
-        fd::OwnedFd,
-        unix::{
-            fs::{MetadataExt, PermissionsExt, symlink},
-            net::{UnixListener, UnixStream},
-        },
+    io::Write,
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt, symlink},
+        net::{UnixListener, UnixStream},
     },
-    path::{Path, PathBuf},
-    process::{Child, Command},
+    path::Path,
+    process::Command,
 };
 
-fn binary() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_core-launch-harness")
-        .unwrap()
-        .into()
-}
-fn private(path: &Path) {
-    fs::create_dir(path).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-}
-struct ChildGuard(Child);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-struct Peer {
-    io: BufReader<UnixStream>,
-    event: serde_json::Value,
-    fd: OwnedFd,
-    core: bool,
-}
-impl Peer {
-    fn new(stream: UnixStream) -> Self {
-        let mut io = BufReader::new(stream);
-        let mut line = String::new();
-        assert_ne!(io.read_line(&mut line).unwrap(), 0);
-        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let fd = pidfd_open(
-            Pid::from_raw(event["pid"].as_u64().unwrap() as i32).unwrap(),
-            PidfdFlags::empty(),
-        )
-        .unwrap();
-        Self {
-            io,
-            event,
-            fd,
-            core: false,
-        }
-    }
-    fn expect(&mut self, stage: &str) {
-        assert_eq!(self.event["stage"], stage, "{:?}", self.event);
-        if stage == "adopted" || stage == "inherited" {
-            self.core = true;
-        }
-    }
-    fn ack(&mut self) {
-        self.io.get_mut().write_all(b"go\n").unwrap();
-    }
-    fn receive(&mut self) {
-        let mut line = String::new();
-        assert_ne!(
-            self.io.read_line(&mut line).unwrap(),
-            0,
-            "control peer exited"
-        );
-        self.event = serde_json::from_str(&line).unwrap();
-    }
-    fn next(&mut self, stage: &str) {
-        self.receive();
-        self.expect(stage);
-    }
-    fn kill(&mut self) {
-        let _ = pidfd_send_signal(&self.fd, Signal::KILL);
-        poll(&mut [PollFd::new(&self.fd, PollFlags::IN)], None).unwrap();
-        self.core = false;
-    }
-}
-impl Drop for Peer {
-    fn drop(&mut self) {
-        if self.core {
-            self.kill();
-        }
-    }
-}
-struct Rig {
-    root: test_socket_dir::SocketDir,
-    config: PathBuf,
-    runtime: PathBuf,
-    control: UnixListener,
-}
-impl Rig {
-    fn new() -> Self {
-        let root = test_socket_dir::SocketDir::new();
-        let config = root.path().join("cfg");
-        private(&config);
-        let runtime = root.path().join("run");
-        private(&runtime);
-        let path = root.path().join("ctl");
-        let control = UnixListener::bind(&path).unwrap();
-        fs::write(config.join("control"), path.as_os_str().as_encoded_bytes()).unwrap();
-        fs::write(
-            config.join("runtime"),
-            runtime.as_os_str().as_encoded_bytes(),
-        )
-        .unwrap();
-        Self {
-            root,
-            config,
-            runtime,
-            control,
-        }
-    }
-    fn accept(&self, stage: &str) -> Peer {
-        let mut p = Peer::new(self.control.accept().unwrap().0);
-        p.expect(stage);
-        p
-    }
-    fn client(&self, config: &Path) -> (ChildGuard, Peer) {
-        let child = ChildGuard(
-            Command::new(binary())
-                .arg("--client")
-                .arg("--config-dir")
-                .arg(config)
-                .spawn()
-                .unwrap(),
-        );
-        let mut peer = self.accept("client-start");
-        peer.ack();
-        (child, peer)
-    }
-    fn spawn(&self, parent: &mut Peer) -> Peer {
-        parent.next("before-spawn");
-        parent.ack();
-        parent.next("spawned");
-        let mut core = self.accept("inherited");
-        core.ack();
-        core.next("adopted");
-        core
-    }
-    fn until_before_ready(&self, core: &mut Peer) {
-        core.ack();
-        let mut scan = self.accept("scan-clean");
-        scan.ack();
-        core.next("before-ready");
-    }
-    fn ready(&self, core: &mut Peer) {
-        self.until_before_ready(core);
-        core.ack();
-        core.next("ready");
-        core.ack();
-    }
-    fn identity(&self) -> ConfigIdentity {
-        ConfigIdentity::new(&self.config).unwrap()
-    }
-}
+mod support;
+use support::*;
 
 #[test]
 fn two_simultaneous_clients_spawn_one_core_and_inherited_launch_reaches_ready() {
@@ -428,25 +278,6 @@ async fn hung_owner_is_diagnosed_without_stealing_locks() {
     ));
 }
 
-fn local_launcher(r: &Rig) -> Launcher {
-    let id = r.identity();
-    let cc = workbench_client::ClientConfig::new(
-        workbench_protocol::ids::ClientId::new("local-test").unwrap(),
-        workbench_protocol::handshake::BuildInfo {
-            name: "test".into(),
-            version: "1".into(),
-            revision: None,
-        },
-    );
-    Launcher::with_socket(
-        id.clone(),
-        CoreBinary::explicit(&binary()).unwrap(),
-        cc,
-        id.socket(&r.runtime).unwrap(),
-    )
-    .unwrap()
-    .diagnostic_after(std::time::Duration::MAX)
-}
 #[test]
 fn parent_can_die_before_child_adopts_the_inherited_open_file_description() {
     let r = Rig::new();
@@ -766,6 +597,11 @@ fn child_exit_two_reconnects_to_existing_owner_without_respawning() {
     pa.ack();
     assert!(a.0.wait().unwrap().success());
     server.join().unwrap();
+    // Merging into the existing owner (exit 2) is not a crash.
+    assert_eq!(
+        core_launcher::CrashBudget::recent_crashes(r.identity().config_dir()).unwrap(),
+        0
+    );
 }
 #[test]
 fn inherited_unlocked_or_wrong_inode_descriptor_is_not_a_launch_guard() {

@@ -24,7 +24,7 @@ endpoint recordはconfig内のatomicな発見ヒントであり生存証明で�
 
 - **07**: planned exec / adopt_handoffは別経路。production への配線は 4b。cold launchの採用と混同しない。
 - **08 / 17**: GUI / CLIはこのLauncherを使い、embedded runtimeへのfallbackを作らない。client configは再接続時も同じrequest counterを再利用する。
-- **18b**: config単位の永続restart budgetを起動決定箇所へ追加する。現在は単一cold-start試行だけでクラッシュ再試行をしない。AlreadyRunningは予算消費対象にしない（`LaunchStage::AlreadyRunning`）。単なるpollingや接続を試行回数として数えない。
+- **18b（予算 leaf は実装済み、GUI/CLI への結合は後続）**: config単位の共有・永続crash予算（`budget.rs`、`.evorch-core.crash-budget`、5分に3回）を起動決定箇所に置いた。数えるのは起動回数ではなく**異常終了の証拠**だけ。(1) lifetime lock が空いているのに endpoint socket が残っている（正常終了は `Instance` の drop で socket を消す。SIGKILL/abort/OOM は消さない）、(2) launcher が起動した core が ready 前に exit 2 以外で終了。正常な起動・終了（idle exit 含む）、予定restart（exec handoff は lifetime lock を保持し launcher の spawn を通らない）、AlreadyRunning合流（exit 2）、polling、接続は数えない。判定・記録は `LaunchGuard` 保持下だけで行い、複数clientが同時に再接続しても二重起動・二重計上しない。窓内3件で次の自動起動を `LaunchError::Budget` で拒否し、再試行も自動リセットもしない（理由文に手動復旧手順を含む）。台帳の破損・不正（所有者/mode/hardlink/symlink/version）も同様に拒否し、台帳は変更しない。記録→証拠socket削除の順なので、間で死んでも過大計上側にしか倒れない。時計逆行で未来になった記録は現在時刻へ補正して永続化する。表示（接続状態・予算超過）とGUI actor/CLIのcore-loss処理は後続PR。version mismatch で稼働中coreを停止する経路はlauncherに存在しない。
 
 ## 検証
 
