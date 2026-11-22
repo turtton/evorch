@@ -1,9 +1,9 @@
 # process-guard: typed PTY backend (D-3a2 B3-02)
 
-**D-7 is not complete.** This supplies a Linux backend, not the shell caller
-migration. Shell PTY owners remain on their old path until B3-03; agent
-Chromium, release-core expiry, CEF and the combined performance/ownership
-evidence remain separate B3 work. Non-Linux behavior is unchanged.
+**D-7 is not complete.** This supplies the Linux backend. B3-03 migrates the
+sandbox/shell PTY caller through `OwnedPtyCommand` / `OwnedPtyChild`. Agent
+Chromium was migrated separately in B3-04 (#756); release-core expiry, CEF and
+the combined performance/ownership evidence remain separate B3 work. Non-Linux behavior is unchanged.
 
 ## Contract for B3-03
 

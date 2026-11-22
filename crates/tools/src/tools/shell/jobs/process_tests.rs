@@ -1,13 +1,6 @@
-//! Process group lifetimes of pipe and PTY jobs (Linux: `/proc`).
-//!
-//! The group must be stopped while its exited leader still reserves the group
-//! id, and every stored handle must be retired once the leader is reaped, so a
-//! later stop cannot signal a reused id.
+//! Typed shell supervision: READY/output notifications, pidfd exits and a real job timeout.
 use super::*;
 use sandbox::{CommandSpec, DirectSandbox};
-use std::path::Path;
-use std::time::Instant;
-
 fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
     let (changed, _) = watch::channel(0);
     let (cancel, cancelled) = watch::channel(false);
@@ -55,125 +48,189 @@ fn stored_group(job: &Job) -> Option<JobGroup> {
         .clone()
 }
 
-fn running(pid: &str) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
-}
-
-async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-/// A helper that ignores the terminal hangup and watches the job's shell
-/// (`$$`): `kill -0` keeps succeeding on the exited, unreaped shell, so the
-/// helper writes `reaped-first` only if the shell is reaped while the helper
-/// still runs. It reports its pid once it watches.
-fn watcher(dir: &Path) -> String {
-    let dir = dir.display();
-    format!(
-        "( trap '' HUP; while kill -0 $$ 2>/dev/null; do :; done; echo yes > '{dir}/reaped-first' ) & \
-         echo $! > '{dir}/helper.tmp' && mv '{dir}/helper.tmp' '{dir}/helper.pid'"
-    )
-}
-
-async fn run(
-    interactive: bool,
-    script: String,
-    dir: &Path,
-    stop: bool,
-) -> (Completion, Arc<Job>, String) {
-    let wrapped = DirectSandbox::new_unchecked()
-        .wrap(CommandSpec {
-            program: "sh".into(),
-            args: vec!["-c".into(), script],
-            cwd: Some(dir.to_path_buf()),
-            extra_env: Vec::new(),
-        })
-        .unwrap();
-    let (job, input, cancel) = job();
-    let worker = Arc::clone(&job);
-    let task = tokio::spawn(async move {
-        let timeout = Duration::from_secs(60);
-        if interactive {
-            run_pty(&wrapped, &worker, input, cancel, Some(timeout)).await
-        } else {
-            run_pipe(&wrapped, &worker, input, cancel, Some(timeout)).await
+async fn ready(
+    job: &Job,
+    task: &mut tokio::task::JoinHandle<Result<Completion, crate::ToolError>>,
+) {
+    let mut changed = job.changed.subscribe();
+    loop {
+        if job.state.lock().unwrap().output.text.contains("READY") {
+            return;
         }
-    });
-    let pid_file = dir.join("helper.pid");
-    wait_until("the helper pid", || {
-        std::fs::read_to_string(&pid_file).is_ok_and(|pid| pid.ends_with('\n'))
-    })
-    .await;
-    let helper = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .to_owned();
-    if stop {
-        // The stop action: cancel the job and kill its group from here.
-        job.cancel_now();
+        tokio::select! {
+            changed = changed.changed() => changed.unwrap(),
+            result = &mut *task => match result {
+                Ok(Ok(completion)) => panic!("supervisor ended before READY: {}", completion.status),
+                Ok(Err(error)) => panic!("supervisor failed before READY: {error}"),
+                Err(error) => panic!("supervisor task ended before READY: {error}"),
+            },
+        }
     }
-    let completion = tokio::time::timeout(Duration::from_secs(30), task)
+}
+
+// Also runs on assertion / observation-bound failure: abort is not just a
+// dropped JoinHandle, and the registered typed capability stops the real peer.
+struct StopTestSupervisor {
+    job: Arc<Job>,
+    task: tokio::task::AbortHandle,
+}
+impl Drop for StopTestSupervisor {
+    fn drop(&mut self) {
+        self.job.cancel_now();
+        self.task.abort();
+    }
+}
+
+// Given a real sh -c PTY caller, cancellation, timeout and abandonment must
+// use its typed stop capability; the waiter confirms a receipt before completion.
+#[tokio::test]
+async fn pty_supervision_preserves_status_cancel_timeout_and_abandonment() {
+    for action in ["exit", "signal", "eof", "cancel", "timeout", "abort"] {
+        eprintln!("PTY_SUPERVISION {action}: starting");
+        let (mut job, input, cancel) = job();
+        let ledger = sandbox::SpawnLedger::new();
+        Arc::get_mut(&mut job).unwrap().ledger = Some(ledger.clone());
+        let wrapped = DirectSandbox::new_unchecked()
+            .wrap(CommandSpec {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    if action == "signal" {
+                        "printf 'READY\n'; read value; kill -INT $$"
+                    } else {
+                        "printf 'READY\n'; read value || exit 42; exit 37"
+                    }
+                    .into(),
+                ],
+                cwd: None,
+                extra_env: vec![],
+            })
+            .unwrap();
+        let worker = job.clone();
+        let mut task = tokio::spawn(async move {
+            run_pty(
+                &wrapped,
+                &worker,
+                input,
+                cancel,
+                if action == "timeout" {
+                    Some(Duration::from_millis(200))
+                } else {
+                    None
+                },
+            )
+            .await
+        });
+        let _cleanup = StopTestSupervisor {
+            job: job.clone(),
+            task: task.abort_handle(),
+        };
+        // Real PTY IO and the product timeout both use real time. This fixed
+        // observation bound is failure-only (explicitly requested for this
+        // regression); it is not a readiness delay or product grace period.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // The real job deadline starts before output is observed. Timeout
+            // is valid even if launch / READY delivery takes longer than 200ms;
+            // prove typed registration and the receipt below, not READY order
+            // or a pidfd opened after the root might already have been reaped.
+            let death = if action == "timeout" {
+                None
+            } else {
+                ready(&job, &mut task).await;
+                let root = ledger.children()[0].leader.unwrap();
+                eprintln!("PTY_SUPERVISION {action}: READY root={root}");
+                Some(process_guard_pidfd(root))
+            };
+            match action {
+                "exit" | "signal" | "eof" => {
+                    let (result, received) = oneshot::channel();
+                    job.input
+                        .send(Input {
+                            bytes: if action == "eof" {
+                                Vec::new()
+                            } else {
+                                b"finish\n".to_vec()
+                            },
+                            close: action == "eof",
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                    received.await.unwrap().unwrap();
+                }
+                "cancel" => job.cancel_now(),
+                "timeout" => {} // Let the real 200 ms job deadline fire.
+                "abort" => task.abort(),
+                _ => unreachable!(),
+            }
+            eprintln!("PTY_SUPERVISION {action}: action delivered");
+            if action == "abort" {
+                assert!(task.await.err().expect("aborted supervisor").is_cancelled());
+            } else {
+                let completion = task.await.unwrap().unwrap();
+                assert_eq!(
+                    completion.status,
+                    match action {
+                        "exit" | "signal" | "eof" => "failed",
+                        "cancel" => "cancelled",
+                        _ => "timed_out",
+                    }
+                );
+                if ["exit", "signal", "eof"].contains(&action) {
+                    assert_eq!(
+                        completion.exit_code,
+                        Some(match action {
+                            "signal" => 1,
+                            "eof" => 42,
+                            _ => 37,
+                        })
+                    );
+                }
+                if action == "timeout" {
+                    assert!(completion.error.as_deref().unwrap().contains("200 ms"));
+                }
+            }
+            eprintln!("PTY_SUPERVISION {action}: supervisor finished");
+            if let Some(death) = death {
+                tokio::task::spawn_blocking(move || {
+                    use std::os::fd::AsRawFd;
+                    let mut fds = [libc::pollfd {
+                        fd: death.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
+                    loop {
+                        let result = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+                        if result > 0 {
+                            break;
+                        }
+                        assert_eq!(
+                            std::io::Error::last_os_error().kind(),
+                            std::io::ErrorKind::Interrupted
+                        );
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            assert_eq!(ledger.child_stats().registered, 1);
+            assert!(matches!(stored_group(&job), Some(JobGroup::Pty(_))));
+            ledger.reap_all_children().await.unwrap();
+            assert_eq!(ledger.child_stats().reaped, 1);
+            assert_eq!(ledger.child_stats().unconfirmed, 0);
+            assert!(stored_group(&job).unwrap().retired());
+            eprintln!("PTY_SUPERVISION {action}: receipt confirmed");
+        })
         .await
-        .expect("the job ends")
-        .unwrap()
-        .unwrap();
-    (completion, job, helper)
-}
-
-async fn assert_retired_after_reap(job: &Job, dir: &Path, helper: &str) {
-    // The group was stopped before the shell was reaped: the helper dies
-    // without ever seeing the shell vanish.
-    wait_until("the helper to stop", || !running(helper)).await;
-    assert!(
-        !dir.join("reaped-first").exists(),
-        "the shell was reaped while its group still ran"
-    );
-    // The handle stored for stop is retired by the reap, and a later stop or
-    // guard drop through it signals nothing.
-    let stored = stored_group(job).expect("the job stored its group");
-    assert!(stored.retired());
-    job.cancel_now();
-    if let JobGroup::Pty(group) = &stored {
-        drop(sandbox::process::ProcessGroupGuard::new(group.clone()));
-    }
-    assert!(stored.retired());
-}
-
-// Given: a job whose shell exits while a helper still holds its output /
-// When: the job ends on its own / Then: the helper is stopped before the
-// shell is reaped, and the stored group handle is retired.
-#[tokio::test]
-async fn a_finished_job_stops_its_group_before_reaping_and_retires_it() {
-    for interactive in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let script = format!("{}; exit 0", watcher(dir.path()));
-        let (completion, job, helper) = run(interactive, script, dir.path(), false).await;
-        assert_eq!(completion.status, "completed", "interactive: {interactive}");
-        assert_eq!(completion.exit_code, Some(0));
-        assert_retired_after_reap(&job, dir.path(), &helper).await;
+        .unwrap_or_else(|_| panic!("PTY_SUPERVISION {action}: 5 s observation bound exceeded"));
     }
 }
-
-// Given: a running job with a helper / When: it is stopped / Then: the group
-// is stopped before the shell is reaped, and the stored handle is retired.
-#[tokio::test]
-async fn a_stopped_job_stops_its_group_before_reaping_and_retires_it() {
-    for interactive in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let script = format!("{}; exec sleep 60", watcher(dir.path()));
-        let (completion, job, helper) = run(interactive, script, dir.path(), true).await;
-        assert_eq!(completion.status, "cancelled", "interactive: {interactive}");
-        assert_retired_after_reap(&job, dir.path(), &helper).await;
-    }
+fn process_guard_pidfd(pid: i32) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+    assert!(fd >= 0);
+    unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }
 }
-
 // Given: a pipe job's guard-owned group registered for stop, whose supervisor
 // is not consuming the cancel signal / When: the job is cancelled from another
 // thread / Then: the registered group is killed through its stop capability.
@@ -196,4 +253,28 @@ async fn cancelling_a_job_kills_its_registered_owned_group() {
     let status = child.wait().await.unwrap();
     assert_eq!(status.signal(), Some(libc::SIGKILL));
     assert!(stored_group(&job).unwrap().retired());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pty_writer_drop_never_writes_eot_on_the_async_worker() {
+    struct Notice(Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>);
+    impl std::io::Write for Notice {
+        fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
+            Ok(value.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for Notice {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(std::thread::current().id());
+        }
+    }
+    let worker = std::thread::current().id();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    drop(super::process::PtyInputWriter::new(Box::new(Notice(Some(
+        sent,
+    )))));
+    assert_ne!(received.await.unwrap(), worker);
 }

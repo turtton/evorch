@@ -8,7 +8,7 @@
 //! reaps it by name:
 //!
 //! * **Children.** [`Admission::spawn_owned`] (a guard-owned child) and
-//!   [`Admission::register_pty_group`] (a pseudo-terminal child, until B3) enter a
+//!   [`Admission::spawn_owned_pty`] (a typed PTY child) enter a
 //!   child in the ledger. [`SpawnLedger::stop_child`],
 //!   [`terminate_child`](SpawnLedger::terminate_child) and
 //!   [`stop_all_children`](SpawnLedger::stop_all_children) signal the process
@@ -261,7 +261,7 @@ impl Admission<'_> {
     }
 
     /// Register a pseudo-terminal child its own owner started inside this
-    /// admission (B3 replaces this raw path).
+    /// admission (legacy adapter/test seams; removed on Linux by B3-05).
     ///
     /// A [`ProcessGroup`] can only come from a portable-pty child
     /// ([`ProcessGroup::spawn_pty`]), so no other kind of child can enter the
@@ -308,6 +308,19 @@ impl Admission<'_> {
         command: &mut crate::owned::OwnedCommand,
     ) -> io::Result<crate::owned::OwnedChild> {
         crate::owned::OwnedChild::spawn_in(self, kind, label, command)
+    }
+
+    /// Typed PTY spawn under this admission. The same typed group/receipt as
+    /// direct children is registered only after authenticated ExecOk.
+    /// Call from a blocking thread; IO setup failures retain RAII ownership.
+    pub fn spawn_owned_pty(
+        &self,
+        kind: ChildKind,
+        label: Option<&str>,
+        command: &crate::owned::OwnedPtyCommand,
+        size: portable_pty::PtySize,
+    ) -> io::Result<(crate::owned::OwnedPtyChild, crate::owned::OwnedPtyMaster)> {
+        crate::owned::OwnedPtyChild::spawn_in(self, kind, label, command, size)
     }
 
     /// Spawn a monitoring task the ledger can join.

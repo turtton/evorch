@@ -1,8 +1,9 @@
-# D-3a2 B2a / B2b handoff
+# D-3a2 owned process handoff (through B3-03 / B3-04)
 
 B2a added the typed API; B2b migrated its non-PTY callers in three parts
-(B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: the pseudo-terminal shell jobs
-and agent Chromium (B3) still run on the raw backend described under
+(B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: shell PTY (B3-03) and agent Chromium (B3-04)
+are now migrated. Linux raw API removal and combined evidence remain below.
+Historical B2 raw-boundary details are under
 "Raw boundary left for B3", with their old guarantees; entry binding does **not**
 guard them.
 
@@ -29,10 +30,9 @@ without a ledger):
 
 Migrated to the guard-owned API (guard-owned on Linux, with or without a ledger):
 
-- Shell **pipe** jobs (`run_pipe`, `ChildKind::ShellJob`). The job's stop
-  capability is a `JobGroup`: the guard-owned `OwnedGroup` of a pipe job or the
-  raw group of a PTY job (`run_pty` is B3). Cancellation signals it outside the
-  job's state lock.
+- Shell pipe and **PTY** jobs (`run_pipe` / `run_pty`, `ChildKind::ShellJob`;
+  PTY migrated in B3-03). Both job stop capabilities are typed `OwnedGroup`s.
+  Cancellation signals them outside the job's state lock.
 - MCP stdio (`ChildKind::McpStdio`; `ChildLease` keeps its Drop fallback on an
   `OwnedChild`), grep (`rg`), git diff, the codex quota RPC, runtime
   `GitReader` and snapshot git, and eval's host git (no ledger: unmanaged
@@ -88,8 +88,10 @@ backend; it makes no new D-7 claim and its code is only compile-checked by CI.
 Nothing a non-PTY caller can reach. What stays, and who uses it:
 
 - `process::ProcessGroup`, `ProcessGroupGuard`, `wait_for_exit`, `has_exited` and
-  `Admission::register_pty_group` (ledger `ChildGroup::Raw`): the shell **PTY** jobs
-  (`run_pty`). A live `ProcessGroup` exists only from `ProcessGroup::spawn_pty`, which
+  `Admission::register_pty_group` (ledger `ChildGroup::Raw`): legacy non-Linux
+  adapter and synthetic restart seams only after B3-03, not the Linux shell
+  product caller. B3-05 removes the Linux public raw surface.
+  A live `ProcessGroup` exists only from `ProcessGroup::spawn_pty`, which
   starts a command on a `portable_pty::SlavePty`; there is no constructor from a
   bare pid and no way to hand it a std or Tokio child (the `compile_fail` doctests on
   `ProcessGroup` pin that: `new` is crate-private, and a std/Tokio child is not a slave).
@@ -99,13 +101,15 @@ Nothing a non-PTY caller can reach. What stays, and who uses it:
 - `process::close_inherited_fds_on_exec`: a descriptor-hygiene hook for the std
   command an evorch-core fixture (`product_exec`) starts and supervises itself. It
   owns nothing and is no way to start a product child.
-- Agent Chromium (`crates/browser`, chromiumoxide's own spawn) and the private
-  core-launcher preflight supervisor (`--die-with-parent`): unchanged.
+- Agent Chromium is migrated by B3-04 (see below). The private core-launcher
+  preflight supervisor (`--die-with-parent`) stays unchanged.
 
 Std spawns outside the audited inventory that this part did not touch: the GUI's
 short git calls (`diff/git_cli.rs`, `evorch-gui.rs`, `composer_mention.rs`,
 `runtime_sink.rs`) and `fc-match` (`theme/fonts.rs`), and `core-launcher` starting the
-core. They never had the launch policy.
+core. They never had the launch policy. The GUI embedded-terminal PTY
+(`gui/src/pty/mod.rs`, approved inventory L21) remains a separate follow-up,
+not a core-owned guarantee.
 
 ### Closed stdio, per path
 
@@ -200,7 +204,7 @@ descriptors 0, 1 and 2 closed starts the representative selections (all pipes,
 | Owner | Production paths to migrate |
 |---|---|
 | Common sandbox/session | **B2b-i: minimal.rs, bwrap probe migrated**; **B2b-iii: raw session seams and to_command removed** |
-| Shell pipe | **B2b-ii: migrated** tools/src/tools/shell/jobs/process.rs::run_pipe (run_pty is B3) |
+| Shell pipe / PTY | **B2b-ii / B3-03: migrated** tools/src/tools/shell/jobs/process.rs::{run_pipe,run_pty} |
 | SandboxSession, LSP, js-worker | **B2b-i: migrated** (raw session spawn removed in B2b-iii) |
 | MCP | **B2b-ii: migrated** tools/src/mcp/transport/stdio.rs, ChildLease supervision |
 | Eval | **B2b-iii: migrated** eval/src/evaluator/groups.rs and eval/src/verify.rs; creator-thread PDEATHSIG(TERM) removed, normal Stop stays TERM |
@@ -212,7 +216,7 @@ descriptors 0, 1 and 2 closed starts the representative selections (all pipes,
 
 Audit external crates separately rather than assuming the Rust API can control
 an internal spawn. The private core-launcher preflight supervisor and bwrap
---die-with-parent stay unchanged. Agent Chromium is migrated in B3-04 (below); all PTY owners belong to B3.
+--die-with-parent stay unchanged. Agent Chromium is migrated in B3-04 (below); shell PTY is migrated in B3-03 (below), while GUI PTY remains excluded.
 
 ## B2b completion and optional further split
 
@@ -290,3 +294,111 @@ the same-group death assertion. Do not add disable-crash-reporter flags or a
 cgroup here: either needs a separate argv/C-13 design review. Carry this into
 B3-09's excluded-spawn audit/follow-up list. PTY migration, real loaded-core
 expiry, real CEF and performance gates remain B3; this is **not D-7 completion**.
+
+## B3-03: typed shell PTY ownership
+
+- `WrappedCommand::to_owned_pty_command` yields a target-only description.
+  `OwnedPtyChild::spawn_blocking(ledger?, kind, label, command, size)` performs
+  admission, openpty, authenticated ExecOk and the existing typed ledger
+  registration together off the async worker. No raw command/slave/PGID enters.
+- The pending launch is RAII-owned before registration; an unwind retires it on
+  that blocking thread before admission is released. Abandoning the await does
+  not abandon the completed result: its normal owner transfers cleanup to the
+  shared off-worker reaper. IO setup errors follow the same Drop path.
+- Linux uses B3-02's opaque master reader/writer/resize and shared GuardChild
+  status/decoder. EIO remains EOF, writer Drop sends EOT, shell PTY signal exits
+  keep portable-pty's shell-facing code 1 (raw Unix status is retained by the
+  owner). Job timeout starts at the same post-launch supervision point and its
+  meaning is unchanged. No new product grace or deadline was added.
+- `FinalStatus` / ledger confirmation mean root reap and group-KILL submission,
+  not all descendants' exit/reap. GuardLost remains an error and an unconfirmed
+  ledger entry. Same-PGID descendants are covered; job-control/setsid/other-PGID
+  escapees are not. Tests explicitly observe and reclaim one escapee.
+- Non-Linux stays on portable-pty and the old group backend behind a typed
+  adapter; no guard or stronger core-death guarantee is claimed.
+- Focused coverage: `tests/owned_pty.rs` (isolated subreaper, native tty /
+  foreground / resize / Ctrl-C / EOT, sh-c root and descendants, drop, GuardLost,
+  errno/fence/openpty and reader/writer setup errors), private cancellation /
+  registration-unwind tests, shell status/cancel/real timeout/supervisor abort,
+  and existing shell input / restart tests. Post-retirement descendant probes
+  distinguish exit from a surviving ACK without timing assertions. No /dev/ptmx
+  pathname identity or bash-only shell syntax is assumed.
+
+B3-05 still owns removal of the public Linux raw process/ledger variants and
+restart synthetic receipt seams. Agent Chromium was migrated separately in
+B3-04 (#756), already in this base; real-core SIGKILL / expiry (B3-06/07),
+CEF and performance evidence remain separate. These synthetic
+API/caller tests do not prove real release-core matrix cells. **D-7 is incomplete.**
+
+### B3-03 focused verification and source-only mutations
+
+Local validation used the normal dev shell (turtton Cargo turtton.5), serial
+builds and a freshly sealed development helper bundle. The final restored tree
+passed 22 selected sandbox tests (20 existing direct-owner regressions plus
+PTY/cancellation controllers), 6 selected shell tests, scoped all-target clippy
+with warnings denied, formatting and diff checks. Other tests are delegated to CI.
+The PTY controller runs 14 isolated cases; these are not real-core callers.
+The 6 selected shell tests also passed with dash 0.5.12 as `sh`, as well as
+the normal bash environment. Non-Linux execution was not tested locally.
+
+Each helper mutation was rebuilt and sealed with its own compat; all mutations
+were restored. Each negative failed after the actual target had emitted READY:
+
+| Temporary mutation | Observed failure |
+| --- | --- |
+| Signal root only rather than its group | Same-group descendant ACKed the post-retirement probe |
+| Omit retirement group KILL | Same-group descendant ACKed the post-retirement probe |
+| Omit abandoned-owner Drop cleanup | After READY, cancelled blocking launch retained GuardChild instead of handing ownership to cleanup |
+| Omit foreground installation | Native READY reported target PGID different from foreground PGID |
+
+Isolated controller RAII reclaims observed processes on failure, including
+escaped-PGID children. No product fault flags or product grace periods were
+introduced. The two former shell watcher tests used a busy loop, wall-clock
+polling and fixed completion timeouts; their same-group property is now checked
+by the native/sh-c controller and their shell cancel/status property by READY /
+pidfd-driven supervision tests.
+
+The initial CI run exposed a hang in the new shell timeout test: real PTY IO
+was mixed with paused/advanced Tokio time. The old-head test was reproduced
+under dash with capture enabled and a temporary 10-second runner bound
+(TIMEOUT at 10.002 s). The correction removes the virtual clock entirely and
+passes a real 200 ms job timeout through the existing API. At the operator's
+explicit request this regression has a fixed, failure-only 5-second observation
+bound plus typed stop/task-abort cleanup, rather than waiting forever if the
+job deadline is broken. A temporary source-only missing-timeout negative failed
+at that assertion in 5.021 s (not the runner timeout) and exited; it was restored.
+All reproduction commands have a 300-second outer bound, use capture, and do not
+add a product fault hook. A grep survey also found existing mixed real-child /
+virtual model-wait tests in shell/job_tests.rs; those out-of-scope tests were
+left unchanged.
+
+Independent review follow-up: the cancellation controller captures root/helper
+pidfds at READY, while the registration gate still keeps both alive, and retains
+those identities for Drop (no late numeric-PID reopen). A related grep survey
+found /proc-child discovery in the integration reaper; it now validates the
+opened fd with P_PIDFD / WNOWAIT before signalling, and rejects the isolated
+controller itself as a non-child. Existing process-guard controller fallbacks
+were reported separately, not edited here. The timeout case no longer requires
+READY (or a live numeric PID) before a valid 200 ms deadline: it checks typed
+Pty/OwnedGroup registration, one ledger entry, its receipt/reap, zero unconfirmed
+entries and retirement. A temporary PATH sh shim sleeps 400 ms before execing
+dash: the previous test failed with `supervisor ended before READY: timed_out`
+(1.866 s), while the corrected test passed (2.240 s). The corrected sandbox
+PTY/cancellation controllers (2 selected tests), 6 normal shell regressions and
+scoped sandbox/tools all-target clippy also passed. The shim is not product code.
+
+The next CI failure was an EOF-only assertion on the descendant Unix control
+socket, not the PTY: killing a peer with an unread probe can report ECONNRESET.
+The controller now proves a live P/ACK before retirement, waits for the typed
+receipt, then drains the post-retirement probe response even if the pidfd won
+the poll. Any ACK still fails; EOF or reset additionally requires peer pidfd
+death and cannot substitute for it. Drop also waits for ledger confirmation
+before this oracle. No pre-retirement I/O error is accepted.
+
+A new native barrier ACKs entry to a handler that never consumes the next P.
+Queueing that probe before the real owner kills the group deterministically
+produces reset after peer death: the old oracle failed at its read unwrap
+(0.142 s), while the corrected oracle passed (0.134 s). With the corrected
+oracle, fresh source-only root-only and omitted-retirement-KILL mutations still
+failed on a post-retirement ACK (0.067 s and 0.062 s); both were restored.
+These checks use neither sleeps, retries nor load, and change no product code.
