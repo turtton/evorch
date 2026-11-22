@@ -1,6 +1,7 @@
 //! Host admission capability shared with the runtime capture boundary.
 pub use runtime::quiesce::{
-    CommandAccess, HostCommandPermit, HostRestartGate, HostRestartPhase, SealedRestart,
+    CommandAccess, HostCommandPermit, HostInvocationLease, HostRestartGate, HostRestartPhase,
+    InvocationBlock, SealedRestart,
 };
 use runtime::{RunId, RuntimeError, StopScope};
 

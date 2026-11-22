@@ -187,6 +187,8 @@ expect ok "the cache gate names core_pr_cache" bash -c "grep -q 'binary(=core_pr
 expect ok "core_pr_cache has a test target" test -f crates/evorch-core/tests/core_pr_cache.rs
 expect ok "the cache gate names core_eval_cache" bash -c "grep -q 'binary(=core_eval_cache)' scripts/contract-test-filters.sh"
 expect ok "core_eval_cache has a test target" test -f crates/evorch-core/tests/core_eval_cache.rs
+expect ok "the cache gate names core_cli_run_cache" bash -c "grep -q 'binary(=core_cli_run_cache)' scripts/contract-test-filters.sh"
+expect ok "core_cli_run_cache has a test target" test -f crates/evorch-core/tests/core_cli_run_cache.rs
 expect ok "the cache gate names core_renderer_cache" bash -c "grep -q 'binary(=core_renderer_cache)' scripts/contract-test-filters.sh"
 expect ok "core_renderer_cache has a test target" test -f crates/evorch-core/tests/core_renderer_cache.rs
 expect ok "every binary of the cache gate has a test target" no_missing_targets scripts/contract-test-filters.sh

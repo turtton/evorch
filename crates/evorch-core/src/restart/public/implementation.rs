@@ -182,6 +182,12 @@ impl PublicRestartCoordinator {
         {
             return Ok(AdminInspection::Restart(binding.clone()));
         }
+        // Early, visible refusal of a new restart; the authoritative claim is
+        // made under the gate's lock when the restart is requested.
+        let running = self.core.0.gate.running_invocations();
+        if running > 0 {
+            return Err(invocation_refusal(running));
+        }
         let target = self.targets.prepare(binding).await?;
         let runtime = self.core.0.runtime.clone();
         let recipe_observation = runtime.observe_restart_recipes();
@@ -261,7 +267,12 @@ impl PublicRestartCoordinator {
                         .map_err(|_| conflict())?;
                     self.core
                         .request_with_source(Some(recipes), timeout, Some(self.recipes.clone()))
-                        .map_err(|_| conflict())
+                        .map_err(|error| match error {
+                            runtime::RuntimeError::RestartRefusedByInvocations { running } => {
+                                invocation_refusal(running)
+                            }
+                            _ => conflict(),
+                        })
                 })
                 .ok_or_else(conflict)?
         })?;
@@ -426,6 +437,13 @@ fn error(code: ErrorCode, message: &str) -> AdminFailure {
 }
 fn conflict() -> AdminFailure {
     error(ErrorCode::Conflict, "restart binding changed")
+}
+fn invocation_refusal(running: usize) -> AdminFailure {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        runtime::RuntimeError::RestartRefusedByInvocations { running }.to_string(),
+        RetryAdvice::UserActionRequired,
+    )
 }
 fn invalid() -> AdminFailure {
     error(

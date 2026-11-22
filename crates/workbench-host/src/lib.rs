@@ -23,6 +23,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod connections;
 pub mod ingress;
+pub mod invocations;
 pub mod lane;
 pub mod lane_delivery;
 pub mod lane_management;

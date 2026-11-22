@@ -1,5 +1,7 @@
 #[path = "fixture.rs"]
 mod fixture;
+#[path = "invocation.rs"]
+mod invocation;
 #[path = "shell.rs"]
 mod shell;
 use fixture::*;

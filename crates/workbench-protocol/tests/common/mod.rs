@@ -201,6 +201,21 @@ pub fn commands() -> Vec<Command> {
             decision: ApprovalDecision::Deny,
         })),
         Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(SetAgentWebToolsEnabled { enabled: true })),
+        Command::Execution(ExecutionCommand::StartInvocation(
+            workbench_protocol::namespaces::execution::StartInvocation {
+                invocation: workbench_protocol::ids::InvocationId::new("inv-1").unwrap(),
+                project_root: "/work/project".into(),
+                role: workbench_protocol::namespaces::execution::invocation::InvocationRole::Worker,
+                prompt: "fix the failing test".into(),
+                thread: None,
+            },
+        )),
+        Command::Execution(ExecutionCommand::EndInvocation(
+            workbench_protocol::namespaces::execution::EndInvocation {
+                invocation: workbench_protocol::ids::InvocationId::new("inv-1").unwrap(),
+                reason: workbench_protocol::namespaces::execution::invocation::EndReason::Interrupted,
+            },
+        )),
         Command::Conversation(ConversationCommand::ResolveProject {
             root: "/work/project".into(),
         }),

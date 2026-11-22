@@ -322,9 +322,10 @@ Known limits, left for later stages:
   bootstrapped core is only checked for wiring (a job for an unknown thread
   fails with its reason). A replay through a real core process under the
   production sandbox is not tested end to end; the bootstrap is a central file.
-- The core still records every Unix-socket connection as `Surface::Desktop`
-  (`crates/evorch-core/src/unix.rs`), so an `evorch eval` job is not yet
-  recorded as `Surface::Cli` (ADR 0045 §6).
+- The core records a Unix-socket connection as `Surface::Cli` only when the client
+  declares `LocalSurface::Cli` (`crates/evorch-core/src/unix.rs`); `evorch run`
+  does (stage 17), `evorch eval` does not yet, so an `evorch eval` job is not
+  yet recorded as `Surface::Cli` (ADR 0045 §6).
 - A command larger than the frame limit fails before it is written; the CLI
   reports it as an unknown outcome rather than a refusal.
 
@@ -668,6 +669,68 @@ implementation:
   not a required acceptance condition.
 - One PR per theme; there is no file-count cap. Do not create placeholder-only
   registration PRs.
+
+## Stage 17 (PR B): `evorch run` is a client of the core
+
+`evorch run` neither opens the configuration database nor builds a runtime. It
+meets the core of its configuration (`connect_core`, which starts one when none
+runs), asks it to start an *invocation* and follows that invocation. A core that
+cannot be reached is the command's failure (exit 1): there is no embedded
+fallback. `--db`, `--web-tools-enabled` and `--run-js-enabled` are refused with
+the reason: the database and the settings belong to the core every client shares.
+`--thread <id>` and `--no-wait` are new. The command declares itself
+`LocalSurface::Cli`, so the core records what it starts as `Surface::Cli`
+(`eval` and the maintenance commands still connect as before).
+
+What an invocation owns is **its own run and that run's subtree**, nothing else.
+Ctrl-C, a lost connection and the end of the process stop that and nothing more;
+input the invocation sent to a run it does not own is withdrawn while it is
+queued and detached once it was taken (the run is left alone). A request whose
+outcome is unknown is never sent again.
+
+| Contract | Where it is held | Where it is tested |
+|---|---|---|
+| `StartInvocation` / `EndInvocation` / `GetInvocation`: only a human on `Surface::Cli` with a client id may start; the same id with the same request answers `already_started`, another request under the id is `Conflict`; only the starting client may read or end it; the run is a one-shot run on a thread bound like a chat, so its questions and approvals reach every client | `workbench_host::ingress::namespaces::execution`, `workbench_host::invocations`, `commands::invocation` | `crates/workbench-host/tests/invocation.rs` |
+| Ending (Ctrl-C, `EndInvocation`, the client's last connection closing, a stopped client) stops the owned run with `StopScope::Subtree` and nothing else, and only while the run is still the execution the invocation started (the incarnation it saw at the start): the check and the stop are one step under the run's restore gate, which a resume also takes, so a run a screen resumed since, and its children, are left alone; a repeat is not an error; the stop of a lost connection is retried, not a command sent again | `invocations::InvocationRegistry::end` / `client_left`, `AgentRuntime::stop_incarnation` | `invocation.rs`; `crates/core-client-e2e/tests/run_cli.rs` (`ctrl_c_…`, `a_lost_connection_…`: a run started by another client keeps running; `an_invocation_that_ended_does_not_stop_the_run_a_screen_resumed`: natural end, resume by a screen, then the old invocation ends: nothing is stopped) |
+| Input to a run the invocation does not own: queued → withdrawn, taken → detached, the run is not stopped | `invocations::InvocationRegistry::end_record` | `invocation.rs::input_to_a_run_the_invocation_does_not_own_…` (host level only, see the limits) |
+| The terminal asks the questions and approvals of the invocation's thread (blocking questions of the owned run's subtree, approvals pending on the thread), once per id and revision; an approval is denied when no answer can be read. The terminal and the invocation are followed at the same time: a question or approval that is no longer pending (answered or decided on a screen), the end of the run or a lost connection ends the wait for the terminal, and the stdin reader thread does not keep the process from ending. An approval whose summary was cut short (`summary_truncated`) is approved from the terminal only after its complete input (at most 256 KiB, read with `GetApprovalInput` and checked to be whole) was shown; otherwise the terminal says why, can only deny it or leave it pending for a screen, and `Asking` refuses an approval from any prompter | `cli::run::Asking`, `Terminal` | `run_cli.rs::a_question_is_asked_on_the_terminal_…`, `a_question_answered_on_a_screen_ends_the_wait_for_the_terminal` (the terminal never answers; success is the command's end), `an_approval_cut_short_is_approved_only_after_…`, `an_approval_whose_complete_input_cannot_be_shown_…` (a `y` does not approve); `cli::run` unit test `y_approves_only_what_was_shown_whole` |
+| `--no-wait`: no prompt; a run that needs an answer ends the command with exit 3 and the owned run is stopped | `cli::run::execute` | `run_cli.rs::without_waiting_a_question_…` |
+| Exit codes: 0 succeeded (or the input reached its run), 1 failed, refused, unreachable or outcome unknown, 3 needs input with `--no-wait` (or no answer could be read), 130 interrupted | `cli::run::Outcome::render` | `cli::run` unit tests, `run_cli.rs` |
+| **Provisional restart refusal (until 5b-R).** While a CLI invocation runs, a planned restart is refused before the gate is taken and before anything is captured, with a reason the user sees (`Busy`, `UserActionRequired`: "N CLI invocation(s) are running …"). The decision and the admission of a new invocation take the same lock (`HostRestartGate`), so no invocation starts between the check and the claim; a restart that claimed admission refuses new invocations (`Busy`) until the host reopens or the claim is released. A connection alone (a screen, the management CLI) is not counted | `runtime::quiesce::host_restart` (`enter_invocation`, `claim_restart_admission`), `RestartCoordinator::request_with_source`, `public::implementation::inspect_request` / `commit_request` | `host_restart` and `restart/tests.rs` unit tests; `public_restart_coordinator/invocation.rs` (the public facade); `run_cli.rs::a_restart_is_refused_while_a_cli_invocation_runs_…` |
+| A crash does not bring a CLI run back: the invocation record lives in memory only; the command never sends `StartInvocation` again after a lost connection (the outcome is unknown, exit 1); recovery restores only what a *planned* restart captured, a planned restart is refused while an invocation runs, and an unplanned crash captures nothing | `InvocationRegistry` (no persistence), `run::execute` (one send), the restart refusal above | by construction; no test crashes a core with an invocation running |
+| **Cache contract.** A CLI invocation is the core's run: its second request extends the first (model, cache key, tool schema, prefix) across a blocking question and its answer; starting, following and answering add nothing to what the model is sent | the runtime, unchanged | `crates/evorch-core/tests/core_cli_run_cache.rs` (input-derived mock cache, `assert_append_only`; registered in `scripts/contract-test-filters.sh`) |
+| The command line (`--db` and the settings overrides refused before a core is looked for, usage) | `cli::run::parse_args` | its unit tests, `crates/evorch/tests/run_e2e.rs` |
+
+`evorch run` reads the invocation when an event arrives and also once a second
+without one: the event stream is a wake-up, not the only way the command learns
+the outcome.
+
+Known limits, left for later stages:
+
+- 5b-R (a CLI that survives a planned restart) is not done: until then the
+  restart is refused while an invocation runs. The refusal is the user's only
+  signal; the CLI does not wait for the restart to be possible.
+- Input withdraw/detach is only partly tested. The host test
+  (`invocation.rs::input_to_a_run_the_invocation_does_not_own_…`) covers
+  queued → withdrawn and asserts `detached_inputs` is 0; the *detached* case
+  (input the run already took) is not tested anywhere, at the host or through the
+  command line, and neither is the end of such an invocation by Ctrl-C or a lost
+  connection. `--thread` on a thread
+  with a live run sends the prompt as input to that run (`InputOnly`); on a
+  thread without one it starts a new run on that thread. Whether that new run
+  sees the thread's earlier turns is not tested here.
+- The run is a one-shot, non-interactive run of the chosen role, like the old
+  headless run: it ends after its turn. A run that needs an answer waits for it
+  (or ends with exit 3 with `--no-wait`). The project root is used as given; a
+  root that is no registered project gives a thread without a sidebar entry.
+- The embedded run was removed with `headless::run_headless`; the scenarios of
+  `headless_e2e` (user agents from a configuration directory, web tools and
+  `run_js` switches, persistence to a `--db`) are properties of the core's
+  composition now and are not exercised through `evorch run`. `recorder` is no
+  longer a dependency of `evorch`.
+- `crates/evorch/tests/run_e2e.rs` starts the `evorch` binary, which refuses to
+  run without the process guard bundle that `scripts/guard-cargo.sh` sets up;
+  like `evaluation_e2e.rs` it only runs under that script.
 
 ## Reserved migration numbers
 

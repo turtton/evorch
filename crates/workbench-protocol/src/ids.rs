@@ -133,6 +133,10 @@ wire_id!(
 );
 
 wire_id!(
+    /// One CLI invocation (`evorch run`), chosen by the client.
+    InvocationId
+);
+wire_id!(
     /// One asynchronous operation, chosen by the client (any unique id, a UUID
     /// say) so that it can find the outcome again without resending. See
     /// [`crate::operation`].

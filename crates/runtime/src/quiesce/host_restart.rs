@@ -26,6 +26,11 @@ struct State {
     phase: HostRestartPhase,
     generation: u64,
     active: usize,
+    /// CLI invocations that own work in this core now (see [`HostInvocationLease`]).
+    invocations: usize,
+    /// A restart passed its invocation preflight and has not reopened the host yet.
+    /// While set, no invocation is admitted, even if the phase still reads `Open`.
+    restart_claimed: bool,
 }
 struct Inner {
     state: Mutex<State>,
@@ -36,6 +41,15 @@ pub struct HostRestartGate(Arc<Inner>);
 /// Clones share one accepted command; synchronous reply and async persistence must both finish.
 pub struct HostCommandPermit(Arc<HostCommandLease>);
 struct HostCommandLease(HostRestartGate);
+/// Held for as long as one CLI invocation owns work in this core. A planned
+/// restart cannot carry a CLI invocation over yet (5b-R), so a held lease
+/// refuses the restart before it takes the gate or captures anything.
+pub struct HostInvocationLease(HostRestartGate);
+/// Why a restart was refused before it began: how many CLI invocations run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvocationBlock {
+    pub running: usize,
+}
 impl Clone for HostCommandPermit {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -84,8 +98,52 @@ impl HostRestartGate {
         }
         state.generation = generation;
         state.phase = phase;
+        if phase == HostRestartPhase::Open {
+            // The restart that claimed admission ended without a successor.
+            state.restart_claimed = false;
+        }
         self.changed();
         true
+    }
+    /// Admit one CLI invocation. The decision is made under the same lock as
+    /// [`Self::claim_restart_admission`], so an invocation is either counted
+    /// before a restart's preflight reads the count or refused after the
+    /// restart claimed admission; it is never accepted behind a preflight that
+    /// already found none.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RestartBusy`] while the host prepares a restart.
+    pub fn enter_invocation(&self) -> Result<HostInvocationLease, RuntimeError> {
+        let mut state = self.0.state.lock().unwrap();
+        if state.phase != HostRestartPhase::Open || state.restart_claimed {
+            return Err(RuntimeError::RestartBusy);
+        }
+        state.invocations += 1;
+        Ok(HostInvocationLease(self.clone()))
+    }
+    /// CLI invocations running now.
+    pub fn running_invocations(&self) -> usize {
+        self.0.state.lock().unwrap().invocations
+    }
+    /// The restart preflight: refuse while a CLI invocation runs, else close
+    /// invocation admission until the host reopens (or
+    /// [`Self::release_restart_admission`]). Idempotent for one restart.
+    ///
+    /// # Errors
+    /// [`InvocationBlock`] with the number of running invocations.
+    pub fn claim_restart_admission(&self) -> Result<(), InvocationBlock> {
+        let mut state = self.0.state.lock().unwrap();
+        if state.invocations > 0 {
+            return Err(InvocationBlock {
+                running: state.invocations,
+            });
+        }
+        state.restart_claimed = true;
+        Ok(())
+    }
+    /// A restart that claimed admission failed before it changed the host phase.
+    pub fn release_restart_admission(&self) {
+        self.0.state.lock().unwrap().restart_claimed = false;
     }
     pub fn enter(&self, access: CommandAccess) -> Result<HostCommandPermit, RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
@@ -170,6 +228,13 @@ impl HostRestartGate {
         }
     }
 }
+impl Drop for HostInvocationLease {
+    fn drop(&mut self) {
+        let mut state = self.0.0.state.lock().unwrap();
+        state.invocations -= 1;
+        self.0.changed();
+    }
+}
 impl Drop for HostCommandLease {
     fn drop(&mut self) {
         let mut state = self.0.0.state.lock().unwrap();
@@ -212,6 +277,35 @@ impl SealedRestart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_restart_claim_and_an_invocation_exclude_each_other() {
+        let gate = HostRestartGate::default();
+        // An invocation counted first refuses the restart, with its count.
+        let first = gate.enter_invocation().unwrap();
+        let second = gate.enter_invocation().unwrap();
+        assert_eq!(
+            gate.claim_restart_admission(),
+            Err(InvocationBlock { running: 2 })
+        );
+        // The refusal closed nothing: invocations are still admitted.
+        let third = gate.enter_invocation().unwrap();
+        drop((first, second, third));
+        assert_eq!(gate.running_invocations(), 0);
+        // A claim closes admission although the phase still reads Open ...
+        gate.claim_restart_admission().unwrap();
+        assert!(gate.enter_invocation().is_err());
+        // ... until the claim is released or the host reopens.
+        gate.release_restart_admission();
+        drop(gate.enter_invocation().unwrap());
+        gate.claim_restart_admission().unwrap();
+        assert!(gate.transition(1, HostRestartPhase::Open));
+        assert!(gate.enter_invocation().is_ok());
+        // Nothing is admitted once the host prepares, and a lease is not an
+        // accepted command that would hold the seal.
+        gate.transition(2, HostRestartPhase::Preparing);
+        assert!(gate.enter_invocation().is_err());
+    }
+
     #[tokio::test]
     async fn preparing_admits_only_existing_input_then_sealing_drains_accepted_commands() {
         let gate = HostRestartGate::default();

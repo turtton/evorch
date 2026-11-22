@@ -75,6 +75,10 @@ pub fn samples() -> AreaSamples {
                 json!({"type": "execution", "payload": {"type": "get_thread_execution", "payload": {
                 "thread": "thread-1"}}}),
             ),
+            de::<Query>(
+                json!({"type": "execution", "payload": {"type": "get_invocation", "payload": {
+                "invocation": "inv-1"}}}),
+            ),
         ],
         ui_events: vec![
             de::<UiEvent>(
@@ -107,6 +111,11 @@ pub fn samples() -> AreaSamples {
                 json!({"type": "execution", "payload": {"type": "thread_execution", "payload": {
                 "thread": "thread-1", "root_run": "run-1", "goal": goal(),
                 "ledger": {"run": "run-1", "seq": "3", "body": "notes", "truncated": false}}}}),
+            ),
+            de::<QueryReply>(
+                json!({"type": "execution", "payload": {"type": "invocation", "payload": {
+                "invocation": "inv-1", "thread": "thread-1", "state": "succeeded",
+                "owned_run": "run-1", "final_text": "done"}}}),
             ),
         ],
     }

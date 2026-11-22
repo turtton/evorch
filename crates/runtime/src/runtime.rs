@@ -3187,10 +3187,45 @@ impl AgentRuntime {
             delivery.deliver()
         }
     }
+
+    /// The incarnation of the execution `run` has now. A resume of the same run
+    /// id makes a new one, so a caller that started a run keeps this to tell its
+    /// own execution from a later one.
+    ///
+    /// # Errors
+    /// [`RuntimeError::UnknownRun`] when the run has no execution.
+    pub fn run_incarnation(&self, run_id: RunId) -> Result<String, RuntimeError> {
+        Ok(self.execution_snapshot(run_id)?.publication().incarnation())
+    }
+
+    /// Stop `run_id` only while its execution is still `incarnation`. The check
+    /// and the stop happen under the run's restore gate, which a resume of the
+    /// same run also takes, so a resume cannot slip in between. A run that has
+    /// moved on to another incarnation is left alone, subtree included.
+    ///
+    /// # Errors
+    /// [`RuntimeError::RunTerminated`] when the run is no longer that
+    /// incarnation (nothing was stopped); otherwise as [`Self::stop`].
+    pub fn stop_incarnation(
+        &self,
+        run_id: RunId,
+        incarnation: &str,
+        scope: StopScope,
+    ) -> Result<(), RuntimeError> {
+        let delivery = crate::quiesce::StopDelivery::new(self, run_id, scope)
+            .expecting_incarnation(incarnation.to_owned());
+        if let Some(boundary) = self.shared.stop_boundary.get() {
+            boundary.stop(delivery)
+        } else {
+            delivery.deliver()
+        }
+    }
+
     pub(crate) fn stop_with_dispatch(
         &self,
         run_id: RunId,
         scope: StopScope,
+        expected: Option<&str>,
     ) -> Result<(), RuntimeError> {
         // Collect before taking admissions: spawning locks intents before admissions.
         let mut targets = match scope {
@@ -3219,6 +3254,14 @@ impl AgentRuntime {
                 }
             })
             .collect::<Vec<_>>();
+        // Under the restore gates a resume of this run cannot interleave.
+        if let Some(expected) = expected
+            && self.execution_snapshot(run_id)?.publication().incarnation() != expected
+        {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
+        }
         for target in &targets {
             self.ensure_no_saved_compaction(*target)?;
         }

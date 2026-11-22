@@ -30,6 +30,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use core_launcher::{CoreBinary, LaunchError, LaunchStage, Launcher};
@@ -229,6 +230,16 @@ pub fn client_config(extra: &[Capability]) -> ClientConfig {
 /// # Errors
 /// The directory cannot be resolved, or the core binary is missing or unsafe.
 pub fn launcher(config_dir: Option<PathBuf>, extra: &[Capability]) -> Result<Launcher, CliError> {
+    launcher_with(config_dir, client_config(extra))
+}
+
+/// As [`launcher`] with a client configuration of the caller's own (`evorch
+/// run` declares itself the command line, which the core records as the
+/// surface of what it starts).
+pub fn launcher_with(
+    config_dir: Option<PathBuf>,
+    client: ClientConfig,
+) -> Result<Launcher, CliError> {
     let dir = config_dir.or_else(config::user_config_dir).ok_or_else(|| {
         CliError::Failed(
             "cannot resolve the user config directory; pass --user-config <dir>".into(),
@@ -237,7 +248,7 @@ pub fn launcher(config_dir: Option<PathBuf>, extra: &[Capability]) -> Result<Lau
     let identity = core_instance::ConfigIdentity::new(&dir)
         .map_err(|error| CliError::Unavailable(error.to_string()))?;
     let binary = CoreBinary::sibling().map_err(|error| CliError::Unavailable(error.to_string()))?;
-    Launcher::new(identity, binary, client_config(extra))
+    Launcher::new(identity, binary, client)
         .map_err(|error| CliError::Unavailable(error.to_string()))
 }
 
@@ -387,6 +398,26 @@ pub async fn wait_settled<T, R, Fut>(
     client: &WorkbenchClient,
     scope: SubscriptionScope,
     relevant: impl Fn(&UiEvent) -> bool,
+    read: R,
+) -> Result<T, CliError>
+where
+    R: FnMut() -> Fut,
+    Fut: Future<Output = Result<Step<T>, ClientError>>,
+{
+    wait_settled_every(client, scope, relevant, None, read).await
+}
+
+/// As [`wait_settled`], and `read` is also called every `poll` when no event
+/// came: for an operation whose changes the event stream does not always
+/// announce (an event is a wake-up, never the only way to learn the outcome).
+///
+/// # Errors
+/// As [`wait_settled`].
+pub async fn wait_settled_every<T, R, Fut>(
+    client: &WorkbenchClient,
+    scope: SubscriptionScope,
+    relevant: impl Fn(&UiEvent) -> bool,
+    poll: Option<Duration>,
     mut read: R,
 ) -> Result<T, CliError>
 where
@@ -405,7 +436,14 @@ where
             Step::Pending => {}
         }
         loop {
-            match subscription.next().await {
+            let next = match poll {
+                Some(every) => match tokio::time::timeout(every, subscription.next()).await {
+                    Ok(next) => next,
+                    Err(_) => break,
+                },
+                None => subscription.next().await,
+            };
+            match next {
                 Some(envelope) if envelope.event.ends_subscription() => {}
                 Some(envelope) if relevant(&envelope.event) => break,
                 Some(_) => continue,

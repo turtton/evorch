@@ -93,7 +93,7 @@ impl CommandHost {
         match query {
             Query::Conversation(q) => self.conversation_query(query, q),
             Query::Workspace(q) => self.workspace_query(query, q),
-            Query::Execution(q) => self.execution_query(query, q),
+            Query::Execution(q) => self.execution_query(query, q, provenance),
             Query::Questions(q) => self.questions_query(query, q),
             Query::Approvals(q) => self.approvals_query(query, q),
             Query::Lanes(q) => self.lanes_query(q),

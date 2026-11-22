@@ -11,7 +11,8 @@
 # scenarios to it. nextest rejects a binary name that matches nothing, so the
 # integration PR that precedes a feature PR registers its new cache binary (for
 # PR 15: core_pr_cache, registered by I-14; for PR 17c: core_eval_cache, registered
-# by the CLI core-client integration PR; for PR 16a-2: core_renderer_cache,
+# by the CLI core-client integration PR (which also registers core_cli_run_cache, the
+# cache contract of `evorch run` as a core client); for PR 16a-2: core_renderer_cache,
 # registered by integration-16a2; for the F4 product proof and the agent observation
 # validation: f4_product_cache and agent_observation_cache, registered by I0) together
 # with a placeholder test file. Those two are independent cache binaries: they are
@@ -79,7 +80,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
       | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
-  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache) | binary(=recovery_disposal)))
+  | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_cli_run_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache) | binary(=recovery_disposal)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))

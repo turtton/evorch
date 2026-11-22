@@ -284,8 +284,19 @@ impl RestartCoordinator {
         if state.phase != RestartPhase::Running {
             return Err(RuntimeError::RestartBusy);
         }
+        // Invocation preflight: before the storage check, the gate and any capture.
+        // The claim and invocation admission share the gate's lock, so no CLI
+        // invocation can start behind a preflight that found none.
+        self.0.gate.claim_restart_admission().map_err(|block| {
+            RuntimeError::RestartRefusedByInvocations {
+                running: block.running,
+            }
+        })?;
         // Runtime does its atomic storage-health preflight BEFORE any host gate changes.
-        self.0.runtime.check_restart_preparation()?;
+        if let Err(error) = self.0.runtime.check_restart_preparation() {
+            self.0.gate.release_restart_admission();
+            return Err(error);
+        }
         state.generation = state
             .generation
             .checked_add(1)

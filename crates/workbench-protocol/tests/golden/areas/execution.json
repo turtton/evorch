@@ -18,6 +18,15 @@
     },
     "type": "execution"
   },
+  "query/execution/get_invocation": {
+    "payload": {
+      "payload": {
+        "invocation": "inv-1"
+      },
+      "type": "get_invocation"
+    },
+    "type": "execution"
+  },
   "query/execution/get_run": {
     "payload": {
       "payload": {
@@ -225,6 +234,19 @@
         "revision": "1"
       },
       "type": "conversation_plan_tree"
+    },
+    "type": "execution"
+  },
+  "query_reply/execution/invocation": {
+    "payload": {
+      "payload": {
+        "final_text": "done",
+        "invocation": "inv-1",
+        "owned_run": "run-1",
+        "state": "succeeded",
+        "thread": "thread-1"
+      },
+      "type": "invocation"
     },
     "type": "execution"
   },

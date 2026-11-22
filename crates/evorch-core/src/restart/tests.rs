@@ -160,6 +160,33 @@ async fn shared_request_survives_waiter_drop_and_stale_cancel_cannot_reopen() {
     host.shutdown().await.unwrap();
 }
 #[tokio::test]
+async fn a_running_cli_invocation_refuses_a_restart_before_anything_is_closed() {
+    let (_dir, mut host) = boot().await;
+    let core = RestartCoordinator::new(&host);
+    let producer = host.runtime.producer_gate();
+    let lease = core.0.gate.enter_invocation().unwrap();
+    // Refused with the user-visible reason; no gate, producer or phase moved.
+    for _ in 0..2 {
+        match core.request() {
+            Err(RuntimeError::RestartRefusedByInvocations { running: 1 }) => {}
+            other => panic!("expected the invocation refusal, got {other:?}"),
+        }
+        assert_eq!(core.snapshot().phase, RestartPhase::Running);
+        assert_eq!(core.0.gate.phase(), HostRestartPhase::Open);
+        assert!(producer.try_enter().is_some());
+    }
+    // The refusal does not close invocation admission (a second one is counted).
+    let second = core.0.gate.enter_invocation().unwrap();
+    drop((lease, second));
+    // With none running the restart proceeds, and from then on no invocation is
+    // admitted, even before the host phase leaves Open.
+    let id = core.request().unwrap();
+    assert!(core.0.gate.enter_invocation().is_err());
+    core.cancel(id).unwrap();
+    assert!(core.0.gate.enter_invocation().is_ok());
+    host.shutdown().await.unwrap();
+}
+#[tokio::test]
 async fn sealed_ingress_rejects_before_new_thread_reservation_and_requires_explicit_retry() {
     use workbench_protocol::{
         commands::{ComposerRole, SendChat},
