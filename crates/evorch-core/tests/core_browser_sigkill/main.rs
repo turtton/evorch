@@ -4,6 +4,8 @@
 #[cfg(target_os = "linux")]
 mod cells;
 #[cfg(target_os = "linux")]
+mod controls;
+#[cfg(target_os = "linux")]
 mod core_process;
 #[cfg(target_os = "linux")]
 mod evidence;
@@ -16,9 +18,6 @@ mod observer;
 mod procs;
 #[cfg(target_os = "linux")]
 mod tls;
-
-#[cfg(target_os = "linux")]
-const CELLS: &[&str] = &["chromium_p", "chromium_stopped_p", "cef_p", "cef_stopped_p"];
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -39,7 +38,7 @@ fn run() -> std::io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--list") {
         if args.iter().any(|arg| arg == "--ignored") {
-            for name in CELLS {
+            for name in cells::CELLS {
                 println!("{name}: test");
             }
         }
@@ -47,13 +46,13 @@ fn run() -> std::io::Result<()> {
     }
     let selected: Vec<_> = args
         .iter()
-        .filter(|arg| CELLS.contains(&arg.as_str()))
+        .filter(|arg| cells::CELLS.contains(&arg.as_str()))
         .collect();
     if selected.is_empty() {
         if !args.iter().any(|arg| arg == "--ignored") {
             return Ok(());
         }
-        for name in CELLS {
+        for name in cells::CELLS {
             let status = std::process::Command::new(std::env::current_exe()?)
                 .args(["--ignored", "--exact", name])
                 .status()?;
@@ -72,7 +71,12 @@ fn run() -> std::io::Result<()> {
     // 30 s and success always comes from an explicit event.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.block_on(observer::bounded(
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(
+                std::env::var("EVORCH_B3_WATCHDOG_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(120),
+            ),
             "whole-cell failure watchdog",
             cells::run(selected[0]),
         ))

@@ -78,8 +78,11 @@ pub fn subtree(tree: &ProcessTree, guard: i32) -> Vec<i32> {
 
 /// One row per process, with its relation to the target root: the same
 /// process group (guaranteed) or an escaped one (reported, never dismissed).
-pub fn describe(tree: &ProcessTree, pids: &[i32], root: i32) -> io::Result<Vec<Value>> {
-    let root_identity = tree.require(root)?.identity.clone();
+pub fn describe(tree: &ProcessTree, pids: &[i32], root: Option<i32>) -> io::Result<Vec<Value>> {
+    let root_identity = match root {
+        Some(root) => Some(tree.require(root)?.identity.clone()),
+        None => None,
+    };
     pids.iter()
         .map(|pid| {
             let identity: &Identity = &tree.require(*pid)?.identity;
@@ -90,8 +93,8 @@ pub fn describe(tree: &ProcessTree, pids: &[i32], root: i32) -> io::Result<Vec<V
                 "type": process_type(&args),
                 "crashpad_handler": is_crashpad_handler(&args),
                 "arg0": args.first().map(|a| a.chars().take(160).collect::<String>()),
-                "same_group_as_target_root": identity.group == root_identity.group,
-                "same_session_as_target_root": identity.session == root_identity.session,
+                "same_group_as_target_root": root_identity.as_ref().is_some_and(|r| identity.group == r.group),
+                "same_session_as_target_root": root_identity.as_ref().is_some_and(|r| identity.session == r.session),
             }))
         })
         .collect()
@@ -113,11 +116,18 @@ pub fn unreachable_marked(tree: &ProcessTree, marker: &str) -> io::Result<Vec<Pi
         if pid == tree.owner.identity.pid
             || pid == i32::try_from(std::process::id()).unwrap_or(-1)
             || tree.descendants.contains_key(&pid)
-            || !cmdline(pid).iter().any(|a| a.contains(marker))
         {
             continue;
         }
-        if let Ok(pin) = PinnedProcess::capture(pid) {
+        // Identity first, then the marker test, then a pin that re-reads and
+        // compares the same identity: a PID reused in between cannot be pinned.
+        let Ok(identity) = Identity::read(pid) else {
+            continue;
+        };
+        if !cmdline(pid).iter().any(|a| a.contains(marker)) {
+            continue;
+        }
+        if let Ok(pin) = PinnedProcess::pin(&identity) {
             pins.push(pin);
         }
     }
@@ -141,4 +151,38 @@ pub fn describe_pin(pin: &PinnedProcess) -> Value {
         "crashpad_handler": is_crashpad_handler(&args),
         "arg0": args.first().map(|a| a.chars().take(160).collect::<String>()),
     })
+}
+
+/// A process is dead when its pidfd is readable; polled once, never waited.
+pub async fn is_dead(pin: &PinnedProcess) -> bool {
+    use std::{future::poll_fn, pin::pin, task::Poll};
+    let mut exited = pin!(pin.exited());
+    poll_fn(|cx| Poll::Ready(std::future::Future::poll(exited.as_mut(), cx).is_ready())).await
+}
+
+#[derive(Debug, Default)]
+pub struct Classified {
+    /// Alive by pidfd. A changed PPID/PGID/SID does not make a process dead.
+    pub alive: Vec<i32>,
+    /// Dead by pidfd.
+    pub gone: Vec<i32>,
+    /// Alive, but its parent/group/session no longer match the pinned identity.
+    pub relation_changed: Vec<i32>,
+}
+
+/// Death comes only from the pidfd; a relationship change is reported apart.
+pub async fn classify(tree: &ProcessTree, pids: &[i32]) -> io::Result<Classified> {
+    let mut out = Classified::default();
+    for pid in pids {
+        let pin = tree.require(*pid)?;
+        if is_dead(pin).await {
+            out.gone.push(*pid);
+        } else {
+            out.alive.push(*pid);
+            if !pin.unchanged() {
+                out.relation_changed.push(*pid);
+            }
+        }
+    }
+    Ok(out)
 }

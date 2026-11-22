@@ -21,6 +21,12 @@ not repeated here.
 | `chromium_stopped_p` | P* | same as `chromium_p`, plus SIGSTOP of the non-root, non-guard members before the SIGKILL | same |
 | `cef_p` | P* | Conversation turns → `render_artifact` → `inspect_artifact` open, snapshot | `evorch-renderer` (`EVORCH_RENDERER_EXE`, product `EVORCH_RENDERER_EXEC` override) with `evorch-cef-helper` and the pinned CEF |
 | `cef_stopped_p` | P* | same as `cef_p`, plus the same SIGSTOP | same |
+| `chromium_navigating_p` | P* | same entrance as `chromium_p`; the fixture accepts the request and never answers, so the core is killed **while the navigation is in flight** (event: the fixture read the request line) | same |
+| `cef_navigating_p` | P* | same entrance as `cef_p`; the page's script never ends, so the core is killed while `inspect_artifact open` is in flight (event: CEF zygote and utility processes exist under the renderer) | same |
+| `renderer_launch_failure_p` | P* | same entrance as `cef_p`; `EVORCH_RENDERER_EXEC` (the product's own override) points at an external script that exits at once. Fault injection: **external executable swap** | none (the replacement exits) |
+| `cef_init_failure_p` | P* | same entrance as `cef_p`; the real renderer runs with a `libcef.so` that is only a symlink in an otherwise empty directory placed first in `LD_LIBRARY_PATH`, so CEF finds no resources beside the library. Fault injection: **environment** | real renderer, CEF initialization fails (the product reports `renderer IPC failed: PeerClosed`) |
+| `classify_control_t` | T (harness control, not the product) | a live process whose parent changed must be classified alive, never dead; a dead one dead | none |
+| `harness_timeout_control_t`, `harness_panic_control_t` | T (harness control) | the real `chromium_p` flow in a child controller with an injected whole-cell timeout / panic while the provider's response is held at its gate; the controller must finish in bounded time and every pinned process must be dead | real Chromium (inner) |
 
 Chromium and CEF are separate paths; neither stands in for the other, and the
 renderer cell disables the agent browser tools, the Chromium cell never opens
@@ -43,7 +49,33 @@ as a guarantee, or that these cells prove the guarantee for any other caller.
    every descendant under the guard, with PID/PPID/PGID/SID/starttime, process
    type and whether it shares the root's group (`same_group_as_target_root`).
 3. Only the core is sent SIGKILL (through its pidfd). Every pinned guard
-   subtree member must report death by pidfd **before any cleanup**.
+   subtree member must report death by pidfd **before any cleanup**. Death is
+   decided by the pidfd alone: a member whose parent, group or session changed
+   is still alive (it is reported as `relation_changed_but_alive`) and is
+   still required to die. Members that are already dead before the kill are
+   reported as `exited_before_kill`.
+
+### Negative cases (finite time, nothing left behind)
+
+`renderer_launch_failure_p` and `cef_init_failure_p` kill the core after the
+product reported the renderer failure, and `*_navigating_p` kill it with the
+navigation in flight. Each ends in bounded time, requires the core to die by
+SIGKILL, and requires every process outside the owner-rooted graph that carries
+the cell's private directory (observed before the kill) to die. In the two failure cells the renderer has already
+exited when the core is killed, so there is **no live descendant to observe**:
+they establish that a failed start leaves nothing behind and that the cell
+terminates, not that a guard kills anything. The launch-failure cell also
+requires that the replacement executable ran (it wrote a marker file); for the
+init-failure cell the check that CEF, not linking, failed is only indirect:
+the same environment without the symlink trick is `cef_p`, which passes.
+
+### Harness recovery (T)
+
+The provider's held response is released by a drop guard before the mock is
+dropped, so a whole-cell timeout or a panic cannot block on the mock's join.
+`harness_timeout_control_t` and `harness_panic_control_t` test this: with the
+release removed the controller hangs and the control fails after its own
+70 s bound.
 
 Evidence JSON (`ready`, `death`) goes to `EVORCH_B3_EVIDENCE_DIR`.
 
@@ -111,5 +143,9 @@ cargo nextest run -p evorch-core --test core_browser_sigkill --run-ignored only 
 The cells are listed only with `--ignored`, so ordinary test groups never run
 them. CI runs `chromium_p` and `chromium_stopped_p` in browser-e2e, `cef_p` and `cef_stopped_p` in cef-e2e.
 
-Mutations (guard bypass, EOF-resistant renderer, root-only kill, no NSS trust, no navigation) run in a
-disposable checkout; no mutation code is committed.
+Mutations (guard bypass, EOF-resistant renderer, root-only kill, no NSS trust,
+no navigation, death decided by relationship instead of pidfd, no gate release)
+run in a disposable checkout; no mutation code is committed. A guard bypass
+(`Lease::force` as a no-op) alone fails `chromium_p` but **not** `cef_p`: the
+real renderer exits by itself on IPC EOF. `cef_p` fails only when the guard
+bypass is combined with a renderer that parks after `PeerClosed`.

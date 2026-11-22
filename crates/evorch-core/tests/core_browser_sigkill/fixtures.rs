@@ -2,6 +2,7 @@
 //! a mock model provider, and for Chromium the cell's own NSS trust store.
 use super::observer::bounded;
 use std::{
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -122,4 +123,48 @@ pub async fn trust_ca(root: &Path, home: &Path, ca_pem: &str) -> io::Result<Path
     )
     .await?;
     Ok(db)
+}
+
+/// An external executable that records its launch and exits at once. The core
+/// is told to use it through its own `EVORCH_RENDERER_EXEC` setting.
+pub fn failing_renderer(root: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("renderer-fail.sh");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho launched > '{}'\nexit 3\n",
+            root.join("renderer-launched").display()
+        ),
+    )?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    Ok(path)
+}
+
+/// `LD_LIBRARY_PATH` that starts with a directory holding only a `libcef.so`
+/// link: the renderer still links (every other library resolves through the
+/// original path), but CEF finds none of its resources beside the library, so
+/// its initialization fails. The library comes from the renderer's own link
+/// resolution (`ldd`), so the cell does not depend on how the host sets CEF up.
+pub fn cef_link_only(root: &Path, renderer: &Path) -> io::Result<OsString> {
+    let listing = std::process::Command::new("ldd").arg(renderer).output()?;
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let library = text
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("libcef.so => ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(PathBuf::from)
+        })
+        .filter(|path| path.is_file())
+        .ok_or_else(|| io::Error::other("ldd does not resolve libcef.so for the renderer"))?;
+    let dir = root.join("cef-link-only");
+    fs::create_dir_all(&dir)?;
+    std::os::unix::fs::symlink(library.canonicalize()?, dir.join("libcef.so"))?;
+    let mut paths = vec![dir];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).map_err(io::Error::other)
 }

@@ -26,6 +26,8 @@ pub struct Fixture {
     pub ca_pem: String,
     /// First line of each request that completed a TLS handshake and was read.
     pub requests: Arc<Mutex<Vec<String>>>,
+    /// Notified (with a stored permit) when a request line was read.
+    pub arrived: Arc<tokio::sync::Notify>,
     serving: tokio::task::JoinHandle<()>,
 }
 impl Drop for Fixture {
@@ -39,7 +41,9 @@ fn other(error: impl std::fmt::Display) -> io::Error {
 }
 
 impl Fixture {
-    pub async fn start() -> io::Result<Self> {
+    /// `hold` keeps every connection open without answering: the navigation
+    /// then stays in flight until the cell ends.
+    pub async fn start(hold: bool) -> io::Result<Self> {
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let ca_key = KeyPair::generate().map_err(other)?;
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).map_err(other)?;
@@ -68,9 +72,11 @@ impl Fixture {
         let port = listener.local_addr()?.port();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let signal = arrived.clone();
         let serving = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (acceptor, log) = (acceptor.clone(), log.clone());
+                let (acceptor, log, signal) = (acceptor.clone(), log.clone(), signal.clone());
                 tokio::spawn(async move {
                     let Ok(mut stream) = acceptor.accept(stream).await else {
                         return;
@@ -89,6 +95,10 @@ impl Fixture {
                         .unwrap_or_default()
                         .to_owned();
                     log.lock().unwrap().push(line);
+                    signal.notify_one();
+                    if hold {
+                        std::future::pending::<()>().await;
+                    }
                     let page = format!(
                         "<!doctype html><html><head><title>b3</title></head><body><h1>{HEADING}</h1></body></html>"
                     );
@@ -105,6 +115,7 @@ impl Fixture {
             port,
             ca_pem: ca.pem(),
             requests,
+            arrived,
             serving,
         })
     }
