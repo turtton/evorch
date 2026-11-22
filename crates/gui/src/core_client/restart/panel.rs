@@ -13,9 +13,10 @@ use workbench_client::{
     },
 };
 use workbench_protocol::{
-    commands::Command,
+    commands::{Command, CommandReply, CommandResult},
     namespaces::lifecycle::{
-        AdminId, AdminReceipt, LifecycleQuery, LifecycleReply,
+        AdminId, AdminReceipt, LifecycleQuery, LifecycleReply, LifecycleResult,
+        owned_graphs::{OwnedGraphsQuery, OwnedGraphsReply},
         restart::{
             InterruptBinding, RestartBinding, RestartManagementStatus, RestartQuery, RestartReply,
             RestartTargets, ShellBlocker, ShellBlockers,
@@ -61,6 +62,13 @@ pub struct RestartPanel {
     observer: EvidenceObserver,
     /// Operations sent whose end the panel has not seen.
     uncertain: Vec<AdminId>,
+    /// This panel's own restart request, from the click until its operation is
+    /// seen to have completed. It is the core's acceptance of a restart, so a
+    /// lost connection while it stands may be the restart itself.
+    own_restart: Option<AdminId>,
+    /// Undisposed graphs the core counted when it last refused a restart.
+    undisposed: Option<u64>,
+    undisposed_due: bool,
 }
 
 fn restart_query(query: RestartQuery) -> PanelRequest {
@@ -76,8 +84,40 @@ impl RestartPanel {
         &self.notices
     }
 
+    /// Keep the newest `keep` notices.
+    pub fn trim_notices(&mut self, keep: usize) {
+        let extra = self.notices.len().saturating_sub(keep);
+        self.notices.drain(..extra);
+    }
+
+    pub fn clear_notices(&mut self) {
+        self.notices.clear();
+    }
+
     pub fn status(&self) -> Option<&RestartManagementStatus> {
         self.status.as_ref()
+    }
+
+    pub fn targets(&self) -> Option<&RestartTargets> {
+        self.targets.as_ref()
+    }
+
+    pub fn blockers(&self) -> Option<&ShellBlockers> {
+        self.blockers.as_ref()
+    }
+
+    pub fn undisposed(&self) -> Option<u64> {
+        self.undisposed
+    }
+
+    /// Whether a restart this panel asked for has not been seen to end.
+    pub fn restart_in_flight(&self) -> bool {
+        self.own_restart.is_some()
+    }
+
+    /// Whether there is anything to read back after a reconnect.
+    pub fn has_uncertain(&self) -> bool {
+        !self.uncertain.is_empty()
     }
 
     pub fn select(&mut self, selector: TargetSelector) {
@@ -125,7 +165,22 @@ impl RestartPanel {
                 self.drop_stale_confirmation();
             }
             LifecycleReply::OperationStatus(receipt) => self.on_receipt(receipt),
+            LifecycleReply::OwnedGraphs(OwnedGraphsReply::Undisposed(graphs)) => {
+                self.undisposed = Some(graphs.count.get());
+                if graphs.count.get() > 0 {
+                    self.notices.push(text::undisposed(graphs.count.get()));
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// The reply of a command: the core's receipt.
+    pub fn on_command_reply(&mut self, reply: &CommandReply) {
+        if let Some(CommandResult::Lifecycle(LifecycleResult::Accepted(receipt))) =
+            reply.result.as_deref()
+        {
+            self.on_receipt(receipt);
         }
     }
 
@@ -135,6 +190,9 @@ impl RestartPanel {
             == workbench_protocol::namespaces::lifecycle::AdminOperationState::Completed
         {
             self.uncertain.retain(|id| id != &receipt.operation_id);
+            if self.own_restart.as_ref() == Some(&receipt.operation_id) {
+                self.own_restart = None;
+            }
         }
     }
 
@@ -192,6 +250,11 @@ impl RestartPanel {
         Ok(())
     }
 
+    /// Something to tell the person that is not a reply.
+    pub fn push_notice(&mut self, notice: String) {
+        self.notices.push(notice);
+    }
+
     pub fn dismiss_confirmation(&mut self) {
         self.confirming = None;
     }
@@ -204,6 +267,7 @@ impl RestartPanel {
         let command = match confirming {
             Confirming::Restart(binding) => {
                 self.uncertain.push(binding.operation_id.clone());
+                self.own_restart = Some(binding.operation_id.clone());
                 request_restart(binding, proof)
             }
             Confirming::Interrupt { binding, .. } => {
@@ -225,6 +289,52 @@ impl RestartPanel {
             .map(PanelRequest::Command)
     }
 
+    /// A refusal or a lost reply of a request. A restart the core refused for a
+    /// conflict is the one place the undisposed graphs are asked about.
+    pub fn on_request_failure(
+        &mut self,
+        command: bool,
+        error: &ClientError,
+        outcome_unknown: bool,
+    ) {
+        if outcome_unknown {
+            self.notices.push(text::outcome_unknown());
+            return;
+        }
+        if command
+            && matches!(error, ClientError::Server(e) if e.code == workbench_protocol::ErrorCode::Conflict)
+        {
+            self.undisposed_due = true;
+        }
+        self.on_failure(error);
+    }
+
+    /// Ask once whether undisposed graphs are why a restart was refused.
+    pub fn take_undisposed_query(&mut self) -> Option<PanelRequest> {
+        std::mem::take(&mut self.undisposed_due).then(|| {
+            PanelRequest::Query(Query::Lifecycle(LifecycleQuery::OwnedGraphs(
+                OwnedGraphsQuery::Undisposed,
+            )))
+        })
+    }
+
+    /// The restart to wait for, from the core's own evidence: what the status
+    /// showed, or this panel's accepted restart request that has not ended.
+    /// Never from the lost connection alone.
+    pub fn planned_restart(
+        &self,
+        epoch: workbench_protocol::wire::InstanceEpoch,
+        now: Instant,
+    ) -> Option<PlannedEvidence> {
+        self.observer.evidence().cloned().or_else(|| {
+            self.own_restart.as_ref().map(|_| PlannedEvidence {
+                restart_id: None,
+                predecessor_epoch: epoch,
+                observed_at: now,
+            })
+        })
+    }
+
     pub fn on_failure(&mut self, error: &ClientError) {
         self.notices.push(text::failure(error));
     }
@@ -242,6 +352,8 @@ impl RestartPanel {
         self.blockers = None;
         self.confirming = None;
         self.observer = EvidenceObserver::default();
+        self.undisposed = None;
+        self.undisposed_due = false;
     }
 
     pub fn banner(&self, view: Option<ReconnectView>, expired: Option<Stage>) -> Banner {

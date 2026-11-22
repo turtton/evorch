@@ -122,6 +122,18 @@ impl Launcher {
             diagnostic_after: Duration::from_secs(30),
         })
     }
+    /// Where this launcher connects, for a connect-only wait (a planned restart):
+    /// the same configuration and socket, and nothing that can start a core.
+    pub fn connect_target(&self) -> handoff::diagnostics::connect::ConnectTarget {
+        handoff::diagnostics::connect::ConnectTarget::with_socket(
+            self.config.clone(),
+            self.standard_socket.clone(),
+        )
+    }
+    /// The client configuration every connection of this launcher uses.
+    pub fn client_config(&self) -> &ClientConfig {
+        &self.client
+    }
     /// A production diagnostic deadline, not a reason to force an owner out.
     pub fn diagnostic_after(mut self, duration: Duration) -> Self {
         self.diagnostic_after = duration;

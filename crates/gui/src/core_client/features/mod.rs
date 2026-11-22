@@ -88,6 +88,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod pull_requests;
+pub mod restart;
 pub mod settings;
 pub mod teams;
 pub mod workspace;
@@ -123,6 +124,7 @@ pub enum FeatureId {
     Maintenance,
     Artifacts,
     Browser,
+    Restart,
 }
 
 impl FeatureId {
@@ -144,6 +146,7 @@ impl FeatureId {
             Self::Maintenance => "maintenance",
             Self::Artifacts => "artifacts",
             Self::Browser => "browser",
+            Self::Restart => "lifecycle",
         }
     }
 }
@@ -453,6 +456,16 @@ pub trait Feature: Send {
         Vec::new()
     }
 
+    /// The planned restart this feature knows the core is performing, from the
+    /// core's own evidence only; `epoch` is the core the connection was to.
+    fn planned_restart(
+        &self,
+        _epoch: workbench_protocol::wire::InstanceEpoch,
+        _now: std::time::Instant,
+    ) -> Option<workbench_client::restart::reconnect::PlannedEvidence> {
+        None
+    }
+
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
 
@@ -521,6 +534,7 @@ impl Default for Features {
                 Box::<maintenance::MaintenanceFeature>::default(),
                 Box::<artifacts::ArtifactsFeature>::default(),
                 Box::<browser::BrowserFeature>::default(),
+                Box::<restart::RestartFeature>::default(),
             ],
         }
     }
@@ -643,6 +657,18 @@ impl Features {
     /// The features shown for a connection with `capabilities`.
     pub fn available(&self, connected: bool, capabilities: &[Capability]) -> Vec<FeatureId> {
         available_ids(&self.features, connected, capabilities)
+    }
+
+    /// The planned restart to wait for when the connection ends (see
+    /// [`Feature::planned_restart`]).
+    pub fn planned_restart(
+        &self,
+        epoch: workbench_protocol::wire::InstanceEpoch,
+        now: std::time::Instant,
+    ) -> Option<workbench_client::restart::reconnect::PlannedEvidence> {
+        self.features
+            .iter()
+            .find_map(|feature| feature.planned_restart(epoch, now))
     }
 
     /// The workspace feature, for what observes the sidebar it holds.

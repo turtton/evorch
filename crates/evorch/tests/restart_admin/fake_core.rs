@@ -98,6 +98,7 @@ type Connection = (usize, mpsc::UnboundedSender<Vec<u8>>, JoinHandle<()>);
 
 struct Shared {
     epoch: u64,
+    identity: String,
     capabilities: Vec<Capability>,
     state: Mutex<State>,
     changed: Notify,
@@ -127,12 +128,23 @@ pub fn cursor(epoch: u64, sequence: u64) -> EventCursor {
 
 impl FakeCore {
     pub fn start(path: &Path, epoch: u64, capabilities: Vec<Capability>) -> Self {
+        Self::start_as(path, epoch, capabilities, "fake-core")
+    }
+
+    /// A core of the given identity, as a launcher that names the core it wants requires.
+    pub fn start_as(
+        path: &Path,
+        epoch: u64,
+        capabilities: Vec<Capability>,
+        identity: &str,
+    ) -> Self {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path).expect("bind the fake core socket");
         std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
         let shared = Arc::new(Shared {
             epoch,
+            identity: identity.to_owned(),
             capabilities,
             state: Mutex::new(State {
                 phase: RestartPhase::Running,
@@ -290,7 +302,7 @@ fn hello(shared: &Shared) -> ServerHello {
         protocol_version: ProtocolVersion::CURRENT,
         capabilities: shared.capabilities.clone(),
         server_build: build(),
-        core: CoreIdentity::new("fake-core").unwrap(),
+        core: CoreIdentity::new(shared.identity.as_str()).unwrap(),
         instance_epoch: InstanceEpoch(shared.epoch),
         limits: WireLimits::default(),
         status: CoreStatus {
@@ -359,7 +371,11 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
                     subscription_id: sid,
                     snapshot_id: (!replay).then(|| SnapshotId::new("snap").unwrap()),
                     high_water: cursor(shared.epoch, 1),
-                    initial_page: None,
+                    initial_page: (!replay).then(|| workbench_protocol::views::Page {
+                        items: vec![],
+                        next_cursor: None,
+                        snapshot_revision: Revision(0),
+                    }),
                 },
             )))
         }

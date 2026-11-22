@@ -94,3 +94,13 @@ pub fn expired(stage: Stage) -> &'static str {
         }
     }
 }
+
+pub fn undisposed(count: u64) -> String {
+    format!(
+        "再起動できません：前回の再起動から未処分のグラフが {count} 件残っています。管理 CLI で `evorch core graphs list`（隔離中のものは `evorch core quarantine list`）を実行し、解放・再開・破棄してからもう一度操作してください。何も変更していません"
+    )
+}
+
+pub fn outcome_unknown() -> String {
+    "結果が不明です。要求は再送していません。再接続後に操作の状態を読み直して確認します".into()
+}
