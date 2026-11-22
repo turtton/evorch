@@ -203,62 +203,82 @@ pub trait Prompter: Send + Sync {
 /// The terminal: prompts on stderr, answers from stdin.
 pub struct Terminal;
 
-/// stdin is read by one thread for the whole process, so that a prompt that is
-/// given up (answered on a screen) leaves nothing blocking behind it but that
-/// thread, which does not keep the process from ending.
-fn stdin_lines() -> &'static tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<String>>>
-{
-    static LINES: std::sync::OnceLock<
-        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<String>>>,
-    > = std::sync::OnceLock::new();
-    LINES.get_or_init(|| {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+/// Lines from one input, read by one thread for the whole process, so that a
+/// prompt that is given up (answered on a screen) leaves nothing blocking behind
+/// it but that thread, which does not keep the process from ending.
+///
+/// A line is read only when a prompt asks for it, after the prompt was shown, and
+/// is handed to that prompt alone: a line whose reading began for an earlier
+/// prompt (typed, or half typed, for what was answered elsewhere) is dropped, so
+/// it is never taken as the answer to a later question or approval.
+struct LineReader {
+    requests: Mutex<std::sync::mpsc::Sender<u64>>,
+    lines: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<(u64, Option<String>)>>,
+    next: std::sync::atomic::AtomicU64,
+    /// The generation of the newest prompt; an older request is not read at all.
+    latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Reads begun so far (a test waits for the thread to be inside one).
+    #[cfg_attr(not(test), allow(dead_code))]
+    started: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl LineReader {
+    fn new(mut source: impl BufRead + Send + 'static) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let (requests, wanted) = std::sync::mpsc::channel::<u64>();
+        let (line_tx, lines) = tokio::sync::mpsc::unbounded_channel();
+        let latest = std::sync::Arc::new(AtomicU64::new(0));
+        let started = std::sync::Arc::new(AtomicU64::new(0));
+        let (seen, begun) = (latest.clone(), started.clone());
         let _ = std::thread::Builder::new()
             .name("evorch-stdin".into())
             .spawn(move || {
-                let stdin = std::io::stdin();
-                loop {
+                for generation in wanted {
+                    if seen.load(Ordering::SeqCst) != generation {
+                        continue;
+                    }
+                    begun.fetch_add(1, Ordering::SeqCst);
                     let mut line = String::new();
-                    match stdin.lock().read_line(&mut line) {
-                        Ok(0) | Err(_) => {
-                            let _ = tx.send(None);
-                            break;
-                        }
-                        Ok(_) => {
-                            if tx.send(Some(line.trim().to_owned())).is_err() {
-                                break;
-                            }
-                        }
+                    let read = match source.read_line(&mut line) {
+                        Ok(0) | Err(_) => None,
+                        Ok(_) => Some(line.trim().to_owned()),
+                    };
+                    if line_tx.send((generation, read)).is_err() {
+                        break;
                     }
                 }
             });
-        tokio::sync::Mutex::new(rx)
-    })
-}
+        Self {
+            requests: Mutex::new(requests),
+            lines: tokio::sync::Mutex::new(lines),
+            next: AtomicU64::new(0),
+            latest,
+            started,
+        }
+    }
 
-/// Set when a prompt was given up: what was typed for it is not an answer to
-/// the next one.
-static PROMPT_GIVEN_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-struct GiveUp(bool);
-
-impl Drop for GiveUp {
-    fn drop(&mut self) {
-        if self.0 {
-            PROMPT_GIVEN_UP.store(true, std::sync::atomic::Ordering::SeqCst);
+    /// The next line typed after this call; `None` at the end of the input.
+    async fn read(&self) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        let generation = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        self.latest.store(generation, Ordering::SeqCst);
+        self.requests.lock().unwrap().send(generation).ok()?;
+        let mut lines = self.lines.lock().await;
+        loop {
+            match lines.recv().await? {
+                (from, line) if from == generation => return line,
+                _ => {}
+            }
         }
     }
 }
 
 async fn read_line() -> Option<String> {
-    let mut lines = stdin_lines().lock().await;
-    if PROMPT_GIVEN_UP.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        while let Ok(Some(_)) = lines.try_recv() {}
-    }
-    let mut guard = GiveUp(true);
-    let line = lines.recv().await.flatten();
-    guard.0 = false;
-    line
+    static STDIN: std::sync::OnceLock<LineReader> = std::sync::OnceLock::new();
+    STDIN
+        .get_or_init(|| LineReader::new(std::io::BufReader::new(std::io::stdin())))
+        .read()
+        .await
 }
 
 /// What the terminal shows for an approval, and whether it may be approved there.
@@ -912,6 +932,81 @@ mod tests {
             parse(&["run", "--project", "/p", "--role", "worker", "--prompt"]),
             Err(USAGE.into())
         );
+    }
+
+    /// Bytes that arrive when the test says so, like a terminal.
+    struct Typed(
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::collections::VecDeque<u8>,
+    );
+
+    impl std::io::Read for Typed {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.1.is_empty() {
+                match self.0.recv() {
+                    Ok(bytes) => self.1.extend(bytes),
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = out.len().min(self.1.len());
+            for slot in out.iter_mut().take(n) {
+                *slot = self.1.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+
+    fn typed() -> (LineReader, std::sync::mpsc::Sender<Vec<u8>>) {
+        let (keys, source) = std::sync::mpsc::channel();
+        let reader = LineReader::new(std::io::BufReader::new(Typed(source, Default::default())));
+        (reader, keys)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_typed_for_a_prompt_given_up_is_not_the_answer_to_the_next_one() {
+        use std::sync::atomic::Ordering;
+        let bound = Duration::from_secs(30);
+        let (reader, keys) = typed();
+        let reader = std::sync::Arc::new(reader);
+        // A question is shown and the person starts typing "y" (no newline) ...
+        let first = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.read().await }
+        });
+        tokio::time::timeout(bound, async {
+            while reader.started.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the thread is reading for the first prompt");
+        keys.send(b"y".to_vec()).unwrap();
+        // ... a screen answers it: the prompt is given up, and an approval is shown.
+        first.abort();
+        let _ = first.await;
+        let second = tokio::spawn({
+            let reader = reader.clone();
+            async move { reader.read().await }
+        });
+        // The newline completes the old line; it must not approve anything.
+        keys.send(b"\n".to_vec()).unwrap();
+        keys.send(b"n\n".to_vec()).unwrap();
+
+        let line = tokio::time::timeout(bound, second)
+            .await
+            .expect("the second prompt gets a line")
+            .unwrap();
+
+        assert_eq!(line.as_deref(), Some("n"));
+        assert_ne!(decision_of(true, line.as_deref()), Decision::Approve);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lines_already_waiting_in_a_pipe_answer_the_prompts_in_order() {
+        let reader = LineReader::new(std::io::Cursor::new(b"y\nsecond\n".to_vec()));
+        assert_eq!(reader.read().await.as_deref(), Some("y"));
+        assert_eq!(reader.read().await.as_deref(), Some("second"));
+        assert_eq!(reader.read().await, None);
     }
 
     #[test]
