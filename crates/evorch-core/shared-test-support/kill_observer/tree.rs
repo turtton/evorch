@@ -68,7 +68,7 @@ impl ProcessTree {
                 }
             }
         };
-        let candidates = reachable(&rows);
+        let candidates = reachable(rows);
         let mut pins = BTreeMap::new();
         for pid in candidates {
             if pid != self.owner.identity.pid

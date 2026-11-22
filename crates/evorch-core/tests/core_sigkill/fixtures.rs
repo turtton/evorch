@@ -28,7 +28,7 @@ pub async fn prepare(
     let bindir = root.join("bin");
     fs::create_dir(&bindir)?;
     if cell == "eval" {
-        super::evaluation::repository(&project).await?;
+        super::evaluation::repository(project).await?;
         script(
             &bindir.join("evorch"),
             &format!(
@@ -127,7 +127,7 @@ pub async fn prepare(
     };
     let mock =
         StreamingMockOpenAi::spawn_with_prompt_cache_models(responses, vec!["mock-model".into()]);
-    configure(&root, &project, &mock.base_url())?;
+    configure(root, project, &mock.base_url())?;
     Ok(Fixture { bindir, cli, mock })
 }
 fn configure(root: &Path, project: &Path, url: &str) -> io::Result<()> {

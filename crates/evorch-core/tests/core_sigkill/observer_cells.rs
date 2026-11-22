@@ -7,7 +7,7 @@ use rustix::process::Signal;
 use std::{io, path::Path, process::Stdio};
 use tokio::{net::UnixListener, process::Command};
 pub async fn run(cell: &str, own: &Path, socket: &Path, listener: &UnixListener) -> io::Result<()> {
-    let mut command = Command::new(&own);
+    let mut command = Command::new(own);
     command.args(["--peer", "root", socket.to_str().unwrap()]);
     if cell == "observer_escaped" {
         command.arg("escape");
@@ -78,5 +78,5 @@ pub async fn run(cell: &str, own: &Path, socket: &Path, listener: &UnixListener)
     for pin in tree.descendants.values() {
         bounded(EXIT, "observer cleanup failed", pin.exited()).await?;
     }
-    return result.and(cleanup);
+    result.and(cleanup)
 }
