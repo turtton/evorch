@@ -101,7 +101,7 @@ pub fn describe_quarantine(reply: &QuarantineReply) -> Vec<String> {
                 items.len(),
                 revision.get()
             )];
-            lines.extend(items.iter().map(|item| describe_quarantine_item(item)));
+            lines.extend(items.iter().map(describe_quarantine_item));
             if *truncated {
                 lines.push("  (the list was cut off)".into());
             }

@@ -311,11 +311,9 @@ impl RestartPanel {
 
     /// Ask once whether undisposed graphs are why a restart was refused.
     pub fn take_undisposed_query(&mut self) -> Option<PanelRequest> {
-        std::mem::take(&mut self.undisposed_due).then(|| {
-            PanelRequest::Query(Query::Lifecycle(LifecycleQuery::OwnedGraphs(
-                OwnedGraphsQuery::Undisposed,
-            )))
-        })
+        std::mem::take(&mut self.undisposed_due).then_some(PanelRequest::Query(Query::Lifecycle(
+            LifecycleQuery::OwnedGraphs(OwnedGraphsQuery::Undisposed),
+        )))
     }
 
     /// The restart to wait for, from the core's own evidence: what the status

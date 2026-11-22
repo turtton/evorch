@@ -170,7 +170,6 @@ fn ready_line(line: &str) -> Option<Value> {
 }
 
 /// Starts the product, runs the whole scenario and takes the product back.
-
 pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
     let env = IsolatedEnv::new();
     let (gate, arrivals) = ResponseGate::new();
@@ -301,7 +300,7 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         .and_then(|guard| guard.lifetime_available())
         .unwrap_or(false);
 
-    let (epoch_after, requests_during) = runtime.block_on(async {
+    let epoch_after = runtime.block_on(async {
         let desktop = connect(&socket, "scenario-desktop-2", LocalSurface::Desktop).await;
         let epoch_after = desktop.server_hello().instance_epoch.0;
         let mut events = desktop
@@ -328,9 +327,8 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
             );
             until_waiting(&desktop, &mut events, &run).await;
         }
-        (epoch_after, ())
+        epoch_after
     });
-    let _ = requests_during;
     let requests: Vec<Value> = provider
         .chat_requests()
         .into_iter()
