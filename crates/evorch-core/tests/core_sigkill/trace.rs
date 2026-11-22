@@ -77,10 +77,13 @@ fn read_logs(prefix: &Path) -> io::Result<BTreeMap<i32, String>> {
 }
 /// `complete` is false for a mid-run look (a thread log may not exist yet);
 /// the closing check after the tracer exited passes true.
-pub fn assert_no_process_spawn(prefix: &Path, pid: i32, complete: bool) -> io::Result<()> {
+pub fn assert_no_process_spawn(prefix: &Path, pid: i32, complete: bool) -> io::Result<Vec<i32>> {
     inspect(&read_logs(prefix)?, pid, complete)
 }
-fn inspect(logs: &BTreeMap<i32, String>, leader: i32, complete: bool) -> io::Result<()> {
+// Returns every inspected TID (the worker and its threads). Detecting a successful
+// exec in a non-leader thread is best effort: strace splits it into an
+// `<pid changed to ...>` line and a `resumed` line that are not joined here.
+fn inspect(logs: &BTreeMap<i32, String>, leader: i32, complete: bool) -> io::Result<Vec<i32>> {
     let text = logs
         .get(&leader)
         .ok_or_else(|| io::Error::other(format!("no strace log for worker {leader}")))?;
@@ -138,7 +141,7 @@ fn inspect(logs: &BTreeMap<i32, String>, leader: i32, complete: bool) -> io::Res
             }
         }
     }
-    Ok(())
+    Ok(seen.into_iter().collect())
 }
 
 pub fn tracer() -> io::Result<super::observer::PinnedProcess> {
@@ -192,7 +195,17 @@ pub async fn finish(
     )
     .await?;
     if let Some(worker) = worker {
-        assert_no_process_spawn(prefix, worker, true)?;
+        let tids = assert_no_process_spawn(prefix, worker, true)?;
+        let logs = read_logs(prefix)?;
+        let traces: BTreeMap<String, &String> = tids
+            .iter()
+            .filter_map(|tid| logs.get(tid).map(|text| (tid.to_string(), text)))
+            .collect();
+        super::evidence::emit(
+            cell,
+            "thread-traces",
+            &serde_json::json!({"worker_pid":worker,"tids":tids,"traces":traces}),
+        )?;
         let trace = fs::read_to_string(prefix.with_extension(worker.to_string()))?;
         check(
             trace.contains("+++ killed by SIGKILL +++"),
@@ -291,12 +304,12 @@ pub async fn thread_spawn_control(own: &Path) -> io::Result<()> {
             format!("{mode}: no separate strace log for the fixture thread"),
         )?;
         match (inspect(&logs, leader, true), rejected) {
-            (Ok(()), false) => {}
+            (Ok(_), false) => {}
             (Err(error), true) => check(
                 error.to_string().contains("worker thread"),
                 format!("rejected for the wrong reason: {error}"),
             )?,
-            (Ok(()), true) => {
+            (Ok(_), true) => {
                 return Err(io::Error::other(
                     "a process created from another thread was not detected",
                 ));

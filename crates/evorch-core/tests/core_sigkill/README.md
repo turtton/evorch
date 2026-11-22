@@ -74,13 +74,13 @@ cleanup**. Socket EOF/ECONNRESET alone is not the death assertion.
 L08 has two distinct structures: outer bwrap → inner bwrap → actual worker,
 and a separate core-owned HostCall shell root + same-PGID grandchild. Worker
 has no process children. Its own pidfd death, initial exec followed by no
-process spawn/exec (strace), and HostCall shell pair death are separate
+new process (strace), and HostCall shell pair death are separate
 observations. An unresolved finally Promise prevents EOF making it pass.
 The copied CLI directory has no installed guard bundle: successful worker
 entry also proves the bind-before-logging exclusion. CLI is an actual build
 from this source; its SHA256 is recorded separately from release core.
 
-Daemonized strace (-D -ff --decode-pids=pidns) is independent evidence and never kills tracees. -ff writes one log per TID, so the no-spawn check follows every thread of the worker (thread ids are mapped from the tracee namespace to the host by --decode-pids=pidns, followed through nested CLONE_THREAD clones, exited threads included): thread-creating clones are allowed, process-creating clone/fork/vfork or any execve is a violation wherever it happens. The negative control observer_trace_thread runs a real strace of a process whose only thread forks a short-lived child and requires rejection; a thread-only process is accepted.
+Daemonized strace (-D -ff --decode-pids=pidns) is independent evidence and never kills tracees. -ff writes one log per TID, so the no-spawn check follows every thread of the worker (thread ids are mapped from the tracee namespace to the host by --decode-pids=pidns, followed through nested CLONE_THREAD clones, exited threads included): thread-creating clones are allowed, while fork, vfork and process-creating clone/clone3 are violations in any thread. An execve after the initial exec is also rejected in the leader and, best effort, in other threads. Detecting a *successful* exec in a non-leader thread is a follow-up: strace splits it into `execve(... <pid changed to ...>` and `<... execve resumed>) = 0`, which this check does not join. The acceptance criterion is that no new process is created. The negative control observer_trace_thread runs a real strace of a process whose only thread forks a short-lived child and requires rejection; a thread-only process is accepted.
 It records group SIGKILL before root wait4 and rejects later group signals.
 CI installs strace/bubblewrap, checks ptrace and /dev/ptmx, enables Ubuntu
 user namespaces and explicitly builds the actual CLI. Missing support fails,
