@@ -7,7 +7,12 @@ pub(super) const LEARNING_COHORT_LIMIT: std::time::Duration = std::time::Duratio
 
 /// How many times one request may observe the recipes again after a run changed
 /// state under it. Past this the request is cancelled, as it always was.
-pub(super) const OBSERVATION_ATTEMPTS: usize = 16;
+pub(super) const OBSERVATION_ATTEMPTS: usize = 100;
+
+/// Between two observations: a run that is finishing a turn settles in
+/// milliseconds, and spinning would only burn the attempts inside that change.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const OBSERVATION_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Observed {
@@ -67,7 +72,7 @@ impl RestartCoordinator {
             match self.observe_and_begin(id, deadline).await? {
                 Observed::Begun(attempt) => return Ok(Some(attempt)),
                 Observed::Cancel => return Ok(None),
-                Observed::Again => tokio::task::yield_now().await,
+                Observed::Again => tokio::time::sleep(OBSERVATION_PAUSE).await,
             }
         }
         Ok(None)

@@ -1,7 +1,8 @@
 //! Q2: the owned-graphs leaf, built from the host's own runtime, owner,
 //! storage, reader and the one live collector, and registered with the common
 //! admin service. Registering is not publishing: the service refuses every
-//! operation until the switch in `capability` is on.
+//! operation until `capability` publishes a complete composition (the switch is
+//! on, on Linux, with every leaf installed).
 use super::super::Inputs;
 use workbench_host::bootstrap::recovery_disposal::OwnedGraphsFacade;
 

@@ -311,10 +311,11 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
             })
             .await
             .unwrap();
-        assert!(
-            waiting_in_snapshot(&events, &run),
-            "the captured run is back, waiting for the user, in the successor's snapshot"
-        );
+        // The successor reports Ready before it has finished restoring the run, so a
+        // client may meet the run in the snapshot or by its event, never not at all.
+        if !waiting_in_snapshot(&events, &run) {
+            until_waiting(&desktop, &mut events, &run).await;
+        }
         for (submission, text) in [("second", "continue"), ("third", "continue again")] {
             let reply = desktop
                 .command(chat(submission, text))
@@ -353,5 +354,143 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         extra_artifact_processes,
         lifetime_free_while_running,
         receipt_state,
+    }
+}
+
+/// What the product looked like after it was asked to restart in ways it must refuse.
+pub struct Refusals {
+    pub pid_before: i32,
+    pub pid_after: i32,
+    pub epoch_before: u64,
+    pub epoch_after: u64,
+    pub run: String,
+    /// One entry per refused request, in the order asked: how the core answered.
+    pub answers: Vec<String>,
+    /// The restart status after every refusal (no restart is under way).
+    pub phases_after: Vec<workbench_protocol::namespaces::lifecycle::RestartPhase>,
+    /// The run the follow-up reached, after the refusals.
+    pub follow_up_run: String,
+    pub extra_artifact_processes: usize,
+    pub provider_requests: usize,
+}
+
+/// The product is asked to restart with a stale target revision, a stale core
+/// epoch and a request that was not confirmed. None may start a restart: the
+/// core stays the same process and epoch, and the run goes on.
+pub fn drive_refusals(artifact: &ProductArtifact) -> Refusals {
+    use workbench_protocol::namespaces::lifecycle::{
+        LifecycleCommand,
+        restart::{RequestRestart, RestartCommand},
+    };
+    let env = IsolatedEnv::new();
+    let provider = MockProvider::scripted(vec![
+        ScriptedResponse::text_stream("turn-1", "mock-model", ["first"]),
+        ScriptedResponse::text_stream("turn-2", "mock-model", ["second"]),
+    ]);
+    env.write_product_config(&provider.base_url(), KEY_ENV);
+    let mut product = ProductLaunch::new(artifact, &env).start().unwrap();
+    let ready = product.wait_ready().expect("the product reports Ready");
+    let pid_before = product.pid();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (run, epoch_before, epoch_after, answers, phases_after, follow_up_run) =
+        runtime.block_on(async {
+            let desktop = connect(&ready.socket, "refusal-desktop", LocalSurface::Desktop).await;
+            let mut events = desktop
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: None,
+                })
+                .await
+                .unwrap();
+            let reply = desktop
+                .command(chat("first", "start the work"))
+                .await
+                .unwrap();
+            let run = reply.run_id.expect("a run").as_str().to_owned();
+            until_waiting(&desktop, &mut events, &run).await;
+            let admin_client = connect(&ready.socket, "refusal-cli", LocalSurface::Cli).await;
+            let admin = RestartAdmin::new(&admin_client);
+            let epoch_before = admin_client.server_hello().instance_epoch.0;
+            let targets = admin.targets().await.unwrap();
+            let base = |n: u32| {
+                plan_restart(
+                    &targets,
+                    &TargetSelector::Current,
+                    AdminId::new(format!("refusal-{n}")).unwrap(),
+                )
+                .unwrap()
+            };
+            let mut stale_revision = base(1);
+            stale_revision.target_revision =
+                workbench_protocol::wire::Revision(stale_revision.target_revision.get() + 1000);
+            let mut stale_epoch = base(2);
+            stale_epoch.expected_core_epoch =
+                workbench_protocol::wire::InstanceEpoch(stale_epoch.expected_core_epoch.get() + 1);
+            let unconfirmed = Command::Lifecycle(LifecycleCommand::Restart(
+                RestartCommand::Request(RequestRestart {
+                    binding: base(3),
+                    confirmed: false,
+                }),
+            ));
+            let proof = confirm(false, true, false).unwrap();
+            let mut answers = vec![];
+            let mut phases_after = vec![];
+            for command in [
+                request_restart(stale_revision, proof),
+                request_restart(stale_epoch, proof),
+                unconfirmed,
+            ] {
+                answers.push(match admin.send(command).await {
+                    Ok(receipt) => format!("accepted {:?}", receipt.outcome),
+                    Err(error) => format!("refused {error:?}"),
+                });
+                let status = admin.status().await.unwrap();
+                assert!(status.status.restart_id.is_none(), "{status:?}");
+                phases_after.push(status.status.phase);
+            }
+            let epoch_after = admin_client.server_hello().instance_epoch.0;
+            let reply = desktop
+                .command(chat("second", "continue"))
+                .await
+                .expect("the core that refused still serves the run");
+            let follow_up_run = reply.run_id.expect("a run").as_str().to_owned();
+            until_waiting(&desktop, &mut events, &run).await;
+            (
+                run,
+                epoch_before,
+                epoch_after,
+                answers,
+                phases_after,
+                follow_up_run,
+            )
+        });
+    let pid_after = product.pid();
+    let extra_artifact_processes = observe::descendants(pid_after)
+        .into_iter()
+        .filter(|p| {
+            p.exe
+                .as_deref()
+                .is_some_and(|exe| observe::same_file(exe, &artifact.path))
+        })
+        .count();
+    let provider_requests = provider.chat_requests().len();
+    let (report, footprint) = product.stop();
+    assert!(report.success(), "{:?} {}", report.status, report.stderr);
+    drop(env);
+    assert!(footprint.remains().is_empty());
+    Refusals {
+        pid_before,
+        pid_after,
+        epoch_before,
+        epoch_after,
+        run,
+        answers,
+        phases_after,
+        follow_up_run,
+        extra_artifact_processes,
+        provider_requests,
     }
 }
