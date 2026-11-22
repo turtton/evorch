@@ -477,10 +477,11 @@ async fn follow(
             if let Some(outcome) = settle(&view) {
                 return Ok(Step::Settled(outcome));
             }
-            if owns && let Some(run) = &view.owned_run {
-                if let Some(outcome) = asking.ask(&view, run).await? {
-                    return Ok(Step::Settled(outcome));
-                }
+            if owns
+                && let Some(run) = &view.owned_run
+                && let Some(outcome) = asking.ask(&view, run).await?
+            {
+                return Ok(Step::Settled(outcome));
             }
             Ok(Step::Pending)
         },
