@@ -1,5 +1,5 @@
 //! Test-only gates in the source's task. A test that installs a gate sees the
-//! task arrive at three points and can hold it there; a source without a gate
+//! task arrive at lifecycle points and can hold it there; a source without a gate
 //! has none of this code, and with the feature off it is not compiled at all.
 use super::Inner;
 use std::{future::Future, pin::Pin};
@@ -10,6 +10,8 @@ pub enum GatePoint {
     /// The subscription was accepted and the task admitted; the upstream is not
     /// taken yet.
     BeforeUpstream,
+    /// The last receiver left; retirement has not been committed yet.
+    NoReceivers,
     /// The task decided to stop and ended its channel (`None` is published);
     /// it is still registered.
     Retiring,
