@@ -32,7 +32,6 @@ evorch eval             normal  17c
 evorch event-bus        normal  19b
 evorch js-engine        normal  19b
 evorch mock-openai      dev     unassigned
-evorch recorder         normal  17
 evorch routing          normal  19b
 evorch runtime          normal  19b
 evorch sandbox          normal  19b
