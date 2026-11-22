@@ -106,11 +106,17 @@ timeout -k 30 900 scripts/guard-cargo.sh run -p evorch-core --release \
 
 ## Mutations (disposable checkout; code is not committed)
 
-Each is applied after the cell started the engines and must fail the cell for
-the intended reason; results are in the PR. Watcher disabled (the watchdog never
-fires: no exit 74 within the backstop). Guard removed (`Lease::force` / the
-group kill as a no-op: the root or the stopped members survive the worker's
-death). Navigation omitted (the fixture starts the engine but does not
-navigate: no `NAVIGATED`, or no fixture request / no memory observable). Also
-useful: the watchdog deadline shortened below ten seconds (the lower bound
-fails).
+Run locally on a disposable edit of the worktree (reverted with `git checkout`),
+each after the engines were running. A mutation counts only when the cell
+fails **for the intended reason**.
+
+| Mutation | Applied to | Cells | Observed failure |
+|---|---|---|---|
+| Watcher disabled (`watch` parks forever) | `evorch-core/src/lifecycle/shutdown_watchdog.rs` | `expiry_chromium_t`, `expiry_cef_t` | `exit 74 not observed` (30 s backstop after the signal) |
+| Guard removed (`Lease::signal` and `Lease::force` no-ops, resealed artifact) | `process-guard/src/guard.rs` | `expiry_chromium_t`, `expiry_chromium_stopped_t`, `expiry_cef_stopped_t` | `owned processes survived owner death: [pids]` |
+| Navigation omitted (engine started, no navigate / an empty page, and `NAVIGATED` printed anyway, so the worker's own read-back check is bypassed) | `core_browser_expiry/fixture.rs` | `expiry_chromium_t`, `expiry_cef_t` | Chromium: `the HTTPS fixture never received the request: []`; CEF: `no guard-owned member holds the page script's memory` |
+
+`expiry_cef_t` (natural) does **not** detect a removed guard: the real renderer
+exits by itself on IPC EOF and the helper children follow. It passed under that
+mutation, as `cef_p` does in B3-08; `expiry_cef_stopped_t` is the cell that
+detects it. This is stated, not hidden.
