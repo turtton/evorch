@@ -73,6 +73,18 @@ fn say(line: &str) {
     println!("{line}");
     std::io::stdout().flush().unwrap();
 }
+/// Extension point of tests/core_browser_expiry (B3-08b): a leaf that includes
+/// this module registers a fixture before `run`. It starts after bootstrap and
+/// before the stall is armed, owns real children through the worker, and is
+/// forgotten by the worker. Unset in every other includer (no-op).
+#[allow(dead_code)]
+pub(super) type FixtureFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Box<dyn std::any::Any + Send>, String>> + Send>,
+>;
+#[allow(dead_code)]
+pub(super) type FixtureStart = fn(fn(&str)) -> FixtureFuture;
+#[allow(dead_code)]
+pub(super) static OWNED_FIXTURE: std::sync::OnceLock<FixtureStart> = std::sync::OnceLock::new();
 pub(super) fn run(
     args: Vec<std::ffi::OsString>,
 ) -> Result<(), workbench_host::bootstrap::BootstrapError> {
@@ -272,6 +284,11 @@ async fn operate(
         })
         .await??;
         std::mem::forget(session);
+    }
+    if let Some(start) = OWNED_FIXTURE.get() {
+        // Never dropped: Drop would reap the children itself, while only the
+        // guard may do that after this process exits.
+        std::mem::forget(start(say).await?);
     }
     let _archive_hold = if case == "cold_stopped_join" {
         let (entered, seen) = tokio::sync::oneshot::channel();
