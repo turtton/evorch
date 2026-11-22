@@ -1,4 +1,4 @@
-//! Typed shell supervision: READY/output notifications, pidfd exits and virtual timeout.
+//! Typed shell supervision: READY/output notifications, pidfd exits and a real job timeout.
 use super::*;
 use sandbox::{CommandSpec, DirectSandbox};
 fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
@@ -48,21 +48,45 @@ fn stored_group(job: &Job) -> Option<JobGroup> {
         .clone()
 }
 
-async fn ready(job: &Job) {
+async fn ready(
+    job: &Job,
+    task: &mut tokio::task::JoinHandle<Result<Completion, crate::ToolError>>,
+) {
     let mut changed = job.changed.subscribe();
     loop {
         if job.state.lock().unwrap().output.text.contains("READY") {
             return;
         }
-        changed.changed().await.unwrap();
+        tokio::select! {
+            changed = changed.changed() => changed.unwrap(),
+            result = &mut *task => match result {
+                Ok(Ok(completion)) => panic!("supervisor ended before READY: {}", completion.status),
+                Ok(Err(error)) => panic!("supervisor failed before READY: {error}"),
+                Err(error) => panic!("supervisor task ended before READY: {error}"),
+            },
+        }
+    }
+}
+
+// Also runs on assertion / observation-bound failure: abort is not just a
+// dropped JoinHandle, and the registered typed capability stops the real peer.
+struct StopTestSupervisor {
+    job: Arc<Job>,
+    task: tokio::task::AbortHandle,
+}
+impl Drop for StopTestSupervisor {
+    fn drop(&mut self) {
+        self.job.cancel_now();
+        self.task.abort();
     }
 }
 
 // Given a real sh -c PTY caller, cancellation, timeout and abandonment must
 // use its typed stop capability; the waiter confirms a receipt before completion.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn pty_supervision_preserves_status_cancel_timeout_and_abandonment() {
     for action in ["exit", "signal", "eof", "cancel", "timeout", "abort"] {
+        eprintln!("PTY_SUPERVISION {action}: starting");
         let (mut job, input, cancel) = job();
         let ledger = sandbox::SpawnLedger::new();
         Arc::get_mut(&mut job).unwrap().ledger = Some(ledger.clone());
@@ -83,96 +107,110 @@ async fn pty_supervision_preserves_status_cancel_timeout_and_abandonment() {
             })
             .unwrap();
         let worker = job.clone();
-        // A large virtual deadline cannot expire while READY arrives from the
-        // external process: keep time advancing under explicit test control.
-        let task = tokio::spawn(async move {
+        let mut task = tokio::spawn(async move {
             run_pty(
                 &wrapped,
                 &worker,
                 input,
                 cancel,
                 if action == "timeout" {
-                    Some(Duration::from_secs(3600))
+                    Some(Duration::from_millis(200))
                 } else {
                     None
                 },
             )
             .await
         });
-        tokio::time::resume();
-        ready(&job).await;
-        tokio::time::pause();
-        let root = ledger.children()[0].leader.unwrap();
-        let death = process_guard_pidfd(root);
-        match action {
-            "exit" | "signal" | "eof" => {
-                let (result, received) = oneshot::channel();
-                job.input
-                    .send(Input {
-                        bytes: if action == "eof" {
-                            Vec::new()
-                        } else {
-                            b"finish\n".to_vec()
-                        },
-                        close: action == "eof",
-                        result,
-                    })
-                    .await
-                    .unwrap();
-                received.await.unwrap().unwrap();
-            }
-            "cancel" => job.cancel_now(),
-            "timeout" => tokio::time::advance(Duration::from_secs(3600)).await,
-            "abort" => task.abort(),
-            _ => unreachable!(),
-        }
-        if action == "abort" {
-            assert!(task.await.err().expect("aborted supervisor").is_cancelled());
-        } else {
-            let completion = task.await.unwrap().unwrap();
-            assert_eq!(
-                completion.status,
-                match action {
-                    "exit" | "signal" | "eof" => "failed",
-                    "cancel" => "cancelled",
-                    _ => "timed_out",
+        let _cleanup = StopTestSupervisor {
+            job: job.clone(),
+            task: task.abort_handle(),
+        };
+        // Real PTY IO and the product timeout both use real time. This fixed
+        // observation bound is failure-only (explicitly requested for this
+        // regression); it is not a readiness delay or product grace period.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            ready(&job, &mut task).await;
+            let root = ledger.children()[0].leader.unwrap();
+            eprintln!("PTY_SUPERVISION {action}: READY root={root}");
+            let death = process_guard_pidfd(root);
+            match action {
+                "exit" | "signal" | "eof" => {
+                    let (result, received) = oneshot::channel();
+                    job.input
+                        .send(Input {
+                            bytes: if action == "eof" {
+                                Vec::new()
+                            } else {
+                                b"finish\n".to_vec()
+                            },
+                            close: action == "eof",
+                            result,
+                        })
+                        .await
+                        .unwrap();
+                    received.await.unwrap().unwrap();
                 }
-            );
-            if ["exit", "signal", "eof"].contains(&action) {
-                assert_eq!(
-                    completion.exit_code,
-                    Some(match action {
-                        "signal" => 1,
-                        "eof" => 42,
-                        _ => 37,
-                    })
-                );
+                "cancel" => job.cancel_now(),
+                "timeout" => {} // Let the real 200 ms job deadline fire.
+                "abort" => task.abort(),
+                _ => unreachable!(),
             }
-        }
-        tokio::task::spawn_blocking(move || {
-            use std::os::fd::AsRawFd;
-            let mut fds = [libc::pollfd {
-                fd: death.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }];
-            loop {
-                let result = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
-                if result > 0 {
-                    break;
+            eprintln!("PTY_SUPERVISION {action}: action delivered");
+            if action == "abort" {
+                assert!(task.await.err().expect("aborted supervisor").is_cancelled());
+            } else {
+                let completion = task.await.unwrap().unwrap();
+                assert_eq!(
+                    completion.status,
+                    match action {
+                        "exit" | "signal" | "eof" => "failed",
+                        "cancel" => "cancelled",
+                        _ => "timed_out",
+                    }
+                );
+                if ["exit", "signal", "eof"].contains(&action) {
+                    assert_eq!(
+                        completion.exit_code,
+                        Some(match action {
+                            "signal" => 1,
+                            "eof" => 42,
+                            _ => 37,
+                        })
+                    );
                 }
-                assert_eq!(
-                    std::io::Error::last_os_error().kind(),
-                    std::io::ErrorKind::Interrupted
-                );
+                if action == "timeout" {
+                    assert!(completion.error.as_deref().unwrap().contains("200 ms"));
+                }
             }
+            eprintln!("PTY_SUPERVISION {action}: supervisor finished");
+            tokio::task::spawn_blocking(move || {
+                use std::os::fd::AsRawFd;
+                let mut fds = [libc::pollfd {
+                    fd: death.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                }];
+                loop {
+                    let result = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+                    if result > 0 {
+                        break;
+                    }
+                    assert_eq!(
+                        std::io::Error::last_os_error().kind(),
+                        std::io::ErrorKind::Interrupted
+                    );
+                }
+            })
+            .await
+            .unwrap();
+            ledger.reap_all_children().await.unwrap();
+            assert_eq!(ledger.child_stats().reaped, 1);
+            assert_eq!(ledger.child_stats().unconfirmed, 0);
+            assert!(stored_group(&job).unwrap().retired());
+            eprintln!("PTY_SUPERVISION {action}: receipt confirmed");
         })
         .await
-        .unwrap();
-        ledger.reap_all_children().await.unwrap();
-        assert_eq!(ledger.child_stats().reaped, 1);
-        assert_eq!(ledger.child_stats().unconfirmed, 0);
-        assert!(stored_group(&job).unwrap().retired());
+        .unwrap_or_else(|_| panic!("PTY_SUPERVISION {action}: 5 s observation bound exceeded"));
     }
 }
 fn process_guard_pidfd(pid: i32) -> std::os::fd::OwnedFd {

@@ -309,7 +309,7 @@ expiry, real CEF and performance gates remain B3; this is **not D-7 completion**
   status/decoder. EIO remains EOF, writer Drop sends EOT, shell PTY signal exits
   keep portable-pty's shell-facing code 1 (raw Unix status is retained by the
   owner). Job timeout starts at the same post-launch supervision point and its
-  meaning is unchanged. No new grace or deadline was added.
+  meaning is unchanged. No new product grace or deadline was added.
 - `FinalStatus` / ledger confirmation mean root reap and group-KILL submission,
   not all descendants' exit/reap. GuardLost remains an error and an unconfirmed
   ledger entry. Same-PGID descendants are covered; job-control/setsid/other-PGID
@@ -319,7 +319,7 @@ expiry, real CEF and performance gates remain B3; this is **not D-7 completion**
 - Focused coverage: `tests/owned_pty.rs` (isolated subreaper, native tty /
   foreground / resize / Ctrl-C / EOT, sh-c root and descendants, drop, GuardLost,
   errno/fence/openpty and reader/writer setup errors), private cancellation /
-  registration-unwind tests, shell status/cancel/virtual timeout/supervisor abort,
+  registration-unwind tests, shell status/cancel/real timeout/supervisor abort,
   and existing shell input / restart tests. Post-retirement descendant probes
   distinguish exit from a surviving ACK without timing assertions. No /dev/ptmx
   pathname identity or bash-only shell syntax is assumed.
@@ -338,7 +338,8 @@ passed 22 selected sandbox tests (20 existing direct-owner regressions plus
 PTY/cancellation controllers), 6 selected shell tests, scoped all-target clippy
 with warnings denied, formatting and diff checks. Other tests are delegated to CI.
 The PTY controller runs 13 isolated cases; these are not 13 real-core callers.
-Non-Linux execution and dash-specific runtime behavior were not tested locally.
+The 6 selected shell tests also passed with dash 0.5.12 as `sh`, as well as
+the normal bash environment. Non-Linux execution was not tested locally.
 
 Each helper mutation was rebuilt and sealed with its own compat; all mutations
 were restored. Each negative failed after the actual target had emitted READY:
@@ -351,8 +352,22 @@ were restored. Each negative failed after the actual target had emitted READY:
 | Omit foreground installation | Native READY reported target PGID different from foreground PGID |
 
 Isolated controller RAII reclaims observed processes on failure, including
-escaped-PGID children. No product fault flags or extra completion deadlines were
+escaped-PGID children. No product fault flags or product grace periods were
 introduced. The two former shell watcher tests used a busy loop, wall-clock
 polling and fixed completion timeouts; their same-group property is now checked
 by the native/sh-c controller and their shell cancel/status property by READY /
-pidfd-driven supervision tests (timeout itself uses virtual time).
+pidfd-driven supervision tests.
+
+The initial CI run exposed a hang in the new shell timeout test: real PTY IO
+was mixed with paused/advanced Tokio time. The old-head test was reproduced
+under dash with capture enabled and a temporary 10-second runner bound
+(TIMEOUT at 10.002 s). The correction removes the virtual clock entirely and
+passes a real 200 ms job timeout through the existing API. At the operator's
+explicit request this regression has a fixed, failure-only 5-second observation
+bound plus typed stop/task-abort cleanup, rather than waiting forever if the
+job deadline is broken. A temporary source-only missing-timeout negative failed
+at that assertion in 5.021 s (not the runner timeout) and exited; it was restored.
+All reproduction commands have a 300-second outer bound, use capture, and do not
+add a product fault hook. A grep survey also found existing mixed real-child /
+virtual model-wait tests in shell/job_tests.rs; those out-of-scope tests were
+left unchanged.
