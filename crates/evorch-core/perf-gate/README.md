@@ -69,10 +69,20 @@ between files fails the gate. Every failing cell is reported.
 `scripts/perf-gate.sh smoke` runs a shrunken, scope-less pass and writes
 `evidence: false` files that the aggregator rejects.
 
-## Known issue
+## Thread rotation (was "Known issue")
 
-A core run reaches `Failed` after roughly 20–43 turns on one thread when each
-turn calls a tool (`read`); text-only turns do not. This reproduces on A and B
-and is not diagnosed here. The runner rotates threads so every arm sees the
-same pattern; it does not hide the cause (`run-length` is the diagnostic
-subcommand).
+A run used to reach `Failed` after a few dozen turns on one thread. Two product
+limits explain it; neither is a bug the gate has to work around:
+
+- `BudgetExhausted max_file_rereads=20`: the same file read more than 20 times
+  (the `run-length` `read-small` mode, a diagnostic, not a gate cell).
+- `ContextWindowExhausted` (projected 201,617 > 200,000 at turn 43 of the
+  `read-big` mode). The runner's mock used the tool call id `call` for every call, so
+  compaction saw one group and had no safe cut. Every tool call id is now unique
+  (`call-<n>`), like a real provider's; with that, `read-big` completes 150 turns.
+
+Product limits are unchanged and the active agents read a different file every tick.
+The runner still rotates to a fresh thread every 20 turns (probes and agents, both
+arms, recorded in conditions.json as `thread_rotation`) so that compaction work is
+not an uncontrolled load in the measurement. The terminal reason is not shown by
+the UI (the protocol exposes only the `Failed` phase): a product follow-up.

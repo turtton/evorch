@@ -40,6 +40,9 @@ pub struct Mark {
 struct Shared {
     marks: Mutex<HashMap<String, Mark>>,
     served: Mutex<u64>,
+    /// Makes every tool call id unique, as a real provider does: the core groups tool
+    /// calls by id when it compacts.
+    calls: std::sync::atomic::AtomicU64,
     notify: Notify,
     commands: Vec<String>,
     project: String,
@@ -70,6 +73,7 @@ impl Provider {
         let shared = Arc::new(Shared {
             marks: Mutex::new(HashMap::new()),
             served: Mutex::new(0),
+            calls: std::sync::atomic::AtomicU64::new(0),
             notify: Notify::new(),
             commands,
             project: project.display().to_string(),
@@ -214,6 +218,12 @@ async fn write_json(stream: &mut TcpStream, body: &Value) -> io::Result<()> {
 
 fn reply(shared: &Shared, marker: Option<&str>, followup: bool) -> (ScriptedResponse, bool) {
     let text = |body: String| ScriptedResponse::text_stream("perf", "mock-model", [body]);
+    let call_id = format!(
+        "call-{}",
+        shared
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let Some(marker) = marker else {
         return (text("ok".into()), true);
     };
@@ -242,7 +252,7 @@ fn reply(shared: &Shared, marker: Option<&str>, followup: bool) -> (ScriptedResp
                     "perf",
                     "mock-model",
                     0,
-                    "call",
+                    &call_id,
                     "read",
                     [args.to_string()],
                 ),
@@ -261,7 +271,7 @@ fn reply(shared: &Shared, marker: Option<&str>, followup: bool) -> (ScriptedResp
                     "perf",
                     "mock-model",
                     0,
-                    "call",
+                    &call_id,
                     "read",
                     [args.to_string()],
                 ),
@@ -281,7 +291,7 @@ fn reply(shared: &Shared, marker: Option<&str>, followup: bool) -> (ScriptedResp
                     "perf",
                     "mock-model",
                     0,
-                    "call",
+                    &call_id,
                     "shell",
                     [args.to_string()],
                 ),

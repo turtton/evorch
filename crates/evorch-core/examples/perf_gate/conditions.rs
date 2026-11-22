@@ -170,6 +170,7 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
         },
         "stress_ng": get("stress-ng"),
         "fixtures": fixture::describe(&spec.state, &repo_commit),
+        "thread_rotation": {"turns_per_thread": super::arm::TURNS_PER_THREAD, "same_for_every_arm": true},
         "runner": {
             "exe_path": runner.display().to_string(),
             "sha256": sha256_file(&runner)?,
