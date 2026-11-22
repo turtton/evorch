@@ -13,6 +13,15 @@
 #   or contradictory job, a malformed or another run's response, and a listing
 #   longer than one page all fail the job (fail closed).
 #
+#   A response whose total_count differs from the length of its array, with
+#   total_count <= 100 and no Link rel="next", is not a second page: the two
+#   come from separate reads and can disagree while jobs or artifacts are still
+#   being created. Such a response decides nothing (no producer state, no
+#   artifact verdict); it is polled again inside the budget below, and a budget
+#   spent on it ends with a failure that names the count mismatch. The same
+#   goes for the artifacts response. total_count > 100 or a next link stays a
+#   hard failure.
+#
 #   Environment: GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_TOKEN (or GH_TOKEN),
 #   GITHUB_RUN_ATTEMPT (recorded only, never branched on), GITHUB_API_URL
 #   (default https://api.github.com), GITHUB_OUTPUT (optional).
@@ -144,6 +153,7 @@ backoff=$backoff_start
 next_wait=0
 last_remaining=unknown
 rate_limited=0
+count_mismatch='' # set while the latest response's total_count and array length disagree
 
 elapsed() { echo $(($(now) - start)); }
 
@@ -154,6 +164,15 @@ emit_outputs() { # key=value lines to GITHUB_OUTPUT
 fail_with() {
   log "giving up after $requests request(s), $(elapsed) s (consumer run_attempt=$attempt, rate_limited=$rate_limited, ratelimit_remaining=$last_remaining)"
   die "$1"
+}
+
+# A budget that ran out: when the latest response was a count mismatch, say so,
+# so that a persistent mismatch is not mistaken for a producer that never finished.
+budget_fail() { # <message>
+  if [[ -n "$count_mismatch" ]]; then
+    fail_with "$1 (the latest response was a count mismatch, never a consistent listing: $count_mismatch)"
+  fi
+  fail_with "$1"
 }
 
 header_value() { # <name> from the response header file; empty when absent
@@ -189,14 +208,14 @@ log "waiting for the '$producer_name' job of run $run_id (consumer run_attempt=$
 while true; do
   if ((next_wait > 0)); then
     remaining=$((deadline - $(now)))
-    ((remaining > 0)) || fail_with "the product artifact job did not succeed within ${deadline_seconds} s"
+    ((remaining > 0)) || budget_fail "the product artifact job did not succeed within ${deadline_seconds} s"
     if ((next_wait > remaining)); then next_wait=$remaining; fi
     run_interruptible sleep "$next_wait"
   fi
   remaining=$((deadline - $(now)))
   timeout=$request_timeout
   if ((remaining < timeout)); then timeout=$remaining; fi
-  ((timeout >= 1)) || fail_with "the product artifact job did not succeed within ${deadline_seconds} s"
+  ((timeout >= 1)) || budget_fail "the product artifact job did not succeed within ${deadline_seconds} s"
 
   requests=$((requests + 1))
   : > "$tmp/headers"
@@ -275,15 +294,24 @@ while true; do
       || fail_with "the artifacts response is malformed or belongs to another run"
     total=$(jq -r '.total_count' "$tmp/body")
     listed=$(jq -r '.artifacts | length' "$tmp/body")
-    if ((total > 100)) || ((listed != total)) || [[ "$(header_value link)" == *'rel="next"'* ]]; then
+    if ((total > 100)) || [[ "$(header_value link)" == *'rel="next"'* ]]; then
       fail_with "the run has more artifacts ($total) than one page lists ($listed); this script supports one page"
     fi
-    named=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name)] | length' "$tmp/body")
-    live=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | length' "$tmp/body")
-    log "request $requests: $named artifact(s) named '$artifact_name', $live not expired"
-    ((named == 1)) || fail_with "run $run_id holds $named artifacts named '$artifact_name', expected exactly 1 (a leftover of an earlier attempt, or the producer's upload is missing)"
-    ((live == 1)) || fail_with "the '$artifact_name' artifact of run $run_id has expired"
-    finish_waiting
+    if ((listed != total)); then
+      # Not a second page: total_count and the array come from separate reads
+      # and can disagree for a moment. Decide nothing from this response, poll again.
+      count_mismatch="$listed of $total artifacts listed"
+      log "request $requests: count mismatch, $count_mismatch; not a second page, asking again"
+      outcome=retry
+    else
+      count_mismatch=''
+      named=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name)] | length' "$tmp/body")
+      live=$(jq -r --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | length' "$tmp/body")
+      log "request $requests: $named artifact(s) named '$artifact_name', $live not expired"
+      ((named == 1)) || fail_with "run $run_id holds $named artifacts named '$artifact_name', expected exactly 1 (a leftover of an earlier attempt, or the producer's upload is missing)"
+      ((live == 1)) || fail_with "the '$artifact_name' artifact of run $run_id has expired"
+      finish_waiting
+    fi
   fi
 
   if [[ "$outcome" == parse ]]; then
@@ -297,9 +325,22 @@ while true; do
       || fail_with "the jobs response is malformed or belongs to another run"
     total=$(jq -r '.total_count' "$tmp/body")
     listed=$(jq -r '.jobs | length' "$tmp/body")
-    if ((total > 100)) || ((listed != total)) || [[ "$(header_value link)" == *'rel="next"'* ]]; then
+    if ((total > 100)) || [[ "$(header_value link)" == *'rel="next"'* ]]; then
       fail_with "the run has more jobs ($total) than one page lists ($listed); this script supports one page of at most 100 jobs"
     fi
+    if ((listed != total)); then
+      # Not a second page: total_count and the array come from separate reads
+      # and can disagree for a moment (jobs still being created). The producer's
+      # state is not decided from such a response; poll again.
+      count_mismatch="$listed of $total jobs listed"
+      log "request $requests: count mismatch, $count_mismatch; not a second page, asking again"
+      outcome=retry
+    else
+      count_mismatch=''
+    fi
+  fi
+
+  if [[ "$outcome" == parse ]]; then
     matches=$(jq -c --arg name "$producer_name" '[.jobs[] | select(.name == $name)]' "$tmp/body")
     case "$(jq -r 'length' <<< "$matches")" in
       0) log "request $requests: '$producer_name' is not listed yet" ;;
@@ -337,8 +378,8 @@ while true; do
     outcome=retry
   fi
 
-  ((requests < max_requests)) || fail_with "the product artifact job did not succeed within $max_requests requests"
-  (($(now) < deadline)) || fail_with "the product artifact job did not succeed within ${deadline_seconds} s"
+  ((requests < max_requests)) || budget_fail "the product artifact job did not succeed within $max_requests requests"
+  (($(now) < deadline)) || budget_fail "the product artifact job did not succeed within ${deadline_seconds} s"
   next_wait=$(gap_before $((requests + 1)))
   if ((wait_for > next_wait)); then next_wait=$wait_for; fi
 done
