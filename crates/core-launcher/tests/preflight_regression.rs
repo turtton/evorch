@@ -77,7 +77,7 @@ fn runtime() -> tokio::runtime::Runtime {
 /// pidfd. Rows run one at a time (`SERIAL`), so one registry serves them all.
 type Registered = Vec<(&'static str, OwnedFd)>;
 static REGISTRY: Mutex<Registered> = Mutex::new(Vec::new());
-static LEFT_ALIVE: AtomicBool = AtomicBool::new(false);
+static LEFT_BEHIND: AtomicBool = AtomicBool::new(false);
 fn registry() -> std::sync::MutexGuard<'static, Registered> {
     REGISTRY.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -92,7 +92,7 @@ fn run(test: impl std::future::Future<Output = ()>) {
 }
 fn run_locked(test: impl std::future::Future<Output = ()>) {
     registry().clear();
-    LEFT_ALIVE.store(false, Ordering::SeqCst);
+    LEFT_BEHIND.store(false, Ordering::SeqCst);
     let runtime = runtime();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         runtime.block_on(async {
@@ -103,10 +103,10 @@ fn run_locked(test: impl std::future::Future<Output = ()>) {
         })
     }));
     runtime.shutdown_background();
-    if LEFT_ALIVE.load(Ordering::SeqCst) {
-        eprintln!("the cleanup left registered processes alive (killed by the backstop)");
+    if LEFT_BEHIND.load(Ordering::SeqCst) {
+        eprintln!("the cleanup left processes behind (see the backstop output)");
         if result.is_ok() {
-            panic!("the cleanup left registered processes alive");
+            panic!("the cleanup left processes behind");
         }
     }
     if let Err(panic) = result {
@@ -269,9 +269,39 @@ fn children() -> Vec<i32> {
 /// Kills and reaps every child of this process, repeatedly: killing a parent
 /// hands its children to this subreaper, which the next pass then finds. The
 /// listed number is only a candidate. The pidfd is opened first and the parent
-/// is re-read, so a number reused by a stranger is never signalled. The whole
-/// cleanup has one absolute deadline: a child that survives SIGKILL is reported
-/// and left to `Backstop`, never waited for forever.
+/// is re-read, so a number reused by a stranger is never signalled. One absolute
+/// deadline bounds the whole call: a child that survives SIGKILL is reported and
+/// never waited for forever. Returns whether no child is left.
+fn kill_and_reap_children(until: std::time::Instant) -> bool {
+    let me = std::process::id() as i32;
+    loop {
+        let candidates = children();
+        if candidates.is_empty() {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            eprintln!("cleanup gave up on children {candidates:?}");
+            return false;
+        }
+        for pid in candidates {
+            let Ok(fd) = pidfd_open(pid) else { continue };
+            if proc_ppid(pid).ok() != Some(me) {
+                continue;
+            }
+            match pidfd_send(&fd, libc::SIGKILL) {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(e) => eprintln!("cleanup: SIGKILL of {pid} failed: {e}"),
+            }
+            if pidfd_wait_exit_blocking(&fd, until) {
+                let _ = pidfd_reap_child(&fd);
+            } else {
+                eprintln!("cleanup: {pid} did not terminate");
+            }
+        }
+        std::thread::yield_now();
+    }
+}
 struct Cleanup;
 impl Cleanup {
     fn assert_nothing_left(&self) {
@@ -281,50 +311,43 @@ impl Cleanup {
 }
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let me = std::process::id() as i32;
-        let until = std::time::Instant::now() + BOUND;
-        loop {
-            let candidates = children();
-            if candidates.is_empty() {
-                return;
-            }
-            if std::time::Instant::now() >= until {
-                eprintln!("cleanup gave up on children {candidates:?}");
-                return;
-            }
-            for pid in candidates {
-                let Ok(fd) = pidfd_open(pid) else { continue };
-                if proc_ppid(pid).ok() != Some(me) {
-                    continue;
-                }
-                match pidfd_send(&fd, libc::SIGKILL) {
-                    Ok(()) => {}
-                    Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
-                    Err(e) => eprintln!("cleanup: SIGKILL of {pid} failed: {e}"),
-                }
-                if pidfd_wait_exit_blocking(&fd, until) {
-                    let _ = pidfd_reap_child(&fd);
-                } else {
-                    eprintln!("cleanup: {pid} did not terminate");
-                }
-            }
-            std::thread::yield_now();
-        }
+        kill_and_reap_children(std::time::Instant::now() + BOUND);
     }
 }
 
 /// Independent of `Cleanup`: after it, kills every registered process that is
-/// still alive, through the pidfd taken at registration, and remembers that it
-/// had to.
+/// still alive through the pidfd taken at registration, waits for each to
+/// terminate and reaps it, then reaps what that left behind (adopted
+/// descendants), all within one absolute deadline. Anything alive, unreaped or
+/// left as a child afterwards is printed and fails the test. It holds the
+/// registry until it is done; the row's serialisation lock outlives it.
 struct Backstop;
 impl Drop for Backstop {
     fn drop(&mut self) {
-        for (name, fd) in registry().iter() {
+        let until = std::time::Instant::now() + BOUND;
+        let registered = registry();
+        for (name, fd) in registered.iter() {
             if !pidfd_exited(fd) {
                 eprintln!("backstop: {name} still alive after the cleanup");
-                LEFT_ALIVE.store(true, Ordering::SeqCst);
+                LEFT_BEHIND.store(true, Ordering::SeqCst);
                 let _ = pidfd_send(fd, libc::SIGKILL);
             }
+        }
+        for (name, fd) in registered.iter() {
+            if !pidfd_wait_exit_blocking(fd, until) {
+                eprintln!("backstop: {name} did not terminate");
+                LEFT_BEHIND.store(true, Ordering::SeqCst);
+                continue;
+            }
+            let _ = pidfd_reap_child(fd);
+        }
+        if !kill_and_reap_children(until) {
+            LEFT_BEHIND.store(true, Ordering::SeqCst);
+        }
+        let left = children();
+        if !left.is_empty() {
+            eprintln!("backstop: children left behind {left:?}");
+            LEFT_BEHIND.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -556,6 +579,7 @@ fn hold_control_write_end(
 async fn core_death(control_stays_open: bool) {
     for behavior in BEHAVIORS {
         let env = Env::new(behavior);
+        let started = std::time::Instant::now();
         // Not tokio's Command: no kill-by-number on drop. `Cleanup` owns failures.
         let host = std::process::Command::new(fixture())
             .args(["--probe-host", "--target"])
@@ -588,6 +612,7 @@ async fn core_death(control_stays_open: bool) {
         .unwrap();
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{behavior}");
         tree.assert_all_terminated().await;
+        assert_before_probe_deadline(started);
         // The orphaned supervisor is ours now (or the dead core's waiter thread
         // reaped it first). It reaps its own descendants before it exits.
         pidfd_reap_child(tree.get("supervisor")).unwrap();
@@ -727,8 +752,9 @@ fn a_row_failing_midway_leaves_no_descendant_behind() {
         .downcast::<&str>()
         .unwrap();
     assert!(message.starts_with("simulated failure"), "{message}");
+    assert!(children().is_empty(), "children left behind");
     assert!(
-        !LEFT_ALIVE.load(Ordering::SeqCst),
+        !LEFT_BEHIND.load(Ordering::SeqCst),
         "the cleanup left part of the tree alive"
     );
     let witnesses = registry();
