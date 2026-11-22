@@ -147,7 +147,7 @@ residual boundary, not a safety claim for arbitrary ELF execution.
 
 > B3-09 did not implement this scaffold as written. A dry run showed the CPU-limited scope, stress-ng
 > and 2/5 ms deltas could not run, and the user reduced the check to an order-of-magnitude one on
-> an idle host (`perf-gate/spec.json`, `perf-gate/README.md`): `p50(B*) <= 1.5 * p50(A)`,
+> a fixed host with no artificial load (`perf-gate/spec.json`, `perf-gate/README.md`): `p50(B*) <= 1.5 * p50(A)`,
 > ForceKill p99 < 1 s and guard PSS. The JSON below stays a B1-era template and its limits and
 > delta gates are **not** claims.
 

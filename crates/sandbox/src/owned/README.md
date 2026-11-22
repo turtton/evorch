@@ -447,9 +447,9 @@ by the independent review and acceptance, not by this README.**
 | #773 (976b3696) | B3-07 expiry | Real ten-second expiry, exit 74, owned-child reaping in a **release test binary** | Product ELF expiry (5a-V T3) |
 | #772, #775 | B3-08/08b real Chromium/CEF | Real core SIGKILL and expiry after real navigation, Chromium and CEF separately | Escaped Crashpad helpers |
 
-Per-PR mutation tables (target, mutation, observed failure) are in each PR body; B3-09's
-aggregation of them with target commits and failure evidence is an operations record kept in
-`docs/`, separate from this code change.
+Per-PR mutation tables (target, mutation, observed failure) are in each PR body. This section is
+only an index to those PR bodies: **an aggregated record of the mutations (with target commits and
+failure evidence) has not been created.**
 
 ### Residual spawns and out-of-scope list
 
@@ -465,7 +465,8 @@ Runner, fixtures, aggregator and the frozen spec live in `crates/evorch-core/per
 README), `examples/perf_gate/`, `shared-test-support/perf_gate/` and `scripts/perf-gate.sh`.
 Measurement code is outside every product path. After a dry run showed the original CPU-limited
 scope gate could not run (a round did not fit 600 s and the A-versus-A noise was hundreds of
-milliseconds), the user reduced it to an **order-of-magnitude check** on an idle fixed host:
+milliseconds), the user reduced it to an **order-of-magnitude check** on a fixed host with no
+artificial load (the host was a desktop, not idle; what ran alongside is recorded in conditions.json):
 shell RTT `p50(B*) <= 1.5 * p50(A)` per workload (50 ABAB pairs, one round), ForceKill p99 < 1 s
 (200 samples) and guard PSS (100 guards, 180 s, median ≤ 4 MiB, p95 ≤ 8 MiB). It supports no
 millisecond-level claim. The measured result, its conditions and the raw-data paths are recorded

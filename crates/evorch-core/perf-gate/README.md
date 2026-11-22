@@ -20,9 +20,10 @@ build, not a toggled one.
 
 ## What is measured
 
-One round, on an otherwise idle fixed host. No cgroup scope, no stress-ng, no C arm. The host
-state (load average, top CPU users, kernel, CPU, governor, memory) is recorded in conditions.json
-and the load average again in the observations file.
+One round on a fixed host with no artificial load: no cgroup scope, no stress-ng, no C arm. The
+host was **not** otherwise idle (a desktop session, load average about 6 of 24 CPUs): what ran at
+the same time and the load average (kernel, CPU, governor, memory too) are recorded in
+conditions.json, and the load average again in the observations file.
 
 - **Arms.** A = `b420a684` (the parent of B1 `d39d2074`, #720: guard not yet introduced). B\* = A
   plus the ten B commits cherry-picked in order (`d39d2074 66848cb6 b846cc81 6e60d280 3769675d
@@ -62,7 +63,7 @@ used (no outlier is removed), and rounds are judged one by one and never pooled
 
 1. Build both arms; write conditions with `scripts/perf-gate.sh conditions` (once, before any
    sample).
-2. `scripts/perf-gate.sh run DIR --runner EXE --a-exe X --b-exe Y` on the idle host. The round is
+2. `scripts/perf-gate.sh run DIR --runner EXE --a-exe X --b-exe Y` on the fixed host (no artificial load; record what else runs). The round is
    measured once and never repeated; a failed or timed-out round is recorded as failed.
 3. `scripts/perf-gate.sh aggregate DIR` writes `summary.json` and the CSVs; raw samples stay in
    the round files.
@@ -87,6 +88,15 @@ still rotates to a fresh thread every 20 turns (probes and agents, both arms, re
 conditions.json) so that compaction work is not an uncontrolled load in the measurement. The
 terminal reason is not shown by the UI (the protocol exposes only the `Failed` phase): a product
 follow-up.
+
+## Spec digest of the recorded measurement
+
+The measurement's conditions.json carries `spec_sha256`
+`95880c7c338df12454e6170cbb44245261f32d94a571965407d6fbcf64968d22`: the digest of
+`perf-gate/spec.json` as committed in `034ced28` (`git show 034ced28:crates/evorch-core/perf-gate/spec.json`),
+before the measurement. A later commit reworded only the `source` text of spec.json (the numbers
+are identical), so the digest of the current file (`76780fe3ae4d6fc6300822b860e8c755e0a82dbd0fcaa0458cabac77a82b02fe`) differs and `aggregate` run with a newer build on the
+recorded round files reports a spec mismatch by design; re-aggregate with that commit's spec.
 
 ## Result
 

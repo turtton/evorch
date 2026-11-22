@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # D-3a2 B3-09 performance check driver (the reduced, order-of-magnitude scope).
-# Build both arms first, then, on an idle fixed host:
+# Build both arms first, then, on a fixed host with no artificial load:
 #
 #   scripts/perf-gate.sh conditions DIR  --runner EXE --a-exe X --a-sha S --a-tree T --a-recipe R \
 #                                        --b-exe Y --b-sha S --b-tree T --b-recipe R [--a-note N --b-note N]
@@ -9,7 +9,7 @@
 #   scripts/perf-gate.sh smoke      DIR  --runner EXE --a-exe X --b-exe Y     (evidence=false)
 #
 # No cgroup scope, no stress-ng and no load other than the fixture's own core
-# state: the host must be otherwise idle, and its state is recorded in
+# state: what else runs on the host is not controlled, but it is recorded in
 # conditions.json (load average, top CPU users) and again in the observations
 # file at the start of the round. The round is measured once and is never
 # repeated: a failed or timed out round is recorded as failed and fails the

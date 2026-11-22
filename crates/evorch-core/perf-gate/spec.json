@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "source": "Reduced scope approved by the user (question-41eda9b4579b24b09e86a96a7e751928): an order-of-magnitude check on an idle fixed host, no cgroup scope, no stress-ng, no C arm. Values are fixed before any measurement; changing one needs the parent's approval before results are seen.",
+  "source": "Reduced scope approved by the user (question-41eda9b4579b24b09e86a96a7e751928): an order-of-magnitude check on a fixed host with no artificial load (no cgroup scope, no stress-ng, no C arm); whatever else ran at the same time and the load average are recorded in conditions.json. Values are fixed before any measurement; changing one needs the parent's approval before results are seen.",
   "rounds": 1,
   "round_timeout_secs": 900,
   "warmup_per_arm": 5,

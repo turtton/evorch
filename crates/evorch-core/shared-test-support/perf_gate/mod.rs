@@ -4,7 +4,7 @@
 //! rules that decide pass/fail are unit-tested apart from the runner
 //! (tests/perf_gate_aggregate.rs) and the runner cannot soften them.
 //!
-//! This is an order-of-magnitude check on an otherwise idle fixed host, not a
+//! This is an order-of-magnitude check on a fixed host with no artificial load, not a
 //! latency gate (the parent's reduced scope, question-41eda9b4579b24b09e86a96a7e751928):
 //! - shell RTT per workload: `p50(B*) <= 1.5 * p50(A)` on integers; the paired
 //!   differences and both delta definitions are recorded and never decide;
