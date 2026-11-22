@@ -11,7 +11,7 @@
 //! |---|---|---|---|
 //! | `conversation` | `resolve_project`, `create_execution`, `create_goal`, `prepare_existing_thread`, `upload_image`, `discard_attachment`, `send_chat`, `continue_chat`, `compact_chat`, `deliver_follow_ups_next_turn`, `withdraw_follow_up` | `get_input_receipts`, `read_committed_history` | `input_receipt_changed`, `message_committed` |
 //! | `workspace` | - | `list_projects`, `list_threads`, `get_thread` | `thread_changed` |
-//! | `execution` | `stop_chat`, `stop_run`, `submit_goal`, `set_goal_review`, `set_goal_checks_paused`, `set_agent_web_tools_enabled` | `list_runs` | `run_changed` |
+//! | `execution` | `stop_chat`, `stop_run`, `submit_goal`, `set_goal_review`, `set_goal_checks_paused`, `set_agent_web_tools_enabled`, `start_invocation`, `end_invocation` | `list_runs`, `get_invocation` | `run_changed` |
 //! | `questions` | `answer_user_question` | `list_questions` | `question_changed` |
 //! | `approvals` | `decide_tool_approval` | `list_approvals`, `get_approval_input` | `approval_changed` |
 //! | `lanes` | `manage_lane`, `close_lane` | `get_lane_management`, `list_lanes`, `get_lane`, `get_lane_close_preview` | `lane_changed` |

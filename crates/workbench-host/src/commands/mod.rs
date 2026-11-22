@@ -14,6 +14,8 @@
 mod chat;
 mod compaction;
 mod goal;
+mod invocation;
+pub(crate) use invocation::InvocationRun;
 mod lanes;
 mod question;
 mod recovery;
@@ -78,7 +80,8 @@ impl ThreadBindings {
 /// Executes [`HostCommand`]s against one runtime.
 pub struct CommandService {
     restart_gate: crate::bootstrap::restart::HostRestartGate,
-    restart_stop: Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>>,
+    restart_stop: crate::invocations::StopSlot,
+    invocations: Arc<crate::invocations::InvocationRegistry>,
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
@@ -99,9 +102,18 @@ pub struct CommandService {
 impl CommandService {
     /// A service over `runtime`, spawning its async work on `handle`.
     pub fn new(runtime: AgentRuntime, handle: tokio::runtime::Handle) -> Self {
+        let restart_gate = crate::bootstrap::restart::HostRestartGate::default();
+        let restart_stop = crate::invocations::StopSlot::default();
+        let invocations = crate::invocations::InvocationRegistry::new(
+            runtime.clone(),
+            handle.clone(),
+            restart_stop.clone(),
+            restart_gate.clone(),
+        );
         Self {
-            restart_gate: Default::default(),
-            restart_stop: None,
+            restart_gate,
+            restart_stop,
+            invocations,
             event_bus: None,
             team_writer: None,
             memory_config: None,
@@ -179,20 +191,24 @@ impl CommandService {
     pub fn restart_stop_handler(
         &self,
     ) -> Option<Arc<dyn crate::bootstrap::restart::RestartStopHandler>> {
-        self.restart_stop.clone()
+        self.restart_stop.get()
     }
     pub fn set_restart_stop_handler(
         &mut self,
         handler: Arc<dyn crate::bootstrap::restart::RestartStopHandler>,
     ) {
-        self.restart_stop = Some(handler);
+        self.restart_stop.set(handler);
+    }
+    /// The CLI invocations this host serves (see [`crate::invocations`]).
+    pub fn invocations(&self) -> &Arc<crate::invocations::InvocationRegistry> {
+        &self.invocations
     }
     pub(crate) fn stop_for_host(
         &self,
         run: RunId,
         scope: runtime::StopScope,
     ) -> Result<(), runtime::RuntimeError> {
-        match &self.restart_stop {
+        match self.restart_stop.get() {
             Some(handler) => handler.stop(run, scope),
             None => self.runtime.stop(run, scope),
         }

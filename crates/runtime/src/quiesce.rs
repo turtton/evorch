@@ -20,7 +20,8 @@ mod recovery_cache_tests;
 mod restart;
 mod stop_boundary;
 pub use host_restart::{
-    CommandAccess, HostCommandPermit, HostRestartGate, HostRestartPhase, SealedRestart,
+    CommandAccess, HostCommandPermit, HostInvocationLease, HostRestartGate, HostRestartPhase,
+    InvocationBlock, SealedRestart,
 };
 pub use stop_boundary::{StopBoundary, StopDelivery};
 pub(crate) mod runtime;

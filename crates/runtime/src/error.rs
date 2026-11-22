@@ -19,6 +19,10 @@ pub enum RuntimeError {
     },
     #[error("runtime is busy preparing restart; retry the manual continuation after cancellation")]
     RestartBusy,
+    #[error(
+        "restart refused: {running} CLI invocation(s) are running and a restart cannot carry them over yet; wait for them to finish or stop them, then retry"
+    )]
+    RestartRefusedByInvocations { running: usize },
     #[error("cannot withdraw follow-up: {0}")]
     FollowUpWithdrawal(#[from] crate::runtime::FollowUpWithdrawalError),
     #[error("review evidence for {run_id} is unavailable: {reason}")]

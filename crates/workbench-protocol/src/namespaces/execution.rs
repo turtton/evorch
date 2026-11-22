@@ -14,7 +14,12 @@ use crate::{
     wire::{Revision, Sequence, UnixMillis},
 };
 use serde::{Deserialize, Serialize};
+pub mod invocation;
 pub mod plan;
+pub use invocation::{
+    EndInvocation, GetInvocation, InvocationEnded, InvocationStarted, InvocationView,
+    StartInvocation,
+};
 
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "stop_chat",
@@ -23,6 +28,8 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "set_goal_review",
     "set_goal_checks_paused",
     "set_agent_web_tools_enabled",
+    "start_invocation",
+    "end_invocation",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "list_runs",
@@ -33,6 +40,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "read_conversation_plan_tree",
     "get_conversation_plan_task",
     "read_conversation_plan_history",
+    "get_invocation",
 ];
 pub const EVENT_TYPES: &[&str] = &[
     "run_changed",
@@ -265,6 +273,8 @@ pub enum ExecutionCommand {
     SetGoalReview(SetGoalReview),
     SetGoalChecksPaused(SetGoalChecksPaused),
     SetAgentWebToolsEnabled(SetAgentWebToolsEnabled),
+    StartInvocation(StartInvocation),
+    EndInvocation(EndInvocation),
 }
 
 impl ExecutionCommand {
@@ -275,8 +285,10 @@ impl ExecutionCommand {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::SubmitGoal(goal) => goal.validate(),
+            Self::StartInvocation(start) => start.validate(),
             Self::StopChat(_)
             | Self::StopRun(_)
+            | Self::EndInvocation(_)
             | Self::SetGoalReview(_)
             | Self::SetGoalChecksPaused(_)
             | Self::SetAgentWebToolsEnabled(_) => Ok(()),
@@ -284,7 +296,17 @@ impl ExecutionCommand {
     }
 }
 
-no_results!(ExecutionResult);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ExecutionResult {
+    InvocationStarted(InvocationStarted),
+    InvocationEnded(InvocationEnded),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -305,6 +327,7 @@ pub enum ExecutionQuery {
     ReadConversationPlanTree(plan::PlanTreeQuery),
     GetConversationPlanTask(plan::PlanTaskQuery),
     ReadConversationPlanHistory(plan::PlanHistoryQuery),
+    GetInvocation(GetInvocation),
 }
 
 impl ExecutionQuery {
@@ -317,6 +340,7 @@ impl ExecutionQuery {
             Self::ListRuns(q) => q.page.validate(),
             Self::ListRunDetails(q) => q.page.validate(),
             Self::GetRun(_) | Self::GetThreadExecution(_) | Self::GetConversationPlan(_) => Ok(()),
+            Self::GetInvocation(_) => Ok(()),
             Self::ReadConversationPlanTree(q) => {
                 plan::limit(q.limit, 100)?;
                 q.cursor
@@ -345,6 +369,7 @@ pub enum ExecutionReply {
     ConversationPlanTree(Box<plan::PlanTreePage>),
     ConversationPlanTask(Box<plan::PlanTaskRead>),
     ConversationPlanHistory(Box<plan::PlanHistoryPage>),
+    Invocation(Box<InvocationView>),
 }
 
 impl ExecutionReply {
@@ -358,6 +383,7 @@ impl ExecutionReply {
             Self::ConversationPlanTree(v) => v.validate(),
             Self::ConversationPlanTask(v) => v.validate(),
             Self::ConversationPlanHistory(v) => v.validate(),
+            Self::Invocation(v) => v.validate(),
         }
     }
 }

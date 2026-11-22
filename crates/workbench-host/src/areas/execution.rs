@@ -111,6 +111,12 @@ impl ExecutionArea {
             ExecutionQuery::GetThreadExecution(target) => ExecutionReply::ThreadExecution(
                 Box::new(thread_execution(runtime, &target.thread)?),
             ),
+            ExecutionQuery::GetInvocation(_) => {
+                return Err(error(
+                    ErrorCode::InvalidRequest,
+                    "answered by the invocation registry",
+                ));
+            }
             ExecutionQuery::GetConversationPlan(_)
             | ExecutionQuery::ReadConversationPlanTree(_)
             | ExecutionQuery::GetConversationPlanTask(_)

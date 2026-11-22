@@ -94,9 +94,11 @@ pub(super) fn command_access(
         )
         | Command::Questions(_)
         | Command::Approvals(_) => CommandAccess::ExistingInput,
-        Command::Execution(ExecutionCommand::StopChat(_) | ExecutionCommand::StopRun(_)) => {
-            CommandAccess::Stop
-        }
+        Command::Execution(
+            ExecutionCommand::StopChat(_)
+            | ExecutionCommand::StopRun(_)
+            | ExecutionCommand::EndInvocation(_),
+        ) => CommandAccess::Stop,
         Command::Lifecycle(workbench_protocol::namespaces::LifecycleCommand::Restart(
             workbench_protocol::namespaces::lifecycle::restart::RestartCommand::Cancel(_),
         )) => CommandAccess::Stop,

@@ -188,6 +188,16 @@
     },
     "type": "conversation"
   },
+  "execution/end_invocation": {
+    "payload": {
+      "payload": {
+        "invocation": "inv-1",
+        "reason": "interrupted"
+      },
+      "type": "end_invocation"
+    },
+    "type": "execution"
+  },
   "execution/set_agent_web_tools_enabled": {
     "payload": {
       "payload": {
@@ -216,6 +226,18 @@
         "thread": "thr-1"
       },
       "type": "set_goal_review"
+    },
+    "type": "execution"
+  },
+  "execution/start_invocation": {
+    "payload": {
+      "payload": {
+        "invocation": "inv-1",
+        "project_root": "/work/project",
+        "prompt": "fix the failing test",
+        "role": "worker"
+      },
+      "type": "start_invocation"
     },
     "type": "execution"
   },

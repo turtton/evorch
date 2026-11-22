@@ -49,6 +49,8 @@ const COMMAND_NAMESPACE = {
   set_goal_review: "execution",
   set_goal_checks_paused: "execution",
   set_agent_web_tools_enabled: "execution",
+  start_invocation: "execution",
+  end_invocation: "execution",
   answer_user_question: "questions",
   decide_tool_approval: "approvals",
   manage_lane: "lanes",

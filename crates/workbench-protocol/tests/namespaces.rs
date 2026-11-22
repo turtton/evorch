@@ -144,6 +144,8 @@ fn each_operation_asks_for_the_capability_it_always_asked_for() {
         ("execution/set_goal_review", Commands),
         ("execution/set_goal_checks_paused", Commands),
         ("execution/set_agent_web_tools_enabled", Commands),
+        ("execution/start_invocation", Commands),
+        ("execution/end_invocation", Commands),
         ("questions/answer_user_question", Questions),
         ("approvals/decide_tool_approval", Approvals),
         ("lanes/manage_lane", Commands),
