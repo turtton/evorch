@@ -125,6 +125,38 @@ pub async fn snapshot(
     snapshot_delivering(client, subscription)
         .await
         .map(|(cache, _)| cache)
+        .map_err(|fault| fault.to_string())
+}
+
+/// Why a snapshot was not read.
+enum SnapshotFault {
+    /// It did not settle; a resync may.
+    Failed(String),
+    /// The core ended the subscription while it was paged: what had arrived so
+    /// far, the ending last. It is the core's own word (its goodbye, the evidence
+    /// of a restart) and must reach the caller, not be dropped as a snapshot error.
+    Ended(Vec<EventEnvelope>),
+}
+
+impl std::fmt::Display for SnapshotFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => f.write_str(error),
+            Self::Ended(_) => f.write_str("snapshot stream requires resync"),
+        }
+    }
+}
+
+impl From<String> for SnapshotFault {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for SnapshotFault {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.into())
+    }
 }
 
 /// [`snapshot`], and the events that arrived while it was being read and apply
@@ -132,7 +164,7 @@ pub async fn snapshot(
 async fn snapshot_delivering(
     client: &WorkbenchClient,
     subscription: &mut Subscription,
-) -> Result<(Cache, Vec<UiEvent>), String> {
+) -> Result<(Cache, Vec<UiEvent>), SnapshotFault> {
     let started = subscription.started().clone();
     let mut cache = Cache::default();
     let Some(id) = started.snapshot_id else {
@@ -167,7 +199,10 @@ async fn snapshot_delivering(
                 reply = &mut next => break reply.map_err(|e| e.to_string())?,
                 event = subscription.next() => {
                     let event = event.ok_or("subscription ended while paging snapshot")?;
-                    if event.event.ends_subscription() { return Err("snapshot stream requires resync".into()); }
+                    if event.event.ends_subscription() {
+                        buffered.push(event);
+                        return Err(SnapshotFault::Ended(buffered));
+                    }
                     bytes += serde_json::to_vec(&event).map_err(|e| e.to_string())?.len();
                     if buffered.len() >= SNAPSHOT_BUFFER_EVENTS || bytes > SNAPSHOT_BUFFER_BYTES {
                         return Err("snapshot event buffer overflow; resync required".into());
@@ -263,6 +298,18 @@ pub async fn serve(
                 }
                 Err(OpenFailed::Subscribe(error)) => {
                     update(&shared, &ctx, |s| s.status = error);
+                    break;
+                }
+                Err(OpenFailed::Ended(events)) => {
+                    // The core spoke while the snapshot was paged: its goodbye
+                    // and the evidence of a restart count as if they had come
+                    // through the session loop, and the session is over.
+                    for event in events {
+                        orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
+                        update(&shared, &ctx, |s| {
+                            let _ = s.cache.event_delivering(event, |e| s.features.event(e));
+                        });
+                    }
                     break;
                 }
                 Err(OpenFailed::Snapshot(error)) => {
@@ -451,6 +498,9 @@ enum OpenFailed {
     Subscribe(String),
     /// The snapshot did not settle; a resync may.
     Snapshot(String),
+    /// The core ended the subscription while the snapshot was paged; what it
+    /// sent first, its ending last.
+    Ended(Vec<EventEnvelope>),
 }
 
 async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
@@ -464,7 +514,10 @@ async fn open_session(client: &WorkbenchClient) -> Result<Opened, OpenFailed> {
     let capabilities = client.server_hello().capabilities.clone();
     let (cache, delivered) = snapshot_delivering(client, &mut stream)
         .await
-        .map_err(OpenFailed::Snapshot)?;
+        .map_err(|fault| match fault {
+            SnapshotFault::Failed(error) => OpenFailed::Snapshot(error),
+            SnapshotFault::Ended(events) => OpenFailed::Ended(events),
+        })?;
     Ok(Opened {
         stream,
         capabilities,
@@ -519,6 +572,7 @@ async fn wait_for_successor(
             match open_session(&client).await {
                 Ok(opened) => Ok((core_launcher::ConnectedCore { client, endpoint }, opened)),
                 Err(OpenFailed::Subscribe(error) | OpenFailed::Snapshot(error)) => Err(error),
+                Err(OpenFailed::Ended(_)) => Err("the core ended the subscription".into()),
             }
         },
     );

@@ -182,6 +182,7 @@ pub async fn connection(
             }
         };
         subscriptions.retain(|_, task: &mut tokio::task::AbortHandle| !task.is_finished());
+        subscribed.retain(|key, _| subscriptions.contains_key(key));
         let request_id = request.request_id.clone();
         let wrong_session = session.as_ref().is_some_and(|s| s != &request.session_id);
         session.get_or_insert(request.session_id.clone());

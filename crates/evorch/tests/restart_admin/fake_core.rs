@@ -75,6 +75,9 @@ pub struct State {
     pub subscribe_mode: SubscribeMode,
     /// Read subscribe requests but never answer them.
     pub hold_subscribe: bool,
+    /// Offer a second snapshot page that is never answered, so that the snapshot
+    /// stays unread while the core says something else.
+    pub hold_snapshot_page: bool,
     /// Read operation queries but never answer them.
     pub hold_operation_status: bool,
     pub blockers: Option<ShellBlockers>,
@@ -154,6 +157,7 @@ impl FakeCore {
                 on_request: OnRequest::Accept,
                 subscribe_mode: SubscribeMode::Honest,
                 hold_subscribe: false,
+                hold_snapshot_page: false,
                 hold_operation_status: false,
                 blockers: None,
                 quarantine: None,
@@ -359,6 +363,9 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
     });
     let reaction = match &request.body {
         RequestBody::Control(Control::Subscribe(_)) if state.hold_subscribe => Reaction::Silent,
+        RequestBody::Query(Query::Projection(
+            workbench_protocol::namespaces::projection::ProjectionQuery::ReadSnapshot(_),
+        )) if state.hold_snapshot_page => Reaction::Silent,
         RequestBody::Query(Query::Lifecycle(LifecycleQuery::OperationStatus { .. }))
             if state.hold_operation_status =>
         {
@@ -384,7 +391,9 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
                     high_water: cursor(shared.epoch, 1),
                     initial_page: (!replay).then(|| workbench_protocol::views::Page {
                         items: vec![],
-                        next_cursor: None,
+                        next_cursor: state
+                            .hold_snapshot_page
+                            .then(|| workbench_protocol::ids::PageCursor::new("page-2").unwrap()),
                         snapshot_revision: Revision(0),
                     }),
                 },

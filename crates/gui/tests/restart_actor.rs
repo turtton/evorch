@@ -362,6 +362,35 @@ async fn a_goodbye_and_the_end_of_the_stream_arriving_together_is_still_a_goodby
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
+    tokio::time::timeout(BOUND, async {
+        let world = world();
+        let core = world.core(7);
+        core.state().hold_snapshot_page = true;
+        let gui = Gui::start(world.launcher());
+        // The subscription is answered and the second page is awaited: the actor
+        // is inside the snapshot paging.
+        core.wait_for(|s| !s.subscribes.is_empty()).await;
+        core.push(workbench_protocol::events::UiEvent::Projection(
+            workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
+                reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
+            },
+        ));
+        core.stop_after_flush();
+        gui.until(|s| s.status.contains("終了の通知あり")).await;
+        assert_eq!(
+            starts(&world),
+            0,
+            "a goodbye read while paging is not a crash"
+        );
+        gui.actions.send(Action::Shutdown).await.unwrap();
+        gui.actor.await.unwrap();
+    })
+    .await
+    .expect("the scenario finishes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_core_that_said_goodbye_is_not_started_again() {
     tokio::time::timeout(BOUND, async {
         let world = world();
