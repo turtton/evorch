@@ -1,4 +1,5 @@
 use workbench_client::restart::intent::{BlockerSelector, TargetSelector};
+use workbench_protocol::namespaces::lifecycle::AdminId;
 
 /// One management command, already checked: a target is an opaque ID, never
 /// a path or an argument vector.
@@ -16,6 +17,25 @@ pub enum AdminCommand {
         blocker: BlockerSelector,
         yes: bool,
     },
+    Quarantine(QuarantineOp),
+    Graphs(GraphsOp),
+}
+
+/// Q1: graphs the core quarantined. A graph is named by the ID the list shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuarantineOp {
+    List,
+    Show { graph: AdminId },
+    Discard { graph: AdminId, yes: bool },
+}
+
+/// Q2: graphs a restart left undisposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphsOp {
+    List,
+    Show { graph: AdminId },
+    Release { graph: AdminId, yes: bool },
+    Resume { graph: AdminId, yes: bool },
 }
 
 /// The command and where the configuration is.
@@ -28,20 +48,28 @@ pub struct Parsed {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     #[error(
-        "usage: evorch core restart <targets | status | request [--target ID] [--yes] [--no-wait] | cancel | interrupt (--blocker N | --run ID) [--yes]> [--user-config DIR]"
+        "usage: evorch core restart <targets | status | request [--target ID] [--yes] [--no-wait] | cancel | interrupt (--blocker N | --run ID) [--yes]> | evorch core quarantine <list | show ID | discard ID [--yes]> | evorch core graphs <list | show ID | release ID [--yes] | resume ID [--yes]>  [--user-config DIR]"
     )]
     Usage,
     #[error("{0}")]
     Invalid(String),
 }
 
+type Words<'a> =
+    std::iter::Peekable<std::iter::Map<std::slice::Iter<'a, String>, fn(&String) -> &str>>;
+
 pub fn parse(argv: &[String]) -> Result<Parsed, ParseError> {
-    let mut words = argv.iter().map(String::as_str).peekable();
+    let mut words: Words<'_> = argv
+        .iter()
+        .map((|s| s.as_str()) as fn(&String) -> &str)
+        .peekable();
     if words.peek() == Some(&"core") {
         words.next();
     }
-    if words.next() != Some("restart") {
-        return Err(ParseError::Usage);
+    match words.next() {
+        Some("restart") => {}
+        Some(group @ ("quarantine" | "graphs")) => return parse_recovery(group, words),
+        _ => return Err(ParseError::Usage),
     }
     let sub = words.next().ok_or(ParseError::Usage)?;
     let mut user_config = None;
@@ -128,6 +156,81 @@ pub fn parse(argv: &[String]) -> Result<Parsed, ParseError> {
     })
 }
 
+/// `quarantine` and `graphs`: a subcommand, at most one graph ID, `--yes` for
+/// the three that change something, and `--user-config`.
+fn parse_recovery(group: &str, mut words: Words<'_>) -> Result<Parsed, ParseError> {
+    let sub = words.next().ok_or(ParseError::Usage)?;
+    let mut user_config = None;
+    let mut graph = None;
+    let mut yes = false;
+    while let Some(word) = words.next() {
+        match word {
+            "--user-config" => {
+                user_config = Some(
+                    words
+                        .next()
+                        .ok_or_else(|| ParseError::Invalid("--user-config needs a value".into()))?
+                        .into(),
+                );
+            }
+            "--yes" => yes = true,
+            other if other.starts_with('-') => {
+                return Err(ParseError::Invalid(format!("unknown argument `{other}`")));
+            }
+            id if graph.is_none() => {
+                graph = Some(
+                    AdminId::new(id)
+                        .map_err(|e| ParseError::Invalid(format!("graph ID `{id}`: {e}")))?,
+                );
+            }
+            _ => return Err(ParseError::Invalid("one graph ID at a time".into())),
+        }
+    }
+    let changes = matches!(
+        (group, sub),
+        ("quarantine", "discard") | ("graphs", "release" | "resume")
+    );
+    if yes && !changes {
+        return Err(ParseError::Invalid(format!(
+            "--yes is not an option of `{sub}`"
+        )));
+    }
+    let listing = sub == "list";
+    if listing && graph.is_some() {
+        return Err(ParseError::Invalid("`list` takes no graph ID".into()));
+    }
+    let need = |graph: Option<AdminId>| {
+        graph.ok_or_else(|| ParseError::Invalid(format!("`{sub}` needs a graph ID from `list`")))
+    };
+    let command = match (group, sub) {
+        ("quarantine", "list") => AdminCommand::Quarantine(QuarantineOp::List),
+        ("quarantine", "show") => AdminCommand::Quarantine(QuarantineOp::Show {
+            graph: need(graph)?,
+        }),
+        ("quarantine", "discard") => AdminCommand::Quarantine(QuarantineOp::Discard {
+            graph: need(graph)?,
+            yes,
+        }),
+        ("graphs", "list") => AdminCommand::Graphs(GraphsOp::List),
+        ("graphs", "show") => AdminCommand::Graphs(GraphsOp::Show {
+            graph: need(graph)?,
+        }),
+        ("graphs", "release") => AdminCommand::Graphs(GraphsOp::Release {
+            graph: need(graph)?,
+            yes,
+        }),
+        ("graphs", "resume") => AdminCommand::Graphs(GraphsOp::Resume {
+            graph: need(graph)?,
+            yes,
+        }),
+        _ => return Err(ParseError::Usage),
+    };
+    Ok(Parsed {
+        command,
+        user_config,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +278,34 @@ mod tests {
         assert!(p(&["restart"]).is_err());
         assert!(p(&["maintenance"]).is_err());
         assert!(p(&["restart", "reboot"]).is_err());
+    }
+
+    #[test]
+    fn recovery_commands_name_one_graph_and_only_the_changing_ones_take_yes() {
+        let id = |s: &str| AdminId::new(s).unwrap();
+        assert_eq!(
+            p(&["core", "graphs", "release", "g1", "--yes"])
+                .unwrap()
+                .command,
+            AdminCommand::Graphs(GraphsOp::Release {
+                graph: id("g1"),
+                yes: true
+            })
+        );
+        assert_eq!(
+            p(&["quarantine", "discard", "q1"]).unwrap().command,
+            AdminCommand::Quarantine(QuarantineOp::Discard {
+                graph: id("q1"),
+                yes: false
+            })
+        );
+        assert!(p(&["graphs", "list", "--yes"]).is_err());
+        assert!(p(&["graphs", "show", "g1", "--yes"]).is_err());
+        assert!(p(&["graphs", "list", "g1"]).is_err());
+        assert!(p(&["graphs", "resume"]).is_err());
+        assert!(p(&["graphs", "resume", "a", "b"]).is_err());
+        assert!(p(&["quarantine", "release", "q1"]).is_err());
+        assert!(p(&["graphs", "discard", "g1"]).is_err());
+        assert!(p(&["graphs", "show", "/bin/sh"]).is_err());
     }
 }

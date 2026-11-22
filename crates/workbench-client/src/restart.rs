@@ -6,6 +6,7 @@
 //! * [`confirmation`] – the proof every irreversible command needs.
 //! * [`intent`] – turns what the person saw (targets, status, blockers) into a
 //!   command bound to exactly that, and refuses a binding that is already stale.
+//! * [`recovery`] – Q1/Q2 discard, release and resume, bound to what was shown.
 //! * [`reconnect`] – a pure state machine: connection loss is a *planned*
 //!   restart only on evidence from the core, never from EOF alone.
 //! * [`resume`] – after a restart the old cursor is discarded, a snapshot is
@@ -16,6 +17,7 @@
 pub mod confirmation;
 pub mod intent;
 pub mod reconnect;
+pub mod recovery;
 pub mod resume;
 pub mod session;
 pub mod view;

@@ -5,6 +5,8 @@ use workbench_protocol::{
     handshake::Capability,
     namespaces::lifecycle::{
         AdminId, AdminReceipt, LifecycleQuery, LifecycleReply, LifecycleResult,
+        owned_graphs::{OwnedGraphsQuery, OwnedGraphsReply},
+        quarantine::{QuarantineQuery, QuarantineReply},
         restart::{
             RestartManagementStatus, RestartQuery, RestartReply, RestartTargets, ShellBlockers,
         },
@@ -67,6 +69,33 @@ impl<'a> RestartAdmin<'a> {
         match self.restart_query(RestartQuery::ShellBlockers).await? {
             RestartReply::ShellBlockers(blockers) => Ok(blockers),
             _ => Err(AdminError::Unexpected("shell blockers query")),
+        }
+    }
+
+    /// Q1: the quarantine the core holds. A read; nothing is changed.
+    pub async fn quarantine(&self, query: QuarantineQuery) -> Result<QuarantineReply, AdminError> {
+        match self
+            .client
+            .query(Query::Lifecycle(LifecycleQuery::Quarantine(query)))
+            .await?
+        {
+            QueryReply::Lifecycle(LifecycleReply::Quarantine(reply)) => Ok(reply),
+            _ => Err(AdminError::Unexpected("quarantine query")),
+        }
+    }
+
+    /// Q2: the graphs a restart left undisposed. A read; nothing is changed.
+    pub async fn owned_graphs(
+        &self,
+        query: OwnedGraphsQuery,
+    ) -> Result<OwnedGraphsReply, AdminError> {
+        match self
+            .client
+            .query(Query::Lifecycle(LifecycleQuery::OwnedGraphs(query)))
+            .await?
+        {
+            QueryReply::Lifecycle(LifecycleReply::OwnedGraphs(reply)) => Ok(reply),
+            _ => Err(AdminError::Unexpected("owned graphs query")),
         }
     }
 

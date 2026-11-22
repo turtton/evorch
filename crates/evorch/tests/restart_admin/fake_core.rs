@@ -31,6 +31,8 @@ use workbench_protocol::{
     namespaces::lifecycle::{
         AdminId, AdminOperationState, AdminOutcome, AdminReceipt, LifecycleCommand, LifecycleEvent,
         LifecycleQuery, LifecycleReply, LifecycleResult, RestartPhase,
+        owned_graphs::{OwnedGraphView, OwnedGraphsQuery, OwnedGraphsReply, UndisposedGraphs},
+        quarantine::{QuarantineDetail, QuarantineQuery, QuarantineReply},
         restart::{
             AdminAuditDiagnostics, RestartCommand, RestartManagementStatus, RestartQuery,
             RestartReply, RestartStatus, RestartTarget, RestartTargets, ShellBlockers,
@@ -76,6 +78,9 @@ pub struct State {
     /// Read operation queries but never answer them.
     pub hold_operation_status: bool,
     pub blockers: Option<ShellBlockers>,
+    pub quarantine: Option<QuarantineDetail>,
+    pub graph: Option<OwnedGraphView>,
+    pub undisposed: Option<UndisposedGraphs>,
     pub operations: HashMap<String, AdminReceipt>,
     pub seen: Vec<Seen>,
     pub served_status: Vec<RestartPhase>,
@@ -139,6 +144,9 @@ impl FakeCore {
                 hold_subscribe: false,
                 hold_operation_status: false,
                 blockers: None,
+                quarantine: None,
+                graph: None,
+                undisposed: None,
                 operations: HashMap::new(),
                 seen: Vec::new(),
                 served_status: Vec::new(),
@@ -389,6 +397,45 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
                 omitted: Revision(0),
             })),
         ))),
+        RequestBody::Query(Query::Lifecycle(LifecycleQuery::Quarantine(query))) => {
+            match (query, state.quarantine.clone()) {
+                (QuarantineQuery::Detail { .. }, Some(detail)) => Reaction::Reply(lifecycle_reply(
+                    LifecycleReply::Quarantine(QuarantineReply::Detail(detail)),
+                )),
+                (QuarantineQuery::List, Some(detail)) => Reaction::Reply(lifecycle_reply(
+                    LifecycleReply::Quarantine(QuarantineReply::List {
+                        items: vec![detail.item],
+                        revision: Revision(1),
+                        truncated: false,
+                    }),
+                )),
+                _ => Reaction::Reply(ReplyResult::Error(WorkbenchError::new(
+                    ErrorCode::NotFound,
+                    "unknown graph",
+                    RetryAdvice::Never,
+                ))),
+            }
+        }
+        RequestBody::Query(Query::Lifecycle(LifecycleQuery::OwnedGraphs(query))) => match query {
+            OwnedGraphsQuery::Undisposed => {
+                state.undisposed.clone().map(OwnedGraphsReply::Undisposed)
+            }
+            OwnedGraphsQuery::Detail { .. } => state
+                .graph
+                .clone()
+                .map(|view| OwnedGraphsReply::Detail(Box::new(view))),
+            OwnedGraphsQuery::Operation { .. } => None,
+        }
+        .map_or_else(
+            || {
+                Reaction::Reply(ReplyResult::Error(WorkbenchError::new(
+                    ErrorCode::NotFound,
+                    "unknown graph",
+                    RetryAdvice::Never,
+                )))
+            },
+            |reply| Reaction::Reply(lifecycle_reply(LifecycleReply::OwnedGraphs(reply))),
+        ),
         RequestBody::Query(Query::Lifecycle(LifecycleQuery::OperationStatus { operation_id })) => {
             match state.operations.get(operation_id.as_str()) {
                 Some(receipt) => Reaction::Reply(lifecycle_reply(LifecycleReply::OperationStatus(
