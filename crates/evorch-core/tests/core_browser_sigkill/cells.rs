@@ -28,6 +28,10 @@ use std::{
 };
 
 const EXIT: Duration = Duration::from_secs(30);
+/// The navigating CEF page touches 6 x 64 MiB. The event threshold is below
+/// that and far above any other member's resident set (checked on every
+/// `cef_p` run, where no script runs).
+const PAGE_RSS_KIB: u64 = 300 * 1024;
 const CEF_HEADING: &str = "B3-08 CEF fixture";
 const REVIEW_APPROVAL: &str = r#"{"approve":true,"reason":"requested navigation","risk_level":"low","procedure_step":"none","authorization_basis":"ordinary_task","authorization_refs":[0],"scope_match":"full","authorization_level":"medium"}"#;
 
@@ -198,10 +202,12 @@ pub async fn run(cell: &str) -> io::Result<()> {
                 real.with_file_name("evorch-cef-helper").is_file(),
                 "evorch-cef-helper must sit beside the renderer",
             )?;
-            // In `Navigating` the page script never ends, so its load cannot
-            // complete while the core is killed.
+            // In `Navigating` the page script first makes its renderer
+            // process hold SCRIPT_MIB of touched memory (the observable that
+            // the page is being loaded) and then never ends, so the load
+            // cannot complete while the core is killed.
             let script = if spec.mode == Mode::Navigating {
-                "<script>while(true){}</script>"
+                "<script>var keep=[];for(var i=0;i<6;i++){var a=new Uint8Array(64*1024*1024);a.fill(i+1);keep.push(a);}while(true){}</script>"
             } else {
                 ""
             };
@@ -290,7 +296,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
                 .await?;
             }
             (Mode::Navigating, Engine::Cef) => {
-                wait_for_cef_engine(&mut tree, renderer.as_deref().unwrap()).await?;
+                wait_for_page_script(&mut tree, renderer.as_deref().unwrap()).await?;
             }
             _ => {
                 // The held response arrives only after the tool result of the
@@ -386,6 +392,20 @@ pub async fn run(cell: &str) -> io::Result<()> {
                     format!("CEF has no zygote-forked/utility processes: {types:?}"),
                 )?;
             }
+        }
+        if spec.mode == Mode::Complete && spec.engine == Engine::Cef {
+            // Control of the navigating observable: with no script, no such
+            // member is anywhere near the threshold.
+            let peak = members
+                .iter()
+                .filter(|pid| Some(**pid) != root_pid && Some(**pid) != guard)
+                .filter_map(|pid| procs::rss_kib(*pid))
+                .max()
+                .unwrap_or(0);
+            check(
+                peak < PAGE_RSS_KIB,
+                format!("a member holds {peak} KiB without any page script: the navigating observable would not discriminate"),
+            )?;
         }
         // Death comes from the pidfd only. A process whose parent, group or
         // session changed is still alive and is still required to die.
@@ -518,32 +538,34 @@ pub async fn run(cell: &str) -> io::Result<()> {
     result.and(cleanup)
 }
 
-/// The renderer's engine is up: the target root exists and CEF's zygote and
-/// network service are its children, so the tab's navigation was requested
-/// (the page's script never ends, so it cannot have completed).
-/// The core's spawn of the renderer has no event an external observer can
-/// await, so this locates the target by refreshing the owner-rooted tree
-/// until it is there. The wait is bounded and only a failure uses the bound.
-async fn wait_for_cef_engine(tree: &mut ProcessTree, renderer: &Path) -> io::Result<()> {
-    bounded(core::LIMIT, "CEF engine processes appeared", async {
-        loop {
-            if tree.refresh().is_ok()
-                && let Ok(root) = find_target_root(Engine::Cef, tree, Some(renderer), Path::new(""))
-                && let Ok((guard, _)) = procs::guard_owner(tree, root)
-            {
-                let members = procs::subtree(tree, guard);
-                let kinds: Vec<_> = members
-                    .iter()
-                    .map(|pid| procs::process_type(&procs::cmdline(*pid)).map(str::to_owned))
-                    .collect();
-                let of = |kind: &str| kinds.iter().filter(|k| k.as_deref() == Some(kind)).count();
-                if of("zygote") >= 3 && of("utility") >= 1 {
+/// The page of `inspect_artifact open` is being loaded and its script runs:
+/// a member of the guard subtree, other than the target root and the guard,
+/// holds the memory the script touches (`PAGE_RSS_KIB`). Launching the
+/// renderer or the engine's helpers does not reach it, so this cannot be
+/// satisfied before the core has had the artifact opened. The core's spawn has
+/// no event an external observer can await, so the tree is refreshed until
+/// the observation holds; the bound only judges failure.
+async fn wait_for_page_script(tree: &mut ProcessTree, renderer: &Path) -> io::Result<()> {
+    bounded(
+        core::LIMIT,
+        "the artifact page's script is running",
+        async {
+            loop {
+                if tree.refresh().is_ok()
+                    && let Ok(root) =
+                        find_target_root(Engine::Cef, tree, Some(renderer), Path::new(""))
+                    && let Ok((guard, _)) = procs::guard_owner(tree, root)
+                    && procs::subtree(tree, guard)
+                        .into_iter()
+                        .filter(|pid| *pid != root && *pid != guard)
+                        .any(|pid| procs::rss_kib(pid).is_some_and(|rss| rss >= PAGE_RSS_KIB))
+                {
                     return Ok(());
                 }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
+        },
+    )
     .await
 }
 

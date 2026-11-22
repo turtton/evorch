@@ -91,6 +91,7 @@ pub fn describe(tree: &ProcessTree, pids: &[i32], root: Option<i32>) -> io::Resu
                 "identity": identity,
                 "exe": exe(*pid).map(|p| p.display().to_string()),
                 "type": process_type(&args),
+                "rss_kib": rss_kib(*pid),
                 "crashpad_handler": is_crashpad_handler(&args),
                 "arg0": args.first().map(|a| a.chars().take(160).collect::<String>()),
                 "same_group_as_target_root": root_identity.as_ref().is_some_and(|r| identity.group == r.group),
@@ -154,10 +155,25 @@ pub fn describe_pin(pin: &PinnedProcess) -> Value {
 }
 
 /// A process is dead when its pidfd is readable; polled once, never waited.
-pub async fn is_dead(pin: &PinnedProcess) -> bool {
+pub async fn is_dead(pin: &PinnedProcess) -> io::Result<bool> {
     use std::{future::poll_fn, pin::pin, task::Poll};
     let mut exited = pin!(pin.exited());
-    poll_fn(|cx| Poll::Ready(std::future::Future::poll(exited.as_mut(), cx).is_ready())).await
+    poll_fn(|cx| match std::future::Future::poll(exited.as_mut(), cx) {
+        Poll::Ready(Ok(())) => Poll::Ready(Ok(true)),
+        // An observation error is not a death: it goes to the caller.
+        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+        Poll::Pending => Poll::Ready(Ok(false)),
+    })
+    .await
+}
+
+/// Resident set size in KiB (`VmRSS`), if the process is readable.
+pub fn rss_kib(pid: i32) -> Option<u64> {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
 }
 
 #[derive(Debug, Default)]
@@ -175,7 +191,7 @@ pub async fn classify(tree: &ProcessTree, pids: &[i32]) -> io::Result<Classified
     let mut out = Classified::default();
     for pid in pids {
         let pin = tree.require(*pid)?;
-        if is_dead(pin).await {
+        if is_dead(pin).await? {
             out.gone.push(*pid);
         } else {
             out.alive.push(*pid);

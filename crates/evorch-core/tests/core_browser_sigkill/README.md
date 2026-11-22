@@ -22,7 +22,7 @@ not repeated here.
 | `cef_p` | P* | Conversation turns → `render_artifact` → `inspect_artifact` open, snapshot | `evorch-renderer` (`EVORCH_RENDERER_EXE`, product `EVORCH_RENDERER_EXEC` override) with `evorch-cef-helper` and the pinned CEF |
 | `cef_stopped_p` | P* | same as `cef_p`, plus the same SIGSTOP | same |
 | `chromium_navigating_p` | P* | same entrance as `chromium_p`; the fixture accepts the request and never answers, so the core is killed **while the navigation is in flight** (event: the fixture read the request line) | same |
-| `cef_navigating_p` | P* | same entrance as `cef_p`; the page's script never ends, so the core is killed while `inspect_artifact open` is in flight (event: CEF zygote and utility processes exist under the renderer) | same |
+| `cef_navigating_p` | P* | same entrance as `cef_p`; the page's script allocates and touches 384 MiB, then never ends, so the core is killed while `inspect_artifact open` is in flight. Event: a member of the guard subtree other than the target root and the guard has a resident set of at least 300 MiB, which only the page's script produces (`cef_p` asserts every such member stays below the threshold when no script runs). Starting the renderer or sending Hello does not satisfy it | same |
 | `renderer_launch_failure_p` | P* | same entrance as `cef_p`; `EVORCH_RENDERER_EXEC` (the product's own override) points at an external script that exits at once. Fault injection: **external executable swap** | none (the replacement exits) |
 | `cef_init_failure_p` | P* | same entrance as `cef_p`; the real renderer runs with a `libcef.so` that is only a symlink in an otherwise empty directory placed first in `LD_LIBRARY_PATH`, so CEF finds no resources beside the library. Fault injection: **environment** | real renderer, CEF initialization fails (the product reports `renderer IPC failed: PeerClosed`) |
 | `classify_control_t` | T (harness control, not the product) | a live process whose parent changed must be classified alive, never dead; a dead one dead | none |
@@ -109,9 +109,12 @@ same observation. Chromium aux processes (zygote, GPU, utility, renderer)
 share the target root's group; the guard itself is in the core's group.
 
 Chromium and CEF children also exit by themselves when their browser/host
-process dies. So `chromium_p` and `cef_p` detect a missing guard (nothing kills
-the root) but **cannot** tell a group kill from a root-only kill followed by
-those self-exits. The `_stopped_` variants (`chromium_stopped_p`,
+process dies. So `chromium_p` detects a missing guard (nothing kills the
+root), but **neither natural cell can** tell a group kill from a root-only kill
+followed by those self-exits. `cef_p` does not even detect a missing guard on
+its own: the real renderer exits by itself on IPC EOF (it is detected only
+when the guard bypass is combined with a renderer that parks after
+`PeerClosed`, see the mutations below). The `_stopped_` variants (`chromium_stopped_p`,
 `cef_stopped_p`) close that gap by fault injection: after the tree is pinned,
 every guard-subtree member except the target root and the guard is SIGSTOPped
 through its pidfd, so it cannot notice the death and exit by itself. Only a
@@ -141,10 +144,10 @@ cargo nextest run -p evorch-core --test core_browser_sigkill --run-ignored only 
 ```
 
 The cells are listed only with `--ignored`, so ordinary test groups never run
-them. CI runs `chromium_p` and `chromium_stopped_p` in browser-e2e, `cef_p` and `cef_stopped_p` in cef-e2e.
+them. CI runs the Chromium cells and the three T controls in browser-e2e and the CEF cells in cef-e2e (the exact filters are in `.github/workflows/ci.yml`).
 
 Mutations (guard bypass, EOF-resistant renderer, root-only kill, no NSS trust,
-no navigation, death decided by relationship instead of pidfd, no gate release)
+no navigation, no OpenArtifact for `cef_navigating_p`, death decided by relationship instead of pidfd, no gate release)
 run in a disposable checkout; no mutation code is committed. A guard bypass
 (`Lease::force` as a no-op) alone fails `chromium_p` but **not** `cef_p`: the
 real renderer exits by itself on IPC EOF. `cef_p` fails only when the guard
