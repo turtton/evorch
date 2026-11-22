@@ -337,7 +337,7 @@ builds and a freshly sealed development helper bundle. The final restored tree
 passed 22 selected sandbox tests (20 existing direct-owner regressions plus
 PTY/cancellation controllers), 6 selected shell tests, scoped all-target clippy
 with warnings denied, formatting and diff checks. Other tests are delegated to CI.
-The PTY controller runs 13 isolated cases; these are not 13 real-core callers.
+The PTY controller runs 14 isolated cases; these are not real-core callers.
 The 6 selected shell tests also passed with dash 0.5.12 as `sh`, as well as
 the normal bash environment. Non-Linux execution was not tested locally.
 
@@ -386,3 +386,19 @@ dash: the previous test failed with `supervisor ended before READY: timed_out`
 (1.866 s), while the corrected test passed (2.240 s). The corrected sandbox
 PTY/cancellation controllers (2 selected tests), 6 normal shell regressions and
 scoped sandbox/tools all-target clippy also passed. The shim is not product code.
+
+The next CI failure was an EOF-only assertion on the descendant Unix control
+socket, not the PTY: killing a peer with an unread probe can report ECONNRESET.
+The controller now proves a live P/ACK before retirement, waits for the typed
+receipt, then drains the post-retirement probe response even if the pidfd won
+the poll. Any ACK still fails; EOF or reset additionally requires peer pidfd
+death and cannot substitute for it. Drop also waits for ledger confirmation
+before this oracle. No pre-retirement I/O error is accepted.
+
+A new native barrier ACKs entry to a handler that never consumes the next P.
+Queueing that probe before the real owner kills the group deterministically
+produces reset after peer death: the old oracle failed at its read unwrap
+(0.142 s), while the corrected oracle passed (0.134 s). With the corrected
+oracle, fresh source-only root-only and omitted-retirement-KILL mutations still
+failed on a post-retirement ACK (0.067 s and 0.062 s); both were restored.
+These checks use neither sleeps, retries nor load, and change no product code.

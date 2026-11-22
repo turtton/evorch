@@ -5,7 +5,7 @@ use sandbox::{
     owned::{OwnedPtyChild, OwnedPtyCommand},
 };
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::process::ExitStatusExt,
@@ -140,6 +140,46 @@ impl Drop for Reaper {
         }
     }
 }
+#[derive(Debug, PartialEq, Eq)]
+enum ControlEnd {
+    Eof,
+    Reset,
+}
+
+fn retired_control_end(
+    control: &mut std::os::unix::net::UnixStream,
+    death: &OwnedFd,
+    probe_queued: bool,
+) -> ControlEnd {
+    if !probe_queued {
+        match control.write_all(b"P") {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                ) => {}
+            Err(error) => panic!("post-retirement probe failed: {error}"),
+        }
+    }
+    let mut fds = [
+        process_guard::wire::fd(death.as_raw_fd(), libc::POLLIN),
+        process_guard::wire::fd(control.as_raw_fd(), libc::POLLIN),
+    ];
+    process_guard::wire::poll(&mut fds, None).unwrap();
+    // Drain even when the pidfd won: a buffered ACK still proves survival
+    // after retirement. A killed peer may close with an unread probe, which
+    // AF_UNIX reports as ECONNRESET rather than EOF. Neither is death proof.
+    let end = match control.read(&mut [0]) {
+        Ok(0) => ControlEnd::Eof,
+        Ok(_) => panic!("same-group descendant ACKed after retirement"),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => ControlEnd::Reset,
+        Err(error) => panic!("post-retirement control read failed: {error}"),
+    };
+    dead(death);
+    end
+}
+
 #[test]
 fn typed_pty_contract() {
     let Ok(case) = std::env::var("OWNED_PTY_CASE") else {
@@ -152,6 +192,7 @@ fn typed_pty_contract() {
             "ctrl-c",
             "eof",
             "group",
+            "reset",
             "shell-group",
             "drop",
             "escape",
@@ -230,12 +271,12 @@ fn typed_pty_contract() {
         let mut c = OwnedPtyCommand::new(&target);
         c.arg(if case == "escape" {
             "escape"
-        } else if case == "group" || case == "drop" {
+        } else if case == "group" || case == "drop" || case == "reset" {
             "group"
         } else {
             "io"
         });
-        if case == "group" || case == "drop" {
+        if case == "group" || case == "drop" || case == "reset" {
             c.arg(&control_path);
         }
         c
@@ -255,7 +296,8 @@ fn typed_pty_contract() {
     let root_death = process_guard::pidfd_open(root).unwrap();
     let mut output = BufReader::new(master.try_clone_reader().unwrap());
     let mut input = master.take_writer().unwrap();
-    let descendant = if ["group", "shell-group", "drop", "escape"].contains(&case.as_str()) {
+    let descendant = if ["group", "shell-group", "drop", "escape", "reset"].contains(&case.as_str())
+    {
         let s = line(&mut output, "DESC ");
         let p = s.split_whitespace().nth(1).unwrap().parse::<i32>().unwrap();
         reaper.add(p);
@@ -289,11 +331,27 @@ fn typed_pty_contract() {
         assert_eq!(ledger.children()[0].leader, Some(root));
     }
     assert!(child.try_wait().unwrap().is_none());
-    let mut control = if ["group", "shell-group", "drop"].contains(&case.as_str()) {
+    let mut control = if ["group", "shell-group", "drop", "reset"].contains(&case.as_str()) {
         Some(listener.accept().unwrap().0)
     } else {
         None
     };
+    if let Some(control) = control.as_mut() {
+        control.write_all(b"P").unwrap();
+        let mut ack = [0];
+        control.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, *b"A", "live descendant must ACK before retirement");
+        eprintln!("{case}: control ACK before retirement");
+        if case == "reset" {
+            // B ACKs entry to a handler that never reads another probe. Queue
+            // P there, then let the real owner kill the same-group descendant.
+            control.write_all(b"B").unwrap();
+            control.read_exact(&mut ack).unwrap();
+            assert_eq!(ack, *b"B");
+            control.write_all(b"P").unwrap();
+            eprintln!("{case}: unread probe queued before group kill");
+        }
+    }
     match case.as_str() {
         "io" | "unmanaged" => {
             master
@@ -320,7 +378,7 @@ fn typed_pty_contract() {
             let mut rest = String::new();
             output.read_to_string(&mut rest).unwrap();
         }
-        "group" | "shell-group" | "escape" => {
+        "group" | "shell-group" | "escape" | "reset" => {
             input.write_all(b"EXIT\n").unwrap();
             assert_eq!(child.wait().unwrap().code(), Some(37));
             if case == "escape" {
@@ -371,29 +429,26 @@ fn typed_pty_contract() {
         _ => unreachable!(),
     }
     dead(&root_death);
-    if let Some((_, fd)) = descendant {
-        if let Some(control) = control.as_mut() {
-            // Distinguish actual exit from a surviving descendant without an
-            // elapsed-time assertion. A child not killed can ACK this probe;
-            // a pending SIGKILL cannot execute it. The outer RAII reaps either.
-            let _ = control.write_all(b"P");
-            let mut fds = [
-                process_guard::wire::fd(fd.as_raw_fd(), libc::POLLIN),
-                process_guard::wire::fd(control.as_raw_fd(), libc::POLLIN),
-            ];
-            process_guard::wire::poll(&mut fds, None).unwrap();
-            if fds[1].revents != 0 {
-                let mut ack = [0];
-                assert_ne!(
-                    control.read(&mut ack).unwrap(),
-                    1,
-                    "same-group descendant ACKed after retirement"
-                );
-            }
-        }
-        dead(&fd);
-    }
     runtime.block_on(ledger.reap_all_children()).unwrap();
     assert_eq!(ledger.child_stats().reaped, u64::from(case != "unmanaged"));
     assert_eq!(ledger.child_stats().unconfirmed, 0);
+    eprintln!("{case}: root dead, ledger receipt confirmed");
+    if let Some((_, fd)) = descendant {
+        if let Some(control) = control.as_mut() {
+            if case == "reset" {
+                dead(&fd);
+                eprintln!("{case}: peer dead with unread probe");
+            }
+            let end = retired_control_end(control, &fd, case == "reset");
+            if case == "reset" {
+                assert_eq!(
+                    end,
+                    ControlEnd::Reset,
+                    "forced unread-probe close must reset"
+                );
+            }
+            eprintln!("{case}: control {end:?}, peer pidfd death confirmed");
+        }
+        dead(&fd);
+    }
 }

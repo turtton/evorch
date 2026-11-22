@@ -34,8 +34,14 @@ int main(int argc, char **argv) {
             assert(write(gate[1], "R", 1) == 1); close(gate[1]);
             if (control >= 0) {
                 char probe;
-                assert(read(control, &probe, 1) == 1);
-                assert(write(control, "A", 1) == 1);
+                while (read(control, &probe, 1) == 1) {
+                    if (probe == 'B') {
+                        assert(write(control, "B", 1) == 1);
+                        for (;;) pause(); /* Never consume the queued probe. */
+                    }
+                    assert(probe == 'P');
+                    assert(write(control, "A", 1) == 1);
+                }
             }
             for (;;) pause();
         }
