@@ -1205,6 +1205,28 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p workbench-web --test public_restart_chromium --run-ignored only --success-output immediate --no-tests fail
+      # D-3a2 B3-08: the sealed product core navigates a real Chromium through
+      # browser_navigate, then only the core is SIGKILLed. Chromium trusts the
+      # cell's loopback CA only through an NSS database that the cell builds
+      # under its own temporary HOME with certutil (libnss3-tools).
+      - name: Install certutil for the Chromium core SIGKILL cell
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libnss3-tools
+      - name: Real Chromium core SIGKILL cell
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
+          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p)' --run-ignored only --success-output immediate --no-tests fail
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: core-browser-sigkill-chromium
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/core-browser-sigkill
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1364,3 +1386,21 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only --success-output immediate --no-tests fail
+      # D-3a2 B3-08: the sealed product core opens an artifact through the real
+      # renderer and CEF (render_artifact, inspect_artifact), then only the core
+      # is SIGKILLed.
+      - name: Real CEF renderer core SIGKILL cell
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: |
+          cargo build -p evorch-renderer
+          cargo build -p browser-cef --features cef --bin evorch-cef-helper
+          export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
+          export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
+          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p)' --run-ignored only --success-output immediate --no-tests fail
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: core-browser-sigkill-cef
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/core-browser-sigkill
