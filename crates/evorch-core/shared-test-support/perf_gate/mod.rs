@@ -226,6 +226,15 @@ pub fn check_conditions(spec: &Spec, c: &serde_json::Value) -> Vec<String> {
     ] {
         hex(pointer, 64, &mut problems);
     }
+    // Arm C (the current main) is report-only: optional, but well-formed when named.
+    if c.pointer("/arms/c").is_some() {
+        hex("/arms/c/source_sha", 40, &mut problems);
+        hex("/arms/c/tree_sha", 40, &mut problems);
+        hex("/arms/c/exe_sha256", 64, &mut problems);
+        if text("/arms/c/build_recipe").is_none() {
+            problems.push("/arms/c/build_recipe: missing or empty".into());
+        }
+    }
     if c.pointer("/seed").and_then(|v| v.as_u64()) != Some(spec.seed) {
         problems.push("/seed: differs from the spec seed".into());
     }
@@ -271,6 +280,16 @@ pub struct PairSample {
     pub a_ns: u64,
     pub b_ns: u64,
 }
+/// Report-only probe of arm C (the current main) taken inside pair `index` of the
+/// same workload: it never decides the gate. `slot` (0..3) is where C ran among
+/// the pair's three probes, rotated so no arm owns a position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CSample {
+    pub workload: String,
+    pub index: u32,
+    pub slot: u8,
+    pub c_ns: u64,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillSample {
     pub index: u32,
@@ -288,6 +307,9 @@ pub struct LatencyRound {
     pub status: CellStatus,
     pub scope: ScopeReadback,
     pub samples: Vec<PairSample>,
+    /// Empty when no C arm was run.
+    #[serde(default)]
+    pub c_samples: Vec<CSample>,
     pub force_kill: Vec<KillSample>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,6 +393,19 @@ pub struct WorkloadVerdict {
     pub pass: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CReport {
+    pub round: u32,
+    pub workload: String,
+    pub pairs: u32,
+    pub b_p50_ns: u64,
+    pub b_p95_ns: u64,
+    pub c_p50_ns: u64,
+    pub c_p95_ns: u64,
+    /// Quantiles of the per-pair C - B differences. Report only.
+    pub delta_p50_ns: i64,
+    pub delta_p95_ns: i64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KillVerdict {
     pub round: u32,
     pub samples: u32,
@@ -392,6 +427,9 @@ pub struct Summary {
     pub conditions_sha256: String,
     pub pass: bool,
     pub latency: Vec<WorkloadVerdict>,
+    /// Arm C against B. Never part of `pass` and never produces a failure.
+    #[serde(default)]
+    pub c_report: Vec<CReport>,
     pub force_kill: Vec<KillVerdict>,
     pub pss: Vec<PssVerdict>,
     pub failures: Vec<Failure>,
@@ -649,6 +687,7 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
             pass: p50_ok && p95_ok,
         });
     }
+    c_report(spec, round, out);
     for s in &round.samples {
         if !spec.workloads.iter().any(|w| w.name == s.workload) {
             ctx.fail(
@@ -661,6 +700,51 @@ fn latency(ctx: &mut Ctx<'_>, conditions: &str, round: &LatencyRound, out: &mut 
         }
     }
     kill(ctx, round, out);
+}
+
+/// Arm C against B, for the record only. A workload whose C samples do not line up
+/// with its pairs is left out of the report: C can neither fail nor rescue the gate.
+fn c_report(spec: &Spec, round: &LatencyRound, out: &mut Summary) {
+    for workload in &spec.workloads {
+        let pairs: Vec<&PairSample> = round
+            .samples
+            .iter()
+            .filter(|s| s.workload == workload.name)
+            .collect();
+        let mut c: Vec<&CSample> = round
+            .c_samples
+            .iter()
+            .filter(|s| s.workload == workload.name)
+            .collect();
+        c.sort_by_key(|s| s.index);
+        let aligned = !c.is_empty()
+            && c.len() == pairs.len()
+            && c.iter()
+                .zip(&pairs)
+                .all(|(c, p)| c.index == p.index && c.c_ns > 0);
+        if !aligned {
+            continue;
+        }
+        let b: Vec<u64> = pairs.iter().map(|p| p.b_ns).collect();
+        let cs: Vec<u64> = c.iter().map(|s| s.c_ns).collect();
+        let diffs: Vec<i64> = c
+            .iter()
+            .zip(&pairs)
+            .map(|(c, p)| c.c_ns as i64 - p.b_ns as i64)
+            .collect();
+        let q = |v: &[u64], p| nearest_rank(v, p).expect("non-empty");
+        out.c_report.push(CReport {
+            round: round.round,
+            workload: workload.name.clone(),
+            pairs: pairs.len() as u32,
+            b_p50_ns: q(&b, 500),
+            b_p95_ns: q(&b, 950),
+            c_p50_ns: q(&cs, 500),
+            c_p95_ns: q(&cs, 950),
+            delta_p50_ns: nearest_rank(&diffs, 500).expect("non-empty"),
+            delta_p95_ns: nearest_rank(&diffs, 950).expect("non-empty"),
+        });
+    }
 }
 
 fn kill(ctx: &mut Ctx<'_>, round: &LatencyRound, out: &mut Summary) {
@@ -833,6 +917,7 @@ pub fn evaluate(spec: &Spec, evidence: &Evidence) -> Summary {
         conditions_sha256: evidence.conditions_sha256.clone(),
         pass: false,
         latency: Vec::new(),
+        c_report: Vec::new(),
         force_kill: Vec::new(),
         pss: Vec::new(),
         failures: Vec::new(),

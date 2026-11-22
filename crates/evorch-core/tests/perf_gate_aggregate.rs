@@ -44,6 +44,7 @@ fn latency_round(spec: &Spec, round: u32, delta_ns: i64) -> LatencyRound {
         status: CellStatus::Ok,
         scope: scope(),
         samples,
+        c_samples: Vec::new(),
         force_kill: (0..spec.force_kill.samples_min)
             .map(|index| KillSample {
                 index,
@@ -662,4 +663,59 @@ fn incomplete_or_altered_conditions_fail_the_gate() {
         ev.conditions_problems = problems;
         rejected(&spec, &ev, FailureKind::ConditionsMismatch);
     }
+}
+
+fn with_c(spec: &Spec, evidence: &mut Evidence, c_delta_ns: i64) {
+    for round in &mut evidence.latency {
+        round.c_samples = round
+            .samples
+            .iter()
+            .map(|s| CSample {
+                workload: s.workload.clone(),
+                index: s.index,
+                slot: (s.index % 3) as u8,
+                c_ns: (s.b_ns as i64 + c_delta_ns) as u64,
+            })
+            .collect();
+    }
+    assert_eq!(
+        evidence.latency[0].c_samples.len(),
+        (spec.pairs * 3) as usize
+    );
+}
+
+#[test]
+fn arm_c_is_reported_but_a_slow_c_cannot_fail_the_gate() {
+    let spec = Spec::frozen();
+    let mut evidence = good(&spec);
+    with_c(&spec, &mut evidence, 50_000_000);
+    let summary = evaluate(&spec, &evidence);
+    assert!(summary.pass, "{:?}", summary.failures);
+    assert_eq!(summary.c_report.len(), 9);
+    assert!(
+        summary
+            .c_report
+            .iter()
+            .all(|r| r.delta_p50_ns == 50_000_000)
+    );
+}
+
+#[test]
+fn a_fast_c_cannot_rescue_a_failing_ab_comparison() {
+    let spec = Spec::frozen();
+    let mut evidence = good(&spec);
+    evidence.latency[1] = latency_round(&spec, 2, 2_000_001);
+    with_c(&spec, &mut evidence, -900_000);
+    rejected(&spec, &evidence, FailureKind::LatencyP50);
+}
+
+#[test]
+fn misaligned_c_samples_are_left_out_of_the_report_and_never_fail() {
+    let spec = Spec::frozen();
+    let mut evidence = good(&spec);
+    with_c(&spec, &mut evidence, 1_000);
+    evidence.latency[0].c_samples.pop();
+    let summary = evaluate(&spec, &evidence);
+    assert!(summary.pass, "{:?}", summary.failures);
+    assert_eq!(summary.c_report.len(), 8);
 }

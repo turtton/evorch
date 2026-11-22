@@ -2,7 +2,7 @@
 //! are driven through their public entrances and nothing is added to them.
 use super::{
     arm::{CoreArm, parent_of},
-    gate::{Arm, GuardPss, KillSample, PairSample, ScopeReadback, Spec, expected_first},
+    gate::{Arm, CSample, GuardPss, KillSample, PairSample, ScopeReadback, Spec, expected_first},
 };
 use sandbox::owned::{GuardRuntime, OwnedChild, OwnedCommand};
 use serde_json::{Value, json};
@@ -95,22 +95,55 @@ async fn probe(arm: &CoreArm, workload: usize, kind: char, n: u32) -> io::Result
 
 /// Warm-up, then `pairs` paired samples per workload in the frozen ABBA order.
 /// Samples are appended as they are taken, so a failure keeps what was measured.
+///
+/// `c` is the report-only arm (current main). Inside every pair it takes one extra
+/// probe whose slot rotates before / between / after the pair's A and B probes; the
+/// relative A/B order stays the frozen one.
 pub async fn latency(
     spec: &Spec,
     round: u32,
     a: &Arc<CoreArm>,
     b: &Arc<CoreArm>,
+    c: Option<&Arc<CoreArm>>,
     out: &mut Vec<PairSample>,
+    c_out: &mut Vec<CSample>,
 ) -> io::Result<()> {
     for (w, workload) in spec.workloads.iter().enumerate() {
         for i in 0..spec.warmup_per_arm {
             probe(a, w, 'w', i).await?;
             probe(b, w, 'w', i).await?;
+            if let Some(c) = c {
+                probe(c, w, 'w', i).await?;
+            }
         }
         for index in 0..spec.pairs {
             let first = expected_first(spec.seed, round, w, index);
             let (mut a_ns, mut b_ns) = (0, 0);
-            for arm in [first, if first == Arm::A { Arm::B } else { Arm::A }] {
+            let slot = ((index as usize + w) % 3) as u8;
+            for position in 0..3u8 {
+                if position == slot {
+                    if let Some(c) = c {
+                        c_out.push(CSample {
+                            workload: workload.name.clone(),
+                            index,
+                            slot,
+                            c_ns: probe(c, w, 'm', index).await?,
+                        });
+                    }
+                    continue;
+                }
+                let turn = if position < slot {
+                    position
+                } else {
+                    position - 1
+                };
+                let arm = if turn == 0 {
+                    first
+                } else if first == Arm::A {
+                    Arm::B
+                } else {
+                    Arm::A
+                };
                 if arm == Arm::A {
                     a_ns = probe(a, w, 'm', index).await?;
                 } else {

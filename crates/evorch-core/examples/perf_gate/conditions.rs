@@ -134,6 +134,10 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
     let cpuinfo = read("/proc/cpuinfo");
     let get = |name: &str| opts.get(name).cloned().unwrap_or_default();
     let runner = std::env::current_exe()?;
+    let mut arms = json!({"a": arm(opts, "a", false)?, "b": arm(opts, "b", true)?});
+    if opts.contains_key("c-exe") {
+        arms["c"] = arm(opts, "c", true)?;
+    }
     Ok(json!({
         "schema": 1,
         "created_unix": std::time::SystemTime::now()
@@ -171,7 +175,7 @@ pub fn collect(opts: &HashMap<String, String>) -> io::Result<Value> {
             "sha256": sha256_file(&runner)?,
             "source_sha": get("runner-sha"),
         },
-        "arms": {"a": arm(opts, "a", false)?, "b": arm(opts, "b", true)?},
+        "arms": arms,
     }))
 }
 

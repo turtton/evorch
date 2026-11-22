@@ -51,22 +51,30 @@ mod linux {
     struct Opts {
         values: HashMap<String, String>,
         smoke: bool,
+        /// Full counts under the scope, but never evidence: noise floor and timing only.
+        dry_run: bool,
     }
     impl Opts {
         fn parse(args: &[String]) -> Opts {
             let mut values = HashMap::new();
             let mut smoke = false;
+            let mut dry_run = false;
             let mut iter = args.iter();
             while let Some(arg) = iter.next() {
                 match arg.strip_prefix("--") {
                     Some("smoke") => smoke = true,
+                    Some("dry-run") => dry_run = true,
                     Some(key) => {
                         values.insert(key.to_owned(), iter.next().cloned().unwrap_or_default());
                     }
                     None => {}
                 }
             }
-            Opts { values, smoke }
+            Opts {
+                values,
+                smoke,
+                dry_run,
+            }
         }
         fn need(&self, key: &str) -> io::Result<&str> {
             self.values
@@ -118,6 +126,7 @@ mod linux {
         match opts.values.get("conditions") {
             Some(path) => conditions::sha256_file(Path::new(path)),
             None if opts.smoke => Ok("smoke".into()),
+            None if opts.dry_run => Ok("dry-run".into()),
             None => Err(io::Error::other("--conditions is required")),
         }
     }
@@ -199,6 +208,8 @@ mod linux {
         let round = opts.round()?;
         let out = opts.path("out")?;
         let (a_exe, b_exe) = (opts.path("a-exe")?, opts.path("b-exe")?);
+        let c_exe = opts.values.get("c-exe").map(PathBuf::from);
+        let started = std::time::Instant::now();
         let conditions_sha256 = conditions_sha(opts)?;
         let fixture_commit = opts
             .values
@@ -212,6 +223,7 @@ mod linux {
             });
         let scope_start = scope(opts)?;
         let mut samples = Vec::new();
+        let mut c_samples = Vec::new();
         let mut kills = Vec::new();
         let mut observations: Vec<Value> = Vec::new();
         let bundle = b_exe.with_file_name("guard-bundle.json");
@@ -220,8 +232,14 @@ mod linux {
                 arm::CoreArm::start("A", &a_exe, &spec),
                 arm::CoreArm::start("B", &b_exe, &spec)
             )?;
+            let c = match &c_exe {
+                Some(exe) => Some(arm::CoreArm::start("C", exe, &spec).await?),
+                None => None,
+            };
             let run = async {
-                if a.commit != b.commit || fixture_commit.as_deref().is_some_and(|c| c != a.commit)
+                if a.commit != b.commit
+                    || c.as_ref().is_some_and(|c| c.commit != a.commit)
+                    || fixture_commit.as_deref().is_some_and(|c| c != a.commit)
                 {
                     return Err(io::Error::other(format!(
                         "fixture repositories differ: A {} B {} conditions {fixture_commit:?}",
@@ -232,25 +250,59 @@ mod linux {
                     arm::populate(&a, &spec.state),
                     arm::populate(&b, &spec.state)
                 )?;
+                if let Some(c) = &c {
+                    arm::populate(c, &spec.state).await?;
+                }
                 let agents = (
                     arm::Agents::start(&a, &spec.state),
                     arm::Agents::start(&b, &spec.state),
                 );
+                let agent_c = c.as_ref().map(|c| arm::Agents::start(c, &spec.state));
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                if agents.0.failed() || agents.1.failed() {
+                if agents.0.failed()
+                    || agents.1.failed()
+                    || agent_c.as_ref().is_some_and(|a| a.failed())
+                {
                     return Err(io::Error::other(
                         "an active agent stopped before LOAD_READY",
                     ));
                 }
-                observations.push(json!({"at": "load_ready", "a": a.observe(), "b": b.observe()}));
-                let measured = cells::latency(&spec, round, &a, &b, &mut samples).await;
-                let killed = if measured.is_ok() && (bundle.exists() || !opts.smoke) {
-                    cells::force_kill(&spec, &bundle, &mut kills).await
-                } else {
-                    measured
-                };
-                observations.push(json!({"at": "end", "a": a.observe(), "b": b.observe()}));
+                observations.push(json!({
+                    "at": "load_ready",
+                    "t_ms": started.elapsed().as_millis() as u64,
+                    "a": a.observe(), "b": b.observe(),
+                    "c": c.as_ref().map(|c| c.observe()),
+                }));
+                let measured = cells::latency(
+                    &spec,
+                    round,
+                    &a,
+                    &b,
+                    c.as_ref(),
+                    &mut samples,
+                    &mut c_samples,
+                )
+                .await;
+                observations.push(json!({
+                    "at": "latency_done",
+                    "t_ms": started.elapsed().as_millis() as u64,
+                }));
+                let killed =
+                    if measured.is_ok() && !opts.dry_run && (bundle.exists() || !opts.smoke) {
+                        cells::force_kill(&spec, &bundle, &mut kills).await
+                    } else {
+                        measured
+                    };
+                observations.push(json!({
+                    "at": "end",
+                    "t_ms": started.elapsed().as_millis() as u64,
+                    "a": a.observe(), "b": b.observe(),
+                    "c": c.as_ref().map(|c| c.observe()),
+                }));
                 let ticks = (agents.0.stop().await, agents.1.stop().await);
+                if let Some(agent) = agent_c {
+                    agent.stop().await?;
+                }
                 observations.push(json!({"agent_ticks": format!("{ticks:?}")}));
                 killed?;
                 ticks.0?;
@@ -259,6 +311,9 @@ mod linux {
             };
             let result = run.await;
             tokio::join!(a.shutdown(), b.shutdown());
+            if let Some(c) = c {
+                c.shutdown().await;
+            }
             result
         };
         let result = tokio::time::timeout(budget(&spec), body).await;
@@ -278,13 +333,14 @@ mod linux {
             &out,
             &LatencyRound {
                 schema: SCHEMA,
-                evidence: !opts.smoke,
+                evidence: !opts.smoke && !opts.dry_run,
                 round,
                 conditions_sha256,
                 spec_sha256: Spec::sha256(),
                 status,
                 scope: scope_start,
                 samples,
+                c_samples,
                 force_kill: kills,
             },
         )?;
@@ -373,6 +429,7 @@ mod linux {
                     status,
                     scope,
                     samples: vec![],
+                    c_samples: vec![],
                     force_kill: vec![],
                 },
             )?,

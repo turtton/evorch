@@ -6,6 +6,7 @@
 #                                        --b-exe Y --b-sha S --b-tree T --b-recipe R [--a-note N --b-note N]
 #   scripts/perf-gate.sh run        DIR  --runner EXE --a-exe X --b-exe Y
 #   scripts/perf-gate.sh aggregate  DIR  --runner EXE
+#   scripts/perf-gate.sh dry-run    DIR  --runner EXE --a-exe X --b-exe X [--c-exe Z]  (evidence=false, noise/time)
 #   scripts/perf-gate.sh smoke      DIR  --runner EXE --a-exe X --b-exe Y     (evidence=false, no scope)
 #
 # `run` needs the host's systemd user scope (scripts/reproduce-under-limits.sh),
@@ -73,7 +74,8 @@ run)
             rc=0
             "$limits" --cpus 2 --memory 2G --tasks 512 --timeout 600s --stress-cpus 1 -- \
                 "$runner" "$cell" --round "$round" --conditions "$dir/conditions.json" \
-                --a-exe "${opt[a-exe]}" --b-exe "${opt[b-exe]}" --out "$out" || rc=$?
+                --a-exe "${opt[a-exe]}" --b-exe "${opt[b-exe]}" ${opt[c-exe]:+--c-exe "${opt[c-exe]}"} \
+                --out "$out" || rc=$?
             echo "$(date -u +%FT%TZ) round $round $cell: exit $rc" >>"$dir/run.log"
             if [[ ! -f $out ]]; then
                 status=failed
@@ -87,6 +89,21 @@ run)
     ;;
 aggregate)
     "$runner" aggregate --dir "$dir"
+    ;;
+dry-run)
+    # Noise floor and round duration only: full counts under the real scope and stress, but
+    # evidence=false, so the aggregator rejects the file. Pass the same A as --a-exe and
+    # --b-exe for an A-versus-A run. No force kill, no PSS, no thresholds are consulted.
+    need a-exe
+    need b-exe
+    [[ ! -e $dir/dry-run-latency.json ]] || die "$dir/dry-run-latency.json exists"
+    stress_ng_record >"$dir/stress-ng.txt"
+    start=$(date +%s)
+    rc=0
+    "$limits" --cpus 2 --memory 2G --tasks 512 --timeout 600s --stress-cpus 1 -- \
+        "$runner" latency --dry-run --round 1 --a-exe "${opt[a-exe]}" --b-exe "${opt[b-exe]}" \
+        ${opt[c-exe]:+--c-exe "${opt[c-exe]}"} --out "$dir/dry-run-latency.json" || rc=$?
+    echo "dry-run: exit $rc after $(( $(date +%s) - start )) s (scope timeout 600 s)"
     ;;
 smoke)
     need a-exe
