@@ -48,6 +48,11 @@ harness = false
 required-features = ["bootstrap-test-support"]
 
 [[test]]
+name = "core_browser_sigkill"
+path = "tests/core_browser_sigkill/main.rs"
+harness = false
+
+[[test]]
 name = "recovery_admin_install"
 path = "tests/recovery_admin_install/main.rs"
 
@@ -119,4 +124,6 @@ workspace-state = { path = "../workspace-state" }
 reqwest = { workspace = true }
 workbench-client = { path = "../workbench-client" }
 tempfile = { workspace = true }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "process", "io-std"] }
