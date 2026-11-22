@@ -119,7 +119,8 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
     );
     assert_eq!(rejected.supported_versions, [ProtocolVersion::CURRENT]);
 
-    // What the core offers is the explicit implemented set; safe restart is not in it.
+    // What the core offers is the explicit implemented set; safe restart is in it
+    // now that the restart is public, and only what was asked for is granted.
     let (mut stream, reply) = connect(
         &socket,
         &hello(&[ProtocolVersion::CURRENT], &["queries.v1"]),
@@ -138,10 +139,10 @@ async fn a_version_1_client_is_refused_and_only_implemented_capabilities_are_off
         ),
     )
     .await;
-    let HandshakeReply::Rejected(rejected) = reply else {
-        panic!("an unadvertised capability was granted");
+    let HandshakeReply::Accepted(restart) = reply else {
+        panic!("the advertised safe restart capability was refused");
     };
-    assert_eq!(rejected.reason, RejectReason::MissingCapabilities);
+    assert_eq!(restart.capabilities, [Capability::SafeRestart]);
 
     // A capability that was not negotiated refuses the request before it runs.
     let command = request(
