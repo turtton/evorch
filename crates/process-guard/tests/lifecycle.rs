@@ -550,11 +550,44 @@ struct FixtureReaper {
 impl FixtureReaper {
     fn new() -> Self {
         assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        // A non-child pidfd must never be signalled by recovery cleanup.
+        assert!(!signal_adopted_child(
+            &pidfd_open(std::process::id() as i32).unwrap()
+        ));
         Self { pids: Vec::new() }
     }
     fn add(&mut self, pid: i32) {
         if pid > 0 {
             self.pids.push((pid, pidfd_open(pid).unwrap()));
+        }
+    }
+}
+// Validate the pidfd identity against our child set, not the raced /proc PID.
+fn signal_adopted_child(fd: &std::os::fd::OwnedFd) -> bool {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    loop {
+        if unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                fd.as_raw_fd() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+            return true;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
         }
     }
 }
@@ -591,20 +624,13 @@ impl Drop for FixtureReaper {
                 break;
             }
             for child in children {
-                if let Ok(fd) = pidfd_open(child) {
+                if let Ok(fd) = pidfd_open(child)
+                    && signal_adopted_child(&fd)
+                {
+                    let mut status = 0;
                     unsafe {
-                        libc::syscall(
-                            libc::SYS_pidfd_send_signal,
-                            fd.as_raw_fd(),
-                            libc::SIGKILL,
-                            std::ptr::null::<libc::siginfo_t>(),
-                            0,
-                        );
+                        libc::waitpid(child, &mut status, 0);
                     }
-                }
-                let mut status = 0;
-                unsafe {
-                    libc::waitpid(child, &mut status, 0);
                 }
             }
         }

@@ -1,11 +1,9 @@
-# D-3a2 owned process handoff (through B3-03 / B3-04)
+# D-3a2 owned process handoff (through B3-05)
 
 B2a added the typed API; B2b migrated its non-PTY callers in three parts
 (B2b-i, B2b-ii, B2b-iii). **D-7 is not complete**: shell PTY (B3-03) and agent Chromium (B3-04)
-are now migrated. Linux raw API removal and combined evidence remain below.
-Historical B2 raw-boundary details are under
-"Raw boundary left for B3", with their old guarantees; entry binding does **not**
-guard them.
+are now migrated. B3-05 removes the Linux raw ownership surface. Combined evidence remains pending;
+entry binding alone does **not** prove owner-death cleanup.
 
 ## B2b-i: sandbox, session, LSP, js-worker
 
@@ -83,33 +81,59 @@ Removed: `GroupChild`, `StdioSession::spawn*`/`spawn_command_*`,
 Linux. The non-Linux adapter keeps them as private (`pub(crate)`) items of its own
 backend; it makes no new D-7 claim and its code is only compile-checked by CI.
 
-### Raw boundary left for B3
+### B3-05: raw ownership boundary removed
 
-Nothing a non-PTY caller can reach. What stays, and who uses it:
+On Linux the raw process backend is not compiled. `spawn_pty`, `retired`,
+`ProcessGroupGuard`, `wait_for_exit`, `has_exited` and
+`Admission::register_pty_group` are unavailable, and the ledger has no
+`ChildGroup::Raw` variant. The remaining non-Linux backend is private;
+there is no public raw Command, arbitrary pre-exec callback or PID/PGID owner
+constructor. The compile-fail examples in `owned.rs` guard this boundary.
+The public descriptor hook is also gone: `product_exec/process.rs` owns its
+fixture-only close-on-exec hook, with the descriptor leak regression retained.
 
-- `process::ProcessGroup`, `ProcessGroupGuard`, `wait_for_exit`, `has_exited` and
-  `Admission::register_pty_group` (ledger `ChildGroup::Raw`): legacy non-Linux
-  adapter and synthetic restart seams only after B3-03, not the Linux shell
-  product caller. B3-05 removes the Linux public raw surface.
-  A live `ProcessGroup` exists only from `ProcessGroup::spawn_pty`, which
-  starts a command on a `portable_pty::SlavePty`; there is no constructor from a
-  bare pid and no way to hand it a std or Tokio child (the `compile_fail` doctests on
-  `ProcessGroup` pin that: `new` is crate-private, and a std/Tokio child is not a slave).
-  `ProcessGroup::retired()` signals nothing and exists for the restart test that
-  registers a synthetic receipt. `portable_pty::Child` itself would prove nothing, as
-  it is implemented for `std::process::Child`.
-- `process::close_inherited_fds_on_exec`: a descriptor-hygiene hook for the std
-  command an evorch-core fixture (`product_exec`) starts and supervises itself. It
-  owns nothing and is no way to start a product child.
-- Agent Chromium is migrated by B3-04 (see below). The private core-launcher
-  preflight supervisor (`--die-with-parent`) stays unchanged.
+Restart's `m2::unconfirmed_reap_blocks_worker_join_and_storage_drain` now
+launches a typed child, pins living root/helper pidfds and kills the helper.
+GuardLost leaves an unconfirmed ledger receipt; finalization must stop at
+StopRequested (before worker join/storage drain). The isolated controller reaps
+the adopted target even on failure. No fake-receipt API or product fault switch
+was introduced. Real process I/O uses the real clock, not Tokio's paused clock.
 
-Std spawns outside the audited inventory that this part did not touch: the GUI's
-short git calls (`diff/git_cli.rs`, `evorch-gui.rs`, `composer_mention.rs`,
-`runtime_sink.rs`) and `fc-match` (`theme/fonts.rs`), and `core-launcher` starting the
-core. They never had the launch policy. The GUI embedded-terminal PTY
-(`gui/src/pty/mod.rs`, approved inventory L21) remains a separate follow-up,
-not a core-owned guarantee.
+### Remaining spawn audit (B3-05)
+
+This is the current-code classification of the approved
+[prework inventory](../../../../docs/single-core/d3a2-B3-prework.md), not a
+replacement for its three separate tables. The **14 product core callers**
+remain L01–05, L07–10, L12–16; L06/L11 have no product core caller. Synthetic
+API coverage is not real-caller SIGKILL/expiry evidence (B3-06–08).
+
+The audit searched Rust sources for std/Tokio Command construction, spawn,
+output/status, portable-pty spawn, fork/exec and their wrappers, then checked
+cfg/test boundaries and callers. Remaining raw launches are classified below;
+none is an unclassified Linux product-core owner entry.
+
+| Inventory / source | Classification and ownership |
+|---|---|
+| L01–05, L07–10, L12–13, L15–16 (tools, sandbox, eval groups, renderer, PR source, git reads) | Typed owners, ledger as in prework. **L02 PTY is now typed** (B3-03); neither its slave nor raw group enters the ledger. |
+| L14 `browser/agent/chromium.rs` | **Migrated B3-04**, owned child without ledger; chromiumoxide connects only. CEF/Chromium native descendants still need B3-08 group traces. |
+| L06 LSP; L11 quota app-server | Typed, test-only core callers; do not count as product callers. |
+| L17–19 eval verify/git, benchmark snapshot git | Typed, owner is eval CLI/benchmark, not core. Nested owner-death evidence is still pending. |
+| L20 GUI slash | Typed, GUI-owned, not a core guarantee. |
+| L21 `gui/src/pty/mod.rs` | **Unmigrated, separate follow-up** (parent C); GUI-owned embedded terminal. Not edited by B3-05. |
+| L22–25 `gui/{diff/git_cli.rs,model/composer_mention.rs,bin/evorch-gui.rs,theme/fonts.rs}` | **Unmigrated, separate follow-up** (parent C): short GUI git/demo and fc-match commands, not intentional lifecycle exemptions. `runtime_sink.rs` git spawn is test-only. |
+| L26 GUI in-process CEF | External native spawn, GUI-owned; separate follow-up/unreviewed, not silently claimed guarded. |
+| L27 `core-launcher/src/lib.rs` | **Intentional exclusion**: starts independent resident core. Guarding it would kill core on launcher exit. |
+| L28 `core-launcher/src/handoff/supervisor.rs` | **Intentional exclusion**: private allocation-free fork/exec supervisor, own core-death/EOF/TERM handling. Do not double-guard. B3-06 owns regression evidence. |
+| L29 `core-instance/src/handoff.rs` | **Intentional exclusion**: exec of self, no child created. |
+| L30–31 `process-guard/src/{helper,guard}.rs` | Guard implementation: pinned helper std spawn and target fork/exec, not an owner bypass. PTY's portable-pty pair only allocates terminals; target spawn is guard-controlled. |
+| `sandbox/src/{process,session}.rs`, `owned/{unix,pty_unix}.rs` | Private non-Linux backend only, not compiled on Linux; no new D-7 guarantee. `OwnedCommand` stores std Command as a description, with non-Linux-only raw conversion. |
+| L32 `process-guard/build.rs` | Build-time `rustc -V`, not a running product child. |
+| L33 tests/support/examples/harness and cfg(test) code | Test controllers/fixtures only, including core `product_exec`, restart GuardLost, lifecycle/idle, storage tests and js-worker summary tests. Not product ownership. |
+| L34 `scripts/measure-renderer/src/helper.rs` | Measurement-only raw spawn, outside product core. |
+
+No newly discovered long-lived core-owned caller was excluded. GUI follow-ups,
+B3-06–08 combined evidence and B3-09 performance/final audit remain open;
+**D-7 is not complete**.
 
 ### Closed stdio, per path
 

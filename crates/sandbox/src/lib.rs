@@ -15,7 +15,8 @@ pub mod minimal;
 pub mod network;
 pub mod owned;
 pub mod policy;
-pub mod process;
+#[cfg(not(target_os = "linux"))]
+mod process;
 pub mod scratch;
 pub mod session;
 

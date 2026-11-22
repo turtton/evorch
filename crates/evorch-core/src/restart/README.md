@@ -1,23 +1,29 @@
 # D-3a2 B1/B2a: distribution and additive ownership API
 
-**D-7 未完了 (PTY / agent Chromium は B3).** B1 delivers `evorch-process-guard` and
-immutable Linux bundles. B2a adds typed `sandbox::owned` owners and startup bundle
-binding for CLI/core/GUI. B2b migrated the non-PTY callers in three parts (see
-`sandbox/src/owned/README.md`); B2b-iii removed the raw Linux ownership APIs.
+**D-7 未完了。** B1 delivers `evorch-process-guard` and immutable Linux
+bundles; B2 adds typed owners and migrates non-PTY callers. B3-03 migrates shell
+PTY, B3-04 migrates agent Chromium, and B3-05 removes Linux raw process/ledger
+ownership APIs. The non-Linux backend stays private; no public synthetic receipt
+API replaces it. See [owned API and remaining-spawn audit](../../../sandbox/src/owned/README.md).
 
-- Migrated to the guard-owned API (B2b-i, -ii, -iii): SandboxSession (LSP, js-worker
-  owner, library listing, bwrap probe), the comment-checker, the shell **pipe**
-  jobs, MCP stdio, grep, git diff, the codex quota RPC, runtime git reads and
-  snapshots, eval's host git, eval groups/verify, the PR source (with or without a
-  ledger), the offline renderer, GUI slash commands and the test/example seams.
-- Still unprotected by B (B3): the shell **PTY** jobs (raw `ProcessGroup`, registered
-  through `Admission::register_pty_group`) and agent Chromium. The std spawns outside
-  the audited inventory (GUI git/`fc-match`) are listed in the owned README.
+- The approved product-core caller inventory remains **14**; LSP/quota test
+  callers and the 13 synthetic API paths are not counted as product evidence.
+- The real typed GuardLost restart fixture in `tests/finalization/m2.rs`
+  verifies that unconfirmed reap stops at StopRequested, before worker join or
+  storage drain. Its isolated controller holds living pidfds and reaps the family;
+  it does not mix real process I/O with a virtual clock.
+- FD hygiene for the product-exec test reaper now lives in
+  `shared-test-support/product_exec/process.rs`; the existing inherited-FD
+  leak regression remains. It is not a public product ownership seam.
+- GUI embedded-terminal PTY and short git/`fc-match` commands are **unmigrated
+  separate follow-ups** (parent C). Launcher core startup and the private
+  preflight supervisor are **intentional exclusions**, not unclassified gaps.
 
-B3 migrates PTY/Chromium and supplies release-core expiry, real Chromium/CEF and
-end-to-end evidence. The private preflight
-supervisor and bwrap `--die-with-parent` remain unchanged. A's real 10s watchdog
-and exit 74 tail do not call a ledger or guard and are not extended.
+B3-06–08 still own real-caller SIGKILL, release test-binary expiry, real Chromium/
+CEF and combined evidence; B3-09 owns performance/final audit. Product ELF expiry
+belongs to the 5a-V T3 gate (not the B3-07 test binary). Private preflight and bwrap
+`--die-with-parent` remain unchanged. A's real 10s watchdog and exit 74 tail do
+not call a ledger or guard and are not extended.
 
 ## Standalone contract
 

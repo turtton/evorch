@@ -28,6 +28,10 @@ pub(super) struct Reaper(Vec<(i32, OwnedFd)>);
 impl Reaper {
     pub(super) fn new() -> Self {
         assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        // A non-child pidfd must never be signalled by recovery cleanup.
+        assert!(!signal_adopted_child(
+            &pidfd_open(std::process::id() as i32).unwrap()
+        ));
         Self(Vec::new())
     }
     pub(super) fn add(&mut self, pid: i32) {
@@ -54,6 +58,35 @@ fn reap(pid: i32) {
         }
     }
 }
+// Validate the pidfd identity against our child set, not the raced /proc PID.
+fn signal_adopted_child(fd: &OwnedFd) -> bool {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    loop {
+        if unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                fd.as_raw_fd() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+            return true;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
 impl Drop for Reaper {
     fn drop(&mut self) {
         for (_, fd) in &self.0 {
@@ -75,10 +108,11 @@ impl Drop for Reaper {
                 break;
             }
             for pid in pids {
-                if let Ok(fd) = pidfd_open(pid) {
-                    kill(&fd);
+                if let Ok(fd) = pidfd_open(pid)
+                    && signal_adopted_child(&fd)
+                {
+                    reap(pid);
                 }
-                reap(pid);
             }
         }
     }

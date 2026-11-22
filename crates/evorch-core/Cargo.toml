@@ -87,6 +87,7 @@ uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+libc = "0.2"
 test-socket-dir = { path = "../test-socket-dir" }
 model = { path = "../model" }
 storage = { path = "../storage", features = ["test-support"] }

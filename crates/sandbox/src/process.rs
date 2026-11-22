@@ -1,17 +1,4 @@
-//! The raw process-group backend that survives the typed owner API.
-//!
-//! Linux non-PTY children are owned by [`crate::owned`] (an authenticated process
-//! guard, with or without a ledger); nothing here starts one. What remains is the
-//! boundary B3 replaces: [`ProcessGroup`] / [`ProcessGroupGuard`] /
-//! [`wait_for_exit`] / [`has_exited`] for a pseudo-terminal child (the shell's PTY
-//! jobs, started by `portable-pty`, which already starts its own session and closes
-//! inherited descriptors), registered through
-//! [`crate::ledger::Admission::register_pty_group`], and
-//! [`close_inherited_fds_on_exec`], a descriptor-hygiene hook for a std command that
-//! a test fixture starts and supervises itself (it owns nothing).
-//!
-//! The non-Linux owner adapter keeps its previous backend privately
-//! (`GroupChild`, the launch policy); it carries no new D-7 claim.
+//! Private non-Linux process backend. Linux ownership lives only in `owned`.
 
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -62,58 +49,10 @@ pub(crate) fn detach_from_terminal(command: &mut Command) {
     }
 }
 
-/// Close every descriptor above stderr when the child executes its program.
-///
-/// Not an ownership API: it only marks descriptors for a std command that a test
-/// fixture starts and supervises itself. Product children are started through
-/// [`crate::owned::OwnedCommand`], whose guard helper applies the same policy.
-///
-/// The child keeps the standard streams configured on `command`; nothing else
-/// evorch has open reaches the executed program. The descriptors are marked
-/// close-on-exec rather than closed, which keeps the pipe the standard library
-/// uses to report a failed exec (a missing program) working until the exec
-/// succeeds.
-///
-/// Linux needs 5.11 or later (`close_range` with `CLOSE_RANGE_CLOEXEC`); on an
-/// older kernel the spawn fails instead of leaking the descriptors. Other Unix
-/// systems keep the standard inheritance.
-pub fn close_inherited_fds_on_exec(command: &mut std::process::Command) {
-    #[cfg(target_os = "linux")]
-    // SAFETY: between fork and exec the hook makes one async-signal-safe
-    // system call and allocates nothing.
-    unsafe {
-        command.pre_exec(mark_inherited_fds_close_on_exec);
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = command;
-}
-
-#[cfg(target_os = "linux")]
-fn mark_inherited_fds_close_on_exec() -> std::io::Result<()> {
-    const FIRST_INHERITED: libc::c_uint = 3;
-    // SAFETY: close_range takes plain integers and only changes descriptor
-    // flags of the calling process. rustix 1 does not wrap it.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            FIRST_INHERITED,
-            libc::c_uint::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        // Reading errno neither allocates nor takes a lock.
-        Err(std::io::Error::last_os_error())
-    }
-}
-
 /// evorch's launch policy for the non-Linux adapter's children.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_launch_policy(command: &mut Command) {
     detach_from_terminal(command);
-    close_inherited_fds_on_exec(command);
 }
 
 /// The process group of a child that leads its own session, shared by everything
@@ -129,41 +68,6 @@ pub(crate) fn apply_launch_policy(command: &mut Command) {
 /// [`kill_and_release`](Self::kill_and_release). After that,
 /// [`kill`](Self::kill) on any clone sends nothing.
 ///
-/// # Only a pseudo-terminal child can lead one
-///
-/// Linux children that are not on a pseudo-terminal are owned by
-/// [`crate::owned`]; this raw handle is the PTY boundary B3 replaces. A live
-/// group comes only from a command started on a pseudo-terminal slave:
-///
-/// ```no_run
-/// fn start(
-///     slave: &dyn portable_pty::SlavePty,
-/// ) -> std::io::Result<sandbox::process::ProcessGroup> {
-///     let command = portable_pty::CommandBuilder::new("true");
-///     sandbox::process::ProcessGroup::spawn_pty(slave, command).map(|(_child, group)| group)
-/// }
-/// ```
-///
-/// A bare pid has no constructor:
-///
-/// ```compile_fail,E0624
-/// let child = std::process::Command::new("true").spawn().unwrap();
-/// let _ = sandbox::process::ProcessGroup::new(Some(child.id()));
-/// ```
-///
-/// and a std or Tokio child is not a pseudo-terminal slave:
-///
-/// ```compile_fail,E0277
-/// let child = std::process::Command::new("true").spawn().unwrap();
-/// let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
-/// ```
-///
-/// ```compile_fail,E0277
-/// async fn start() {
-///     let child = tokio::process::Command::new("true").spawn().unwrap();
-///     let _ = sandbox::process::ProcessGroup::spawn_pty(&child, portable_pty::CommandBuilder::new("true"));
-/// }
-/// ```
 #[derive(Debug, Clone)]
 pub struct ProcessGroup {
     leader: Arc<Mutex<Option<Pid>>>,
@@ -174,10 +78,8 @@ impl ProcessGroup {
     /// leads. portable-pty starts the child in a session of its own, so its pid
     /// is the group id.
     ///
-    /// The only way to obtain a live group: there is no constructor from a bare
-    /// pid, and a std or Tokio child cannot be passed (`portable_pty::Child` is
-    /// implemented for `std::process::Child`, so the child itself would prove
-    /// nothing; the pseudo-terminal slave that starts it does).
+    /// Used only by the private non-Linux PTY adapter. Other private non-Linux
+    /// owners construct their group from the child they started themselves.
     ///
     /// # Errors
     /// The error of the pseudo-terminal's spawn.
@@ -188,11 +90,6 @@ impl ProcessGroup {
         let child = slave.spawn_command(command).map_err(io::Error::other)?;
         let group = Self::new(child.process_id());
         Ok((child, group))
-    }
-
-    /// A group with no leader: it signals nothing and is already retired.
-    pub fn retired() -> Self {
-        Self::new(None)
     }
 
     /// The group led by the child with this pid (`Child::id`). `None`, as
@@ -264,22 +161,6 @@ impl ProcessGroup {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Pid>> {
         self.leader.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// Kills a [`ProcessGroup`] when dropped, unless its leader was reaped first.
-#[derive(Debug)]
-pub struct ProcessGroupGuard(ProcessGroup);
-
-impl ProcessGroupGuard {
-    pub const fn new(group: ProcessGroup) -> Self {
-        Self(group)
-    }
-}
-
-impl Drop for ProcessGroupGuard {
-    fn drop(&mut self) {
-        self.0.kill();
     }
 }
 

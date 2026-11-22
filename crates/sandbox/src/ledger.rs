@@ -52,6 +52,7 @@ pub use workers::{JoinFailed, WorkerActivity, WorkerId, WorkerInfo, WorkerStats}
 
 #[cfg(not(target_os = "linux"))]
 use crate::process::GroupChild;
+#[cfg(not(target_os = "linux"))]
 use crate::process::ProcessGroup;
 
 /// Why a child or a worker could not be started through the ledger.
@@ -260,15 +261,14 @@ impl Admission<'_> {
         Ok(child)
     }
 
-    /// Register a pseudo-terminal child its own owner started inside this
-    /// admission (legacy adapter/test seams; removed on Linux by B3-05).
+    /// Register a group started by the private non-Linux owner backend inside
+    /// this admission. Linux has no raw registration entry.
     ///
-    /// A [`ProcessGroup`] can only come from a portable-pty child
-    /// ([`ProcessGroup::spawn_pty`]), so no other kind of child can enter the
-    /// ledger through here. The owner calls [`ChildEntry::reaped`] once it has
+    /// The owner calls [`ChildEntry::reaped`] once it has
     /// reaped the leader; a dropped entry means the owner gave the child up
     /// without reaping it. `None` without a ledger.
-    pub fn register_pty_group(
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn register_pty_group(
         &self,
         kind: ChildKind,
         label: Option<&str>,
