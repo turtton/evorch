@@ -18,7 +18,7 @@ mod procs;
 mod tls;
 
 #[cfg(target_os = "linux")]
-const CELLS: &[&str] = &["chromium_p", "cef_p"];
+const CELLS: &[&str] = &["chromium_p", "chromium_stopped_p", "cef_p", "cef_stopped_p"];
 
 #[cfg(target_os = "linux")]
 fn main() {

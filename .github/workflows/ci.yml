@@ -1220,7 +1220,7 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p)' --run-ignored only --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=chromium_p) | test(=chromium_stopped_p)' --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1397,7 +1397,7 @@ jobs:
           cargo build -p browser-cef --features cef --bin evorch-cef-helper
           export EVORCH_RENDERER_EXE="$PWD/target/ci-shared/debug/evorch-renderer"
           export EVORCH_B3_EVIDENCE_DIR="$RUNNER_TEMP/core-browser-sigkill"
-          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p)' --run-ignored only --success-output immediate --no-tests fail
+          scripts/guard-cargo.sh run -p evorch-core --test core_browser_sigkill -E 'test(=cef_p) | test(=cef_stopped_p)' --run-ignored only --success-output immediate --no-tests fail
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

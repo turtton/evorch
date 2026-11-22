@@ -18,7 +18,9 @@ not repeated here.
 | Cell | Evidence | Entrance | Real engine |
 |---|---|---|---|
 | `chromium_p` | P* | Conversation `CreateExecution` → agent tool `browser_navigate` (the product's model review of the URL is answered by the mock) | installed Chromium/Chrome (`CHROME`), launched by the core's owned launch (B3-04) |
+| `chromium_stopped_p` | P* | same as `chromium_p`, plus SIGSTOP of the non-root, non-guard members before the SIGKILL | same |
 | `cef_p` | P* | Conversation turns → `render_artifact` → `inspect_artifact` open, snapshot | `evorch-renderer` (`EVORCH_RENDERER_EXE`, product `EVORCH_RENDERER_EXEC` override) with `evorch-cef-helper` and the pinned CEF |
+| `cef_stopped_p` | P* | same as `cef_p`, plus the same SIGSTOP | same |
 
 Chromium and CEF are separate paths; neither stands in for the other, and the
 renderer cell disables the agent browser tools, the Chromium cell never opens
@@ -74,10 +76,18 @@ crashpad handler (or any such process) fails the cell. CEF started none in the
 same observation. Chromium aux processes (zygote, GPU, utility, renderer)
 share the target root's group; the guard itself is in the core's group.
 
-Chromium and CEF children also exit when their browser/host process dies, so
-these cells detect a missing guard (nothing kills the root) but cannot tell a
-group kill from a root kill followed by those self-exits; the group-kill
-property itself is B3-06's fixture evidence.
+Chromium and CEF children also exit by themselves when their browser/host
+process dies. So `chromium_p` and `cef_p` detect a missing guard (nothing kills
+the root) but **cannot** tell a group kill from a root-only kill followed by
+those self-exits. The `_stopped_` variants (`chromium_stopped_p`,
+`cef_stopped_p`) close that gap by fault injection: after the tree is pinned,
+every guard-subtree member except the target root and the guard is SIGSTOPped
+through its pidfd, so it cannot notice the death and exit by itself. Only a
+kill that reaches it ends it, and the cell requires that before any cleanup.
+Delivery of SIGSTOP is not awaited, so these variants prove "a group member
+that cannot cooperate still dies", not a timing property. They are an
+injected-fault cell, not the natural lifecycle; the natural cells stay as they
+are. Crashpad handlers are not stopped (they are outside the guard).
 
 ## Bounds and execution
 
@@ -99,7 +109,7 @@ cargo nextest run -p evorch-core --test core_browser_sigkill --run-ignored only 
 ```
 
 The cells are listed only with `--ignored`, so ordinary test groups never run
-them. CI runs `chromium_p` in browser-e2e and `cef_p` in cef-e2e.
+them. CI runs `chromium_p` and `chromium_stopped_p` in browser-e2e, `cef_p` and `cef_stopped_p` in cef-e2e.
 
-Mutations (guard bypass, root-only kill, no NSS trust, no navigation) run in a
+Mutations (guard bypass, EOF-resistant renderer, root-only kill, no NSS trust, no navigation) run in a
 disposable checkout; no mutation code is committed.

@@ -78,7 +78,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
     let mut fixture = None;
     let mut renderer = None;
     let (responses, browser_config) = match cell {
-        "chromium_p" => {
+        "chromium_p" | "chromium_stopped_p" => {
             let chrome = fixtures::require_absolute_file("CHROME")?;
             let served = tls::Fixture::start().await?;
             // The cell's own HOME is the only trust the product Chromium gets.
@@ -107,7 +107,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
                 ),
             )
         }
-        "cef_p" => {
+        "cef_p" | "cef_stopped_p" => {
             let exe = fixtures::require_absolute_file("EVORCH_RENDERER_EXE")?;
             let helper = exe.with_file_name("evorch-cef-helper");
             check(
@@ -150,7 +150,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
     let result = async {
         let mut core = core::connect(&mut child).await?;
         match cell {
-            "chromium_p" => {
+            "chromium_p" | "chromium_stopped_p" => {
                 core::create_execution(&core, "b3", "navigate").await?;
             }
             _ => {
@@ -191,7 +191,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
         .await?;
         let results = tool_results(&mock);
         let (needle, requests) = match cell {
-            "chromium_p" => {
+            "chromium_p" | "chromium_stopped_p" => {
                 let served = fixture.as_ref().unwrap().requests.lock().unwrap().clone();
                 check(
                     served.iter().any(|line| line.starts_with("GET /b3-08")),
@@ -218,7 +218,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
         // A renderer forked from the zygote keeps the zygote's argv, so CEF's
         // renderers are only visible as extra zygote-typed members; the page
         // content itself is shown by the tool result checked above.
-        if cell == "chromium_p" {
+        if cell.starts_with("chromium") {
             check(
                 count("renderer") >= 1 && count("gpu-process") + count("utility") >= 1,
                 format!("Chromium has no renderer/service processes: {types:?}"),
@@ -238,12 +238,27 @@ pub async fn run(cell: &str) -> io::Result<()> {
             format!("target tree changed before core KILL: alive {alive:?} gone {gone:?}"),
         )?;
         let marked = procs::unreachable_marked(&tree, &marker)?;
+        // Fault injection of the `_stopped_` cells: a stopped process cannot
+        // notice that its browser or host died and exit by itself, so only a
+        // kill that reaches it ends it. The root and the guard keep running.
+        let paused: Vec<i32> = if cell.contains("_stopped_") {
+            alive
+                .iter()
+                .copied()
+                .filter(|pid| *pid != root_pid && *pid != guard)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for pid in &paused {
+            tree.require(*pid)?.signal(Signal::STOP)?;
+        }
         evidence::emit(
             cell,
             "ready",
             &json!({
                 "cell": cell, "artifact": "P*", "core_owner": true,
-                "entrance": if cell == "chromium_p" {
+                "entrance": if cell.starts_with("chromium") {
                     "Conversation CreateExecution -> agent tool browser_navigate -> real Chromium (https loopback, NSS-trusted CA)"
                 } else {
                     "Conversation turns -> render_artifact -> inspect_artifact open/snapshot -> evorch-renderer + real CEF"
@@ -253,7 +268,7 @@ pub async fn run(cell: &str) -> io::Result<()> {
                 "core_sha256": artifact.manifest.sha256,
                 "guard_sha256": artifact.manifest.guard.as_ref().unwrap().sha256,
                 "fixture_requests": requests,
-                "members": described, "exited_before_kill": gone,
+                "members": described, "exited_before_kill": gone, "stopped_before_kill": paused,
                 "unreachable_marked": marked.iter().map(procs::describe_pin).collect::<Vec<_>>(),
             }),
         )?;
@@ -324,7 +339,7 @@ fn find_target_root(
         .map(|pin| pin.identity.pid)
         .filter(|pid| {
             let args = procs::cmdline(*pid);
-            if cell == "chromium_p" {
+            if cell.starts_with("chromium") {
                 args.iter().any(|a| a == "--remote-debugging-port=0")
                     && procs::process_type(&args).is_none()
             } else {
@@ -337,7 +352,7 @@ fn find_target_root(
         format!("expected exactly one target root, found {found:?}"),
     )?;
     let root = found.pop().unwrap();
-    if cell == "chromium_p" {
+    if cell.starts_with("chromium") {
         let environ = fs::read(format!("/proc/{root}/environ"))?;
         let expected = format!("HOME={}", home.display());
         check(
