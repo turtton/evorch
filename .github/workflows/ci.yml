@@ -695,6 +695,7 @@ jobs:
           scripts/guard-cargo.sh prepare "$warm/cef-5" -p gui --lib
           scripts/guard-cargo.sh prepare "$warm/cef-6" -p evorch-core --test f4_product_cef --test agent_observation_restart
           scripts/guard-cargo.sh prepare "$warm/cef-7" -p core-client-e2e --features gui/cef --test agent_observation_gui
+          scripts/guard-cargo.sh prepare "$warm/expiry-1" -p evorch-core --release --features bootstrap-test-support --test core_expiry --locked
       - name: Report disk usage
         if: always()
         run: |

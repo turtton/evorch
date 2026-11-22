@@ -59,13 +59,18 @@ pidfds and a subreaper, never an unbounded `waitid`.
 
 ## Not covered, and why
 
-* **A repeated signal must not renew the deadline.** Not reachable here: once the
-  watchdog is armed, nothing re-reads the inbox in a stalled cleanup (the lifecycle
-  reader is stopped before the stage-11 stall, and the flush stall ends the
-  lifecycle's reading). A first attempt (a second SIGTERM, then a delayed lifecycle
-  read) raced the stall's own event and was removed. A `Deadline::arm` that renews
-  therefore PASSES this leaf (see the PR's mutation table); the deterministic
-  test-clock unit tests of the watchdog are the evidence for it.
+* **A repeated signal must not renew the deadline** (mutation W4). Not reachable
+  here: once the watchdog is armed, nothing re-reads the inbox in a stalled cleanup
+  (the lifecycle reader is stopped before the stage-11 stall, and the flush stall
+  ends the lifecycle's reading). A first attempt (a second SIGTERM, then a delayed
+  lifecycle read) raced the stall's own event and was removed. A `Deadline::arm`
+  that renews therefore PASSES this leaf. **Parent-approved substitute: this leaf
+  does not reach the deadline-update path, so W4 is covered by the unit tests**
+  `restart::shutdown_watchdog_tests::deadline_is_ten_seconds_once_and_overflow_fails_closed`
+  (state.rs:13, a re-arm at 99 s must keep 10_000_000_017) and
+  `...::capture_and_signal_are_order_independent_and_duplicate_does_not_extend`
+  (:83, a duplicate signal/capture must keep 10_000_000_700). With W4 applied both
+  FAIL (the baseline runs 18/18 PASS); recorded in the PR.
 * **Other incarnation** (an exec'd successor does not inherit the capture): left
   to `planned_shutdown_watchdog_composition::product_exec` (product ELF).
   Not duplicated here.
@@ -82,6 +87,12 @@ pidfds and a subreaper, never an unbounded `waitid`.
   `core_sigkill` leaf.
 * Code 74 certifies neither cleanup nor lease release (product README). This leaf
   asserts exit 74, the diagnostic and reaping of guard-owned children, nothing more.
+
+## Runner timeout
+
+`.config/nextest.toml` gives only this binary a 240 s slow-timeout (default 180 s):
+a cell's failure backstops end at 180 s and its controller cleanup takes up to
+30 s more, which the runner must not cut short.
 
 ## Running locally
 
