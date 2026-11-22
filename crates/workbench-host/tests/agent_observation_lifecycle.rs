@@ -269,6 +269,7 @@ async fn repaint(
 /// holds the task until the test releases it. The task of a source without
 /// this gate never waits.
 struct Held {
+    hold_no_receivers: bool,
     arrivals: tokio::sync::mpsc::UnboundedSender<(GatePoint, tokio::sync::oneshot::Sender<()>)>,
 }
 type Arrivals = tokio::sync::mpsc::UnboundedReceiver<(GatePoint, tokio::sync::oneshot::Sender<()>)>;
@@ -277,6 +278,9 @@ impl SourceGate for Held {
         &self,
         point: GatePoint,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        if point == GatePoint::NoReceivers && !self.hold_no_receivers {
+            return Box::pin(async {});
+        }
         let (release, released) = tokio::sync::oneshot::channel();
         if self.arrivals.send((point, release)).is_err() {
             return Box::pin(async {});
@@ -296,7 +300,10 @@ fn gated(world: &World, tasks: &AreaTasks) -> (AgentObservationSource, Arrivals)
         7,
         tasks.clone(),
     )
-    .with_gate_for_test(Arc::new(Held { arrivals }));
+    .with_gate_for_test(Arc::new(Held {
+        arrivals,
+        hold_no_receivers: false,
+    }));
     (source, receiver)
 }
 
@@ -567,72 +574,40 @@ async fn old_cleanup_finishing_after_a_new_channel_registered_does_not_remove_it
     assert_eq!(tasks.active(), 0);
 }
 
-/// The next page of the host's feed that satisfies `predicate`; `None` when the
-/// feed ended first.
-async fn host_until_or_end(
-    feed: &mut ObservationFeed,
-    predicate: impl Fn(&ObservedPage) -> bool,
-) -> Option<Arc<ObservedPage>> {
-    loop {
-        if let Some(page) = feed
-            .updates
-            .borrow_and_update()
-            .as_ref()
-            .filter(|page| predicate(page))
-            .cloned()
-        {
-            return Some(page);
-        }
-        if feed.updates.changed().await.is_err() {
-            return None;
-        }
-    }
-}
-
-/// Subscribing again right after the previous subscriber left must end in a
-/// live feed: if it is attached to a channel that is being torn down it ends
-/// visibly (it is closed, never silently stale) and the next subscribe is
-/// served by a new channel. The entry that serves a live feed stays the
-/// registered one: a finished teardown does not remove it.
-///
-/// Reading the code, a subscriber can in theory be handed the channel of a
-/// task that has decided to stop (`tx.closed()`) but has not yet published
-/// `None`. That window was not observed in 20 runs under CPU pressure, so this
-/// test pins the contract that holds whether or not the window is hit: a feed
-/// that ends is visibly ended, and the next subscribe is live and registered.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// A returning subscriber wins before idle retirement commits. Hold the task
+/// after it observes zero receivers, subscribe again, then release it. The same
+/// registered task must deliver the navigated page, not end the returned feed.
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed Chromium; run explicitly with --ignored"]
-async fn resubscribing_during_teardown_ends_in_a_live_registered_feed() {
+async fn resubscribing_before_idle_retirement_keeps_the_navigation_feed_alive() {
     let world = World::new().await;
     let page = world.open(RED).await;
     let scope = world.scope();
-    for round in 0..24 {
-        drop(world.source.subscribe(&scope).unwrap());
-        let mut attempts = 0;
-        let mut feed = loop {
-            let mut feed = world.source.subscribe(&scope).unwrap();
-            let rgb = palette(round + attempts);
-            paint(&page, rgb).await;
-            if host_until_or_end(&mut feed, |page| {
-                page.frame.as_ref().is_some_and(|f| near(centre(f), rgb))
-            })
-            .await
-            .is_some()
-            {
-                break feed;
-            }
-            attempts += 1;
-            assert!(
-                attempts < 50,
-                "round {round}: no live feed in {attempts} attempts"
-            );
-        };
-        // the live channel is the registered one
-        let mut other = world.source.subscribe(&scope).unwrap();
-        assert!(feed.updates.same_channel(&other.updates), "round {round}");
-        assert!(feed.updates.has_changed().is_ok(), "round {round}");
-        let _ = (&mut feed, &mut other);
-    }
+    let (arrivals, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let source = world.source.clone().with_gate_for_test(Arc::new(Held {
+        arrivals,
+        hold_no_receivers: true,
+    }));
+
+    let mut first = source.subscribe(&scope).unwrap();
+    passes(&mut receiver, GatePoint::BeforeUpstream).await;
+    host_until(&mut first, |page| page.frame.is_some()).await;
+    drop(first);
+    let retire = arrives(&mut receiver, GatePoint::NoReceivers).await;
+    let mut feed = source.subscribe(&scope).unwrap();
+    assert_eq!(world.tasks.active(), 1, "reuse the registered producer");
+    retire.send(()).unwrap();
+    // Further lifecycle gates must not hold shutdown (or mask a closed feed).
+    drop(receiver);
+
+    page.navigate(BLUE).await.unwrap();
+    host_until(&mut feed, |page| {
+        title_of(page) == "Blue" && page.frame.as_ref().is_some_and(|f| is_blue(centre(f)))
+    })
+    .await;
+    let other = source.subscribe(&scope).unwrap();
+    assert!(feed.updates.same_channel(&other.updates));
+    assert_eq!(world.tasks.active(), 1);
     world.tasks.shutdown().await.unwrap();
 }
 
@@ -644,14 +619,13 @@ fn title_of(page: &ObservedPage) -> &str {
         .map_or("", |tab| tab.title.as_str())
 }
 
-/// Navigating the page of a run right after a subscription started its
-/// producer keeps the observation alive. `Page.startScreencast` can be refused
-/// ("Not attached to an active page") while the page navigates; that must be
-/// retried, not taken as the end of the observation. Every navigation is
-/// followed by a frame that can only be the new page's: the page is painted in
-/// a colour of its own, and the feed must carry that colour with the new title.
+/// Navigating the page of a run right after subscribing keeps the observation
+/// alive, including when the previous round's last subscriber just left.
+/// Every navigation is followed by a frame that can only be the new page's:
+/// the page is painted in a colour of its own, and the feed must carry that
+/// colour with the new title.
 ///
-/// The race shows only under CPU pressure, so several browsers navigate at
+/// Exercise the ungated subscription/navigation timing in several browsers at
 /// once; run it also under
 /// `scripts/reproduce-under-limits.sh --cpus 1 --stress-cpus 2`.
 #[tokio::test(flavor = "multi_thread")]

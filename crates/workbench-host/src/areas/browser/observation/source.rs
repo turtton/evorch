@@ -182,7 +182,19 @@ impl AgentObservationPort for AgentObservationSource {
                 tx.send_replace(Some(page));
                 tokio::select! { biased;
                     _ = stop.stopped() => break,
-                    _ = tx.closed() => break,
+                    _ = tx.closed() => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        gate::pass(&inner, gate::GatePoint::NoReceivers).await;
+                        // A subscriber may have returned after closed() became
+                        // ready. Commit idle retirement under the same lock as
+                        // subscribe(): either keep serving that receiver, or
+                        // mark this channel ended before it can be reused.
+                        let _feeds = locked(&inner.feeds);
+                        if tx.receiver_count() == 0 {
+                            tx.send_replace(None);
+                            break;
+                        }
+                    }
                     _ = async { if let Some(observed) = &mut observed { observed.invalidated().await; } } => break,
                     changed = source_updates.changed() => { if changed.is_err() { break; } }
                 }
