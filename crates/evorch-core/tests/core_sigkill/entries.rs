@@ -187,7 +187,10 @@ pub async fn enter_caller(
         model_preference: None,
         fork_seed: None,
     };
-    let peer = if cell == "eval" {
+    let peer = if cell == "eval_cli" {
+        super::evaluation::enter(&client).await?;
+        peer_ready(listener).await?
+    } else if cell == "eval" {
         super::evaluation::enter(&client).await?;
         let peer = peer_ready(listener).await?;
         super::evaluation::verify_argv(project)?;

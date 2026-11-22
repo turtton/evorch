@@ -37,6 +37,10 @@ pub async fn prepare(
             ),
         )?;
     }
+    if cell == "eval_cli" {
+        super::evaluation::repository(project).await?;
+        super::evaluation::install_cli(&bindir)?;
+    }
     let selector = match cell {
         "grep" => Some(("rg", String::new())),
         "git_diff" => Some((
@@ -121,12 +125,23 @@ pub async fn prepare(
         )
     };
     let responses = if cell == "eval" {
-        super::evaluation::responses()
+        super::evaluation::responses(None)
+    } else if cell == "eval_cli" {
+        let replay_peer = format!(
+            "trap '' HUP; exec {} --peer root {}",
+            quote(&super::evaluation::in_replay_sandbox(root, own)),
+            quote(&super::evaluation::in_replay_sandbox(root, socket))
+        );
+        super::evaluation::responses(Some(&replay_peer))
     } else {
         vec![response]
     };
-    let mock =
-        StreamingMockOpenAi::spawn_with_prompt_cache_models(responses, vec!["mock-model".into()]);
+    // The replay's preflight checks the candidate profile's model too.
+    let mut models = vec!["mock-model".to_owned()];
+    if cell == "eval_cli" {
+        models.push("mock-model-candidate".into());
+    }
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(responses, models);
     configure(root, project, &mock.base_url())?;
     Ok(Fixture { bindir, cli, mock })
 }

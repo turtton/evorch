@@ -27,9 +27,20 @@ pub async fn run(cell: &str) -> io::Result<()> {
     let root = dir.path().canonicalize()?;
     let project = root.join("project");
     fs::create_dir(&project)?;
-    let socket = project.join(".peer-socket");
+    // The replay's tool sandbox is rooted in its own workspace and does not show
+    // the original project. It does mount the host's Cargo caches read-only,
+    // so the replay's peer and its control socket live in one (see
+    // evaluation::REPLAY_PEER_DIR).
+    let peer_dir = if cell == "eval_cli" {
+        let dir = root.join(super::evaluation::REPLAY_PEER_DIR);
+        fs::create_dir_all(&dir)?;
+        dir
+    } else {
+        project.clone()
+    };
+    let socket = peer_dir.join(".peer-socket");
     let listener = UnixListener::bind(&socket)?;
-    let own = project.join(".peer-bin");
+    let own = peer_dir.join(".peer-bin");
     fs::copy(std::env::current_exe()?, &own)?;
     if cell.ends_with("_t") {
         return super::t_controller::run(cell, &root, &own, &socket, &listener).await;
@@ -49,7 +60,8 @@ pub async fn run(cell: &str) -> io::Result<()> {
         }
     }
     let path = std::env::join_paths(
-        std::iter::once(bindir).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        std::iter::once(bindir.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
     command
@@ -138,6 +150,28 @@ pub async fn run(cell: &str) -> io::Result<()> {
             trace_worker = Some(worker);
             owned.push(worker);
         }
+        let mut cli_guard = None;
+        if cell == "eval_cli" {
+            let (pid, cli_owner, group) = super::evaluation::observe_cli(
+                &tree,
+                &bindir.join("evorch"),
+                &bindir.join("evorch-core"),
+                &mock.recorded_requests(),
+            )?;
+            let identity = &tree.require(pid)?.identity;
+            super::evidence::emit(
+                cell,
+                "cli",
+                &json!({
+                    "cell":cell,"external_cli_fixture":false,"provider":"mock",
+                    "cli":identity,"cli_guard":cli_owner,"cli_children":0,
+                    "cli_sha256":super::evidence::digest(Path::new(&format!("/proc/{pid}/exe")))?,
+                    "replay_peer_root":peer,
+                }),
+            )?;
+            owned.extend(group);
+            cli_guard = Some(cli_owner);
+        }
         check(
             owned.len() >= 2,
             format!("missing same-PGID root/grandchild: {owned:?}"),
@@ -169,6 +203,9 @@ pub async fn run(cell: &str) -> io::Result<()> {
             format!("core not SIGKILL: {status}"),
         )?;
         super::trace::finish(cell, &trace, trace_worker, &tracer, &guard).await?;
+        if let Some(cli_guard) = &cli_guard {
+            super::trace::finish("eval_cli_client", &trace, None, &tracer, cli_guard).await?;
+        }
         super::evidence::emit(
             cell,
             "death",
@@ -189,6 +226,15 @@ pub async fn run(cell: &str) -> io::Result<()> {
                 fs::read_to_string(format!("/proc/{}/cmdline", pin.identity.pid))
                     .unwrap_or_default()
             );
+        }
+        if cell == "eval_cli" {
+            for log in glob_logs(&root.join("eval/.groups")) {
+                eprintln!(
+                    "CLI log {}: {}",
+                    log.display(),
+                    fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
         }
         for (index, request) in mock.recorded_requests().iter().enumerate().rev().take(3) {
             let messages = request.body["messages"].as_array().map(|rows| {
@@ -212,6 +258,19 @@ pub async fn run(cell: &str) -> io::Result<()> {
     let cleanup = tree.cleanup(EXIT).await;
     let _ = child.wait().await;
     result.and(cleanup)
+}
+
+/// The CLI's redirected stdout/stderr files of every evaluation group.
+fn glob_logs(groups: &Path) -> Vec<std::path::PathBuf> {
+    let mut logs = Vec::new();
+    for group in fs::read_dir(groups).into_iter().flatten().flatten() {
+        for file in fs::read_dir(group.path()).into_iter().flatten().flatten() {
+            if file.path().extension().is_some_and(|e| e == "log") {
+                logs.push(file.path());
+            }
+        }
+    }
+    logs
 }
 
 pub(super) async fn peer_ready(listener: &UnixListener) -> io::Result<i32> {
