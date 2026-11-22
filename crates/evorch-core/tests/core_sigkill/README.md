@@ -29,7 +29,8 @@ DirectSandbox is only T.
 | L09 | libraries | P* | run_js preparation → library detection (bwrap --list) | SandboxSession; yes |
 | L10 | bwrap_probe | P | core startup → bwrap feature probe | Other; yes |
 | L11 | quota_t | T | real CodexQuotaClient app-server RPC | Other; yes |
-| L12 | eval | P* | delegate → Evaluator → eval_save_sample → approved eval_start → groups::launch | Eval; yes |
+| L12 | eval | P* | delegate → Evaluator → eval_save_sample → approved eval_start → groups::launch; external CLI is a fixture | Eval; yes |
+| L12 | eval_cli | P* | same entrance; the CLI is the **real** `evorch eval run` (only the provider is the offline mock) | Eval; yes (CLI); replay tools: guard-owned, no ledger |
 | L13 | renderer_t | T | real RendererOwner.open; external executable fixture | Renderer; yes |
 | L14 | chromium_t | T | real AgentBrowser.page; external executable fixture | Other; **no** |
 | L15 | pull_request | P* | PR query + LinkPullRequest → external gh | PullRequestSource; yes |
@@ -39,8 +40,55 @@ L12: **external CLI replaced by a fixture; core caller and API are product
 code**. Recorded argv must contain eval run, --thread sample, candidate,
 problem, repeat, output and user-config. A replayable sample is created via
 public conversation commands and an isolated git repository, then pinned by
-Evaluator. Actual evorch eval run and its two-stage owner chain are a
-B3-07/B3-08 follow-up, not evidence here.
+Evaluator. The real CLI is the separate `eval_cli` cell below.
+
+### eval_cli: the real `evorch eval run` (P*)
+
+Same product entrance as `eval`; the external command is the actual
+`evorch` CLI, only the model provider is the offline mock. The cell installs
+the CLI like a distribution: the ELF from EVORCH_B3_CLI_EXE, the
+`guard-bundle.json` and helper that the build's bind step
+(scripts/guard-cargo.sh, run by CI and locally) wrote beside it, and a sibling
+`evorch-core` (the launcher refuses a CLI without one). `evorch` binds
+itself to that bundle (role `cli`) before doing anything but `js-worker`,
+`--help` and `--version`. A missing or unbound bundle fails the cell with the
+reason; it is never skipped and never made up.
+
+**Structure: not a second owner level.** `evorch eval run` is a thin client
+of the core running for `--user-config` (the same config dir, so it attaches
+and starts no core) and owns no process; the replay is a job inside the core,
+so its tools hang under the core's guard like L01. The cell asserts exactly
+that, and does **not** claim a core → CLI → CLI-owned-child chain:
+
+1. core ← guard (argv names the core) ← real `evorch eval run`, which is the
+   guard's root process itself, not a wrapper's child (argv checked:
+   eval run, --thread sample, --candidate, --problem, --repeat 1, --output,
+   --user-config); the CLI has no child and no `evorch-core` copy was
+   started.
+2. core ← guard ← bwrap ← root ← same-PGID leaf: the replay's own shell tool,
+   run by the mock's first replay request. The replay's tool executor is built
+   without a spawn ledger, so only guard ownership is claimed for it. The
+   replay sandbox shows only its workspace, the system directories and the
+   host's Cargo caches (read-only), so the peer binary and control socket sit
+   in `$HOME/.cargo/bin`, mounted at `/tmp/home/.cargo/bin`.
+
+The mock script entry that starts the peer is attributed to the replay (only
+replay requests carry the `Run identifier:` preamble), so an Evaluator or
+orchestrator request cannot be mistaken for it.
+
+**Event synchronisation.** The injection waits for READY from the replay's
+peer. That proves the replay was inside a tool call; no API names a running
+job's state, so it is not a read of the job operation. Nothing waits on time.
+
+**Observed:** after the core alone is SIGKILLed, pidfd death (before any
+cleanup) of the CLI and of the replay peer's whole group, and for both guards
+the strace order (group KILL before root reap, no group signal after).
+
+**Not claimed:** that the CLI died *because of* its guard rather than its lost
+connection (both end it; ownership is asserted from the guard ancestry, and
+the replay group, which has no such natural exit, is the discriminating
+part); anything about the job finishing; a detached core started by a CLI that
+finds none (not guard-owned, not reclaimed, not tested here).
 
 L13/L14: **core_owner:false; T/API evidence, not product P* evidence**.
 They prove launch ownership, not renderer IPC/CDP handshake or navigation.

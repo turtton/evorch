@@ -40,6 +40,7 @@ const CELLS: &[&str] = &[
     "libraries",
     "pull_request",
     "eval",
+    "eval_cli",
     "shell_direct_t",
     "js_direct_t",
     "lsp_t",
