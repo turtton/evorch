@@ -186,6 +186,7 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
         &title,
         options,
         Box::new(move |cc| {
+            crate::theme::fonts::install(&cc.egui_ctx);
             let shared = Arc::new(Mutex::new(Shared::default()));
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let task = runtime.spawn(connection::serve(
