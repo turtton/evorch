@@ -19,6 +19,8 @@ pub struct HostBackend {
     pub host: Arc<Mutex<CommandHost>>,
     pub projection: Arc<Projection>,
     runtime: runtime::AgentRuntime,
+    status: Arc<workbench_host::ingress::HostStatusProbe>,
+    status_reader: Mutex<Option<storage::Database>>,
     connections: Arc<workbench_host::connections::ConnectionHooks>,
     hello: ServerHello,
     redactor: Arc<secret_guard::SecretRedactor>,
@@ -80,18 +82,21 @@ impl HostBackend {
         active != 0 || unconfirmed
     }
     pub fn new(host: Arc<Mutex<CommandHost>>, identity: String) -> Self {
-        let (projection, connections, runtime) = {
+        let (projection, connections, runtime, status) = {
             let host = host.lock().unwrap();
             (
                 host.projection().clone(),
                 host.connections(),
                 host.service().runtime().clone(),
+                host.status_probe(),
             )
         };
         Self {
             host,
             projection,
             runtime,
+            status,
+            status_reader: Mutex::new(None),
             connections,
             redactor: Arc::new(secret_guard::SecretRedactor::from_env()),
             closing: AtomicBool::new(false),
@@ -150,13 +155,7 @@ impl HostBackend {
         self.management_advertised.store(true, Ordering::SeqCst);
     }
     fn management_published(&self) -> bool {
-        self.management_advertised.load(Ordering::SeqCst)
-            && self
-                .host
-                .lock()
-                .unwrap()
-                .admin()
-                .is_some_and(|admin| admin.management_enabled())
+        self.management_advertised.load(Ordering::SeqCst) && self.status.management_enabled()
     }
     pub(crate) fn track_web_clients(&self, clients: workbench_web::ActivityObserver) {
         *self.web_clients.lock().unwrap() = Some(clients);
@@ -189,12 +188,7 @@ impl HostBackend {
             .unix_clients
             .load(Ordering::SeqCst)
             .saturating_add(web_count);
-        // A lifecycle reply may still hold the command-host mutex. Read via
-        // the captured runtime instead of recursively locking that host.
-        let pending_reindex = self
-            .runtime
-            .with_storage_reader(|db| db.has_pending_reindex())
-            .map_or(true, |pending| pending.unwrap_or(false));
+        let pending_reindex = self.pending_reindex().unwrap_or(true);
         for (retain, reason) in [
             (pending_reindex, RetentionReason::PendingReindex),
             (
@@ -224,6 +218,20 @@ impl HostBackend {
         }
         status
     }
+    // Neither the host mutex nor the shared reader: both wait behind a projection refresh.
+    fn pending_reindex(&self) -> Result<bool, storage::StorageError> {
+        let mut reader = self.status_reader.lock().unwrap();
+        if reader.is_none() {
+            *reader = self.runtime.open_storage_reader().and_then(Result::ok);
+        }
+        match reader.as_ref() {
+            Some(db) => db.has_pending_reindex(),
+            None => self
+                .runtime
+                .with_storage_reader(|db| db.has_pending_reindex())
+                .map(Option::unwrap_or_default),
+        }
+    }
     pub fn instance_epoch(&self) -> u64 {
         self.projection.instance_epoch().0
     }
@@ -239,15 +247,11 @@ impl HostBackend {
         if self.management_published() {
             hello.capabilities.push(Capability::SafeRestart);
         }
-        hello.status = self.projection.cached_status();
-        let (grace, invocations) = {
-            let host = self.host.lock().unwrap();
-            (
-                host.renderer_reconnect_grace(),
-                host.service().restart_gate().running_invocations(),
-            )
-        };
-        hello.status = self.transport_status(hello.status, grace, invocations);
+        hello.status = self.transport_status(
+            self.projection.cached_status(),
+            self.status.renderer_reconnect_grace(),
+            self.status.running_invocations(),
+        );
         hello
     }
     pub fn mask<T: Serialize + DeserializeOwned>(&self, value: T) -> Result<T, WorkbenchError> {
@@ -520,6 +524,35 @@ mod tests {
         assert!(backend.hello().status.retention_reasons.is_empty());
         backend.close();
         assert_eq!(backend.hello().status.state, CoreState::Draining);
+        boot.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn hello_waits_for_neither_the_host_lock_nor_the_shared_reader() {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let mut boot = BootstrappedHost::open(BootstrapOptions {
+            config_dir: root.clone(),
+            project_root: root.clone(),
+            ownership_root: dir.sockets().to_path_buf(),
+        })
+        .await
+        .unwrap();
+        let backend = HostBackend::new(boot.host.clone(), "core-hello".into());
+        let expected = backend.hello();
+        let host = backend.host.lock().unwrap();
+        let hello = backend
+            .runtime
+            .with_storage_reader(|_| {
+                Ok(std::thread::scope(|scope| {
+                    scope.spawn(|| backend.hello()).join().unwrap()
+                }))
+            })
+            .unwrap()
+            .unwrap();
+        drop(host);
+        assert_eq!(hello.status, expected.status);
+        assert_eq!(hello.instance_epoch, expected.instance_epoch);
+        assert_eq!(hello.capabilities, expected.capabilities);
         boot.shutdown().await.unwrap();
     }
     #[test]

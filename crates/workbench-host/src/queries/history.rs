@@ -121,29 +121,24 @@ impl Bodies {
     }
     pub fn changes(
         &self,
-        runtime: &AgentRuntime,
+        db: &storage::Database,
         scanner: &mut CommitScanner,
         runs: &[String],
         mut visit: impl FnMut(CommittedMessage),
-    ) -> Result<bool, WorkbenchError> {
-        runtime
-            .with_storage_reader(|db| {
-                let mut step = scanner.advance(db, runs)?;
-                if !step.rewritten {
-                    for (_, message) in std::mem::take(&mut step.fresh) {
-                        if let Some(thread) = db.thread_of_run(&message.run)?
-                            && db.thread(&thread.thread_id)?.is_some()
-                            && let Ok(thread) = ThreadId::new(thread.thread_id)
-                            && let Some(message) = self.message(&thread, message)
-                        {
-                            visit(message);
-                        }
-                    }
+    ) -> Result<bool, storage::StorageError> {
+        let mut step = scanner.advance(db, runs)?;
+        if !step.rewritten {
+            for (_, message) in std::mem::take(&mut step.fresh) {
+                if let Some(thread) = db.thread_of_run(&message.run)?
+                    && db.thread(&thread.thread_id)?.is_some()
+                    && let Ok(thread) = ThreadId::new(thread.thread_id)
+                    && let Some(message) = self.message(&thread, message)
+                {
+                    visit(message);
                 }
-                Ok(scanner.commit(step))
-            })
-            .map_err(storage_error)
-            .map(Option::unwrap_or_default)
+            }
+        }
+        Ok(scanner.commit(step))
     }
     pub fn read(&self, runtime: &AgentRuntime, q: &ReadBody) -> Result<BodyChunk, WorkbenchError> {
         if !(4..=64 * 1024).contains(&q.max_bytes) {
@@ -719,6 +714,10 @@ fn hydrate(
 }
 
 impl CommitScanner {
+    pub(crate) fn initialized(&self) -> bool {
+        self.cut.is_some()
+    }
+
     fn live_anchors(
         &self,
         db: &storage::Database,

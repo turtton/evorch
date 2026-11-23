@@ -32,7 +32,7 @@ impl CommandHost {
                     self.service().ownership(),
                     &resume,
                 )?;
-                if let Err(error) = self.projection().refresh() {
+                if let Err(error) = self.projection().refresh_models() {
                     tracing::warn!(?error.code, "lane projection refresh failed");
                 }
                 Ok(CommandReply {

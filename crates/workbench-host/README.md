@@ -9,7 +9,7 @@ hydration. GUI and HTTP/SSE transport integration are separate work.
 ## Snapshot and stream
 
 CommandHost::projection() exposes subscribe_with_snapshot, snapshot_page and
-unsubscribe. The projection mutex covers refresh, high-water selection, frozen
+unsubscribe. The projection mutex covers the models refresh, high-water selection, frozen
 snapshot creation, replay selection and subscriber registration. Updates arriving
 during that boundary are projected once after it, with a greater cursor. Replay
 uses the same cursor/envelope payload as original delivery, with a new subscription
@@ -18,15 +18,20 @@ A resumed stream advertises its accepted after cursor as high_water. An expired,
 future or foreign-epoch cursor yields a new snapshot and terminal ResyncRequired;
 control events also advance sequence so clients cannot discard them as duplicates.
 
-The core bus and the singleton sandbox approval registry wake the projection.
-StorageHandle's weak commit observer wakes it after append_event / fenced append
-success, independently of bus-vs-writer scheduling. MessageCommitted is read only
+The core bus and the singleton sandbox approval registry wake the models refresh,
+which runs on a blocking thread. StorageHandle's weak commit observer wakes only the
+committed-message reader after append_event / fenced append success, independently
+of bus-vs-writer scheduling: an event append writes no row the models read. Every
+models refresh also wakes that reader. It publishes MessageCommitted asynchronously,
+reading on a read-only connection of its own and taking the projection mutex only
+to publish, so the hello, queries and lane reads never wait behind it.
+Projection::refresh reads both before it returns. MessageCommitted is read only
 from committed event rows and Delivered human receipts (assistant completions/finish,
 user task prompts/followups and tool output; message parts assemble in order). Deltas are ignored.
 Other read models are compared with their last published DTOs. Host bus **and**
 approval notification lag invalidate the epoch and terminate all old streams;
 there is no silent lag recovery. Deletion or question routing scope removal also
-invalidates old snapshots/replay/queued DTOs. Query reads refresh first, so a
+invalidates old snapshots/replay/queued DTOs. Query reads refresh the models first, so a
 persisted tombstone is honored even before its bus notification is processed.
 
 Default bounds: replay 4096 events / 8 MiB, each subscriber 256 / 1 MiB, at most
@@ -110,7 +115,8 @@ A late delivery or retention can change an already published message prefix.
 The host verifies each run's previous prefix digest (a SHA-256 chain over the
 published messages), advances the stream epoch and requests resync rather than
 silently renumbering indices. Normal append-only messages retain their indices.
-The first refresh reads no event rows: it takes the newest committed row of a
+The first read, which runs right after the first models refresh and before its
+caller continues, reads no event rows: it takes the newest committed row of a
 live run as the cut and records every listed run's receipt headers as of the
 cut. Everything up to the cut is history and never published. A run stays
 unfolded (Cold) until a committed row of it arrives after the cut, or its

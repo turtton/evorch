@@ -9,7 +9,10 @@ use sandbox::approval::{ApprovalRegistry, ApprovalSnapshot};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use workbench_protocol::namespaces::{
     ApprovalsEvent, ApprovalsQuery, ApprovalsReply, ConversationEvent, ConversationQuery,
@@ -52,7 +55,7 @@ struct State {
     epoch_tx: Arc<tokio::sync::watch::Sender<u64>>,
     sequence: u64,
     next_subscription: u64,
-    scanner: queries::CommitScanner,
+    models_ready: bool,
     projects: Vec<(ProjectId, PathBuf)>,
     /// The names saved with the projects; an id stands in for a missing one.
     project_names: std::collections::BTreeMap<String, String>,
@@ -138,6 +141,13 @@ impl State {
         }
     }
 }
+#[derive(Default)]
+struct BodyCursor {
+    #[cfg(test)]
+    advance_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    scanner: queries::CommitScanner,
+    reader: Option<storage::Database>,
+}
 /// Transport-independent host read service. All adapters may share this instance.
 pub struct Projection {
     runtime: AgentRuntime,
@@ -147,8 +157,11 @@ pub struct Projection {
     status: Mutex<CoreStatus>,
     pager: Pager,
     bodies: Bodies,
+    body_cursor: Mutex<BodyCursor>,
+    bodies_wake: Arc<tokio::sync::Notify>,
+    cut_taken: AtomicBool,
     limits: SubscriptionLimits,
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     _commit_observer: Arc<dyn Fn() + Send + Sync>,
 }
 // Bound work per wakeup, not time: a continuously busy producer must still let runs advance.
@@ -233,8 +246,8 @@ impl Projection {
         let mut events = bus.subscribe();
         let registry = ApprovalRegistry::for_bus(&bus);
         let mut approvals = registry.subscribe();
-        let commits = Arc::new(tokio::sync::Notify::new());
-        let wake = commits.clone();
+        let bodies_wake = Arc::new(tokio::sync::Notify::new());
+        let wake = bodies_wake.clone();
         let observer: Arc<dyn Fn() + Send + Sync> = Arc::new(move || wake.notify_one());
         runtime.observe_event_commits(&observer);
         let epoch = epoch.unwrap_or_else(|| {
@@ -249,6 +262,9 @@ impl Projection {
             status: Mutex::new(Models::default().status()),
             pager: Pager::default(),
             bodies: Bodies::default(),
+            body_cursor: Mutex::default(),
+            bodies_wake: bodies_wake.clone(),
+            cut_taken: AtomicBool::new(false),
             limits,
             state: Mutex::new(State {
                 #[cfg(test)]
@@ -259,7 +275,7 @@ impl Projection {
                 epoch_tx,
                 sequence: 0,
                 next_subscription: 0,
-                scanner: queries::CommitScanner::default(),
+                models_ready: false,
                 projects: vec![],
                 project_names: Default::default(),
                 models: Models::default(),
@@ -269,43 +285,55 @@ impl Projection {
                 snapshots: VecDeque::new(),
                 answer_provenance: BTreeMap::new(),
             }),
-            task: Mutex::new(None),
+            tasks: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&this);
-        let task = handle.spawn(async move {
+        let models = handle.spawn(async move {
             loop {
-                enum Change { Commit, Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>) }
-                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a), _ = commits.notified() => Change::Commit };
+                enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>) }
+                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a) };
                 let Some(this) = weak.upgrade() else { break };
-                match change {
-                    Change::Event(event) => {
+                // Never retain the projection (and its runtime) across a scheduler wait:
+                // failed bootstrap must be able to drop both without another task poll.
+                let closed = match (this, change) {
+                    (this, Change::Event(event)) => {
                         // Bus events only wake a canonical read. Coalesce queued wakeups:
                         // the ledger supplies current state and the commit scanner retains
                         // every durable message, even when its bus notification was skipped.
                         let wakeups = RefreshWakeups::drain(&mut events, event).await;
                         if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty && this.refresh().is_err() { this.invalidate(); }
-                        if wakeups.closed { break; }
+                        if wakeups.dirty { Self::in_background(this, |p| if p.refresh_models().is_err() { p.invalidate(); }).await; }
+                        wakeups.closed
                     }
-                    Change::Commit => { if this.refresh().is_err() { this.invalidate(); } }
-                    Change::Approval(Ok(approval)) => { if this.approval_changed(&approval.id).is_err() { this.invalidate(); } }
-                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    (this, Change::Approval(Ok(approval))) => { Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
+                    (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
                         // Lost input means the projection cannot vouch for ANY old cursor.
                         this.invalidate();
-                        let _ = this.refresh();
+                        Self::in_background(this, |p| { let _ = p.refresh_models(); }).await;
+                        false
                     }
-                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                }
-                // Full scans are synchronous: do not spend the executor's entire receive
-                // budget on back-to-back scans while run startup and storage wait to run.
-                // Never retain the projection (and its runtime) across a scheduler wait:
-                // failed bootstrap must be able to drop both without another task poll.
-                drop(this);
+                    (_, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => true,
+                };
+                if closed { break; }
                 tokio::task::yield_now().await;
             }
         });
-        *this.task.lock().unwrap() = Some(task);
+        let weak = Arc::downgrade(&this);
+        let bodies = handle.spawn(async move {
+            loop {
+                bodies_wake.notified().await;
+                let Some(this) = weak.upgrade() else { break };
+                Self::in_background(this, |p| {
+                    let _ = p.advance_bodies();
+                })
+                .await;
+            }
+        });
+        this.tasks.lock().unwrap().extend([models, bodies]);
         this
+    }
+    async fn in_background(this: Arc<Self>, work: impl FnOnce(&Self) + Send + 'static) {
+        let _ = tokio::task::spawn_blocking(move || work(&this)).await;
     }
     pub(crate) fn configure(&self, projects: Vec<(ProjectId, PathBuf)>) {
         self.state.lock().unwrap().projects = projects;
@@ -317,10 +345,14 @@ impl Projection {
         projects: Vec<(ProjectId, PathBuf)>,
         names: std::collections::BTreeMap<String, String>,
     ) -> Result<(), WorkbenchError> {
-        let mut state = self.state.lock().unwrap();
-        state.projects = projects;
-        state.project_names = names;
-        self.refresh_locked(&mut state)
+        {
+            let mut state = self.state.lock().unwrap();
+            state.projects = projects;
+            state.project_names = names;
+            self.refresh_models_locked(&mut state, None)?;
+        }
+        self.models_changed();
+        Ok(())
     }
     /// Epoch used by the handshake and subscription cursors.
     pub fn instance_epoch(&self) -> InstanceEpoch {
@@ -368,21 +400,85 @@ impl Projection {
     pub fn invalidate(&self) {
         self.state.lock().unwrap().invalidate(self.limits);
     }
+    /// Reads the models and publishes every committed message before returning.
     pub fn refresh(&self) -> Result<(), WorkbenchError> {
-        let mut state = self.state.lock().unwrap();
-        self.refresh_locked(&mut state)
+        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
+        self.advance_bodies()
+    }
+    pub(crate) fn refresh_models(&self) -> Result<(), WorkbenchError> {
+        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
+        self.models_changed();
+        Ok(())
     }
     pub(crate) fn approval_changed(
         &self,
         id: &sandbox::approval::ApprovalId,
     ) -> Result<(), WorkbenchError> {
+        self.refresh_models_locked(&mut self.state.lock().unwrap(), Some(id))?;
+        self.models_changed();
+        Ok(())
+    }
+    /// The first advance takes the cut that decides which messages are history, so
+    /// it runs before the caller sees the models; later ones run in the background.
+    fn models_changed(&self) {
+        if self.cut_taken.load(Ordering::Acquire) {
+            self.bodies_wake.notify_one();
+        } else {
+            let _ = self.advance_bodies();
+        }
+    }
+    /// Never holds the state lock or the shared storage reader while it reads.
+    fn advance_bodies(&self) -> Result<(), WorkbenchError> {
+        let mut cursor = self.body_cursor.lock().unwrap();
+        let runs: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            if !state.models_ready {
+                return Ok(());
+            }
+            state.models.runs.keys().cloned().collect()
+        };
+        let cursor = &mut *cursor;
+        if cursor.reader.is_none() {
+            cursor.reader = self.runtime.open_storage_reader().and_then(Result::ok);
+        }
+        #[cfg(test)]
+        let mut hook = cursor.advance_hook.take();
+        let scanner = &mut cursor.scanner;
+        let mut messages = Vec::new();
+        let mut read = |db: &storage::Database| {
+            #[cfg(test)]
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+            self.bodies
+                .changes(db, scanner, &runs, |m| messages.push(m))
+        };
+        let result = match &cursor.reader {
+            Some(db) => read(db),
+            None => self
+                .runtime
+                .with_storage_reader(read)
+                .map(Option::unwrap_or_default),
+        }
+        .map_err(queries::storage_error);
+        self.cut_taken
+            .store(cursor.scanner.initialized(), Ordering::Release);
         let mut state = self.state.lock().unwrap();
-        self.refresh_after_approval(&mut state, Some(id))
+        if result.as_ref().is_ok_and(|rewritten| !*rewritten) {
+            for message in messages {
+                if state.models.threads.contains_key(message.thread.as_str()) {
+                    state.publish(
+                        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
+                        self.limits,
+                    );
+                }
+            }
+        } else {
+            state.invalidate(self.limits);
+        }
+        result.map(drop)
     }
-    fn refresh_locked(&self, state: &mut State) -> Result<(), WorkbenchError> {
-        self.refresh_after_approval(state, None)
-    }
-    fn refresh_after_approval(
+    fn refresh_models_locked(
         &self,
         state: &mut State,
         observed: Option<&sandbox::approval::ApprovalId>,
@@ -528,6 +624,7 @@ impl Projection {
                 .keys()
                 .any(|id| !next.receipts.contains_key(id));
         state.models = next;
+        state.models_ready = true;
         *self.status.lock().unwrap() = state.models.status();
         if removed {
             state.invalidate(self.limits);
@@ -535,23 +632,7 @@ impl Projection {
         for event in changes {
             state.publish(event, self.limits);
         }
-        let mut scanner = std::mem::take(&mut state.scanner);
-        let runs: Vec<_> = state.models.runs.keys().cloned().collect();
-        let result = self
-            .bodies
-            .changes(&self.runtime, &mut scanner, &runs, |message| {
-                if state.models.threads.contains_key(message.thread.as_str()) {
-                    state.publish(
-                        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
-                        self.limits,
-                    );
-                }
-            });
-        state.scanner = scanner;
-        if !result.as_ref().is_ok_and(|rewritten| !*rewritten) {
-            state.invalidate(self.limits);
-        }
-        result.map(drop)
+        Ok(())
     }
     pub(crate) fn note_answer(&self, id: &str, provenance: &Provenance) {
         let mut state = self.state.lock().unwrap();
@@ -603,9 +684,13 @@ impl Projection {
         &self,
         read: impl FnOnce(&Models) -> Result<T, WorkbenchError>,
     ) -> Result<T, WorkbenchError> {
-        let mut state = self.state.lock().unwrap();
-        self.refresh_locked(&mut state)?;
-        read(&state.models)
+        let read = {
+            let mut state = self.state.lock().unwrap();
+            self.refresh_models_locked(&mut state, None)?;
+            read(&state.models)
+        };
+        self.models_changed();
+        read
     }
 
     /// One page of `values`, identified by `query` with its cursor left out.
@@ -804,8 +889,13 @@ impl Projection {
         &self,
         request: &Subscribe,
     ) -> Result<Subscription, WorkbenchError> {
+        let subscription = self.subscribe_after_refresh(request);
+        self.models_changed();
+        subscription
+    }
+    fn subscribe_after_refresh(&self, request: &Subscribe) -> Result<Subscription, WorkbenchError> {
         let mut state = self.state.lock().unwrap();
-        self.refresh_locked(&mut state)?;
+        self.refresh_models_locked(&mut state, None)?;
         match &request.scope {
             SubscriptionScope::Project { project }
                 if !state.models.projects.contains_key(project.as_str()) =>
@@ -939,8 +1029,16 @@ impl Projection {
     }
     pub fn read_snapshot(&self, request: &ReadSnapshot) -> Result<SnapshotPage, WorkbenchError> {
         request.page.validate()?;
+        let page = self.read_snapshot_after_refresh(request);
+        self.models_changed();
+        page
+    }
+    fn read_snapshot_after_refresh(
+        &self,
+        request: &ReadSnapshot,
+    ) -> Result<SnapshotPage, WorkbenchError> {
         let mut state = self.state.lock().unwrap();
-        self.refresh_locked(&mut state)?;
+        self.refresh_models_locked(&mut state, None)?;
         state.expire_snapshots();
         let snapshot = state
             .snapshots
@@ -1015,7 +1113,7 @@ impl Projection {
 }
 impl Drop for Projection {
     fn drop(&mut self) {
-        if let Some(task) = self.task.get_mut().unwrap().take() {
+        for task in self.tasks.get_mut().unwrap().drain(..) {
             task.abort();
         }
         let state = self.state.get_mut().unwrap();

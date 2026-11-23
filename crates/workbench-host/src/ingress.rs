@@ -49,6 +49,32 @@ pub struct CommandHost {
     projection: std::sync::Arc<crate::projection::Projection>,
     /// The services behind the namespaces that later PRs fill in; see [`crate::areas`].
     pub(crate) areas: crate::areas::Areas,
+    status: std::sync::Arc<HostStatusProbe>,
+}
+
+/// What the handshake reports about the host, read without taking the host lock.
+pub struct HostStatusProbe {
+    admin: std::sync::Mutex<std::sync::Weak<crate::admin::AdminService>>,
+    renderer: std::sync::Mutex<std::sync::Weak<crate::areas::browser::service::RendererService>>,
+    restart_gate: crate::bootstrap::restart::HostRestartGate,
+}
+impl HostStatusProbe {
+    pub fn management_enabled(&self) -> bool {
+        self.admin
+            .lock()
+            .unwrap()
+            .upgrade()
+            .is_some_and(|admin| admin.management_enabled())
+    }
+    pub fn renderer_reconnect_grace(&self) -> crate::areas::browser::RendererReconnectGrace {
+        let renderer = self.renderer.lock().unwrap().upgrade();
+        renderer
+            .map(|service| service.reconnect_grace())
+            .unwrap_or_default()
+    }
+    pub fn running_invocations(&self) -> usize {
+        self.restart_gate.running_invocations()
+    }
 }
 
 /// What the host knows about a submission id.
@@ -390,7 +416,13 @@ impl CommandHost {
             Default::default(),
             epoch,
         );
+        let status = std::sync::Arc::new(HostStatusProbe {
+            admin: Default::default(),
+            renderer: Default::default(),
+            restart_gate: service.restart_gate(),
+        });
         Self {
+            status,
             service,
             admin: None,
             conversation: Default::default(),
@@ -404,8 +436,12 @@ impl CommandHost {
     }
 
     pub fn with_admin(mut self, admin: std::sync::Arc<crate::admin::AdminService>) -> Self {
+        *self.status.admin.lock().unwrap() = std::sync::Arc::downgrade(&admin);
         self.admin = Some(admin);
         self
+    }
+    pub fn status_probe(&self) -> std::sync::Arc<HostStatusProbe> {
+        self.status.clone()
     }
     pub fn admin(&self) -> Option<std::sync::Arc<crate::admin::AdminService>> {
         self.admin.clone()
@@ -436,6 +472,7 @@ impl CommandHost {
     /// (the projection they publish through is [`Self::projection`]). The
     /// projects the saved sidebar holds join the project directory.
     pub fn with_areas(mut self, areas: crate::areas::Areas) -> Self {
+        *self.status.renderer.lock().unwrap() = areas.browser.service_handle();
         self.areas = areas;
         if let Err(error) = self.sync_projects() {
             tracing::warn!(?error.code, "the saved projects were not read into the project directory");
@@ -983,7 +1020,7 @@ impl CommandHost {
                 _ => {}
             }
         }
-        if let Err(error) = self.projection.refresh() {
+        if let Err(error) = self.projection.refresh_models() {
             tracing::warn!(code = ?error.code, "host projection refresh failed");
         }
         Executed::Events(events)

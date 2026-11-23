@@ -289,7 +289,7 @@ impl CommandHost {
             self.service().ownership().cloned(),
         );
         let result = adapter.close_lane_as(request, provenance)?;
-        if let Err(error) = self.projection().refresh() {
+        if let Err(error) = self.projection().refresh_models() {
             tracing::warn!(?error.code, "lane projection refresh failed");
         }
         Ok(result)
@@ -405,7 +405,7 @@ impl CommandHost {
             replayed: op.replayed,
             projection_pending: op.projection_pending || outcome.refresh_pending,
         };
-        if let Err(error) = self.projection().refresh() {
+        if let Err(error) = self.projection().refresh_models() {
             tracing::warn!(?error.code, "lane projection refresh failed");
         }
         Ok(CommandReply {

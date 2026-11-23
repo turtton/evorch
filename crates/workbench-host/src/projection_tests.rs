@@ -310,9 +310,12 @@ async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch()
     );
 }
 
-#[test]
-fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+fn stored() -> (
+    tempfile::TempDir,
+    storage::Storage,
+    Arc<EventBus>,
+    AgentRuntime,
+) {
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: dir.path().join("host.db"),
@@ -326,6 +329,13 @@ fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
         Arc::new(NoModel),
     )
     .with_run_store(runtime::RunStore::open(&config, store.handle()).unwrap());
+    (dir, store, bus, runtime)
+}
+
+#[test]
+fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (dir, store, bus, runtime) = stored();
     let project = ProjectId::new("project").unwrap();
     let title = |value: &str| {
         store
@@ -423,6 +433,70 @@ fn hello_epoch_and_status_do_not_wait_for_a_refresh() {
     assert_eq!(p.cached_status(), status);
     release.wait();
     refreshing.join().unwrap().unwrap();
+}
+
+#[test]
+fn hello_and_lane_reads_do_not_wait_for_a_bodies_advance() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (dir, store, _bus, runtime) = stored();
+    let project = ProjectId::new("project").unwrap();
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread".into(),
+            project_id: Some(project.as_str().into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: Some("title".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let p = Projection::new(runtime.clone(), rt.handle(), Default::default());
+    p.configure_projects(
+        vec![(project.clone(), dir.path().to_path_buf())],
+        Default::default(),
+    )
+    .unwrap();
+    let status = p.cached_status();
+    let epoch = p.instance_epoch();
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.body_cursor.lock().unwrap().advance_hook = Some({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    let advancing = {
+        let p = p.clone();
+        std::thread::spawn(move || p.refresh())
+    };
+    entered.wait();
+    assert_eq!(p.instance_epoch(), epoch);
+    assert_eq!(p.cached_status(), status);
+    let QueryReply::Workspace(WorkspaceReply::Threads(threads)) = p
+        .query(&Query::Workspace(WorkspaceQuery::ListThreads(
+            workbench_protocol::queries::ListThreads {
+                project,
+                page: PageRequest::default(),
+            },
+        )))
+        .unwrap()
+    else {
+        panic!("expected threads")
+    };
+    assert_eq!(threads.items.len(), 1);
+    assert!(
+        runtime
+            .with_storage_reader(|db| db.thread("thread"))
+            .unwrap()
+            .flatten()
+            .is_some()
+    );
+    release.wait();
+    advancing.join().unwrap().unwrap();
 }
 
 #[test]

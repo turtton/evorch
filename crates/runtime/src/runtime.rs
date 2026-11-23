@@ -2955,6 +2955,13 @@ impl AgentRuntime {
             .transpose()
     }
 
+    pub fn open_storage_reader(&self) -> Option<Result<storage::Database, storage::StorageError>> {
+        self.shared
+            .run_store
+            .get()
+            .map(|store| storage::Database::open_read_only(&store.db_path))
+    }
+
     /// Subscribe to local durable event commits without changing persistence.
     pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
         if let Some(store) = self.shared.run_store.get() {

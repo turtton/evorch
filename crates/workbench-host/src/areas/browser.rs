@@ -22,6 +22,11 @@ impl BrowserArea {
     {
         self.service.as_ref().ok_or_else(service::unavailable)
     }
+    pub(crate) fn service_handle(&self) -> std::sync::Weak<service::RendererService> {
+        self.service
+            .as_ref()
+            .map_or_else(std::sync::Weak::new, std::sync::Arc::downgrade)
+    }
     /// The unexpired grace of a disconnected client's preview, as a copy.
     pub(super) fn reconnect_grace(&self) -> service::RendererReconnectGrace {
         self.service
