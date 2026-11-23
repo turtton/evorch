@@ -174,7 +174,8 @@ impl ConfigStore {
         input: &ProviderInput,
     ) -> Result<SettingsRevision, SaveError> {
         self.check_revision(expected)?;
-        self.typed_save(|| self.save_provider_unchecked(original_name, input))?;
+        let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)))?;
+        self.typed_save(|| self.save_provider_unchecked(original_name, input, &existing))?;
         self.revision()
     }
 
@@ -182,12 +183,12 @@ impl ConfigStore {
         &self,
         original_name: Option<&str>,
         input: &ProviderInput,
+        existing: &[ModelEntryConfig],
     ) -> Result<(), ConfigError> {
         let options = self.options();
         let context = config::LayeredSaveContext::new(&options);
         let path = self.path();
-        let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)));
-        let model_entries = |models: &[ModelInput]| model_entries(models, &existing);
+        let model_entries = |models: &[ModelInput]| model_entries(models, existing);
         match input {
             ProviderInput::OpenaiCompatible {
                 name,
@@ -279,23 +280,20 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// The models the file itself (not its drop-ins) lists for provider `name`.
-    fn existing_models(&self, name: &str) -> Vec<ModelEntryConfig> {
-        let Ok(bytes) = self.read() else {
-            return Vec::new();
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
-            return Vec::new();
-        };
-        local_view(&text)
-            .ok()
-            .and_then(|config| {
-                config
-                    .providers
-                    .get(name)
-                    .map(|profile| profile.models.clone())
+    /// The models the file itself (not its drop-ins) lists for provider `name`, read as TOML
+    /// without validating any other setting. A file whose models cannot be read is not saved
+    /// over: that would replace entries whose detail this save cannot see.
+    fn existing_models(&self, name: &str) -> Result<Vec<ModelEntryConfig>, SaveError> {
+        let text = String::from_utf8(self.read()?)
+            .map_err(|_| SaveError::Io("the configuration file is not text".into()))?;
+        // The reason is fixed: a parse error would quote the file, which may hold secrets.
+        config::provider_models_in_text(&text, name)
+            .map(Option::unwrap_or_default)
+            .map_err(|_| {
+                SaveError::Invalid(format!(
+                    "the models of provider `{name}` in the configuration file could not be read, so the provider was not saved over them"
+                ))
             })
-            .unwrap_or_default()
     }
 
     pub(super) fn delete_provider(

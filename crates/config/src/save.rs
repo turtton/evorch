@@ -640,6 +640,47 @@ fn normalized_string_models(input: &[String]) -> Vec<&str> {
     models
 }
 
+/// The models the configuration `text` itself lists for provider `name`, read as TOML and
+/// nothing else: no other setting is validated, so a file that is valid only together with
+/// its drop-ins still answers. `None` when the file has no such provider.
+///
+/// # Errors
+/// The text is not TOML, or the provider's `models` is not a list of model entries.
+pub fn provider_models_in_text(
+    text: &str,
+    name: &str,
+) -> Result<Option<Vec<ModelEntryConfig>>, ConfigError> {
+    use serde::Deserialize as _;
+    let document: toml::Table = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        path: std::path::PathBuf::from("config.toml"),
+        source,
+    })?;
+    let Some(profile) = document
+        .get("providers")
+        .and_then(toml::Value::as_table)
+        .and_then(|providers| providers.get(name))
+    else {
+        return Ok(None);
+    };
+    let models_path = format!("providers.{name}.models");
+    let Some(models) = profile.as_table().and_then(|profile| profile.get("models")) else {
+        return Ok(None);
+    };
+    let toml::Value::Array(models) = models else {
+        return Err(invalid_field(&models_path, "must be a list"));
+    };
+    models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            ModelEntryConfig::deserialize(model.clone()).map_err(|error| {
+                invalid_field(&format!("{models_path}[{index}]"), &error.to_string())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 #[cfg(test)]
 mod restart_target_tests {
     use super::*;

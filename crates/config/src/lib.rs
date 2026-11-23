@@ -36,8 +36,8 @@ pub use load::{
 pub use presets::{PresetOrigin, PresetStore};
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use save::{
-    OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
-    validate_openai_compatible_provider_input,
+    OpenAiCompatibleProviderInput, ProviderCredentialInput, provider_models_in_text,
+    save_openai_compatible_provider, validate_openai_compatible_provider_input,
 };
 pub use save_agent_features::{AgentFeatures, save_agent_features};
 pub use save_agents::save_agent_bindings;

@@ -43,6 +43,9 @@ enum Pending {
     Command(OperationId),
     /// A change of the Agent web tools of the running core (an execution command).
     WebTools(bool),
+    /// The same change after its reply was lost: kept for the result the core recorded for it,
+    /// which is shown when it arrives; it no longer disables the buttons (nothing is resent).
+    WebToolsUnknown(bool),
 }
 
 /// The document being edited and what it was made from.
@@ -355,8 +358,12 @@ impl Feature for SettingsFeature {
         // that is no longer wanted; the operations are asked for again.
         // A web tools change whose reply was lost is kept: the resolved reply for its tag
         // follows the reconnect, and is shown.
-        self.pending
-            .retain(|_, pending| matches!(pending, Pending::Command(_) | Pending::WebTools(_)));
+        self.pending.retain(|_, pending| {
+            matches!(
+                pending,
+                Pending::Command(_) | Pending::WebTools(_) | Pending::WebToolsUnknown(_)
+            )
+        });
         for (id, view) in &self.operations {
             if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
@@ -425,16 +432,20 @@ impl Feature for SettingsFeature {
                     }
                 }
             },
-            (Pending::WebTools(enabled), FeatureReply::Command(result)) => {
+            (
+                Pending::WebTools(enabled) | Pending::WebToolsUnknown(enabled),
+                FeatureReply::Command(result),
+            ) => {
                 let word = if enabled { "有効" } else { "無効" };
                 self.web_tools_status = match result {
                     Ok(_) => format!(
                         "Agent の Web ツールを{word}にしました（実行中のコアへの設定です。すでに開始した run が送ったツール定義は変わりません）。"
                     ),
                     Err(error) if error.outcome_unknown => {
-                        // The resolved reply for this tag follows after a reconnect; the
-                        // command is not sent again.
-                        self.pending.insert(tag, Pending::WebTools(enabled));
+                        // The core's recorded result for this tag follows after a reconnect, if it
+                        // has one; until then the buttons work again and the
+                        // command is not sent again by this screen.
+                        self.pending.insert(tag, Pending::WebToolsUnknown(enabled));
                         format!(
                             "Agent の Web ツールの切り替えは結果不明です（再送していません）。必要なら選び直してください — {}",
                             error.message

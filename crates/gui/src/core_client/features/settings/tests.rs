@@ -828,3 +828,51 @@ fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
             .is_some()
     );
 }
+
+// Given: a web tools change whose reply was lost, and the core has no record of it (the
+//        receipt stays unknown, so no resolved result ever arrives)
+// When: nothing more arrives, and then the user chooses again
+// Then: "unknown" stays on the screen, nothing is sent by itself, the controls work again,
+//       and the new choice is one new command
+#[test]
+fn a_web_tools_change_with_no_recorded_result_does_not_disable_the_controls() {
+    use workbench_protocol::commands::SetAgentWebToolsEnabled;
+    use workbench_protocol::namespaces::ExecutionCommand;
+    let mut screen = loaded('a');
+    screen.get_by_label("Web ツールを有効にする").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    screen.state_mut().feature.reset();
+    let read = asked(&mut screen);
+    answer(&mut screen, read[0].tag, snapshot('a', 'a'));
+    assert!(asked(&mut screen).is_empty(), "nothing is sent by itself");
+    assert!(
+        screen
+            .query_all_by_label_contains("結果不明です（再送していません）")
+            .next()
+            .is_some(),
+        "the unknown outcome stays shown"
+    );
+    // Both controls accept a click again.
+    screen.get_by_label("Web ツールを無効にする").click();
+    let again = asked(&mut screen);
+    assert_eq!(again.len(), 1, "one click, one new command");
+    assert!(matches!(
+        command_of(&again[0]),
+        Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
+            SetAgentWebToolsEnabled { enabled: false }
+        ))
+    ));
+    answer(&mut screen, again[0].tag, ok_command());
+    assert!(
+        screen
+            .query_all_by_label_contains("Agent の Web ツールを無効にしました")
+            .next()
+            .is_some()
+    );
+}
