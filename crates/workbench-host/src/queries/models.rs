@@ -107,12 +107,6 @@ pub(crate) fn collect(
                         },
                     );
                     for run in db.runs_of_thread(&row.thread_id)? {
-                        if !db
-                            .tombstoned_runs(std::slice::from_ref(&run.run_id))?
-                            .is_empty()
-                        {
-                            continue;
-                        }
                         if let Some(meta) = db.run_context_meta(&run.run_id)?
                             && let Ok(id) = RunId::new(&run.run_id)
                         {
