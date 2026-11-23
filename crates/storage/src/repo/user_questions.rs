@@ -213,12 +213,20 @@ fn answer_checked(
 /// truncated or fail once the lifetime total passes the capacity; omitting a
 /// delivered answer would make a restored run inject it again.
 pub fn for_run(conn: &Connection, run_id: &str) -> Result<Vec<UserQuestion>, StorageError> {
-    list(
-        conn,
-        "SELECT q.payload FROM user_questions q WHERE ?1 NOT IN (SELECT run_id FROM run_tombstones) AND ((q.run_id=?1 AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id != q.run_id AND l.run_id=?1)) ORDER BY q.rowid",
-        run_id,
-    )
+    list(conn, FOR_RUN_SQL, run_id)
 }
+
+// One OR EXISTS filter can use neither run index and scans every question. The
+// branches are disjoint (owned vs. owned by another run) and the link key allows
+// one row per question and run, so UNION ALL returns exactly the same rows.
+const FOR_RUN_SQL: &str = "SELECT payload FROM (\
+     SELECT q.rowid AS r, q.payload FROM user_questions q \
+     WHERE q.run_id=?1 AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
+     UNION ALL \
+     SELECT q.rowid, q.payload FROM user_question_links l \
+     JOIN user_questions q ON q.id=l.question_id \
+     WHERE l.run_id=?1 AND q.run_id != ?1) \
+     WHERE ?1 NOT IN (SELECT run_id FROM run_tombstones) ORDER BY r";
 
 /// Explicit continuation inheritance; caller-chosen IDs must already belong to
 /// source. Links preserve the original requester's provenance in the payload.
@@ -333,3 +341,6 @@ fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageErro
 fn invalid(message: &str) -> StorageError {
     StorageError::Serialization(message.into())
 }
+
+#[cfg(test)]
+mod tests;
