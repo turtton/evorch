@@ -84,6 +84,7 @@ CACHE_CONTRACT_FILTER='
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))
+  | (package(=core-client-e2e) & binary(=default_gui_cache))
 '
 IO_CONTRACT_FILTER='
   (package(=storage) & (binary(=lane_delivery) | binary(=conversation_plan) | binary(=pull_request_auto_fix) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))

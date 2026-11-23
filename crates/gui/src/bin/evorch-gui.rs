@@ -125,7 +125,10 @@ enum GuiError {
 #[derive(Debug, Default)]
 struct Arguments {
     demo: bool,
+    /// Accepted for compatibility: the core client is the default since 19a.
     core_client: bool,
+    /// The pre-single-core embedded runtime (own writer); explicit only.
+    legacy_embedded: bool,
     config_dir: Option<PathBuf>,
     settings: Option<PathBuf>,
     layout: Option<PathBuf>,
@@ -147,6 +150,7 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
         match argument.as_str() {
             "--demo" => arguments.demo = true,
             "--core-client" => arguments.core_client = true,
+            "--legacy-embedded" => arguments.legacy_embedded = true,
             "--config-dir" => arguments.config_dir = Some(next_path(&mut values, "--config-dir")?),
             "--settings" => arguments.settings = Some(next_path(&mut values, "--settings")?),
             "--layout" => arguments.layout = Some(next_path(&mut values, "--layout")?),
@@ -169,11 +173,69 @@ fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Argu
     Ok(arguments)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The default (stage 19a): connect to, or start, the single core.
+    CoreClient,
+    /// Only when asked for with `--legacy-embedded` (or the `--demo` session).
+    Embedded,
+}
+
+/// Decide the mode from the arguments alone. The core client is the default and the
+/// embedded runtime is never reached by a failure, only by an explicit option.
+fn select_mode(arguments: &Arguments) -> Result<Mode, GuiError> {
+    if arguments.legacy_embedded || arguments.demo {
+        if arguments.core_client {
+            return Err(GuiError::Arguments(
+                "--core-client cannot be combined with --legacy-embedded or --demo".into(),
+            ));
+        }
+        if arguments.config_dir.is_some() {
+            return Err(GuiError::Arguments(
+                "--config-dir selects the core's configuration and cannot be combined with --legacy-embedded or --demo".into(),
+            ));
+        }
+        return Ok(Mode::Embedded);
+    }
+    let embedded_only: Vec<&str> = [
+        ("--state", arguments.state.is_some()),
+        ("--settings", arguments.settings.is_some()),
+        ("--layout", arguments.layout.is_some()),
+        ("--save-layout", arguments.save_layout.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
+    if !embedded_only.is_empty() {
+        return Err(GuiError::Arguments(format!(
+            "{} only apply to the embedded runtime, which is started explicitly with --legacy-embedded",
+            embedded_only.join(", ")
+        )));
+    }
+    Ok(Mode::CoreClient)
+}
+
 fn print_help() {
     println!(
-        r#"Usage: evorch-gui [--core-client [--config-dir PATH]] [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
+        r#"Usage: evorch-gui [--config-dir PATH] [--window-title <text>]
+       evorch-gui --demo [--window-title <text>]
+       evorch-gui --legacy-embedded [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
 
 --window-title <text>  Set the window title (default: evorch).
+
+By default evorch-gui is a client of the single evorch core: it connects to the
+core of the configuration directory, or starts the evorch-core installed beside
+this executable, and it never opens the database or a runtime itself. When the
+core cannot be reached or started the window says so; the embedded runtime is
+not used instead. The configuration directory is --config-dir, then
+EVORCH_CONFIG_DIR, then the user configuration directory. --core-client is
+accepted and changes nothing.
+
+--legacy-embedded runs the embedded runtime that existed before the single
+core. It is a separate writer of the same configuration directory, is kept only
+until the old ownership code is removed (stage 20), and is never chosen
+automatically. --demo (below) is the scripted session on temporary data and
+also uses the embedded window.
 
 Demo mode (--demo) runs a deterministic scripted session; no external AI
 provider is used or required.
@@ -736,26 +798,15 @@ fn prepare() -> Result<Prepared, GuiError> {
 fn run() -> Result<(), GuiError> {
     gui::logging::init();
     let arguments = parse_arguments()?;
-    if arguments.core_client {
-        if arguments.demo
-            || arguments.state.is_some()
-            || arguments.settings.is_some()
-            || arguments.layout.is_some()
-            || arguments.save_layout.is_some()
-        {
-            return Err(GuiError::Arguments("--core-client does not support legacy --demo/--state/--settings/--layout/--save-layout".into()));
-        }
+    if select_mode(&arguments)? == Mode::CoreClient {
         let directory = arguments
             .config_dir
             .or_else(|| std::env::var_os("EVORCH_CONFIG_DIR").map(PathBuf::from))
             .or_else(config::user_config_dir)
             .ok_or_else(|| GuiError::Startup("user config directory is unavailable".into()))?;
+        // No fallback: a core that cannot be reached or started ends here (or is
+        // shown in the window), and the embedded runtime below is never tried.
         return gui::core_client::run(directory, arguments.window_title).map_err(GuiError::Startup);
-    }
-    if arguments.config_dir.is_some() {
-        return Err(GuiError::Arguments(
-            "--config-dir requires --core-client".into(),
-        ));
     }
     // Panicking runs then report where they panicked; the crash spool wraps this later.
     runtime::panic_capture::install();
@@ -1736,10 +1787,48 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn core_client_is_explicit_and_keeps_legacy_argument_defaults() {
-        let legacy = super::parse_arguments_from(std::iter::empty()).unwrap();
-        assert!(!legacy.core_client);
-        assert!(legacy.config_dir.is_none());
+    fn no_argument_selects_the_core_client_and_the_embedded_runtime_needs_its_flag() {
+        use super::{Mode, select_mode};
+        let parse = |values: &[&str]| {
+            super::parse_arguments_from(values.iter().map(|value| String::from(*value))).unwrap()
+        };
+        let default = parse(&[]);
+        assert!(!default.core_client && !default.legacy_embedded && default.config_dir.is_none());
+        assert_eq!(select_mode(&default).unwrap(), Mode::CoreClient);
+        // The 19a opt-in flag, the title and the config directory keep working.
+        for values in [
+            &["--core-client"][..],
+            &["--config-dir", "/tmp/core-config"],
+            &["--window-title", "t"],
+        ] {
+            assert_eq!(select_mode(&parse(values)).unwrap(), Mode::CoreClient);
+        }
+        // The embedded runtime only by option; the scripted demo is its own session.
+        assert_eq!(
+            select_mode(&parse(&["--legacy-embedded", "--layout", "/tmp/l.json"])).unwrap(),
+            Mode::Embedded
+        );
+        assert_eq!(select_mode(&parse(&["--demo"])).unwrap(), Mode::Embedded);
+        // Options of the embedded runtime alone are not silently ignored by the client,
+        // and the two modes are never mixed.
+        for values in [
+            &["--state", "/tmp/s"][..],
+            &["--settings", "/tmp/s"],
+            &["--layout", "/tmp/l"],
+            &["--save-layout", "/tmp/l"],
+            &["--legacy-embedded", "--core-client"],
+            &["--demo", "--core-client"],
+            &["--legacy-embedded", "--config-dir", "/tmp/c"],
+            &["--demo", "--config-dir", "/tmp/c"],
+        ] {
+            assert!(
+                matches!(
+                    select_mode(&parse(values)),
+                    Err(super::GuiError::Arguments(_))
+                ),
+                "{values:?}"
+            );
+        }
         let client = super::parse_arguments_from(
             [
                 "--core-client",

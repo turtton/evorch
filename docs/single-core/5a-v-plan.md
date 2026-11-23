@@ -16,7 +16,7 @@
 | 5a-Vの公開・検証 | 管理操作はまだ公開されていない。placeholder試験がある | placeholderは機能完成・製品検証の証拠に数えない |
 | 17c／17d／17e | eval、maintenance、offline／inspect／benchmark境界の主要経路 | main収録済みとして扱い、19aでは回帰確認する |
 | 18a／18b | idle基盤はmainにある。crash後の再接続・共有予算の統合には差分が残る | invocation保持等の必要差分をPR Cで扱う |
-| 19a | GUIはまだcore-client opt-in | PR A〜Cと既定起動・管理更新操作の確認後に既定を切り替える |
+| 19a | PR D（本変更）で既定を core client に切り替え済み。引数なしの `evorch-gui` は core client、embedded は明示 `--legacy-embedded`（と `--demo`）のみ | PR A〜Cと既定起動・管理更新操作の確認後に切り替えた。embedded の撤去は 20 |
 
 **公開と検証完了は別の状態として記録する。** 公開は製品の管理機能を有効化する変更がmainに入った状態。検証完了は製品から公開restartを実行し、successorへの移行と基本の再開を確認し、製品ELFのexpiry（capture後の実時間10秒、exit 74、所有する子の回収）も確認した状態である。一方を他方の証拠として扱わない。
 

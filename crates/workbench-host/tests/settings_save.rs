@@ -725,3 +725,131 @@ async fn a_whole_save_keeps_the_mode_of_the_file_it_replaces() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+/// A client names a model by its id and `enabled` only. Saving the provider must keep
+/// what the file already says about that model, and change only what was sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn saving_a_provider_keeps_the_detail_of_a_model_the_file_already_has() {
+    let mut f = Fixture::new(
+        "version = 3\n\
+[providers.local]\n\
+type = 'openai-compatible'\n\
+base_url = 'https://llm.example.invalid/v1'\n\
+api_key_env = 'EVORCH_TEST_ABSENT_KEY'\n\
+models = [{ id = 'm', enabled = true, context_window = 123456, input_price = 1.5, effort_levels = ['low', 'high'] }, 'other']\n\
+default_model = 'm'\n",
+    );
+    let revision = f.snapshot().revision;
+    let mut input = provider("local", "m");
+    if let ProviderInput::OpenaiCompatible { models, .. } = &mut input {
+        models.push(ModelInput {
+            id: "other".into(),
+            enabled: false,
+        });
+        models.push(ModelInput {
+            id: "fresh".into(),
+            enabled: true,
+        });
+    }
+    f.run(SettingsCommand::SaveProvider(Box::new(SaveProvider {
+        operation_id: op("keep"),
+        expected_revision: revision,
+        original_name: Some("local".into()),
+        provider: input,
+    })))
+    .unwrap();
+    let state = f.settings.wait_operation(&op("keep")).await.unwrap();
+    assert_eq!(state.operation.state, OperationState::Ready);
+    let config = config::Config::load_unresolved_with_file_text(
+        &config::LoadOptions {
+            user_config_dir: Some("/nonexistent/evorch-settings-test".into()),
+            read_env: false,
+            ..Default::default()
+        },
+        std::path::Path::new("/nonexistent/evorch-settings-test/config.toml"),
+        &f.file(),
+    )
+    .unwrap();
+    let models = &config.providers["local"].models;
+    let by_id = |id: &str| models.iter().find(|model| model.id == id).unwrap();
+    assert_eq!(by_id("m").context_window, Some(123_456), "{models:?}");
+    assert_eq!(by_id("m").input_price, Some(1.5));
+    assert_eq!(
+        by_id("m").effort_levels.as_deref(),
+        Some(&["low".to_owned(), "high".to_owned()][..])
+    );
+    assert!(by_id("m").enabled);
+    assert!(!by_id("other").enabled, "the sent flag is applied");
+    assert!(by_id("fresh").enabled);
+}
+
+const DETAILED_PROVIDER: &str = "[providers.local]\n\
+type = 'openai-compatible'\n\
+base_url = 'https://llm.example.invalid/v1'\n\
+api_key_env = 'EVORCH_TEST_ABSENT_KEY'\n\
+models = [{ id = 'm', enabled = true, context_window = 123456, input_price = 1.5 }]\n\
+default_model = 'm'\n";
+
+/// The file is valid only together with its drop-in (`stable_poll_seconds` must not be
+/// below `pending_poll_seconds`): reading the models must not depend on that.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_save_keeps_model_detail_when_the_file_is_valid_only_with_its_drop_ins() {
+    let mut f = Fixture::new(&format!(
+        "version = 3\n[pull_requests]\npending_poll_seconds = 600\n{DETAILED_PROVIDER}"
+    ));
+    let drop_ins = f.dir.path().join("config.d");
+    std::fs::create_dir(&drop_ins).unwrap();
+    std::fs::write(
+        drop_ins.join("pr.toml"),
+        "[pull_requests]\nstable_poll_seconds = 900\n",
+    )
+    .unwrap();
+    let revision = f.snapshot().revision;
+    f.run(SettingsCommand::SaveProvider(Box::new(SaveProvider {
+        operation_id: op("layered"),
+        expected_revision: revision,
+        original_name: Some("local".into()),
+        provider: provider("local", "m"),
+    })))
+    .unwrap();
+    let state = f.settings.wait_operation(&op("layered")).await.unwrap();
+    assert_eq!(state.operation.state, OperationState::Ready, "{state:?}");
+    let file = f.file();
+    assert!(file.contains("context_window = 123456"), "{file}");
+    assert!(file.contains("input_price = 1.5"), "{file}");
+}
+
+/// Models that cannot be read are not replaced by a save that cannot see their detail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_save_is_refused_when_the_existing_models_cannot_be_read() {
+    let broken = DETAILED_PROVIDER.replace(
+        "models = [{ id = 'm', enabled = true, context_window = 123456, input_price = 1.5 }]",
+        "models = 'not a list'",
+    );
+    let initial = format!("version = 3\n{broken}");
+    let mut f = Fixture::new(&initial);
+    let revision = f.snapshot().revision;
+    f.run(SettingsCommand::SaveProvider(Box::new(SaveProvider {
+        operation_id: op("unreadable"),
+        expected_revision: revision,
+        original_name: Some("local".into()),
+        provider: provider("local", "m"),
+    })))
+    .unwrap();
+    let state = f.settings.wait_operation(&op("unreadable")).await.unwrap();
+    assert_eq!(
+        state.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::InvalidRequest
+        },
+        "{state:?}"
+    );
+    assert!(
+        state
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("could not be read")),
+        "the reason is shown: {state:?}"
+    );
+    assert_eq!(f.file(), initial, "nothing was written");
+}

@@ -475,6 +475,13 @@
             # executable (ADR 0039), so the CLI is linked next to the GUI. The
             # worker's sandbox mounts the link's target, the store's evorch.
             ln -s ${evorch}/bin/evorch $app/evorch
+            # With no option evorch-gui is a client of the single core (stage 19a):
+            # its launcher starts the evorch-core beside the running executable and
+            # refuses a symlink there. A wrapper is a regular file; it runs the
+            # store's evorch-core, whose process guard sits beside that real ELF, and
+            # keeps the renderer helper of this libexec for the core's own children.
+            makeWrapper ${evorch}/bin/evorch-core $app/evorch-core \
+              --set-default EVORCH_RENDERER_EXEC "$app/evorch-renderer"
             # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
@@ -501,6 +508,13 @@
             worker="$(readlink -f "$out/libexec/evorch-gui-cef/evorch")"
             test -f "$worker"
             test "$worker" = "${evorch}/bin/evorch"
+            # The GUI's core launcher needs a regular executable named evorch-core
+            # beside evorch-gui, and the core behind it must exist and print its help.
+            test -f "$out/libexec/evorch-gui-cef/evorch-core"
+            test ! -L "$out/libexec/evorch-gui-cef/evorch-core"
+            test -x "$out/libexec/evorch-gui-cef/evorch-core"
+            env -u LD_LIBRARY_PATH "$out/libexec/evorch-gui-cef/evorch-core" --help \
+              | grep -q '^usage: evorch-core '
             printf '%s\n' '{"type":"run","code":"return 6 * 7;","timeout_ms":5000,"memory_limit_bytes":67108864,"tools":[]}' \
               | env -u LD_LIBRARY_PATH "$out/libexec/evorch-gui-cef/evorch" js-worker > js-worker.out
             cat js-worker.out

@@ -17,25 +17,35 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::layout::bounded_list;
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
 use workbench_protocol::{
-    commands::{Command, CommandResult},
+    commands::{Command, CommandResult, SetAgentWebToolsEnabled},
     errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::OperationId,
+    namespaces::ExecutionCommand,
     namespaces::settings::{
-        DeleteProvider, ProviderView, RefreshSettings, ReloadModels, SaveDocument, SettingsCommand,
-        SettingsEvent, SettingsOperationKind, SettingsOperationView, SettingsProblem,
-        SettingsQuery, SettingsReply, SettingsResult, SettingsRevision, SettingsSnapshot,
+        DeleteProvider, ProviderView, RefreshSettings, ReloadModels, SaveDocument, SaveProvider,
+        SettingsCommand, SettingsEvent, SettingsOperationKind, SettingsOperationView,
+        SettingsProblem, SettingsQuery, SettingsReply, SettingsResult, SettingsRevision,
+        SettingsSnapshot,
     },
     operation::{CancelReason, OperationState},
     queries::{Query, QueryReply},
 };
+
+mod provider_form;
+use provider_form::{FormAction, ProviderForm};
 
 #[derive(Debug, Clone)]
 enum Pending {
     Snapshot,
     Operation(OperationId),
     Command(OperationId),
+    /// A change of the Agent web tools of the running core (an execution command).
+    WebTools(bool),
+    /// The same change after its reply was lost: kept for the result the core recorded for it,
+    /// which is shown when it arrives; it no longer disables the buttons (nothing is resent).
+    WebToolsUnknown(bool),
 }
 
 /// The document being edited and what it was made from.
@@ -71,6 +81,13 @@ pub struct SettingsFeature {
     status: String,
     stale: bool,
     snapshot_in_flight: bool,
+    /// The provider form while one is open, and the save it is waiting on.
+    form: Option<ProviderForm>,
+    provider_saving: Option<OperationId>,
+    /// The form the running provider save was made from: only that form is closed when it ends.
+    saving_form: Option<u64>,
+    form_serial: u64,
+    web_tools_status: String,
 }
 
 impl Default for SettingsFeature {
@@ -87,6 +104,11 @@ impl Default for SettingsFeature {
             status: String::new(),
             stale: true,
             snapshot_in_flight: false,
+            form: None,
+            provider_saving: None,
+            saving_form: None,
+            form_serial: 0,
+            web_tools_status: String::new(),
         }
     }
 }
@@ -117,8 +139,15 @@ fn failure_label(code: ErrorCode) -> &'static str {
     }
 }
 
-fn provider_row(ui: &mut egui::Ui, provider: &ProviderView) -> bool {
-    let mut delete = false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAction {
+    None,
+    Edit,
+    Delete,
+}
+
+fn provider_row(ui: &mut egui::Ui, provider: &ProviderView) -> RowAction {
+    let mut action = RowAction::None;
     ui.horizontal_wrapped(|ui| {
         ui.strong(&provider.name);
         ui.label(format!(
@@ -128,9 +157,19 @@ fn provider_row(ui: &mut egui::Ui, provider: &ProviderView) -> bool {
             provider.models.len(),
             provider.default_model
         ));
-        delete = ui.button("削除").clicked();
+        let editable = ProviderForm::from_view(provider).is_some();
+        if ui
+            .add_enabled(editable, egui::Button::new("編集"))
+            .on_disabled_hover_text("この種類のプロバイダーは設定ファイルで編集してください。")
+            .clicked()
+        {
+            action = RowAction::Edit;
+        }
+        if ui.button("削除").clicked() {
+            action = RowAction::Delete;
+        }
     });
-    delete
+    action
 }
 
 impl SettingsFeature {
@@ -157,6 +196,9 @@ impl SettingsFeature {
         }
         self.lost.insert(id.clone());
         self.saving.remove(id);
+        if self.provider_saving.as_ref() == Some(id) {
+            self.provider_saving = None;
+        }
         self.stale = true;
         self.status =
             "操作の結果を確認できませんでした（コアが再起動した可能性があります）。保存済みの内容を確認してください。編集中の内容は残してあります。"
@@ -203,6 +245,16 @@ impl SettingsFeature {
         self.lost.remove(&id);
         if state.is_final() && !matches!(state, OperationState::Ready) {
             self.saving.remove(&id);
+        }
+        if state.is_final() && self.provider_saving.as_ref() == Some(&id) {
+            self.provider_saving = None;
+            // A saved provider closes the form; a refused one keeps what was typed.
+            let saved_form = self.saving_form.take();
+            if matches!(state, OperationState::Ready)
+                && self.form.as_ref().map(|form| form.serial) == saved_form
+            {
+                self.form = None;
+            }
         }
         match state {
             OperationState::Pending => {}
@@ -304,8 +356,14 @@ impl Feature for SettingsFeature {
         self.stale = true;
         // What was asked before the snapshot is answered, if at all, by a reply
         // that is no longer wanted; the operations are asked for again.
-        self.pending
-            .retain(|_, pending| matches!(pending, Pending::Command(_)));
+        // A web tools change whose reply was lost is kept: the resolved reply for its tag
+        // follows the reconnect, and is shown.
+        self.pending.retain(|_, pending| {
+            matches!(
+                pending,
+                Pending::Command(_) | Pending::WebTools(_) | Pending::WebToolsUnknown(_)
+            )
+        });
         for (id, view) in &self.operations {
             if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
@@ -368,9 +426,37 @@ impl Feature for SettingsFeature {
                     } else {
                         self.operations.remove(&id);
                         self.saving.remove(&id);
+                        if self.provider_saving.as_ref() == Some(&id) {
+                            self.provider_saving = None;
+                        }
                     }
                 }
             },
+            (
+                Pending::WebTools(enabled) | Pending::WebToolsUnknown(enabled),
+                FeatureReply::Command(result),
+            ) => {
+                let word = if enabled { "有効" } else { "無効" };
+                self.web_tools_status = match result {
+                    Ok(_) => format!(
+                        "Agent の Web ツールを{word}にしました（実行中のコアへの設定です。すでに開始した run が送ったツール定義は変わりません）。"
+                    ),
+                    Err(error) if error.outcome_unknown => {
+                        // The core's recorded result for this tag follows after a reconnect, if it
+                        // has one; until then the buttons work again and the
+                        // command is not sent again by this screen.
+                        self.pending.insert(tag, Pending::WebToolsUnknown(enabled));
+                        format!(
+                            "Agent の Web ツールの切り替えは結果不明です（再送していません）。必要なら選び直してください — {}",
+                            error.message
+                        )
+                    }
+                    Err(error) => format!(
+                        "Agent の Web ツールを{word}にできませんでした: {}",
+                        error.message
+                    ),
+                };
+            }
             _ => {}
         }
     }
@@ -444,15 +530,16 @@ impl Feature for SettingsFeature {
         ui.separator();
         ui.strong("プロバイダー");
         let mut delete = None;
+        let mut edit = None;
         bounded_list(ui, "settings-providers", |ui| {
             if snapshot.providers.is_empty() {
                 ui.label("プロバイダーはありません。");
             }
             for provider in &snapshot.providers {
-                ui.push_id(&provider.name, |ui| {
-                    if provider_row(ui, provider) {
-                        delete = Some(provider.name.clone());
-                    }
+                ui.push_id(&provider.name, |ui| match provider_row(ui, provider) {
+                    RowAction::None => {}
+                    RowAction::Edit => edit = Some(provider.clone()),
+                    RowAction::Delete => delete = Some(provider.name.clone()),
                 });
             }
         });
@@ -465,6 +552,129 @@ impl Feature for SettingsFeature {
                     expected_revision: snapshot.revision.clone(),
                     name,
                 }),
+            );
+        }
+        // The form is opened from the revision this snapshot has; the save quotes that one.
+        // A form is not replaced while its save runs.
+        if let Some(provider) = edit.filter(|_| self.provider_saving.is_none()) {
+            self.form_serial += 1;
+            self.form = ProviderForm::from_view(&provider).map(|mut form| {
+                form.based_on = Some(snapshot.revision.clone());
+                form.serial = self.form_serial;
+                form
+            });
+        }
+        if self.form.is_none()
+            && ui
+                .add_enabled(!busy, egui::Button::new("プロバイダーを追加"))
+                .clicked()
+        {
+            self.form_serial += 1;
+            self.form = Some(ProviderForm {
+                based_on: Some(snapshot.revision.clone()),
+                serial: self.form_serial,
+                ..ProviderForm::default()
+            });
+        }
+        let mut reread = false;
+        if let Some(form) = &self.form
+            && form
+                .based_on
+                .as_ref()
+                .is_some_and(|based| based != &snapshot.revision)
+        {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "設定ファイルがこのフォームを開いた後に更新されています。保存は拒否されます。",
+            );
+            reread = ui.button("最新の内容で開き直す").clicked();
+        }
+        if reread {
+            let current = self.form.take();
+            self.form_serial += 1;
+            self.form = current.and_then(|old| {
+                let mut form = match &old.original {
+                    Some(name) => snapshot
+                        .providers
+                        .iter()
+                        .find(|provider| &provider.name == name)
+                        .and_then(ProviderForm::from_view)?,
+                    None => ProviderForm {
+                        based_on: None,
+                        ..old
+                    },
+                };
+                form.based_on = Some(snapshot.revision.clone());
+                form.serial = self.form_serial;
+                Some(form)
+            });
+        }
+        let mut form_action = FormAction::None;
+        if let Some(form) = &mut self.form {
+            form_action = form.draw(ui, busy);
+        }
+        match form_action {
+            FormAction::None => {}
+            FormAction::Cancel => self.form = None,
+            FormAction::Save => {
+                if let Some(form) = &self.form {
+                    match form.to_input() {
+                        Ok(provider) => {
+                            let operation_id = new_operation();
+                            self.provider_saving = Some(operation_id.clone());
+                            self.saving_form = Some(form.serial);
+                            let expected_revision = form
+                                .based_on
+                                .clone()
+                                .unwrap_or_else(|| snapshot.revision.clone());
+                            let original_name = form.original.clone();
+                            self.send(
+                                ctx,
+                                SettingsCommand::SaveProvider(Box::new(SaveProvider {
+                                    operation_id,
+                                    expected_revision,
+                                    original_name,
+                                    provider,
+                                })),
+                            );
+                        }
+                        Err(missing) => self.status = missing,
+                    }
+                }
+            }
+        }
+        ui.separator();
+        ui.strong("Agent の Web ツール");
+        ui.label("実行中のコアに設定します。設定ファイルは変更せず、コアを再起動すると設定ファイルの値に戻ります。現在の値はこの画面では読み取れません。");
+        let web_waiting = self
+            .pending
+            .values()
+            .any(|pending| matches!(pending, Pending::WebTools(_)));
+        let mut web_tools = None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!web_waiting, egui::Button::new("Web ツールを有効にする"))
+                .clicked()
+            {
+                web_tools = Some(true);
+            }
+            if ui
+                .add_enabled(!web_waiting, egui::Button::new("Web ツールを無効にする"))
+                .clicked()
+            {
+                web_tools = Some(false);
+            }
+        });
+        if !self.web_tools_status.is_empty() {
+            ui.label(&self.web_tools_status);
+        }
+        if let Some(enabled) = web_tools {
+            let tag = self.tag(Pending::WebTools(enabled));
+            ctx.command(
+                tag,
+                Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
+                    SetAgentWebToolsEnabled { enabled },
+                )),
             );
         }
         ui.separator();

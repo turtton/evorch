@@ -147,7 +147,7 @@ L1 から L7 のうち、下表の検証は **main への push でだけ** CI �
 - 必要コマンド: `Xvfb`、`openbox`、`xdotool`、ImageMagick、`jq`。
   Nix 開発環境では例えば
   `nix develop -c nix shell nixpkgs#xorg-server nixpkgs#openbox nixpkgs#xdotool nixpkgs#imagemagick nixpkgs#jq -c scripts/check-gui-native.sh`。
-- 実アプリまで通す場合: `cargo build -p gui --bin evorch-gui` の後、
+- 実アプリまで通す場合 (`evorch-gui --demo`、embedded の窓): `cargo build -p gui --bin evorch-gui` の後、
   bubblewrap が動作する Linux ホストで `GUI_QA_MODE=runtime scripts/check-gui-native.sh [OUT]`。
   GitHub Actions ランナーでは bubblewrap のネットワーク名前空間作成が拒否されるため、
   CI では fixture モードを使用する。

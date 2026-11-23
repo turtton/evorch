@@ -20,9 +20,10 @@ use workbench_protocol::{
     namespaces::{
         WorkspaceEvent, WorkspaceQuery, WorkspaceReply,
         workspace::{
-            FamilyIdentity, FamilyView, ProjectAccessView, RenameThread, SetFamilyArchived,
-            SetFamilyPinned, SetProjectTrust, ThreadDetail, TrustLevel, WorkspaceCommand,
-            WorkspaceRejection, WorkspaceResult,
+            AllowedDirectoryAction, FamilyIdentity, FamilyView, ProjectAccessView, RegisterProject,
+            RenameProject, RenameThread, SetFamilyArchived, SetFamilyPinned, SetProjectTrust,
+            ThreadDetail, TrustLevel, UpdateAllowedDirectory, WorkspaceCommand, WorkspaceRejection,
+            WorkspaceResult,
         },
     },
     queries::{PageRequest, Query, QueryReply},
@@ -53,6 +54,26 @@ enum Inflight {
     Command(String),
     Access(String),
     TrustCommand(String),
+    ProjectCommand(String),
+    Register,
+}
+
+/// What the user asked for on a project's access, to be sent once its revision is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectIntent {
+    Rename(String),
+    AddDirectory { path: String, trust: TrustLevel },
+    RemoveDirectory(String),
+}
+
+/// The text the project forms hold between frames.
+#[derive(Debug, Default)]
+struct ProjectForms {
+    register_name: String,
+    register_path: String,
+    rename: String,
+    directory: String,
+    directory_approved: bool,
 }
 
 /// A request waiting to leave with the next frame.
@@ -96,6 +117,10 @@ pub struct WorkspaceFeature {
     inflight: BTreeMap<u64, Inflight>,
     intents: BTreeMap<String, Intent>,
     trust_intents: BTreeMap<String, TrustLevel>,
+    project_intents: BTreeMap<String, ProjectIntent>,
+    forms: ProjectForms,
+    /// What the last project operation did, once the core said it was applied.
+    confirmation: Option<String>,
     outbox: Vec<Outgoing>,
     /// The core says something changed (or nothing was read yet).
     stale: bool,
@@ -115,6 +140,77 @@ impl WorkspaceFeature {
 
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
+    }
+
+    /// The outcome of the last project operation, when the core applied it.
+    pub fn confirmation(&self) -> Option<&str> {
+        self.confirmation.as_deref()
+    }
+
+    /// The user asked to register the directory `path` as a project named `name`. The core
+    /// canonicalises the path and refuses one it does not accept; nothing is guessed here.
+    pub fn register_project(&mut self, name: &str, path: &str) {
+        self.notice = None;
+        self.confirmation = None;
+        let (name, path) = (name.trim(), path.trim());
+        if name.is_empty() || path.is_empty() {
+            self.notice = Some("the project needs a name and a directory".into());
+            return;
+        }
+        let tag = self.tag(Inflight::Register);
+        self.outbox.push(Outgoing::Command(
+            tag,
+            Command::Workspace(WorkspaceCommand::RegisterProject(RegisterProject {
+                name: name.to_owned(),
+                path: path.to_owned(),
+            })),
+        ));
+    }
+
+    /// The user asked for `intent` on `project`; it is sent with the revision the core
+    /// reports for the project's access, never with one guessed here.
+    pub fn ask_project(&mut self, project: &str, intent: ProjectIntent) {
+        self.notice = None;
+        self.confirmation = None;
+        self.project_intents.insert(project.to_owned(), intent);
+        if self.model.access.contains_key(project) {
+            self.send_project_intent(project);
+        } else {
+            self.want_access(project);
+        }
+    }
+
+    fn send_project_intent(&mut self, project: &str) {
+        let (Some(intent), Some(access)) = (
+            self.project_intents.remove(project),
+            self.model.access.get(project).cloned(),
+        ) else {
+            return;
+        };
+        let command = match intent {
+            ProjectIntent::Rename(name) => WorkspaceCommand::RenameProject(RenameProject {
+                project: access.project,
+                name,
+                expected_revision: access.revision,
+            }),
+            ProjectIntent::AddDirectory { path, trust } => {
+                WorkspaceCommand::UpdateAllowedDirectory(UpdateAllowedDirectory {
+                    project: access.project,
+                    action: AllowedDirectoryAction::Add { path, trust },
+                    expected_revision: access.revision,
+                })
+            }
+            ProjectIntent::RemoveDirectory(path) => {
+                WorkspaceCommand::UpdateAllowedDirectory(UpdateAllowedDirectory {
+                    project: access.project,
+                    action: AllowedDirectoryAction::Remove { path },
+                    expected_revision: access.revision,
+                })
+            }
+        };
+        let tag = self.tag(Inflight::ProjectCommand(project.to_owned()));
+        self.outbox
+            .push(Outgoing::Command(tag, Command::Workspace(command)));
     }
 
     /// Whether the sidebar is waiting for an answer of the core.
@@ -334,6 +430,46 @@ impl WorkspaceFeature {
                 if self.trust_intents.contains_key(&project) {
                     self.send_trust(&project);
                 }
+                if self.project_intents.contains_key(&project) {
+                    self.send_project_intent(&project);
+                }
+            }
+            (Inflight::ProjectCommand(project), FeatureReply::Command(Ok(reply))) => {
+                match reply.result.as_deref() {
+                    Some(CommandResult::Workspace(WorkspaceResult::Applied(applied))) => {
+                        self.confirmation = Some(if applied.changed {
+                            "the project settings were saved".into()
+                        } else {
+                            "the project already had these settings".into()
+                        });
+                    }
+                    Some(CommandResult::Workspace(WorkspaceResult::Rejected(rejection))) => {
+                        self.notice = Some(rejection_text(rejection));
+                    }
+                    _ => self.notice = Some("the core answered something unexpected".into()),
+                }
+                // What it was decided on is read again, applied or not.
+                self.model.access.remove(&project);
+                self.stale = true;
+                self.want_access(&project);
+            }
+            (Inflight::Register, FeatureReply::Command(Ok(reply))) => {
+                match reply.result.as_deref() {
+                    Some(CommandResult::Workspace(WorkspaceResult::Applied(applied))) => {
+                        self.confirmation = Some(if applied.changed {
+                            "the project was registered".into()
+                        } else {
+                            "the directory was already registered".into()
+                        });
+                        self.forms.register_name.clear();
+                        self.forms.register_path.clear();
+                        self.stale = true;
+                    }
+                    Some(CommandResult::Workspace(WorkspaceResult::Rejected(rejection))) => {
+                        self.notice = Some(rejection_text(rejection));
+                    }
+                    _ => self.notice = Some("the core answered something unexpected".into()),
+                }
             }
             (Inflight::TrustCommand(project), FeatureReply::Command(Ok(reply))) => {
                 match reply.result.as_deref() {
@@ -388,6 +524,20 @@ impl WorkspaceFeature {
             self.family_pages.clear();
             self.refreshing = false;
             self.stale = true;
+        }
+        if error.outcome_unknown {
+            // The command may have been applied: what it changed is read again,
+            // and it is never sent again.
+            match what {
+                Inflight::ProjectCommand(project) | Inflight::TrustCommand(project) => {
+                    let project = project.clone();
+                    self.model.access.remove(&project);
+                    self.stale = true;
+                    self.want_access(&project);
+                }
+                Inflight::Register | Inflight::Command(_) => self.stale = true,
+                _ => {}
+            }
         }
         self.notice = Some(if error.outcome_unknown {
             format!("not known whether it was applied: {}", error.message)
@@ -478,6 +628,26 @@ impl Feature for WorkspaceFeature {
         let mut navigations = Vec::new();
         let mut asks: Vec<(String, Intent)> = Vec::new();
         let mut trust_asks: Vec<(String, TrustLevel)> = Vec::new();
+        let mut project_asks: Vec<(String, ProjectIntent)> = Vec::new();
+        let mut register_ask: Option<(String, String)> = None;
+        egui::CollapsingHeader::new("Register project")
+            .id_salt("workspace-register-project")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut self.forms.register_name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Directory");
+                    ui.text_edit_singleline(&mut self.forms.register_path);
+                });
+                if ui.button("Register").clicked() {
+                    register_ask = Some((
+                        self.forms.register_name.clone(),
+                        self.forms.register_path.clone(),
+                    ));
+                }
+            });
         ui.horizontal_wrapped(|ui| {
             for project in &projects {
                 let selected = selection.project.as_ref() == Some(&project.id);
@@ -514,6 +684,95 @@ impl Feature for WorkspaceFeature {
                     ui.label("Trust: …");
                     ui.add_enabled(false, egui::Button::new("…").small());
                 });
+            }
+            // The header is drawn whether or not the access was read yet, so a read that ends
+            // does not move the rows below it under the pointer.
+            let access = self.model.access.get(project.as_str()).cloned();
+            egui::CollapsingHeader::new("Project settings")
+                .id_salt(("workspace-project-settings", project.as_str()))
+                .show(ui, |ui| {
+                    let Some(access) = &access else {
+                        ui.label("…");
+                        return;
+                    };
+                    ui.label(format!("Directory: {}", access.root));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.forms.rename)
+                                .hint_text(access.name.as_str()),
+                        );
+                        let name = self.forms.rename.trim().to_owned();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("Rename project"))
+                            .clicked()
+                        {
+                            project_asks
+                                .push((project.as_str().to_owned(), ProjectIntent::Rename(name)));
+                            self.forms.rename.clear();
+                        }
+                    });
+                    ui.label("Allowed directories");
+                    for directory in &access.allowed_directories {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{} ({}{})",
+                                directory.path,
+                                if directory.trust == TrustLevel::Approved {
+                                    "approved"
+                                } else {
+                                    "unapproved"
+                                },
+                                if directory.live { "" } else { ", missing" }
+                            ));
+                            if ui.small_button("Remove").clicked() {
+                                project_asks.push((
+                                    project.as_str().to_owned(),
+                                    ProjectIntent::RemoveDirectory(directory.path.clone()),
+                                ));
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.forms.directory);
+                        ui.checkbox(&mut self.forms.directory_approved, "Approved");
+                        let path = self.forms.directory.trim().to_owned();
+                        if ui
+                            .add_enabled(!path.is_empty(), egui::Button::new("Add directory"))
+                            .clicked()
+                        {
+                            let trust = if self.forms.directory_approved {
+                                TrustLevel::Approved
+                            } else {
+                                TrustLevel::Unapproved
+                            };
+                            project_asks.push((
+                                project.as_str().to_owned(),
+                                ProjectIntent::AddDirectory { path, trust },
+                            ));
+                            self.forms.directory.clear();
+                        }
+                    });
+                });
+            if let Some(thread) = selection.thread.as_ref() {
+                // Read from the core; changing the list is not available in this window yet.
+                let dirs = self.model.details.get(thread.as_str()).map_or_else(
+                    || "…".to_owned(),
+                    |detail| {
+                        if detail.extra_read_dirs.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            detail
+                                .extra_read_dirs
+                                .iter()
+                                .map(|directory| directory.path.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    },
+                );
+                ui.label(format!(
+                    "Extra read directories: {dirs} (read-only; not supported here yet)"
+                ));
             }
             ui.horizontal(|ui| {
                 if ui.small_button("New conversation").clicked() {
@@ -588,6 +847,15 @@ impl Feature for WorkspaceFeature {
         }
         if let Some(notice) = &self.notice {
             ui.colored_label(ui.visuals().warn_fg_color, notice);
+        }
+        if let Some(confirmation) = &self.confirmation {
+            ui.label(confirmation);
+        }
+        if let Some((name, path)) = register_ask {
+            self.register_project(&name, &path);
+        }
+        for (project, intent) in project_asks {
+            self.ask_project(&project, intent);
         }
         for (thread, intent) in asks {
             self.ask(&thread, intent);
@@ -738,6 +1006,167 @@ mod tests {
         };
         assert_eq!(c.trust, TrustLevel::Approved);
         assert_eq!(c.expected_revision, Revision(9));
+    }
+
+    fn access_reply(revision: u64) -> FeatureReply {
+        FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::ProjectAccess(
+            Box::new(ProjectAccessView {
+                project: workbench_protocol::ids::ProjectId::new("p").unwrap(),
+                name: "p".into(),
+                root: "/p".into(),
+                trust: TrustLevel::Unapproved,
+                allowed_directories: Vec::new(),
+                revision: Revision(revision),
+            }),
+        ))))
+    }
+
+    fn applied(changed: bool) -> WorkspaceResult {
+        WorkspaceResult::Applied(Applied {
+            revision: Revision(2),
+            changed,
+            project: None,
+        })
+    }
+
+    // Given: the project forms of the sidebar
+    // When: a project is registered and the core applies it, and then refuses another
+    // Then: the command carries exactly the typed name and directory, the applied
+    //       result is confirmed, and the refusal is shown with the core's reason
+    #[test]
+    fn registering_a_project_sends_its_name_and_directory_and_shows_the_outcome() {
+        let mut feature = WorkspaceFeature::default();
+        feature.register_project(" repo ", " /work/repo ");
+        let (tag, command) = only_command(feature.take_outbox());
+        let WorkspaceCommand::RegisterProject(register) = command else {
+            panic!("a registration was expected");
+        };
+        assert_eq!(
+            (register.name.as_str(), register.path.as_str()),
+            ("repo", "/work/repo")
+        );
+        feature.on_reply(tag, command_reply(applied(true)));
+        assert_eq!(feature.confirmation(), Some("the project was registered"));
+        assert!(feature.notice().is_none());
+
+        feature.register_project("again", "relative");
+        let (tag, _) = only_command(feature.take_outbox());
+        feature.on_reply(
+            tag,
+            command_reply(WorkspaceResult::Rejected(WorkspaceRejection::InvalidPath {
+                reason: "the path is not absolute".into(),
+            })),
+        );
+        assert_eq!(feature.notice(), Some("the path is not absolute"));
+        assert!(feature.confirmation().is_none());
+        assert!(feature.take_outbox().is_empty(), "nothing is sent twice");
+
+        feature.register_project("", "/x");
+        assert!(
+            feature.take_outbox().is_empty(),
+            "an empty name is not sent"
+        );
+        assert!(feature.notice().is_some());
+    }
+
+    // Given: a project whose access the core reported at revision 9
+    // When: it is renamed, a directory is added and removed
+    // Then: each command quotes revision 9; a refusal is shown with its reason and the
+    //       access is read again; a lost reply is read back, not sent again
+    #[test]
+    fn project_rename_and_allowed_directories_quote_the_revision_and_show_the_outcome() {
+        let mut feature = WorkspaceFeature::default();
+        feature.ask_project("p", ProjectIntent::Rename("renamed".into()));
+        let outbox = feature.take_outbox();
+        let [Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::GetProjectAccess(_)))] =
+            outbox.as_slice()
+        else {
+            panic!("{outbox:?}")
+        };
+        feature.on_reply(*tag, access_reply(9));
+        let (tag, command) = only_command(feature.take_outbox());
+        let WorkspaceCommand::RenameProject(rename) = command else {
+            panic!("a rename was expected");
+        };
+        assert_eq!(
+            (rename.name.as_str(), rename.expected_revision),
+            ("renamed", Revision(9))
+        );
+        feature.on_reply(tag, command_reply(applied(true)));
+        assert_eq!(
+            feature.confirmation(),
+            Some("the project settings were saved")
+        );
+        // The access is read again after the command, never patched.
+        let outbox = feature.take_outbox();
+        let [Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::GetProjectAccess(_)))] =
+            outbox.as_slice()
+        else {
+            panic!("{outbox:?}")
+        };
+        feature.on_reply(*tag, access_reply(10));
+
+        feature.ask_project(
+            "p",
+            ProjectIntent::AddDirectory {
+                path: "/data".into(),
+                trust: TrustLevel::Approved,
+            },
+        );
+        let (tag, command) = only_command(feature.take_outbox());
+        let WorkspaceCommand::UpdateAllowedDirectory(update) = command else {
+            panic!("a directory update was expected");
+        };
+        assert_eq!(update.expected_revision, Revision(10));
+        assert_eq!(
+            update.action,
+            AllowedDirectoryAction::Add {
+                path: "/data".into(),
+                trust: TrustLevel::Approved
+            }
+        );
+        feature.on_reply(
+            tag,
+            command_reply(WorkspaceResult::Rejected(WorkspaceRejection::InvalidPath {
+                reason: "the directory is nested in another".into(),
+            })),
+        );
+        assert_eq!(feature.notice(), Some("the directory is nested in another"));
+        assert!(feature.confirmation().is_none());
+        let outbox = feature.take_outbox();
+        let [Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::GetProjectAccess(_)))] =
+            outbox.as_slice()
+        else {
+            panic!("{outbox:?}")
+        };
+        feature.on_reply(*tag, access_reply(11));
+
+        feature.ask_project("p", ProjectIntent::RemoveDirectory("/data".into()));
+        let (tag, command) = only_command(feature.take_outbox());
+        assert!(matches!(
+            command,
+            WorkspaceCommand::UpdateAllowedDirectory(UpdateAllowedDirectory {
+                action: AllowedDirectoryAction::Remove { .. },
+                expected_revision: Revision(11),
+                ..
+            })
+        ));
+        feature.on_reply(
+            tag,
+            FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+        );
+        assert!(feature.notice().unwrap().contains("not known"));
+        let outbox = feature.take_outbox();
+        assert!(
+            matches!(
+                outbox.as_slice(),
+                [Outgoing::Query(
+                    _,
+                    Query::Workspace(WorkspaceQuery::GetProjectAccess(_))
+                )]
+            ),
+            "the access is read back and nothing is sent again: {outbox:?}"
+        );
     }
 
     #[test]

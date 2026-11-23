@@ -174,7 +174,8 @@ impl ConfigStore {
         input: &ProviderInput,
     ) -> Result<SettingsRevision, SaveError> {
         self.check_revision(expected)?;
-        self.typed_save(|| self.save_provider_unchecked(original_name, input))?;
+        let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)))?;
+        self.typed_save(|| self.save_provider_unchecked(original_name, input, &existing))?;
         self.revision()
     }
 
@@ -182,10 +183,12 @@ impl ConfigStore {
         &self,
         original_name: Option<&str>,
         input: &ProviderInput,
+        existing: &[ModelEntryConfig],
     ) -> Result<(), ConfigError> {
         let options = self.options();
         let context = config::LayeredSaveContext::new(&options);
         let path = self.path();
+        let model_entries = |models: &[ModelInput]| model_entries(models, existing);
         match input {
             ProviderInput::OpenaiCompatible {
                 name,
@@ -275,6 +278,22 @@ impl ConfigStore {
             )?,
         }
         Ok(())
+    }
+
+    /// The models the file itself (not its drop-ins) lists for provider `name`, read as TOML
+    /// without validating any other setting. A file whose models cannot be read is not saved
+    /// over: that would replace entries whose detail this save cannot see.
+    fn existing_models(&self, name: &str) -> Result<Vec<ModelEntryConfig>, SaveError> {
+        let text = String::from_utf8(self.read()?)
+            .map_err(|_| SaveError::Io("the configuration file is not text".into()))?;
+        // The reason is fixed: a parse error would quote the file, which may hold secrets.
+        config::provider_models_in_text(&text, name)
+            .map(Option::unwrap_or_default)
+            .map_err(|_| {
+                SaveError::Invalid(format!(
+                    "the models of provider `{name}` in the configuration file could not be read, so the provider was not saved over them"
+                ))
+            })
     }
 
     pub(super) fn delete_provider(
@@ -467,14 +486,31 @@ impl Drop for Scratch {
     }
 }
 
-fn model_entries(models: &[ModelInput]) -> Vec<ModelEntryConfig> {
+/// The entries a client's model list stands for. A client names a model by id and
+/// whether it is enabled; whatever else the file already says about that id (preset,
+/// context window, prices, effort levels, edit tool, kind) is kept, so a save that
+/// carries only those two fields does not erase it.
+fn model_entries(models: &[ModelInput], existing: &[ModelEntryConfig]) -> Vec<ModelEntryConfig> {
     models
         .iter()
-        .map(|model| ModelEntryConfig {
-            enabled: model.enabled,
-            ..ModelEntryConfig::enabled_with_inferred_kind(model.id.clone())
+        .map(|model| {
+            let mut entry = existing
+                .iter()
+                .find(|entry| entry.id == model.id)
+                .cloned()
+                .unwrap_or_else(|| ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()));
+            entry.enabled = model.enabled;
+            entry
         })
         .collect()
+}
+
+fn input_name(input: &ProviderInput) -> &str {
+    match input {
+        ProviderInput::OpenaiCompatible { name, .. }
+        | ProviderInput::Codex { name, .. }
+        | ProviderInput::Subscription { name, .. } => name,
+    }
 }
 
 fn provider_view((name, profile): (&String, &ProviderProfileConfig)) -> ProviderView {

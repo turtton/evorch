@@ -312,7 +312,10 @@ writes a verbose CEF log.
   `nix build .#evorch-gui-cef` builds the CEF GUI alone. It fetches the CEF
   build cef-rs pins with a fixed hash, strips `libcef.so`, keeps the `en-US`
   and `ja` locales, and installs `evorch-gui-cef` with the helper and CEF files
-  in one `libexec` directory.
+  in one `libexec` directory. That directory also holds `evorch` (the run_js
+  worker) and a wrapper `evorch-core`: with no option the GUI connects to or
+  starts the core beside it, and the launcher accepts only a regular file
+  there, so the install check requires one that is not a link.
 - Development: the default `nix develop` shell (`.#cef` is the same shell) sets
   `CEF_PATH` to that distribution and puts it at the end of `LD_LIBRARY_PATH`.
   Outside Nix, run `scripts/setup-cef.sh <dir>` once, which installs the
@@ -331,12 +334,16 @@ writes a verbose CEF log.
   CEF is not started (CI does, except in `cef-e2e`).
 
 `cargo build -p gui` builds `evorch-gui` only; the helper is a binary of
-`browser-cef`, so build both together:
+`browser-cef`, and the GUI is a client of the single core, which it starts from
+the `evorch-core` beside it (stage 19a), so build all three together:
 
 ```sh
-cargo build --locked -p gui -p browser-cef --bin evorch-gui --bin evorch-cef-helper
-cargo run -p gui --bin evorch-gui
+cargo build --locked -p gui -p browser-cef -p evorch-core --bin evorch-gui --bin evorch-cef-helper --bin evorch-core
+target/debug/evorch-gui
 ```
+
+`cargo run -p gui --bin evorch-gui` works once `evorch-core` has been built into
+the same `target/debug`. `--demo` and `--legacy-embedded` select the embedded window.
 
 ### Tests
 
