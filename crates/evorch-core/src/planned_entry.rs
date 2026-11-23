@@ -69,8 +69,10 @@ pub fn run(
             Some(at_ms) => at_ms,
             None => pending.fail_boot(BootFailure::AdoptedBeforeReady),
         };
+        let published = pending.successor_epoch();
         let (mut host, instance, listener, _) =
             pending.confirm_ready(listener, at_ms, &inbox).await;
+        backend.republish_endpoint(instance.clone(), published);
         // The watchdog no longer reads the inbox. Transfer, do not create a second one.
         let signals = OperatorSignals::from_inbox(inbox)?;
         listener.set_nonblocking(true)?;

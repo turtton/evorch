@@ -15,6 +15,7 @@
 5. 親はlaunch FDをCLOEXECのまま保持し、fork後の子だけCLOEXECを解除する。子は `--launch-fd` をentryで採用し、CLOEXECを戻す。同じファイルをopen/flockし直さない。
 6. 子は `Instance::acquire(&launch, ...)` でlifetime取得後、検証済みstale socketを掃除する。listenerをbindし、handshakeと同じepochのrecordをpublishしてlaunchをcloseする。親も実際のreadiness検証後にcloseする。LOCK_UNやlock file unlinkは禁止。
 7. exit 2は再spawnせず既存コアへの再接続へ移る。
+8. handshake epochはprojectionのinvalidateごとに進むため、コアはepochが変わるたびにrecordを最新値で再publishする（`HostBackend::publish_endpoint`）。再publishは`HostBackend::close`（drainとplanned handoffのcontrol drain）で止まり、後継のrecordを上書きしない。
 
 endpoint recordはconfig内のatomicな発見ヒントであり生存証明ではない。PIDを記録・参照しない。異なるXDG_RUNTIME_DIRの旧socketもlifetime取得後にのみ掃除する。廃止した `.evorch-core.start` には触れない。
 

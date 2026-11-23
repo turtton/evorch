@@ -340,6 +340,9 @@ impl PendingPlannedHost {
     pub fn measurements(&self) -> &BootMeasurements {
         &self.boot.measurements
     }
+    pub fn successor_epoch(&self) -> u64 {
+        self.boot.receipt.successor_epoch
+    }
     /// Call only after the Web listener (if enabled) has also bound. Graph/tool
     /// comparison and learning dispatch remain deferred for the Ready caller.
     pub async fn confirm_ready(

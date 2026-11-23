@@ -13,6 +13,8 @@ use workbench_protocol::{
 };
 use workbench_web::{BackendSubscription, WebSession, WorkbenchBackend};
 
+mod endpoint;
+
 pub struct HostBackend {
     pub host: Arc<Mutex<CommandHost>>,
     pub projection: Arc<Projection>,
@@ -26,6 +28,7 @@ pub struct HostBackend {
     management_advertised: AtomicBool,
     web_clients: Mutex<Option<workbench_web::ActivityObserver>>,
     web_deliveries: workbench_web::RestartTasks,
+    endpoint: endpoint::Endpoint,
 }
 
 pub(crate) struct ConnectedClient<'a>(&'a HostBackend);
@@ -97,6 +100,7 @@ impl HostBackend {
             management_advertised: AtomicBool::new(false),
             web_clients: Mutex::new(None),
             web_deliveries: Default::default(),
+            endpoint: Default::default(),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
                 capabilities: Capability::IMPLEMENTED.to_vec(),
@@ -118,6 +122,23 @@ impl HostBackend {
     }
     pub fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        self.endpoint.stop();
+    }
+    /// Publishes the current epoch and keeps the record on the latest epoch
+    /// until [`Self::close`].
+    pub fn publish_endpoint(&self, instance: Arc<core_instance::Instance>) -> std::io::Result<()> {
+        let mut epochs = self.projection.epoch_changes();
+        let epoch = *epochs.borrow_and_update();
+        instance.publish(epoch)?;
+        self.endpoint.start(instance, epochs, epoch);
+        Ok(())
+    }
+    pub fn republish_endpoint(&self, instance: Arc<core_instance::Instance>, published: u64) {
+        self.endpoint
+            .start(instance, self.projection.epoch_changes(), published);
+    }
+    pub fn endpoint_published(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.endpoint.published()
     }
     pub fn set_web_enabled(&self, enabled: bool) {
         self.web_enabled.store(enabled, Ordering::SeqCst);

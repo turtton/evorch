@@ -616,3 +616,51 @@ async fn observed_signal_prevents_dispatch_even_when_mail_already_selected() {
     driver.restart.transition_to_shutdown();
     host.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn control_drain_stops_endpoint_republishing_before_the_handoff() {
+    if masked_child().await {
+        return;
+    }
+    let dir = test_socket_dir::SplitDir::new();
+    let mut host = boot(&dir).await;
+    let mut driver = LifecycleDriver::new(&host);
+    let (context, signals, backend) = context(&dir, &host, &driver);
+    let listener = context.instance().bind().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    backend
+        .publish_endpoint(context.instance().clone())
+        .unwrap();
+    let booted = backend.instance_epoch();
+    let mut published = backend.endpoint_published().unwrap();
+    let control = driver.control_drain();
+    let action = async {
+        let drained = control
+            .drain(tokio::time::Instant::now() + std::time::Duration::from_secs(120))
+            .await
+            .unwrap();
+        backend.projection.invalidate();
+        assert_ne!(backend.instance_epoch(), booted);
+        assert!(published.changed().await.is_err());
+        drop(drained);
+        signal();
+    };
+    let running = driver.run_owned_with_web(
+        &mut host,
+        backend.clone(),
+        listener,
+        None,
+        signals,
+        &context,
+    );
+    let (outcome, ()) = tokio::join!(running, action);
+    outcome.unwrap();
+    let record = core_instance::ConfigIdentity::new(dir.path())
+        .unwrap()
+        .read_record()
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.epoch, booted);
+    host.shutdown().await.unwrap();
+}
