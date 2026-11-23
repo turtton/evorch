@@ -633,12 +633,13 @@ Current migration status and 19a boundary:
 
 | Work | Status / 19a handling |
 |---|---|
+| 17 ordinary CLI | Complete in PR B (#780, merge `4e053793`): the normal CLI is a core client; `--db`, `--web-tools-enabled` and `--run-js-enabled` are removed, and restart is refused with a reason while a CLI invocation is active |
 | 17c eval | Main-recorded core path; regression check only |
 | 17d maintenance | Main-recorded backfill and reindex core paths; no reimplementation PR before 19a |
 | 17e offline / inspect / benchmark boundary | Merged; regression check only |
 | 18a idle | Base is main-recorded; add only invocation retention/status differences |
-| 18b crash / reconnect | Partial; shared persistent crash budget and client integration are PR C |
-| 19a | Done by PR D (after A, B and C), which also adds the screens of the old window's update operations that the core client lacked (project registration/rename, allowed directories, provider add/edit, Agent web tools; per-conversation extra read directories remain read-only and are labelled so): a bare `evorch-gui` is a core client and never falls back to the embedded runtime; the embedded window remains only as the explicit `--legacy-embedded` (and the `--demo` session) until 20. The Nix GUI package ships a regular-file `evorch-core` wrapper beside `evorch-gui`, which the launcher requires. The management update operations listed above are kept |
+| 18b crash / reconnect | Complete in PR C (#779, merge `a0d21082`): only abnormal-exit evidence consumes the shared budget, capped at 3 in 5 minutes; the GUI reconnects by restarting within budget (parent decision: `question-182c5ee382012a1f6bf339e9ee339bf9`) |
+| 19a | Complete in PR D (#782, merge `e61a5629`), after A–C. An argument-free launch is a core client; embedded mode requires `--legacy-embedded` or `--demo`. The GUI package includes `evorch-core`. Management update screens cover project registration/rename, allowed directories, provider add/edit and Agent web tools. SetThreadExtraReadDirs remains unsupported and is labelled as such |
 
 PR A combines the old public-restart work and the T1–T4 product/native checks
 into one PR. It includes the one-restart product-to-successor check; CEF and
@@ -659,6 +660,11 @@ implementation:
 | **20** | After 19a: remove old ownership such as owners.db, claim and shared_feed |
 | **19b** | After 20: reduce the client-crate internal-dependency allowlist to zero |
 | **Q1/Q2 GUI and read-only parity** | After 19a; management recovery remains available through the admin CLI |
+| **SetThreadExtraReadDirs screen** | Deferred by 19a; the GUI marks the operation unsupported |
+| **CLI crash-continuity integration test** | Crash a core with a CLI run active and verify that the run is not revived |
+| **Packaged GUI/CLI sharing smoke** | With the distribution actually installed, verify the GUI and CLI share the same core |
+| **Restart preflight observation change (PR A, #781 S3)** | Some requests can end as `Cancelled` if the observed state changes inside preflight; this is the safe-side behavior, with follow-up still needed |
+| **Read current Agent web-tool setting** | Add a way for clients to obtain the current value from the core |
 
 ## Review and acceptance policy for this migration
 
@@ -697,7 +703,7 @@ outcome is unknown is never sent again.
 | `--no-wait`: no prompt; a run that needs an answer ends the command with exit 3 and the owned run is stopped | `cli::run::execute` | `run_cli.rs::without_waiting_a_question_…` |
 | Exit codes: 0 succeeded (or the input reached its run), 1 failed, refused, unreachable or outcome unknown, 3 needs input with `--no-wait` (or no answer could be read), 130 interrupted | `cli::run::Outcome::render` | `cli::run` unit tests, `run_cli.rs` |
 | **Provisional restart refusal (until 5b-R).** While a CLI invocation runs, a planned restart is refused before the gate is taken and before anything is captured, with a reason the user sees (`Busy`, `UserActionRequired`: "N CLI invocation(s) are running …"). The decision and the admission of a new invocation take the same lock (`HostRestartGate`), so no invocation starts between the check and the claim; a restart that claimed admission refuses new invocations (`Busy`) until the host reopens or the claim is released. A connection alone (a screen, the management CLI) is not counted | `runtime::quiesce::host_restart` (`enter_invocation`, `claim_restart_admission`), `RestartCoordinator::request_with_source`, `public::implementation::inspect_request` / `commit_request` | `host_restart` and `restart/tests.rs` unit tests; `public_restart_coordinator/invocation.rs` (the public facade); `run_cli.rs::a_restart_is_refused_while_a_cli_invocation_runs_…` |
-| A crash does not bring a CLI run back: the invocation record lives in memory only; the command never sends `StartInvocation` again after a lost connection (the outcome is unknown, exit 1); recovery restores only what a *planned* restart captured, a planned restart is refused while an invocation runs, and an unplanned crash captures nothing | `InvocationRegistry` (no persistence), `run::execute` (one send), the restart refusal above | by construction; no test crashes a core with an invocation running |
+| A crash does not bring a CLI run back: the invocation record lives in memory only; the command never sends `StartInvocation` again after a lost connection (the outcome is unknown, exit 1); recovery restores only what a *planned* restart captured, a planned restart is refused while an invocation runs, and an unplanned crash captures nothing | `InvocationRegistry` (no persistence), `run::execute` (one send), the restart refusal above | By construction. An integration test that crashes a core while a CLI run is active and checks that the run is not revived remains follow-up work |
 | **Cache contract.** A CLI invocation is the core's run: its second request extends the first (model, cache key, tool schema, prefix) across a blocking question and its answer; starting, following and answering add nothing to what the model is sent | the runtime, unchanged | `crates/evorch-core/tests/core_cli_run_cache.rs` (input-derived mock cache, `assert_append_only`; registered in `scripts/contract-test-filters.sh`) |
 | The command line (`--db` and the settings overrides refused before a core is looked for, usage) | `cli::run::parse_args` | its unit tests, `crates/evorch/tests/run_e2e.rs` |
 
