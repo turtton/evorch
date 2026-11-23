@@ -4,7 +4,7 @@
 //! reaches the screen, the command or a log.
 use workbench_protocol::namespaces::settings::{
     CredentialRef, ModelInput, OpenaiCompatibleKind, ProviderInput, ProviderKind, ProviderView,
-    SubscriptionKind,
+    SettingsRevision, SubscriptionKind,
 };
 
 /// The kinds of provider the core's `save_provider` can write.
@@ -66,6 +66,11 @@ pub(super) struct ProviderForm {
     /// Model ids to leave out, separated by commas or lines.
     pub excluded: String,
     pub default_model: String,
+    /// The revision of the settings the form was opened from; a save quotes this one, not the
+    /// newest, so a change made since is refused instead of overwritten.
+    pub based_on: Option<SettingsRevision>,
+    /// Tells this form from the ones opened before and after it.
+    pub serial: u64,
 }
 
 impl Default for ProviderForm {
@@ -82,6 +87,8 @@ impl Default for ProviderForm {
             models: String::new(),
             excluded: String::new(),
             default_model: String::new(),
+            based_on: None,
+            serial: 0,
         }
     }
 }

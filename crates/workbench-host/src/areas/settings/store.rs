@@ -186,6 +186,8 @@ impl ConfigStore {
         let options = self.options();
         let context = config::LayeredSaveContext::new(&options);
         let path = self.path();
+        let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)));
+        let model_entries = |models: &[ModelInput]| model_entries(models, &existing);
         match input {
             ProviderInput::OpenaiCompatible {
                 name,
@@ -275,6 +277,25 @@ impl ConfigStore {
             )?,
         }
         Ok(())
+    }
+
+    /// The models the file itself (not its drop-ins) lists for provider `name`.
+    fn existing_models(&self, name: &str) -> Vec<ModelEntryConfig> {
+        let Ok(bytes) = self.read() else {
+            return Vec::new();
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Vec::new();
+        };
+        local_view(&text)
+            .ok()
+            .and_then(|config| {
+                config
+                    .providers
+                    .get(name)
+                    .map(|profile| profile.models.clone())
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn delete_provider(
@@ -467,14 +488,31 @@ impl Drop for Scratch {
     }
 }
 
-fn model_entries(models: &[ModelInput]) -> Vec<ModelEntryConfig> {
+/// The entries a client's model list stands for. A client names a model by id and
+/// whether it is enabled; whatever else the file already says about that id (preset,
+/// context window, prices, effort levels, edit tool, kind) is kept, so a save that
+/// carries only those two fields does not erase it.
+fn model_entries(models: &[ModelInput], existing: &[ModelEntryConfig]) -> Vec<ModelEntryConfig> {
     models
         .iter()
-        .map(|model| ModelEntryConfig {
-            enabled: model.enabled,
-            ..ModelEntryConfig::enabled_with_inferred_kind(model.id.clone())
+        .map(|model| {
+            let mut entry = existing
+                .iter()
+                .find(|entry| entry.id == model.id)
+                .cloned()
+                .unwrap_or_else(|| ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()));
+            entry.enabled = model.enabled;
+            entry
         })
         .collect()
+}
+
+fn input_name(input: &ProviderInput) -> &str {
+    match input {
+        ProviderInput::OpenaiCompatible { name, .. }
+        | ProviderInput::Codex { name, .. }
+        | ProviderInput::Subscription { name, .. } => name,
+    }
 }
 
 fn provider_view((name, profile): (&String, &ProviderProfileConfig)) -> ProviderView {

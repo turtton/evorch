@@ -81,6 +81,9 @@ pub struct SettingsFeature {
     /// The provider form while one is open, and the save it is waiting on.
     form: Option<ProviderForm>,
     provider_saving: Option<OperationId>,
+    /// The form the running provider save was made from: only that form is closed when it ends.
+    saving_form: Option<u64>,
+    form_serial: u64,
     web_tools_status: String,
 }
 
@@ -100,6 +103,8 @@ impl Default for SettingsFeature {
             snapshot_in_flight: false,
             form: None,
             provider_saving: None,
+            saving_form: None,
+            form_serial: 0,
             web_tools_status: String::new(),
         }
     }
@@ -241,7 +246,10 @@ impl SettingsFeature {
         if state.is_final() && self.provider_saving.as_ref() == Some(&id) {
             self.provider_saving = None;
             // A saved provider closes the form; a refused one keeps what was typed.
-            if matches!(state, OperationState::Ready) {
+            let saved_form = self.saving_form.take();
+            if matches!(state, OperationState::Ready)
+                && self.form.as_ref().map(|form| form.serial) == saved_form
+            {
                 self.form = None;
             }
         }
@@ -345,8 +353,10 @@ impl Feature for SettingsFeature {
         self.stale = true;
         // What was asked before the snapshot is answered, if at all, by a reply
         // that is no longer wanted; the operations are asked for again.
+        // A web tools change whose reply was lost is kept: the resolved reply for its tag
+        // follows the reconnect, and is shown.
         self.pending
-            .retain(|_, pending| matches!(pending, Pending::Command(_)));
+            .retain(|_, pending| matches!(pending, Pending::Command(_) | Pending::WebTools(_)));
         for (id, view) in &self.operations {
             if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
@@ -533,15 +543,60 @@ impl Feature for SettingsFeature {
                 }),
             );
         }
-        if let Some(provider) = edit {
-            self.form = ProviderForm::from_view(&provider);
+        // The form is opened from the revision this snapshot has; the save quotes that one.
+        // A form is not replaced while its save runs.
+        if let Some(provider) = edit.filter(|_| self.provider_saving.is_none()) {
+            self.form_serial += 1;
+            self.form = ProviderForm::from_view(&provider).map(|mut form| {
+                form.based_on = Some(snapshot.revision.clone());
+                form.serial = self.form_serial;
+                form
+            });
         }
         if self.form.is_none()
             && ui
                 .add_enabled(!busy, egui::Button::new("プロバイダーを追加"))
                 .clicked()
         {
-            self.form = Some(ProviderForm::default());
+            self.form_serial += 1;
+            self.form = Some(ProviderForm {
+                based_on: Some(snapshot.revision.clone()),
+                serial: self.form_serial,
+                ..ProviderForm::default()
+            });
+        }
+        let mut reread = false;
+        if let Some(form) = &self.form
+            && form
+                .based_on
+                .as_ref()
+                .is_some_and(|based| based != &snapshot.revision)
+        {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "設定ファイルがこのフォームを開いた後に更新されています。保存は拒否されます。",
+            );
+            reread = ui.button("最新の内容で開き直す").clicked();
+        }
+        if reread {
+            let current = self.form.take();
+            self.form_serial += 1;
+            self.form = current.and_then(|old| {
+                let mut form = match &old.original {
+                    Some(name) => snapshot
+                        .providers
+                        .iter()
+                        .find(|provider| &provider.name == name)
+                        .and_then(ProviderForm::from_view)?,
+                    None => ProviderForm {
+                        based_on: None,
+                        ..old
+                    },
+                };
+                form.based_on = Some(snapshot.revision.clone());
+                form.serial = self.form_serial;
+                Some(form)
+            });
         }
         let mut form_action = FormAction::None;
         if let Some(form) = &mut self.form {
@@ -556,12 +611,17 @@ impl Feature for SettingsFeature {
                         Ok(provider) => {
                             let operation_id = new_operation();
                             self.provider_saving = Some(operation_id.clone());
+                            self.saving_form = Some(form.serial);
+                            let expected_revision = form
+                                .based_on
+                                .clone()
+                                .unwrap_or_else(|| snapshot.revision.clone());
                             let original_name = form.original.clone();
                             self.send(
                                 ctx,
                                 SettingsCommand::SaveProvider(Box::new(SaveProvider {
                                     operation_id,
-                                    expected_revision: snapshot.revision.clone(),
+                                    expected_revision,
                                     original_name,
                                     provider,
                                 })),
