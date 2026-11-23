@@ -367,6 +367,27 @@ impl Database {
         crate::repo::host_input_receipt::delivered_history(&self.conn, run_id)
     }
 
+    /// [`Self::delivered_host_input_history`] of every run, grouped by run, without text.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn delivered_host_input_headers(
+        &self,
+    ) -> Result<Vec<crate::host_input::DeliveredHostInputHeader>, StorageError> {
+        crate::repo::host_input_receipt::delivered_headers_all(&self.conn)
+    }
+
+    /// The text of each delivered input in request order, `None` above 16 KiB.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn delivered_host_input_texts(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<(String, Option<String>)>, StorageError> {
+        crate::repo::host_input_receipt::delivered_texts(&self.conn, prompt_ids)
+    }
+
     /// Read one consistent, bounded snapshot of a root and its persisted descendants.
     /// Limits fail closed rather than silently omitting potential evidence.
     pub fn learning_source_contexts(
@@ -791,6 +812,49 @@ impl Database {
         visit: impl FnMut(crate::DeferredRow),
     ) -> Result<(), StorageError> {
         crate::for_each_event_for_runs_deferred(&self.conn, run_ids, after_id, through_id, visit)
+    }
+
+    /// See [`crate::for_each_committed_event_after`].
+    ///
+    /// # Errors
+    /// Returns an error if a query itself fails.
+    pub fn for_each_committed_event_after(
+        &self,
+        runs: &std::collections::HashSet<&str>,
+        after: i64,
+        through: i64,
+        visit: impl FnMut(crate::DeferredRow),
+    ) -> Result<Option<(i64, crate::EventStamp)>, StorageError> {
+        crate::for_each_committed_event_after(&self.conn, runs, after, through, visit)
+    }
+
+    /// See [`crate::for_each_committed_event_of_run`].
+    ///
+    /// # Errors
+    /// Returns an error if a query itself fails.
+    pub fn for_each_committed_event_of_run(
+        &self,
+        run: &str,
+        through: i64,
+        visit: impl FnMut(crate::DeferredRow),
+    ) -> Result<(), StorageError> {
+        crate::for_each_committed_event_of_run(&self.conn, run, through, visit)
+    }
+
+    /// See [`crate::max_committed_id`].
+    ///
+    /// # Errors
+    /// Returns an error if a query itself fails.
+    pub fn max_committed_id(&self) -> Result<Option<(i64, crate::EventStamp)>, StorageError> {
+        crate::max_committed_id(&self.conn)
+    }
+
+    /// See [`crate::event_stamps`].
+    ///
+    /// # Errors
+    /// Returns an error if a query itself fails.
+    pub fn event_stamps(&self, ids: &[i64]) -> Result<Vec<(i64, crate::EventStamp)>, StorageError> {
+        crate::event_stamps(&self.conn, ids)
     }
 
     /// Up to `limit` rows after `after_id`, passing over the rows of `exclude_session`,

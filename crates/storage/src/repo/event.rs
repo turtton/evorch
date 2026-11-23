@@ -12,6 +12,9 @@ use crate::entity::SecretGuard;
 use crate::{HardLimits, LimitKind, StorageError};
 
 mod accounting;
+pub mod committed;
+#[cfg(test)]
+mod committed_tests;
 #[cfg(test)]
 mod compaction_window_tests;
 pub mod deferred;

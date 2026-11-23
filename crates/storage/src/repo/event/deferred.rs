@@ -149,7 +149,7 @@ pub fn for_each_event_ordered_deferred(
 }
 
 /// The failure a row that cannot be read becomes, with what its columns still say.
-fn failed_row(
+pub(super) fn failed_row(
     row: &Row<'_>,
     run_id: Option<String>,
     reason: StoredEventFailureReason,
@@ -164,7 +164,7 @@ fn failed_row(
     })
 }
 
-const DEFERRED_COLUMNS: &str = "id, session_id, schema_version, monotonic_ns, wall_clock_ns, \
+pub(super) const DEFERRED_COLUMNS: &str = "id, session_id, schema_version, monotonic_ns, wall_clock_ns, \
      kind, payload, body_format, subkind, run_id";
 
 /// The events concerning `run_ids` with `after_id < id <= through_id`, in `id` order, as
@@ -192,6 +192,7 @@ pub fn for_each_event_for_runs_deferred(
         .into_iter()
         .filter(|candidate| candidate.id > after_id && candidate.id <= through_id)
         .collect();
+    let mut fetched = 0_u64;
     let mut statement = conn.prepare(&format!(
         "SELECT {DEFERRED_COLUMNS} FROM events WHERE id = ?1"
     ))?;
@@ -199,6 +200,7 @@ pub fn for_each_event_for_runs_deferred(
         let mut rows = statement.query([candidate.id])?;
         // The row may have been deleted since the ids were collected.
         let Some(row) = rows.next()? else { continue };
+        fetched += 1;
         let run_id: Option<String> = row.get(9).ok().flatten();
         match deferred_row(row) {
             Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
@@ -221,6 +223,7 @@ pub fn for_each_event_for_runs_deferred(
             }
         }
     }
+    super::committed::record_fetched(conn, fetched);
     Ok(())
 }
 
@@ -289,7 +292,7 @@ pub fn deferred_events_after(
     Ok(page)
 }
 
-fn deferred_row(row: &Row<'_>) -> Result<DeferredStoredEvent, StoredEventFailureReason> {
+pub(super) fn deferred_row(row: &Row<'_>) -> Result<DeferredStoredEvent, StoredEventFailureReason> {
     use StoredEventFailureReason::{Payload, Row as RowReason, Variant};
     let meta = row_meta(row).map_err(|error| RowReason(error.to_string()))?;
     let format = row

@@ -38,7 +38,7 @@ admin-audit-fault = []
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
-storage = { path = ".", features = ["unchecked-open", "plan-write-gate", "admin-audit-fault", "recovery-test-support"] }
+storage = { path = ".", features = ["unchecked-open", "plan-write-gate", "admin-audit-fault", "recovery-test-support", "test-support"] }
 # Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
 providers = { path = "../providers" }
 rusqlite = { workspace = true, features = ["hooks"] }

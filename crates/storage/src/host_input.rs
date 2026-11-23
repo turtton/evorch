@@ -85,6 +85,16 @@ pub struct DeliveredHostInput {
     pub first_in_run: bool,
 }
 
+/// A [`DeliveredHostInput`] without its text, for every run at once.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeliveredHostInputHeader {
+    pub prompt_id: String,
+    pub run_id: String,
+    pub accepted_at_ns: i64,
+    pub text_bytes: u64,
+    pub first_in_run: bool,
+}
+
 /// What the runtime recorded for a submission: the host's own words and the
 /// skills it attached to them.
 #[derive(Debug, Clone, PartialEq, Eq)]

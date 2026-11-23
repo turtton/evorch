@@ -122,6 +122,10 @@ pub use migrations::backfill::{
 };
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, RunContextMeta, StoredAgentMessage};
+pub use repo::event::committed::{
+    COMMITTED_SUBKINDS, EventStamp, event_stamps, for_each_committed_event_after,
+    for_each_committed_event_of_run, max_committed_id,
+};
 pub use repo::event::deferred::{
     BodyFailure, BodyFailureClass, BodyRef, DeferredPage, DeferredRow, DeferredStoredEvent,
     MAX_RESOLVE_REFS, StoredEventFailure, StoredEventFailureReason, deferred_events_after,

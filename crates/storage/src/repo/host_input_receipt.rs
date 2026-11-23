@@ -313,6 +313,58 @@ pub(crate) fn delivered_history(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// [`delivered_history`] of every run in one statement, grouped by run, without text.
+pub(crate) fn delivered_headers_all(
+    conn: &Connection,
+) -> Result<Vec<crate::host_input::DeliveredHostInputHeader>, StorageError> {
+    // `first_in_run` ranks every human receipt of the run, whatever its status, before the
+    // delivered and tombstone filters, as `delivered_history` does.
+    let mut statement = conn.prepare(
+        "SELECT prompt_id, run_id, accepted_at_ns, text_bytes, first_in_run FROM (
+             SELECT prompt_id, run_id, root_run_id, status, accepted_at_ns,
+                 octet_length(text) AS text_bytes,
+                 ROW_NUMBER() OVER (PARTITION BY run_id
+                     ORDER BY acceptance_seq, accepted_at_ns, prompt_id) = 1 AS first_in_run
+             FROM host_input_receipts WHERE json_extract(provenance_json,'$.kind')='user')
+         WHERE status = 'delivered'
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+         AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+         ORDER BY run_id, accepted_at_ns, prompt_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(crate::host_input::DeliveredHostInputHeader {
+            prompt_id: row.get(0)?,
+            run_id: row.get(1)?,
+            accepted_at_ns: row.get(2)?,
+            text_bytes: row.get(3)?,
+            first_in_run: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The text of each of `prompt_ids` in request order, `None` above 16 KiB as in
+/// [`delivered_history`]. IDs without a human receipt of a live run are skipped.
+pub(crate) fn delivered_texts(
+    conn: &Connection,
+    prompt_ids: &[String],
+) -> Result<Vec<(String, Option<String>)>, StorageError> {
+    let ids = serde_json::to_string(prompt_ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "SELECT receipt.prompt_id,
+             CASE WHEN octet_length(receipt.text) <= 16384 THEN receipt.text END
+         FROM json_each(?1) AS requested
+         JOIN host_input_receipts AS receipt ON receipt.prompt_id = requested.value
+         WHERE json_extract(receipt.provenance_json,'$.kind')='user'
+         AND receipt.run_id NOT IN (SELECT run_id FROM run_tombstones)
+         AND receipt.root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+         ORDER BY requested.key",
+    )?;
+    let rows = statement.query_map([ids], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Human delivery metadata; unlike for_run, this never selects the text column.
 pub(crate) fn headers_for_run(
     conn: &Connection,
