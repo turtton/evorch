@@ -20,7 +20,7 @@ pub struct HostBackend {
     pub projection: Arc<Projection>,
     runtime: runtime::AgentRuntime,
     status: Arc<workbench_host::ingress::HostStatusProbe>,
-    status_reader: Mutex<Option<storage::Database>>,
+    status_reader: Arc<StatusReader>,
     connections: Arc<workbench_host::connections::ConnectionHooks>,
     hello: ServerHello,
     redactor: Arc<secret_guard::SecretRedactor>,
@@ -31,6 +31,20 @@ pub struct HostBackend {
     web_clients: Mutex<Option<workbench_web::ActivityObserver>>,
     web_deliveries: workbench_web::RestartTasks,
     endpoint: endpoint::Endpoint,
+}
+
+#[derive(Default)]
+struct StatusReader {
+    db: Mutex<Option<storage::Database>>,
+    opening: AtomicBool,
+}
+impl StatusReader {
+    fn open(&self, runtime: &runtime::AgentRuntime) {
+        if let Some(Ok(db)) = runtime.open_storage_reader() {
+            *self.db.lock().unwrap() = Some(db);
+        }
+        self.opening.store(false, Ordering::SeqCst);
+    }
 }
 
 pub(crate) struct ConnectedClient<'a>(&'a HostBackend);
@@ -91,12 +105,14 @@ impl HostBackend {
                 host.status_probe(),
             )
         };
+        let status_reader = Arc::new(StatusReader::default());
+        status_reader.open(&runtime);
         Self {
             host,
             projection,
             runtime,
             status,
-            status_reader: Mutex::new(None),
+            status_reader,
             connections,
             redactor: Arc::new(secret_guard::SecretRedactor::from_env()),
             closing: AtomicBool::new(false),
@@ -219,18 +235,19 @@ impl HostBackend {
         status
     }
     // Neither the host mutex nor the shared reader: both wait behind a projection refresh.
-    fn pending_reindex(&self) -> Result<bool, storage::StorageError> {
-        let mut reader = self.status_reader.lock().unwrap();
-        if reader.is_none() {
-            *reader = self.runtime.open_storage_reader().and_then(Result::ok);
+    fn pending_reindex(&self) -> Option<bool> {
+        if !self.runtime.has_run_store() {
+            return Some(false);
         }
-        match reader.as_ref() {
-            Some(db) => db.has_pending_reindex(),
-            None => self
-                .runtime
-                .with_storage_reader(|db| db.has_pending_reindex())
-                .map(Option::unwrap_or_default),
+        if let Some(db) = self.status_reader.db.lock().unwrap().as_ref() {
+            return db.has_pending_reindex().ok();
         }
+        if !self.status_reader.opening.swap(true, Ordering::SeqCst) {
+            let reader = Arc::clone(&self.status_reader);
+            let runtime = self.runtime.clone();
+            std::thread::spawn(move || reader.open(&runtime));
+        }
+        None
     }
     pub fn instance_epoch(&self) -> u64 {
         self.projection.instance_epoch().0
@@ -553,6 +570,52 @@ mod tests {
         assert_eq!(hello.status, expected.status);
         assert_eq!(hello.instance_epoch, expected.instance_epoch);
         assert_eq!(hello.capabilities, expected.capabilities);
+        boot.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn hello_without_its_own_reader_retains_instead_of_using_the_shared_reader() {
+        let dir = test_socket_dir::SplitDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let mut boot = BootstrappedHost::open(BootstrapOptions {
+            config_dir: root.clone(),
+            project_root: root.clone(),
+            ownership_root: dir.sockets().to_path_buf(),
+        })
+        .await
+        .unwrap();
+        let backend = HostBackend::new(boot.host.clone(), "core-hello".into());
+        assert!(
+            !backend
+                .hello()
+                .status
+                .retention_reasons
+                .contains(&RetentionReason::PendingReindex)
+        );
+        *backend.status_reader.db.lock().unwrap() = None;
+        backend.status_reader.opening.store(true, Ordering::SeqCst);
+        let hello = backend
+            .runtime
+            .with_storage_reader(|_| {
+                Ok(std::thread::scope(|scope| {
+                    scope.spawn(|| backend.hello()).join().unwrap()
+                }))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            hello
+                .status
+                .retention_reasons
+                .contains(&RetentionReason::PendingReindex)
+        );
+        backend.status_reader.open(&backend.runtime);
+        assert!(
+            !backend
+                .hello()
+                .status
+                .retention_reasons
+                .contains(&RetentionReason::PendingReindex)
+        );
         boot.shutdown().await.unwrap();
     }
     #[test]
