@@ -638,7 +638,7 @@ Current migration status and 19a boundary:
 | 17e offline / inspect / benchmark boundary | Merged; regression check only |
 | 18a idle | Base is main-recorded; add only invocation retention/status differences |
 | 18b crash / reconnect | Partial; shared persistent crash budget and client integration are PR C |
-| 19a | Done by PR D (after A, B and C): a bare `evorch-gui` is a core client and never falls back to the embedded runtime; the embedded window remains only as the explicit `--legacy-embedded` (and the `--demo` session) until 20. The Nix GUI package ships a regular-file `evorch-core` wrapper beside `evorch-gui`, which the launcher requires. The management update operations listed above are kept |
+| 19a | Done by PR D (after A, B and C), which also adds the screens of the old window's update operations that the core client lacked (project registration/rename, allowed directories, provider add/edit, Agent web tools; per-conversation extra read directories remain read-only and are labelled so): a bare `evorch-gui` is a core client and never falls back to the embedded runtime; the embedded window remains only as the explicit `--legacy-embedded` (and the `--demo` session) until 20. The Nix GUI package ships a regular-file `evorch-core` wrapper beside `evorch-gui`, which the launcher requires. The management update operations listed above are kept |
 
 PR A combines the old public-restart work and the T1–T4 product/native checks
 into one PR. It includes the one-restart product-to-successor check; CEF and

@@ -471,3 +471,183 @@ fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() 
     assert!(screen.query_by_label("実行中…").is_none());
     screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
 }
+
+fn provider_save(action: &crate::core_client::features::FeatureAction) -> SaveProvider {
+    let SettingsCommand::SaveProvider(save) = settings_command(action).clone() else {
+        panic!("a provider save was expected");
+    };
+    *save
+}
+
+// Given: a screen that has read a provider named `local`
+// When: it is edited and saved, the core refuses it with a reason, and the save is made again
+// Then: the command quotes the snapshot revision and the profile being replaced, the
+//       refusal is shown with its reason and the form keeps what was typed, and the
+//       saved provider closes the form
+#[test]
+fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
+    use workbench_protocol::namespaces::settings::ProviderInput;
+    let mut screen = loaded('a');
+    screen.get_by_label("編集").click();
+    screen.run_steps(2);
+    screen.get_by_label("プロバイダーを保存").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1, "one click, one command");
+    let save = provider_save(&sent[0]);
+    assert_eq!(save.expected_revision, revision('a'));
+    assert_eq!(save.original_name.as_deref(), Some("local"));
+    let ProviderInput::OpenaiCompatible {
+        name,
+        base_url,
+        credential,
+        default_model,
+        ..
+    } = &save.provider
+    else {
+        panic!("an OpenAI-compatible provider was expected");
+    };
+    assert_eq!(
+        (name.as_str(), base_url.as_str(), default_model.as_str()),
+        ("local", "https://llm.example.invalid/v1", "m")
+    );
+    assert_eq!(credential, &CredentialRef::Env { var: "KEY".into() });
+
+    answer(
+        &mut screen,
+        sent[0].tag,
+        command_reply(view(
+            &save.operation_id,
+            SettingsOperationKind::SaveProvider,
+            OperationState::Pending,
+        )),
+    );
+    screen.get_by_label("実行中…");
+    let mut refused = view(
+        &save.operation_id,
+        SettingsOperationKind::SaveProvider,
+        OperationState::Failed {
+            code: ErrorCode::InvalidRequest,
+        },
+    );
+    refused.message = Some("base_url is not a URL".into());
+    screen.state_mut().feature.event(&completed(refused));
+    screen.run_steps(4);
+    assert!(
+        screen
+            .query_all_by_label_contains("base_url is not a URL")
+            .next()
+            .is_some(),
+        "the refusal says why"
+    );
+    // What was typed is still there, and the snapshot is read again; nothing is resent.
+    let again = asked(&mut screen);
+    assert!(again.iter().all(|a| matches!(
+        query_of(a),
+        Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+    )));
+    screen.get_by_label("プロバイダーを保存").click();
+    let sent = asked(&mut screen);
+    let save = provider_save(&sent[0]);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        command_reply(view(
+            &save.operation_id,
+            SettingsOperationKind::SaveProvider,
+            OperationState::Pending,
+        )),
+    );
+    screen.state_mut().feature.event(&completed(view(
+        &save.operation_id,
+        SettingsOperationKind::SaveProvider,
+        OperationState::Ready,
+    )));
+    screen.run_steps(4);
+    screen.get_by_label("保存しました。反映するにはモデルを再読込してください。");
+    assert!(screen.query_by_label("プロバイダーを保存").is_none());
+}
+
+// Given: a new provider form with nothing typed
+// When: it is saved
+// Then: nothing is sent and the missing field is named; an API key is never a field
+#[test]
+fn a_new_provider_form_names_what_is_missing_and_sends_nothing() {
+    let mut screen = loaded('a');
+    screen.get_by_label("プロバイダーを追加").click();
+    screen.run_steps(2);
+    assert!(
+        screen
+            .query_all_by_label_contains("API キーそのものはここに入力しません")
+            .next()
+            .is_some()
+    );
+    screen.get_by_label("プロバイダーを保存").click();
+    assert!(asked(&mut screen).is_empty());
+    screen.run_steps(2);
+    screen.get_by_label("プロバイダー名を入力してください。");
+}
+
+// Given: a screen with the Agent web tools control
+// When: web tools are enabled and the core accepts, disabled and the core refuses, and
+//       enabled again with a lost reply
+// Then: each click sends exactly one execution command with the chosen value; the
+//       outcomes are shown; a lost reply is shown as unknown and nothing is resent
+#[test]
+fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
+    use workbench_protocol::commands::SetAgentWebToolsEnabled;
+    use workbench_protocol::namespaces::ExecutionCommand;
+    let web = |action: &crate::core_client::features::FeatureAction| match command_of(action) {
+        Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
+            SetAgentWebToolsEnabled { enabled },
+        )) => *enabled,
+        other => panic!("a web tools command was expected: {other:?}"),
+    };
+    let mut screen = loaded('a');
+    screen.get_by_label("Web ツールを有効にする").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    assert!(web(&sent[0]));
+    answer(&mut screen, sent[0].tag, ok_command());
+    assert!(
+        screen
+            .query_all_by_label_contains("Agent の Web ツールを有効にしました")
+            .next()
+            .is_some()
+    );
+
+    screen.get_by_label("Web ツールを無効にする").click();
+    let sent = asked(&mut screen);
+    assert!(!web(&sent[0]));
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::new("permission denied"))),
+    );
+    assert!(
+        screen
+            .query_all_by_label_contains(
+                "Agent の Web ツールを無効にできませんでした: permission denied"
+            )
+            .next()
+            .is_some()
+    );
+
+    screen.get_by_label("Web ツールを有効にする").click();
+    let sent = asked(&mut screen);
+    assert!(web(&sent[0]));
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    assert!(
+        screen
+            .query_all_by_label_contains("結果不明です（再送していません）")
+            .next()
+            .is_some()
+    );
+    assert!(
+        asked(&mut screen).is_empty(),
+        "a lost reply is not sent again"
+    );
+}
