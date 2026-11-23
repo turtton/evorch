@@ -129,41 +129,46 @@ impl Bodies {
     ) -> Result<bool, WorkbenchError> {
         runtime
             .with_storage_reader(|db| {
-                let raw = committed_messages(db, runs, db.last_event_id()?)?;
-                let mut grouped = std::collections::BTreeMap::<String, Vec<&RawMessage>>::new();
-                for message in &raw {
-                    grouped
-                        .entry(message.run.clone())
-                        .or_default()
-                        .push(message);
-                }
+                let mut prefixes = std::collections::BTreeMap::<String, Digest>::new();
+                let mut fresh = Vec::new();
+                let mut record = |order: Order, message: RawMessage, chain: &Digest| {
+                    let count = published
+                        .runs
+                        .get(&message.run)
+                        .map_or(0, |(n, _)| *n as u64);
+                    if message.index + 1 == count {
+                        prefixes.insert(message.run.clone(), *chain);
+                    }
+                    // Before the first publication every message is history: counting
+                    // it is enough, resolving its thread or body would be discarded.
+                    if publish && message.index >= count {
+                        fresh.push((order, message));
+                    }
+                };
+                let folds = fold_runs(db, runs, db.last_event_id()?, &mut record)?;
                 // Delivered may arrive after messages following its acceptance time
                 // were published. Never silently renumber their append-only indices.
-                let rewritten = grouped.iter().any(|(run, messages)| {
-                    published.runs.get(run).is_some_and(|(count, digest)| {
-                        messages.len() < *count || super::revision(&&messages[..*count]) != *digest
+                let rewritten = folds.iter().any(|(run, fold)| {
+                    published.runs.get(*run).is_some_and(|(count, chain)| {
+                        fold.next < *count as u64
+                            || (*count > 0 && prefixes.get(*run) != Some(chain))
                     })
-                }) || published.runs.iter().any(|(run, (count, _))| {
-                    runs.contains(run) && *count > 0 && !grouped.contains_key(run)
                 });
-                // Before the first publication every message is history: counting
-                // it is enough, resolving its thread or body would be discarded.
-                if publish && !rewritten {
-                    for message in &raw {
-                        let count = published.runs.get(&message.run).map_or(0, |(n, _)| *n);
-                        if message.index >= count as u64
-                            && let Some(thread) = db.thread_of_run(&message.run)?
+                if !rewritten {
+                    fresh.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (_, message) in fresh {
+                        if let Some(thread) = db.thread_of_run(&message.run)?
                             && db.thread(&thread.thread_id)?.is_some()
                             && let Ok(thread) = ThreadId::new(thread.thread_id)
-                            && let Some(message) = self.message(&thread, message.clone())
+                            && let Some(message) = self.message(&thread, message)
                         {
                             visit(message);
                         }
                     }
                 }
-                published.runs = grouped
+                published.runs = folds
                     .into_iter()
-                    .map(|(run, rows)| (run, (rows.len(), super::revision(&rows))))
+                    .map(|(run, fold)| (run.to_owned(), (fold.next as usize, fold.chain)))
                     .collect();
                 Ok(rewritten)
             })
@@ -351,31 +356,137 @@ struct InputBody {
     bytes: u64,
 }
 type PendingParts = (usize, usize, Vec<(String, bool)>);
-#[derive(Default)]
-struct Scanner {
-    positions: std::collections::BTreeMap<String, u64>,
-    parts: std::collections::BTreeMap<(String, String), PendingParts>,
-    initial_receipts: std::collections::BTreeSet<String>,
-    first_prompt: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
-    last_assistant: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
+type Key = Vec<([u8; 32], u64)>;
+type Digest = [u8; 32];
+
+/// Where a message sits among the messages of every run: the committed row that emitted
+/// it, or the one its input was merged ahead of (`i64::MAX` for trailing inputs).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Order(i64, bool, i64, String);
+
+fn wall_clock_ns(at: std::time::SystemTime) -> i64 {
+    match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+    }
 }
-impl Scanner {
+
+fn extend(chain: &Digest, raw: &RawMessage) -> Digest {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(chain);
+    hash.update(serde_json::to_vec(raw).expect("serializable message"));
+    hash.finalize().into()
+}
+
+fn by_acceptance(
+    mut inputs: Vec<storage::host_input::DeliveredHostInput>,
+) -> std::collections::VecDeque<storage::host_input::DeliveredHostInput> {
+    inputs.sort_by(|a, b| (a.accepted_at_ns, &a.prompt_id).cmp(&(b.accepted_at_ns, &b.prompt_id)));
+    inputs.into()
+}
+
+/// The transcript of one run, folded from its committed rows in id order and its
+/// delivered inputs. No other run can change it.
+#[derive(Clone)]
+struct RunFold {
+    run: String,
+    next: u64,
+    parts: std::collections::BTreeMap<String, PendingParts>,
+    initial_receipt: bool,
+    first_prompt: Option<Key>,
+    last_assistant: Option<Key>,
+    merge_max: i64,
+    last_id: i64,
+    consumed: std::collections::BTreeMap<String, (i64, bool)>,
+    chain: Digest,
+}
+impl RunFold {
+    fn new(run: &str) -> Self {
+        Self {
+            run: run.to_owned(),
+            next: 0,
+            parts: Default::default(),
+            initial_receipt: false,
+            first_prompt: None,
+            last_assistant: None,
+            merge_max: i64::MIN,
+            last_id: 0,
+            consumed: Default::default(),
+            chain: [0; 32],
+        }
+    }
+    /// An input goes ahead of this run's first committed row stamped at or after its
+    /// acceptance, ties broken by prompt id.
+    fn row(
+        &mut self,
+        row: &storage::DeferredStoredEvent,
+        inputs: &mut std::collections::VecDeque<storage::host_input::DeliveredHostInput>,
+        emit: &mut impl FnMut(Order, RawMessage, &Digest),
+    ) {
+        let at = wall_clock_ns(row.event.meta.wall_clock);
+        while inputs.front().is_some_and(|r| r.accepted_at_ns <= at) {
+            let input = inputs.pop_front().unwrap();
+            self.consumed.insert(
+                input.prompt_id.clone(),
+                (input.accepted_at_ns, input.first_in_run),
+            );
+            let order = Order(row.id, false, input.accepted_at_ns, input.prompt_id.clone());
+            if let Some(message) = self.input(input) {
+                self.push(order, message, emit);
+            }
+        }
+        if let Some(message) = self.observe(
+            &row.event.kind,
+            row.format == storage::StoredFormat::Tokenized,
+        ) {
+            self.push(Order(row.id, true, 0, String::new()), message, emit);
+        }
+        self.merge_max = self.merge_max.max(at);
+        self.last_id = row.id;
+    }
+    /// A receipt is authoritative even if its notification has not been stored.
+    fn trailing(
+        &mut self,
+        inputs: std::collections::VecDeque<storage::host_input::DeliveredHostInput>,
+        emit: &mut impl FnMut(Order, RawMessage, &Digest),
+    ) {
+        for input in inputs {
+            let order = Order(
+                i64::MAX,
+                false,
+                input.accepted_at_ns,
+                input.prompt_id.clone(),
+            );
+            if let Some(message) = self.input(input) {
+                self.push(order, message, emit);
+            }
+        }
+    }
+    fn push(
+        &mut self,
+        order: Order,
+        message: RawMessage,
+        emit: &mut impl FnMut(Order, RawMessage, &Digest),
+    ) {
+        self.chain = extend(&self.chain, &message);
+        emit(order, message, &self.chain);
+    }
     fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
-        let (run, role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
-            run_id,
+        let (role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
             response_id,
             text,
             index,
             total,
+            ..
         }) = kind
         {
-            let key = (run_id.clone(), response_id.clone());
             if *index == 0 {
-                self.parts.insert(key.clone(), (0, *total, vec![]));
+                self.parts.insert(response_id.clone(), (0, *total, vec![]));
             }
-            let pending = self.parts.get_mut(&key)?;
+            let pending = self.parts.get_mut(response_id)?;
             if pending.0 != *index || pending.1 != *total || *total == 0 || *total > 4096 {
-                self.parts.remove(&key);
+                self.parts.remove(response_id);
                 return None;
             }
             pending.0 += 1;
@@ -383,18 +494,17 @@ impl Scanner {
             if pending.0 != *total {
                 return None;
             }
-            let parts = self.parts.remove(&key)?.2;
-            (run_id.as_str(), MessageRole::Assistant, parts)
+            let parts = self.parts.remove(response_id)?.2;
+            (MessageRole::Assistant, parts)
         } else {
-            let (run, role, body) = committed_text(kind)?;
-            (run, role, vec![(body.to_owned(), tokenized)])
+            let (_, role, body) = committed_text(kind)?;
+            (role, vec![(body.to_owned(), tokenized)])
         };
         let prompt = matches!(
             kind,
             EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
         );
         self.message(
-            run,
             role,
             parts,
             prompt,
@@ -406,21 +516,14 @@ impl Scanner {
     }
     fn input(&mut self, input: storage::host_input::DeliveredHostInput) -> Option<RawMessage> {
         if input.first_in_run {
-            self.initial_receipts.insert(input.run_id.clone());
+            self.initial_receipt = true;
         }
         if let Some(value) = input.text {
-            return self.message(
-                &input.run_id,
-                MessageRole::User,
-                vec![(value, false)],
-                false,
-                false,
-            );
+            return self.message(MessageRole::User, vec![(value, false)], false, false);
         }
-        let index = self.positions.entry(input.run_id.clone()).or_default();
         let raw = RawMessage {
-            run: input.run_id,
-            index: *index,
+            run: self.run.clone(),
+            index: self.next,
             role: MessageRole::User,
             parts: vec![],
             input: Some(InputBody {
@@ -428,12 +531,11 @@ impl Scanner {
                 bytes: input.text_bytes,
             }),
         };
-        *index += 1;
+        self.next += 1;
         Some(raw)
     }
     fn message(
         &mut self,
-        run: &str,
         role: MessageRole,
         parts: Vec<(String, bool)>,
         prompt: bool,
@@ -449,7 +551,7 @@ impl Scanner {
                 normalized.push((part, deferred));
             }
         }
-        let key: Vec<_> = normalized
+        let key: Key = normalized
             .iter()
             .map(|(part, deferred)| {
                 if *deferred {
@@ -461,45 +563,111 @@ impl Scanner {
             })
             .collect();
         if (role == MessageRole::Assistant && key.iter().all(|(_, n)| *n == 0))
-            || (finish && self.last_assistant.get(run) == Some(&key))
+            || (finish && self.last_assistant.as_ref() == Some(&key))
         {
             return None;
         }
         if prompt {
-            if self.first_prompt.get(run) == Some(&key) {
+            if self.first_prompt.as_ref() == Some(&key) {
                 return None;
             }
-            if !self.first_prompt.contains_key(run) {
-                self.first_prompt.insert(run.to_owned(), key.clone());
+            if self.first_prompt.is_none() {
+                self.first_prompt = Some(key.clone());
                 // The first accepted receipt ID of this run, replayed before its
                 // first task, establishes identity without comparing bodies.
                 // Later changed instructions are not that initial submission.
-                if self.initial_receipts.contains(run) {
+                if self.initial_receipt {
                     return None;
                 }
             }
         }
         if role == MessageRole::Assistant {
-            self.last_assistant.insert(run.to_owned(), key);
+            self.last_assistant = Some(key);
         }
-        let parts = normalized;
-        let index = self.positions.entry(run.to_owned()).or_default();
         let raw = RawMessage {
-            run: run.to_owned(),
-            index: *index,
+            run: self.run.clone(),
+            index: self.next,
             role,
-            parts,
+            parts: normalized,
             input: None,
         };
-        *index += 1;
+        self.next += 1;
         Some(raw)
     }
 }
 
-/// Only counts and a prefix digest are retained, not the historical bodies.
+fn unreadable() -> storage::StorageError {
+    storage::StorageError::Io("unreadable committed history".into())
+}
+
+/// Folds `run` through `through` and returns the inputs no committed row has taken yet.
+fn fold_run(
+    db: &storage::Database,
+    run: &str,
+    through: i64,
+    inputs: Vec<storage::host_input::DeliveredHostInput>,
+    mut emit: impl FnMut(Order, RawMessage, &Digest),
+) -> Result<
+    (
+        RunFold,
+        std::collections::VecDeque<storage::host_input::DeliveredHostInput>,
+    ),
+    storage::StorageError,
+> {
+    let mut fold = RunFold::new(run);
+    let mut inputs = by_acceptance(inputs);
+    let mut failure = None;
+    db.for_each_committed_event_of_run(run, through, |row| match row {
+        storage::DeferredRow::Failed(_) => failure = Some(unreadable()),
+        storage::DeferredRow::Event(row) => fold.row(&row, &mut inputs, &mut emit),
+    })?;
+    match failure {
+        Some(e) => Err(e),
+        None => Ok((fold, inputs)),
+    }
+}
+
+fn fold_runs<'a>(
+    db: &storage::Database,
+    runs: &'a [String],
+    through: i64,
+    mut emit: impl FnMut(Order, RawMessage, &Digest),
+) -> Result<std::collections::BTreeMap<&'a str, RunFold>, storage::StorageError> {
+    let mut folds = std::collections::BTreeMap::new();
+    for run in runs {
+        let inputs = by_acceptance(db.delivered_host_input_history(run)?);
+        folds.insert(run.as_str(), (RunFold::new(run), inputs));
+    }
+    let listed = folds.keys().copied().collect();
+    let mut failure = None;
+    db.for_each_committed_event_after(&listed, 0, through, |row| match row {
+        storage::DeferredRow::Failed(_) => failure = Some(unreadable()),
+        storage::DeferredRow::Event(row) => {
+            let run = row
+                .run_id
+                .as_deref()
+                .or_else(|| row.event.kind.primary_run_id());
+            if let Some((fold, inputs)) = run.and_then(|run| folds.get_mut(run)) {
+                fold.row(&row, inputs, &mut emit);
+            }
+        }
+    })?;
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(folds
+        .into_iter()
+        .map(|(run, (mut fold, inputs))| {
+            fold.trailing(inputs, &mut emit);
+            (run, fold)
+        })
+        .collect())
+}
+
+/// Only counts and a chained prefix digest are retained, not the historical bodies.
 #[derive(Default)]
 pub(crate) struct CommitScanner {
-    runs: std::collections::BTreeMap<String, (usize, Revision)>,
+    runs: std::collections::BTreeMap<String, (usize, Digest)>,
 }
 
 fn committed_messages(
@@ -507,54 +675,17 @@ fn committed_messages(
     runs: &[String],
     high_water: i64,
 ) -> Result<Vec<RawMessage>, storage::StorageError> {
-    let mut inputs = Vec::new();
+    let mut ordered = Vec::new();
+    let mut emit = |order, message, _: &Digest| ordered.push((order, message));
     for run in runs {
-        inputs.extend(db.delivered_host_input_history(run)?);
+        let inputs = db.delivered_host_input_history(run)?;
+        let (mut fold, rest) = fold_run(db, run, high_water, inputs, &mut emit)?;
+        fold.trailing(rest, &mut emit);
     }
-    inputs.sort_by(|a, b| (a.accepted_at_ns, &a.prompt_id).cmp(&(b.accepted_at_ns, &b.prompt_id)));
-    let mut inputs = inputs.into_iter().peekable();
-    let mut raw = Vec::new();
-    let mut scanner = Scanner::default();
-    let mut failure = None;
-    db.for_each_event_for_runs_deferred(runs, 0, high_water, |row| match row {
-        storage::DeferredRow::Failed(_) => {
-            failure = Some(storage::StorageError::Io(
-                "unreadable committed history".into(),
-            ))
-        }
-        storage::DeferredRow::Event(row) => {
-            let at = match row
-                .event
-                .meta
-                .wall_clock
-                .duration_since(std::time::UNIX_EPOCH)
-            {
-                Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
-                Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
-            };
-            // Match the GUI's durable replay: accepted user inputs precede the
-            // first event at or after their acceptance timestamp (ID breaks ties).
-            while inputs.peek().is_some_and(|r| r.accepted_at_ns <= at) {
-                if let Some(message) = scanner.input(inputs.next().unwrap()) {
-                    raw.push(message);
-                }
-            }
-            if let Some(message) = scanner.observe(
-                &row.event.kind,
-                row.format == storage::StoredFormat::Tokenized,
-            ) {
-                raw.push(message);
-            }
-        }
-    })?;
-    if let Some(e) = failure {
-        return Err(e);
-    }
-    // A receipt is authoritative even if its notification has not been stored.
-    for input in inputs {
-        if let Some(message) = scanner.input(input) {
-            raw.push(message);
-        }
-    }
-    Ok(raw)
+    // Each run's messages are already in order: this is their k-way merge.
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(ordered.into_iter().map(|(_, message)| message).collect())
 }
+
+#[cfg(test)]
+mod tests;

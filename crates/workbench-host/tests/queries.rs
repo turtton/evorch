@@ -1250,6 +1250,39 @@ fn late_delivery_resynchronizes_instead_of_silently_reindexing_history() {
     assert_eq!(history[1].index, Sequence(1));
 }
 #[test]
+fn skewed_cross_run_clocks_keep_history_and_stream_indices_equal() {
+    let f = current_thread_fixture();
+    f.thread("thread-2", "run-2", "Second");
+    let mut sub = f.subscribe();
+    let answer = |run: &str, text: &str| MessageEvent::MessageCompleted {
+        run_id: run.into(),
+        text: text.into(),
+    };
+    // run-2's clock runs ahead: it must not pull run-1's input before run-1's own rows.
+    saved_event(&f, 200, answer("run-2", "elsewhere"));
+    saved_event(&f, 50, answer("run-1", "before"));
+    input(
+        &f,
+        "followup",
+        "followup",
+        100,
+        storage::HostInputStatus::Delivered,
+    );
+    saved_event(&f, 150, answer("run-1", "after"));
+    f.host.projection().refresh().unwrap();
+    let mut streamed: Vec<_> = (0..4).map(|_| next_message(&f, &mut sub)).collect();
+    streamed.retain(|m| m.run.as_str() == "run-1");
+    let texts: Vec<_> = streamed
+        .iter()
+        .map(|m| match &m.content {
+            MessageContent::Inline { text } => text.as_str(),
+            other => panic!("unexpected content {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts, ["before", "followup", "after"]);
+    assert_eq!(messages(&f), streamed);
+}
+#[test]
 fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
     for direction in [HistoryDirection::Forward, HistoryDirection::Backward] {
         let history = |page| {

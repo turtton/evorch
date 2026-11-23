@@ -69,15 +69,30 @@ or runtime execution/prompt changes are introduced.
 
 ## Committed transcript sources
 
-ReadCommittedHistory and MessageCommitted share one canonical deferred scanner.
-It emits completed/assembled assistant messages, nonempty finish results (unless
+ReadCommittedHistory and MessageCommitted share one canonical per-run fold.
+A run's transcript is built from that run's committed rows alone (completed
+messages, finish results, message parts, task prompts and tool completions, in
+event ID order) and its own Delivered receipts. It emits completed/assembled assistant messages, nonempty finish results (unless
 identical to that run's last assistant message), task prompts, delivered human
 input receipts and tool outputs. Initial instructions are linked to the earliest
 accepted human receipt ID in each run by acceptance_seq (all statuses): only a
 Delivered initial receipt preceding that run's first task prompt suppresses the
 prompt. Repeated descriptors of that initial task are deduplicated; changed
 later instructions and distinct submissions of identical text remain visible.
-Human inputs merge by acceptance timestamp and ID ahead of the corresponding stored event, matching GUI history replay.
+Human inputs merge per run: a Delivered input of run R goes ahead of R's first
+committed row whose wall clock is at or after its acceptance timestamp, inputs
+with equal timestamps in prompt ID order; inputs no committed row has reached yet
+follow R's last message. Rows of other runs and non-committed rows of R (deltas,
+progress, diagnostics) never move an input, so ReadCommittedHistory of one thread
+or run and the stream over every run assign the same indices by construction.
+When wall clocks do not decrease in event ID order this equals the earlier global
+merge and GUI history replay; under cross-run clock skew indices can differ from
+what an older core published, which is harmless across a restart because the
+epoch changes and clients resync. A page spanning several runs orders messages by
+the committed row that emitted them, or that their input was merged ahead of;
+trailing inputs come last by acceptance timestamp and prompt ID. Only an
+unreadable committed row of a listed run fails the fold, not an unreadable delta
+or other non-committed row.
 Accepted, withdrawn, dropped and unknown receipts are not themselves committed
 messages; a Delivered receipt is sufficient without persisting its notification.
 The storage descriptor API leaves texts over 16 KiB in SQLite for ReadBody,
@@ -92,11 +107,12 @@ both history pages and subscription refresh, with an explicit ReadBody positive
 control.
 
 A late delivery or retention can change an already published message prefix.
-The host verifies each run's previous prefix digest, advances the stream epoch
-and requests resync rather than silently renumbering indices. Normal append-only
-messages retain their indices. To detect these insertions, the current projection
-rescans deferred event descriptors and committed receipt headers on refresh; it
-retains only per-run counts and prefix digests, not historical full bodies.
+The host verifies each run's previous prefix digest (a SHA-256 chain over the
+published messages), advances the stream epoch and requests resync rather than
+silently renumbering indices. Normal append-only messages retain their indices. To
+detect these insertions, the current projection refolds the committed rows and
+receipt headers of every run on refresh; it retains only per-run counts and
+prefix digests, not historical full bodies.
 
 The protocol currently lacks structured transcript variants for compaction
 cards, tool call/status cards, artifact cards, reasoning and peer-addressed agent
