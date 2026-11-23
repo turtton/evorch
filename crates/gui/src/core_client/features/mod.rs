@@ -500,6 +500,7 @@ struct Pins {
     /// The latest first: what the user was taken to (an artifact's preview, the artifacts of
     /// the conversation) is where they look, not somewhere far down a long column.
     pinned: Vec<FeatureId>,
+    focus: Vec<FeatureId>,
 }
 
 /// The registration of every feature. A PR implementing a feature changes the
@@ -628,6 +629,53 @@ impl Features {
         self.pins.pinned.retain(|f| *f != feature);
         self.pins.pinned.insert(0, feature);
         self.pins.pinned.truncate(2);
+        self.pins.focus.retain(|f| *f != feature);
+        self.pins.focus.push(feature);
+    }
+
+    /// The tabs to bring to the front, oldest request first, so the latest ends in front.
+    /// Taken once: the dock applies them before it draws, so the tab renders in that pass.
+    pub fn take_focus(&mut self) -> Vec<FeatureId> {
+        std::mem::take(&mut self.pins.focus)
+    }
+
+    pub fn focus_pending(&self) -> bool {
+        !self.pins.focus.is_empty()
+    }
+
+    pub fn titles(&self) -> Vec<(FeatureId, &'static str)> {
+        self.features.iter().map(|f| (f.id(), f.title())).collect()
+    }
+
+    pub fn placeholders(&self) -> Vec<FeatureId> {
+        self.features
+            .iter()
+            .filter(|f| f.availability() == Availability::Placeholder)
+            .map(|f| f.id())
+            .collect()
+    }
+
+    /// Start one composition pass of the docked desktop (see [`DockPass`]). While the window
+    /// is minimized the pass draws and maintains nothing: minimized maintenance belongs to
+    /// `App::logic` alone, as for [`Features::render`].
+    pub fn begin_dock_pass<'a>(
+        &'a mut self,
+        minimized: bool,
+        view: FeatureView<'a>,
+    ) -> DockPass<'a> {
+        let selection_changed = !minimized && self.observe_selection(view.selection);
+        DockPass {
+            features: &mut self.features,
+            data: &mut self.data,
+            expanded: &mut self.expanded,
+            view,
+            selection_changed,
+            frame: FeatureFrame::default(),
+            drawn: Vec::new(),
+            fronted: Vec::new(),
+            selector_drawn: false,
+            minimized,
+        }
     }
 
     /// Whether the section of `feature` is shown for this connection.
@@ -926,6 +974,135 @@ fn render_selector(
     SelectorOutcome {
         replaced: false,
         frame,
+    }
+}
+
+/// One composition pass of the docked desktop. Every feature is maintained exactly once per
+/// pass: a feature whose tab the dock draws is maintained as visible right before it renders,
+/// and every other one (an inactive or closed tab, an unavailable or placeholder feature) is
+/// maintained as hidden by [`DockPass::finish`]. Visibility is what the dock really drew in
+/// this pass, never a guess made before it, so a stream runs only while its tab is on screen.
+pub struct DockPass<'a> {
+    features: &'a mut [Box<dyn Feature>],
+    data: &'a mut DataInbox,
+    expanded: &'a mut std::collections::HashMap<FeatureId, bool>,
+    view: FeatureView<'a>,
+    selection_changed: bool,
+    frame: FeatureFrame,
+    drawn: Vec<FeatureId>,
+    fronted: Vec<FeatureId>,
+    selector_drawn: bool,
+    minimized: bool,
+}
+
+impl<'a> DockPass<'a> {
+    pub fn view(&self) -> FeatureView<'a> {
+        self.view
+    }
+
+    pub fn navigate(&mut self, navigation: Navigation) {
+        self.frame.navigation.push(navigation);
+    }
+
+    pub fn is_available(&self, feature: FeatureId) -> bool {
+        self.features.iter().any(|f| {
+            f.id() == feature
+                && is_available(f.as_ref(), self.view.connected, self.view.capabilities)
+        })
+    }
+
+    /// Draw the body of `feature` in its tab. Returns `false` when nothing was drawn: the
+    /// feature is unavailable, the window is minimized, or it was already drawn this pass.
+    pub fn render_tab(&mut self, feature: FeatureId, ui: &mut egui::Ui) -> bool {
+        if !self.minimized && !self.fronted.contains(&feature) {
+            self.fronted.push(feature);
+        }
+        if self.minimized || self.drawn.contains(&feature) || !self.is_available(feature) {
+            return false;
+        }
+        let Some(entry) = self.features.iter_mut().find(|f| f.id() == feature) else {
+            return false;
+        };
+        self.drawn.push(feature);
+        self.expanded.insert(feature, true);
+        let visibility = Visibility {
+            available: true,
+            expanded: true,
+            minimized: false,
+        };
+        let mut ctx = FeatureContext {
+            feature,
+            view: self.view,
+            frame: &mut self.frame,
+            data: self.data,
+        };
+        maintain_feature(entry.as_mut(), &mut ctx, self.selection_changed, visibility);
+        layout::in_tab(ui, |ui| entry.render(ui, &mut ctx));
+        true
+    }
+
+    pub fn render_selector(&mut self, ui: &mut egui::Ui) -> bool {
+        self.selector_drawn = true;
+        let outcome = render_selector(self.features, self.data, ui, self.view);
+        self.frame.absorb(outcome.frame);
+        outcome.replaced
+    }
+
+    /// End the pass and hand back what the features asked for. The selector is asked even
+    /// when its tab is hidden, on a child that draws nothing, so the requests the workspace
+    /// queued still leave.
+    pub fn finish(mut self, ui: &mut egui::Ui) -> FeatureFrame {
+        if !self.selector_drawn {
+            let mut hidden = ui.new_child(egui::UiBuilder::new().invisible());
+            self.render_selector(&mut hidden);
+        }
+        if self.minimized {
+            return self.frame;
+        }
+        for feature in self.features.iter_mut() {
+            let id = feature.id();
+            if self.drawn.contains(&id) {
+                continue;
+            }
+            // A tab in front stays expanded while its area is unavailable, as an open
+            // section did, so it is drawn again as soon as the area returns.
+            let expanded = self.fronted.contains(&id);
+            self.expanded.insert(id, expanded);
+            let visibility = Visibility {
+                available: is_available(
+                    feature.as_ref(),
+                    self.view.connected,
+                    self.view.capabilities,
+                ),
+                expanded,
+                minimized: false,
+            };
+            let mut ctx = FeatureContext {
+                feature: id,
+                view: self.view,
+                frame: &mut self.frame,
+                data: self.data,
+            };
+            maintain_feature(
+                feature.as_mut(),
+                &mut ctx,
+                self.selection_changed,
+                visibility,
+            );
+        }
+        self.frame
+    }
+}
+
+impl FeatureFrame {
+    fn absorb(&mut self, other: FeatureFrame) {
+        self.actions.extend(other.actions);
+        self.navigation.extend(other.navigation);
+        self.data.extend(other.data);
+        self.previews.extend(other.previews);
+        if !other.observations.is_empty() {
+            self.observations = other.observations;
+        }
     }
 }
 

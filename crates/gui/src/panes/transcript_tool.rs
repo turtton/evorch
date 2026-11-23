@@ -1,4 +1,5 @@
 use crate::body::BodyText;
+use crate::panes::transcript_widgets::{code_block as code, diff_block as diff_code};
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use crate::model::transcript::{
 };
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
-use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette};
+use crate::theme::tokens::{FONT_BODY, FONT_SMALL, ROW_DENSE, palette};
 use crate::theme::widgets::{ghost_icon_button, icon_button, soft_frame};
 
 mod header;
@@ -652,47 +653,4 @@ fn header_job(
 
 fn pretty_json(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|error| error.to_string())
-}
-
-fn code(ui: &mut Ui, content: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(palette().SURFACE_RAISED)
-        .corner_radius(R_SM)
-        .inner_margin(SP_2)
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(content).monospace().color(color)).wrap());
-        });
-}
-
-fn diff_code(ui: &mut Ui, content: &str) {
-    let mut job = LayoutJob::default();
-    for line in content.split_inclusive('\n') {
-        let color = if line.starts_with('+') && !line.starts_with("+++ ") {
-            palette().SUCCESS
-        } else if line.starts_with('-') && !line.starts_with("--- ") {
-            palette().ERROR_FG
-        } else if line.starts_with("@@") {
-            palette().INFO
-        } else {
-            palette().TEXT
-        };
-        job.append(
-            line,
-            0.0,
-            TextFormat {
-                font_id: FontId::monospace(FONT_SMALL),
-                color,
-                ..Default::default()
-            },
-        );
-    }
-    egui::Frame::new()
-        .fill(palette().SURFACE_RAISED)
-        .corner_radius(R_SM)
-        .inner_margin(SP_2)
-        .show(ui, |ui| {
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
-            });
-        });
 }

@@ -1,10 +1,11 @@
 use egui::{RichText, Ui};
 
 use crate::model::pending_approvals::PendingApproval;
-use crate::theme::tokens::{FONT_MONO, FONT_SMALL, SP_2, palette};
+use crate::theme::tokens::{FONT_SMALL, palette};
 use crate::theme::widgets::copy_id_button;
 
 use super::requests::{RequestAction, request_card};
+use crate::panes::transcript_widgets::full_input;
 
 /// Always render the complete input. Commands (or a file access's paths) get a
 /// literal, selectable code block (including newlines), with all other
@@ -80,18 +81,4 @@ fn primary_key(input: &serde_json::Value) -> &'static str {
     } else {
         "command"
     }
-}
-
-fn full_input(ui: &mut Ui, text: &str) {
-    egui::Frame::new()
-        .fill(palette().CANVAS)
-        .inner_margin(SP_2)
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(text).monospace().size(FONT_MONO))
-                    .wrap()
-                    .selectable(true),
-            );
-        });
-    ui.add_space(SP_2);
 }

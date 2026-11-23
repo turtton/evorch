@@ -96,10 +96,10 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
     .await;
     let mut window = open_window(&env, egui::vec2(1100.0, 1500.0), None::<NoRenderer>);
 
-    // From the conversation: its "成果物" button opens the artifacts section and pins it at
-    // the top of the column, where the thread's artifact is listed.
-    window.until(|w| shows_exact(w, "成果物")).await;
-    click_exact(&mut window, "成果物");
+    // From the conversation: its "Artifacts" header button brings the artifacts tab
+    // forward, where the thread's artifact is listed.
+    window.until(|w| shows_exact(w, "Artifacts")).await;
+    click_exact(&mut window, "Artifacts");
     window.until(|w| shows(w, "page.html  (")).await;
     click(&mut window, "page.html  (");
     // The choice is taken within the frame of the click: the artifact is opened under its

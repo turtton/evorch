@@ -6,7 +6,7 @@ use egui::{RichText, Ui};
 use event_bus::UserQuestion;
 
 use crate::model::pending_approvals::PendingApproval;
-use crate::theme::tokens::{R_SM, SP_2, STATUS_STROKE, attention_color, palette};
+use crate::theme::tokens::palette;
 
 const MAX_ANSWER_BYTES: usize = 4096;
 
@@ -100,17 +100,4 @@ impl ConversationRequests<'_> {
     }
 }
 
-pub(super) fn request_card(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
-    egui::Frame::new()
-        .fill(palette().SURFACE)
-        .stroke(egui::Stroke::new(STATUS_STROKE, attention_color()))
-        .corner_radius(R_SM)
-        .inner_margin(SP_2)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.add(egui::Label::new(RichText::new(title).strong().color(attention_color())).wrap());
-            ui.add_space(SP_2);
-            body(ui);
-        });
-    ui.add_space(SP_2);
-}
+pub(super) use crate::panes::transcript_widgets::request_card;

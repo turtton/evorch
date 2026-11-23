@@ -1,6 +1,7 @@
 //! Composer strip rendering and action reporting without dispatch.
 
 use crate::model::composer::{CompletionItem, CompletionKind, ComposerModel};
+use crate::panes::transcript_widgets::ime_composing;
 use crate::theme::icons;
 use crate::theme::tokens::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
@@ -259,24 +260,6 @@ fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egu
     };
     ui.add(egui::Button::new(egui::RichText::new(label).color(color)).fill(fill))
         .on_hover_text(hover)
-}
-
-/// Tracks IME preedit across frames so Enter can confirm a conversion without sending.
-fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
-    let mut composing = ui.data(|data| data.get_temp::<bool>(id).unwrap_or_default());
-    ui.input(|input| {
-        for event in &input.events {
-            if let egui::Event::Ime(event) = event {
-                #[allow(deprecated)] // Accept legacy backend Enabled/Disabled events too.
-                match event {
-                    egui::ImeEvent::Preedit { text, .. } => composing = !text.is_empty(),
-                    egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => composing = false,
-                    egui::ImeEvent::Enabled | egui::ImeEvent::DeleteSurrounding { .. } => {}
-                }
-            }
-        }
-    });
-    composing
 }
 
 /// Tab / Shift+Tab and arrows cycle the highlight, Tab accepts a sole

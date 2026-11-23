@@ -1,12 +1,50 @@
 //! How the feature screens lay out lists of unbounded or large size.
 //!
-//! The feature screens are stacked in one scrolling column, so a list that grows
-//! without bound would push everything below it, and the control that pages it,
-//! out of reach. A list therefore scrolls inside an area of bounded height, and the
-//! control that pages it stays below that area, in view.
+//! A feature screen may be stacked with others in one scrolling column, or fill a tab of
+//! the docked desktop. Either way a list that grows without bound would push everything
+//! below it, and the control that pages it, out of reach. A list therefore scrolls inside
+//! an area of bounded height, and the control that pages it stays below that area, in view.
+//! In a tab the bound grows with the tab, so a tall tab is not left mostly empty.
 
-/// The height at which a list starts to scroll.
+/// The height at which a list starts to scroll in the stacked column, and at least in a tab.
 pub(super) const LIST_MAX_HEIGHT: f32 = 240.0;
+
+#[derive(Clone, Copy)]
+struct TabHeight(f32);
+
+fn tab_height_id() -> egui::Id {
+    egui::Id::new("core-client-feature-tab-height")
+}
+
+/// Draw a feature body as the content of a dock tab: it scrolls as a whole, and its lists
+/// take up to about half of the tab.
+pub(super) fn in_tab<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let height = ui.available_height();
+    let previous = ui.ctx().data(|d| d.get_temp::<TabHeight>(tab_height_id()));
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(tab_height_id(), TabHeight(height)));
+    let inner = egui::ScrollArea::vertical()
+        .id_salt("core-feature-tab")
+        .auto_shrink([false, false])
+        .show(ui, body)
+        .inner;
+    ui.ctx().data_mut(|d| {
+        if let Some(previous) = previous {
+            d.insert_temp(tab_height_id(), previous);
+        } else {
+            d.remove::<TabHeight>(tab_height_id());
+        }
+    });
+    inner
+}
+
+fn list_max_height(ui: &egui::Ui) -> f32 {
+    ui.ctx()
+        .data(|d| d.get_temp::<TabHeight>(tab_height_id()))
+        .map_or(LIST_MAX_HEIGHT, |TabHeight(tab)| {
+            (tab * 0.55).max(LIST_MAX_HEIGHT)
+        })
+}
 
 /// The rows of a list in an area that scrolls once it is [`LIST_MAX_HEIGHT`] tall.
 pub(super) fn bounded_list<R>(
@@ -16,7 +54,7 @@ pub(super) fn bounded_list<R>(
 ) -> R {
     egui::ScrollArea::vertical()
         .id_salt(id)
-        .max_height(LIST_MAX_HEIGHT)
+        .max_height(list_max_height(ui))
         .show(ui, rows)
         .inner
 }
