@@ -43,12 +43,17 @@ impl Fixture {
         f.thread("thread-1", "run-1", "First");
         f
     }
-    fn with_history(seed: impl FnOnce(&storage::Storage)) -> Self {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    fn with_history(seed: impl FnOnce(&storage::Storage, &std::path::Path)) -> Self {
+        Self::with_history_on(tokio::runtime::Runtime::new().unwrap(), seed)
+    }
+    fn with_history_on(
+        rt: tokio::runtime::Runtime,
+        seed: impl FnOnce(&storage::Storage, &std::path::Path),
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, store) = common::runtime_with_store_and_bus_capacity(dir.path(), 64);
         seed_thread(&store, dir.path(), "thread-1", "run-1", "First");
-        seed(&store);
+        seed(&store, dir.path());
         let host = common::host_with_project(&rt, runtime.clone(), dir.path());
         Self {
             rt,
@@ -1101,7 +1106,7 @@ fn boot_refresh_registers_no_bodies() {
         run_id: "run-1".into(),
         text: text.repeat(20 * 1024),
     };
-    let f = Fixture::with_history(|store| {
+    let f = Fixture::with_history(|store, _| {
         for text in ["a", "b", "c"] {
             store
                 .handle()
@@ -1281,6 +1286,322 @@ fn skewed_cross_run_clocks_keep_history_and_stream_indices_equal() {
         .collect();
     assert_eq!(texts, ["before", "followup", "after"]);
     assert_eq!(messages(&f), streamed);
+}
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+fn row_meter(f: &Fixture) -> std::sync::Arc<storage::test_support::EventRowMeter> {
+    f.runtime
+        .with_storage_reader(|db| Ok(storage::test_support::meter_event_rows(db)))
+        .unwrap()
+        .unwrap()
+}
+fn stamped(at: u64, kind: impl Into<event_bus::EventKind>) -> Event {
+    let mut event = Event::new(kind);
+    event.meta.wall_clock = std::time::UNIX_EPOCH + Duration::from_nanos(at);
+    event
+}
+fn answer(run: &str, text: &str) -> MessageEvent {
+    MessageEvent::MessageCompleted {
+        run_id: run.into(),
+        text: text.into(),
+    }
+}
+fn inline(message: &CommittedMessage) -> &str {
+    match &message.content {
+        MessageContent::Inline { text } => text,
+        other => panic!("unexpected content {other:?}"),
+    }
+}
+fn expect_resync(f: &Fixture, sub: &mut workbench_host::subscriptions::Subscription) {
+    f.rt.block_on(async {
+        loop {
+            match sub.recv().await.expect("open subscription").event {
+                UiEvent::Projection(ProjectionEvent::ResyncRequired { .. }) => break,
+                UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
+                    panic!("unexpected message {message:?}")
+                }
+                _ => {}
+            }
+        }
+    });
+    assert!(f.rt.block_on(sub.recv()).is_none());
+}
+#[test]
+fn refresh_cost_does_not_scale_with_old_history() {
+    for n in [20, 400] {
+        let f = Fixture::with_history_on(current_thread(), |store, root| {
+            for run in 2..=4 {
+                seed_thread(
+                    store,
+                    root,
+                    &format!("thread-{run}"),
+                    &format!("run-{run}"),
+                    "next",
+                );
+            }
+            for i in 0..n {
+                for run in 1..=4 {
+                    let event = stamped(i, answer(&format!("run-{run}"), &format!("{run}:{i}")));
+                    store.handle().append_event(None, &event).unwrap();
+                }
+            }
+        });
+        let mut sub = f.subscribe();
+        let rows = row_meter(&f);
+        let bodies = read_meter(&f);
+        saved_event(&f, n, answer("run-1", "appended"));
+        f.host.projection().refresh().unwrap();
+        let message = next_message(&f, &mut sub);
+        assert_eq!(message.index, Sequence(n));
+        assert_eq!(inline(&message), "appended");
+        assert_eq!(
+            rows.counts().rows_fetched,
+            1,
+            "history of {n} messages per run"
+        );
+        assert_eq!(
+            bodies.counts(),
+            storage::test_support::BodyReadCounts::default()
+        );
+    }
+}
+#[test]
+fn tail_rowid_reuse_is_published_once() {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    saved_event(&f, 10, answer("run-1", "zero"));
+    f.host.projection().refresh().unwrap();
+    assert_eq!(next_message(&f, &mut sub).index, Sequence(0));
+    let tail = saved_event(
+        &f,
+        20,
+        MessageEvent::StreamRetried {
+            run_id: Some("run-1".into()),
+        },
+    );
+    f.host.projection().refresh().unwrap();
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    db.execute("DELETE FROM events WHERE id=?1", [tail])
+        .unwrap();
+    assert_eq!(saved_event(&f, 30, answer("run-1", "one")), tail);
+    f.host.projection().refresh().unwrap();
+    let reused = next_message(&f, &mut sub);
+    assert_eq!((reused.index, inline(&reused)), (Sequence(1), "one"));
+    f.host.projection().refresh().unwrap();
+    saved_event(&f, 40, answer("run-1", "two"));
+    f.host.projection().refresh().unwrap();
+    let next = next_message(&f, &mut sub);
+    assert_eq!((next.index, inline(&next)), (Sequence(2), "two"));
+    assert_eq!(messages(&f).len(), 3);
+}
+#[test]
+fn deleting_all_anchors_recuts_with_resync() {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    let mut anchors = Vec::new();
+    for (at, text) in [(10, "zero"), (20, "one")] {
+        anchors.push(saved_event(&f, at, answer("run-1", text)));
+        f.host.projection().refresh().unwrap();
+        next_message(&f, &mut sub);
+    }
+    let kept = saved_event(
+        &f,
+        30,
+        event_bus::LifecycleEvent::TaskPromptPublished {
+            run_id: "run-2".into(),
+            agent_name: "Worker".into(),
+            role: "Worker".into(),
+            parent_run_id: None,
+            prompt: "elsewhere".into(),
+            user_text: None,
+            skills: vec![],
+        },
+    );
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    for id in &anchors {
+        db.execute("DELETE FROM events WHERE id=?1", [id]).unwrap();
+    }
+    f.host.projection().refresh().unwrap();
+    expect_resync(&f, &mut sub);
+    assert!(messages(&f).is_empty());
+    let mut sub = f.subscribe();
+    assert!(saved_event(&f, 40, answer("run-1", "after")) > kept);
+    f.host.projection().refresh().unwrap();
+    let after = next_message(&f, &mut sub);
+    assert_eq!((after.index, inline(&after)), (Sequence(0), "after"));
+}
+#[test]
+fn deleted_newest_anchor_falls_back_without_republishing() {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    saved_event(&f, 10, answer("run-1", "zero"));
+    f.host.projection().refresh().unwrap();
+    next_message(&f, &mut sub);
+    saved_event(&f, 20, answer("run-1", "one"));
+    saved_event(&f, 30, answer("run-1", "two"));
+    // Like a reclaimed run's rows, the newest anchor goes and its id is reused.
+    let newest = saved_event(&f, 35, answer("run-9", "reclaimed"));
+    f.host.projection().refresh().unwrap();
+    for _ in 0..2 {
+        next_message(&f, &mut sub);
+    }
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    db.execute("DELETE FROM events WHERE id=?1", [newest])
+        .unwrap();
+    assert_eq!(saved_event(&f, 40, answer("run-1", "three")), newest);
+    f.host.projection().refresh().unwrap();
+    let next = next_message(&f, &mut sub);
+    assert_eq!((next.index, inline(&next)), (Sequence(3), "three"));
+}
+#[test]
+fn late_delivery_rebuilds_only_that_run() {
+    let f = Fixture::with_history_on(current_thread(), |store, root| {
+        seed_thread(store, root, "thread-2", "run-2", "Second");
+        for i in 0..50 {
+            let event = stamped(i, answer("run-2", &format!("other {i}")));
+            store.handle().append_event(None, &event).unwrap();
+        }
+    });
+    input(
+        &f,
+        "late",
+        "followup",
+        100,
+        storage::HostInputStatus::Accepted,
+    );
+    for (at, text) in [(90, "before"), (110, "answer"), (120, "more")] {
+        saved_event(&f, at, answer("run-1", text));
+    }
+    let mut sub = f.subscribe();
+    let rows = row_meter(&f);
+    f.store
+        .handle()
+        .transition_host_inputs(&[storage::HostInputTransition {
+            prompt_id: "late".into(),
+            status: storage::HostInputStatus::Delivered,
+            reason: None,
+        }])
+        .unwrap();
+    f.host.projection().refresh().unwrap();
+    expect_resync(&f, &mut sub);
+    assert_eq!(rows.counts().rows_fetched, 3);
+    let history: Vec<_> = messages(&f)
+        .into_iter()
+        .filter(|m| m.run.as_str() == "run-1")
+        .collect();
+    let texts: Vec<_> = history.iter().map(inline).collect();
+    assert_eq!(texts, ["before", "followup", "answer", "more"]);
+}
+fn trailing_input_then(at: u64) -> (Fixture, Option<CommittedMessage>) {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    saved_event(&f, 10, answer("run-1", "answer"));
+    f.host.projection().refresh().unwrap();
+    assert_eq!(next_message(&f, &mut sub).index, Sequence(0));
+    input(
+        &f,
+        "followup",
+        "followup",
+        100,
+        storage::HostInputStatus::Delivered,
+    );
+    f.host.projection().refresh().unwrap();
+    let trailing = next_message(&f, &mut sub);
+    assert_eq!(
+        (trailing.index, inline(&trailing)),
+        (Sequence(1), "followup")
+    );
+    saved_event(&f, at, answer("run-1", "event"));
+    f.host.projection().refresh().unwrap();
+    if at < 100 {
+        expect_resync(&f, &mut sub);
+        return (f, None);
+    }
+    let next = next_message(&f, &mut sub);
+    (f, Some(next))
+}
+#[test]
+fn trailing_input_then_earlier_event_resyncs() {
+    let (f, appended) = trailing_input_then(50);
+    assert!(appended.is_none());
+    let texts: Vec<_> = messages(&f).iter().map(|m| inline(m).to_owned()).collect();
+    assert_eq!(texts, ["answer", "event", "followup"]);
+}
+#[test]
+fn trailing_input_then_later_event_appends() {
+    let (f, appended) = trailing_input_then(150);
+    let appended = appended.unwrap();
+    assert_eq!((appended.index, inline(&appended)), (Sequence(2), "event"));
+    let texts: Vec<_> = messages(&f).iter().map(|m| inline(m).to_owned()).collect();
+    assert_eq!(texts, ["answer", "followup", "event"]);
+}
+#[test]
+fn new_run_after_cut_publishes_from_zero() {
+    let f = current_thread_fixture();
+    saved_event(&f, 10, answer("run-2", "early"));
+    saved_event(&f, 20, answer("run-1", "first"));
+    let mut sub = f.subscribe();
+    saved_event(&f, 30, answer("run-1", "second"));
+    f.host.projection().refresh().unwrap();
+    assert_eq!(next_message(&f, &mut sub).index, Sequence(1));
+    f.thread("thread-2", "run-2", "Second");
+    saved_event(&f, 40, answer("run-2", "late"));
+    f.host.projection().refresh().unwrap();
+    let joined: Vec<_> = (0..2).map(|_| next_message(&f, &mut sub)).collect();
+    let joined: Vec<_> = joined
+        .iter()
+        .map(|m| (m.run.as_str(), m.index, inline(m)))
+        .collect();
+    assert_eq!(
+        joined,
+        [
+            ("run-2", Sequence(0), "early"),
+            ("run-2", Sequence(1), "late")
+        ]
+    );
+}
+#[test]
+fn unreadable_committed_row_errs_without_advancing() {
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    saved_event(&f, 10, answer("run-1", "zero"));
+    f.host.projection().refresh().unwrap();
+    assert_eq!(next_message(&f, &mut sub).index, Sequence(0));
+    let rows = row_meter(&f);
+    let broken = saved_event(&f, 20, answer("run-1", "one"));
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    let payload: rusqlite::types::Value = db
+        .query_row("SELECT payload FROM events WHERE id=?1", [broken], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    db.execute(
+        "UPDATE events SET payload='{\"kind\":\"Removed\"}' WHERE id=?1",
+        [broken],
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert!(f.host.projection().refresh().is_err());
+    }
+    assert_eq!(rows.counts().rows_fetched, 2);
+    expect_resync(&f, &mut sub);
+    db.execute(
+        "UPDATE events SET payload=?1 WHERE id=?2",
+        rusqlite::params![payload, broken],
+    )
+    .unwrap();
+    f.host.projection().refresh().unwrap();
+    let mut sub = f.subscribe();
+    saved_event(&f, 30, answer("run-1", "two"));
+    f.host.projection().refresh().unwrap();
+    let next = next_message(&f, &mut sub);
+    assert_eq!((next.index, inline(&next)), (Sequence(2), "two"));
+    let texts: Vec<_> = messages(&f).iter().map(|m| inline(m).to_owned()).collect();
+    assert_eq!(texts, ["zero", "one", "two"]);
 }
 #[test]
 fn history_cursor_rejects_retained_row_removal_or_deleted_run() {

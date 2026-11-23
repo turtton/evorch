@@ -122,41 +122,15 @@ impl Bodies {
     pub fn changes(
         &self,
         runtime: &AgentRuntime,
-        published: &mut CommitScanner,
+        scanner: &mut CommitScanner,
         runs: &[String],
-        publish: bool,
         mut visit: impl FnMut(CommittedMessage),
     ) -> Result<bool, WorkbenchError> {
         runtime
             .with_storage_reader(|db| {
-                let mut prefixes = std::collections::BTreeMap::<String, Digest>::new();
-                let mut fresh = Vec::new();
-                let mut record = |order: Order, message: RawMessage, chain: &Digest| {
-                    let count = published
-                        .runs
-                        .get(&message.run)
-                        .map_or(0, |(n, _)| *n as u64);
-                    if message.index + 1 == count {
-                        prefixes.insert(message.run.clone(), *chain);
-                    }
-                    // Before the first publication every message is history: counting
-                    // it is enough, resolving its thread or body would be discarded.
-                    if publish && message.index >= count {
-                        fresh.push((order, message));
-                    }
-                };
-                let folds = fold_runs(db, runs, db.last_event_id()?, &mut record)?;
-                // Delivered may arrive after messages following its acceptance time
-                // were published. Never silently renumber their append-only indices.
-                let rewritten = folds.iter().any(|(run, fold)| {
-                    published.runs.get(*run).is_some_and(|(count, chain)| {
-                        fold.next < *count as u64
-                            || (*count > 0 && prefixes.get(*run) != Some(chain))
-                    })
-                });
-                if !rewritten {
-                    fresh.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (_, message) in fresh {
+                let mut step = scanner.advance(db, runs)?;
+                if !step.rewritten {
+                    for (_, message) in std::mem::take(&mut step.fresh) {
                         if let Some(thread) = db.thread_of_run(&message.run)?
                             && db.thread(&thread.thread_id)?.is_some()
                             && let Ok(thread) = ThreadId::new(thread.thread_id)
@@ -166,11 +140,7 @@ impl Bodies {
                         }
                     }
                 }
-                published.runs = folds
-                    .into_iter()
-                    .map(|(run, fold)| (run.to_owned(), (fold.next as usize, fold.chain)))
-                    .collect();
-                Ok(rewritten)
+                Ok(scanner.commit(step))
             })
             .map_err(storage_error)
             .map(Option::unwrap_or_default)
@@ -627,47 +597,274 @@ fn fold_run(
     }
 }
 
-fn fold_runs<'a>(
-    db: &storage::Database,
-    runs: &'a [String],
-    through: i64,
-    mut emit: impl FnMut(Order, RawMessage, &Digest),
-) -> Result<std::collections::BTreeMap<&'a str, RunFold>, storage::StorageError> {
-    let mut folds = std::collections::BTreeMap::new();
-    for run in runs {
-        let inputs = by_acceptance(db.delivered_host_input_history(run)?);
-        folds.insert(run.as_str(), (RunFold::new(run), inputs));
-    }
-    let listed = folds.keys().copied().collect();
-    let mut failure = None;
-    db.for_each_committed_event_after(&listed, 0, through, |row| match row {
-        storage::DeferredRow::Failed(_) => failure = Some(unreadable()),
-        storage::DeferredRow::Event(row) => {
-            let run = row
-                .run_id
-                .as_deref()
-                .or_else(|| row.event.kind.primary_run_id());
-            if let Some((fold, inputs)) = run.and_then(|run| folds.get_mut(run)) {
-                fold.row(&row, inputs, &mut emit);
-            }
-        }
-    })?;
-    if let Some(e) = failure {
-        return Err(e);
-    }
-    Ok(folds
-        .into_iter()
-        .map(|(run, (mut fold, inputs))| {
-            fold.trailing(inputs, &mut emit);
-            (run, fold)
-        })
-        .collect())
+const ANCHORS: usize = 8;
+const INLINE_INPUT_BYTES: u64 = 16 * 1024;
+
+struct Slot {
+    fold: RunFold,
+    published: (u64, Digest),
 }
 
-/// Only counts and a chained prefix digest are retained, not the historical bodies.
+/// Only fold state, counts and a chained prefix digest are retained, not the historical bodies.
 #[derive(Default)]
 pub(crate) struct CommitScanner {
-    runs: std::collections::BTreeMap<String, (usize, Digest)>,
+    cut: Option<i64>,
+    // While a committed row is stored unchanged every later row has a larger id.
+    anchors: VecDeque<(i64, storage::EventStamp)>,
+    slots: std::collections::BTreeMap<String, Slot>,
+}
+
+struct Step {
+    cut: i64,
+    recut: bool,
+    rewritten: bool,
+    anchors: VecDeque<(i64, storage::EventStamp)>,
+    staged: std::collections::BTreeMap<String, RunFold>,
+    published: std::collections::BTreeMap<String, (u64, Digest)>,
+    fresh: Vec<(Order, RawMessage)>,
+}
+
+impl CommitScanner {
+    fn live_anchors(
+        &self,
+        db: &storage::Database,
+    ) -> Result<VecDeque<(i64, storage::EventStamp)>, storage::StorageError> {
+        if self.anchors.is_empty() {
+            return Ok(VecDeque::new());
+        }
+        let ids: Vec<i64> = self.anchors.iter().map(|(id, _)| *id).collect();
+        let stored: std::collections::HashMap<_, _> = db.event_stamps(&ids)?.into_iter().collect();
+        Ok(self
+            .anchors
+            .iter()
+            .filter(|(id, stamp)| stored.get(id) == Some(stamp))
+            .cloned()
+            .collect())
+    }
+
+    fn advance(
+        &self,
+        db: &storage::Database,
+        runs: &[String],
+    ) -> Result<Step, storage::StorageError> {
+        use std::collections::{BTreeMap, BTreeSet, HashSet};
+        let through = db.last_event_id()?;
+        let anchors = self.live_anchors(db)?;
+        // With every anchor gone a row may have been written below the last window:
+        // fold everything again and let clients resynchronize.
+        let recut = self.cut.is_none() || (anchors.is_empty() && !self.anchors.is_empty());
+        let (floor, anchors) = if recut {
+            (0, VecDeque::new())
+        } else {
+            (anchors.back().map_or(0, |(id, _)| *id), anchors)
+        };
+        let publish = !recut;
+
+        let mut headers = BTreeMap::<String, Vec<_>>::new();
+        for header in db.delivered_host_input_headers()? {
+            headers
+                .entry(header.run_id.clone())
+                .or_default()
+                .push(header);
+        }
+        let mut rebuild = BTreeSet::<&str>::new();
+        let mut pending =
+            BTreeMap::<&str, Vec<storage::host_input::DeliveredHostInputHeader>>::new();
+        let mut published = BTreeMap::<String, (u64, Digest)>::new();
+        let mut prefixes = BTreeMap::<String, Digest>::new();
+        for run in runs {
+            let mut inputs = headers.remove(run).unwrap_or_default();
+            inputs.sort_by(|a, b| {
+                (a.accepted_at_ns, &a.prompt_id).cmp(&(b.accepted_at_ns, &b.prompt_id))
+            });
+            let slot = self.slots.get(run).filter(|_| !recut);
+            let shown = slot.map_or((0, [0; 32]), |slot| slot.published);
+            published.insert(run.clone(), shown);
+            let start = match slot {
+                // A delivery at or before rows already folded, or a change to one already
+                // merged, can only be placed by folding the run again.
+                Some(slot)
+                    if inputs
+                        .iter()
+                        .filter(|h| h.accepted_at_ns <= slot.fold.merge_max)
+                        .map(|h| (h.prompt_id.clone(), (h.accepted_at_ns, h.first_in_run)))
+                        .collect::<BTreeMap<_, _>>()
+                        == slot.fold.consumed =>
+                {
+                    inputs.retain(|h| h.accepted_at_ns > slot.fold.merge_max);
+                    (slot.fold.next, slot.fold.chain)
+                }
+                _ => {
+                    rebuild.insert(run);
+                    (0, [0; 32])
+                }
+            };
+            if shown.0 == start.0 {
+                prefixes.insert(run.clone(), start.1);
+            }
+            pending.insert(run, inputs);
+        }
+        let wanted: Vec<String> = pending
+            .values()
+            .flatten()
+            .filter(|h| h.text_bytes <= INLINE_INPUT_BYTES)
+            .map(|h| h.prompt_id.clone())
+            .collect();
+        let mut texts: std::collections::HashMap<_, _> = if wanted.is_empty() {
+            Default::default()
+        } else {
+            db.delivered_host_input_texts(&wanted)?
+                .into_iter()
+                .collect()
+        };
+        let mut pending: BTreeMap<&str, VecDeque<_>> = pending
+            .into_iter()
+            .map(|(run, inputs)| {
+                let inputs = inputs
+                    .into_iter()
+                    .map(|h| storage::host_input::DeliveredHostInput {
+                        text: if h.text_bytes <= INLINE_INPUT_BYTES {
+                            texts.remove(&h.prompt_id).flatten()
+                        } else {
+                            None
+                        },
+                        prompt_id: h.prompt_id,
+                        run_id: h.run_id,
+                        text_bytes: h.text_bytes,
+                        accepted_at_ns: h.accepted_at_ns,
+                        first_in_run: h.first_in_run,
+                    });
+                (run, inputs.collect())
+            })
+            .collect();
+
+        let mut fresh = Vec::new();
+        let mut collect = |order: Order, message: RawMessage, chain: &Digest| {
+            let count = published.get(&message.run).map_or(0, |(n, _)| *n);
+            if message.index + 1 == count {
+                prefixes.insert(message.run.clone(), *chain);
+            }
+            // Before the first publication every message is history: counting it is enough.
+            if publish && message.index >= count {
+                fresh.push((order, message));
+            }
+        };
+        let ranged: HashSet<&str> = runs
+            .iter()
+            .map(String::as_str)
+            .filter(|run| floor == 0 || !rebuild.contains(run))
+            .collect();
+        let mut staged = BTreeMap::<&str, RunFold>::new();
+        for run in &ranged {
+            if rebuild.contains(run) {
+                staged.insert(run, RunFold::new(run));
+            }
+        }
+        let mut failure = None;
+        let newest =
+            db.for_each_committed_event_after(&ranged, floor, through, |row| match row {
+                storage::DeferredRow::Failed(_) => failure = Some(unreadable()),
+                storage::DeferredRow::Event(row) => {
+                    let Some(run) = row
+                        .run_id
+                        .as_deref()
+                        .or_else(|| row.event.kind.primary_run_id())
+                        .and_then(|run| ranged.get(run).copied())
+                    else {
+                        return;
+                    };
+                    let folded = staged
+                        .get(run)
+                        .map_or_else(|| self.slots[run].fold.last_id, |fold| fold.last_id);
+                    if row.id <= folded {
+                        return;
+                    }
+                    let fold = staged
+                        .entry(run)
+                        .or_insert_with(|| self.slots[run].fold.clone());
+                    fold.row(&row, pending.get_mut(run).unwrap(), &mut collect);
+                }
+            })?;
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        for run in rebuild.iter().filter(|run| !ranged.contains(*run)) {
+            let inputs = pending.remove(run).unwrap_or_default().into();
+            let (fold, rest) = fold_run(db, run, through, inputs, &mut collect)?;
+            staged.insert(run, fold);
+            pending.insert(run, rest);
+        }
+        let mut shown = BTreeMap::new();
+        for run in runs {
+            let base = staged
+                .get(run.as_str())
+                .unwrap_or_else(|| &self.slots[run].fold);
+            let rest = pending.remove(run.as_str()).unwrap_or_default();
+            let tentative = if rest.is_empty() {
+                (base.next, base.chain)
+            } else {
+                let mut tail = base.clone();
+                tail.trailing(rest, &mut collect);
+                (tail.next, tail.chain)
+            };
+            shown.insert(run.clone(), tentative);
+        }
+        // Delivered may arrive after messages following its acceptance time were
+        // published. Never silently renumber their append-only indices.
+        let rewritten = (recut && self.cut.is_some())
+            || published.iter().any(|(run, (count, chain))| {
+                shown[run].0 < *count || prefixes.get(run) != Some(chain)
+            });
+        fresh.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut anchors = anchors;
+        if let Some(newest) = newest {
+            anchors.push_back(newest);
+            while anchors.len() > ANCHORS {
+                anchors.pop_front();
+            }
+        }
+        Ok(Step {
+            cut: self.cut.filter(|_| !recut).unwrap_or(through),
+            recut,
+            rewritten,
+            anchors,
+            staged: staged
+                .into_iter()
+                .map(|(run, fold)| (run.to_owned(), fold))
+                .collect(),
+            published: shown,
+            fresh,
+        })
+    }
+
+    fn commit(&mut self, step: Step) -> bool {
+        let Step {
+            cut,
+            recut,
+            rewritten,
+            anchors,
+            mut staged,
+            published,
+            ..
+        } = step;
+        let mut old = std::mem::take(&mut self.slots);
+        if recut {
+            old.clear();
+        }
+        self.slots = published
+            .into_iter()
+            .map(|(run, published)| {
+                let fold = staged
+                    .remove(&run)
+                    .or_else(|| old.remove(&run).map(|slot| slot.fold))
+                    .expect("every listed run is staged or retained");
+                (run, Slot { fold, published })
+            })
+            .collect();
+        self.cut = Some(cut);
+        self.anchors = anchors;
+        rewritten
+    }
 }
 
 fn committed_messages(

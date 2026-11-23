@@ -53,7 +53,6 @@ struct State {
     sequence: u64,
     next_subscription: u64,
     scanner: queries::CommitScanner,
-    initialized: bool,
     projects: Vec<(ProjectId, PathBuf)>,
     /// The names saved with the projects; an id stands in for a missing one.
     project_names: std::collections::BTreeMap<String, String>,
@@ -261,7 +260,6 @@ impl Projection {
                 sequence: 0,
                 next_subscription: 0,
                 scanner: queries::CommitScanner::default(),
-                initialized: false,
                 projects: vec![],
                 project_names: Default::default(),
                 models: Models::default(),
@@ -539,24 +537,21 @@ impl Projection {
         }
         let mut scanner = std::mem::take(&mut state.scanner);
         let runs: Vec<_> = state.models.runs.keys().cloned().collect();
-        let initialized = state.initialized;
-        let result =
-            self.bodies
-                .changes(&self.runtime, &mut scanner, &runs, initialized, |message| {
-                    if state.models.threads.contains_key(message.thread.as_str()) {
-                        state.publish(
-                            UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
-                            self.limits,
-                        );
-                    }
-                });
+        let result = self
+            .bodies
+            .changes(&self.runtime, &mut scanner, &runs, |message| {
+                if state.models.threads.contains_key(message.thread.as_str()) {
+                    state.publish(
+                        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
+                        self.limits,
+                    );
+                }
+            });
         state.scanner = scanner;
         if !result.as_ref().is_ok_and(|rewritten| !*rewritten) {
             state.invalidate(self.limits);
         }
-        result?;
-        state.initialized = true;
-        Ok(())
+        result.map(drop)
     }
     pub(crate) fn note_answer(&self, id: &str, provenance: &Provenance) {
         let mut state = self.state.lock().unwrap();

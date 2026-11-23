@@ -391,13 +391,18 @@ fn per_run_fold_matches_legacy_global_fold_under_monotonic_clocks() {
         let through = db.last_event_id().unwrap();
         let legacy = legacy_committed_messages(&db, &runs, through).unwrap();
         let history = committed_messages(&db, &runs, through).unwrap();
+        let scanner = CommitScanner {
+            cut: Some(0),
+            ..Default::default()
+        };
+        let step = scanner.advance(&db, &runs).unwrap();
+        assert!(!step.rewritten, "seed {seed}");
         let mut window = Vec::new();
-        fold_runs(&db, &runs, through, |order, message, _| {
+        for (order, message) in step.fresh {
             trailing += usize::from(order.0 == i64::MAX);
             merged += usize::from(order.0 != i64::MAX && !order.1);
             window.push(message);
-        })
-        .unwrap();
+        }
         deferred_inputs += legacy.iter().filter(|m| m.input.is_some()).count();
         assert_eq!(per_run(&history), per_run(&legacy), "seed {seed}");
         assert_eq!(per_run(&window), per_run(&legacy), "seed {seed}");
