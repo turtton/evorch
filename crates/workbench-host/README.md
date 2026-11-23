@@ -110,18 +110,27 @@ A late delivery or retention can change an already published message prefix.
 The host verifies each run's previous prefix digest (a SHA-256 chain over the
 published messages), advances the stream epoch and requests resync rather than
 silently renumbering indices. Normal append-only messages retain their indices.
-The projection folds every run once, on its first refresh, and then keeps each
-run's fold state, published count and prefix digest, not historical full bodies.
+The first refresh reads no event rows: it takes the newest committed row of a
+live run as the cut and records every listed run's receipt headers as of the
+cut. Everything up to the cut is history and never published. A run stays
+unfolded (Cold) until a committed row of it arrives after the cut, or its
+receipt headers differ from that baseline. It is then folded from its own rows up
+to the cut with the baseline inputs, which gives the count and prefix digest it
+had there without emitting anything, and continues from that fold, so its first
+message after boot has the index ReadCommittedHistory gave it. Folding it again
+with a late delivery placed in its history still requests resync. From then on
+the projection keeps the run's fold state, published count and prefix digest,
+not historical full bodies.
 A later refresh reads only the committed rows after the newest of a few recent
-committed rows (anchors) that is still stored unchanged: while it is, every row
-written since has a larger ID, even when SQLite reuses the ID of a deleted tail
-row, and rows a run has already folded are skipped. If every anchor is gone, the
-projection folds everything again and requests resync. Receipt headers (never
-their texts) are compared on every refresh: a run whose merged inputs changed (a
-late delivery, a status change or a different initial receipt) is folded again
-from its own rows, and only inputs no committed row has reached yet have their
-texts read. A run that joins later is folded from its first row and all of its
-messages are published. A raw deletion or payload rewrite of a committed row
+committed rows (anchors, the cut first) that is still stored unchanged: while it
+is, every row written since has a larger ID, even when SQLite reuses the ID of a
+deleted tail row, and rows a run has already folded are skipped. If every anchor
+is gone, the projection cuts again, leaving every run Cold, and requests resync.
+Receipt headers (never their texts) are compared on every refresh: a folded run
+whose merged inputs changed (a late delivery, a status change or a different
+initial receipt) is folded again from its own rows, and only inputs no committed
+row has reached yet have their texts read. A run that joins after the cut is
+folded from its first row and all of its messages are published. A raw deletion or payload rewrite of a committed row
 older than the anchors is not detected by the stream; no online path does this,
 and ReadCommittedHistory cursors still fail with Conflict.
 

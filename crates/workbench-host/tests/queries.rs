@@ -991,7 +991,17 @@ fn input_for(
     at: i64,
     status: storage::HostInputStatus,
 ) {
-    f.store
+    receipt(&f.store, run, id, text, at, status);
+}
+fn receipt(
+    store: &storage::Storage,
+    run: &str,
+    id: &str,
+    text: &str,
+    at: i64,
+    status: storage::HostInputStatus,
+) {
+    store
         .handle()
         .append_host_input_accepted(
             &[],
@@ -1353,14 +1363,18 @@ fn refresh_cost_does_not_scale_with_old_history() {
         let mut sub = f.subscribe();
         let rows = row_meter(&f);
         let bodies = read_meter(&f);
-        saved_event(&f, n, answer("run-1", "appended"));
+        saved_event(&f, n, answer("run-1", "hydrates"));
+        f.host.projection().refresh().unwrap();
+        assert_eq!(next_message(&f, &mut sub).index, Sequence(n));
+        assert_eq!(rows.counts().rows_fetched, n + 1);
+        saved_event(&f, n + 1, answer("run-1", "appended"));
         f.host.projection().refresh().unwrap();
         let message = next_message(&f, &mut sub);
-        assert_eq!(message.index, Sequence(n));
+        assert_eq!(message.index, Sequence(n + 1));
         assert_eq!(inline(&message), "appended");
         assert_eq!(
             rows.counts().rows_fetched,
-            1,
+            n + 2,
             "history of {n} messages per run"
         );
         assert_eq!(
@@ -1466,6 +1480,7 @@ fn late_delivery_rebuilds_only_that_run() {
             store.handle().append_event(None, &event).unwrap();
         }
     });
+    let mut sub = f.subscribe();
     input(
         &f,
         "late",
@@ -1476,7 +1491,10 @@ fn late_delivery_rebuilds_only_that_run() {
     for (at, text) in [(90, "before"), (110, "answer"), (120, "more")] {
         saved_event(&f, at, answer("run-1", text));
     }
-    let mut sub = f.subscribe();
+    f.host.projection().refresh().unwrap();
+    for _ in 0..3 {
+        next_message(&f, &mut sub);
+    }
     let rows = row_meter(&f);
     f.store
         .handle()
@@ -1602,6 +1620,146 @@ fn unreadable_committed_row_errs_without_advancing() {
     assert_eq!((next.index, inline(&next)), (Sequence(2), "two"));
     let texts: Vec<_> = messages(&f).iter().map(|m| inline(m).to_owned()).collect();
     assert_eq!(texts, ["zero", "one", "two"]);
+}
+#[test]
+fn boot_reads_no_event_rows() {
+    let rt = current_thread();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, store) = common::runtime_with_store_and_bus_capacity(dir.path(), 64);
+    seed_thread(&store, dir.path(), "thread-1", "run-1", "First");
+    seed_thread(&store, dir.path(), "thread-2", "run-2", "Second");
+    for i in 0..50 {
+        for run in ["run-1", "run-2"] {
+            let event = stamped(i * 10, answer(run, &format!("{run}:{i}")));
+            store.handle().append_event(None, &event).unwrap();
+        }
+    }
+    receipt(
+        &store,
+        "run-1",
+        "followup",
+        "followup",
+        1_000,
+        storage::HostInputStatus::Delivered,
+    );
+    let rows = runtime
+        .with_storage_reader(|db| Ok(storage::test_support::meter_event_rows(db)))
+        .unwrap()
+        .unwrap();
+    let host = common::host_with_project(&rt, runtime.clone(), dir.path());
+    let f = Fixture {
+        rt,
+        dir,
+        store,
+        runtime,
+        host,
+    };
+    let mut sub = f.subscribe();
+    f.host.projection().refresh().unwrap();
+    assert_eq!(rows.counts().rows_fetched, 0);
+    saved_event(&f, 2_000, answer("run-2", "after"));
+    f.host.projection().refresh().unwrap();
+    let after = next_message(&f, &mut sub);
+    assert_eq!((after.run.as_str(), after.index), ("run-2", Sequence(50)));
+}
+#[test]
+fn cold_run_first_message_after_boot_has_index_equal_to_precut_count() {
+    let f = Fixture::with_history_on(current_thread(), |store, _| {
+        for (at, text) in [(10, "zero"), (20, "one"), (30, "answer")] {
+            let event = stamped(at, answer("run-1", text));
+            store.handle().append_event(None, &event).unwrap();
+        }
+        receipt(
+            store,
+            "run-1",
+            "followup",
+            "followup",
+            40,
+            storage::HostInputStatus::Delivered,
+        );
+    });
+    let mut sub = f.subscribe();
+    saved_event(
+        &f,
+        50,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: "answer".into(),
+        },
+    );
+    saved_event(&f, 60, answer("run-1", "after"));
+    f.host.projection().refresh().unwrap();
+    let after = next_message(&f, &mut sub);
+    assert_eq!((after.index, inline(&after)), (Sequence(4), "after"));
+    let texts: Vec<_> = messages(&f).iter().map(|m| inline(m).to_owned()).collect();
+    assert_eq!(texts, ["zero", "one", "answer", "followup", "after"]);
+}
+#[test]
+fn late_delivery_on_never_hydrated_run_resyncs() {
+    let f = Fixture::with_history_on(current_thread(), |store, root| {
+        seed_thread(store, root, "thread-2", "run-2", "Second");
+        receipt(
+            store,
+            "run-1",
+            "late",
+            "followup",
+            100,
+            storage::HostInputStatus::Accepted,
+        );
+        for (at, text) in [(90, "before"), (110, "answer"), (120, "more")] {
+            let event = stamped(at, answer("run-1", text));
+            store.handle().append_event(None, &event).unwrap();
+        }
+        let event = stamped(130, answer("run-2", "other"));
+        store.handle().append_event(None, &event).unwrap();
+    });
+    let mut sub = f.subscribe();
+    let rows = row_meter(&f);
+    f.store
+        .handle()
+        .transition_host_inputs(&[storage::HostInputTransition {
+            prompt_id: "late".into(),
+            status: storage::HostInputStatus::Delivered,
+            reason: None,
+        }])
+        .unwrap();
+    f.host.projection().refresh().unwrap();
+    expect_resync(&f, &mut sub);
+    assert_eq!(rows.counts().rows_fetched, 6);
+    let texts: Vec<_> = messages(&f)
+        .iter()
+        .filter(|m| m.run.as_str() == "run-1")
+        .map(|m| inline(m).to_owned())
+        .collect();
+    assert_eq!(texts, ["before", "followup", "answer", "more"]);
+    let mut sub = f.subscribe();
+    saved_event(&f, 140, answer("run-1", "next"));
+    f.host.projection().refresh().unwrap();
+    let next = next_message(&f, &mut sub);
+    assert_eq!((next.index, inline(&next)), (Sequence(4), "next"));
+}
+#[test]
+fn hydration_reads_only_that_runs_rows() {
+    for other in [10, 200] {
+        let f = Fixture::with_history_on(current_thread(), |store, root| {
+            seed_thread(store, root, "thread-2", "run-2", "Second");
+            for i in 0..other {
+                let event = stamped(i, answer("run-2", &format!("other {i}")));
+                store.handle().append_event(None, &event).unwrap();
+                if i < 5 {
+                    let event = stamped(i, answer("run-1", &format!("own {i}")));
+                    store.handle().append_event(None, &event).unwrap();
+                }
+            }
+        });
+        let mut sub = f.subscribe();
+        let rows = row_meter(&f);
+        saved_event(&f, other, answer("run-1", "appended"));
+        f.host.projection().refresh().unwrap();
+        let message = next_message(&f, &mut sub);
+        assert_eq!((message.index, inline(&message)), (Sequence(5), "appended"));
+        assert_eq!(rows.counts().rows_fetched, 6, "{other} rows of another run");
+    }
 }
 #[test]
 fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
