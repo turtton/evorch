@@ -28,6 +28,8 @@ pub struct EventStamp {
     pub wall_clock_ns: i64,
 }
 
+const KIND_COLUMN: usize = 5;
+const SUBKIND_COLUMN: usize = 8;
 const RUN_ID_COLUMN: usize = 9;
 
 pub(crate) const IDS_COMMITTED_BETWEEN_SQL: &str =
@@ -192,6 +194,14 @@ fn visit_committed(
             {
                 visit(DeferredRow::Event(Box::new(event)));
             }
+            continue;
+        }
+        // An id collected as committed may since have been deleted and reused by another row.
+        let kind: Option<String> = row.get(KIND_COLUMN).ok();
+        let subkind: Option<String> = row.get(SUBKIND_COLUMN).ok().flatten();
+        if !kind.zip(subkind).is_some_and(|(kind, subkind)| {
+            COMMITTED_SUBKINDS.contains(&(kind.as_str(), subkind.as_str()))
+        }) {
             continue;
         }
         let run_id: Option<String> = row.get(RUN_ID_COLUMN).ok().flatten();

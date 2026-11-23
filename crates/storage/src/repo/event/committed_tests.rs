@@ -252,6 +252,53 @@ fn unbackfilled_rows_are_confirmed_tombstones_skipped_and_failures_named_by_colu
 }
 
 #[test]
+fn a_row_written_under_a_collected_id_after_collection_is_not_handed_over() {
+    // Given: the newest committed row is deleted after its id was collected, and a delta
+    // and then an unreadable delta of the same run reuse that id before it is fetched.
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Database::open(&StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..StorageConfig::default()
+    })
+    .unwrap();
+    let conn = &db.conn;
+    let first = append(conn, &answer("run-a"));
+    for unreadable in [false, true] {
+        let tail = append(conn, &answer("run-a"));
+        let reuse = || {
+            conn.execute("DELETE FROM events WHERE id = ?1", [tail])
+                .unwrap();
+            let reused = if unreadable {
+                insert_unreadable(conn, Some("MessageDelta"), Some("run-a"))
+            } else {
+                append(conn, &delta("run-a"))
+            };
+            assert_eq!(reused, tail);
+        };
+        let (mut seen, mut pending) = (Vec::new(), Some(reuse));
+        let runs = HashSet::from(["run-a"]);
+
+        // When: the window is read while the id is reused.
+        let newest = db
+            .for_each_committed_event_after(&runs, 0, tail, |row| {
+                if let Some(reuse) = pending.take() {
+                    reuse();
+                }
+                seen.push(label(&row));
+            })
+            .unwrap();
+
+        // Then: only the committed row that is still there is handed over or newest.
+        assert_eq!(
+            (seen, newest.map(|(id, _)| id)),
+            (events(&[first]), Some(first))
+        );
+        conn.execute("DELETE FROM events WHERE id = ?1", [tail])
+            .unwrap();
+    }
+}
+
+#[test]
 fn stamps_tell_a_replaced_row_from_the_original() {
     let db = Database::open_in_memory().unwrap();
     let conn = &db.conn;
