@@ -28,8 +28,7 @@ impl ControlDrainHandle {
 }
 impl ControlDrained {
     pub fn validate(&self, identity: &str, epoch: u64) -> io::Result<()> {
-        let hello = self.backend.hello();
-        if hello.core.as_str() != identity || hello.instance_epoch.0 != epoch {
+        if self.backend.identity() != identity || self.backend.instance_epoch() != epoch {
             return Err(io::Error::other(
                 "control drain belongs to another core/epoch",
             ));

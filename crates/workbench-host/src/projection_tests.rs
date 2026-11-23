@@ -393,6 +393,39 @@ fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
 }
 
 #[test]
+fn hello_epoch_and_status_do_not_wait_for_a_refresh() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (p, _) = make(rt.handle(), 64, Default::default());
+    p.refresh().unwrap();
+    let status = p.cached_status();
+    let mut epochs = p.epoch_changes();
+    p.invalidate();
+    rt.block_on(epochs.changed()).unwrap();
+    let epoch = InstanceEpoch(*epochs.borrow_and_update());
+    assert_eq!(p.instance_epoch(), epoch);
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    let refreshing = {
+        let p = p.clone();
+        std::thread::spawn(move || p.refresh())
+    };
+    entered.wait();
+    assert_eq!(p.instance_epoch(), epoch);
+    assert_eq!(p.cached_status(), status);
+    release.wait();
+    refreshing.join().unwrap().unwrap();
+}
+
+#[test]
 fn update_during_snapshot_cannot_cross_registration_or_high_water() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (p, _) = make(rt.handle(), 64, Default::default());

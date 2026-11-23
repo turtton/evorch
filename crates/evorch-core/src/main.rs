@@ -193,7 +193,7 @@ async fn serve(
             return Err(e.into());
         }
     };
-    if let Err(e) = instance.publish(backend.hello().instance_epoch.0) {
+    if let Err(e) = instance.publish(backend.instance_epoch()) {
         if let Some(s) = server {
             s.shutdown().await?;
         }

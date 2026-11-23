@@ -72,13 +72,14 @@ pub async fn connection(
 ) -> io::Result<()> {
     let verified_peer = workbench_authority::verify_unix_peer(&stream)?;
     let (mut read, write) = stream.into_split();
-    let mut hello = backend.hello();
-    let first = tokio::select! { r = payload(&mut read, hello.limits.max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
+    let max_frame_bytes = backend.wire_limits().max_frame_bytes;
+    let first = tokio::select! { r = payload(&mut read, max_frame_bytes) => r?, _ = shutdown.changed() => return Ok(()) };
     let Some((mut read, mut write)) =
         crate::renderer::route(&first, read, write, &backend, &mut shutdown).await?
     else {
         return Ok(());
     };
+    let mut hello = backend.hello();
     let _connected = backend.connected();
     let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
     let negotiated = negotiate(

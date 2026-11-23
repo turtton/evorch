@@ -7,7 +7,7 @@ use std::sync::{
 };
 use workbench_authority::IngressContext;
 use workbench_host::{CommandHost, projection::Projection};
-use workbench_protocol::namespaces::{LifecycleQuery, LifecycleReply};
+use workbench_protocol::namespaces::LifecycleReply;
 use workbench_protocol::{
     envelope::*, errors::*, events::*, handshake::*, ids::*, wire::InstanceEpoch,
 };
@@ -33,12 +33,6 @@ impl Drop for ConnectedClient<'_> {
     fn drop(&mut self) {
         self.0.unix_clients.fetch_sub(1, Ordering::SeqCst);
     }
-}
-/// The caller of the core's own status query behind `hello`. It is named, not
-/// defaulted: the query is a fixed `Lifecycle` one, so no namespace that
-/// authorizes reads per caller (artifacts, browser) can be reached with it.
-fn internal_health_provenance() -> Provenance {
-    Provenance::human(Surface::Cli, ClientId::new("core-health").unwrap())
 }
 pub fn error(code: ErrorCode, message: &str) -> WorkbenchError {
     WorkbenchError::new(code, message, RetryAdvice::Never)
@@ -209,21 +203,22 @@ impl HostBackend {
         }
         status
     }
+    pub fn instance_epoch(&self) -> u64 {
+        self.projection.instance_epoch().0
+    }
+    pub fn identity(&self) -> &str {
+        self.hello.core.as_str()
+    }
+    pub(crate) fn wire_limits(&self) -> &WireLimits {
+        &self.hello.limits
+    }
     pub fn hello(&self) -> ServerHello {
         let mut hello = self.hello.clone();
         hello.instance_epoch = self.projection.instance_epoch();
         if self.management_published() {
             hello.capabilities.push(Capability::SafeRestart);
         }
-        if let Ok(workbench_protocol::queries::QueryReply::Lifecycle(LifecycleReply::CoreStatus(
-            status,
-        ))) = self.host.lock().unwrap().handle_query(
-            &SessionId::new("core-health").unwrap(),
-            &workbench_protocol::queries::Query::Lifecycle(LifecycleQuery::GetCoreStatus),
-            &internal_health_provenance(),
-        ) {
-            hello.status = status;
-        }
+        hello.status = self.projection.cached_status();
         let (grace, invocations) = {
             let host = self.host.lock().unwrap();
             (
@@ -438,6 +433,7 @@ impl WorkbenchBackend for HostBackend {
 mod tests {
     use super::*;
     use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost};
+    use workbench_protocol::namespaces::LifecycleQuery;
 
     #[tokio::test]
     async fn status_tracks_connection_lifetimes_and_web_without_browser_clients() {

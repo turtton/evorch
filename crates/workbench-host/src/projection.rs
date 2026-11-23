@@ -21,6 +21,7 @@ use workbench_protocol::{
     envelope::Provenance,
     errors::{ErrorCode, WorkbenchError},
     events::*,
+    handshake::CoreStatus,
     ids::*,
     queries::{PageRequest, Query, QueryReply, ReadSnapshot, SnapshotPage},
     views::*,
@@ -48,6 +49,7 @@ struct State {
     #[cfg(test)]
     refresh_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     epoch: u64,
+    epoch_tx: Arc<tokio::sync::watch::Sender<u64>>,
     sequence: u64,
     next_subscription: u64,
     scanner: queries::CommitScanner,
@@ -114,6 +116,7 @@ impl State {
     }
     fn invalidate(&mut self, limits: SubscriptionLimits) {
         self.epoch = self.epoch.checked_add(1).expect("epoch exhausted");
+        self.epoch_tx.send_replace(self.epoch);
         self.sequence = 0;
         self.replay.clear();
         self.replay_bytes = 0;
@@ -141,6 +144,8 @@ pub struct Projection {
     runtime: AgentRuntime,
     registry: Arc<ApprovalRegistry>,
     state: Mutex<State>,
+    epoch: Arc<tokio::sync::watch::Sender<u64>>,
+    status: Mutex<CoreStatus>,
     pager: Pager,
     bodies: Bodies,
     limits: SubscriptionLimits,
@@ -233,10 +238,16 @@ impl Projection {
         let wake = commits.clone();
         let observer: Arc<dyn Fn() + Send + Sync> = Arc::new(move || wake.notify_one());
         runtime.observe_event_commits(&observer);
+        let epoch = epoch.unwrap_or_else(|| {
+            u64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap()) >> 1
+        });
+        let epoch_tx = Arc::new(tokio::sync::watch::Sender::new(epoch));
         let this = Arc::new(Self {
             _commit_observer: observer,
             runtime,
             registry,
+            epoch: epoch_tx.clone(),
+            status: Mutex::new(Models::default().status()),
             pager: Pager::default(),
             bodies: Bodies::default(),
             limits,
@@ -245,10 +256,8 @@ impl Projection {
                 snapshot_hook: None,
                 #[cfg(test)]
                 refresh_hook: None,
-                epoch: epoch.unwrap_or_else(|| {
-                    u64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap())
-                        >> 1
-                }),
+                epoch,
+                epoch_tx,
                 sequence: 0,
                 next_subscription: 0,
                 scanner: queries::CommitScanner::default(),
@@ -317,7 +326,16 @@ impl Projection {
     }
     /// Epoch used by the handshake and subscription cursors.
     pub fn instance_epoch(&self) -> InstanceEpoch {
-        InstanceEpoch(self.state.lock().unwrap().epoch)
+        InstanceEpoch(*self.epoch.borrow())
+    }
+
+    pub fn epoch_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.epoch.subscribe()
+    }
+
+    /// As of the last refresh; unlike `GetCoreStatus`, never waits for one.
+    pub fn cached_status(&self) -> CoreStatus {
+        self.status.lock().unwrap().clone()
     }
 
     pub fn approval_registry(&self) -> &Arc<ApprovalRegistry> {
@@ -507,6 +525,7 @@ impl Projection {
                 .keys()
                 .any(|id| !next.receipts.contains_key(id));
         state.models = next;
+        *self.status.lock().unwrap() = state.models.status();
         if removed {
             state.invalidate(self.limits);
         }
