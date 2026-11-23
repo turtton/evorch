@@ -338,6 +338,11 @@ impl Projection {
         self.status.lock().unwrap().clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained_bodies(&self) -> usize {
+        self.bodies.retained()
+    }
+
     pub fn approval_registry(&self) -> &Arc<ApprovalRegistry> {
         &self.registry
     }
@@ -535,16 +540,16 @@ impl Projection {
         let mut scanner = std::mem::take(&mut state.scanner);
         let runs: Vec<_> = state.models.runs.keys().cloned().collect();
         let initialized = state.initialized;
-        let result = self
-            .bodies
-            .changes(&self.runtime, &mut scanner, &runs, |message| {
-                if initialized && state.models.threads.contains_key(message.thread.as_str()) {
-                    state.publish(
-                        UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
-                        self.limits,
-                    );
-                }
-            });
+        let result =
+            self.bodies
+                .changes(&self.runtime, &mut scanner, &runs, initialized, |message| {
+                    if state.models.threads.contains_key(message.thread.as_str()) {
+                        state.publish(
+                            UiEvent::Conversation(ConversationEvent::MessageCommitted { message }),
+                            self.limits,
+                        );
+                    }
+                });
         state.scanner = scanner;
         if !result.as_ref().is_ok_and(|rewritten| !*rewritten) {
             state.invalidate(self.limits);

@@ -43,34 +43,23 @@ impl Fixture {
         f.thread("thread-1", "run-1", "First");
         f
     }
+    fn with_history(seed: impl FnOnce(&storage::Storage)) -> Self {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, store) = common::runtime_with_store_and_bus_capacity(dir.path(), 64);
+        seed_thread(&store, dir.path(), "thread-1", "run-1", "First");
+        seed(&store);
+        let host = common::host_with_project(&rt, runtime.clone(), dir.path());
+        Self {
+            rt,
+            dir,
+            store,
+            runtime,
+            host,
+        }
+    }
     fn thread(&self, thread: &str, run: &str, title: &str) {
-        self.store
-            .handle()
-            .upsert_threads_host(&[storage::threads::ThreadUpsert {
-                thread_id: thread.into(),
-                project_id: Some(common::project().to_string()),
-                project_root: Some(self.dir.path().to_string_lossy().into_owned()),
-                title: Some(title.into()),
-                root_run_id: Some(run.into()),
-                ..Default::default()
-            }])
-            .unwrap();
-        self.store
-            .handle()
-            .upsert_run_context(&storage::RunContextRecord {
-                run_id: run.into(),
-                role: "worker".into(),
-                name: format!("chat:Worker:{thread}"),
-                parent_run_id: None,
-                config_json: "{}".into(),
-                messages_json: "[]".into(),
-                checkpoints_json: "[]".into(),
-                terminal_phase: "done".into(),
-                restorable: false,
-                updated_at_ns: 1,
-                host_inputs_json: "[]".into(),
-            })
-            .unwrap();
+        seed_thread(&self.store, self.dir.path(), thread, run, title);
     }
     fn query(&self, query: Query) -> QueryReply {
         self.host
@@ -95,6 +84,41 @@ impl Fixture {
         db.execute("INSERT INTO thread_tombstones(thread_id,family_key,deleted_at_ns) VALUES ('thread-1','family',1)", []).unwrap();
         db.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('run-1','thread-1','family')", []).unwrap();
     }
+}
+fn seed_thread(
+    store: &storage::Storage,
+    root: &std::path::Path,
+    thread: &str,
+    run: &str,
+    title: &str,
+) {
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: thread.into(),
+            project_id: Some(common::project().to_string()),
+            project_root: Some(root.to_string_lossy().into_owned()),
+            title: Some(title.into()),
+            root_run_id: Some(run.into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    store
+        .handle()
+        .upsert_run_context(&storage::RunContextRecord {
+            run_id: run.into(),
+            role: "worker".into(),
+            name: format!("chat:Worker:{thread}"),
+            parent_run_id: None,
+            config_json: "{}".into(),
+            messages_json: "[]".into(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "done".into(),
+            restorable: false,
+            updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
+        })
+        .unwrap();
 }
 fn pending() -> PendingQuery {
     PendingQuery {
@@ -1070,6 +1094,29 @@ fn finish_is_committed_once_and_history_matches_stream_indices() {
         }
     );
     assert_eq!(messages(&f), vec![first, finish]);
+}
+#[test]
+fn boot_refresh_registers_no_bodies() {
+    let large = |text: &str| MessageEvent::MessageCompleted {
+        run_id: "run-1".into(),
+        text: text.repeat(20 * 1024),
+    };
+    let f = Fixture::with_history(|store| {
+        for text in ["a", "b", "c"] {
+            store
+                .handle()
+                .append_event(None, &Event::new(large(text)))
+                .unwrap();
+        }
+    });
+    let mut sub = f.subscribe();
+    assert_eq!(f.host.projection().retained_bodies(), 0);
+    saved_event(&f, 1, large("d"));
+    f.host.projection().refresh().unwrap();
+    let message = next_message(&f, &mut sub);
+    assert_eq!(message.index, Sequence(3));
+    assert!(matches!(message.content, MessageContent::Body(_)));
+    assert_eq!(f.host.projection().retained_bodies(), 1);
 }
 #[test]
 fn delivered_followups_merge_by_acceptance_order_and_deduplicate_initial_prompt() {

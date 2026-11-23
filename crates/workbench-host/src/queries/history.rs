@@ -25,8 +25,17 @@ struct Entry {
     source: Source,
 }
 #[derive(Default)]
-pub(crate) struct Bodies(Mutex<VecDeque<Entry>>);
+struct Retained {
+    entries: VecDeque<Entry>,
+    bytes: usize,
+}
+#[derive(Default)]
+pub(crate) struct Bodies(Mutex<Retained>);
 impl Bodies {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained(&self) -> usize {
+        self.0.lock().unwrap().entries.len()
+    }
     fn register(
         &self,
         thread: &ThreadId,
@@ -35,22 +44,20 @@ impl Bodies {
         bytes: u64,
     ) -> MessageContent {
         let id = BodyId::new(uuid::Uuid::new_v4().to_string()).unwrap();
-        let mut entries = self.0.lock().unwrap();
-        entries.push_back(Entry {
+        let mut retained = self.0.lock().unwrap();
+        retained.bytes += source.retained_bytes();
+        retained.entries.push_back(Entry {
             id: id.clone(),
             thread: thread.clone(),
             run: run.clone(),
             source,
         });
         // Inline bodies retained for live events are bounded independently of blobs.
-        while entries.len() > 4096
-            || entries
-                .iter()
-                .map(|e| e.source.retained_bytes())
-                .sum::<usize>()
-                > 8 * 1024 * 1024
-        {
-            entries.pop_front();
+        while retained.entries.len() > 4096 || retained.bytes > 8 * 1024 * 1024 {
+            let Some(evicted) = retained.entries.pop_front() else {
+                break;
+            };
+            retained.bytes -= evicted.source.retained_bytes();
         }
         MessageContent::Body(BodyRef {
             body_id: id,
@@ -117,6 +124,7 @@ impl Bodies {
         runtime: &AgentRuntime,
         published: &mut CommitScanner,
         runs: &[String],
+        publish: bool,
         mut visit: impl FnMut(CommittedMessage),
     ) -> Result<bool, WorkbenchError> {
         runtime
@@ -138,7 +146,9 @@ impl Bodies {
                 }) || published.runs.iter().any(|(run, (count, _))| {
                     runs.contains(run) && *count > 0 && !grouped.contains_key(run)
                 });
-                if !rewritten {
+                // Before the first publication every message is history: counting
+                // it is enough, resolving its thread or body would be discarded.
+                if publish && !rewritten {
                     for message in &raw {
                         let count = published.runs.get(&message.run).map_or(0, |(n, _)| *n);
                         if message.index >= count as u64
@@ -171,6 +181,7 @@ impl Bodies {
             .0
             .lock()
             .unwrap()
+            .entries
             .iter()
             .find(|e| e.id == q.body_id)
             .cloned()
