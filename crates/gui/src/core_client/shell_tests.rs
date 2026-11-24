@@ -555,3 +555,388 @@ fn notifications_keep_watching_runs_while_the_window_is_minimized() {
         .harness
         .get_by_label("Rebuild the search index completed");
 }
+
+mod progress_band {
+    use super::*;
+    use workbench_protocol::commands::Command;
+    use workbench_protocol::namespaces::execution::plan::{
+        PlanHistoryPage, PlanNodeView, PlanProgress, PlanStatusValues, PlanSummary, PlanTaskStatus,
+        PlanTreePage,
+    };
+    use workbench_protocol::namespaces::{ExecutionCommand, ExecutionQuery, ExecutionReply};
+
+    fn progress() -> PlanProgress {
+        PlanProgress {
+            node_count: 5,
+            leaf_count: 4,
+            leaf_counts: PlanStatusValues {
+                completed: 2,
+                blocked: 1,
+                pending: 1,
+                ..PlanStatusValues::default()
+            },
+            weighted_ppm: PlanStatusValues {
+                completed: 500_000,
+                pending: 500_000,
+                ..PlanStatusValues::default()
+            },
+        }
+    }
+
+    fn tree() -> Vec<PlanNodeView> {
+        let node = |id: &str, position, depth, title: &str, status| PlanNodeView {
+            task_id: id.into(),
+            parent_id: (depth > 0).then(|| "task-0".into()),
+            position,
+            depth,
+            title: title.into(),
+            weight: 1,
+            status,
+            child_count: if status.is_none() { 4 } else { 0 },
+            progress_ppm: if status.is_none() {
+                progress().weighted_ppm
+            } else {
+                PlanStatusValues::default()
+            },
+        };
+        vec![
+            node("task-0", 0, 0, "Fix the login redirect", None),
+            node(
+                "task-1",
+                0,
+                1,
+                "Find the redirect handler",
+                Some(PlanTaskStatus::Completed),
+            ),
+            node(
+                "task-2",
+                1,
+                1,
+                "Honour the next parameter",
+                Some(PlanTaskStatus::Completed),
+            ),
+            node(
+                "task-3",
+                2,
+                1,
+                "Write the redirect test",
+                Some(PlanTaskStatus::Blocked),
+            ),
+            node(
+                "task-4",
+                3,
+                1,
+                "Run the auth suite",
+                Some(PlanTaskStatus::Pending),
+            ),
+        ]
+    }
+
+    fn reply(query: &ExecutionQuery) -> Option<ExecutionReply> {
+        let thread = ThreadId::new("thr-1").unwrap();
+        Some(match query {
+            ExecutionQuery::GetThreadExecution(_) => {
+                ExecutionReply::ThreadExecution(Box::new(view(json!({
+                    "thread": "thr-1", "root_run": "run-1",
+                    "goal": {"goal": "g1", "root_run": "run-1", "objective": "ship it",
+                        "criteria": ["tests pass", "an invalid next falls back to /home"],
+                        "checks": [{"criterion": 0, "met": true,
+                            "evidence": "cargo test -p auth: 12 passed"}],
+                        "phase": "working",
+                        "review_enabled": false, "checks_paused": false,
+                        "work_stopped": false, "review_round": 1, "max_review_rounds": 3,
+                        "findings": ["the redirect test does not cover an empty next"],
+                        "epoch": "1"},
+                }))))
+            }
+            ExecutionQuery::GetConversationPlan(_) => {
+                ExecutionReply::ConversationPlan(Box::new(PlanSummary {
+                    thread,
+                    plan_id: Some("plan-1".into()),
+                    revision: Revision(3),
+                    progress: progress(),
+                    updated_at_unix_ms: None,
+                }))
+            }
+            ExecutionQuery::ReadConversationPlanTree(_) => {
+                ExecutionReply::ConversationPlanTree(Box::new(PlanTreePage {
+                    plan_id: Some("plan-1".into()),
+                    revision: Revision(3),
+                    progress: progress(),
+                    nodes: tree(),
+                    next_cursor: None,
+                }))
+            }
+            ExecutionQuery::ReadConversationPlanHistory(_) => {
+                ExecutionReply::ConversationPlanHistory(Box::new(PlanHistoryPage {
+                    plan_id: Some("plan-1".into()),
+                    revision: Revision(3),
+                    entries: Vec::new(),
+                    next_after_revision: None,
+                }))
+            }
+            _ => return None,
+        })
+    }
+
+    impl Screen {
+        /// Answers the execution feature's goal and plan reads from the
+        /// fixture; returns what was asked for, answered or not.
+        fn answer_execution(&mut self, actions: Vec<Action>) -> Vec<FeatureRequest> {
+            let mut asked = Vec::new();
+            for action in actions {
+                let Action::Feature(FeatureAction {
+                    feature: FeatureId::Execution,
+                    tag,
+                    request,
+                }) = action
+                else {
+                    continue;
+                };
+                if let FeatureRequest::Query(Query::Execution(query)) = &request
+                    && let Some(answer) = reply(query)
+                {
+                    let reply = FeatureReply::Query(Ok(QueryReply::Execution(answer)));
+                    let mut shared = self.shared.lock().unwrap();
+                    shared.features.reply(FeatureId::Execution, tag, reply);
+                }
+                asked.push(request);
+            }
+            self.harness.run_steps(2);
+            asked
+        }
+
+        /// Settles the workspace, then answers the execution reads until none is left.
+        fn settle_band(&mut self) -> Vec<FeatureRequest> {
+            let mut asked = Vec::new();
+            for _ in 0..8 {
+                // What is pressed leaves in the execution feature's next pass.
+                self.harness.run_steps(2);
+                let actions = self.settle();
+                if actions.is_empty() {
+                    return asked;
+                }
+                asked.extend(self.answer_execution(actions));
+            }
+            panic!("the execution feature kept asking");
+        }
+    }
+
+    fn teams_in_front() -> Screen {
+        teams_in_front_at(egui::vec2(1440.0, 900.0))
+    }
+
+    fn teams_in_front_at(size: egui::Vec2) -> Screen {
+        let mut screen = screen(size);
+        shell::focus(
+            &mut screen.harness.state_mut().dock,
+            CoreTab::Feature(FeatureId::Teams),
+        );
+        screen.settle_band();
+        screen
+    }
+
+    fn is_query(request: &FeatureRequest, wanted: fn(&ExecutionQuery) -> bool) -> bool {
+        matches!(request, FeatureRequest::Query(Query::Execution(query)) if wanted(query))
+    }
+
+    // Given: thr-1 has a goal and a plan half done, and Teams is in front of Execution
+    // When: the window is drawn
+    // Then: the conversation's band above the composer shows the goal and the plan
+    #[test]
+    fn the_conversation_shows_the_goal_and_plan_band_while_teams_is_in_front() {
+        let mut screen = teams_in_front();
+        // A newer plan is read again though the Execution tab is not drawn.
+        screen.shared.lock().unwrap().features.event(
+            &workbench_protocol::events::UiEvent::Execution(
+                workbench_protocol::namespaces::ExecutionEvent::ConversationPlanChanged {
+                    thread: ThreadId::new("thr-1").unwrap(),
+                    revision: Revision(4),
+                },
+            ),
+        );
+        screen.harness.run_steps(1);
+        let asked = screen.settle_band();
+        assert!(
+            asked
+                .iter()
+                .any(|r| is_query(r, |q| matches!(q, ExecutionQuery::GetConversationPlan(_))))
+        );
+        assert!(
+            !asked
+                .iter()
+                .any(|r| is_query(r, |q| matches!(q, ExecutionQuery::ListRunDetails(_))))
+        );
+        screen.capture("plan-band");
+        let harness = &screen.harness;
+        harness.get_by_label("Goal: ship it");
+        harness.get_by_label("Plan 50% complete, 2 of 4 tasks completed, 1 blocked");
+        harness.get_by_label("Pause goal checks");
+        harness.get_by_label("Enable independent review before completion");
+        harness.get_by_label("Message");
+        assert!(harness.query_by_label("Plan tab").is_none());
+    }
+
+    // Given: the band shows thr-1's goal with a met check and a review finding,
+    //        at a wide and a narrow window
+    // When: Show goal details is pressed
+    // Then: the details open inside the band, and the composer and the status
+    //       strip below stay on screen
+    #[test]
+    fn goal_details_open_in_the_band_and_keep_the_composer_on_screen() {
+        for (width, height, suffix) in [
+            (1440.0, 900.0, "plan-band-details"),
+            (1024.0, 768.0, "plan-band-details-narrow"),
+        ] {
+            let mut screen = teams_in_front_at(egui::vec2(width, height));
+            screen.harness.get_by_label("Show goal details").click();
+            screen.harness.run_steps(4);
+            screen.capture(suffix);
+            let harness = &screen.harness;
+            harness.get_by_label("Hide goal details");
+            harness.get_by_label("Independent review: disabled · round 1/3");
+            harness.get_by_label("cargo test -p auth: 12 passed");
+            harness.get_by_label("Review findings");
+            assert!(
+                harness
+                    .query_by_label_contains("Original request")
+                    .is_none()
+            );
+            let message = harness.get_by_label("Message").rect();
+            let status = harness.get_by_label("Waiting for approval").rect();
+            let goal = harness.get_by_label("Goal: ship it").rect();
+            assert!(
+                goal.max.y <= message.min.y,
+                "{suffix}: {goal:?} over {message:?}"
+            );
+            let finding = harness
+                .get_by_label("the redirect test does not cover an empty next")
+                .rect();
+            let composer_top =
+                harness.get_by_label("Role: Worker").rect().min.y - crate::theme::tokens::SP_2;
+            assert!(
+                goal.max.y < finding.min.y && finding.max.y <= composer_top,
+                "{suffix}: {finding:?} not between {goal:?} and the composer at {composer_top}"
+            );
+            assert!(
+                message.max.y <= status.min.y && status.max.y <= height,
+                "{suffix}: {message:?} and {status:?} in a {height} high window"
+            );
+        }
+    }
+
+    // Given: thr-1's goal details are open in the band
+    // When: the session restarts, so the goal is read again and is missing
+    //       until the answer arrives
+    // Then: the details are open again once the goal is back
+    #[test]
+    fn goal_details_stay_open_across_a_reconnect() {
+        let mut screen = teams_in_front();
+        screen.harness.get_by_label("Show goal details").click();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Hide goal details");
+
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .features
+            .begin_session(&[], Vec::new());
+        screen.harness.run_steps(2);
+        assert!(screen.harness.query_by_label("Goal: ship it").is_none());
+
+        screen.settle_band();
+        screen.harness.get_by_label("Hide goal details");
+        screen
+            .harness
+            .get_by_label("Independent review: disabled · round 1/3");
+    }
+
+    // Given: the band shows thr-1's plan
+    // When: Open plan is pressed
+    // Then: the Plan tab opens in front right after Execution in its leaf, and the
+    //       plan's tree and history are read
+    #[test]
+    fn open_plan_opens_the_plan_tab_beside_execution_and_reads_the_tree() {
+        let mut screen = teams_in_front();
+        screen.harness.get_by_label("Open plan").click();
+        let asked = screen.settle_band();
+        assert!(asked.iter().any(|r| is_query(r, |q| matches!(
+            q,
+            ExecutionQuery::ReadConversationPlanTree(_)
+        ))));
+        assert!(asked.iter().any(|r| is_query(r, |q| matches!(
+            q,
+            ExecutionQuery::ReadConversationPlanHistory(_)
+        ))));
+        let dock = &screen.harness.state().dock;
+        let path = dock.find_tab(&CoreTab::Plan).expect("the Plan tab");
+        let leaf = dock.leaf(path.node_path()).unwrap();
+        let execution = leaf
+            .tabs
+            .iter()
+            .position(|tab| *tab == CoreTab::Feature(FeatureId::Execution))
+            .expect("in Execution's leaf");
+        assert_eq!(path.tab.0, execution + 1);
+        assert_eq!(leaf.tabs[leaf.active.0], CoreTab::Plan);
+        screen.capture("plan-tab");
+        screen.harness.get_by_label("Plan tab");
+        screen.harness.get_by_label("Fix the login redirect");
+        screen.harness.get_by_label("Write the redirect test");
+    }
+
+    // Given: the band shows thr-1's goal with its checks running
+    // When: Pause goal checks is pressed
+    // Then: exactly one SetGoalChecksPaused for that goal is sent, nothing else
+    #[test]
+    fn pause_goal_checks_in_the_band_sends_set_goal_checks_paused() {
+        let mut screen = teams_in_front();
+        screen.harness.get_by_label("Pause goal checks").click();
+        let asked = screen.settle_band();
+        let commands: Vec<_> = asked
+            .iter()
+            .filter_map(|request| match request {
+                FeatureRequest::Command(command) => Some(command),
+                FeatureRequest::Query(_) => None,
+            })
+            .collect();
+        let [Command::Execution(ExecutionCommand::SetGoalChecksPaused(paused))] = commands[..]
+        else {
+            panic!("one pause was expected, got {commands:?}");
+        };
+        assert_eq!(
+            (paused.thread.as_str(), paused.goal.as_str(), paused.paused),
+            ("thr-1", "g1", true)
+        );
+    }
+
+    // Given: the Plan tab opened from the band
+    // When: it is closed, then opened from ⚙ → Panels
+    // Then: it returns beside Execution
+    #[test]
+    fn plan_tab_closes_and_reopens_from_panels() {
+        let mut screen = teams_in_front();
+        screen.harness.get_by_label("Open plan").click();
+        screen.settle_band();
+        let dock = &mut screen.harness.state_mut().dock;
+        let path = dock.find_tab(&CoreTab::Plan).expect("the Plan tab");
+        dock.remove_tab(path);
+        screen.harness.run_steps(2);
+        assert!(screen.harness.query_by_label("Plan tab").is_none());
+
+        screen.harness.get_by_label("⚙").click();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Panels ⏵").click();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Plan").click();
+        screen.settle_band();
+        screen.harness.get_by_label("Plan tab");
+        let dock = &screen.harness.state().dock;
+        let plan = dock.find_tab(&CoreTab::Plan).unwrap();
+        let execution = dock
+            .find_tab(&CoreTab::Feature(FeatureId::Execution))
+            .unwrap();
+        assert_eq!(plan.node_path(), execution.node_path());
+        assert_eq!(plan.tab.0, execution.tab.0 + 1);
+    }
+}

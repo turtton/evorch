@@ -43,6 +43,13 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
                 view,
                 frame: &mut screen.frame,
             };
+            // As the dock draws a tab: maintained, then rendered.
+            let visibility = super::super::Visibility {
+                available: true,
+                expanded: true,
+                minimized: false,
+            };
+            screen.feature.maintain(&mut ctx, visibility);
             screen.feature.render(ui, &mut ctx);
         },
         state,
@@ -559,8 +566,9 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
         3,
         "the runs, the thread execution and the plan"
     );
-    assert_eq!(scope_of(&first[0]), RunScope::Roots);
     let roots_tag = runs_tag(&first);
+    let roots = first.iter().find(|a| a.tag == roots_tag).unwrap();
+    assert_eq!(scope_of(roots), RunScope::Roots);
     answer(
         &mut screen,
         roots_tag,
@@ -592,7 +600,9 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
             .unwrap(),
         }));
     let refresh = asked(&mut screen);
-    assert_eq!(scope_of(&refresh[0]), RunScope::Roots);
+    let refresh_tag = runs_tag(&refresh);
+    let roots = refresh.iter().find(|a| a.tag == refresh_tag).unwrap();
+    assert_eq!(scope_of(roots), RunScope::Roots);
     screen.get_by_label("子 run (2)").click();
     let drill = asked(&mut screen);
     assert_eq!(drill.len(), 1);
@@ -614,7 +624,7 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     // The slow answer for the roots now belongs to a level that is gone.
     answer(
         &mut screen,
-        refresh[0].tag,
+        refresh_tag,
         runs_reply(
             vec![run("run-b", None, "stopped", "history_only", 0)],
             false,
@@ -746,4 +756,324 @@ fn an_unknown_command_outcome_is_shown_and_never_resent() {
     feature.reply(tag, ok_command());
     assert!(feature.status.contains("受け付けました"));
     assert!(!feature.pending.contains_key(&tag));
+}
+
+/// The feature with its tab hidden: only `maintain` runs, as for a tab behind
+/// another one in the dock.
+struct Hidden {
+    feature: ExecutionFeature,
+    selection: Selection,
+    cache: Cache,
+}
+
+impl Hidden {
+    fn new(thread: &str) -> Self {
+        Self {
+            feature: ExecutionFeature::default(),
+            selection: Selection {
+                project: Some(ProjectId::new("p").unwrap()),
+                thread: Some(ThreadId::new(thread).unwrap()),
+            },
+            cache: Cache::default(),
+        }
+    }
+
+    fn select(&mut self, thread: &str) {
+        self.selection.thread = Some(ThreadId::new(thread).unwrap());
+    }
+
+    /// One pass; what it asked for.
+    fn maintain(&mut self) -> Vec<FeatureAction> {
+        let capabilities = [Capability::Queries, Capability::Commands];
+        let mut frame = FeatureFrame::default();
+        let mut ctx = FeatureContext {
+            data: &mut super::super::data::DataInbox::default(),
+            feature: FeatureId::Execution,
+            view: FeatureView {
+                connected: true,
+                capabilities: &capabilities,
+                cache: &self.cache,
+                selection: &self.selection,
+            },
+            frame: &mut frame,
+        };
+        let visibility = super::super::Visibility {
+            available: true,
+            expanded: false,
+            minimized: false,
+        };
+        self.feature.maintain(&mut ctx, visibility);
+        frame.actions
+    }
+
+    fn band_label(&self) -> String {
+        crate::panes::conversation_plan::band_label(self.feature.band().unwrap().plan.summary)
+    }
+}
+
+fn plan_query<'a>(actions: &'a [FeatureAction], kind: &str) -> Option<&'a FeatureAction> {
+    actions.iter().find(|a| {
+        let Query::Execution(query) = query_of(a) else {
+            return false;
+        };
+        match query {
+            ExecutionQuery::GetConversationPlan(_) => kind == "summary",
+            ExecutionQuery::ReadConversationPlanTree(_) => kind == "tree",
+            ExecutionQuery::ReadConversationPlanHistory(_) => kind == "history",
+            ExecutionQuery::GetConversationPlanTask(_) => kind == "task",
+            _ => false,
+        }
+    })
+}
+
+fn summary_tag(actions: &[FeatureAction]) -> u64 {
+    plan_query(actions, "summary")
+        .expect("the plan summary is read")
+        .tag
+}
+
+fn plan_summary(thread: &str, revision: u64, completed: u32, blocked: u32) -> FeatureReply {
+    let leaves = json!({"pending": 4 - completed - blocked, "in_progress": 0,
+        "completed": completed, "blocked": blocked, "interrupted": 0});
+    let weights = json!({"pending": 1_000_000 - completed * 250_000, "in_progress": 0,
+        "completed": completed * 250_000, "blocked": 0, "interrupted": 0});
+    query_reply(
+        json!({"type": "execution", "payload": {"type": "conversation_plan",
+        "payload": {"thread": thread, "plan_id": "plan-1", "revision": revision.to_string(),
+            "progress": {"node_count": 5, "leaf_count": 4, "leaf_counts": leaves,
+                "weighted_ppm": weights}}}}),
+    )
+}
+
+fn empty_plan(revision: u64) -> FeatureReply {
+    let empty = json!({"pending": 0, "in_progress": 0, "completed": 0, "blocked": 0,
+        "interrupted": 0});
+    query_reply(json!({"type": "execution", "payload": {
+    "type": "conversation_plan", "payload": {"thread": "t1", "plan_id": null,
+        "revision": revision.to_string(), "progress": {"node_count": 0, "leaf_count": 0,
+            "leaf_counts": empty, "weighted_ppm": empty}}}}))
+}
+
+fn plan_changed(revision: u64) -> UiEvent {
+    UiEvent::Execution(ExecutionEvent::ConversationPlanChanged {
+        thread: ThreadId::new("t1").unwrap(),
+        revision: workbench_protocol::wire::Revision(revision),
+    })
+}
+
+#[test]
+fn plan_summary_is_read_from_maintain_while_the_tab_is_hidden() {
+    // Given: the Execution tab is never drawn (Teams is in front of it).
+    let mut hidden = Hidden::new("t1");
+
+    // When: the dock maintains the hidden feature.
+    let first = hidden.maintain();
+
+    // Then: the goal and the plan summary are read, the runs are not, and the
+    // answer reaches the band.
+    assert!(first.iter().any(|a| matches!(
+        query_of(a),
+        Query::Execution(ExecutionQuery::GetThreadExecution(_))
+    )));
+    assert!(plan_query(&first, "tree").is_none());
+    assert!(!first.iter().any(|a| matches!(
+        query_of(a),
+        Query::Execution(ExecutionQuery::ListRunDetails(_))
+    )));
+    hidden
+        .feature
+        .reply(summary_tag(&first), plan_summary("t1", 3, 2, 1));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 50% complete, 2 of 4 tasks completed, 1 blocked"
+    );
+    assert!(hidden.maintain().is_empty(), "nothing is read twice");
+}
+
+#[test]
+fn a_newer_plan_notice_rereads_and_a_late_notice_or_answer_never_moves_back() {
+    let mut hidden = Hidden::new("t1");
+    let tag = summary_tag(&hidden.maintain());
+    hidden.feature.reply(tag, plan_summary("t1", 5, 3, 0));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 75% complete, 3 of 4 tasks completed"
+    );
+
+    // A notice for the revision already shown, or an older one, asks nothing.
+    hidden.feature.event(&plan_changed(5));
+    hidden.feature.event(&plan_changed(2));
+    assert!(plan_query(&hidden.maintain(), "summary").is_none());
+
+    hidden.feature.event(&plan_changed(6));
+    let reread = summary_tag(&hidden.maintain());
+    // An answer older than what is shown is dropped.
+    hidden.feature.reply(reread, plan_summary("t1", 4, 1, 0));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 75% complete, 3 of 4 tasks completed"
+    );
+}
+
+#[test]
+fn a_thread_switch_drops_the_old_plan_and_its_late_answer() {
+    let mut hidden = Hidden::new("t1");
+    let old = summary_tag(&hidden.maintain());
+    hidden.select("t2");
+    let switched = hidden.maintain();
+    hidden.feature.reply(old, plan_summary("t1", 9, 4, 0));
+    let band = hidden.feature.band().unwrap();
+    assert_eq!(band.thread.as_str(), "t2");
+    assert!(
+        band.plan.summary.is_none(),
+        "the old thread's answer is dropped"
+    );
+    hidden
+        .feature
+        .reply(summary_tag(&switched), plan_summary("t2", 1, 1, 0));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 25% complete, 1 of 4 tasks completed"
+    );
+}
+
+#[test]
+fn an_unplanned_and_a_cleared_plan_are_told_apart() {
+    for (revision, label) in [(0, "Not planned"), (4, "Plan cleared")] {
+        let mut hidden = Hidden::new("t1");
+        let tag = summary_tag(&hidden.maintain());
+        hidden.feature.reply(tag, empty_plan(revision));
+        assert_eq!(hidden.band_label(), label);
+    }
+}
+
+#[test]
+fn detail_reads_wait_for_the_plan_tab() {
+    let mut hidden = Hidden::new("t1");
+    let tag = summary_tag(&hidden.maintain());
+    hidden.feature.reply(tag, plan_summary("t1", 3, 2, 0));
+    assert!(
+        hidden.maintain().is_empty(),
+        "no tree or history while hidden"
+    );
+
+    // The Plan tab is drawn: its reads leave in the next pass.
+    assert!(hidden.feature.plan_drawn(), "the tab was hidden before");
+    let shown = hidden.maintain();
+    assert!(plan_query(&shown, "tree").is_some());
+    assert!(plan_query(&shown, "history").is_some());
+    assert!(!hidden.feature.plan_drawn(), "the tab stays shown");
+
+    hidden
+        .feature
+        .enqueue_plan(PlanPanelAction::Select("task-1".into()));
+    let selected = hidden.maintain();
+    let Query::Execution(ExecutionQuery::GetConversationPlanTask(task)) =
+        query_of(plan_query(&selected, "task").expect("the selected task is read"))
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (task.thread.as_str(), task.task_id.as_str()),
+        ("t1", "task-1")
+    );
+}
+
+#[test]
+fn a_reconnect_rereads_without_a_stuck_read() {
+    // Given: the summary shown, and a newer read in flight when the
+    // connection is replaced.
+    let mut hidden = Hidden::new("t1");
+    let tag = summary_tag(&hidden.maintain());
+    hidden.feature.reply(tag, plan_summary("t1", 3, 2, 0));
+    hidden.feature.event(&plan_changed(4));
+    let old = summary_tag(&hidden.maintain());
+
+    // When: a new snapshot resets the feature.
+    hidden.feature.reset();
+
+    // Then: the summary is read again at once and stays shown meanwhile, and
+    // the old connection's late answer is ignored.
+    let again = summary_tag(&hidden.maintain());
+    assert_ne!(again, old);
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 50% complete, 2 of 4 tasks completed"
+    );
+    hidden.feature.reply(old, plan_summary("t1", 9, 4, 0));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 50% complete, 2 of 4 tasks completed"
+    );
+    hidden.feature.reply(again, plan_summary("t1", 4, 3, 0));
+    assert_eq!(
+        hidden.band_label(),
+        "Plan 75% complete, 3 of 4 tasks completed"
+    );
+}
+
+#[test]
+fn queued_goal_actions_send_review_and_pause_for_the_shown_goal() {
+    let mut hidden = Hidden::new("t1");
+    let first = hidden.maintain();
+    let execution = first
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of(a),
+                Query::Execution(ExecutionQuery::GetThreadExecution(_))
+            )
+        })
+        .unwrap()
+        .tag;
+    hidden.feature.reply(execution, execution_reply(true));
+    assert_eq!(
+        hidden
+            .feature
+            .band()
+            .unwrap()
+            .goal
+            .map(|g| g.objective.as_str()),
+        Some("ship it")
+    );
+
+    // An action for another goal or thread (pressed before a switch) is dropped.
+    for (thread, goal) in [("t1", "g-old"), ("t2", "g1")] {
+        hidden.feature.enqueue_goal(GoalAction::Review {
+            thread_id: thread.into(),
+            goal_id: goal.into(),
+            enabled: false,
+        });
+    }
+    assert!(hidden.maintain().is_empty());
+
+    hidden.feature.enqueue_goal(GoalAction::Review {
+        thread_id: "t1".into(),
+        goal_id: "g1".into(),
+        enabled: false,
+    });
+    hidden.feature.enqueue_goal(GoalAction::ChecksPaused {
+        thread_id: "t1".into(),
+        goal_id: "g1".into(),
+        paused: true,
+    });
+    let sent = hidden.maintain();
+    assert_eq!(sent.len(), 2);
+    let Command::Execution(ExecutionCommand::SetGoalReview(review)) = command_of(&sent[0]) else {
+        panic!("a review toggle was expected");
+    };
+    assert_eq!(
+        (review.thread.as_str(), review.goal.as_str(), review.enabled),
+        ("t1", "g1", false)
+    );
+    let Command::Execution(ExecutionCommand::SetGoalChecksPaused(paused)) = command_of(&sent[1])
+    else {
+        panic!("a pause toggle was expected");
+    };
+    assert_eq!((paused.goal.as_str(), paused.paused), ("g1", true));
+    hidden.feature.reply(sent[0].tag, ok_command());
+    assert_eq!(
+        hidden.feature.status,
+        "ゴールレビューの切替: 受け付けました"
+    );
 }

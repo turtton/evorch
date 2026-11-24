@@ -368,3 +368,28 @@ fn a_refresh_during_a_read_keeps_the_view_due_for_another() {
     // Then: the summary is read once more.
     assert_eq!(kinds(&state.requests(false)), [ReadKind::Summary]);
 }
+
+#[test]
+fn restart_reads_keeps_the_shown_summary_and_drops_the_old_answers() {
+    // Given: the summary shown at revision 5 and a newer read in flight.
+    let mut state = shown(5);
+    state.invalidate(&thread("a"), Revision(6));
+    let requests = state.requests(false);
+    let old = take(&requests, ReadKind::Summary).generation;
+
+    // When: the connection is replaced before the answer arrives.
+    state.restart_reads();
+
+    // Then: the shown summary stays, the read is sent again, and the late
+    // answer of the old connection moves nothing.
+    assert_eq!(state.summary().map(|s| s.revision), Some(Revision(5)));
+    let again = state.requests(false);
+    assert_eq!(kinds(&again), [ReadKind::Summary]);
+    assert_ne!(again[0].generation, old);
+    state.apply(ReadKind::Summary, old, Ok(summary("a", 9, 900_000)));
+    assert_eq!(state.summary().map(|s| s.revision), Some(Revision(5)));
+    assert!(
+        state.requests(false).is_empty(),
+        "the new read is in flight"
+    );
+}

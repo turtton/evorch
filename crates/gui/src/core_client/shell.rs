@@ -4,13 +4,15 @@
 use std::collections::BTreeSet;
 
 use egui::{RichText, Ui};
-use egui_dock::{DockState, NodeIndex, TabViewer};
+use egui_dock::{DockState, NodeIndex, TabIndex, TabViewer};
 use workbench_protocol::ids::{ProjectId, ThreadId};
 
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
 use super::features::{DockPass, FeatureId, Navigation, Selection};
 use super::notifications::{self, NotificationLog};
+use crate::panes::conversation_plan::plan_panel;
+use crate::panes::goal_widgets::GoalAction;
 use crate::panes::sidebar_widgets::{INDENT, ProjectRowView, project_row};
 use crate::theme::icons;
 use crate::theme::text::muted;
@@ -22,6 +24,8 @@ pub enum CoreTab {
     Projects,
     Conversation,
     Notifications,
+    /// The selected thread's plan, opened from the composer band.
+    Plan,
     Feature(FeatureId),
 }
 
@@ -30,6 +34,8 @@ pub enum Effect {
     Send(Box<Action>),
     Reveal(FeatureId),
     Open(CoreTab),
+    /// A goal control pressed in the composer band, for the execution feature.
+    Goal(GoalAction),
     ResetLayout,
     Status(String),
     AttachRequested {
@@ -98,6 +104,26 @@ pub fn focus(dock: &mut DockState<CoreTab>, tab: CoreTab) {
     }
 }
 
+/// Bring `tab` forward. A tab not in the dock opens right after `anchor` in the
+/// anchor's leaf (else beside the conversation), and the leaf's tab bar scrolls
+/// back to its start so the new tab is in sight.
+pub fn focus_beside(dock: &mut DockState<CoreTab>, tab: CoreTab, anchor: CoreTab) {
+    if dock.find_tab(&tab).is_none()
+        && let Some(path) = dock.find_tab(&anchor)
+        && let Ok(leaf) = dock.leaf_mut(path.node_path())
+    {
+        let index = (path.tab.0 + 1).min(leaf.tabs.len());
+        leaf.tabs.insert(index, tab);
+        leaf.active = TabIndex(index);
+    }
+    focus(dock, tab);
+    if let Some(path) = dock.find_tab(&tab)
+        && let Ok(leaf) = dock.leaf_mut(path.node_path())
+    {
+        leaf.scroll = 0.0;
+    }
+}
+
 pub fn feature_icon(feature: FeatureId) -> &'static str {
     match feature {
         FeatureId::Workspace => icons::FOLDER_SIMPLE,
@@ -142,6 +168,7 @@ impl Viewer<'_, '_> {
             CoreTab::Projects => (icons::FOLDER_SIMPLE, "Projects"),
             CoreTab::Conversation => (icons::CHAT_CIRCLE_TEXT, "Conversation"),
             CoreTab::Notifications => (icons::BELL, "Notifications"),
+            CoreTab::Plan => (icons::LIST_CHECKS, "Plan"),
             CoreTab::Feature(feature) => (feature_icon(feature), self.title_of(feature)),
         }
     }
@@ -180,13 +207,35 @@ impl Viewer<'_, '_> {
         });
     }
 
-    fn unavailable(&self, ui: &mut Ui, feature: FeatureId) {
+    fn unavailable(&self, ui: &mut Ui, title: &str) {
         let hint = if !self.io.connected {
             "Connect to the core to use this area."
         } else {
             "The connected core does not offer this area."
         };
-        empty_state(ui, self.title_of(feature), hint, None);
+        empty_state(ui, title, hint, None);
+    }
+
+    /// The plan of the thread the execution feature follows. Selecting a task
+    /// or paging the history is queued into the feature.
+    fn plan(&mut self, ui: &mut Ui) {
+        let Some(execution) = self.pass.execution() else {
+            self.unavailable(ui, "Plan");
+            return;
+        };
+        let action = plan_panel(ui, execution.plan_state());
+        let Some(execution) = self.pass.execution_mut() else {
+            return;
+        };
+        // Reads for a tab shown again leave in the next pass.
+        let mut repaint = execution.plan_drawn();
+        if let Some(action) = action {
+            execution.enqueue_plan(action);
+            repaint = true;
+        }
+        if repaint {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -230,23 +279,28 @@ impl TabViewer for Viewer<'_, '_> {
         match *tab {
             CoreTab::Projects => self.projects(ui),
             CoreTab::Notifications => self.notifications(ui),
-            CoreTab::Conversation => conversation::show(
-                ui,
-                self.conversation,
-                &mut self.io,
-                self.selection,
-                self.effects,
-            ),
+            CoreTab::Conversation => {
+                let band = self.pass.execution().and_then(|e| e.band());
+                conversation::show(
+                    ui,
+                    self.conversation,
+                    &mut self.io,
+                    self.selection,
+                    band,
+                    self.effects,
+                );
+            }
+            CoreTab::Plan => self.plan(ui),
             CoreTab::Feature(feature) => {
                 if !self.pass.render_tab(feature, ui) {
-                    self.unavailable(ui, feature);
+                    self.unavailable(ui, self.title_of(feature));
                 }
             }
         }
     }
 
     fn is_closeable(&self, tab: &CoreTab) -> bool {
-        matches!(tab, CoreTab::Feature(_))
+        matches!(tab, CoreTab::Feature(_) | CoreTab::Plan)
     }
 
     fn scroll_bars(&self, _tab: &CoreTab) -> [bool; 2] {
@@ -364,10 +418,12 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
                     CoreTab::Projects,
                     CoreTab::Conversation,
                     CoreTab::Notifications,
+                    CoreTab::Plan,
                 ] {
                     let label = match tab {
                         CoreTab::Projects => "Projects",
                         CoreTab::Notifications => "Notifications",
+                        CoreTab::Plan => "Plan",
                         _ => "Conversation",
                     };
                     if ui.button(label).clicked() {

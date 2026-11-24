@@ -232,6 +232,18 @@ impl PlanState {
         }
     }
 
+    /// The reads in flight will never be answered (a new connection): their
+    /// answers are dropped and every view is read again, while what was read
+    /// stays on screen.
+    pub fn restart_reads(&mut self) {
+        self.generation += 1;
+        self.in_flight = [false; 4];
+        self.stale = [true; 4];
+        self.tree_read = None;
+        self.task_read = None;
+        self.history_read = None;
+    }
+
     pub fn select(&mut self, task_id: &str) {
         if self.selected.as_deref() != Some(task_id) {
             self.selected = Some(task_id.to_owned());
