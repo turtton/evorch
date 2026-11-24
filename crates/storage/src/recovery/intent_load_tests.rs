@@ -118,3 +118,24 @@ fn a_scan_that_cannot_start_is_an_error_not_a_partial_result() {
         Err(StorageError::Sqlite(_))
     ));
 }
+
+#[test]
+fn the_visitor_delivers_the_same_pinned_rows() {
+    let db = database();
+    let mut loads = Vec::new();
+    db.for_each_recovery_intent(|load| loads.push(load))
+        .unwrap();
+    assert_pinned(&loads);
+}
+
+#[test]
+fn a_visitor_scan_that_cannot_start_visits_nothing() {
+    let db = Database::open_in_memory().unwrap();
+    db.conn.execute_batch("DROP TABLE resume_intents").unwrap();
+    let mut visited = 0;
+    assert!(matches!(
+        db.for_each_recovery_intent(|_| visited += 1),
+        Err(StorageError::Sqlite(_))
+    ));
+    assert_eq!(visited, 0);
+}

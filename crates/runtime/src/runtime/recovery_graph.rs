@@ -756,27 +756,31 @@ impl AgentRuntime {
             }
         }
         // Legacy/crash intents without a committed manifest are never candidates.
-        let rows = store
-            .with_database(|db| db.recovery_intent_loads())
+        // Every stored row is still decoded (a corrupt row must be reported even when a
+        // manifest covers it), but only its outcome is kept: each payload is dropped as soon
+        // as it has been judged.
+        store
+            .with_database(|db| {
+                db.for_each_recovery_intent(|(id, row)| {
+                    let run = id.and_then(|id| id.parse::<RunId>().ok());
+                    match row.ok().and_then(|row| ResumeIntent::decode(row).ok()) {
+                        Some(intent) if intent.active && !covered.contains(&intent.run_id) => {
+                            plan.report.skipped.push(RecoveryOutcome {
+                                manifest_id: None,
+                                runs: vec![intent.run_id],
+                                reason: RecoveryReason::NoCommittedManifest,
+                            })
+                        }
+                        None => plan.report.blocked.push(RecoveryOutcome {
+                            manifest_id: None,
+                            runs: run.into_iter().collect(),
+                            reason: RecoveryReason::CorruptComponent,
+                        }),
+                        _ => {}
+                    }
+                })
+            })
             .map_err(graph_error)?;
-        for (id, row) in rows {
-            let run = id.and_then(|id| id.parse::<RunId>().ok());
-            match row.ok().and_then(|row| ResumeIntent::decode(row).ok()) {
-                Some(intent) if intent.active && !covered.contains(&intent.run_id) => {
-                    plan.report.skipped.push(RecoveryOutcome {
-                        manifest_id: None,
-                        runs: vec![intent.run_id],
-                        reason: RecoveryReason::NoCommittedManifest,
-                    })
-                }
-                None => plan.report.blocked.push(RecoveryOutcome {
-                    manifest_id: None,
-                    runs: run.into_iter().collect(),
-                    reason: RecoveryReason::CorruptComponent,
-                }),
-                _ => {}
-            }
-        }
         Ok(plan)
     }
 }
