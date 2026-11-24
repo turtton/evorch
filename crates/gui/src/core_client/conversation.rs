@@ -17,26 +17,27 @@ use super::connection::Action;
 use super::features::execution::ExecutionBand;
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::pull_requests::PullRequestBar;
-use super::features::{FeatureId, Selection};
+use super::features::{FeatureId, Navigation, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
-use super::transcript::{self, Scope, TranscriptView, byte_size};
+use super::transcript::{self, Scope, TranscriptView};
 use super::{ClientAttachmentDraft, Draft};
 use crate::attachments::{AttachmentIo, Intake};
+use crate::composer_input::CompletionState;
 use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, progress_band};
 use crate::panes::phase_indicator::phase_circle;
 use crate::panes::pull_request_widgets;
 use crate::panes::transcript_widgets::{
-    full_input, ime_composing, request_card, run_transcript_empty, run_transcript_title,
-    stop_button as shared_stop_button,
+    event_line, full_input, request_card, run_transcript_empty, run_transcript_title,
 };
 use crate::theme::icons;
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
-use crate::theme::widgets::{
-    empty_state, fill_label, ghost, icon_button, pane_root, primary_icon_button, soft_frame,
-    surface_frame,
-};
+use crate::theme::widgets::{empty_state, fill_label, ghost, icon_button, pane_root, soft_frame};
+
+mod composer;
+mod mentions;
+mod slash;
 
 const MAX_ANSWER_BYTES: usize = 4096;
 
@@ -46,6 +47,19 @@ pub struct ConversationPane {
     pub(super) attachment_imports: BTreeMap<String, (ProjectId, ThreadId)>,
     composer_role: ComposerRole,
     team: bool,
+    completion: CompletionState,
+    /// The thread the composer was last drawn for: Esc's dismissal does not carry
+    /// over to another thread, as the embedded workbench clears it on a switch.
+    completion_thread: Option<ThreadId>,
+    /// Whether the composer held focus at the end of the last frame it was drawn in.
+    was_focused: bool,
+    mentions: mentions::MentionWork,
+    /// Pasted and dropped files, captured before the frame, for the attachment worker.
+    intakes: Vec<(ProjectId, ThreadId, Intake)>,
+    /// What the slash commands answered, per thread: shown at the transcript's end
+    /// until the thread's next submission. Kept on this machine only.
+    notices: BTreeMap<String, Vec<String>>,
+    navigation: Option<Navigation>,
     /// The message bodies asked of the projection numbered `projection`.
     requested_bodies: BTreeSet<String>,
     projection: u64,
@@ -59,6 +73,13 @@ impl Default for ConversationPane {
             attachment_imports: BTreeMap::new(),
             composer_role: ComposerRole::Worker,
             team: false,
+            completion: CompletionState::default(),
+            completion_thread: None,
+            was_focused: false,
+            mentions: mentions::MentionWork::default(),
+            intakes: Vec::new(),
+            notices: BTreeMap::new(),
+            navigation: None,
             requested_bodies: BTreeSet::new(),
             projection: 0,
         }
@@ -97,15 +118,6 @@ impl ConversationIo<'_> {
             thread,
         )
     }
-
-    fn can_discard_attachments(&self, thread: &str) -> bool {
-        super::can_discard_attachments(
-            self.sending,
-            self.loading_attachments,
-            self.attachment_drafts,
-            thread,
-        )
-    }
 }
 
 /// What the areas draw into the conversation: the execution feature's goal and plan band
@@ -132,6 +144,7 @@ pub fn show(
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
 ) {
+    pane.submit_intakes(ui.ctx(), io.sending, effects);
     pane_root(ui, "Conversation", |ui| {
         let (Some(project), Some(thread)) = (selection.project.clone(), selection.thread.clone())
         else {
@@ -175,7 +188,7 @@ pub fn show(
                     let vertical_spacing = ui.spacing().item_spacing.y;
                     ui.spacing_mut().item_spacing.y = 0.0;
                     progress(ui, io.cache, &thread, band, details_max, effects);
-                    composer(ui, pane, io, &project, &thread, activity, effects);
+                    composer::composer(ui, pane, io, &project, &thread, activity, effects);
                     ui.spacing_mut().item_spacing.y = vertical_spacing;
                     status_strip(ui, io.cache, &thread, activity);
                 });
@@ -509,7 +522,13 @@ fn thread_transcript(
     let questions = open_questions(io.cache, thread);
     let approvals = pending_approvals(io.cache, thread);
     let routed = lead_routed_count(io.cache, thread);
-    let waiting = !questions.is_empty() || !approvals.is_empty() || routed > 0;
+    let notices = pane
+        .notices
+        .get(thread.as_str())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let waiting =
+        !questions.is_empty() || !approvals.is_empty() || routed > 0 || !notices.is_empty();
     // While older pages exist, the thread may have messages that are not read yet.
     let older = io
         .cache
@@ -544,6 +563,9 @@ fn thread_transcript(
             }
             for approval in approvals {
                 approval_card(ui, io.cache, approval, effects);
+            }
+            for notice in notices {
+                event_line(ui, icons::INFO, notice, palette().TEXT_MUTED, None);
             }
         },
         effects,
@@ -821,329 +843,6 @@ fn queue_rows(ui: &mut Ui, receipts: &[&InputReceipt], thread: &ThreadId) -> Opt
         });
     }
     withdraw
-}
-
-fn composer(
-    ui: &mut Ui,
-    pane: &mut ConversationPane,
-    io: &mut ConversationIo<'_>,
-    project: &ProjectId,
-    thread: &ThreadId,
-    activity: Activity,
-    effects: &mut Vec<Effect>,
-) {
-    let can_stop = activity.root_active || activity.stopped;
-    let input_id = ui.id().with("composer-input");
-    let min_input = COMPOSER_MIN_HEIGHT - 2.0 * SP_2;
-    // Wrapped rows are only known after layout, so the viewport follows the
-    // last measured document height and the pass is redone when it changes.
-    let measured_id = input_id.with("wanted-height");
-    let wanted = ui
-        .data(|data| data.get_temp::<f32>(measured_id))
-        .unwrap_or_else(|| {
-            let text = io
-                .drafts
-                .get(thread.as_str())
-                .map_or("", |d| d.text.as_str());
-            let rows = text.split('\n').count().max(1);
-            rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 2.0 * SP_2
-        })
-        .clamp(min_input, COMPOSER_MAX_HEIGHT);
-    let mut measured = wanted;
-    surface_frame(palette().SURFACE_RAISED)
-        .corner_radius(R_2XL)
-        .inner_margin(egui::vec2(SP_3, SP_2))
-        .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
-                selectors(ui, pane, io, project, thread, effects);
-                attachments(ui, io, project, thread, effects);
-                let ime_id = ui.id().with("ime-composing");
-                let ime = ime_composing(ui, ime_id);
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
-                        let draft_text = io
-                            .drafts
-                            .get(thread.as_str())
-                            .map_or("", |d| d.text.as_str());
-                        let has_attachments = io
-                            .attachment_drafts
-                            .get(thread.as_str())
-                            .is_some_and(|files| !files.is_empty());
-                        let can_send = io.can_send(thread.as_str())
-                            && (!draft_text.trim().is_empty() || has_attachments);
-                        let mut send = false;
-                        if can_stop
-                            && shared_stop_button(ui, activity.stopped, activity.running_children)
-                                .clicked()
-                        {
-                            effects.push(Effect::send(stop(thread)));
-                        }
-                        let send_button = if activity.root_active {
-                            ui.add_enabled(can_send, egui::Button::new("Queue"))
-                                .on_hover_text("Queue as a follow-up (Enter)")
-                        } else if can_send {
-                            primary_icon_button(ui, icons::PAPER_PLANE_RIGHT, "Send")
-                        } else {
-                            ui.add_enabled(
-                                false,
-                                ghost(icons::with_icon(icons::PAPER_PLANE_RIGHT, "Send")),
-                            )
-                        };
-                        send |= send_button.clicked();
-                        let draft = io.drafts.entry(thread.to_string()).or_default();
-                        let input = egui::ScrollArea::vertical()
-                            .id_salt("composer-scroll")
-                            .min_scrolled_width(0.0)
-                            .min_scrolled_height(wanted)
-                            .max_height(wanted)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut draft.text)
-                                            .id(input_id)
-                                            .hint_text("Message  (Shift+Enter: newline)")
-                                            .desired_rows(1)
-                                            .desired_width(f32::INFINITY)
-                                            .min_size(egui::vec2(
-                                                0.0,
-                                                COMPOSER_MIN_HEIGHT - 2.0 * SP_2,
-                                            ))
-                                            .return_key(egui::KeyboardShortcut::new(
-                                                egui::Modifiers::SHIFT,
-                                                egui::Key::Enter,
-                                            ))
-                                            .frame(
-                                                egui::Frame::NONE
-                                                    .inner_margin(egui::vec2(SP_3, SP_2)),
-                                            )
-                                            .background_color(palette().INPUT),
-                                    )
-                                })
-                                .inner
-                            })
-                            .inner;
-                        measured = input.rect.height().clamp(min_input, COMPOSER_MAX_HEIGHT);
-                        input.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Message")
-                        });
-                        if input.changed() {
-                            draft.revision += 1;
-                        }
-                        let focused = input.has_focus();
-                        let enter = focused
-                            && !ime
-                            && ui.input(|i| {
-                                i.key_pressed(egui::Key::Enter)
-                                    && !i.modifiers.shift
-                                    && !i.modifiers.command
-                            });
-                        ui.data_mut(|d| d.insert_temp(ime_id, ime && focused));
-                        if focused && can_stop && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            effects.push(Effect::send(stop(thread)));
-                        }
-                        if (send || enter) && can_send {
-                            submit(pane, io, project, thread, effects);
-                            input.request_focus();
-                        }
-                    });
-                });
-            });
-        });
-    if (measured - wanted).abs() > 0.5 {
-        ui.data_mut(|data| data.insert_temp(measured_id, measured));
-        ui.ctx().request_discard("composer input rows changed");
-        ui.ctx().request_repaint();
-    }
-}
-
-fn selectors(
-    ui: &mut Ui,
-    pane: &mut ConversationPane,
-    io: &ConversationIo<'_>,
-    project: &ProjectId,
-    thread: &ThreadId,
-    effects: &mut Vec<Effect>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        let (icon, label) = match pane.composer_role {
-            ComposerRole::Worker => (icons::ROBOT, "Worker"),
-            ComposerRole::Orchestrator => (icons::TREE_STRUCTURE, "Orchestrator"),
-        };
-        let response = ui
-            .button(icons::with_icon(icon, label))
-            .on_hover_text("Switch the role that receives your message");
-        let accessible = format!("Role: {label}");
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &accessible));
-        if response.clicked() {
-            pane.composer_role = match pane.composer_role {
-                ComposerRole::Worker => ComposerRole::Orchestrator,
-                ComposerRole::Orchestrator => ComposerRole::Worker,
-            };
-        }
-        ui.toggle_value(
-            &mut pane.team,
-            icons::with_icon(icons::USERS_THREE, "Team objective"),
-        )
-        .on_hover_text(
-            "Send the message as an objective for a team. Attachments are not supported.",
-        );
-        let sending = io.sending.contains(thread.as_str());
-        ui.add_enabled_ui(!sending, |ui| {
-            ui.menu_button(icons::with_icon(icons::PAPERCLIP, "Attach"), |ui| {
-                for (label, intake) in [
-                    ("Choose files…", Intake::ChooseFiles),
-                    ("Paste image from clipboard", Intake::Clipboard),
-                ] {
-                    if ui.button(label).clicked() {
-                        match pane.attachment_io.submit(thread.as_str(), intake, ui.ctx()) {
-                            Ok(request) => effects.push(Effect::AttachRequested {
-                                request,
-                                project: project.clone(),
-                                thread: thread.clone(),
-                            }),
-                            Err(error) => effects.push(Effect::Status(error)),
-                        }
-                        ui.close();
-                    }
-                }
-            });
-        });
-    });
-}
-
-fn attachments(
-    ui: &mut Ui,
-    io: &ConversationIo<'_>,
-    project: &ProjectId,
-    thread: &ThreadId,
-    effects: &mut Vec<Effect>,
-) {
-    let files = io
-        .attachment_drafts
-        .get(thread.as_str())
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let loading = io
-        .loading_attachments
-        .get(thread.as_str())
-        .copied()
-        .unwrap_or(0);
-    if files.is_empty() && loading == 0 {
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        for file in files {
-            let state = if file.reference.is_some() {
-                "ready"
-            } else if file.uploading {
-                "uploading"
-            } else {
-                "needs retry"
-            };
-            crate::theme::widgets::badge(
-                ui,
-                format!(
-                    "{} · {} · {state}",
-                    file.file.filename,
-                    byte_size(file.file.bytes.len() as u64)
-                ),
-                if file.reference.is_some() || file.uploading {
-                    palette().TEXT
-                } else {
-                    palette().WARNING_FG
-                },
-                palette().SURFACE,
-            );
-        }
-        if loading > 0 {
-            ui.label(muted("Reading files…").size(FONT_SMALL));
-        }
-        let pending = files
-            .iter()
-            .any(|file| file.reference.is_none() && !file.uploading && !file.uncertain);
-        if pending && ui.add(ghost("Retry upload")).clicked() {
-            effects.push(Effect::RetryAttachments {
-                project: project.clone(),
-                thread: thread.clone(),
-            });
-        }
-        if ui
-            .add_enabled(
-                io.can_discard_attachments(thread.as_str()),
-                ghost(icons::with_icon(icons::X, "Discard")),
-            )
-            .clicked()
-        {
-            effects.push(Effect::DiscardAttachments(thread.clone()));
-        }
-    });
-}
-
-fn submit(
-    pane: &mut ConversationPane,
-    io: &ConversationIo<'_>,
-    project: &ProjectId,
-    thread: &ThreadId,
-    effects: &mut Vec<Effect>,
-) {
-    let Some(draft) = io.drafts.get(thread.as_str()) else {
-        return;
-    };
-    let attachments: Vec<_> = io
-        .attachment_drafts
-        .get(thread.as_str())
-        .into_iter()
-        .flatten()
-        .filter_map(|i| i.reference.as_ref().map(|reference| reference.id.clone()))
-        .collect();
-    if pane.team && !attachments.is_empty() {
-        effects.push(Effect::Status(
-            "A team objective cannot carry attachments".into(),
-        ));
-        return;
-    }
-    let exists = io.cache.threads.contains_key(thread.as_str());
-    let command = if pane.team {
-        let goal = SubmitGoal {
-            project: project.clone(),
-            thread: thread.clone(),
-            objective: draft.text.clone(),
-            references: vec![],
-            constraints: vec![],
-            delegation: Some(Delegation::Team {
-                value: draft.text.clone(),
-            }),
-        };
-        if exists {
-            Command::Execution(ExecutionCommand::SubmitGoal(goal))
-        } else {
-            Command::Conversation(ConversationCommand::CreateGoal(goal))
-        }
-    } else {
-        let chat = SendChat {
-            project: project.clone(),
-            thread: thread.clone(),
-            submission_id: SubmissionId::new(uuid::Uuid::new_v4().to_string()).unwrap(),
-            composer_role: pane.composer_role,
-            text: draft.text.clone(),
-            skills: vec![],
-            attachments,
-            model_preference: None,
-            fork_seed: None,
-        };
-        if exists {
-            Command::Conversation(ConversationCommand::SendChat(chat))
-        } else {
-            Command::Conversation(ConversationCommand::CreateExecution(chat))
-        }
-    };
-    effects.push(Effect::send(Action::Command {
-        command,
-        draft: Some((thread.to_string(), draft.revision)),
-    }));
 }
 
 fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId, activity: Activity) {

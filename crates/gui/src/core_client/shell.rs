@@ -67,7 +67,11 @@ pub enum Effect {
         project: ProjectId,
         thread: ThreadId,
     },
-    DiscardAttachments(ThreadId),
+    /// Remove pressed on one pending file of a thread.
+    RemoveAttachment {
+        thread: ThreadId,
+        id: String,
+    },
 }
 
 impl Effect {
@@ -461,6 +465,7 @@ impl TabViewer for Viewer<'_, '_> {
                 let band = self.pass.execution().and_then(|e| e.band());
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());
                 let pull_request = self.pass.pull_requests().and_then(|prs| prs.bar());
+                self.conversation.set_mention_scope(self.local.roots());
                 conversation::show(
                     ui,
                     self.conversation,
@@ -474,6 +479,9 @@ impl TabViewer for Viewer<'_, '_> {
                     root.as_ref(),
                     self.effects,
                 );
+                if let Some(navigation) = self.conversation.take_navigation() {
+                    self.pass.navigate(navigation);
+                }
             }
             CoreTab::Plan => self.plan(ui),
             CoreTab::Diff => self.local.diff_tab(ui),

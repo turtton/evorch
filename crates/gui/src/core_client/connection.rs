@@ -72,7 +72,12 @@ fn update(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, f: impl FnOnce(&mut 
 
 #[derive(Clone)]
 enum Pending {
-    Command(Option<(String, u64)>),
+    /// `draft` is cleared when the core accepts; the thread's files go with it
+    /// only when `takes_files`.
+    Command {
+        draft: Option<(String, u64)>,
+        takes_files: bool,
+    },
     Upload {
         thread: String,
         id: String,
@@ -96,7 +101,10 @@ impl Pending {
                     .features
                     .reply(*feature, *tag, FeatureReply::Command(Err(error)));
             }
-            Self::Command(Some((thread, _))) => {
+            Self::Command {
+                draft: Some((thread, _)),
+                ..
+            } => {
                 state.sending.remove(thread);
             }
             Self::Upload { thread, id, .. } => {
@@ -364,7 +372,8 @@ pub async fn serve(
                         if matches!(action, Action::Shutdown) { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; release_own(&client, &shared).await; return; }
                         match action {
                             Action::Command { command, draft } => {
-                                send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command(draft)).await;
+                                let takes_files = takes_files(&command);
+                                send_command(&client, &shared, &ctx, &mut uncertain, command, Pending::Command { draft, takes_files }).await;
                             }
                             Action::Feature(FeatureAction { feature, tag, request }) => match request {
                                 FeatureRequest::Command(command) => {
@@ -792,12 +801,12 @@ async fn accepted(
     let mut discarded = Vec::new();
     update(shared, ctx, |s| {
         let mut reply_error = None;
-        let draft = match pending {
-            Pending::Command(draft) => draft,
+        let (draft, takes_files) = match pending {
+            Pending::Command { draft, takes_files } => (draft, takes_files),
             Pending::Feature { feature, tag } => {
                 s.features
                     .reply(feature, tag, FeatureReply::Command(Ok(reply.clone())));
-                None
+                (None, false)
             }
             Pending::Upload {
                 thread,
@@ -843,11 +852,15 @@ async fn accepted(
                     }
                     reply_error = Some("Attachment command returned no upload result".into());
                 }
-                None
+                (None, false)
             }
         };
         if let Some((thread, _)) = &draft {
             s.sending.remove(thread);
+        }
+        if let Some((thread, _)) = &draft
+            && takes_files
+        {
             discarded.extend(
                 s.attachment_drafts
                     .remove(thread)
@@ -873,6 +886,17 @@ async fn accepted(
             ))
             .await;
     }
+}
+
+/// Only a message carries the thread's files; a slash command sent from the
+/// same composer leaves them for the next message.
+fn takes_files(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Conversation(
+            ConversationCommand::SendChat(_) | ConversationCommand::CreateExecution(_)
+        )
+    )
 }
 
 fn next_upload(
@@ -1035,6 +1059,53 @@ mod tests {
             b"retained local bytes"
         );
         assert!(state.attachment_drafts["t"][0].reference.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_accepted_slash_command_clears_its_text_and_leaves_the_files() {
+        use workbench_protocol::envelope::{ReplyPayload, ReplyResult};
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        {
+            let mut state = shared.lock().unwrap();
+            state.drafts.insert(
+                "t".into(),
+                super::super::Draft {
+                    text: "/compaction".into(),
+                    revision: 2,
+                },
+            );
+            state.sending.insert("t".into());
+            state.attachment_draft(
+                ProjectId::new("p").unwrap(),
+                "t",
+                crate::fixture::attachment_draft().file,
+            );
+        }
+        let command = Command::Conversation(ConversationCommand::CompactChat(
+            workbench_protocol::commands::ThreadTarget {
+                thread: ThreadId::new("t").unwrap(),
+            },
+        ));
+        let pending = Pending::Command {
+            draft: Some(("t".into(), 2)),
+            takes_files: takes_files(&command),
+        };
+        let (client, mut core) = connect().await;
+        let (ctx, mut uncertain) = (egui::Context::default(), Vec::new());
+        tokio::join!(
+            send_command(&client, &shared, &ctx, &mut uncertain, command, pending,),
+            async {
+                let request = core.recv_request().await.unwrap();
+                core.reply(
+                    &request.request_id,
+                    ReplyResult::Success(ReplyPayload::Command(CommandReply::accepted())),
+                );
+            },
+        );
+        let state = shared.lock().unwrap();
+        assert_eq!(state.drafts["t"].text, "");
+        assert!(!state.sending.contains("t"));
+        assert_eq!(state.attachment_drafts["t"].len(), 1);
     }
 
     /// Remembers what the features were told, in order.

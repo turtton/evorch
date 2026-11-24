@@ -150,6 +150,11 @@ impl LocalPanes {
         terminal_pane(ui, &mut self.terminals, &key, &cwd);
     }
 
+    /// The selection's directories as of this frame's [`Self::begin_frame`].
+    pub fn roots(&self) -> &LocalRoots {
+        &self.roots
+    }
+
     /// The selected thread's working tree on this machine, which relative links in
     /// the transcripts resolve against.
     pub fn workspace(&self) -> Option<&Path> {
@@ -361,6 +366,7 @@ mod tests {
             thread: None,
             project_root: LocalRoot::Ready(root.path().into()),
             workspace: LocalRoot::Ready(root.path().into()),
+            allowed: Vec::new(),
         };
         let ctx = egui::Context::default();
 

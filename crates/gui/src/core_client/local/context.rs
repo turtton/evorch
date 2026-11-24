@@ -11,6 +11,7 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use crate::core_client::cache::Cache;
 use crate::core_client::features::Selection;
 use crate::core_client::features::workspace::SidebarModel;
+use workbench_protocol::namespaces::workspace::TrustLevel;
 
 /// One directory the core reported, checked against this machine.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -58,17 +59,30 @@ pub struct LocalRoots {
     /// The selected thread's working tree (its active root, else the project's root):
     /// what the Diff shows.
     pub workspace: LocalRoot,
+    /// The project's approved allowed directories that exist, as absolute paths: what
+    /// the composer's `@` mentions list beside the project's own files.
+    pub allowed: Vec<PathBuf>,
 }
 
 impl LocalRoots {
     /// The roots of `selection` from what the sidebar has read of the core.
     pub fn resolve(selection: &Selection, sidebar: Option<&SidebarModel>, cache: &Cache) -> Self {
-        let project_root = match &selection.project {
-            None => LocalRoot::None,
-            Some(project) => sidebar
-                .and_then(|sidebar| sidebar.access.get(project.as_str()))
-                .map_or(LocalRoot::Pending, |access| LocalRoot::local(&access.root)),
+        let access = selection
+            .project
+            .as_ref()
+            .and_then(|project| sidebar?.access.get(project.as_str()));
+        let project_root = match (&selection.project, access) {
+            (None, _) => LocalRoot::None,
+            (Some(_), None) => LocalRoot::Pending,
+            (Some(_), Some(access)) => LocalRoot::local(&access.root),
         };
+        let allowed = access
+            .into_iter()
+            .flat_map(|access| &access.allowed_directories)
+            .filter(|directory| directory.trust == TrustLevel::Approved && directory.live)
+            .map(|directory| PathBuf::from(&directory.path))
+            .filter(|path| path.is_absolute())
+            .collect();
         let workspace = match &selection.thread {
             // A new conversation is not in the core yet: it works in the project.
             Some(thread) if cache.threads.contains_key(thread.as_str()) => {
@@ -89,6 +103,7 @@ impl LocalRoots {
             thread: selection.thread.clone(),
             project_root,
             workspace,
+            allowed,
         }
     }
 
@@ -98,6 +113,9 @@ impl LocalRoots {
     pub fn keep_known(mut self, previous: &Self) -> Self {
         if self.project != previous.project || self.thread != previous.thread {
             return self;
+        }
+        if self.project_root == LocalRoot::Pending && previous.project_root.known() {
+            self.allowed.clone_from(&previous.allowed);
         }
         for (fresh, known) in [
             (&mut self.project_root, &previous.project_root),
@@ -114,7 +132,9 @@ impl LocalRoots {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use workbench_protocol::namespaces::workspace::{ProjectAccessView, ThreadDetail, TrustLevel};
+    use workbench_protocol::namespaces::workspace::{
+        AllowedDirectoryView, ProjectAccessView, ThreadDetail,
+    };
     use workbench_protocol::views::ThreadSummary;
     use workbench_protocol::wire::Revision;
 
@@ -309,5 +329,41 @@ mod tests {
             (other.project_root, other.workspace),
             (LocalRoot::Pending, LocalRoot::Pending)
         );
+    }
+
+    // Given: the project's allowed directories: approved and live, approved but gone,
+    //        not approved, and a relative path
+    // When: the project is resolved, then read again by a new session
+    // Then: only the approved, live, absolute one is listed, and the reread keeps it
+    #[test]
+    fn only_approved_live_allowed_directories_are_listed() {
+        let mut world = world();
+        let shared = world.worktree.path().to_string_lossy().into_owned();
+        let directory = |path: &str, trust, live| AllowedDirectoryView {
+            path: path.into(),
+            trust,
+            live,
+        };
+        world
+            .sidebar
+            .access
+            .get_mut("p")
+            .unwrap()
+            .allowed_directories = vec![
+            directory(&shared, TrustLevel::Approved, true),
+            directory("/gone", TrustLevel::Approved, false),
+            directory("/unapproved", TrustLevel::Unapproved, true),
+            directory("relative", TrustLevel::Approved, true),
+        ];
+        let known = world.resolve(Some("p"), None);
+        assert_eq!(known.allowed, [PathBuf::from(&shared)]);
+
+        let reread = LocalRoots::resolve(
+            &selection(Some("p"), None),
+            Some(&SidebarModel::default()),
+            &world.cache,
+        )
+        .keep_known(&known);
+        assert_eq!(reread.allowed, known.allowed);
     }
 }
