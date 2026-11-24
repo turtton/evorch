@@ -142,9 +142,9 @@ impl FakeCore {
         identity: &str,
     ) -> Self {
         let _ = std::fs::remove_file(path);
-        let listener = UnixListener::bind(path).expect("bind the fake core socket");
-        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
+        let listener = core_instance::bind_private_socket(path).expect("bind the fake core socket");
+        listener.set_nonblocking(true).unwrap();
+        let listener = UnixListener::from_std(listener).unwrap();
         let shared = Arc::new(Shared {
             epoch,
             identity: identity.to_owned(),
@@ -283,32 +283,40 @@ impl FakeCore {
         }
     }
 
-    /// The core goes away: every connection ends and the socket disappears.
+    /// The core goes away: the socket disappears, then every connection ends.
+    ///
+    /// A real core ends its sessions first, but it removes its socket before it
+    /// releases its lifetime lock (evorch-core drops the instance last), so a peer
+    /// never finds the lock free and the socket still there. This fake holds no
+    /// lifetime lock, so it removes the socket before anything else instead: a
+    /// peer that reacts to the end of its connection (a launcher deciding whether
+    /// the core crashed, or reconnecting) must not still find it. Aborting a task
+    /// only schedules its cancellation, so the connections can close and the
+    /// listener accept again on another worker before this thread runs on; a
+    /// socket left behind then reads as a crash (the launcher counts it against
+    /// the budget) or is connected to and served by a core that was stopped.
     pub fn stop_by_ref(&self) {
+        let _ = std::fs::remove_file(&self.path);
         self.accept.abort();
         for (_, _, task) in self.shared.connections.lock().unwrap().drain(..) {
             task.abort();
         }
-        let _ = std::fs::remove_file(&self.path);
     }
 
     /// The core goes away *after* what it queued has been written: the peer reads
-    /// those frames and then the end of the stream, nearly at once.
+    /// those frames and then the end of the stream, nearly at once. The socket is
+    /// removed first, as in [`Self::stop_by_ref`].
     pub fn stop_after_flush(&self) {
+        let _ = std::fs::remove_file(&self.path);
         self.accept.abort();
         let connections: Vec<_> = self.shared.connections.lock().unwrap().drain(..).collect();
         for (_, tx, _task) in connections {
             drop(tx);
         }
-        let _ = std::fs::remove_file(&self.path);
     }
 
     pub fn stop(self) {
-        self.accept.abort();
-        for (_, _, task) in self.shared.connections.lock().unwrap().drain(..) {
-            task.abort();
-        }
-        let _ = std::fs::remove_file(&self.path);
+        self.stop_by_ref();
     }
 }
 
