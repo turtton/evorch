@@ -249,13 +249,7 @@ fn is_active(phase: RunPhase) -> bool {
 pub(super) fn activity(cache: &Cache, thread: &ThreadId, root: Option<&RunId>) -> Activity {
     let runs = || cache.runs.values().filter(|run| &run.thread == thread);
     let root_active = runs().any(|run| run.parent_run.is_none() && is_active(run.phase));
-    let current = match root {
-        Some(root) => cache.runs.get(root.as_str()),
-        None => {
-            let mut roots = runs().filter(|run| run.parent_run.is_none());
-            roots.next().filter(|_| roots.next().is_none())
-        }
-    };
+    let current = current_root(cache, thread, root);
     let running_children = current.map_or(0, |current| {
         cache
             .runs
@@ -269,6 +263,25 @@ pub(super) fn activity(cache: &Cache, thread: &ThreadId, root: Option<&RunId>) -
             && running_children > 0
             && current.is_some_and(|run| run.phase == RunPhase::Cancelled),
         running_children,
+    }
+}
+
+/// The thread's current root run: `root`, the one its detail names, or without it the
+/// thread's only run without a parent.
+pub(super) fn current_root<'c>(
+    cache: &'c Cache,
+    thread: &ThreadId,
+    root: Option<&RunId>,
+) -> Option<&'c RunSummary> {
+    match root {
+        Some(root) => cache.runs.get(root.as_str()),
+        None => {
+            let mut roots = cache
+                .runs
+                .values()
+                .filter(|run| &run.thread == thread && run.parent_run.is_none());
+            roots.next().filter(|_| roots.next().is_none())
+        }
     }
 }
 

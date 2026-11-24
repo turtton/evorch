@@ -1,6 +1,7 @@
 //! Opt-in conversation-only desktop. This module does not open a database,
 //! construct a runtime, read a sidebar, or own an agent lifecycle.
 pub mod attachments;
+mod attention;
 pub mod auto_reconnect;
 pub mod cache;
 pub mod restart;
@@ -292,6 +293,7 @@ pub struct CoreClientScreen {
     dock: egui_dock::DockState<shell::CoreTab>,
     notifications: notifications::NotificationLog,
     run_tabs: run_tabs::RunTabs,
+    attention: attention::TabAttention,
     local: local::LocalPanes,
     keymap: crate::keymap::Keymap,
     store: Option<persistence::ClientStateStore>,
@@ -321,6 +323,7 @@ impl CoreClientScreen {
             dock: shell::default_dock(),
             notifications: notifications::NotificationLog::default(),
             run_tabs: run_tabs::RunTabs::default(),
+            attention: attention::TabAttention::default(),
             local: local::LocalPanes::default(),
             keymap: core_keymap(&workspace_ui::KeybindSettings::default()),
             store: None,
@@ -823,6 +826,12 @@ impl CoreClientScreen {
                 selection: &selection,
             };
             let mut pass = s.features.begin_dock_pass(minimized, view);
+            let root = shell::selected_root(&pass, &selection);
+            let thread = selection.thread.as_ref();
+            let current = thread
+                .and_then(|thread| conversation::current_root(&s.cache, thread, root.as_ref()));
+            self.attention
+                .observe(thread, current, &s.cache, &self.run_tabs);
             let mut viewer = shell::Viewer {
                 pass: &mut pass,
                 titles: &titles,
@@ -841,6 +850,7 @@ impl CoreClientScreen {
                 notifications: &mut self.notifications,
                 run_tabs: &self.run_tabs,
                 local: &mut self.local,
+                attention: &mut self.attention,
             };
             egui_dock::DockArea::new(&mut self.dock)
                 .style(crate::theme::dock::dock_style(ui.style()))
