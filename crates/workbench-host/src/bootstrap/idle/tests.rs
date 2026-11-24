@@ -215,6 +215,45 @@ async fn unanswered_questions_retain_only_while_a_recipient_is_live() {
 }
 
 #[tokio::test]
+async fn a_question_retains_through_a_live_continuation_it_was_handed_to() {
+    let dir = test_socket_dir::SplitDir::new();
+    let model = Arc::new(Model::default());
+    let mut host = open(&dir, model.clone()).await;
+    let mut events = host.runtime.event_bus().subscribe();
+    let asker = chat_between_turns(&host, &model, &mut events).await;
+    let question = host
+        .runtime
+        .request_user_question(asker, "carried over".into(), vec![], false)
+        .unwrap();
+    host.runtime.stop(asker, StopScope::SelfOnly).unwrap();
+    assert_eq!(
+        host.runtime.wait(asker).await.unwrap(),
+        AgentRunPhase::Stopped
+    );
+    let continuation = chat_between_turns(&host, &model, &mut events).await;
+    rusqlite::Connection::open(dir.path().join("evorch-events.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO user_question_links(question_id, run_id) VALUES (?1, ?2)",
+            rusqlite::params![question.id, continuation.to_string()],
+        )
+        .unwrap();
+    assert!(
+        host.busy(),
+        "the continuation now consumes the answer of a stopped asker"
+    );
+    host.runtime
+        .stop(continuation, StopScope::SelfOnly)
+        .unwrap();
+    assert_eq!(
+        host.runtime.wait(continuation).await.unwrap(),
+        AgentRunPhase::Stopped
+    );
+    assert!(!host.busy());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_run_blocked_on_its_own_question_retains_until_answered() {
     let dir = test_socket_dir::SplitDir::new();
     let model = Arc::new(Model::default());
