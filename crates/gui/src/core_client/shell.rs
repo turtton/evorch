@@ -10,6 +10,7 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
 use super::features::{DockPass, FeatureId, Navigation, Selection};
+use super::notifications::{self, NotificationLog};
 use crate::panes::sidebar_widgets::{INDENT, ProjectRowView, project_row};
 use crate::theme::icons;
 use crate::theme::text::muted;
@@ -20,6 +21,7 @@ use crate::theme::widgets::{compact_row, empty_state, ghost_icon_button, row_tit
 pub enum CoreTab {
     Projects,
     Conversation,
+    Notifications,
     Feature(FeatureId),
 }
 
@@ -72,7 +74,9 @@ pub fn default_dock() -> DockState<CoreTab> {
     let surface = dock.main_surface_mut();
     let [middle, left] =
         surface.split_left(NodeIndex::root(), SIDEBAR_FRACTION, vec![CoreTab::Projects]);
-    surface.split_below(left, 0.65, LEFT.map(CoreTab::Feature).to_vec());
+    let mut bottom_left = vec![CoreTab::Notifications];
+    bottom_left.extend(LEFT.map(CoreTab::Feature));
+    surface.split_below(left, 0.65, bottom_left);
     let [_, right] = surface.split_right(middle, 0.7, RIGHT_TOP.map(CoreTab::Feature).to_vec());
     surface.split_below(right, 0.5, RIGHT_BOTTOM.map(CoreTab::Feature).to_vec());
     dock
@@ -100,7 +104,7 @@ pub fn feature_icon(feature: FeatureId) -> &'static str {
         FeatureId::Mcp => icons::PLUGS,
         FeatureId::Execution => icons::ROBOT,
         FeatureId::Teams => icons::USERS_THREE,
-        FeatureId::Lanes => icons::BELL,
+        FeatureId::Lanes => icons::STACK,
         FeatureId::Settings => icons::GEAR,
         FeatureId::Auth => icons::KEY,
         FeatureId::Diagnostics => icons::CHART_BAR,
@@ -122,6 +126,7 @@ pub struct Viewer<'v, 'p> {
     pub io: ConversationIo<'v>,
     pub selection: &'v Selection,
     pub effects: &'v mut Vec<Effect>,
+    pub notifications: &'v mut NotificationLog,
 }
 
 impl Viewer<'_, '_> {
@@ -136,7 +141,32 @@ impl Viewer<'_, '_> {
         match tab {
             CoreTab::Projects => (icons::FOLDER_SIMPLE, "Projects"),
             CoreTab::Conversation => (icons::CHAT_CIRCLE_TEXT, "Conversation"),
+            CoreTab::Notifications => (icons::BELL, "Notifications"),
             CoreTab::Feature(feature) => (feature_icon(feature), self.title_of(feature)),
+        }
+    }
+
+    fn unread(&self, tab: CoreTab) -> bool {
+        tab == CoreTab::Notifications && self.notifications.unread_count() > 0
+    }
+
+    fn notifications(&mut self, ui: &mut Ui) {
+        let focused = ui.input(|input| input.viewport().focused == Some(true));
+        let Some((project, thread)) = notifications::show(ui, self.notifications, focused) else {
+            return;
+        };
+        let project = project.or_else(|| {
+            self.pass
+                .view()
+                .cache
+                .threads
+                .get(thread.as_str())
+                .map(|summary| summary.project.clone())
+        });
+        if let Some(project) = project {
+            self.pass
+                .navigate(Navigation::SelectThread { project, thread });
+            self.effects.push(Effect::Open(CoreTab::Conversation));
         }
     }
 
@@ -169,7 +199,25 @@ impl TabViewer for Viewer<'_, '_> {
 
     fn title(&mut self, tab: &mut CoreTab) -> egui::WidgetText {
         let (icon, title) = self.label(*tab);
-        icons::with_icon(icon, title).into()
+        let title = icons::with_icon(icon, title);
+        // egui_dock paints the title without a widget, so the prefix never reaches the
+        // tab's accessible name, which `on_tab_button` sets from the plain label.
+        if self.unread(*tab) {
+            RichText::new(format!("• {title}"))
+                .color(palette().INFO)
+                .into()
+        } else {
+            title.into()
+        }
+    }
+
+    fn tab_style_override(
+        &self,
+        tab: &CoreTab,
+        global_style: &egui_dock::TabStyle,
+    ) -> Option<egui_dock::TabStyle> {
+        self.unread(*tab)
+            .then(|| crate::theme::dock::attention_tab_style(global_style, palette().INFO))
     }
 
     fn on_tab_button(&mut self, tab: &mut CoreTab, response: &egui::Response) {
@@ -181,6 +229,7 @@ impl TabViewer for Viewer<'_, '_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut CoreTab) {
         match *tab {
             CoreTab::Projects => self.projects(ui),
+            CoreTab::Notifications => self.notifications(ui),
             CoreTab::Conversation => conversation::show(
                 ui,
                 self.conversation,
@@ -311,9 +360,14 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
             }
             ui.separator();
             ui.menu_button("Panels", |ui| {
-                for tab in [CoreTab::Projects, CoreTab::Conversation] {
+                for tab in [
+                    CoreTab::Projects,
+                    CoreTab::Conversation,
+                    CoreTab::Notifications,
+                ] {
                     let label = match tab {
                         CoreTab::Projects => "Projects",
+                        CoreTab::Notifications => "Notifications",
                         _ => "Conversation",
                     };
                     if ui.button(label).clicked() {

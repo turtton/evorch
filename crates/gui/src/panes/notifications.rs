@@ -1,11 +1,11 @@
-use egui::{RichText, Ui};
+use egui::Ui;
 use event_bus::AgentRunPhase;
 use workspace_ui::{ThreadId, ThreadRunPhase};
 
 use crate::model::notifications::{NotificationKind, NotificationsModel};
+use crate::panes::notification_widgets::{NotificationRowView, notification_row};
 use crate::theme::tokens::{
-    CANCELLED_LABEL, FONT_BADGE, R_SM, STATUS_STROKE, attention_color, cancelled_color, palette,
-    phase_color, phase_label,
+    CANCELLED_LABEL, attention_color, cancelled_color, palette, phase_color, phase_label,
 };
 use crate::theme::widgets::empty_state;
 
@@ -63,115 +63,82 @@ pub fn notifications_pane(
                 NotificationKind::PullRequestMerged { .. } => ("Merged", palette().MERGED_FG),
                 NotificationKind::PullRequestAutoFixLimit { .. } => ("Auto fix", attention_color()),
             };
-            let row = ui
+            let pull_request_thread = match &notification.kind {
+                NotificationKind::PullRequestChecksFailed { thread_id }
+                | NotificationKind::PullRequestAutoFixLimit { thread_id }
+                | NotificationKind::PullRequestMerged { thread_id } => Some(thread_id.clone()),
+                _ => None,
+            };
+            let evaluation = matches!(
+                notification.kind,
+                NotificationKind::EvaluationFinished { .. }
+            );
+            let clicks = ui
                 .push_id(notification.id, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        egui::Frame::new()
-                            .fill(if unread {
-                                accent
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .stroke(egui::Stroke::new(STATUS_STROKE, accent))
-                            .corner_radius(egui::CornerRadius::same(R_SM))
-                            .inner_margin(egui::Margin::symmetric(4, 0))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(label).size(FONT_BADGE).color(if unread {
-                                    palette().CANVAS
-                                } else {
-                                    accent
-                                }));
-                            });
-                        ui.label(crate::theme::text::muted(if unread {
-                            "Unread"
-                        } else {
-                            "Read"
-                        }));
-                        let pull_request_thread = match &notification.kind {
-                            NotificationKind::PullRequestChecksFailed { thread_id }
-                            | NotificationKind::PullRequestAutoFixLimit { thread_id }
-                            | NotificationKind::PullRequestMerged { thread_id } => {
-                                Some(thread_id.clone())
+                    notification_row(
+                        ui,
+                        NotificationRowView {
+                            label,
+                            accent,
+                            unread,
+                            summary: &notification.summary,
+                            clickable: pull_request_thread.is_some()
+                                || evaluation
+                                || notification.run_id.is_some(),
+                        },
+                        |ui| {
+                            let mut action = None;
+                            if evaluation && ui.button("Open evaluations").clicked() {
+                                action = Some(NotificationsAction::OpenEvaluations);
                             }
-                            _ => None,
-                        };
-                        let summary = RichText::new(&notification.summary);
-                        let summary = if unread {
-                            summary.strong().color(palette().TEXT)
-                        } else {
-                            summary.color(palette().TEXT_MUTED)
-                        };
-                        match &notification.run_id {
-                            _ if pull_request_thread.is_some() => {
-                                if ui
-                                    .add(egui::Button::new(summary).frame(false).wrap())
-                                    .clicked()
-                                {
-                                    action = pull_request_thread
-                                        .clone()
-                                        .map(NotificationsAction::OpenThread);
-                                }
-                            }
-                            _ if matches!(
-                                notification.kind,
-                                NotificationKind::EvaluationFinished { .. }
-                            ) =>
+                            if let NotificationKind::QuestionPending { thread_id, .. } =
+                                &notification.kind
+                                && ui.button("Open thread").clicked()
                             {
-                                if ui
-                                    .add(egui::Button::new(summary).frame(false).wrap())
-                                    .clicked()
-                                {
-                                    action = Some(NotificationsAction::OpenEvaluations);
-                                }
-                            }
-                            Some(run_id) => {
-                                if ui
-                                    .add(egui::Button::new(summary).frame(false).wrap())
-                                    .clicked()
-                                {
-                                    action = Some(match &notification.kind {
-                                        NotificationKind::QuestionPending {
-                                            thread_id: Some(thread_id),
-                                            ..
-                                        } => NotificationsAction::OpenThread(thread_id.clone()),
-                                        NotificationKind::ApprovalPending { .. }
-                                        | NotificationKind::QuestionPending { .. } => {
-                                            NotificationsAction::OpenConversation(run_id.clone())
-                                        }
-                                        _ => NotificationsAction::OpenRun(run_id.clone()),
+                                action = thread_id
+                                    .clone()
+                                    .map(NotificationsAction::OpenThread)
+                                    .or_else(|| {
+                                        notification
+                                            .run_id
+                                            .clone()
+                                            .map(NotificationsAction::OpenConversation)
                                     });
-                                }
                             }
-                            None => {
-                                ui.label(summary);
-                            }
-                        }
-                        if matches!(
-                            notification.kind,
-                            NotificationKind::EvaluationFinished { .. }
-                        ) && ui.button("Open evaluations").clicked()
-                        {
-                            action = Some(NotificationsAction::OpenEvaluations);
-                        }
-                        if let NotificationKind::QuestionPending { thread_id, .. } =
-                            &notification.kind
-                            && ui.button("Open thread").clicked()
-                        {
-                            action = thread_id
-                                .clone()
-                                .map(NotificationsAction::OpenThread)
-                                .or_else(|| {
-                                    notification
-                                        .run_id
-                                        .clone()
-                                        .map(NotificationsAction::OpenConversation)
-                                });
-                        }
-                    })
-                    .response
+                            action
+                        },
+                    )
                 })
                 .inner;
-            if ui.is_rect_visible(row.rect) {
+            let summary = if clicks.summary {
+                match (&pull_request_thread, &notification.run_id) {
+                    (Some(thread_id), _) => {
+                        Some(NotificationsAction::OpenThread(thread_id.clone()))
+                    }
+                    _ if evaluation => Some(NotificationsAction::OpenEvaluations),
+                    (None, Some(run_id)) => Some(match &notification.kind {
+                        NotificationKind::QuestionPending {
+                            thread_id: Some(thread_id),
+                            ..
+                        } => NotificationsAction::OpenThread(thread_id.clone()),
+                        NotificationKind::ApprovalPending { .. }
+                        | NotificationKind::QuestionPending { .. } => {
+                            NotificationsAction::OpenConversation(run_id.clone())
+                        }
+                        _ => NotificationsAction::OpenRun(run_id.clone()),
+                    }),
+                    (None, None) => None,
+                }
+            } else {
+                None
+            };
+            if summary.is_some() {
+                action = summary;
+            }
+            if let Some(clicked) = clicks.trailing {
+                action = Some(clicked);
+            }
+            if ui.is_rect_visible(clicks.rect) {
                 displayed.push((notification.id, revision, unread));
             }
         }
