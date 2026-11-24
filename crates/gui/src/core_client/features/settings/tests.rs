@@ -20,11 +20,11 @@ use workbench_protocol::{
 
 const DOCUMENT: &str = "version = 3\n";
 
-fn revision(c: char) -> SettingsRevision {
+pub(super) fn revision(c: char) -> SettingsRevision {
     SettingsRevision::new(c.to_string().repeat(64)).unwrap()
 }
 
-fn provider(name: &str) -> ProviderView {
+pub(super) fn provider(name: &str) -> ProviderView {
     ProviderView {
         name: name.into(),
         kind: ProviderKind::OpenaiCompatible,
@@ -56,7 +56,7 @@ fn snapshot_of(saved: char, applied: Option<char>, failure: Option<&str>) -> Fea
     )))))
 }
 
-fn view(
+pub(super) fn view(
     id: &OperationId,
     kind: SettingsOperationKind,
     state: OperationState,
@@ -97,11 +97,19 @@ fn loaded(applied: char) -> Harness<'static, Screen> {
     screen
 }
 
-fn settings_command(action: &crate::core_client::features::FeatureAction) -> &SettingsCommand {
+pub(super) fn settings_command(
+    action: &crate::core_client::features::FeatureAction,
+) -> &SettingsCommand {
     let Command::Settings(command) = command_of(action) else {
         panic!("a settings command was expected");
     };
     command
+}
+
+/// Opens the settings modal from the tab's button of `tab`.
+pub(super) fn open_modal(screen: &mut Harness<'static, Screen>, tab: &str) {
+    screen.get_by_label(tab).click();
+    screen.run();
 }
 
 fn type_into_document(screen: &mut Harness<'static, Screen>, text: &str) {
@@ -114,12 +122,14 @@ fn type_into_document(screen: &mut Harness<'static, Screen>, text: &str) {
 #[test]
 fn what_is_saved_and_what_is_applied_are_shown_apart() {
     let screen = loaded('b');
-    screen.get_by_label("保存済みの設定は、まだ実行中のコアに適用されていません。");
-    screen.get_by_label("local");
+    screen.get_by_label("Saved settings are not applied to the running core yet.");
+    for tab in ["Providers", "Routing", "Agent roles"] {
+        screen.get_by_label(tab);
+    }
     drop(screen);
 
     let screen = loaded('a');
-    screen.get_by_label("保存済みの設定は適用済みです。");
+    screen.get_by_label("Saved settings are applied.");
 }
 
 /// A reload that failed part-way leaves the models a mixture: the screen says
@@ -135,16 +145,16 @@ fn an_unknown_applied_state_is_shown_with_its_reason_not_as_applied() {
         snapshot_of('a', None, Some("the project did not load")),
     );
     screen.get_by_label(
-        "適用状態が不明です（直近の再読込が失敗しました: the project did not load）。モデルを再読込してください。",
+        "The applied state is unknown (the last reload failed: the project did not load). Reload models.",
     );
     assert!(
         screen
-            .query_by_label("保存済みの設定は適用済みです。")
+            .query_by_label("Saved settings are applied.")
             .is_none()
     );
     assert!(
         screen
-            .query_by_label("保存済みの設定は、まだ実行中のコアに適用されていません。")
+            .query_by_label("Saved settings are not applied to the running core yet.")
             .is_none()
     );
 }
@@ -153,7 +163,7 @@ fn an_unknown_applied_state_is_shown_with_its_reason_not_as_applied() {
 fn a_save_quotes_the_revision_of_its_draft_and_is_not_sent_twice() {
     let mut screen = loaded('a');
     type_into_document(&mut screen, "# edited\n");
-    screen.get_by_label("保存").click();
+    screen.get_by_label("Save file").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1, "one click, one command");
     let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]) else {
@@ -172,7 +182,7 @@ fn a_save_quotes_the_revision_of_its_draft_and_is_not_sent_twice() {
             OperationState::Pending,
         )),
     );
-    screen.get_by_label("実行中…");
+    screen.get_by_label("Working…");
     assert!(asked(&mut screen).is_empty());
 }
 
@@ -181,14 +191,14 @@ fn a_refused_save_keeps_the_draft_and_says_why() {
     let cases = [
         (
             ErrorCode::StaleRevision,
-            "他の場所で設定が変更されました。読み込み直してから保存してください。",
+            "The settings were changed elsewhere. Re-read them before saving.",
         ),
         (ErrorCode::PermissionDenied, "core.restart.targets"),
     ];
     for (code, expected) in cases {
         let mut screen = loaded('a');
         type_into_document(&mut screen, "# edited\n");
-        screen.get_by_label("保存").click();
+        screen.get_by_label("Save file").click();
         let sent = asked(&mut screen);
         let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
             panic!("a document save was expected");
@@ -220,7 +230,12 @@ fn a_refused_save_keeps_the_draft_and_says_why() {
             Query::Settings(SettingsQuery::GetSettingsSnapshot {})
         )));
         screen.get_by_role(Role::MultilineTextInput);
-        assert!(!screen.get_by_label("保存").accesskit_node().is_disabled());
+        assert!(
+            !screen
+                .get_by_label("Save file")
+                .accesskit_node()
+                .is_disabled()
+        );
     }
 }
 
@@ -228,7 +243,7 @@ fn a_refused_save_keeps_the_draft_and_says_why() {
 fn a_finished_save_asks_for_the_reload_and_the_reload_reports_its_end() {
     let mut screen = loaded('a');
     type_into_document(&mut screen, "# edited\n");
-    screen.get_by_label("保存").click();
+    screen.get_by_label("Save file").click();
     let sent = asked(&mut screen);
     let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
         panic!("a document save was expected");
@@ -242,9 +257,9 @@ fn a_finished_save_asks_for_the_reload_and_the_reload_reports_its_end() {
             OperationState::Ready,
         )),
     );
-    screen.get_by_label("保存しました。反映するにはモデルを再読込してください。");
+    screen.get_by_label("Saved. Reload models to apply it.");
 
-    screen.get_by_label("モデルを再読込").click();
+    screen.get_by_label("Reload models").click();
     let sent = asked(&mut screen);
     let reload = sent
         .iter()
@@ -274,13 +289,15 @@ fn a_finished_save_asks_for_the_reload_and_the_reload_reports_its_end() {
         OperationState::Ready,
     )));
     screen.run_steps(4);
-    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
+    screen.get_by_label(
+        "Models reloaded. Requests from now on use them (what was already sent does not change).",
+    );
 }
 
 #[test]
 fn a_lost_reply_or_a_reconnect_asks_for_the_operation_and_does_not_resend() {
     let mut screen = loaded('a');
-    screen.get_by_label("モデルを再読込").click();
+    screen.get_by_label("Reload models").click();
     let sent = asked(&mut screen);
     let SettingsCommand::ReloadModels(reload) = settings_command(&sent[0]).clone() else {
         panic!("a reload was expected");
@@ -306,11 +323,13 @@ fn a_lost_reply_or_a_reconnect_asks_for_the_operation_and_does_not_resend() {
             OperationState::Ready,
         ))))),
     );
-    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
+    screen.get_by_label(
+        "Models reloaded. Requests from now on use them (what was already sent does not change).",
+    );
 
     // A running operation survives a new snapshot as a question, not a command.
     let mut screen = loaded('a');
-    screen.get_by_label("モデルを再読込").click();
+    screen.get_by_label("Reload models").click();
     let sent = asked(&mut screen);
     answer(&mut screen, sent[0].tag, ok_command());
     screen.state_mut().feature.reset();
@@ -331,7 +350,7 @@ fn not_found() -> FeatureReply {
 fn a_save_whose_end_was_lost_with_a_core_restart_is_unknown_and_keeps_the_draft() {
     let mut screen = loaded('a');
     type_into_document(&mut screen, "# edited\n");
-    screen.get_by_label("保存").click();
+    screen.get_by_label("Save file").click();
     let sent = asked(&mut screen);
     let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
         panic!("a document save was expected");
@@ -341,7 +360,7 @@ fn a_save_whose_end_was_lost_with_a_core_restart_is_unknown_and_keeps_the_draft(
         sent[0].tag,
         FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
     );
-    screen.get_by_label("実行中…");
+    screen.get_by_label("Working…");
     // The core restarted: it does not know the operation any more.
     let asked_again = asked(&mut screen);
     let query = asked_again
@@ -359,17 +378,17 @@ fn a_save_whose_end_was_lost_with_a_core_restart_is_unknown_and_keeps_the_draft(
 
     // Not busy for ever, the result said to be unknown, the edit still there
     // and the snapshot read again to show what the file holds.
-    assert!(screen.query_by_label("実行中…").is_none());
+    assert!(screen.query_by_label("Working…").is_none());
     assert!(
         screen
-            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .query_all_by_label_contains("The result of the operation could not be confirmed")
             .next()
             .is_some()
     );
     screen.get_by_role(Role::MultilineTextInput);
     assert!(
         !screen
-            .get_by_label("モデルを再読込")
+            .get_by_label("Reload models")
             .accesskit_node()
             .is_disabled()
     );
@@ -387,14 +406,19 @@ fn a_save_whose_end_was_lost_with_a_core_restart_is_unknown_and_keeps_the_draft(
     answer(&mut screen, snapshot_query.tag, snapshot('b', 'a'));
     screen.run_steps(4);
     screen.get_by_role(Role::MultilineTextInput);
-    assert!(!screen.get_by_label("保存").accesskit_node().is_disabled());
+    assert!(
+        !screen
+            .get_by_label("Save file")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 
 #[test]
 fn text_typed_while_a_save_runs_is_not_discarded_when_the_save_ends() {
     let mut screen = loaded('a');
     type_into_document(&mut screen, "# first\n");
-    screen.get_by_label("保存").click();
+    screen.get_by_label("Save file").click();
     let sent = asked(&mut screen);
     let SettingsCommand::SaveDocument(save) = settings_command(&sent[0]).clone() else {
         panic!("a document save was expected");
@@ -421,9 +445,14 @@ fn text_typed_while_a_save_runs_is_not_discarded_when_the_save_ends() {
     // What was typed after the sent text is still there, and is the only
     // change left to save, over the revision the save produced.
     screen.get_by_role(Role::MultilineTextInput);
-    assert!(!screen.get_by_label("保存").accesskit_node().is_disabled());
+    assert!(
+        !screen
+            .get_by_label("Save file")
+            .accesskit_node()
+            .is_disabled()
+    );
     let _ = asked(&mut screen);
-    screen.get_by_label("保存").click();
+    screen.get_by_label("Save file").click();
     let next = asked(&mut screen);
     let SettingsCommand::SaveDocument(second) = next
         .iter()
@@ -447,7 +476,7 @@ fn text_typed_while_a_save_runs_is_not_discarded_when_the_save_ends() {
 #[test]
 fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() {
     let mut screen = loaded('a');
-    screen.get_by_label("モデルを再読込").click();
+    screen.get_by_label("Reload models").click();
     let sent = asked(&mut screen);
     let SettingsCommand::ReloadModels(reload) = settings_command(&sent[0]).clone() else {
         panic!("a reload was expected");
@@ -468,11 +497,13 @@ fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() 
         )),
     );
     screen.run_steps(4);
-    assert!(screen.query_by_label("実行中…").is_none());
-    screen.get_by_label("モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。");
+    assert!(screen.query_by_label("Working…").is_none());
+    screen.get_by_label(
+        "Models reloaded. Requests from now on use them (what was already sent does not change).",
+    );
 }
 
-fn provider_save(action: &crate::core_client::features::FeatureAction) -> SaveProvider {
+pub(super) fn provider_save(action: &crate::core_client::features::FeatureAction) -> SaveProvider {
     let SettingsCommand::SaveProvider(save) = settings_command(action).clone() else {
         panic!("a provider save was expected");
     };
@@ -488,9 +519,10 @@ fn provider_save(action: &crate::core_client::features::FeatureAction) -> SavePr
 fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
     use workbench_protocol::namespaces::settings::ProviderInput;
     let mut screen = loaded('a');
-    screen.get_by_label("編集").click();
-    screen.run_steps(2);
-    screen.get_by_label("プロバイダーを保存").click();
+    open_modal(&mut screen, "Providers");
+    screen.get_by_label("Edit").click();
+    screen.run();
+    screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1, "one click, one command");
     let save = provider_save(&sent[0]);
@@ -521,7 +553,7 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
             OperationState::Pending,
         )),
     );
-    screen.get_by_label("実行中…");
+    screen.get_by_label("Working…");
     let mut refused = view(
         &save.operation_id,
         SettingsOperationKind::SaveProvider,
@@ -545,7 +577,7 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
         query_of(a),
         Query::Settings(SettingsQuery::GetSettingsSnapshot {})
     )));
-    screen.get_by_label("プロバイダーを保存").click();
+    screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     let save = provider_save(&sent[0]);
     answer(
@@ -563,28 +595,30 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
         OperationState::Ready,
     )));
     screen.run_steps(4);
-    screen.get_by_label("保存しました。反映するにはモデルを再読込してください。");
-    assert!(screen.query_by_label("プロバイダーを保存").is_none());
+    screen.get_by_label("Provider settings updated. Reload models to apply them.");
+    assert!(screen.query_by_label("Save").is_none());
 }
 
-// Given: a new provider form with nothing typed
+// Given: a new OpenAI-compatible form, which starts without a base URL
 // When: it is saved
 // Then: nothing is sent and the missing field is named; an API key is never a field
 #[test]
 fn a_new_provider_form_names_what_is_missing_and_sends_nothing() {
     let mut screen = loaded('a');
-    screen.get_by_label("プロバイダーを追加").click();
-    screen.run_steps(2);
+    open_modal(&mut screen, "Providers");
+    screen.get_by_label("+ Add OpenAI-compatible").click();
+    screen.run();
     assert!(
         screen
-            .query_all_by_label_contains("API キーそのものはここに入力しません")
+            .query_all_by_label_contains("Store the API key itself in Authentication")
             .next()
             .is_some()
     );
-    screen.get_by_label("プロバイダーを保存").click();
+    assert_eq!(screen.query_all_by_role(Role::PasswordInput).count(), 0);
+    screen.get_by_label("Save").click();
     assert!(asked(&mut screen).is_empty());
     screen.run_steps(2);
-    screen.get_by_label("プロバイダー名を入力してください。");
+    screen.get_by_label("Enter a base URL.");
 }
 
 // Given: a screen with the Agent web tools control
@@ -603,19 +637,19 @@ fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
         other => panic!("a web tools command was expected: {other:?}"),
     };
     let mut screen = loaded('a');
-    screen.get_by_label("Web ツールを有効にする").click();
+    screen.get_by_label("Enable web tools").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     assert!(web(&sent[0]));
     answer(&mut screen, sent[0].tag, ok_command());
     assert!(
         screen
-            .query_all_by_label_contains("Agent の Web ツールを有効にしました")
+            .query_all_by_label_contains("Agent web tools enabled")
             .next()
             .is_some()
     );
 
-    screen.get_by_label("Web ツールを無効にする").click();
+    screen.get_by_label("Disable web tools").click();
     let sent = asked(&mut screen);
     assert!(!web(&sent[0]));
     answer(
@@ -625,14 +659,12 @@ fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
     );
     assert!(
         screen
-            .query_all_by_label_contains(
-                "Agent の Web ツールを無効にできませんでした: permission denied"
-            )
+            .query_all_by_label_contains("Could not disable Agent web tools: permission denied")
             .next()
             .is_some()
     );
 
-    screen.get_by_label("Web ツールを有効にする").click();
+    screen.get_by_label("Enable web tools").click();
     let sent = asked(&mut screen);
     assert!(web(&sent[0]));
     answer(
@@ -642,7 +674,7 @@ fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
     );
     assert!(
         screen
-            .query_all_by_label_contains("結果不明です（再送していません）")
+            .query_all_by_label_contains("is unknown (not resent)")
             .next()
             .is_some()
     );
@@ -661,23 +693,24 @@ fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
 #[test]
 fn a_provider_form_saves_against_the_revision_it_was_opened_from() {
     let mut screen = loaded('a');
-    screen.get_by_label("編集").click();
-    screen.run_steps(2);
+    open_modal(&mut screen, "Providers");
+    screen.get_by_label("Edit").click();
+    screen.run();
     // Another client changes the file; this screen reads the new snapshot.
     screen.state_mut().feature.reset();
     let read = asked(&mut screen);
     assert_eq!(read.len(), 1);
     answer(&mut screen, read[0].tag, snapshot('b', 'b'));
     screen.run_steps(2);
-    screen.get_by_label("最新の内容で開き直す");
+    screen.get_by_label("Reopen with the latest settings");
     assert!(
         screen
-            .query_all_by_label_contains("保存は拒否されます")
+            .query_all_by_label_contains("saving will be refused")
             .next()
             .is_some()
     );
 
-    screen.get_by_label("プロバイダーを保存").click();
+    screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     let save = provider_save(&sent[0]);
@@ -696,25 +729,27 @@ fn a_provider_form_saves_against_the_revision_it_was_opened_from() {
     stale.message = Some("the settings changed since this revision".into());
     screen.state_mut().feature.event(&completed(stale));
     screen.run_steps(4);
-    screen.get_by_label("プロバイダーを保存");
+    screen.get_by_label("Save");
     assert!(
         screen
-            .query_all_by_label_contains("最新の内容で開き直す")
+            .query_all_by_label_contains("Reopen with the latest settings")
             .next()
             .is_some(),
         "the form stays, with the way to re-read"
     );
     let _ = asked(&mut screen);
 
-    screen.get_by_label("最新の内容で開き直す").click();
-    screen.run_steps(2);
+    screen
+        .get_by_label("Reopen with the latest settings")
+        .click();
+    screen.run();
     assert!(
         screen
-            .query_all_by_label_contains("最新の内容で開き直す")
+            .query_all_by_label_contains("Reopen with the latest settings")
             .next()
             .is_none()
     );
-    screen.get_by_label("プロバイダーを保存").click();
+    screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     assert_eq!(provider_save(&sent[0]).expected_revision, revision('b'));
 }
@@ -725,9 +760,10 @@ fn a_provider_form_saves_against_the_revision_it_was_opened_from() {
 #[test]
 fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
     let mut screen = loaded('a');
-    screen.get_by_label("編集").click();
-    screen.run_steps(2);
-    screen.get_by_label("プロバイダーを保存").click();
+    open_modal(&mut screen, "Providers");
+    screen.get_by_label("Edit").click();
+    screen.run();
+    screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     let save = provider_save(&sent[0]);
     answer(
@@ -740,8 +776,8 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
         )),
     );
     // The form is dropped while the save runs; no other form can be opened until it ends.
-    screen.get_by_label("編集をやめる").click();
-    screen.run_steps(2);
+    screen.get_by_label("Back to list").click();
+    screen.run();
     let ready = completed(view(
         &save.operation_id,
         SettingsOperationKind::SaveProvider,
@@ -749,13 +785,13 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
     ));
     screen.state_mut().feature.event(&ready);
     screen.run_steps(2);
-    screen.get_by_label("プロバイダーを追加").click();
-    screen.run_steps(2);
-    screen.get_by_label("プロバイダーを保存");
+    screen.get_by_label("+ Add OpenAI-compatible").click();
+    screen.run();
+    screen.get_by_label("Save");
     // The end of the earlier save, seen again, does not close the form opened since.
     screen.state_mut().feature.event(&ready);
     screen.run_steps(2);
-    screen.get_by_label("プロバイダーを保存");
+    screen.get_by_label("Save");
 }
 
 // Given: a web tools change whose reply was lost
@@ -765,7 +801,7 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
 #[test]
 fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
     let mut screen = loaded('a');
-    screen.get_by_label("Web ツールを有効にする").click();
+    screen.get_by_label("Enable web tools").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     answer(
@@ -775,7 +811,7 @@ fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
     );
     assert!(
         screen
-            .query_all_by_label_contains("結果不明です（再送していません）")
+            .query_all_by_label_contains("is unknown (not resent)")
             .next()
             .is_some()
     );
@@ -786,14 +822,14 @@ fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
     answer(&mut screen, sent[0].tag, ok_command());
     assert!(
         screen
-            .query_all_by_label_contains("Agent の Web ツールを有効にしました")
+            .query_all_by_label_contains("Agent web tools enabled")
             .next()
             .is_some(),
         "the resolved result is shown"
     );
     assert!(
         screen
-            .query_all_by_label_contains("結果不明")
+            .query_all_by_label_contains("is unknown (not resent)")
             .next()
             .is_none()
     );
@@ -806,7 +842,7 @@ fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
     );
 
     // A refusal that resolves later is shown with its reason as well.
-    screen.get_by_label("Web ツールを無効にする").click();
+    screen.get_by_label("Disable web tools").click();
     let sent = asked(&mut screen);
     answer(
         &mut screen,
@@ -823,7 +859,7 @@ fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
     );
     assert!(
         screen
-            .query_all_by_label_contains("無効にできませんでした: permission denied")
+            .query_all_by_label_contains("Could not disable Agent web tools: permission denied")
             .next()
             .is_some()
     );
@@ -839,7 +875,7 @@ fn a_web_tools_change_with_no_recorded_result_does_not_disable_the_controls() {
     use workbench_protocol::commands::SetAgentWebToolsEnabled;
     use workbench_protocol::namespaces::ExecutionCommand;
     let mut screen = loaded('a');
-    screen.get_by_label("Web ツールを有効にする").click();
+    screen.get_by_label("Enable web tools").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     answer(
@@ -853,13 +889,13 @@ fn a_web_tools_change_with_no_recorded_result_does_not_disable_the_controls() {
     assert!(asked(&mut screen).is_empty(), "nothing is sent by itself");
     assert!(
         screen
-            .query_all_by_label_contains("結果不明です（再送していません）")
+            .query_all_by_label_contains("is unknown (not resent)")
             .next()
             .is_some(),
         "the unknown outcome stays shown"
     );
     // Both controls accept a click again.
-    screen.get_by_label("Web ツールを無効にする").click();
+    screen.get_by_label("Disable web tools").click();
     let again = asked(&mut screen);
     assert_eq!(again.len(), 1, "one click, one new command");
     assert!(matches!(
@@ -871,8 +907,62 @@ fn a_web_tools_change_with_no_recorded_result_does_not_disable_the_controls() {
     answer(&mut screen, again[0].tag, ok_command());
     assert!(
         screen
-            .query_all_by_label_contains("Agent の Web ツールを無効にしました")
+            .query_all_by_label_contains("Agent web tools disabled")
             .next()
             .is_some()
     );
+}
+
+// Given: a reload whose reply was lost
+// When: asking for its operation fails with an error other than not-found
+// Then: the screen is not left busy, and the error is shown
+#[test]
+fn an_operation_that_cannot_be_asked_for_does_not_keep_the_screen_busy() {
+    let mut screen = loaded('a');
+    screen.get_by_label("Reload models").click();
+    let sent = asked(&mut screen);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    let check = asked(&mut screen);
+    assert!(matches!(
+        query_of(&check[0]),
+        Query::Settings(SettingsQuery::GetSettingsOperation { .. })
+    ));
+    answer(
+        &mut screen,
+        check[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("the send queue is full"))),
+    );
+    screen.run_steps(4);
+    assert!(screen.query_by_label("Working…").is_none());
+    assert!(
+        !screen
+            .get_by_label("Reload models")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        screen
+            .query_all_by_label_contains("the send queue is full")
+            .next()
+            .is_some()
+    );
+}
+
+// Given: a reload that is running and no settings modal
+// When: the footer menu asks for the Routing tab
+// Then: the modal opens on it
+#[test]
+fn the_footer_opens_the_modal_while_an_operation_runs() {
+    let mut screen = loaded('a');
+    screen.get_by_label("Reload models").click();
+    let sent = asked(&mut screen);
+    answer(&mut screen, sent[0].tag, ok_command());
+    screen.get_by_label("Working…");
+    let feature = screen.state_mut().feature.as_settings_mut().unwrap();
+    feature.open_modal(SettingsTab::Routing);
+    assert_eq!(feature.modal_tab(), Some(SettingsTab::Routing));
 }

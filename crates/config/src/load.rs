@@ -191,7 +191,10 @@ impl Config {
     }
 
     /// Treat this text as the only user layer; never discover home or neighbors.
-    pub(crate) fn load_standalone_text(text: &str) -> Result<Config, ConfigError> {
+    ///
+    /// # Errors
+    /// The text is not a valid configuration on top of the built-in layer.
+    pub fn load_standalone_text(text: &str) -> Result<Config, ConfigError> {
         let mut source = FileSource {
             replacement: Some((Path::new("config.toml"), text)),
             consumed: false,

@@ -139,7 +139,7 @@ fn loaded() -> Harness<'static, Screen> {
 /// A screen whose Claude login has been started and is waiting for a person.
 fn waiting_login(input: bool) -> (Harness<'static, Screen>, OperationId) {
     let mut screen = loaded();
-    screen.get_by_label("Claude でログイン").click();
+    screen.get_by_label("Sign in to Claude").click();
     let sent = asked(&mut screen);
     let AuthCommand::StartLogin(start) = auth_command(&sent[0]).clone() else {
         panic!("a login start was expected");
@@ -186,9 +186,9 @@ fn type_secret(screen: &mut Harness<'static, Screen>, text: &str) {
 #[test]
 fn every_slot_shows_its_state_and_only_what_can_be_done_with_it() {
     let screen = loaded();
-    screen.get_by_label("Claude でログイン");
-    screen.get_by_label("設定済み");
-    screen.get_by_label("環境変数 ENV_KEY から読み込みます。");
+    screen.get_by_label("Sign in to Claude");
+    screen.get_by_label("Stored");
+    screen.get_by_label("Read from environment variable ENV_KEY.");
     // A login profile takes no typed key.
     assert_eq!(screen.get_all_by_role(Role::PasswordInput).count(), 1);
 }
@@ -196,17 +196,17 @@ fn every_slot_shows_its_state_and_only_what_can_be_done_with_it() {
 #[test]
 fn a_login_shows_its_link_and_a_box_for_what_the_browser_ended_on() {
     let (screen, _) = waiting_login(true);
-    screen.get_by_label("ログインページを開く");
-    screen.get_by_label("リンクをコピー");
-    screen.get_by_label("送信");
-    screen.get_by_label("ログインを取り消す");
+    screen.get_by_label("Open login page");
+    screen.get_by_label("Copy link");
+    screen.get_by_label("Complete sign-in");
+    screen.get_by_label("Cancel sign-in");
 }
 
 #[test]
 fn a_pasted_input_is_sent_once_and_leaves_nothing_behind() {
     let (mut screen, id) = waiting_login(true);
     type_secret(&mut screen, &format!("{SECRET}#state"));
-    screen.get_by_label("送信").click();
+    screen.get_by_label("Complete sign-in").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1, "one click, one command");
     let AuthCommand::SubmitLoginInput(submit) = auth_command(&sent[0]) else {
@@ -220,14 +220,19 @@ fn a_pasted_input_is_sent_once_and_leaves_nothing_behind() {
     );
 
     // The box is empty at once, before any answer: there is nothing to send again.
-    assert!(screen.get_by_label("送信").accesskit_node().is_disabled());
+    assert!(
+        screen
+            .get_by_label("Complete sign-in")
+            .accesskit_node()
+            .is_disabled()
+    );
 
     answer(
         &mut screen,
         sent[0].tag,
         input_reply(LoginInputOutcome::Accepted),
     );
-    screen.get_by_label("入力を受け付けました。ログインを完了しています…");
+    screen.get_by_label("Code accepted. Completing sign-in…");
     assert!(
         commands(&asked(&mut screen)).is_empty(),
         "nothing is sent again"
@@ -241,8 +246,8 @@ fn a_pasted_input_is_sent_once_and_leaves_nothing_behind() {
             operation: op_view(&id, AuthOperationKind::Login, OperationState::Ready),
         }));
     screen.run_steps(4);
-    screen.get_by_label("ログインしました。");
-    assert!(screen.query_by_label("送信").is_none());
+    screen.get_by_label("Signed in.");
+    assert!(screen.query_by_label("Complete sign-in").is_none());
 }
 
 #[test]
@@ -250,25 +255,25 @@ fn a_refused_input_says_why_and_keeps_the_login_open() {
     let cases = [
         (
             LoginInputRejection::StateMismatch,
-            "このログインのものではない入力です。表示中のリンクからやり直してください。",
+            "This input belongs to another sign-in. Start again from the link shown.",
         ),
         (
             LoginInputRejection::AlreadyUsed,
-            "このログインでは既に入力が使われています。",
+            "This sign-in already used its input.",
         ),
         (
             LoginInputRejection::Expired,
-            "ログインの有効期限が切れました。もう一度始めてください。",
+            "The sign-in expired. Start again.",
         ),
         (
             LoginInputRejection::Malformed,
-            "リダイレクト先のアドレス、または表示されたコードを貼り付けてください。",
+            "Paste the authorization code or final callback URL.",
         ),
     ];
     for (reason, expected) in cases {
         let (mut screen, _) = waiting_login(true);
         type_secret(&mut screen, "value");
-        screen.get_by_label("送信").click();
+        screen.get_by_label("Complete sign-in").click();
         let sent = asked(&mut screen);
         answer(
             &mut screen,
@@ -276,7 +281,7 @@ fn a_refused_input_says_why_and_keeps_the_login_open() {
             input_reply(LoginInputOutcome::Rejected { reason }),
         );
         screen.get_by_label(expected);
-        screen.get_by_label("ログインを取り消す");
+        screen.get_by_label("Cancel sign-in");
     }
 }
 
@@ -296,14 +301,14 @@ fn a_login_that_a_restart_cancelled_is_dropped_with_its_reason() {
             ),
         }));
     screen.run_steps(4);
-    screen.get_by_label("再起動または終了のため中断しました。ログインはやり直してください。");
-    assert!(screen.query_by_label("ログインを取り消す").is_none());
+    screen.get_by_label("Interrupted by a restart or shutdown. Sign in again.");
+    assert!(screen.query_by_label("Cancel sign-in").is_none());
 }
 
 #[test]
 fn cancelling_a_login_names_that_login_only() {
     let (mut screen, id) = waiting_login(true);
-    screen.get_by_label("ログインを取り消す").click();
+    screen.get_by_label("Cancel sign-in").click();
     let sent = asked(&mut screen);
     let [AuthCommand::CancelLogin(cancel)] = commands(&sent)[..] else {
         panic!("one cancel was expected");
@@ -315,7 +320,7 @@ fn cancelling_a_login_names_that_login_only() {
 fn a_typed_key_is_sent_once_and_the_box_is_cleared() {
     let mut screen = loaded();
     type_secret(&mut screen, SECRET);
-    screen.get_by_label("キーを保存").click();
+    screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
     let [AuthCommand::SaveApiKey(save)] = commands(&sent)[..] else {
         panic!("one key save was expected");
@@ -337,7 +342,7 @@ fn a_typed_key_is_sent_once_and_the_box_is_cleared() {
     assert!(commands(&asked(&mut screen)).is_empty());
     assert!(
         screen
-            .get_by_label("キーを保存")
+            .get_by_label("Save API key")
             .accesskit_node()
             .is_disabled()
     );
@@ -347,7 +352,7 @@ fn a_typed_key_is_sent_once_and_the_box_is_cleared() {
 fn a_lost_reply_asks_for_the_operation_and_never_sends_it_again() {
     let mut screen = loaded();
     type_secret(&mut screen, "value");
-    screen.get_by_label("キーを保存").click();
+    screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
     let AuthCommand::SaveApiKey(save) = auth_command(&sent[0]).clone() else {
         panic!("a key save was expected");
@@ -372,7 +377,7 @@ fn a_lost_reply_asks_for_the_operation_and_never_sends_it_again() {
             OperationState::Ready,
         ))))),
     );
-    screen.get_by_label("API キーを保存しました。");
+    screen.get_by_label("API key saved.");
 }
 
 fn not_found() -> FeatureReply {
@@ -385,7 +390,7 @@ fn not_found() -> FeatureReply {
 fn a_key_save_whose_end_was_lost_with_a_core_restart_is_unknown_not_busy() {
     let mut screen = loaded();
     type_secret(&mut screen, "value");
-    screen.get_by_label("キーを保存").click();
+    screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
     let AuthCommand::SaveApiKey(save) = auth_command(&sent[0]).clone() else {
         panic!("a key save was expected");
@@ -408,7 +413,7 @@ fn a_key_save_whose_end_was_lost_with_a_core_restart_is_unknown_not_busy() {
         .expect("the operation is asked for");
     assert!(
         screen
-            .get_by_label("資格情報を読み直す")
+            .get_by_label("Refresh credentials")
             .accesskit_node()
             .is_disabled(),
         "busy while the end is unknown to the screen"
@@ -417,13 +422,13 @@ fn a_key_save_whose_end_was_lost_with_a_core_restart_is_unknown_not_busy() {
     screen.run_steps(4);
     assert!(
         screen
-            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .query_all_by_label_contains("The result of the operation could not be confirmed")
             .next()
             .is_some()
     );
     assert!(
         !screen
-            .get_by_label("資格情報を読み直す")
+            .get_by_label("Refresh credentials")
             .accesskit_node()
             .is_disabled()
     );
@@ -455,10 +460,10 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
         .expect("the operation is asked for");
     answer(&mut screen, operation.tag, not_found());
     screen.run_steps(4);
-    assert!(screen.query_by_label("ログインを取り消す").is_none());
+    assert!(screen.query_by_label("Cancel sign-in").is_none());
     assert!(
         screen
-            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .query_all_by_label_contains("The result of the operation could not be confirmed")
             .next()
             .is_some()
     );
@@ -470,14 +475,14 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
         .map(|a| a.tag)
         .expect("the status is asked for");
     answer(&mut screen, status, status_reply());
-    screen.get_by_label("Claude でログイン");
+    screen.get_by_label("Sign in to Claude");
 }
 
 #[test]
 fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() {
     let mut screen = loaded();
     type_secret(&mut screen, "value");
-    screen.get_by_label("キーを保存").click();
+    screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
     let AuthCommand::SaveApiKey(save) = auth_command(&sent[0]).clone() else {
         panic!("a key save was expected");
@@ -504,11 +509,11 @@ fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() 
     screen.run_steps(4);
     assert!(
         !screen
-            .get_by_label("資格情報を読み直す")
+            .get_by_label("Refresh credentials")
             .accesskit_node()
             .is_disabled()
     );
-    screen.get_by_label("API キーを保存しました。");
+    screen.get_by_label("API key saved.");
 }
 
 #[test]
@@ -528,10 +533,10 @@ fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
             )],
         })))),
     );
-    screen.get_by_label("Cursor でログイン");
+    screen.get_by_label("Sign in to Cursor");
     assert_eq!(screen.get_all_by_role(Role::PasswordInput).count(), 1);
     type_secret(&mut screen, SECRET);
-    screen.get_by_label("キーを保存").click();
+    screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
     let [AuthCommand::SaveApiKey(save)] = commands(&sent)[..] else {
         panic!("one key save was expected");
@@ -547,7 +552,7 @@ fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
 #[test]
 fn a_login_still_being_prepared_is_not_taken_for_lost() {
     let mut screen = loaded();
-    screen.get_by_label("Claude でログイン").click();
+    screen.get_by_label("Sign in to Claude").click();
     let sent = asked(&mut screen);
     let AuthCommand::StartLogin(start) = auth_command(&sent[0]).clone() else {
         panic!("a login start was expected");
@@ -589,11 +594,11 @@ fn a_login_still_being_prepared_is_not_taken_for_lost() {
     // Still tracked as a login in preparation: nothing says it is lost.
     assert!(
         screen
-            .query_all_by_label_contains("操作の結果を確認できませんでした")
+            .query_all_by_label_contains("The result of the operation could not be confirmed")
             .next()
             .is_none()
     );
-    screen.get_by_label("ログインを準備しています。");
+    screen.get_by_label("Preparing browser sign-in…");
 
     // The core announces the session, and the link is shown.
     screen
@@ -614,5 +619,102 @@ fn a_login_still_being_prepared_is_not_taken_for_lost() {
         login_reply(login_view(&id, LoginPhase::Waiting, true)),
     );
     screen.run_steps(4);
-    screen.get_by_label("ログインページを開く");
+    screen.get_by_label("Open login page");
+}
+
+const NOW: u64 = 1_791_000_000;
+
+// Given: sign-ins that expire in 5h 20m, that expired, and whose expiry cannot be read, on a
+//        fixed clock
+// When: the status is shown
+// Then: each reads as legacy's editor reads it, the expired one says it renews by itself,
+//       and every row carries the badge of its provider type
+#[test]
+fn a_sign_in_expiry_reads_as_time_left_with_the_provider_badge() {
+    let mut screen = screen(
+        Box::new(AuthFeature {
+            now: || NOW,
+            ..AuthFeature::default()
+        }),
+        None,
+    );
+    let first = asked(&mut screen);
+    let signed_in = |profile: &str, kind, at, login| CredentialSlot {
+        profile: profile.into(),
+        kind,
+        storage: keyring(profile),
+        state: CredentialState::Present {
+            expires_at_unix: Some(at),
+        },
+        login: Some(login),
+    };
+    answer(
+        &mut screen,
+        first[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
+            revision: Revision(1),
+            slots: vec![
+                signed_in(
+                    "claude",
+                    ProviderKind::AnthropicSubscription,
+                    NOW + 5 * 3_600 + 20 * 60,
+                    LoginMethod::Claude,
+                ),
+                signed_in(
+                    "codex",
+                    ProviderKind::OpenaiCodex,
+                    NOW - 60,
+                    LoginMethod::Codex,
+                ),
+                signed_in(
+                    "cursor",
+                    ProviderKind::Cursor,
+                    u64::MAX,
+                    LoginMethod::Cursor,
+                ),
+            ],
+        })))),
+    );
+    screen.get_by_label("Signed in · token expires in 5h 20m");
+    screen.get_by_label("Signed in · token expired");
+    screen.get_by_label("Token expired; it will renew automatically when used.");
+    screen.get_by_label("Signed in · token expiry unknown");
+    for badge in ["Claude subscription", "Codex subscription", "Cursor"] {
+        screen.get_by_label(badge);
+    }
+    assert!(screen.query_by_label_contains("UNIX").is_none());
+}
+
+// Given: a stored API key
+// When: Delete credential is pressed, then Keep credential, then Delete credential and
+//       Confirm delete
+// Then: nothing is sent until the confirmation, and then exactly one delete of that profile
+#[test]
+fn a_credential_is_deleted_only_after_its_confirmation() {
+    let mut screen = loaded();
+    delete_key_credential(&mut screen);
+    screen.run_steps(2);
+    assert!(asked(&mut screen).is_empty());
+    screen.get_by_label("Delete the credential of key?");
+    screen.get_by_label("Keep credential").click();
+    screen.run_steps(2);
+    assert!(asked(&mut screen).is_empty());
+    assert!(screen.query_by_label("Confirm delete").is_none());
+
+    delete_key_credential(&mut screen);
+    screen.run_steps(2);
+    screen.get_by_label("Confirm delete").click();
+    let sent = asked(&mut screen);
+    let sent = commands(&sent);
+    assert_eq!(sent.len(), 1);
+    assert!(matches!(
+        sent[0],
+        AuthCommand::DeleteCredential(DeleteCredential { profile, .. }) if profile == "key"
+    ));
+}
+
+fn delete_key_credential(screen: &mut Harness<'static, Screen>) {
+    let buttons: Vec<_> = screen.query_all_by_label("Delete credential").collect();
+    assert_eq!(buttons.len(), 2);
+    buttons[1].click();
 }

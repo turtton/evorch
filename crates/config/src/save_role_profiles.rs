@@ -98,8 +98,16 @@ pub(crate) fn bindings_document(
     changes: &[RoleProfileBindings<'_>],
 ) -> Result<DocumentMut, ConfigError> {
     let mut doc = crate::save::read_document(path)?;
+    apply_bindings(&mut doc, changes)?;
+    Ok(doc)
+}
+
+fn apply_bindings(
+    doc: &mut DocumentMut,
+    changes: &[RoleProfileBindings<'_>],
+) -> Result<(), ConfigError> {
     for change in changes {
-        let target = target_table(&mut doc, change.profile, false)?;
+        let target = target_table(doc, change.profile, false)?;
         if let Some(routing) = change.routing {
             target.insert("routing", Item::Table(routing_document_table(routing)));
         }
@@ -107,7 +115,79 @@ pub(crate) fn bindings_document(
             target.insert("agents", Item::Table(agents_document_table(agents)));
         }
     }
-    Ok(doc)
+    Ok(())
+}
+
+fn apply_role_profile(
+    doc: &mut DocumentMut,
+    name: &str,
+    profile: &RoleProfileConfig,
+) -> Result<(), ConfigError> {
+    validate_named(name)?;
+    let target = target_table(doc, Some(name), true)?;
+    target.insert(
+        "routing",
+        Item::Table(routing_document_table(&profile.routing)),
+    );
+    target.insert(
+        "agents",
+        Item::Table(agents_document_table(&profile.agents)),
+    );
+    Ok(())
+}
+
+fn apply_delete_role_profile(doc: &mut DocumentMut, name: &str) -> Result<(), ConfigError> {
+    validate_named(name)?;
+    if let Some(profiles) = doc
+        .get_mut("role_profiles")
+        .and_then(Item::as_table_like_mut)
+    {
+        profiles.remove(name);
+        if profiles.is_empty() {
+            doc.remove("role_profiles");
+        }
+    }
+    Ok(())
+}
+
+fn edited_text(
+    previous: &str,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<(), ConfigError>,
+) -> Result<String, ConfigError> {
+    let mut doc = crate::save::parse_document(previous, "config.toml")?;
+    edit(&mut doc)?;
+    crate::save::checked_standalone_text(previous, &doc)
+}
+
+/// [`save_role_profiles_bindings`] applied to the file text `previous` instead of a path.
+///
+/// # Errors
+/// Fails like [`save_role_profiles_bindings`] with a standalone check.
+pub fn role_profiles_bindings_text(
+    previous: &str,
+    changes: &[RoleProfileBindings<'_>],
+) -> Result<String, ConfigError> {
+    edited_text(previous, |doc| apply_bindings(doc, changes))
+}
+
+/// [`save_role_profile`] applied to the file text `previous` instead of a path.
+///
+/// # Errors
+/// Fails like [`save_role_profile`].
+pub fn role_profile_text(
+    previous: &str,
+    name: &str,
+    profile: &RoleProfileConfig,
+) -> Result<String, ConfigError> {
+    edited_text(previous, |doc| apply_role_profile(doc, name, profile))
+}
+
+/// [`delete_role_profile`] applied to the file text `previous` instead of a path.
+///
+/// # Errors
+/// Fails like [`delete_role_profile`].
+pub fn without_role_profile_text(previous: &str, name: &str) -> Result<String, ConfigError> {
+    edited_text(previous, |doc| apply_delete_role_profile(doc, name))
 }
 
 /// 名前付きプロファイルを作成 (または置換) する。
@@ -136,15 +216,7 @@ pub(crate) fn save_role_profile_in_scope(
 ) -> Result<(), ConfigError> {
     validate_named(name)?;
     let mut doc = crate::save::read_document(path)?;
-    let target = target_table(&mut doc, Some(name), true)?;
-    target.insert(
-        "routing",
-        Item::Table(routing_document_table(&profile.routing)),
-    );
-    target.insert(
-        "agents",
-        Item::Table(agents_document_table(&profile.agents)),
-    );
+    apply_role_profile(&mut doc, name, profile)?;
     crate::save::write_document_in_scope(path, &doc, scope)
 }
 
@@ -163,15 +235,7 @@ pub(crate) fn delete_role_profile_in_scope(
 ) -> Result<(), ConfigError> {
     validate_named(name)?;
     let mut doc = crate::save::read_document(path)?;
-    if let Some(profiles) = doc
-        .get_mut("role_profiles")
-        .and_then(Item::as_table_like_mut)
-    {
-        profiles.remove(name);
-        if profiles.is_empty() {
-            doc.remove("role_profiles");
-        }
-    }
+    apply_delete_role_profile(&mut doc, name)?;
     crate::save::write_document_in_scope(path, &doc, scope)
 }
 
@@ -264,4 +328,86 @@ fn target_table<'a>(
         })
         .as_table_mut()
         .ok_or_else(missing)
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    use crate::RouteCandidateConfig;
+
+    const PREVIOUS: &str = r#"version = 3
+# kept as written
+[core]
+idle_grace_secs = 123
+
+[core.restart.targets.next]
+path = "/local/core"
+
+[providers.local]
+type = "openai-compatible"
+base_url = "http://localhost:1/v1"
+api_key_env = "KEY"
+models = ["m"]
+default_model = "m"
+"#;
+
+    fn routing() -> RoutingConfig {
+        let mut routing = RoutingConfig::default();
+        routing.routes.insert(
+            "fast".into(),
+            vec![RouteCandidateConfig {
+                profile: "local".into(),
+                model: None,
+                auto: false,
+            }],
+        );
+        routing
+    }
+
+    // Given: a file with a comment, an unrelated section and restart targets
+    // When: its routing is replaced through the text function and through the path function
+    // Then: both give the same bytes, and the comment, the section and the targets survive
+    #[test]
+    fn the_text_and_the_path_save_give_the_same_bytes_and_keep_the_rest() {
+        let routing = routing();
+        let changes = [RoleProfileBindings {
+            profile: None,
+            routing: Some(&routing),
+            agents: None,
+        }];
+        let text = role_profiles_bindings_text(PREVIOUS, &changes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, PREVIOUS).unwrap();
+        save_role_profiles_bindings(&path, &changes).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        for kept in ["# kept as written", "idle_grace_secs = 123", "/local/core"] {
+            assert!(text.contains(kept), "{kept} in {text}");
+        }
+        assert!(text.contains("fast"), "{text}");
+    }
+
+    // Given: a file with restart targets
+    // When: a profile is created and deleted by text, and a document without the targets is checked
+    // Then: the profile edits keep the targets and pass; the document that drops them is refused
+    #[test]
+    fn profile_edits_keep_the_restart_targets_and_dropping_them_is_refused() {
+        let profile = RoleProfileConfig {
+            routing: routing(),
+            ..RoleProfileConfig::default()
+        };
+        let created = role_profile_text(PREVIOUS, "cheap", &profile).unwrap();
+        assert!(created.contains("[role_profiles.cheap"), "{created}");
+        let deleted = without_role_profile_text(&created, "cheap").unwrap();
+        assert!(!deleted.contains("role_profiles"), "{deleted}");
+        assert!(deleted.contains("/local/core"));
+        assert!(role_profile_text(PREVIOUS, "default", &profile).is_err());
+
+        let without_targets = crate::save::parse_document("version = 3\n", "config.toml").unwrap();
+        let refused = crate::save::checked_standalone_text(PREVIOUS, &without_targets).unwrap_err();
+        assert!(
+            refused.to_string().contains("core.restart.targets"),
+            "{refused}"
+        );
+    }
 }

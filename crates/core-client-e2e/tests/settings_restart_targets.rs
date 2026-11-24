@@ -260,7 +260,7 @@ async fn no_client_can_change_the_restart_targets_by_saving_settings() {
 
     // The desktop: the screen shows the file; the person replaces it with a
     // document that has no restart targets at all and saves.
-    until(&mut window, |w| shows(w, "保存済みの設定は適用済みです。")).await;
+    until(&mut window, |w| shows(w, "Saved settings are applied.")).await;
     window
         .get_all_by_role(Role::MultilineTextInput)
         .next()
@@ -275,9 +275,12 @@ async fn no_client_can_change_the_restart_targets_by_saving_settings() {
         .unwrap()
         .type_text("version = 3");
     window.run_steps(4);
-    window.get_by_label("保存").click();
+    window.get_by_label("Save file").click();
     window.run_steps(4);
-    until(&mut window, |w| shows(w, "この画面から変更できません")).await;
+    until(&mut window, |w| {
+        shows(w, "cannot be changed from this screen")
+    })
+    .await;
     assert_eq!(
         std::fs::read_to_string(root.join("config.toml")).unwrap(),
         base,

@@ -37,6 +37,8 @@ pub mod role_settings;
 pub mod routing_settings;
 pub mod scoped_call;
 pub mod self_improvement_settings;
+pub mod settings_document;
+pub mod settings_tabs;
 pub mod system_notifications;
 pub use crate::panes::system_footer::stats as system_stats;
 pub mod tasks;

@@ -1,3 +1,8 @@
+use super::provider_widgets::{
+    ADD_CLAUDE_SUBSCRIPTION, ADD_CODEX, ADD_CURSOR, ADD_KIMI, ADD_OPENAI_COMPATIBLE,
+    API_KEY_EMPTY_HINT, API_KEY_STORED_HINT, ProviderRowAction, provider_list_row,
+    provider_type_label,
+};
 use crate::model::codex_auth::CodexAuthModel;
 use crate::model::provider_settings::{
     CredentialMode, OpenAiEditorModel, ProfileEditor, ProviderKind, ProviderSettingsModel,
@@ -76,74 +81,40 @@ pub fn provider_settings_body(
                 None => {
                     let mut edit = None;
                     for profile in &model.profiles {
-                        ui.push_id(&profile.name, |ui| {
-                            crate::theme::widgets::compact_row(ui, false, |ui| {
-                                ui.label(&profile.name);
-                                let label = match profile.provider_type {
-                                    config::ProviderTypeConfig::OpenAiCompatible => {
-                                        "OpenAI-compatible"
-                                    }
-                                    config::ProviderTypeConfig::OpenAiCodex => "Codex subscription",
-                                    config::ProviderTypeConfig::Anthropic => "Claude API",
-                                    config::ProviderTypeConfig::Cursor => "Cursor",
-                                    config::ProviderTypeConfig::AnthropicSubscription => {
-                                        "Claude subscription"
-                                    }
-                                    config::ProviderTypeConfig::OpenAi => "OpenAI",
-                                    config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
-                                    config::ProviderTypeConfig::Openrouter => "OpenRouter",
-                                    config::ProviderTypeConfig::KimiSubscription => {
-                                        "Kimi subscription"
-                                    }
-                                };
-                                crate::theme::widgets::badge(
-                                    ui,
-                                    label,
-                                    palette().ACCENT,
-                                    palette().SURFACE,
-                                );
-                                ui.label(muted(&profile.default_model));
-                                if ui.button("Edit").clicked() {
-                                    edit = Some(profile.name.clone());
-                                }
-                                if ui.button("Delete").clicked() {
-                                    model.confirm_delete = Some(profile.name.clone());
-                                }
-                            });
-                            if model.confirm_delete.as_deref() == Some(&profile.name) {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("Delete {}?", profile.name));
-                                    if ui.button("Confirm delete").clicked() {
-                                        action = Some(ProviderSettingsAction::Delete(
-                                            profile.name.clone(),
-                                        ));
-                                    }
-                                    if ui.button("Keep profile").clicked() {
-                                        model.confirm_delete = None;
-                                    }
-                                });
+                        match provider_list_row(
+                            ui,
+                            &profile.name,
+                            provider_type_label(profile.provider_type),
+                            &profile.default_model,
+                            None,
+                            &mut model.confirm_delete,
+                        ) {
+                            Some(ProviderRowAction::Edit) => edit = Some(profile.name.clone()),
+                            Some(ProviderRowAction::Delete) => {
+                                action = Some(ProviderSettingsAction::Delete(profile.name.clone()));
                             }
-                        });
+                            None => {}
+                        }
                     }
                     if let Some(name) = edit {
                         model.edit(&name);
                     }
-                    if ui.button("+ Add OpenAI-compatible").clicked() {
+                    if ui.button(ADD_OPENAI_COMPATIBLE).clicked() {
                         model.add(ProviderKind::OpenAiCompatible);
                     }
-                    if ui.button("+ Add Codex subscription").clicked() {
+                    if ui.button(ADD_CODEX).clicked() {
                         model.add(ProviderKind::CodexSubscription);
                     }
                     if ui.button("+ Add Claude API").clicked() {
                         model.add(ProviderKind::ClaudeApi);
                     }
-                    if ui.button("+ Add Claude subscription").clicked() {
+                    if ui.button(ADD_CLAUDE_SUBSCRIPTION).clicked() {
                         model.add(ProviderKind::ClaudeSubscription);
                     }
-                    if ui.button("+ Add Cursor").clicked() {
+                    if ui.button(ADD_CURSOR).clicked() {
                         model.add(ProviderKind::Cursor);
                     }
-                    if ui.button("+ Add Kimi subscription").clicked() {
+                    if ui.button(ADD_KIMI).clicked() {
                         model.add(ProviderKind::KimiSubscription);
                     }
                 }
@@ -204,9 +175,9 @@ fn openai_body(
         CredentialMode::Keyring => {
             let label = ui.label("API key");
             let hint = if model.api_key_stored {
-                "•••• stored — enter to replace"
+                API_KEY_STORED_HINT
             } else {
-                "Paste API key (stored in OS keyring)"
+                API_KEY_EMPTY_HINT
             };
             ui.add(
                 egui::TextEdit::singleline(&mut model.api_key_input)

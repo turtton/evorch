@@ -58,6 +58,8 @@ pub enum Effect {
     PullRequest(super::features::pull_requests::PullRequestBarAction),
     ResetLayout,
     ThemeSettings,
+    /// ⚙ → Providers, Routing or Agent roles: the Settings tab with its modal on that tab.
+    Settings(crate::panes::settings::SettingsTab),
     Status(String),
     AttachRequested {
         request: String,
@@ -662,6 +664,14 @@ fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>
             if ui.button("Theme").clicked() {
                 effects.push(Effect::ThemeSettings);
                 ui.close();
+            }
+            if !state.placeholders.contains(&FeatureId::Settings) {
+                for tab in crate::panes::settings::SettingsTab::ALL {
+                    if ui.button(tab.label()).clicked() {
+                        effects.push(Effect::Settings(tab));
+                        ui.close();
+                    }
+                }
             }
             for feature in ON_DEMAND {
                 if state.placeholders.contains(&feature) {
