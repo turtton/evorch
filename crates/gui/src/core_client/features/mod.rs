@@ -287,6 +287,8 @@ pub struct FeatureFrame {
     pub data: Vec<DataAction>,
     pub previews: Vec<ArtifactRef>,
     pub observations: Vec<workbench_protocol::namespaces::browser::observation::ObservationTarget>,
+    /// What a lane thread's menu asked of the lanes feature.
+    pub lanes: Vec<lanes::LaneIntent>,
 }
 
 /// What asking the features for the selector came to.
@@ -366,6 +368,11 @@ impl FeatureContext<'_> {
         if self.feature == FeatureId::Artifacts {
             self.frame.previews.push(artifact);
         }
+    }
+
+    /// Ask the lanes feature for what a lane thread's menu chose, applied after the frame.
+    pub fn lane(&mut self, intent: lanes::LaneIntent) {
+        self.frame.lanes.push(intent);
     }
 
     /// Typed View-to-run intent, processed once after this composition pass.
@@ -500,6 +507,21 @@ pub trait Feature: Send {
     }
 
     fn as_execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
+        None
+    }
+
+    /// The workspace feature itself, to hand it what the sidebar's lane menus offer.
+    fn as_workspace_mut(&mut self) -> Option<&mut workspace::WorkspaceFeature> {
+        None
+    }
+
+    /// The lanes feature itself, for the sidebar's lane menus and the conversation's lane
+    /// card, which queue what is pressed in them into it.
+    fn as_lanes(&self) -> Option<&lanes::LanesFeature> {
+        None
+    }
+
+    fn as_lanes_mut(&mut self) -> Option<&mut lanes::LanesFeature> {
         None
     }
 }
@@ -742,6 +764,10 @@ impl Features {
         self.features.iter_mut().find_map(|f| f.as_execution_mut())
     }
 
+    pub fn lanes_mut(&mut self) -> Option<&mut lanes::LanesFeature> {
+        self.features.iter_mut().find_map(|f| f.as_lanes_mut())
+    }
+
     fn observe_selection(&mut self, selection: &Selection) -> bool {
         let changed = self.selection.as_ref() != Some(selection);
         if changed {
@@ -970,6 +996,16 @@ fn render_selector(
     view: FeatureView<'_>,
 ) -> SelectorOutcome {
     let mut frame = FeatureFrame::default();
+    // The sidebar offers lane operations only while the lanes feature can send them.
+    let menu = features
+        .iter()
+        .find(|f| f.id() == FeatureId::Lanes)
+        .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
+        .and_then(|f| f.as_lanes())
+        .map(lanes::LanesFeature::menu);
+    if let Some(workspace) = features.iter_mut().find_map(|f| f.as_workspace_mut()) {
+        workspace.set_lane_menu(menu);
+    }
     for feature in features
         .iter_mut()
         .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
@@ -1046,6 +1082,13 @@ impl<'a> DockPass<'a> {
             return None;
         }
         self.features.iter_mut().find_map(|f| f.as_execution_mut())
+    }
+
+    /// The lanes feature while it is available.
+    pub fn lanes(&self) -> Option<&lanes::LanesFeature> {
+        self.is_available(FeatureId::Lanes)
+            .then(|| self.features.iter().find_map(|f| f.as_lanes()))
+            .flatten()
     }
 
     /// Draw the body of `feature` in its tab. Returns `false` when nothing was drawn: the
@@ -1137,6 +1180,7 @@ impl FeatureFrame {
         self.navigation.extend(other.navigation);
         self.data.extend(other.data);
         self.previews.extend(other.previews);
+        self.lanes.extend(other.lanes);
         if !other.observations.is_empty() {
             self.observations = other.observations;
         }

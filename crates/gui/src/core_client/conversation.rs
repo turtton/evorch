@@ -15,6 +15,7 @@ use workspace_ui::ThreadRunPhase;
 use super::cache::Cache;
 use super::connection::Action;
 use super::features::execution::ExecutionBand;
+use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::{FeatureId, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
@@ -31,7 +32,8 @@ use crate::theme::icons;
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::{
-    empty_state, fill_label, ghost, icon_button, pane_root, primary_icon_button, surface_frame,
+    empty_state, fill_label, ghost, icon_button, pane_root, primary_icon_button, soft_frame,
+    surface_frame,
 };
 
 const MAX_ANSWER_BYTES: usize = 4096;
@@ -104,13 +106,21 @@ impl ConversationIo<'_> {
     }
 }
 
+/// What the areas draw into the conversation: the execution feature's goal and plan band
+/// above the composer, and the lanes feature's card of a lane thread under the header. Each
+/// is drawn only for the thread it was read for.
+pub struct Bands<'a> {
+    pub band: Option<ExecutionBand<'a>>,
+    pub lane: Option<(&'a ThreadId, LaneCardView<'a>)>,
+}
+
 /// `root` is the thread's current root run, as its detail names it.
 pub fn show(
     ui: &mut Ui,
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
     selection: &Selection,
-    band: Option<ExecutionBand<'_>>,
+    Bands { band, lane }: Bands<'_>,
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
 ) {
@@ -142,6 +152,9 @@ pub fn show(
                 pane.composer_role,
                 effects,
             );
+            if let Some((_, card)) = lane.filter(|(lane_thread, _)| *lane_thread == &thread) {
+                lane_card(ui, io.cache, &card, pane.composer_role, effects);
+            }
             let details_max = ui.available_height() * 0.3;
             egui::Panel::bottom(ui.id().with("composer"))
                 .resizable(false)
@@ -402,6 +415,54 @@ fn header(
             });
         });
     ui.separator();
+}
+
+/// The lane card of a lane's conversation, under its header as in the embedded workbench.
+/// Resuming held notices goes through the lanes feature, which knows the lead's root run;
+/// continuing the lead is the same command as the header's Continue, for the lead.
+fn lane_card(
+    ui: &mut Ui,
+    cache: &Cache,
+    card: &LaneCardView<'_>,
+    role: ComposerRole,
+    effects: &mut Vec<Effect>,
+) {
+    let lead_project = cache
+        .threads
+        .get(card.lead.as_str())
+        .map(|lead| lead.project.clone());
+    let choice = soft_frame(palette().SURFACE)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            lane_body(
+                ui,
+                card,
+                CardPlace::Conversation {
+                    can_continue: lead_project.is_some(),
+                },
+            )
+        })
+        .inner;
+    match choice {
+        Some(CardChoice::ResumeNotifications) => {
+            effects.push(Effect::Lane(LaneCardAction::ResumeNotifications {
+                lane: card.summary.lane_id.clone(),
+            }));
+        }
+        Some(CardChoice::ContinueLead) => {
+            if let Some(project) = lead_project {
+                effects.push(Effect::send(command(Command::Conversation(
+                    ConversationCommand::ContinueChat(ContinueChat {
+                        project,
+                        thread: card.lead.clone(),
+                        composer_role: role,
+                        model_preference: None,
+                    }),
+                ))));
+            }
+        }
+        None => {}
+    }
 }
 
 fn stop_button() -> egui::Button<'static> {

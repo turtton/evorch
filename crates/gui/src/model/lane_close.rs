@@ -9,21 +9,13 @@ use event_bus::lane::{
     LaneCloseKind, LaneClosePrContext, LaneCloseResult, LanePrContextStatus, LaneReadyState,
 };
 use storage::lane_control::LaneClosePreview;
+use workbench_protocol::lane_management::LaneCloseRecordKind;
 
-/// What closing means, shown in the confirmation and as the tooltip of its buttons.
-pub const MEANING: &str = "This only records the lane as ended in the ledger. It does not stop its run, delete its thread or worktree, or detach it. It is your decision, not a verification.";
-
-/// What closing leaves as it is, said next to the meaning so nobody reads a close as cleanup.
-pub const REMAINS: &str = "Its open questions stay open. If the lane reports again, the close is lifted and the lane reads as active.";
-
-/// Shown when the lane's thread has a run going: the close does not stop it.
-pub const RUNNING_WARNING: &str = "This lane is running now. Ending it here does not stop the run; stop it yourself if you want it to end.";
-
-/// Shown when a person closes a lane that has not reported Ready for its brief.
-pub const NO_READY_WARNING: &str = "This lane has not reported Ready for its current brief. You are ending it without a result to read.";
-
-/// Shown when the latest Ready was reported for an earlier brief: it is only for reference.
-pub const OLDER_BRIEF_WARNING: &str = "The latest Ready was reported for an earlier brief. The brief was revised after it, so it is shown for reference only and is not a result for the current brief.";
+use crate::panes::lane_widgets;
+pub use crate::panes::lane_widgets::{
+    ARTIFACT_REFS_SHOWN, CloseChoice, MEANING, NO_READY_WARNING, OLDER_BRIEF_WARNING, REMAINS,
+    RUNNING_WARNING, open_questions_line,
+};
 
 /// Whether the Ready a preview shows answers the lane's current brief. `None` when there is
 /// no Ready for the current management at all.
@@ -46,79 +38,28 @@ pub fn ready_warning(preview: &LaneClosePreview) -> Option<&'static str> {
 /// Longest note the ledger accepts, in bytes.
 pub const NOTE_MAX_BYTES: usize = storage::lane_control::LANE_CLOSE_NOTE_MAX_BYTES;
 
-/// Which ending the person chose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseChoice {
-    /// The person judges the lane done, with no verification behind it.
-    Complete,
-    /// The person ends the lane without claiming it is done.
-    Discard,
-}
-
-impl CloseChoice {
-    /// The entry of a managed lane's sidebar menu.
-    #[must_use]
-    pub const fn menu_label(self) -> &'static str {
-        match self {
-            Self::Complete => "Close by human decision…",
-            Self::Discard => "Discard…",
-        }
-    }
-
-    /// The button on the attention row.
-    #[must_use]
-    pub const fn button(self) -> &'static str {
-        match self {
-            Self::Complete => "Close…",
-            Self::Discard => "Discard…",
-        }
-    }
-
-    /// The confirm button of the dialog.
-    #[must_use]
-    pub const fn confirm(self) -> &'static str {
-        match self {
-            Self::Complete => "Close lane",
-            Self::Discard => "Discard lane",
-        }
-    }
-
-    /// The dialog's title.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Complete => "Close lane (unverified)",
-            Self::Discard => "Discard lane",
-        }
-    }
-
-    /// How the ledger will word the result.
-    #[must_use]
-    pub const fn recorded_as(self) -> &'static str {
-        match self {
-            Self::Complete => "Recorded as: completed by human decision (unverified)",
-            Self::Discard => "Recorded as: discarded",
-        }
-    }
-
-    /// Whether the request ends the lane without claiming it is done.
-    #[must_use]
-    pub const fn discards(self) -> bool {
-        matches!(self, Self::Discard)
+/// The protocol's word for the ledger's kind of close; the variants are the same.
+#[must_use]
+pub(crate) const fn record_kind(kind: LaneCloseKind) -> LaneCloseRecordKind {
+    match kind {
+        LaneCloseKind::LeadClosed => LaneCloseRecordKind::LeadClosed,
+        LaneCloseKind::HumanClosed => LaneCloseRecordKind::HumanClosed,
+        LaneCloseKind::Discarded => LaneCloseRecordKind::Discarded,
     }
 }
 
 /// The review of the Ready in a sentence.
 #[must_use]
 pub const fn review_line(readiness: LaneReadyState) -> &'static str {
-    match readiness {
-        LaneReadyState::NoEvidence => "Review: none, and no fixed artifact is named.",
-        LaneReadyState::Unreviewed => "Review: none yet; a fixed artifact is named.",
-        LaneReadyState::ReviewInProgress => "Review: under way.",
-        LaneReadyState::ReviewRejected => "Review: rejected this Ready.",
-        LaneReadyState::ReviewIncomplete => "Review: ended without a complete result.",
-        LaneReadyState::AwaitingClose => "Review: approved.",
-    }
+    use workbench_protocol::lane_attention::LaneReadyState as Wire;
+    lane_widgets::review_line(match readiness {
+        LaneReadyState::NoEvidence => Wire::NoEvidence,
+        LaneReadyState::Unreviewed => Wire::Unreviewed,
+        LaneReadyState::ReviewInProgress => Wire::ReviewInProgress,
+        LaneReadyState::ReviewRejected => Wire::ReviewRejected,
+        LaneReadyState::ReviewIncomplete => Wire::ReviewIncomplete,
+        LaneReadyState::AwaitingClose => Wire::AwaitingClose,
+    })
 }
 
 /// What the ledger holds about the lane's pull request, in a sentence.
@@ -147,11 +88,6 @@ pub fn pr_line(context: &LaneClosePrContext) -> String {
     }
 }
 
-/// Most artifact references the confirmation lists; the rest are only counted.
-pub const ARTIFACT_REFS_SHOWN: usize = 5;
-/// Longest reference shown, in characters.
-const ARTIFACT_REF_CHARS: usize = 200;
-
 /// The artifact the Ready names, exactly as the lane reported it: the fixed revision, then at
 /// most [`ARTIFACT_REFS_SHOWN`] references (a pull request URL, a commit SHA, a file), then
 /// how many more there are. Nothing is checked or fetched, and nothing here decides whether the
@@ -159,52 +95,20 @@ const ARTIFACT_REF_CHARS: usize = 200;
 #[must_use]
 pub fn artifact_lines(ready: &event_bus::lane::LaneReport) -> Vec<String> {
     use event_bus::lane::ArtifactRevision;
-    let mut lines = Vec::new();
-    match &ready.artifact_revision {
-        Some(ArtifactRevision::CommitSha(value)) => {
-            lines.push(format!("revision (commit): {}", clipped(value)));
-        }
-        Some(ArtifactRevision::Sha256(value)) => {
-            lines.push(format!("revision (sha256): {}", clipped(value)));
-        }
-        None => {}
-    }
-    lines.extend(
-        ready
-            .artifact_refs
-            .iter()
-            .take(ARTIFACT_REFS_SHOWN)
-            .map(|reference| clipped(reference)),
-    );
-    let rest = ready
-        .artifact_refs
-        .len()
-        .saturating_sub(ARTIFACT_REFS_SHOWN);
-    if rest > 0 {
-        lines.push(format!("… and {rest} more"));
-    }
-    lines
-}
-
-fn clipped(text: &str) -> String {
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(ARTIFACT_REF_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
+    let revision = ready
+        .artifact_revision
+        .as_ref()
+        .map(|revision| match revision {
+            ArtifactRevision::CommitSha(value) => ("commit", value.as_str()),
+            ArtifactRevision::Sha256(value) => ("sha256", value.as_str()),
+        });
+    lane_widgets::artifact_lines(revision, &ready.artifact_refs, ready.artifact_refs.len())
 }
 
 /// The artifact the Ready names, in a sentence.
 #[must_use]
 pub fn evidence_line(ready: &event_bus::lane::LaneReport) -> String {
-    let refs = ready.artifact_refs.len();
-    match (&ready.artifact_revision, refs) {
-        (None, 0) => "Evidence: no fixed artifact and no references.".to_owned(),
-        (None, n) => format!("Evidence: {n} reference(s), no fixed artifact revision."),
-        (Some(_), n) => format!("Evidence: a fixed artifact revision and {n} reference(s)."),
-    }
+    lane_widgets::evidence_line(ready.artifact_revision.is_some(), ready.artifact_refs.len())
 }
 
 /// Why a screen that was drawn earlier cannot decide: the lane is not what the list item
@@ -227,18 +131,6 @@ pub fn moved_since_listed(
     None
 }
 
-/// How many unanswered questions the lane still holds, in a sentence; `None` when none.
-#[must_use]
-pub fn open_questions_line(count: u64) -> Option<String> {
-    match count {
-        0 => None,
-        1 => Some("1 question from this lane is still unanswered. It stays open.".to_owned()),
-        n => Some(format!(
-            "{n} questions from this lane are still unanswered. They stay open."
-        )),
-    }
-}
-
 /// What a lane's row in the sidebar shows once its close stands: a short word, and the same
 /// words the lane view uses on hover. It is a record of the ledger, never a state of any run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,11 +143,7 @@ impl LaneCloseBadge {
     #[must_use]
     pub fn of(close: &LaneCloseResult) -> Self {
         Self {
-            text: match close.kind {
-                LaneCloseKind::LeadClosed => "closed",
-                LaneCloseKind::HumanClosed => "closed (unverified)",
-                LaneCloseKind::Discarded => "discarded",
-            },
+            text: lane_widgets::close_badge_text(record_kind(close.kind)),
             hover: format!("{}\n{}", close_label(close), close_detail(close)),
         }
     }
@@ -264,11 +152,7 @@ impl LaneCloseBadge {
 /// The badge text of a lane's close, which never reads like a verified one.
 #[must_use]
 pub const fn close_label(close: &LaneCloseResult) -> &'static str {
-    match close.kind {
-        LaneCloseKind::LeadClosed => "closed by lead",
-        LaneCloseKind::HumanClosed => "completed by human decision (unverified)",
-        LaneCloseKind::Discarded => "discarded",
-    }
+    lane_widgets::close_kind_label(record_kind(close.kind))
 }
 
 /// Who decided and why, as a line under the badge.

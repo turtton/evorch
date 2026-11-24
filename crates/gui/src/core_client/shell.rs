@@ -51,6 +51,8 @@ pub enum Effect {
     OpenRun(RunPane),
     /// A goal control pressed in the composer band, for the execution feature.
     Goal(GoalAction),
+    /// A control pressed on the lane card of a lane's conversation, for the lanes feature.
+    Lane(super::features::lanes::LaneCardAction),
     ResetLayout,
     Status(String),
     AttachRequested {
@@ -441,12 +443,13 @@ impl TabViewer for Viewer<'_, '_> {
             CoreTab::Conversation => {
                 let root = self.selected_root();
                 let band = self.pass.execution().and_then(|e| e.band());
+                let lane = self.pass.lanes().and_then(|lanes| lanes.card());
                 conversation::show(
                     ui,
                     self.conversation,
                     &mut self.io,
                     self.selection,
-                    band,
+                    conversation::Bands { band, lane },
                     root.as_ref(),
                     self.effects,
                 );

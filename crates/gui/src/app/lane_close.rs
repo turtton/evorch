@@ -24,6 +24,7 @@ use super::WorkbenchState;
 use crate::model::lane_attention::AttentionAction;
 use crate::model::lane_close::{self, CloseChoice};
 use crate::model::tasks::AgentRunSource;
+use crate::panes::lane_widgets;
 
 /// Reads what a person needs to decide, from one snapshot of the ledger. Blocking: it always
 /// runs on a worker thread.
@@ -122,17 +123,14 @@ impl CloseDialog {
     #[must_use]
     pub fn blocker(&self) -> Option<String> {
         if self.stale {
-            return Some("The lane changed after this screen was read. Reload first.".to_owned());
+            return Some(lane_widgets::STALE_BLOCKER.to_owned());
         }
         match &self.phase {
-            ClosePhase::Loading => Some("Reading the lane from the ledger…".to_owned()),
+            ClosePhase::Loading => Some(lane_widgets::LOADING_BLOCKER.to_owned()),
             ClosePhase::Unavailable(reason) => Some(reason.clone()),
             ClosePhase::Loaded(preview) => {
                 if let Some(close) = &preview.current_close {
-                    return Some(format!(
-                        "This lane is already ended ({}). Nothing more to record.",
-                        lane_close::close_label(close)
-                    ));
+                    return Some(lane_widgets::already_ended(lane_close::close_label(close)));
                 }
                 self.listed.and_then(|listed| {
                     lane_close::moved_since_listed(
@@ -150,9 +148,9 @@ impl CloseDialog {
     pub fn note_error(&self) -> Option<&'static str> {
         let note = self.note.trim();
         if note.is_empty() {
-            Some("A reason is required.")
+            Some(lane_widgets::REASON_REQUIRED)
         } else if note.len() > lane_close::NOTE_MAX_BYTES {
-            Some("The reason is too long.")
+            Some(lane_widgets::REASON_TOO_LONG)
         } else {
             None
         }
@@ -423,9 +421,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let lane_thread = dialog.lane_thread.clone();
                 let words = lane_close::close_label(&result);
                 let notice = if result.outcome == LaneCloseOutcome::AlreadyClosed {
-                    format!("The lane was already ended ({words}); nothing was recorded.")
+                    lane_widgets::already_closed_notice(words)
                 } else {
-                    format!("Lane ended: {words}. No run was stopped and nothing was deleted.")
+                    lane_widgets::closed_notice(words)
                 };
                 self.lane_close.dialog = None;
                 self.push_notice(notice);
@@ -437,9 +435,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Err(failure) => {
                 dialog.stale = failure.stale;
                 dialog.notice = Some(if failure.stale {
-                    "The lane changed after this screen was read; nothing was recorded. Reload to see it now.".to_owned()
+                    lane_widgets::STALE_NOTICE.to_owned()
                 } else {
-                    format!("Nothing was recorded: {}", failure.message)
+                    lane_widgets::not_recorded(&failure.message)
                 });
             }
         }
