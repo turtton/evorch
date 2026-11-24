@@ -149,46 +149,128 @@ async fn waiting(
     }
 }
 
+async fn chat_between_turns(
+    host: &BootstrappedHost,
+    model: &Model,
+    events: &mut event_bus::EventReceiver,
+) -> runtime::RunId {
+    let run = host.runtime.delegate_background(
+        Role::Worker,
+        "chat".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    model.entered.notified().await;
+    model.release.notify_one();
+    waiting(&host.runtime, run, events).await;
+    assert!(!host.busy());
+    run
+}
+
 #[tokio::test]
-async fn unanswered_questions_retain_even_after_the_requester_stops() {
+async fn unanswered_questions_retain_only_while_a_recipient_is_live() {
     for blocking in [false, true] {
         let dir = test_socket_dir::SplitDir::new();
         let model = Arc::new(Model::default());
         let mut host = open(&dir, model.clone()).await;
         let mut events = host.runtime.event_bus().subscribe();
-        let run = host.runtime.delegate_background(
-            Role::Worker,
-            "chat".into(),
-            RunConfig {
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
-        );
-        model.entered.notified().await;
-        model.release.notify_one();
-        waiting(&host.runtime, run, &mut events).await;
-        assert!(!host.busy());
+        let run = chat_between_turns(&host, &model, &mut events).await;
         let question = host
             .runtime
-            .request_user_question(run, "retain until answered".into(), vec![], blocking)
+            .request_user_question(run, "retain while consumable".into(), vec![], blocking)
             .unwrap();
         assert!(
             host.busy(),
             "pending questions are not ordinary input waits"
         );
         host.runtime.stop(run, StopScope::SelfOnly).unwrap();
-        host.runtime.wait(run).await.unwrap();
+        assert_eq!(
+            host.runtime.wait(run).await.unwrap(),
+            AgentRunPhase::Stopped
+        );
         assert!(
-            host.busy(),
-            "unloaded/terminal requesters do not make a question recoverable"
+            !host.busy(),
+            "a terminal requester can no longer consume the answer"
+        );
+        assert_eq!(
+            host.runtime
+                .with_storage_reader(|db| db.pending_user_questions())
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .map(|pending| pending.id)
+                .collect::<Vec<_>>(),
+            vec![question.id.clone()],
+            "the question stays answerable from storage"
         );
         host.runtime
             .answer_user_question(&question.id, "answer")
             .unwrap();
-        assert!(!host.busy(), "an answered question alone does not retain");
+        assert!(!host.busy());
         host.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_run_blocked_on_its_own_question_retains_until_answered() {
+    let dir = test_socket_dir::SplitDir::new();
+    let model = Arc::new(Model::default());
+    let mut host = open(&dir, model.clone()).await;
+    let run =
+        host.runtime
+            .delegate_background(Role::Worker, "ask first".into(), RunConfig::default());
+    model.script.lock().unwrap().insert(
+        run.to_string(),
+        providers::ContentBlock::ToolUse {
+            id: "blocking-question".into(),
+            name: "ask_user".into(),
+            input: serde_json::json!({"title": "Which scope?", "blocking": true}),
+        },
+    );
+    let responder = tokio::spawn({
+        let model = model.clone();
+        async move {
+            loop {
+                model.entered.notified().await;
+                model.release.notify_one();
+            }
+        }
+    });
+    let runtime::RunWait::BlockedOnUser(pending) =
+        host.runtime.wait_or_blocked_on_user(run).await.unwrap()
+    else {
+        panic!("the run must block on its question");
+    };
+    assert!(host.busy(), "a live run still waits for the answer");
+    host.runtime
+        .answer_user_question(&pending[0].id, "all of it")
+        .unwrap();
+    assert_eq!(host.runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    responder.abort();
+    assert!(!host.busy());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unreadable_question_store_retains() {
+    let dir = test_socket_dir::SplitDir::new();
+    let model = Arc::new(Model::default());
+    let mut host = open(&dir, model.clone()).await;
+    let mut events = host.runtime.event_bus().subscribe();
+    let run = chat_between_turns(&host, &model, &mut events).await;
+    let sql = rusqlite::Connection::open(dir.path().join("evorch-events.db")).unwrap();
+    sql.execute_batch("ALTER TABLE user_questions RENAME TO user_questions_hidden")
+        .unwrap();
+    assert!(host.busy(), "an unknown question state fails closed");
+    sql.execute_batch("ALTER TABLE user_questions_hidden RENAME TO user_questions")
+        .unwrap();
+    assert!(!host.busy());
+    host.runtime.stop(run, StopScope::SelfOnly).unwrap();
+    host.runtime.wait(run).await.unwrap();
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]

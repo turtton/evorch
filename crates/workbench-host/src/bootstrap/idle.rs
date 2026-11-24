@@ -26,11 +26,8 @@ impl BootstrappedHost {
             || self.runtime.has_active_runs()
             || self.runtime.with_storage_reader(|db| db.has_pending_reindex())
                 .map_or(true, |pending| pending.unwrap_or(false))
-            // P9 recovery does not yet restore questions or approval authority.
-            // Preserve even questions belonging to a run not currently loaded.
-            || self.runtime.with_storage_reader(|db| {
-                db.pending_user_questions().map(|questions| !questions.is_empty())
-            }).map_or(true, |pending| pending.unwrap_or(false))
+            || self.runtime.has_pending_question_with_live_recipient().unwrap_or(true)
+            // P9 recovery does not yet restore approval authority.
             || sandbox::approval::ApprovalRegistry::existing(self.runtime.event_bus().as_ref())
                 .is_some_and(|registry| !registry.list_pending(None, 1).is_empty())
             || self.runtime.list_agents().iter().any(|r| {

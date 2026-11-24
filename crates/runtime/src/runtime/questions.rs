@@ -702,22 +702,40 @@ impl AgentRuntime {
             .user_question_recipients(id)
             .map_err(|e| e.to_string())?
         {
-            let run = crate::meta::parse_run_id(&run)?;
-            if self.entry(run).is_ok_and(|entry| {
-                matches!(
-                    *entry.phase_rx.borrow(),
-                    event_bus::AgentRunPhase::Pending
-                        | event_bus::AgentRunPhase::Running
-                        | event_bus::AgentRunPhase::Waiting
-                )
-            }) || self
-                .admission_snapshot(run)
-                .is_some_and(|admission| admission.result.is_none())
-            {
+            if self.is_live_question_recipient(crate::meta::parse_run_id(&run)?) {
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    pub fn has_pending_question_with_live_recipient(&self) -> Result<bool, StorageError> {
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(false);
+        };
+        let candidates = store.with_database(|db| {
+            Ok(db
+                .pending_user_questions()?
+                .into_iter()
+                .flat_map(|question| {
+                    std::iter::once(question.run_id).chain(question.recipient_run_ids)
+                })
+                .collect::<std::collections::BTreeSet<_>>())
+        })?;
+        Ok(candidates.iter().any(|run| {
+            crate::meta::parse_run_id(run).is_ok_and(|run| self.is_live_question_recipient(run))
+        }))
+    }
+
+    fn is_live_question_recipient(&self, run: RunId) -> bool {
+        self.entry(run).is_ok_and(|entry| {
+            matches!(
+                *entry.phase_rx.borrow(),
+                AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+            )
+        }) || self
+            .admission_snapshot(run)
+            .is_some_and(|admission| admission.result.is_none())
     }
 
     pub(crate) fn inherit_user_questions(
