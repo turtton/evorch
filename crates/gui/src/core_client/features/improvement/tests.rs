@@ -6,13 +6,13 @@ use crate::core_client::features::{
     FeatureError, FeatureRequest,
     execution::tests::{answer, asked, command_of, query_of, screen},
 };
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use workbench_protocol::{
-    ids::OperationId,
+    ids::{OperationId, RunId},
     management::{DenialReason, ImprovementState},
     namespaces::{
         diagnostics::{BoundedText, ReadOutcome},
-        improvement::ImprovementList,
+        improvement::{ImprovementList, ImprovementSeverity, ImprovementSource},
     },
     operation::{OperationState, OperationView},
     views::Page,
@@ -82,12 +82,15 @@ fn candidates_the_switch_and_a_detail_follow_what_the_core_answered() {
             vec![summary("cand-a", ImprovementStatus::New)],
         ),
     );
-    screen.get_by_label("自己改善は設定で無効です。記録済みの候補だけを表示します。");
-    screen.get_by_label("cand-a · 未確認 · 警告 · 3 回 · title of cand-a");
+    screen.get_by_label_contains(crate::panes::improvement_widgets::DISABLED);
+    screen.get_by_label("cand-a");
+    screen.get_by_label("new");
+    screen.get_by_label("warning");
+    screen.get_by_label("title of cand-a");
+    screen.get_by_label_contains("Seen 3 times");
+    screen.get_by_label("1 candidates");
 
-    screen
-        .get_by_label("cand-a · 未確認 · 警告 · 3 回 · title of cand-a")
-        .click();
+    screen.get_by_label("cand-a").click();
     let detail = asked(&mut screen);
     let Query::Improvement(ImprovementQuery::GetImprovement(get)) = query_of(&detail[0]) else {
         panic!("a detail was expected");
@@ -107,16 +110,27 @@ fn candidates_the_switch_and_a_detail_follow_what_the_core_answered() {
                         truncated: false,
                     },
                     draft_file: Some("cand-a.md".into()),
-                    run: None,
-                    recent_runs: vec![],
+                    run: Some(RunId::new("run-first").unwrap()),
+                    recent_runs: vec![
+                        RunId::new("run-first").unwrap(),
+                        RunId::new("run-last").unwrap(),
+                    ],
                     created_ms: 1,
-                    reopened_count: 0,
+                    reopened_count: 2,
                 }),
             }),
         )))),
     );
-    screen.get_by_label("下書き: cand-a.md");
+    screen.get_by_label("Draft: cand-a.md");
+    screen.get_by_label("Reopened ×2");
+    assert_eq!(screen.query_all_by_label("title of cand-a").count(), 2);
+    // The evidence is folded, as in the legacy pane, with the runs behind it.
+    assert!(screen.query_by_label("the tool exited 2").is_none());
+    screen.get_by_label("Evidence").click();
+    screen.run();
     screen.get_by_label("the tool exited 2");
+    screen.get_by_label("Copy run ID");
+    screen.get_by_label("Recent runs: run-first, run-last");
 }
 
 #[test]
@@ -153,9 +167,7 @@ fn screen_with_detail()
             vec![summary("cand-a", ImprovementStatus::New)],
         ),
     );
-    screen
-        .get_by_label("cand-a · 未確認 · 警告 · 3 回 · title of cand-a")
-        .click();
+    screen.get_by_label("cand-a").click();
     let detail = asked(&mut screen);
     let Query::Improvement(ImprovementQuery::GetImprovement(get)) = query_of(&detail[0]) else {
         panic!("a detail was expected");
@@ -202,8 +214,13 @@ fn screen_with_detail()
 #[test]
 fn a_triage_names_the_candidate_and_its_revision_only_and_shows_the_draft_by_file() {
     let mut screen = screen_with_detail();
-    screen.get_by_label("却下する");
-    screen.get_by_label("下書きを作る").click();
+    assert!(
+        screen
+            .get_by_label("Dismiss")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.get_by_label("Create draft").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     let Command::Improvement(ImprovementCommand::TriageImprovement(triage)) = command_of(&sent[0])
@@ -230,7 +247,7 @@ fn a_triage_names_the_candidate_and_its_revision_only_and_shows_the_draft_by_fil
         },
     ));
     let again = asked(&mut screen);
-    screen.get_by_label_contains("下書き: cand-a-draft.md（送信はされません）");
+    screen.get_by_label_contains("Draft: cand-a-draft.md (nothing is sent).");
     assert!(
         again
             .iter()
@@ -242,7 +259,7 @@ fn a_triage_names_the_candidate_and_its_revision_only_and_shows_the_draft_by_fil
 #[test]
 fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
     let mut screen = screen_with_detail();
-    screen.get_by_label("下書きを作る").click();
+    screen.get_by_label("Create draft").click();
     let sent = asked(&mut screen);
     let Command::Improvement(ImprovementCommand::TriageImprovement(triage)) = command_of(&sent[0])
     else {
@@ -268,6 +285,37 @@ fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
             FeatureError::new("no such operation").with_code(ErrorCode::NotFound)
         )),
     );
-    screen.get_by_label_contains("成功とは扱いません");
-    assert!(screen.query_by_label_contains("下書き:").is_none());
+    screen.get_by_label_contains("not counted as done");
+    assert!(screen.query_by_label_contains("Draft:").is_none());
+}
+
+#[test]
+fn the_candidate_status_filter_asks_for_that_status_only() {
+    let mut screen = screen(Box::<ImprovementFeature>::default(), None);
+    let first = list_of(&asked(&mut screen)[0]);
+    assert_eq!(first.status, None);
+    screen.get_by_label("Candidate status").click();
+    screen.run();
+    screen.get_by_label("dismissed").click();
+    let next = asked(&mut screen);
+    assert_eq!(next.len(), 1);
+    let next = list_of(&next[0]);
+    assert_eq!(next.status, Some(ImprovementStatus::Dismissed));
+    assert_ne!(next.operation_id, first.operation_id);
+}
+
+#[test]
+fn a_time_past_what_chrono_holds_reads_as_unknown_and_an_ordinary_one_as_legacy() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let now = UNIX_EPOCH + Duration::from_secs(951_827_696 + 3_742);
+    assert_eq!(
+        when_ms(951_827_696_000, now, "Unknown creation time"),
+        ("1h 2m ago".into(), "2000-02-29 12:34 UTC".into())
+    );
+    for ms in [8_300_000_000_000_000, i64::MAX as u64, u64::MAX] {
+        assert_eq!(
+            when_ms(ms, now, "Unknown creation time"),
+            ("unknown time".into(), "Unknown creation time".into())
+        );
+    }
 }
