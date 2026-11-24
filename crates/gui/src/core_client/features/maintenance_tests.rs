@@ -87,8 +87,17 @@ fn compose(
     output.textures_delta.clear();
     output
 }
+fn probe_tab() -> String {
+    crate::theme::icons::with_icon(
+        crate::core_client::shell::feature_icon(FeatureId::Browser),
+        "maintenance probe",
+    )
+}
+fn conversation_tab() -> String {
+    crate::theme::icons::with_icon(crate::theme::icons::CHAT_CIRCLE_TEXT, "Conversation")
+}
 fn title_position(shapes: &[egui::epaint::ClippedShape]) -> egui::Pos2 {
-    text_position(shapes, "maintenance probe")
+    text_position(shapes, &probe_tab())
 }
 fn text_position(shapes: &[egui::epaint::ClippedShape], wanted: &str) -> egui::Pos2 {
     try_text_position(shapes, wanted).unwrap_or_else(|| panic!("{wanted:?} was drawn"))
@@ -143,30 +152,35 @@ fn collapsed_selection_and_minimized_disconnect_run_maintenance_through_screen_c
         expanded: true,
         minimized: false,
     };
+    let collapsed = Visibility {
+        expanded: false,
+        ..expanded
+    };
+    // The probe's tab starts behind the conversation tab of the centre leaf.
     assert_eq!(
         take(&log),
         [
             Observed::Selection(None, None),
-            Observed::Maintain(expanded, true),
-            Observed::Render
+            Observed::Maintain(collapsed, true)
         ]
     );
+    assert_cancels(&mut rx, 1);
+    // Real pointer input on the production tab bar brings the area forward.
+    click(&ctx, &mut screen, title_position(&first.shapes));
+    take(&log);
+    while rx.try_recv().is_ok() {}
+    let shown = compose(&ctx, &mut screen, input(false));
+    assert_eq!(
+        take(&log),
+        [Observed::Maintain(expanded, true), Observed::Render]
+    );
     assert_cancels(&mut rx, 0);
-    let pos = title_position(&first.shapes);
-    // Real pointer input closes the production header (including its title).
-    for pressed in [true, false] {
-        let mut input = input(false);
-        input.events = vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::default(),
-            },
-        ];
-        compose(&ctx, &mut screen, input);
-    }
+    // ...and on the conversation tab hides it again.
+    click(
+        &ctx,
+        &mut screen,
+        text_position(&shown.shapes, &conversation_tab()),
+    );
     take(&log);
     while rx.try_recv().is_ok() {}
     let project = ProjectId::new("new-project").unwrap();
@@ -174,10 +188,6 @@ fn collapsed_selection_and_minimized_disconnect_run_maintenance_through_screen_c
     screen.project = Some(project.clone());
     screen.selected = Some(thread.clone());
     compose(&ctx, &mut screen, input(false));
-    let collapsed = Visibility {
-        expanded: false,
-        ..expanded
-    };
     assert_eq!(
         take(&log),
         [
@@ -223,7 +233,7 @@ fn collapsed_selection_and_minimized_disconnect_run_maintenance_through_screen_c
         )]
     );
     assert_cancels(&mut rx, 1);
-    // Restoring the viewport preserves collapse; the body is still not rendered.
+    // Restoring the viewport keeps the tab hidden; the body is still not rendered.
     compose(&ctx, &mut screen, input(false));
     assert_eq!(
         take(&log),
@@ -298,8 +308,11 @@ fn expanded_minimize_restore_and_disconnect_preserve_visibility_and_invalidate_d
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
     let ctx = egui::Context::default();
+    let first = compose(&ctx, &mut screen, input(false));
+    click(&ctx, &mut screen, title_position(&first.shapes));
     compose(&ctx, &mut screen, input(false));
     take(&log);
+    while rx.try_recv().is_ok() {}
     let expanded = Visibility {
         available: true,
         expanded: true,
@@ -446,16 +459,15 @@ fn native_logic_only_minimization_delivers_maintenance_and_cancel_without_a_ui_p
     );
     assert_cancels(&mut rx, 1);
 
-    let visible = Visibility {
+    // The first UI pass finds the probe's tab behind the conversation tab.
+    let hidden = Visibility {
+        expanded: false,
         minimized: false,
         ..minimized
     };
     let output = native_ui(&ctx, &mut app, &mut frame, input(false));
-    assert_eq!(
-        take(&log),
-        [Observed::Maintain(visible, true), Observed::Render]
-    );
-    assert_cancels(&mut rx, 0);
+    assert_eq!(take(&log), [Observed::Maintain(hidden, true)]);
+    assert_cancels(&mut rx, 1);
     let pos = title_position(&output.shapes);
     for pressed in [true, false] {
         let mut input = input(false);
@@ -472,31 +484,31 @@ fn native_logic_only_minimization_delivers_maintenance_and_cancel_without_a_ui_p
     }
     take(&log);
     while rx.try_recv().is_ok() {}
-    let collapsed_minimized = Visibility {
-        expanded: false,
-        ..minimized
-    };
+    // A logic-only pass remembers that the tab was in front.
     native_logic(&ctx, &mut app, &mut frame);
-    assert_eq!(take(&log), [Observed::Maintain(collapsed_minimized, true)]);
+    assert_eq!(take(&log), [Observed::Maintain(minimized, true)]);
     assert_cancels(&mut rx, 1);
 
     // A visible child can make eframe run UI even with the root minimized.
     // Calling BOTH actual App entry points must still maintain/cancel only once.
     native_ui(&ctx, &mut app, &mut frame, input(true));
-    assert_eq!(take(&log), [Observed::Maintain(collapsed_minimized, true)]);
+    assert_eq!(take(&log), [Observed::Maintain(minimized, true)]);
     assert_cancels(&mut rx, 1);
     native_ui(&ctx, &mut app, &mut frame, input(false));
     assert_eq!(
         take(&log),
-        [Observed::Maintain(
-            Visibility {
-                minimized: false,
-                ..collapsed_minimized
-            },
-            true
-        )]
+        [
+            Observed::Maintain(
+                Visibility {
+                    minimized: false,
+                    ..minimized
+                },
+                true
+            ),
+            Observed::Render
+        ]
     );
-    assert_cancels(&mut rx, 1);
+    assert_cancels(&mut rx, 0);
 }
 
 fn click(ctx: &egui::Context, screen: &mut CoreClientScreen, pos: egui::Pos2) {
@@ -525,7 +537,7 @@ fn picture() -> ArtifactRef {
 }
 
 #[test]
-fn a_preview_asked_for_in_a_collapsed_section_opens_the_section_so_it_can_start() {
+fn a_preview_asked_for_behind_another_tab_brings_the_area_forward_so_it_can_start() {
     let log = Log::default();
     let shared = Arc::new(Mutex::new(Shared {
         connected: true,
@@ -535,17 +547,14 @@ fn a_preview_asked_for_in_a_collapsed_section_opens_the_section_so_it_can_start(
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
     let ctx = egui::Context::default();
-    let first = compose(&ctx, &mut screen, input(false));
-    click(&ctx, &mut screen, title_position(&first.shapes));
-    take(&log);
     compose(&ctx, &mut screen, input(false));
-    let collapsed = take(&log);
+    let hidden = take(&log);
     assert!(
-        matches!(collapsed.as_slice(), [Observed::Maintain(v, true)] if !v.expanded),
-        "the click collapsed the section: {collapsed:?}"
+        !hidden.contains(&Observed::Render),
+        "the area starts behind the conversation tab: {hidden:?}"
     );
     // The same route the artifacts feature takes: the frame's reference reaches the
-    // browser feature and the section is opened for it.
+    // browser feature and its tab is brought forward for it.
     shared.lock().unwrap().features.open_preview(picture());
     compose(&ctx, &mut screen, input(false));
     let opened = take(&log);
@@ -557,9 +566,13 @@ fn a_preview_asked_for_in_a_collapsed_section_opens_the_section_so_it_can_start(
         "{opened:?}"
     );
     assert!(opened.contains(&Observed::Render), "{opened:?}");
-    // Asking once opens once: the user may collapse the section again.
+    // Asking once opens once: the user may switch to another tab again.
     let again = compose(&ctx, &mut screen, input(false));
-    click(&ctx, &mut screen, title_position(&again.shapes));
+    click(
+        &ctx,
+        &mut screen,
+        text_position(&again.shapes, &conversation_tab()),
+    );
     take(&log);
     compose(&ctx, &mut screen, input(false));
     assert!(
@@ -599,7 +612,7 @@ fn a_preview_the_core_cannot_show_is_refused_with_a_message_not_queued() {
 }
 
 #[test]
-fn the_conversation_row_button_opens_the_section_of_what_the_thread_produced() {
+fn the_conversation_header_button_brings_forward_the_area_of_what_the_thread_produced() {
     let log = Log::default();
     let shared = Arc::new(Mutex::new(Shared {
         connected: true,
@@ -614,63 +627,46 @@ fn the_conversation_row_button_opens_the_section_of_what_the_thread_produced() {
         Some(ThreadId::new("t").unwrap()),
     );
     let ctx = egui::Context::default();
-    let first = compose(&ctx, &mut screen, input(false));
-    click(&ctx, &mut screen, title_position(&first.shapes));
+    compose(&ctx, &mut screen, input(false));
     take(&log);
-    let collapsed = compose(&ctx, &mut screen, input(false));
+    let hidden = compose(&ctx, &mut screen, input(false));
     assert!(!take(&log).contains(&Observed::Render));
-    // The button of the conversation row, clicked like a user does.
+    // The preview button of the conversation header, clicked like a user does.
     click(
         &ctx,
         &mut screen,
-        text_position(&collapsed.shapes, "プレビュー / 検査"),
+        text_position(&hidden.shapes, crate::theme::icons::BROWSER),
     );
     compose(&ctx, &mut screen, input(false));
     assert!(
         take(&log).contains(&Observed::Render),
-        "the section the button names is opened and drawn"
+        "the area the button names is brought forward and drawn"
     );
 }
 
-/// A section that fills the column, so what comes after it is far below.
-struct Tall;
-impl Feature for Tall {
+/// An on-demand area that the default layout does not place.
+struct OnDemand;
+impl Feature for OnDemand {
     fn id(&self) -> FeatureId {
         FeatureId::Settings
     }
     fn title(&self) -> &'static str {
-        "tall filler"
+        "on-demand area"
     }
     fn availability(&self) -> Availability {
         Availability::Implemented { required: &[] }
     }
-    fn render(&mut self, ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {
-        ui.allocate_space(egui::vec2(10.0, 4000.0));
-    }
-}
-
-fn scroll(ctx: &egui::Context, screen: &mut CoreClientScreen, at: egui::Pos2, dy: f32) {
-    let mut input = input(false);
-    input.events = vec![
-        egui::Event::PointerMoved(at),
-        egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: egui::vec2(0.0, dy),
-            phase: egui::TouchPhase::Move,
-            modifiers: egui::Modifiers::default(),
-        },
-    ];
-    compose(ctx, screen, input);
+    fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
 }
 
 #[test]
-fn a_revealed_section_is_brought_into_view_from_a_scrolled_page() {
+fn a_revealed_area_missing_from_the_layout_is_opened_as_a_tab() {
     let log = Log::default();
     let shared = Arc::new(Mutex::new(Shared {
         connected: true,
         features: Features {
             features: vec![
-                Box::new(Tall),
+                Box::new(OnDemand),
                 Box::new(Probe {
                     log: log.clone(),
                     availability: Availability::Implemented { required: &[] },
@@ -686,41 +682,32 @@ fn a_revealed_section_is_brought_into_view_from_a_scrolled_page() {
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let mut screen = CoreClientScreen::new(shared.clone(), tx, None, None);
     let ctx = egui::Context::default();
-    let screen_rect = ctx.content_rect();
-    let first = compose(&ctx, &mut screen, input(false));
-    // Scroll the page and the column away from their tops.
-    let tall = text_position(&first.shapes, "tall filler");
-    for _ in 0..6 {
-        scroll(&ctx, &mut screen, tall, -400.0);
-    }
-    for _ in 0..60 {
-        compose(&ctx, &mut screen, input(false));
-    }
-    let scrolled = compose(&ctx, &mut screen, input(false));
-    let visible = |output: &egui::FullOutput| {
-        try_text_position(&output.shapes, "maintenance probe")
-            .is_some_and(|p| (screen_rect.top()..screen_rect.bottom()).contains(&p.y))
-    };
-    assert!(
-        !visible(&scrolled),
-        "the section is out of view before the request"
+    let tab = crate::theme::icons::with_icon(
+        crate::core_client::shell::feature_icon(FeatureId::Settings),
+        "on-demand area",
     );
-    shared.lock().unwrap().features.reveal(FeatureId::Browser);
-    compose(&ctx, &mut screen, input(false));
+    let first = compose(&ctx, &mut screen, input(false));
+    assert!(try_text_position(&first.shapes, &tab).is_none());
+    shared.lock().unwrap().features.reveal(FeatureId::Settings);
     compose(&ctx, &mut screen, input(false));
     let revealed = compose(&ctx, &mut screen, input(false));
     assert!(
-        visible(&revealed),
-        "the request brings the section into view"
+        try_text_position(&revealed.shapes, &tab).is_some(),
+        "the request adds a tab for the area"
     );
-    // The request is spent: the user's own scrolling afterwards is not undone.
-    for _ in 0..3 {
-        scroll(&ctx, &mut screen, tall, -400.0);
-    }
-    let again = compose(&ctx, &mut screen, input(false));
-    assert!(
-        try_text_position(&again.shapes, "maintenance probe").map(|p| p.y)
-            != try_text_position(&revealed.shapes, "maintenance probe").map(|p| p.y),
-        "scrolling after the request moves the page"
+    // A revealed area that already has a tab is brought to the front of its leaf.
+    take(&log);
+    shared.lock().unwrap().features.reveal(FeatureId::Browser);
+    compose(&ctx, &mut screen, input(false));
+    let front = compose(&ctx, &mut screen, input(false));
+    assert!(take(&log).contains(&Observed::Render));
+    // The request is spent: the user's own tab switch afterwards is not undone.
+    click(
+        &ctx,
+        &mut screen,
+        text_position(&front.shapes, &conversation_tab()),
     );
+    take(&log);
+    compose(&ctx, &mut screen, input(false));
+    assert!(!take(&log).contains(&Observed::Render));
 }

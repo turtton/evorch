@@ -24,26 +24,6 @@ impl ThemeSettings {
     }
 }
 
-impl From<workspace_ui::ThemePresetName> for ThemePreset {
-    fn from(value: workspace_ui::ThemePresetName) -> Self {
-        match value {
-            workspace_ui::ThemePresetName::Graphite => Self::Graphite,
-            workspace_ui::ThemePresetName::TokyoNight => Self::TokyoNight,
-            workspace_ui::ThemePresetName::HighContrast => Self::HighContrast,
-        }
-    }
-}
-
-impl From<ThemePreset> for workspace_ui::ThemePresetName {
-    fn from(value: ThemePreset) -> Self {
-        match value {
-            ThemePreset::Graphite => Self::Graphite,
-            ThemePreset::TokyoNight => Self::TokyoNight,
-            ThemePreset::HighContrast => Self::HighContrast,
-        }
-    }
-}
-
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn theme_preset(&self) -> ThemePreset {
         self.theme_preset

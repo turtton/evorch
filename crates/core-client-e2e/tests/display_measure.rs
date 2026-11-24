@@ -961,13 +961,13 @@ async fn operations(rig: &mut Rig, close: bool) -> Value {
         |u| u.size[0] != new[0],
     )
     .await;
-    // Hide: the section is collapsed; the stream must stop, and start again when shown.
-    rig.click(0, "Browser");
+    // Hide: another tab is brought forward; the stream must stop, and start again when shown.
+    rig.click(0, "Conversation tab");
     rig.run(Duration::from_millis(1500)).await;
     let before = rig.stats(0).frames_received;
     rig.run(Duration::from_secs(1)).await;
     let received_while_hidden = rig.stats(0).frames_received - before;
-    let show = after(rig, "show again", |r| r.click(0, "Browser"), |_| true).await;
+    let show = after(rig, "show again", |r| r.click(0, "Browser tab"), |_| true).await;
     if !close {
         return json!({
             "resize_narrower_to_first_new_size_ms": resize_down,

@@ -1168,22 +1168,30 @@ fn compose(
     (output.shapes, freed)
 }
 
-/// Click the title of the feature's header, which opens or closes it.
-fn toggle_header(ctx: &egui::Context, screen: &mut CoreClientScreen) {
-    fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
-        match shape {
-            egui::Shape::Text(text) if text.galley.text() == "Artifacts" => {
-                Some(text.pos + text.galley.rect.center().to_vec2())
+/// Click the neighbouring tab of the artifacts tab, which hides the panel.
+fn hide_panel(ctx: &egui::Context, screen: &mut CoreClientScreen) {
+    use crate::core_client::{features::FeatureId, shell::feature_icon};
+    let label = crate::theme::icons::with_icon(
+        feature_icon(FeatureId::PullRequests),
+        FeatureId::PullRequests.namespace(),
+    );
+    let find = |shape: &egui::Shape| -> Option<egui::Pos2> {
+        fn walk(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| walk(s, label)),
+                _ => None,
             }
-            egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
-            _ => None,
         }
-    }
+        walk(shape, &label)
+    };
     let pos = compose(ctx, screen, vec![])
         .0
         .iter()
         .find_map(|s| find(&s.shape))
-        .expect("the header title was drawn");
+        .expect("the neighbouring tab was drawn");
     for pressed in [true, false] {
         compose(
             ctx,
@@ -1234,7 +1242,7 @@ fn text_view(read_tag: Option<u64>) -> Body {
 }
 
 #[test]
-fn a_selection_change_drops_the_body_texture_and_slot_while_the_panel_is_collapsed() {
+fn a_selection_change_drops_the_body_texture_and_slot_while_the_panel_is_hidden() {
     let (mut screen, _shared, feature, mut wire) = composition();
     let ctx = egui::Context::default();
     compose(&ctx, &mut screen, vec![]);
@@ -1243,7 +1251,7 @@ fn a_selection_change_drops_the_body_texture_and_slot_while_the_panel_is_collaps
         Some((project("p"), thread("t1"))),
         "the first pass follows the selection"
     );
-    toggle_header(&ctx, &mut screen);
+    hide_panel(&ctx, &mut screen);
     while wire.try_recv().is_ok() {}
     // Something is open for t1: a picture on screen, its slot held.
     let picture = reference("t1", 1);
@@ -1263,7 +1271,7 @@ fn a_selection_change_drops_the_body_texture_and_slot_while_the_panel_is_collaps
         "the same selection keeps what is open"
     );
     assert!(data_cancels(&mut wire).is_empty());
-    // Another thread is selected while the body is collapsed (never drawn).
+    // Another thread is selected while the panel is hidden (never drawn).
     screen.selected = Some(thread("t2"));
     let (_, freed) = compose(&ctx, &mut screen, vec![]);
     let held = feature.lock().unwrap();

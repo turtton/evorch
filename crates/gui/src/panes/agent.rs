@@ -8,8 +8,8 @@ use crate::model::transcript::{TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::ComposerAction;
 use crate::panes::sidebar::SidebarAction;
-use crate::theme::icons::{self, with_icon};
-use crate::theme::text::medium;
+use crate::panes::transcript_widgets::{event_line, role_label, user_bubble};
+use crate::theme::icons;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
@@ -1051,75 +1051,6 @@ fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
         }
     };
     soft_frame(fill)
-}
-
-fn user_bubble(ui: &mut egui::Ui, text: &str, skills: &[String]) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-        let max_width = (ui.available_width() * 0.8).max(120.0);
-        soft_frame(palette().SURFACE_RAISED)
-            .corner_radius(egui::CornerRadius::same(R_XL))
-            .show(ui, |ui| {
-                ui.set_max_width(max_width);
-                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                    let response = ui.add(
-                        egui::Label::new(egui::RichText::new(text).color(palette().TEXT)).wrap(),
-                    );
-                    let label = format!("You: {text}");
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
-                    });
-                    if !skills.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            for skill in skills {
-                                ui.label(
-                                    egui::RichText::new(icons::with_icon(
-                                        icons::SPARKLE,
-                                        format!("skill: {skill}"),
-                                    ))
-                                    .small()
-                                    .color(palette().TEXT_MUTED),
-                                )
-                                .on_hover_text("Skill body attached when sent");
-                            }
-                        });
-                    }
-                });
-            });
-    });
-}
-
-fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32, hover: Option<&str>) {
-    ui.horizontal_wrapped(|ui| {
-        ui.add_space(SP_1);
-        ui.spacing_mut().item_spacing.x = SP_2;
-        ui.label(
-            egui::RichText::new(icon)
-                .size(FONT_SMALL + 1.0)
-                .color(color),
-        );
-        let response = ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .size(FONT_SMALL)
-                    .color(palette().TEXT_MUTED),
-            )
-            .wrap(),
-        );
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
-        if let Some(hover) = hover {
-            response.on_hover_text(hover);
-        }
-    });
-}
-
-fn role_label(ui: &mut egui::Ui, role: &str) {
-    let response = ui.label(
-        medium(with_icon(icons::ROBOT, role))
-            .size(FONT_SMALL)
-            .color(palette().TEXT_MUTED),
-    );
-    let label = format!("[{role}]");
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
 }
 
 fn entry_label(entry: &TranscriptEntry) -> String {

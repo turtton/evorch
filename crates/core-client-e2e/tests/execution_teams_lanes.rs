@@ -415,8 +415,8 @@ struct Desktop {
 }
 
 impl Desktop {
-    /// The whole page the window draws (the features and the conversation controls below
-    /// them) for `thread`. Its queries reach the core; its commands are only recorded.
+    /// The whole window the client draws (the area tabs and the conversation beside them)
+    /// for `thread`. Its queries reach the core; its commands are only recorded.
     fn page(
         shared: Arc<Mutex<Shared>>,
         actions: tokio::sync::mpsc::Sender<Action>,
@@ -1626,7 +1626,7 @@ async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_conversation_controls_stay_reachable_below_a_screenful_of_features() {
+async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features() {
     let world = start().await;
     let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
     // The ledger is written first: the runs below keep the database busy.
@@ -1698,50 +1698,43 @@ async fn the_conversation_controls_stay_reachable_below_a_screenful_of_features(
             (0..8).map(|n| format!("criterion {n}")).collect(),
         )
         .unwrap();
-    // The page the window draws: every feature has a long list, and the controls of the
-    // conversation sit below the features. Each is reached by the wheel and the pointer.
+    // The window the client draws: the areas sit in tabs beside the conversation, so a long
+    // list in one of them never pushes the conversation's controls out of view.
     let mut desktop = Desktop::page(
         world.shared.clone(),
         world.actions.clone(),
         world.project.clone(),
         LEAD,
     );
-    desktop.until(|d| d.shows("task-000")).await;
     desktop.until(|d| d.shows_part("criterion 7")).await;
-    let anchors = [
-        "再接続 / 再同期",
-        "履歴更新",
-        "続行",
-        "停止",
-        "送信 / follow-up",
-    ];
-    // The page's own controls are the last of their name (the run rows have a "停止" too).
-    for control in ["続行", "停止", "送信 / follow-up"] {
-        desktop
-            .wheel_until(
-                control,
-                |d| d.anchor(&anchors).unwrap_or(Desktop::window().center()),
-                |d| {
-                    let center = d
-                        .harness
-                        .get_all_by_label(control)
-                        .last()
-                        .expect("the control")
-                        .rect()
-                        .center();
-                    Desktop::window().contains(center)
-                },
-            )
-            .await;
-        desktop
-            .harness
-            .get_all_by_label(control)
-            .last()
-            .expect("the control")
-            .click();
-        desktop.flush().await;
-    }
-    assert_eq!(desktop.commands, ["continue", "stop", "send"]);
+    // Teams waits behind Execution; its tab brings the long task list forward.
+    desktop.click("Teams tab").await;
+    desktop.until(|d| d.shows("task-000")).await;
+    let in_window = |d: &Desktop, control: &str| {
+        d.harness
+            .query_all_by_label(control)
+            .next()
+            .is_some_and(|node| Desktop::window().contains(node.rect().center()))
+    };
+    desktop.until(|d| in_window(d, "Stop")).await;
+    assert!(in_window(&desktop, "Message"));
+    // The header and the composer both offer it; either sends the same command.
+    desktop
+        .harness
+        .get_all_by_label("Stop")
+        .next()
+        .expect("a stop control")
+        .click();
+    desktop.flush().await;
+    desktop.harness.get_by_label("Message").focus();
+    desktop
+        .harness
+        .get_by_label("Message")
+        .type_text("one more thing");
+    desktop.flush().await;
+    assert!(in_window(&desktop, "Queue"));
+    desktop.click("Queue").await;
+    assert_eq!(desktop.commands, ["stop", "send"]);
 
     for run in kids.into_iter().chain([world.lead]) {
         let _ = world.boot.runtime.cancel(run);
