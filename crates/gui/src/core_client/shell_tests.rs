@@ -479,6 +479,9 @@ fn notifications_tab_lists_the_pending_question_and_approval() {
     let harness = &screen.harness;
     harness.get_by_label("Notifications tab");
     harness.get_by_label("Lanes tab");
+    // The read features keep the legacy panels' titles.
+    harness.get_by_label("Memory tab");
+    harness.get_by_label("Self-improvement drafts tab");
     harness.get_by_label("Question: Should an invalid `next` fall back to /home or to /?");
     assert_eq!(
         harness
@@ -502,6 +505,11 @@ fn notifications_tab_lists_the_pending_question_and_approval() {
     );
     assert_eq!(screen.harness.state().selected, Some(thr_4));
     assert_eq!(front_of_conversation_leaf(&screen), CoreTab::Conversation);
+
+    // The toolbar opens the on-demand Evaluations tab under the legacy panel's title.
+    screen.harness.get_by_label("Evaluations").click();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("Evaluations tab");
 }
 
 fn front_of_conversation_leaf(screen: &Screen) -> CoreTab {
@@ -2412,6 +2420,7 @@ mod lanes;
 
 mod many_subagents;
 mod pull_requests;
+mod read_panes;
 
 // Given: the lane thr-4 asked its lead thr-1 a question the lead has not passed on
 // When: the lead thread thr-1 is shown

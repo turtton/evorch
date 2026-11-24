@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use storage::memory::{MemoryEntry, MemoryFilter, MemoryStatus};
 use storage::{Database, StorageConfig, StorageHandle};
 
+use super::memory_widgets::{
+    ALL_STATUSES, APPROVAL_FILTERS, EMPTY, EVIDENCE, NO_PROJECT, REFRESH, approval_action,
+    approval_badge, approval_filter_label, reject_controls,
+};
+
 pub struct MemoryPane {
     pub config: Option<StorageConfig>,
     /// Writer for approving and rejecting lessons; without it the pane is read-only.
@@ -48,7 +53,7 @@ impl Default for MemoryPane {
 impl MemoryPane {
     pub fn render(&mut self, ui: &mut egui::Ui, repo_root: Option<&Path>) {
         let Some(repo_root) = repo_root else {
-            ui.label("Select a project to browse memory.");
+            ui.label(NO_PROJECT);
             return;
         };
         if self.config.is_none() {
@@ -69,10 +74,10 @@ impl MemoryPane {
             ui.label("Search");
             refresh |= ui.text_edit_singleline(&mut self.query).changed();
             egui::ComboBox::from_id_salt("memory_status")
-                .selected_text(self.status.map_or("All statuses", MemoryStatus::as_str))
+                .selected_text(self.status.map_or(ALL_STATUSES, MemoryStatus::as_str))
                 .show_ui(ui, |ui| {
                     refresh |= ui
-                        .selectable_value(&mut self.status, None, "All statuses")
+                        .selectable_value(&mut self.status, None, ALL_STATUSES)
                         .changed();
                     for status in [
                         MemoryStatus::Candidate,
@@ -86,23 +91,15 @@ impl MemoryPane {
                     }
                 });
             egui::ComboBox::from_id_salt("memory_approval")
-                .selected_text(match self.approval {
-                    None => "Any approval",
-                    Some(true) => "Approved",
-                    Some(false) => "Unconfirmed",
-                })
+                .selected_text(approval_filter_label(self.approval))
                 .show_ui(ui, |ui| {
-                    for (value, label) in [
-                        (None, "Any approval"),
-                        (Some(true), "Approved"),
-                        (Some(false), "Unconfirmed"),
-                    ] {
+                    for (value, label) in APPROVAL_FILTERS {
                         refresh |= ui
                             .selectable_value(&mut self.approval, value, label)
                             .changed();
                     }
                 });
-            refresh |= ui.button("Refresh").clicked();
+            refresh |= ui.button(REFRESH).clicked();
         });
         if refresh {
             self.notice = None;
@@ -147,7 +144,7 @@ impl MemoryPane {
             .id_salt("memory_results")
             .show(ui, |ui| {
                 if self.entries.is_empty() && self.error.is_none() {
-                    ui.label("No matching lessons.");
+                    ui.label(EMPTY);
                 }
                 for entry in &self.entries {
                     ui.push_id(&entry.lesson.id, |ui| {
@@ -155,46 +152,27 @@ impl MemoryPane {
                             ui.monospace(&entry.lesson.id);
                             ui.label(entry.status.as_str());
                             ui.label(entry.lesson.scope.as_str());
-                            let (badge, tip) = if entry.favorite {
-                                (
-                                    "Approved",
-                                    "You approved this lesson (favorite). This mark is separate \
-                                     from the status and cannot be rejected until you clear it.",
-                                )
-                            } else {
-                                (
-                                    "Unconfirmed",
-                                    "You have not approved this lesson. Approval is your own \
-                                     mark, separate from the status.",
-                                )
-                            };
-                            ui.label(crate::theme::text::badge(badge)).on_hover_text(tip);
+                            approval_badge(ui, entry.favorite);
                         });
                         ui.label(&entry.lesson.content);
-                        ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
+                        ui.collapsing(crate::theme::text::badge(EVIDENCE), |ui| {
                             ui.label(&entry.lesson.evidence);
                             ui.monospace(&entry.lesson.task_id);
                         });
                         if self.handle.is_some() && entry.status != MemoryStatus::Rejected {
                             ui.horizontal(|ui| {
-                                let (label, tip) = if entry.favorite {
-                                    (
-                                        "Clear approval",
-                                        "Remove your approval mark. The lesson's status is unchanged.",
-                                    )
-                                } else {
-                                    (
-                                        "Approve",
-                                        "Mark this lesson as approved by you. The status is unchanged, \
-                                         and an approved lesson cannot be rejected.",
-                                    )
-                                };
+                                let (label, tip) = approval_action(entry.favorite);
                                 if ui.button(label).on_hover_text(tip).clicked() {
                                     approve = Some((entry.lesson.id.clone(), !entry.favorite));
                                 }
                                 // An approved lesson offers no way to reject it.
                                 if !entry.favorite {
-                                    reject_controls(ui, entry, &mut self.confirm_reject, &mut reject);
+                                    reject_controls(
+                                        ui,
+                                        &entry.lesson.id,
+                                        &mut self.confirm_reject,
+                                        &mut reject,
+                                    );
                                 }
                             });
                         }
@@ -219,29 +197,5 @@ impl MemoryPane {
             self.stale = true;
             ui.ctx().request_repaint();
         }
-    }
-}
-
-/// Reject button, or its confirmation once clicked, since rejection cannot be undone.
-fn reject_controls(
-    ui: &mut egui::Ui,
-    entry: &MemoryEntry,
-    confirm: &mut Option<String>,
-    reject: &mut Option<String>,
-) {
-    if confirm.as_ref() == Some(&entry.lesson.id) {
-        ui.label("Reject permanently?");
-        if ui.button("Confirm reject").clicked() {
-            *reject = Some(entry.lesson.id.clone());
-        }
-        if ui.button("Cancel").clicked() {
-            *confirm = None;
-        }
-    } else if ui
-        .button("Reject")
-        .on_hover_text("Stop using this lesson in task prompts. Cannot be undone.")
-        .clicked()
-    {
-        *confirm = Some(entry.lesson.id.clone());
     }
 }

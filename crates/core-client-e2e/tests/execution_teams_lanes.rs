@@ -1478,24 +1478,24 @@ async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_rep
     desktop.until(|d| d.shows("task-claimed")).await;
     assert!(desktop.shows("task-ready"));
     assert!(desktop.shows_part(&format!(
-        "待機 {} / 担当中 {} / 完了 {}",
+        "{} ready · {} claimed · {} complete",
         team.ready, team.claimed, team.complete
     )));
     assert!(
-        !desktop.shows("タスク task-claimed"),
+        !desktop.shows("Task task-claimed"),
         "no detail before the click"
     );
     desktop.click("task-claimed").await;
-    desktop.until(|d| d.shows("タスク task-claimed")).await;
-    assert!(desktop.shows_part(&format!("claim 世代 {}", task.claim_generation.0)));
-    assert!(desktop.shows(&format!("担当: {}", task.owner.as_deref().unwrap())));
+    desktop.until(|d| d.shows("Task task-claimed")).await;
+    assert!(desktop.shows_part(&format!("Generation {}", task.claim_generation.0)));
+    assert!(desktop.shows(&format!("Owner: {}", task.owner.as_deref().unwrap())));
     assert!(desktop.shows(&format!(
-        "担当 run: {}",
+        "Owner run: {}",
         task.owner_run.as_ref().unwrap().as_str()
     )));
     assert!(desktop.shows(&task.paths[0]));
     assert!(
-        !desktop.shows("タスク task-ready"),
+        !desktop.shows("Task task-ready"),
         "only the clicked task is opened"
     );
 
@@ -1837,20 +1837,20 @@ async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view(
         "the last task is behind the cursor"
     );
     desktop
-        .scroll_window_to("さらに読み込む", &["Teams", "待機"])
+        .scroll_window_to("Load more tasks", &["Teams", " ready · "])
         .await;
-    desktop.click("さらに読み込む").await;
+    desktop.click("Load more tasks").await;
     desktop.until(|d| d.shows(&id(count - 1))).await;
 
     // The last task is drawn last: the list is scrolled to it, and the click opens its detail,
     // which must then be reachable in the window.
     desktop.scroll_list_to(&id(0), &id(count - 1)).await;
     desktop.click(&id(count - 1)).await;
-    let title = format!("タスク {}", id(count - 1));
+    let title = format!("Task {}", id(count - 1));
     desktop.until(|d| d.shows(&title)).await;
     let path = format!("src/file-{}.rs", count - 1);
     desktop
-        .scroll_window_to(&path, &["Teams", "待機", &title])
+        .scroll_window_to(&path, &["Teams", " ready · ", &title])
         .await;
     assert!(desktop.shows(&path));
 

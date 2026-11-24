@@ -2,62 +2,51 @@ use runtime::{
     RunId,
     team::{ClaimState, TeamTask},
 };
+use workbench_protocol::namespaces::teams::TeamTaskState;
 
-use crate::theme::{
-    text::{h3, muted},
-    tokens::{SP_1, palette},
-    widgets::surface_frame,
-};
+use super::team_widgets::{COORDINATOR, EMPTY, HEADING, TaskCardView, owner_tip, task_card};
+use crate::theme::text::{h3, muted};
 
 pub fn team_pane(ui: &mut egui::Ui, teams: &[(RunId, Vec<TeamTask>)]) {
-    ui.label(h3("Team"));
+    ui.label(h3(HEADING));
     if teams.is_empty() {
-        ui.label(muted("Team mode is disabled or no team has started."));
+        ui.label(muted(EMPTY));
         return;
     }
     for (coordinator, tasks) in teams {
         ui.push_id(coordinator, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(muted("Coordinator"));
+                ui.label(muted(COORDINATOR));
                 ui.label(coordinator.to_string());
             });
             for task in tasks {
                 ui.push_id(&task.spec.id, |ui| {
-                    surface_frame(palette().SURFACE).show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&task.spec.id)
-                                        .strong()
-                                        .color(palette().TEXT),
-                                )
-                                .wrap(),
-                            );
-                            match &task.state {
-                                ClaimState::Ready => {
-                                    ui.label("Ready");
-                                }
-                                ClaimState::Claimed(lease) => {
-                                    ui.label("Claimed");
-                                    ui.label(&lease.owner_id).on_hover_text(format!(
-                                        "Assigned execution · Generation {} · lease deadline {} ms",
-                                        lease.generation, lease.expires_at
-                                    ));
-                                }
-                                ClaimState::Complete => {
-                                    ui.label("Complete");
-                                }
-                            }
-                        });
-                        if !task.spec.paths.is_empty() {
-                            ui.label(muted("Paths").strong());
-                            for path in &task.spec.paths {
-                                ui.add(egui::Label::new(path.display().to_string()).wrap());
-                            }
-                        }
-                    });
-                    ui.add_space(SP_1);
+                    let (state, owner, tip) = match &task.state {
+                        ClaimState::Ready => (TeamTaskState::Ready, None, None),
+                        ClaimState::Claimed(lease) => (
+                            TeamTaskState::Claimed,
+                            Some(lease.owner_id.as_str()),
+                            Some(owner_tip(lease.generation, Some(lease.expires_at))),
+                        ),
+                        ClaimState::Complete => (TeamTaskState::Complete, None, None),
+                    };
+                    let paths = task
+                        .spec
+                        .paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>();
+                    task_card(
+                        ui,
+                        &TaskCardView {
+                            title: &task.spec.id,
+                            state,
+                            owner,
+                            owner_tip: tip,
+                            paths: &paths,
+                        },
+                        |_| {},
+                    );
                 });
             }
         });

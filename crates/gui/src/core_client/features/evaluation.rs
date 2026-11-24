@@ -5,11 +5,21 @@
 //! A file that is missing, one that cannot be used and one that is there are shown
 //! as three different things; the core guesses none of them. Nothing here shows a
 //! path.
+//!
+//! The screen pages as the legacy Evaluations panel does: the groups, then one
+//! group's threads, then one thread's report, with a breadcrumb back.
 use std::collections::BTreeMap;
 
-use super::diagnostics::read::{Phase, Read, phase_line};
+use super::diagnostics::read::{Phase, Read, phase_label};
 use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use crate::panes::evaluation_widgets::{
+    UNVERIFIED_HINT, crumb, group_badge, member_badge, member_is_active, problem_line, problem_word,
+};
+use crate::panes::markdown_render::render_markdown;
+use crate::theme::text::{h3, h4, muted};
+use crate::theme::tokens::{SP_2, palette};
+use crate::theme::widgets::empty_state;
 use workbench_protocol::{
     events::UiEvent,
     handshake::Capability,
@@ -17,8 +27,8 @@ use workbench_protocol::{
     management::{ArtifactPresence, EvaluationArtifactRef},
     namespaces::evaluation::{
         EvaluationEvent, EvaluationGroupDetail, EvaluationGroupPhase, EvaluationGroupSummary,
-        EvaluationMemberPhase, EvaluationProblemKind, EvaluationQuery, EvaluationReply,
-        EvaluationReportText, GetEvaluation, GetEvaluationReport, ListEvaluations,
+        EvaluationMemberPhase, EvaluationMemberSummary, EvaluationProblemKind, EvaluationQuery,
+        EvaluationReply, EvaluationReportText, GetEvaluation, GetEvaluationReport, ListEvaluations,
     },
     queries::{PageRequest, Query, QueryReply},
 };
@@ -82,64 +92,41 @@ impl Default for EvaluationFeature {
     }
 }
 
-fn problem_label(kind: EvaluationProblemKind) -> &'static str {
-    match kind {
-        EvaluationProblemKind::Malformed => "形式が壊れています",
-        EvaluationProblemKind::UnsupportedSchema => "未対応の版です",
-        EvaluationProblemKind::TooLarge => "大きすぎます",
-        EvaluationProblemKind::PermissionDenied => "読み取りが許可されていません",
-        EvaluationProblemKind::UnsafePath => "安全でないパスです",
-        EvaluationProblemKind::Io => "読み取りに失敗しました",
-    }
-}
-
-fn group_phase_label(phase: EvaluationGroupPhase) -> &'static str {
-    match phase {
-        EvaluationGroupPhase::Running => "実行中",
-        EvaluationGroupPhase::Finished => "完了",
-        EvaluationGroupPhase::Incomplete => "未完了 (失敗またはレポートなしのメンバーあり)",
-        EvaluationGroupPhase::Unverified => "状態を確認できません",
-        EvaluationGroupPhase::Partial => "一部のメンバーのみ読み取り",
-    }
-}
-
-fn member_phase_label(phase: EvaluationMemberPhase) -> &'static str {
-    match phase {
-        EvaluationMemberPhase::Starting => "開始中",
-        EvaluationMemberPhase::RunningTrials => "試行中",
-        EvaluationMemberPhase::Reporting => "レポート作成中",
-        EvaluationMemberPhase::Finished => "完了",
-        EvaluationMemberPhase::FinishedWithoutReport => "完了 (レポートなし)",
-        EvaluationMemberPhase::Failed => "失敗",
-        EvaluationMemberPhase::Unverified => "状態を確認できません",
-    }
-}
-
 /// How an artifact stands: three states, never merged.
-fn presence_label(artifact: &EvaluationArtifactRef) -> &'static str {
+fn presence_word(artifact: &EvaluationArtifactRef) -> &'static str {
     match artifact.presence {
-        ArtifactPresence::Present => "あり",
-        ArtifactPresence::Missing => "なし",
-        ArtifactPresence::Problem => "利用不可",
+        ArtifactPresence::Present => "available",
+        ArtifactPresence::Missing => "missing",
+        ArtifactPresence::Problem => "unusable",
     }
 }
 
-fn group_row(group: &EvaluationGroupSummary) -> String {
-    match group.presence {
-        ArtifactPresence::Present => format!(
-            "{} · {} · {} · メンバー {}",
-            group.group.as_str(),
-            group.phase.map_or("", group_phase_label),
-            group.started_at.as_deref().unwrap_or(""),
-            group.members_total.unwrap_or(0)
-        ),
-        ArtifactPresence::Missing => format!("{} · 記録なし", group.group.as_str()),
-        ArtifactPresence::Problem => format!(
-            "{} · 読み取れません ({})",
-            group.group.as_str(),
-            group.problem.map_or("", problem_label)
-        ),
+fn member_title(member: &EvaluationMemberSummary) -> String {
+    if member.thread_id.is_empty() {
+        format!("member {}", member.index + 1)
+    } else {
+        member.thread_id.clone()
     }
+}
+
+fn progress_text(member: &EvaluationMemberSummary) -> String {
+    let trials = &member.trials;
+    let mut text = format!("{} of {} trials finished", trials.finished, trials.planned);
+    if trials.failed > 0 {
+        text.push_str(&format!(", {} failed", trials.failed));
+    }
+    if trials.running > 0 {
+        text.push_str(&format!(", {} running", trials.running));
+    }
+    text
+}
+
+/// What the breadcrumb or a row asked the screen to show.
+enum Go {
+    Groups,
+    Group(EvaluationGroupId),
+    Member(EvaluationMemberId),
+    GroupOnly,
 }
 
 impl EvaluationFeature {
@@ -182,12 +169,10 @@ impl EvaluationFeature {
         self.list_request = Some(request);
     }
 
+    /// Re-reads the selected group. The open member, if any, stays: a Refresh or a
+    /// reconnect on a thread's report page re-reads the report too, after this.
     fn begin_group(&mut self, ctx: &mut FeatureContext<'_>, group: EvaluationGroupId) {
         self.group = None;
-        self.member = None;
-        self.report = None;
-        self.report_read.forget();
-        self.report_request = None;
         let request = GetEvaluation {
             operation_id: self.group_read.begin("evaluation-group"),
             group,
@@ -239,7 +224,7 @@ impl Feature for EvaluationFeature {
     }
 
     fn title(&self) -> &'static str {
-        "Evaluation"
+        "Evaluations"
     }
 
     fn availability(&self) -> Availability {
@@ -339,11 +324,20 @@ impl Feature for EvaluationFeature {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        if ui.button("再読み込み").clicked() {
-            self.list_due = true;
-            self.group_due = self.selected.is_some();
-            self.report_due = self.member.is_some();
+        let go = self.toolbar(ui);
+        ui.separator();
+        let go = go.or(if self.selected.is_none() {
+            self.group_list(ui)
+        } else if self.member.is_none() {
+            self.group_page(ui)
+        } else {
+            self.member_page(ui);
+            None
+        });
+        if let Some(go) = go {
+            self.go(go);
         }
+
         if std::mem::take(&mut self.list_due) {
             self.begin_list(ctx);
         } else if self.list_read.take_ask_again()
@@ -375,137 +369,303 @@ impl Feature for EvaluationFeature {
         {
             self.ask_report(ctx, request);
         }
+    }
+}
 
-        if let Some(line) = phase_line(self.list_read.phase()) {
-            ui.label(line);
+impl EvaluationFeature {
+    fn go(&mut self, go: Go) {
+        match go {
+            Go::Groups => {
+                self.selected = None;
+                self.group = None;
+                self.group_read.forget();
+                self.group_request = None;
+                self.forget_member();
+            }
+            Go::Group(group) => {
+                self.forget_member();
+                self.selected = Some(group);
+                self.group_due = true;
+            }
+            Go::GroupOnly => self.forget_member(),
+            Go::Member(member) => {
+                self.member = Some(member);
+                self.report_due = true;
+            }
         }
-        if self.list_read.phase() == &Phase::Ready && self.groups.is_empty() {
-            ui.label("評価グループはありません。");
-        }
+    }
+
+    fn forget_member(&mut self) {
+        self.member = None;
+        self.report = None;
+        self.report_read.forget();
+        self.report_request = None;
+        self.report_due = false;
+    }
+
+    fn shown_member(&self) -> Option<&EvaluationMemberSummary> {
+        let member = self.member.as_ref()?;
+        self.group
+            .as_ref()?
+            .members
+            .iter()
+            .find(|shown| &shown.member == member)
+    }
+
+    /// Refresh, the breadcrumb, and what the page in front is waiting for.
+    fn toolbar(&mut self, ui: &mut egui::Ui) -> Option<Go> {
+        let mut go = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Refresh").clicked() {
+                self.list_due = true;
+                self.group_due = self.selected.is_some();
+                self.report_due = self.member.is_some();
+            }
+            if let Some(group) = &self.selected {
+                crumb(ui);
+                if ui.link("Groups").clicked() {
+                    go = Some(Go::Groups);
+                }
+                crumb(ui);
+                if self.member.is_some() {
+                    if ui.link(group.as_str()).clicked() {
+                        go = Some(Go::GroupOnly);
+                    }
+                } else {
+                    ui.label(group.as_str());
+                }
+            }
+            if let Some(member) = &self.member {
+                crumb(ui);
+                ui.label(
+                    self.shown_member()
+                        .map_or_else(|| member.as_str().to_owned(), member_title),
+                );
+            }
+            let read = if self.member.is_some() && self.group.is_some() {
+                &self.report_read
+            } else if self.selected.is_some() {
+                &self.group_read
+            } else {
+                &self.list_read
+            };
+            phase_label(ui, read.phase());
+        });
+        go
+    }
+
+    fn group_list(&mut self, ui: &mut egui::Ui) -> Option<Go> {
         if let Some(problem) = self.list_problem {
-            ui.label(format!(
-                "一覧を読み取れませんでした ({})。",
-                problem_label(problem)
-            ));
+            problem_line(ui, problem_word(problem));
         }
-        if self.omitted > 0 || self.scan_truncated {
-            ui.label(format!(
-                "ほかに {} 件のグループがあります(表示は新しい順の一部)。",
-                self.omitted
-            ));
+        if self.list_read.phase() == &Phase::Ready
+            && self.groups.is_empty()
+            && self.list_problem.is_none()
+        {
+            empty_state(
+                ui,
+                "No evaluations yet",
+                "Evaluations the Evaluator starts appear here with their progress and reports.",
+                None,
+            );
+            return None;
         }
         let mut open = None;
         let groups = &self.groups;
         let more = paged_list(
             ui,
             "evaluation-groups",
-            self.next_cursor.is_some().then_some("さらに読み込む"),
+            self.next_cursor.is_some().then_some("Load more groups"),
             |ui| {
                 for group in groups {
-                    if ui.button(group_row(group)).clicked() {
-                        open = Some(group.group.clone());
-                    }
+                    ui.push_id(group.group.as_str(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let id = egui::RichText::new(group.group.as_str()).strong();
+                            if ui.add(egui::Button::new(id).frame(false)).clicked() {
+                                open = Some(group.group.clone());
+                            }
+                            match group.presence {
+                                ArtifactPresence::Present => {
+                                    if let Some(phase) = group.phase {
+                                        group_badge(ui, phase);
+                                    }
+                                    ui.label(muted(format!(
+                                        "{} · {} threads",
+                                        group.started_at.as_deref().unwrap_or("—"),
+                                        group.members_total.unwrap_or(0)
+                                    )));
+                                }
+                                ArtifactPresence::Missing => {
+                                    ui.label(muted("record missing"));
+                                }
+                                ArtifactPresence::Problem => {
+                                    problem_line(
+                                        ui,
+                                        group.problem.map_or("unusable", problem_word),
+                                    );
+                                }
+                            }
+                        });
+                    });
                 }
             },
         );
         if more {
             self.more_requested = true;
         }
-        if let Some(group) = open {
-            self.selected = Some(group);
-            self.group_due = true;
+        if self.omitted > 0 {
+            ui.label(muted(format!("{} older groups not listed", self.omitted)));
         }
-
-        if self.selected.is_some() {
-            ui.separator();
-            if let Some(line) = phase_line(self.group_read.phase()) {
-                ui.label(line);
-            }
-        }
-        let mut open_member = None;
-        if let Some(group) = &self.group {
-            ui.strong(format!(
-                "{} · {} · 開始 {}",
-                group.group.as_str(),
-                group_phase_label(group.phase),
-                group.started_at
+        if self.scan_truncated {
+            ui.label(muted(
+                "The groups directory is larger than what was scanned.",
             ));
-            if let Some(finished) = &group.finished_at {
-                ui.label(format!("終了 {finished}"));
-            }
-            if let Some(notice) = &group.notice {
-                ui.label(format!("通知: {notice}"));
-            }
-            if group.members_omitted > 0 {
-                ui.label(format!(
-                    "メンバー {} 件のうち {} 件は表示していません。",
-                    group.members_total, group.members_omitted
-                ));
-            }
-            bounded_list(ui, "evaluation-members", |ui| {
-                for member in &group.members {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!(
-                            "{} · {} · 試行 完了 {} / 失敗 {} / 実行中 {} / 予定 {}",
-                            member.member.as_str(),
-                            member_phase_label(member.phase),
-                            member.trials.finished,
-                            member.trials.failed,
-                            member.trials.running,
-                            member.trials.planned
-                        ));
-                        ui.label(format!(
-                            "レポート: {} / リプレイ: {}",
-                            presence_label(&member.report),
-                            presence_label(&member.replay)
-                        ));
-                        if let Some(failure) = &member.failure {
-                            ui.label(format!("失敗: {failure}"));
-                        }
-                        if ui
-                            .button(format!("{} のレポートを開く", member.member.as_str()))
-                            .clicked()
-                        {
-                            open_member = Some(member.member.clone());
-                        }
-                    });
+        }
+        open.map(Go::Group)
+    }
+
+    fn group_page(&mut self, ui: &mut egui::Ui) -> Option<Go> {
+        let group = self.group.as_ref()?;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(h3(group.group.as_str()));
+            group_badge(ui, group.phase);
+        });
+        ui.label(muted(format!(
+            "Started {}{}",
+            group.started_at,
+            group
+                .finished_at
+                .as_ref()
+                .map_or_else(String::new, |at| format!(" · finished {at}"))
+        )));
+        if group.phase == EvaluationGroupPhase::Unverified {
+            ui.colored_label(palette().WARNING_FG, UNVERIFIED_HINT);
+        }
+        if let Some(notice) = &group.notice {
+            ui.label(muted(notice));
+        }
+        if let Some(candidate) = &group.candidate {
+            ui.collapsing("Candidate configuration", |ui| {
+                ui.monospace(&candidate.text);
+                if candidate.truncated {
+                    ui.label(muted(format!(
+                        "Showing the start of {} bytes.",
+                        candidate.total_bytes
+                    )));
                 }
             });
         }
-        if let Some(member) = open_member {
-            self.member = Some(member);
-            self.report_due = true;
-        }
-
-        if self.member.is_some() {
-            ui.separator();
-            if let Some(line) = phase_line(self.report_read.phase()) {
-                ui.label(line);
-            }
-            if let Some(report) = &self.report {
-                match (report.artifact.presence, &report.text, report.problem) {
-                    (ArtifactPresence::Present, Some(text), _) => {
-                        ui.strong(format!("{} のレポート", report.artifact.member.as_str()));
-                        ui.label(&text.text);
-                        if text.truncated {
-                            ui.label(format!(
-                                "(先頭 {} バイトのみ表示 / 全体 {} バイト)",
-                                text.text.len(),
-                                text.total_bytes
-                            ));
+        ui.add_space(SP_2);
+        ui.label(h4("Threads"));
+        let mut open = None;
+        bounded_list(ui, "evaluation-members", |ui| {
+            for member in &group.members {
+                ui.push_id(member.member.as_str(), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let label = if member.thread_id.is_empty() {
+                            member.member.as_str().to_owned()
+                        } else {
+                            format!("{} · {}", member.member.as_str(), member.thread_id)
+                        };
+                        let label = egui::RichText::new(label).strong();
+                        if ui.add(egui::Button::new(label).frame(false)).clicked() {
+                            open = Some(member.member.clone());
                         }
+                        member_badge(ui, member.phase);
+                        ui.label(muted(progress_text(member)));
+                        ui.label(muted(format!(
+                            "Report: {} · Replay: {}",
+                            presence_word(&member.report),
+                            presence_word(&member.replay)
+                        )));
+                        if let Some(failure) = &member.failure {
+                            ui.colored_label(palette().ERROR_FG, format!("Failed: {failure}"));
+                        }
+                        if member.problems > 0 {
+                            ui.colored_label(
+                                palette().WARNING_FG,
+                                format!("{} artifact problems", member.problems),
+                            );
+                        }
+                    });
+                });
+            }
+        });
+        if group.members_omitted > 0 {
+            ui.label(muted(format!(
+                "{} more threads not shown",
+                group.members_omitted
+            )));
+        }
+        open.map(Go::Member)
+    }
+
+    /// The member's page. While its group is re-read (Refresh, a reconnect) the
+    /// summary is gone for a moment: the page keeps its place under the member id.
+    fn member_page(&self, ui: &mut egui::Ui) {
+        let (Some(group), Some(member_id)) = (self.selected.as_ref(), self.member.as_ref()) else {
+            return;
+        };
+        let shown = self.shown_member();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(h3(
+                shown.map_or_else(|| member_id.as_str().to_owned(), member_title)
+            ));
+            if let Some(member) = shown {
+                member_badge(ui, member.phase);
+            }
+        });
+        if let Some(member) = shown {
+            if member.phase == EvaluationMemberPhase::Unverified {
+                ui.colored_label(palette().WARNING_FG, UNVERIFIED_HINT);
+            }
+            ui.label(progress_text(member));
+            if let Some(failure) = &member.failure {
+                ui.colored_label(palette().ERROR_FG, format!("Failed: {failure}"));
+            }
+        }
+        ui.add_space(SP_2);
+        ui.label(h4("Report"));
+        if let Some(report) = &self.report {
+            match (report.artifact.presence, &report.text) {
+                (ArtifactPresence::Present, Some(text)) => {
+                    if text.truncated {
+                        ui.label(muted(format!(
+                            "Showing the start of report.md ({} of {} bytes).",
+                            text.text.len(),
+                            text.total_bytes
+                        )));
                     }
-                    (ArtifactPresence::Problem, _, problem) => {
-                        ui.label(format!(
-                            "レポートは利用できません ({})。",
-                            problem.map_or("", problem_label)
-                        ));
-                    }
-                    _ => {
-                        ui.label("レポートはまだありません。");
-                    }
+                    let id = format!(
+                        "core-evaluation-report-{}-{}",
+                        group.as_str(),
+                        member_id.as_str()
+                    );
+                    render_markdown(ui, &text.text, &id);
+                }
+                (ArtifactPresence::Problem, _) => {
+                    problem_line(ui, report.problem.map_or("unusable", problem_word));
+                }
+                _ if shown.is_some_and(|member| member_is_active(member.phase)) => {
+                    ui.label(muted(
+                        "The report is not there yet; the evaluation still runs.",
+                    ));
+                }
+                _ => {
+                    ui.label(muted("No report was produced."));
                 }
             }
+        }
+        match shown.map(|member| member.replay.presence) {
+            Some(ArtifactPresence::Present) => {
+                ui.label(muted(
+                    "Replay: available (opening it needs the core client's replay view)",
+                ));
+            }
+            Some(ArtifactPresence::Problem) => {
+                ui.label(muted("Replay: unusable"));
+            }
+            Some(ArtifactPresence::Missing) | None => {}
         }
     }
 }

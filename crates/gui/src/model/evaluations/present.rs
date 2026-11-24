@@ -2,6 +2,9 @@
 //! "—" and is never shown as zero; a partial total says which part it covers.
 
 use eval::cost::Cost;
+use workbench_protocol::namespaces::evaluation::{EvaluationGroupPhase, EvaluationMemberPhase};
+
+use crate::panes::evaluation_widgets;
 use eval::inspection::{
     Artifact, CostSource, CostUnavailable, DatabaseBudget, EvaluationMemberSnapshot, GroupPhase,
     MemberCost, MemberPhase, ProcessStatus, TrialCost, TrialOutcome, TrialState,
@@ -98,26 +101,36 @@ pub fn member_cost_lines(cost: &MemberCost) -> (String, Vec<String>) {
     (source.to_owned(), lines)
 }
 
-pub fn group_phase_label(phase: GroupPhase) -> &'static str {
+#[must_use]
+pub const fn shown_group_phase(phase: GroupPhase) -> EvaluationGroupPhase {
     match phase {
-        GroupPhase::Running => "Running",
-        GroupPhase::Finished => "Finished",
-        GroupPhase::Incomplete => "Incomplete",
-        GroupPhase::Unverified => "Unverified",
-        GroupPhase::Partial => "Partial",
+        GroupPhase::Running => EvaluationGroupPhase::Running,
+        GroupPhase::Finished => EvaluationGroupPhase::Finished,
+        GroupPhase::Incomplete => EvaluationGroupPhase::Incomplete,
+        GroupPhase::Unverified => EvaluationGroupPhase::Unverified,
+        GroupPhase::Partial => EvaluationGroupPhase::Partial,
     }
 }
 
-pub fn member_phase_label(phase: MemberPhase) -> &'static str {
+#[must_use]
+pub const fn shown_member_phase(phase: MemberPhase) -> EvaluationMemberPhase {
     match phase {
-        MemberPhase::Starting => "Starting",
-        MemberPhase::RunningTrials => "Running trials",
-        MemberPhase::Reporting => "Reporting",
-        MemberPhase::Finished => "Finished",
-        MemberPhase::FinishedWithoutReport => "Finished without a report",
-        MemberPhase::Failed => "Failed",
-        MemberPhase::Unverified => "Unverified",
+        MemberPhase::Starting => EvaluationMemberPhase::Starting,
+        MemberPhase::RunningTrials => EvaluationMemberPhase::RunningTrials,
+        MemberPhase::Reporting => EvaluationMemberPhase::Reporting,
+        MemberPhase::Finished => EvaluationMemberPhase::Finished,
+        MemberPhase::FinishedWithoutReport => EvaluationMemberPhase::FinishedWithoutReport,
+        MemberPhase::Failed => EvaluationMemberPhase::Failed,
+        MemberPhase::Unverified => EvaluationMemberPhase::Unverified,
     }
+}
+
+pub fn group_phase_label(phase: GroupPhase) -> &'static str {
+    evaluation_widgets::group_phase_label(shown_group_phase(phase))
+}
+
+pub fn member_phase_label(phase: MemberPhase) -> &'static str {
+    evaluation_widgets::member_phase_label(shown_member_phase(phase))
 }
 
 pub fn trial_state_label(state: TrialState) -> &'static str {
@@ -132,8 +145,7 @@ pub fn trial_state_label(state: TrialState) -> &'static str {
     }
 }
 
-/// What "unverified" means, wherever it is shown.
-pub const UNVERIFIED_HINT: &str = "Nothing shows that the evaluation process still runs or how it ended: it was started by another session. Its files are shown as they are.";
+pub use crate::panes::evaluation_widgets::UNVERIFIED_HINT;
 
 pub fn process_text(process: &ProcessStatus) -> String {
     match process {
