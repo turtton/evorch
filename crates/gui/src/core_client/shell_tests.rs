@@ -2046,3 +2046,38 @@ mod attention;
 mod lanes;
 
 mod pull_requests;
+
+// Given: the lane thr-4 asked its lead thr-1 a question the lead has not passed on
+// When: the lead thread thr-1 is shown
+// Then: the lane's question is not offered as a question for the person; the lead
+//       thread shows the embedded workbench's count of lane questions instead
+#[test]
+fn a_lane_question_routed_to_its_lead_is_not_offered_to_the_person() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    let lane_question: QuestionView = view(json!({
+        "id": "q-lane",
+        "requester": {"run": "run-4", "thread": "thr-4", "root_run": "run-4"},
+        "target": {"type": "lead", "payload": {"lead_thread": "thr-1", "lead_run": "run-1"}},
+        "management_revision": "1", "routing_revision": "1", "blocking": true,
+        "title": "Which redirect test matrix should the lane cover?",
+        "options": [],
+        "revision": "2",
+        "raised_by": {"actor": "agent", "agent_run_id": "run-4", "surface": "none"},
+    }));
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .cache
+        .questions
+        .insert("q-lane".into(), lane_question);
+    screen.harness.run_steps(4);
+    let harness = &screen.harness;
+    assert_eq!(harness.query_all_by_label("Question for you").count(), 1);
+    assert!(
+        harness
+            .query_by_label_contains("Which redirect test matrix")
+            .is_none()
+    );
+    harness.get_by_label_contains("1 lane question(s) wait for your answer here");
+}
