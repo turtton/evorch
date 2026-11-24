@@ -10,10 +10,11 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
 use super::features::{DockPass, FeatureId, Navigation, Selection};
+use crate::panes::sidebar_widgets::{INDENT, ProjectRowView, project_row};
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{empty_state, ghost, ghost_icon_button, status_dot};
+use crate::theme::widgets::{compact_row, empty_state, ghost_icon_button, row_title, status_dot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreTab {
@@ -62,7 +63,7 @@ pub const ON_DEMAND: [FeatureId; 7] = [
     FeatureId::Maintenance,
 ];
 
-const SIDEBAR_FRACTION: f32 = 0.24;
+const SIDEBAR_FRACTION: f32 = 0.30;
 
 pub fn default_dock() -> DockState<CoreTab> {
     let mut centre = vec![CoreTab::Conversation];
@@ -71,7 +72,7 @@ pub fn default_dock() -> DockState<CoreTab> {
     let surface = dock.main_surface_mut();
     let [middle, left] =
         surface.split_left(NodeIndex::root(), SIDEBAR_FRACTION, vec![CoreTab::Projects]);
-    surface.split_below(left, 0.62, LEFT.map(CoreTab::Feature).to_vec());
+    surface.split_below(left, 0.65, LEFT.map(CoreTab::Feature).to_vec());
     let [_, right] = surface.split_right(middle, 0.7, RIGHT_TOP.map(CoreTab::Feature).to_vec());
     surface.split_below(right, 0.5, RIGHT_BOTTOM.map(CoreTab::Feature).to_vec());
     dock
@@ -139,18 +140,14 @@ impl Viewer<'_, '_> {
         }
     }
 
+    /// The workspace feature draws the whole tab, its own scroll area included; the
+    /// pass maintains it like a feature whose tab is hidden.
     fn projects(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical()
-            .id_salt("core-projects")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_enabled_ui(self.io.connected, |ui| {
-                    self.pass.render_tab(FeatureId::Workspace, ui);
-                    if !self.pass.render_selector(ui) {
-                        builtin_selector(ui, self.pass, self.selection);
-                    }
-                });
-            });
+        ui.add_enabled_ui(self.io.connected, |ui| {
+            if !self.pass.render_selector(ui) {
+                builtin_selector(ui, self.pass, self.selection);
+            }
+        });
     }
 
     fn unavailable(&self, ui: &mut Ui, feature: FeatureId) {
@@ -208,47 +205,74 @@ impl TabViewer for Viewer<'_, '_> {
     }
 }
 
+/// The projects and threads of the snapshot, drawn while the workspace feature is not
+/// available (the tab is disabled then).
 fn builtin_selector(ui: &mut Ui, pass: &mut DockPass<'_>, selection: &Selection) {
     let view = pass.view();
     let mut navigations = Vec::new();
-    for project in view.cache.projects.values() {
-        let selected_project = selection.project.as_ref() == Some(&project.id);
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(
-                    selected_project,
-                    icons::with_icon(icons::FOLDER_SIMPLE, &project.display_name),
-                )
-                .clicked()
-            {
-                navigations.push(Navigation::SelectProject(project.id.clone()));
-            }
-            if ui
-                .add(ghost(icons::PLUS))
-                .on_hover_text("New conversation")
-                .clicked()
-            {
-                navigations.push(Navigation::NewConversation(project.id.clone()));
+    egui::ScrollArea::vertical()
+        .id_salt("core-projects")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for project in view.cache.projects.values() {
+                let id = project.id.as_str();
+                let folded = egui::Id::new(("core-builtin-folded", id));
+                let open = !ui.data(|data| data.get_temp::<bool>(folded).unwrap_or(false));
+                let threads: Vec<_> = view
+                    .cache
+                    .threads
+                    .values()
+                    .filter(|t| t.project == project.id)
+                    .collect();
+                let clicks = ui
+                    .push_id(id, |ui| {
+                        project_row(
+                            ui,
+                            ProjectRowView {
+                                name: &project.display_name,
+                                hover_root: None,
+                                selected: selection.project.as_ref() == Some(&project.id),
+                                open,
+                                count: threads.len(),
+                                search: false,
+                                settings: false,
+                            },
+                        )
+                    })
+                    .inner;
+                if clicks.toggle {
+                    ui.data_mut(|data| data.insert_temp(folded, open));
+                }
+                if clicks.select {
+                    navigations.push(Navigation::SelectProject(project.id.clone()));
+                }
+                if clicks.new_thread {
+                    navigations.push(Navigation::NewConversation(project.id.clone()));
+                }
+                if !open {
+                    continue;
+                }
+                for thread in threads {
+                    let selected = selection.thread.as_ref() == Some(&thread.id);
+                    let clicked = ui
+                        .push_id(thread.id.as_str(), |ui| {
+                            let mut clicked = false;
+                            compact_row(ui, selected, |ui| {
+                                ui.add_space(SP_2 + INDENT);
+                                clicked = row_title(ui, thread.title.as_str()).clicked();
+                            });
+                            clicked
+                        })
+                        .inner;
+                    if clicked {
+                        navigations.push(Navigation::SelectThread {
+                            project: project.id.clone(),
+                            thread: thread.id.clone(),
+                        });
+                    }
+                }
             }
         });
-        for thread in view
-            .cache
-            .threads
-            .values()
-            .filter(|t| t.project == project.id)
-        {
-            ui.horizontal(|ui| {
-                ui.add_space(SP_4);
-                let selected = selection.thread.as_ref() == Some(&thread.id);
-                if ui.selectable_label(selected, &thread.title).clicked() {
-                    navigations.push(Navigation::SelectThread {
-                        project: project.id.clone(),
-                        thread: thread.id.clone(),
-                    });
-                }
-            });
-        }
-    }
     for navigation in navigations {
         pass.navigate(navigation);
     }

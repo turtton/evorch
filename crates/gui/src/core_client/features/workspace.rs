@@ -8,10 +8,17 @@
 //! particular a conflict with another client, is shown as such and nothing is
 //! assumed applied. Window selection and anything the user has not sent stay
 //! client state (`Selection`, drafts).
+mod dialogs;
+mod sidebar;
+mod tree;
+
+use self::tree::RunState;
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Navigation,
+    Selection, Visibility,
 };
-use std::collections::BTreeMap;
+use crate::core_client::cache::Cache;
+use std::collections::{BTreeMap, BTreeSet};
 use workbench_protocol::{
     commands::{Command, CommandResult},
     events::UiEvent,
@@ -27,7 +34,9 @@ use workbench_protocol::{
         },
     },
     queries::{PageRequest, Query, QueryReply},
+    views::ProjectSummary,
 };
+use workspace_ui::ProjectSort;
 
 fn family_identity(family: &FamilyView) -> FamilyIdentity {
     FamilyIdentity {
@@ -50,6 +59,7 @@ pub enum Intent {
 #[derive(Debug, Clone)]
 enum Inflight {
     Families,
+    Projects,
     Detail(String),
     Command(String),
     Access(String),
@@ -90,6 +100,8 @@ pub struct SidebarModel {
     pub details: BTreeMap<String, ThreadDetail>,
     /// Trust and allowed directories of the projects asked about.
     pub access: BTreeMap<String, ProjectAccessView>,
+    /// The projects as last listed; until then the snapshot's are shown.
+    pub projects: Option<Vec<ProjectSummary>>,
 }
 
 impl SidebarModel {
@@ -106,6 +118,46 @@ impl SidebarModel {
     pub fn pinned(&self, thread: &str) -> bool {
         self.details.get(thread).is_some_and(|d| d.pinned)
     }
+
+    /// The projects to show: the last listing, or the snapshot's before one arrived.
+    pub fn project_list<'a>(&'a self, cache: &'a Cache) -> Vec<&'a ProjectSummary> {
+        match &self.projects {
+            Some(projects) => projects.iter().collect(),
+            None => cache.projects.values().collect(),
+        }
+    }
+}
+
+/// How the sidebar is arranged in this window; never sent and kept across a reset.
+#[derive(Debug)]
+struct SidebarView {
+    sort: ProjectSort,
+    collapsed: BTreeSet<String>,
+}
+
+impl Default for SidebarView {
+    fn default() -> Self {
+        Self {
+            sort: ProjectSort::Name,
+            collapsed: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Dialog {
+    AddProject,
+    Settings(String),
+}
+
+/// What a frame of the sidebar asked for, applied once it is drawn.
+#[derive(Debug, Default)]
+struct Requests {
+    navigations: Vec<Navigation>,
+    asks: Vec<(String, Intent)>,
+    trust: Vec<(String, TrustLevel)>,
+    project: Vec<(String, ProjectIntent)>,
+    register: Option<(String, String)>,
 }
 
 #[derive(Default)]
@@ -126,11 +178,27 @@ pub struct WorkspaceFeature {
     stale: bool,
     refreshing: bool,
     notice: Option<String>,
+    /// The thread whose title is being edited, and the text typed so far.
     renaming: Option<(String, String)>,
+    /// The rename field takes the keyboard focus when it next appears.
+    focus_rename: bool,
     /// The pages of the family list read so far, until the last one arrives.
     family_pages: Vec<FamilyView>,
-    /// Archived conversations are listed (with a way to restore them).
-    show_archived: bool,
+    /// The pages of the project list read so far, until the last one arrives.
+    project_pages: Vec<ProjectSummary>,
+    listing_projects: bool,
+    view: SidebarView,
+    dialog: Option<Dialog>,
+    /// Threads whose run ended while another thread was shown, until they are opened.
+    unread: BTreeSet<String>,
+    /// What the runs of each cached thread made of it at the last pass, to see a run end.
+    last_state: BTreeMap<String, RunState>,
+    /// Threads with a working run at the last pass, to refuse archiving their family.
+    working: BTreeSet<String>,
+    /// Details and accesses that may be out of date. They stay shown until the fresh
+    /// one replaces them, but nothing is decided on them.
+    refetch_details: BTreeSet<String>,
+    refetch_access: BTreeSet<String>,
 }
 
 impl WorkspaceFeature {
@@ -173,7 +241,7 @@ impl WorkspaceFeature {
         self.notice = None;
         self.confirmation = None;
         self.project_intents.insert(project.to_owned(), intent);
-        if self.model.access.contains_key(project) {
+        if self.current_access(project) {
             self.send_project_intent(project);
         } else {
             self.want_access(project);
@@ -229,7 +297,7 @@ impl WorkspaceFeature {
     pub fn ask(&mut self, thread: &str, intent: Intent) {
         self.notice = None;
         self.intents.insert(thread.to_owned(), intent);
-        if self.model.details.contains_key(thread) {
+        if self.current_detail(thread) {
             self.send_intent(thread);
         } else {
             self.want_detail(thread);
@@ -241,16 +309,26 @@ impl WorkspaceFeature {
     pub fn ask_trust(&mut self, project: &str, trust: TrustLevel) {
         self.notice = None;
         self.trust_intents.insert(project.to_owned(), trust);
-        if self.model.access.contains_key(project) {
+        if self.current_access(project) {
             self.send_trust(project);
         } else {
             self.want_access(project);
         }
     }
 
+    /// The detail of `thread` is read and not out of date.
+    fn current_detail(&self, thread: &str) -> bool {
+        self.model.details.contains_key(thread) && !self.refetch_details.contains(thread)
+    }
+
+    /// The access of `project` is read and not out of date.
+    fn current_access(&self, project: &str) -> bool {
+        self.model.access.contains_key(project) && !self.refetch_access.contains(project)
+    }
+
     /// Asks the core for the access of `project` unless that is already on its way.
     pub fn want_access(&mut self, project: &str) {
-        if self.model.access.contains_key(project)
+        if self.current_access(project)
             || self
                 .inflight
                 .values()
@@ -299,7 +377,7 @@ impl WorkspaceFeature {
             .inflight
             .values()
             .any(|f| matches!(f, Inflight::Detail(t) if t == thread));
-        if known || waiting >= DETAILS_IN_FLIGHT || self.model.details.contains_key(thread) {
+        if known || waiting >= DETAILS_IN_FLIGHT || self.current_detail(thread) {
             return;
         }
         let Ok(id) = ThreadId::new(thread) else {
@@ -335,6 +413,13 @@ impl WorkspaceFeature {
                     self.stale = true;
                     return;
                 };
+                // The same guards as the row's Archive button, on the newest detail: a
+                // pinned family or one with a working run is not archived. As in the
+                // embedded workbench, such a click is ignored. Restoring is always safe.
+                if archived && (detail.pinned || family.pinned || self.family_works(thread, family))
+                {
+                    return;
+                }
                 WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
                     thread: detail.thread.clone(),
                     archived,
@@ -361,15 +446,74 @@ impl WorkspaceFeature {
             .push(Outgoing::Command(tag, Command::Workspace(command)));
     }
 
+    /// Whether `thread` or a member of `family` had a working run at the last pass.
+    fn family_works(&self, thread: &str, family: &FamilyView) -> bool {
+        self.working.iter().any(|member| {
+            member == thread
+                || self
+                    .model
+                    .details
+                    .get(member)
+                    .and_then(|detail| detail.family.as_ref())
+                    .is_some_and(|key| *key == family.key)
+        })
+    }
+
     /// Asks for the family list again when the core said something changed.
     pub fn refresh_if_stale(&mut self) {
-        if !self.stale || self.refreshing {
+        if !self.stale || self.refreshing || self.listing_projects {
             return;
         }
         self.stale = false;
         self.refreshing = true;
+        self.listing_projects = true;
         self.family_pages.clear();
+        self.project_pages.clear();
         self.request_families(PageRequest::default());
+        self.request_projects(PageRequest::default());
+    }
+
+    fn request_projects(&mut self, page: PageRequest) {
+        let tag = self.tag(Inflight::Projects);
+        self.outbox.push(Outgoing::Query(
+            tag,
+            Query::Workspace(WorkspaceQuery::ListProjects(page)),
+        ));
+    }
+
+    /// Notes which threads stopped running while another one was shown, as the
+    /// embedded workbench does: a run that finished, failed or waits for the user is
+    /// unread, a cancelled one is not. A thread that runs again, or is gone from the
+    /// projection, is not unread any more.
+    fn observe_threads(&mut self, cache: &Cache, selection: &Selection) {
+        let selected = selection.thread.as_ref().map(ThreadId::as_str);
+        self.working = tree::working_threads(cache)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for id in cache.threads.keys() {
+            let state = tree::run_state(cache, &self.model, id);
+            let before = self.last_state.insert(id.clone(), state);
+            match state {
+                RunState::Running => {
+                    self.unread.remove(id);
+                }
+                RunState::Settled | RunState::Failed
+                    if before == Some(RunState::Running) && selected != Some(id.as_str()) =>
+                {
+                    self.unread.insert(id.clone());
+                }
+                _ => {}
+            }
+        }
+        self.last_state
+            .retain(|id, _| cache.threads.contains_key(id));
+        self.unread.retain(|id| cache.threads.contains_key(id));
+    }
+
+    /// Threads whose finished work was not opened yet.
+    pub fn unread(&self) -> &BTreeSet<String> {
+        &self.unread
     }
 
     fn request_families(&mut self, page: PageRequest) {
@@ -408,17 +552,32 @@ impl WorkspaceFeature {
                     .into_iter()
                     .map(|f| (f.key.to_string(), f))
                     .collect();
-                // What was learned about a thread before may be out of date.
-                let known: Vec<String> = self.model.details.keys().cloned().collect();
-                self.model.details.clear();
-                for thread in known {
+                // What was learned about a thread before may be out of date. It stays
+                // shown until the fresh read replaces it, so the tree keeps its shape
+                // and a pinned or running family never looks archivable meanwhile.
+                self.refetch_details = self.model.details.keys().cloned().collect();
+                for thread in self.refetch_details.clone() {
                     self.want_detail(&thread);
                 }
-                let known: Vec<String> = self.model.access.keys().cloned().collect();
-                self.model.access.clear();
-                for project in known {
+                self.refetch_access = self.model.access.keys().cloned().collect();
+                for project in self.refetch_access.clone() {
                     self.want_access(&project);
                 }
+            }
+            (
+                Inflight::Projects,
+                FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Projects(page)))),
+            ) => {
+                self.project_pages.extend(page.items);
+                if let Some(cursor) = page.next_cursor {
+                    self.request_projects(PageRequest {
+                        cursor: Some(cursor),
+                        ..PageRequest::default()
+                    });
+                    return;
+                }
+                self.listing_projects = false;
+                self.model.projects = Some(std::mem::take(&mut self.project_pages));
             }
             (
                 Inflight::Access(project),
@@ -426,6 +585,7 @@ impl WorkspaceFeature {
                     access,
                 )))),
             ) => {
+                self.refetch_access.remove(&project);
                 self.model.access.insert(project.clone(), *access);
                 if self.trust_intents.contains_key(&project) {
                     self.send_trust(&project);
@@ -463,6 +623,9 @@ impl WorkspaceFeature {
                         });
                         self.forms.register_name.clear();
                         self.forms.register_path.clear();
+                        if self.dialog == Some(Dialog::AddProject) {
+                            self.dialog = None;
+                        }
                         self.stale = true;
                     }
                     Some(CommandResult::Workspace(WorkspaceResult::Rejected(rejection))) => {
@@ -493,6 +656,7 @@ impl WorkspaceFeature {
                     detail,
                 )))),
             ) => {
+                self.refetch_details.remove(&thread);
                 self.model.details.insert(thread.clone(), *detail);
                 if self.intents.contains_key(&thread) {
                     self.send_intent(&thread);
@@ -524,6 +688,13 @@ impl WorkspaceFeature {
             self.family_pages.clear();
             self.refreshing = false;
             self.stale = true;
+        }
+        if matches!(what, Inflight::Projects) {
+            // The last list (or the snapshot's) stays shown, and the next change the
+            // core reports lists the projects again. Asking at once would relist the
+            // families and reread every detail on each failure.
+            self.project_pages.clear();
+            self.listing_projects = false;
         }
         if error.outcome_unknown {
             // The command may have been applied: what it changed is read again,
@@ -580,11 +751,17 @@ impl Feature for WorkspaceFeature {
 
     fn reset(&mut self) {
         self.model = SidebarModel::default();
+        self.refetch_details.clear();
+        self.refetch_access.clear();
         // Replies can queue reads between frames. Keep those not-yet-sent
         // requests with their tags, otherwise want_detail/want_access would
         // wait forever for a request discarded here. A command in this outbox
         // has never left the feature; sent commands are never queued again.
         self.refreshing = false;
+        self.listing_projects = false;
+        // A new snapshot is not a run ending: what is unread stays, and states are
+        // learned again from the snapshot.
+        self.last_state.clear();
         // The tags in flight and the intent behind them stay.
         self.stale = true;
     }
@@ -606,261 +783,60 @@ impl Feature for WorkspaceFeature {
         Some(self)
     }
 
-    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        self.refresh_if_stale();
-        if let Some(notice) = &self.notice {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
+    fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
+        if let Some(thread) = &ctx.selection().thread {
+            self.unread.remove(thread.as_str());
         }
+    }
+
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, _visibility: Visibility) {
+        self.observe_threads(ctx.cache(), ctx.selection());
+    }
+
+    fn render(&mut self, _ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.refresh_if_stale();
         self.flush(ctx);
     }
 
     fn render_selector(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) -> bool {
         self.refresh_if_stale();
-        let selection = ctx.selection().clone();
-        let projects: Vec<_> = ctx.cache().projects.values().cloned().collect();
-        let threads: Vec<_> = ctx.cache().threads.values().cloned().collect();
+        let threads: Vec<String> = ctx.cache().threads.keys().cloned().collect();
         for thread in &threads {
-            self.want_detail(thread.id.as_str());
+            self.want_detail(thread);
         }
-        if let Some(project) = selection.project.as_ref() {
-            self.want_access(project.as_str());
+        let projects: Vec<String> = self
+            .model
+            .project_list(ctx.cache())
+            .iter()
+            .map(|project| project.id.as_str().to_owned())
+            .collect();
+        for project in &projects {
+            self.want_access(project);
         }
-        let mut navigations = Vec::new();
-        let mut asks: Vec<(String, Intent)> = Vec::new();
-        let mut trust_asks: Vec<(String, TrustLevel)> = Vec::new();
-        let mut project_asks: Vec<(String, ProjectIntent)> = Vec::new();
-        let mut register_ask: Option<(String, String)> = None;
-        egui::CollapsingHeader::new("Register project")
-            .id_salt("workspace-register-project")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut self.forms.register_name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Directory");
-                    ui.text_edit_singleline(&mut self.forms.register_path);
-                });
-                if ui.button("Register").clicked() {
-                    register_ask = Some((
-                        self.forms.register_name.clone(),
-                        self.forms.register_path.clone(),
-                    ));
-                }
-            });
-        ui.horizontal_wrapped(|ui| {
-            for project in &projects {
-                let selected = selection.project.as_ref() == Some(&project.id);
-                if ui
-                    .selectable_label(selected, &project.display_name)
-                    .clicked()
-                {
-                    navigations.push(Navigation::SelectProject(project.id.clone()));
-                }
-            }
-        });
-        if let Some(project) = selection.project.as_ref() {
-            if let Some(access) = self.model.access.get(project.as_str()) {
-                let approved = access.trust == TrustLevel::Approved;
-                ui.horizontal(|ui| {
-                    ui.label(if approved {
-                        "Trust: Approved"
-                    } else {
-                        "Trust: Unapproved"
-                    });
-                    let (button, next) = if approved {
-                        ("Revoke trust", TrustLevel::Unapproved)
-                    } else {
-                        ("Approve project", TrustLevel::Approved)
-                    };
-                    if ui.small_button(button).clicked() {
-                        trust_asks.push((project.as_str().to_owned(), next));
-                    }
-                });
-            } else {
-                // Same height as the row it stands in for, so that a read in
-                // progress does not move the rows below it under the pointer.
-                ui.horizontal(|ui| {
-                    ui.label("Trust: …");
-                    ui.add_enabled(false, egui::Button::new("…").small());
-                });
-            }
-            // The header is drawn whether or not the access was read yet, so a read that ends
-            // does not move the rows below it under the pointer.
-            let access = self.model.access.get(project.as_str()).cloned();
-            egui::CollapsingHeader::new("Project settings")
-                .id_salt(("workspace-project-settings", project.as_str()))
-                .show(ui, |ui| {
-                    let Some(access) = &access else {
-                        ui.label("…");
-                        return;
-                    };
-                    ui.label(format!("Directory: {}", access.root));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.forms.rename)
-                                .hint_text(access.name.as_str()),
-                        );
-                        let name = self.forms.rename.trim().to_owned();
-                        if ui
-                            .add_enabled(!name.is_empty(), egui::Button::new("Rename project"))
-                            .clicked()
-                        {
-                            project_asks
-                                .push((project.as_str().to_owned(), ProjectIntent::Rename(name)));
-                            self.forms.rename.clear();
-                        }
-                    });
-                    ui.label("Allowed directories");
-                    for directory in &access.allowed_directories {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "{} ({}{})",
-                                directory.path,
-                                if directory.trust == TrustLevel::Approved {
-                                    "approved"
-                                } else {
-                                    "unapproved"
-                                },
-                                if directory.live { "" } else { ", missing" }
-                            ));
-                            if ui.small_button("Remove").clicked() {
-                                project_asks.push((
-                                    project.as_str().to_owned(),
-                                    ProjectIntent::RemoveDirectory(directory.path.clone()),
-                                ));
-                            }
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.forms.directory);
-                        ui.checkbox(&mut self.forms.directory_approved, "Approved");
-                        let path = self.forms.directory.trim().to_owned();
-                        if ui
-                            .add_enabled(!path.is_empty(), egui::Button::new("Add directory"))
-                            .clicked()
-                        {
-                            let trust = if self.forms.directory_approved {
-                                TrustLevel::Approved
-                            } else {
-                                TrustLevel::Unapproved
-                            };
-                            project_asks.push((
-                                project.as_str().to_owned(),
-                                ProjectIntent::AddDirectory { path, trust },
-                            ));
-                            self.forms.directory.clear();
-                        }
-                    });
-                });
-            if let Some(thread) = selection.thread.as_ref() {
-                // Read from the core; changing the list is not available in this window yet.
-                let dirs = self.model.details.get(thread.as_str()).map_or_else(
-                    || "…".to_owned(),
-                    |detail| {
-                        if detail.extra_read_dirs.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            detail
-                                .extra_read_dirs
-                                .iter()
-                                .map(|directory| directory.path.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    },
-                );
-                ui.label(format!(
-                    "Extra read directories: {dirs} (read-only; not supported here yet)"
-                ));
-            }
-            ui.horizontal(|ui| {
-                if ui.small_button("New conversation").clicked() {
-                    navigations.push(Navigation::NewConversation(project.clone()));
-                }
-                ui.checkbox(&mut self.show_archived, "Show archived");
-            });
-            let mut visible: Vec<_> = threads
-                .iter()
-                .filter(|t| {
-                    &t.project == project
-                        && (self.show_archived || !self.model.archived(t.id.as_str()))
-                })
-                .collect();
-            visible.sort_by_key(|t| {
-                (
-                    !self.model.pinned(t.id.as_str()),
-                    std::cmp::Reverse(t.updated_at),
-                )
-            });
-            for thread in visible {
-                let id = thread.id.as_str();
-                ui.horizontal(|ui| {
-                    let title = self
-                        .model
-                        .details
-                        .get(id)
-                        .map_or(thread.title.as_str(), |d| d.title.as_str())
-                        .to_owned();
-                    if let Some((editing, text)) = self.renaming.as_mut()
-                        && editing == id
-                    {
-                        let done = ui.text_edit_singleline(text).lost_focus();
-                        if done {
-                            asks.push((id.to_owned(), Intent::Rename(text.clone())));
-                            self.renaming = None;
-                        }
-                        return;
-                    }
-                    let pinned = if self.model.pinned(id) { "📌 " } else { "" };
-                    let archived = if self.model.archived(id) {
-                        "(archived) "
-                    } else {
-                        ""
-                    };
-                    let selected = selection.thread.as_ref() == Some(&thread.id);
-                    if ui
-                        .selectable_label(selected, format!("{pinned}{archived}{title}"))
-                        .clicked()
-                    {
-                        navigations.push(Navigation::SelectThread {
-                            project: project.clone(),
-                            thread: thread.id.clone(),
-                        });
-                    }
-                    if ui.small_button("Rename").clicked() {
-                        self.renaming = Some((id.to_owned(), title.clone()));
-                    }
-                    let pin = !self.model.pinned(id);
-                    if ui.small_button(if pin { "Pin" } else { "Unpin" }).clicked() {
-                        asks.push((id.to_owned(), Intent::Pin(pin)));
-                    }
-                    if self.model.archived(id) {
-                        if ui.small_button("Restore").clicked() {
-                            asks.push((id.to_owned(), Intent::Archive(false)));
-                        }
-                    } else if ui.small_button("Archive").clicked() {
-                        asks.push((id.to_owned(), Intent::Archive(true)));
-                    }
-                });
-            }
+        let mut requests = Requests::default();
+        self.draw_sidebar(ui, ctx, &mut requests);
+        if ui.is_visible() {
+            // A modal is drawn over the whole window, so the hidden pass that only
+            // collects requests must not draw one.
+            self.draw_dialog(ui.ctx(), &mut requests);
         }
-        if let Some(notice) = &self.notice {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
-        }
-        if let Some(confirmation) = &self.confirmation {
-            ui.label(confirmation);
-        }
-        if let Some((name, path)) = register_ask {
+        let Requests {
+            navigations,
+            asks,
+            trust,
+            project,
+            register,
+        } = requests;
+        if let Some((name, path)) = register {
             self.register_project(&name, &path);
         }
-        for (project, intent) in project_asks {
+        for (project, intent) in project {
             self.ask_project(&project, intent);
         }
         for (thread, intent) in asks {
             self.ask(&thread, intent);
         }
-        for (project, trust) in trust_asks {
+        for (project, trust) in trust {
             self.ask_trust(&project, trust);
         }
         for navigation in navigations {
@@ -886,7 +862,11 @@ impl WorkspaceFeature {
 mod tests {
     use super::*;
     use workbench_protocol::{
-        commands::CommandReply, namespaces::workspace::Applied, views::Page, wire::Revision,
+        commands::CommandReply,
+        ids::RunId,
+        namespaces::workspace::Applied,
+        views::{Page, RunPhase, RunRole, RunSummary, ThreadState},
+        wire::Revision,
     };
 
     fn thread(id: &str) -> ThreadId {
@@ -1309,11 +1289,509 @@ mod tests {
         feature.refresh_if_stale();
         assert!(matches!(
             feature.take_outbox().as_slice(),
-            [Outgoing::Query(
-                _,
-                Query::Workspace(WorkspaceQuery::ListFamilies(_))
-            )]
+            [
+                Outgoing::Query(_, Query::Workspace(WorkspaceQuery::ListFamilies(_))),
+                Outgoing::Query(_, Query::Workspace(WorkspaceQuery::ListProjects(_)))
+            ]
         ));
+    }
+
+    fn project(id: &str, name: &str) -> ProjectSummary {
+        ProjectSummary {
+            id: workbench_protocol::ids::ProjectId::new(id).unwrap(),
+            display_name: name.into(),
+            thread_count: 0,
+            revision: Revision(1),
+        }
+    }
+
+    fn projects_page(items: Vec<ProjectSummary>, next: Option<&str>) -> FeatureReply {
+        FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Projects(Page {
+            items,
+            next_cursor: next
+                .map(|cursor| workbench_protocol::ids::PageCursor::new(cursor).unwrap()),
+            snapshot_revision: Revision(1),
+        }))))
+    }
+
+    /// The tag of the only `ListProjects` query in `outbox`, and the cursor it asks from.
+    fn projects_query(outbox: &[Outgoing]) -> (u64, Option<String>) {
+        let mut found = outbox.iter().filter_map(|outgoing| match outgoing {
+            Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::ListProjects(page))) => {
+                Some((*tag, page.cursor.as_ref().map(|c| c.as_str().to_owned())))
+            }
+            _ => None,
+        });
+        let query = found.next().expect("the projects are listed");
+        assert!(found.next().is_none(), "listed once: {outbox:?}");
+        query
+    }
+
+    fn names(feature: &WorkspaceFeature) -> Vec<String> {
+        feature
+            .model
+            .projects
+            .iter()
+            .flatten()
+            .map(|p| p.display_name.clone())
+            .collect()
+    }
+
+    // Given: a sidebar that has not read anything yet
+    // When: it refreshes and the core lists the projects over two pages, then says the
+    //       workspace changed
+    // Then: both pages make the list, and the change lists them again
+    #[test]
+    fn refresh_lists_projects_over_every_page_and_a_workspace_change_lists_them_again() {
+        let mut feature = WorkspaceFeature {
+            stale: true,
+            ..WorkspaceFeature::default()
+        };
+        feature.refresh_if_stale();
+        let (tag, cursor) = projects_query(&feature.take_outbox());
+        assert!(cursor.is_none());
+        feature.reply(tag, projects_page(vec![project("p1", "one")], Some("next")));
+        assert!(
+            feature.model.projects.is_none(),
+            "a first page is not the list"
+        );
+        let (tag, cursor) = projects_query(&feature.take_outbox());
+        assert_eq!(cursor.as_deref(), Some("next"));
+        feature.reply(tag, projects_page(vec![project("p2", "two")], None));
+        assert_eq!(names(&feature), ["one", "two"]);
+
+        feature.event(&UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+            revision: Revision(5),
+        }));
+        // The family listing of the first refresh is still unanswered.
+        let families = feature
+            .inflight
+            .iter()
+            .find_map(|(tag, what)| matches!(what, Inflight::Families).then_some(*tag))
+            .unwrap();
+        feature.reply(families, families_reply_empty());
+        feature.refresh_if_stale();
+        let (tag, _) = projects_query(&feature.take_outbox());
+        feature.reply(tag, projects_page(vec![project("p1", "renamed")], None));
+        assert_eq!(names(&feature), ["renamed"]);
+    }
+
+    fn families_reply_empty() -> FeatureReply {
+        families(Vec::new())
+    }
+
+    fn summary(id: &str, state: ThreadState) -> workbench_protocol::views::ThreadSummary {
+        workbench_protocol::views::ThreadSummary {
+            id: thread(id),
+            project: workbench_protocol::ids::ProjectId::new("p").unwrap(),
+            title: id.into(),
+            state,
+            lead_thread: None,
+            revision: Revision(1),
+            updated_at: workbench_protocol::wire::UnixMillis(1),
+        }
+    }
+
+    fn run(id: &str, thread_id: &str, phase: RunPhase) -> RunSummary {
+        RunSummary {
+            id: RunId::new(id).unwrap(),
+            thread: thread(thread_id),
+            parent_run: None,
+            role: RunRole::Orchestrator,
+            phase,
+            revision: Revision(1),
+        }
+    }
+
+    /// Threads with one root run each, in the given phase. The summary says Running
+    /// whenever the run has not ended, as the core's does.
+    fn cache_with(phases: &[(&str, RunPhase)]) -> Cache {
+        let mut cache = Cache::default();
+        for &(id, phase) in phases {
+            let state = match phase {
+                RunPhase::Done | RunPhase::Cancelled => ThreadState::Idle,
+                RunPhase::Failed => ThreadState::Failed,
+                _ => ThreadState::Running,
+            };
+            cache.threads.insert(id.into(), summary(id, state));
+            let root = format!("{id}-root");
+            cache.runs.insert(root.clone(), run(&root, id, phase));
+        }
+        cache
+    }
+
+    fn showing(thread_id: Option<&str>) -> Selection {
+        Selection {
+            project: Some(workbench_protocol::ids::ProjectId::new("p").unwrap()),
+            thread: thread_id.map(thread),
+        }
+    }
+
+    /// One composition pass as the dock runs it for a feature whose tab is hidden.
+    fn pass(feature: &mut WorkspaceFeature, cache: &Cache, selection: &Selection, changed: bool) {
+        let mut frame = super::super::FeatureFrame::default();
+        let mut data = super::super::DataInbox::default();
+        let mut ctx = FeatureContext {
+            feature: FeatureId::Workspace,
+            view: super::super::FeatureView {
+                connected: true,
+                capabilities: &[],
+                cache,
+                selection,
+            },
+            frame: &mut frame,
+            data: &mut data,
+        };
+        if changed {
+            feature.selection_changed(&mut ctx);
+        }
+        let hidden = Visibility {
+            available: true,
+            expanded: false,
+            minimized: false,
+        };
+        feature.maintain(&mut ctx, hidden);
+        assert!(frame.actions.is_empty(), "noting unread sends nothing");
+    }
+
+    // Given: two running threads while "a" is shown
+    // When: both stop, then "b" is opened, then "b" runs and stops while it is shown
+    // Then: only "b" becomes unread, opening it clears that, and stopping while shown
+    //       leaves it read
+    #[test]
+    fn a_thread_that_stops_while_another_is_shown_is_unread_until_it_is_opened() {
+        let mut feature = WorkspaceFeature::default();
+        let running = cache_with(&[("a", RunPhase::Running), ("b", RunPhase::Running)]);
+        let stopped = cache_with(&[("a", RunPhase::Done), ("b", RunPhase::Done)]);
+        pass(&mut feature, &running, &showing(Some("a")), true);
+        pass(&mut feature, &stopped, &showing(Some("a")), false);
+        assert_eq!(feature.unread().iter().collect::<Vec<_>>(), ["b"]);
+
+        pass(&mut feature, &stopped, &showing(Some("b")), true);
+        assert!(feature.unread().is_empty());
+
+        let b_runs = cache_with(&[("a", RunPhase::Done), ("b", RunPhase::Running)]);
+        pass(&mut feature, &b_runs, &showing(Some("b")), false);
+        pass(&mut feature, &stopped, &showing(Some("b")), false);
+        assert!(feature.unread().is_empty());
+    }
+
+    // Given: three running threads while none of them is shown
+    // When: one finishes its turn and waits for the user (the core's summary still says
+    //       Running), one fails and one is cancelled
+    // Then: the first two are unread and the cancelled one is not, as in the embedded
+    //       workbench
+    #[test]
+    fn a_finished_turn_and_a_failure_are_unread_but_a_cancelled_run_is_not() {
+        let mut feature = WorkspaceFeature::default();
+        let selection = showing(Some("other"));
+        pass(
+            &mut feature,
+            &cache_with(&[
+                ("turn", RunPhase::Running),
+                ("fail", RunPhase::Running),
+                ("stop", RunPhase::Running),
+            ]),
+            &selection,
+            true,
+        );
+        let ended = cache_with(&[
+            ("turn", RunPhase::WaitingForUser),
+            ("fail", RunPhase::Failed),
+            ("stop", RunPhase::Cancelled),
+        ]);
+        assert_eq!(ended.threads["turn"].state, ThreadState::Running);
+        pass(&mut feature, &ended, &selection, false);
+        assert_eq!(
+            feature.unread().iter().collect::<Vec<_>>(),
+            ["fail", "turn"]
+        );
+    }
+
+    // Given: a thread whose root run was stopped while a subagent of it runs on
+    // When: the subagent finishes while another thread is shown
+    // Then: the thread stays stopped and is not unread
+    #[test]
+    fn a_stopped_root_is_not_unread_when_its_subagents_finish() {
+        let mut feature = WorkspaceFeature::default();
+        let selection = showing(Some("other"));
+        let mut cache = cache_with(&[("t", RunPhase::Cancelled)]);
+        let mut subagent = run("sub", "t", RunPhase::Running);
+        subagent.parent_run = Some(RunId::new("t-root").unwrap());
+        cache.runs.insert("sub".into(), subagent.clone());
+        pass(&mut feature, &cache, &selection, true);
+        subagent.phase = RunPhase::Done;
+        cache.runs.insert("sub".into(), subagent);
+        pass(&mut feature, &cache, &selection, false);
+        assert!(feature.unread().is_empty());
+    }
+
+    // Given: an unread thread and a running one
+    // When: a new snapshot replaces the projection with both idle
+    // Then: the unread thread stays unread and the snapshot invents no other
+    #[test]
+    fn a_reset_keeps_what_is_unread_and_invents_nothing() {
+        let mut feature = WorkspaceFeature::default();
+        let selection = showing(None);
+        pass(
+            &mut feature,
+            &cache_with(&[("a", RunPhase::Running), ("b", RunPhase::Running)]),
+            &selection,
+            true,
+        );
+        pass(
+            &mut feature,
+            &cache_with(&[("a", RunPhase::Done), ("b", RunPhase::Running)]),
+            &selection,
+            false,
+        );
+        feature.reset();
+        pass(
+            &mut feature,
+            &cache_with(&[("a", RunPhase::Done), ("b", RunPhase::Done)]),
+            &selection,
+            false,
+        );
+        assert_eq!(feature.unread().iter().collect::<Vec<_>>(), ["a"]);
+    }
+
+    struct Screen {
+        feature: WorkspaceFeature,
+        cache: Cache,
+        selection: Selection,
+        frame: super::super::FeatureFrame,
+        data: super::super::DataInbox,
+        invisible: bool,
+    }
+
+    fn draw(ui: &mut egui::Ui, screen: &mut Screen) {
+        let Screen {
+            feature,
+            cache,
+            selection,
+            frame,
+            data,
+            invisible,
+        } = screen;
+        let mut ctx = FeatureContext {
+            feature: FeatureId::Workspace,
+            view: super::super::FeatureView {
+                connected: true,
+                capabilities: &[],
+                cache,
+                selection,
+            },
+            frame,
+            data,
+        };
+        if *invisible {
+            let mut hidden = ui.new_child(egui::UiBuilder::new().invisible());
+            feature.render_selector(&mut hidden, &mut ctx);
+        } else {
+            feature.render_selector(ui, &mut ctx);
+        }
+    }
+
+    fn screen(invisible: bool) -> egui_kittest::Harness<'static, Screen> {
+        let mut cache = Cache::default();
+        cache.projects.insert("p".into(), project("p", "evorch"));
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(480.0, 640.0))
+            .build_ui_state(
+                draw,
+                Screen {
+                    feature: WorkspaceFeature::default(),
+                    cache,
+                    selection: showing(None),
+                    frame: super::super::FeatureFrame::default(),
+                    data: super::super::DataInbox::default(),
+                    invisible,
+                },
+            )
+    }
+
+    fn registrations(screen: &Screen) -> Vec<(String, String)> {
+        screen
+            .frame
+            .actions
+            .iter()
+            .filter_map(|action| match &action.request {
+                super::super::FeatureRequest::Command(Command::Workspace(
+                    WorkspaceCommand::RegisterProject(register),
+                )) => Some((register.name.clone(), register.path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Given: the Projects tab
+    // When: "Add project" on the toolbar is clicked and the modal is filled in and confirmed
+    // Then: the core is asked to register exactly the typed name and directory
+    #[test]
+    fn the_toolbar_add_dialog_registers_the_typed_project() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = screen(false);
+        harness.run();
+        harness.get_by_label("Add project").click();
+        harness.run();
+        assert!(harness.query_by_label("New project").is_some());
+        for (label, text) in [("Project name", "repo"), ("Project path", "/work/repo")] {
+            harness.get_by_label(label).focus();
+            harness.run();
+            harness.get_by_label(label).type_text(text);
+            harness.run();
+        }
+        harness.get_by_label("Add").click();
+        harness.run();
+        assert_eq!(
+            registrations(harness.state()),
+            [("repo".to_owned(), "/work/repo".to_owned())]
+        );
+    }
+
+    // Given: a modal the user opened
+    // When: the sidebar is drawn on a pass that only collects its requests
+    // Then: the modal is not drawn; on a visible pass it is
+    #[test]
+    fn modals_are_not_drawn_on_an_invisible_ui() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = screen(true);
+        harness.state_mut().feature.dialog = Some(Dialog::AddProject);
+        harness.run();
+        assert!(harness.query_by_label("New project").is_none());
+        harness.state_mut().invisible = false;
+        harness.run();
+        assert!(harness.query_by_label("New project").is_some());
+    }
+
+    /// Lists the families once and answers with `items`, leaving the project listing
+    /// unanswered.
+    fn list_families(feature: &mut WorkspaceFeature, items: Vec<FamilyView>) {
+        feature.stale = true;
+        feature.refresh_if_stale();
+        let tag = feature
+            .take_outbox()
+            .into_iter()
+            .find_map(|outgoing| match outgoing {
+                Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::ListFamilies(_))) => {
+                    Some(tag)
+                }
+                _ => None,
+            })
+            .expect("the families are listed");
+        feature.reply(tag, families(items));
+    }
+
+    fn detail_queries(outbox: &[Outgoing]) -> Vec<(u64, String)> {
+        outbox
+            .iter()
+            .filter_map(|outgoing| match outgoing {
+                Outgoing::Query(tag, Query::Workspace(WorkspaceQuery::GetThreadDetail(target))) => {
+                    Some((*tag, target.thread.as_str().to_owned()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Given: a pinned thread whose detail was read
+    // When: the core reports a change, the families are listed again, and the user asks
+    //       to archive the thread before and after its detail is read again
+    // Then: the old detail stays shown while the fresh one is read, nothing is decided
+    //       on the old one, and the pinned family is not archived
+    #[test]
+    fn a_family_refresh_keeps_details_shown_and_never_archives_a_pinned_family() {
+        let mut feature = WorkspaceFeature::default();
+        feature.model.details.insert(
+            "t1".into(),
+            ThreadDetail {
+                pinned: true,
+                ..detail("t1", 1, "t1")
+            },
+        );
+        list_families(&mut feature, vec![family("t1", 5, 7)]);
+        assert!(feature.model.pinned("t1"), "the pin stays shown meanwhile");
+        let reads = detail_queries(&feature.take_outbox());
+        let [(tag, id)] = reads.as_slice() else {
+            panic!("{reads:?}")
+        };
+        assert_eq!(id, "t1");
+
+        feature.ask("t1", Intent::Archive(true));
+        assert!(
+            feature.take_outbox().is_empty(),
+            "nothing is decided on an out-of-date detail"
+        );
+        feature.reply(
+            *tag,
+            detail_reply(ThreadDetail {
+                pinned: true,
+                ..detail("t1", 2, "t1")
+            }),
+        );
+        assert!(feature.take_outbox().is_empty(), "a pinned family stays");
+        assert!(feature.intents.is_empty(), "the refused click is dropped");
+    }
+
+    // Given: a family whose fork runs
+    // When: archiving its root is asked, then again once the run ended
+    // Then: the first is ignored and the second is sent
+    #[test]
+    fn a_family_with_a_working_run_is_not_archived() {
+        let mut feature = WorkspaceFeature::default();
+        feature
+            .model
+            .families
+            .insert("root".into(), family("root", 5, 7));
+        for id in ["root", "fork"] {
+            feature
+                .model
+                .details
+                .insert(id.into(), detail(id, 1, "root"));
+        }
+        let selection = showing(None);
+        let mut cache = cache_with(&[("root", RunPhase::Done), ("fork", RunPhase::Running)]);
+        pass(&mut feature, &cache, &selection, true);
+        feature.ask("root", Intent::Archive(true));
+        assert!(feature.take_outbox().is_empty());
+
+        cache.runs.get_mut("fork-root").unwrap().phase = RunPhase::Done;
+        pass(&mut feature, &cache, &selection, false);
+        feature.ask("root", Intent::Archive(true));
+        let (_, command) = only_command(feature.take_outbox());
+        assert!(matches!(command, WorkspaceCommand::SetFamilyArchived(a) if a.archived));
+    }
+
+    // Given: a refresh whose project listing fails
+    // When: the family listing completes
+    // Then: nothing is listed again until the core reports a change, and the snapshot's
+    //       projects stay shown
+    #[test]
+    fn a_failed_project_listing_waits_for_the_next_change() {
+        let mut feature = WorkspaceFeature {
+            stale: true,
+            ..WorkspaceFeature::default()
+        };
+        feature.refresh_if_stale();
+        let outbox = feature.take_outbox();
+        let (projects, _) = projects_query(&outbox);
+        let Some(Outgoing::Query(families_tag, _)) = outbox.first() else {
+            panic!("{outbox:?}")
+        };
+        feature.reply(
+            projects,
+            FeatureReply::Query(Err(FeatureError::new("storage failed"))),
+        );
+        feature.reply(*families_tag, families_reply_empty());
+        feature.refresh_if_stale();
+        assert!(feature.take_outbox().is_empty(), "no relist loop");
+        assert!(feature.settled() && feature.model.projects.is_none());
+
+        feature.event(&UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+            revision: Revision(2),
+        }));
+        feature.refresh_if_stale();
+        projects_query(&feature.take_outbox());
     }
 
     #[test]

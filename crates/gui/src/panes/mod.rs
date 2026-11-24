@@ -38,6 +38,7 @@ pub mod self_improvement;
 pub mod settings;
 pub mod shell_jobs;
 pub mod sidebar;
+pub mod sidebar_widgets;
 pub mod system_footer;
 pub mod team;
 pub mod terminal;
