@@ -14,7 +14,9 @@ mod tests;
 use event_bus::{EventKind, LifecycleEvent, MessageEvent};
 
 pub type PendingParts = (usize, usize, Vec<(String, bool)>);
-pub type Key = Vec<([u8; 32], u64)>;
+/// Domain-separated digest of ordered normalized part identities. Fixed size
+/// keeps the next append independent of the preceding message's part count.
+pub type Key = [u8; 32];
 
 /// Validate one response locally; a new index zero restarts that response.
 pub fn part_progress(
@@ -134,18 +136,23 @@ impl Reducer {
                 normalized.push((part, deferred));
             }
         }
-        let key: Key = normalized
-            .iter()
-            .map(|(part, deferred)| {
-                if *deferred {
-                    let r = crate::BodyRef::from_token(part).unwrap();
-                    (r.hash, r.byte_len)
-                } else {
-                    (Sha256::digest(part.as_bytes()).into(), part.len() as u64)
-                }
-            })
-            .collect();
-        if (role == Role::Assistant && key.iter().all(|(_, n)| *n == 0))
+        let mut digest = Sha256::new();
+        digest.update(b"evorch/history/dedupe/v2\0");
+        digest.update((normalized.len() as u64).to_be_bytes());
+        let mut empty = true;
+        for (part, deferred) in &normalized {
+            let (hash, len): ([u8; 32], u64) = if *deferred {
+                let r = crate::BodyRef::from_token(part).unwrap();
+                (r.hash, r.byte_len)
+            } else {
+                (Sha256::digest(part.as_bytes()).into(), part.len() as u64)
+            };
+            digest.update(hash);
+            digest.update(len.to_be_bytes());
+            empty &= len == 0;
+        }
+        let key: Key = digest.finalize().into();
+        if (role == Role::Assistant && empty)
             || (finish && self.last_assistant.as_ref() == Some(&key))
         {
             return None;
@@ -155,7 +162,7 @@ impl Reducer {
                 return None;
             }
             if self.first_prompt.is_none() {
-                self.first_prompt = Some(key.clone());
+                self.first_prompt = Some(key);
                 // The first accepted receipt ID of this run, replayed before its
                 // first task, establishes identity without comparing bodies.
                 // Later changed instructions are not that initial submission.

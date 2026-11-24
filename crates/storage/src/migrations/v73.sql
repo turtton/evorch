@@ -4,7 +4,7 @@ CREATE TABLE history_control (
  migration_max INTEGER NOT NULL, generation INTEGER, discovery_after INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO history_control(id,format_version,reducer_version,migration_max,generation)
- SELECT 1,1,1,COALESCE(MAX(id),0),0 FROM events;
+ SELECT 1,1,2,COALESCE(MAX(id),0),0 FROM events;
 CREATE TABLE history_run_state (
  run_id TEXT PRIMARY KEY, phase INTEGER NOT NULL DEFAULT 0,
  source INTEGER DEFAULT 0, applied INTEGER DEFAULT 0, generation INTEGER DEFAULT 0,

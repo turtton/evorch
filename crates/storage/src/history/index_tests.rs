@@ -157,13 +157,64 @@ fn noncommitted_tail_id_reuse_does_not_dirty_the_projection() {
 #[test]
 fn newer_projection_version_is_not_downgraded_by_append() {
     let db = Database::open_in_memory().unwrap();
+    let newer = REDUCER_VERSION + 1;
     db.conn
-        .execute("UPDATE history_control SET reducer_version=2", [])
+        .execute("UPDATE history_control SET reducer_version=?1", [newer])
         .unwrap();
     append(&db, message("run", "answer"));
     assert!(!version_ok(&db.conn).unwrap());
-    assert_eq!(int(&db, "SELECT reducer_version FROM history_control"), 2);
+    assert_eq!(
+        int(&db, "SELECT reducer_version FROM history_control"),
+        newer
+    );
     assert_eq!(int(&db, "SELECT COUNT(*) FROM history_messages"), 0);
+}
+
+#[test]
+fn append_after_4096_deferred_parts_keeps_fixed_size_reducer_and_no_source_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&crate::StorageConfig {
+        db_path: dir.path().join("history.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    for index in 0..4096 {
+        append(
+            &db,
+            MessageEvent::MessagePart {
+                run_id: "run".into(),
+                response_id: "response".into(),
+                index,
+                total: 4096,
+                text: format!("\u{e000}part-{index}"),
+            },
+        );
+    }
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM history_message_sources"),
+        4096
+    );
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM history_pending_parts"), 0);
+    assert!(int(&db, "SELECT octet_length(reducer) FROM history_run_state") < 512);
+    let meter = crate::test_support::meter_history(&db);
+    append(
+        &db,
+        event_bus::ToolEvent::ToolCompleted {
+            run_id: Some("run".into()),
+            call_id: "tool".into(),
+            tool_name: "test".into(),
+            is_error: false,
+            output: None,
+            detail: None,
+            parent_call_id: None,
+        },
+    );
+    assert_eq!(meter.counts().payload_decodes, 0);
+    assert_eq!(meter.counts().source_rows, 0);
+    let state = state(&db.conn, "run").unwrap().unwrap();
+    assert_eq!(state.phase, 2);
+    assert_eq!(state.source, state.applied);
+    assert_eq!(state.reducer.next, 1);
 }
 
 #[test]

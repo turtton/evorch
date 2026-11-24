@@ -287,3 +287,221 @@ fn inline_receipt_replacement_revokes_the_cursor_without_any_projection_writes()
         }
     );
 }
+
+fn measured(
+    f: &Fixture,
+    direction: HistoryDirection,
+    cursor: Option<PageCursor>,
+    limit: u32,
+) -> (Page<CommittedMessage>, storage::test_support::HistoryCounts) {
+    let db = storage::Database::open_read_only(&f.dir.path().join("host.db")).unwrap();
+    let meter = storage::test_support::meter_history(&db);
+    let before = meter.counts();
+    let Query::Conversation(ConversationQuery::ReadCommittedHistory(mut q)) =
+        history(PageRequest { cursor, limit })
+    else {
+        panic!()
+    };
+    q.direction = direction;
+    let QueryReply::Conversation(ConversationReply::CommittedHistory(page)) = f.query(
+        Query::Conversation(ConversationQuery::ReadCommittedHistory(q)),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        f.host.projection().history_route(),
+        Some(HistoryRoute::Indexed)
+    );
+    let mut counts = meter.counts();
+    macro_rules! delta {
+        ($($field:ident),*) => {$(counts.$field -= before.$field;)*};
+    }
+    delta!(
+        payload_decodes,
+        source_rows,
+        source_references,
+        cut_headers,
+        message_headers,
+        receipt_headers,
+        fingerprint_bytes,
+        merge_candidates,
+        vm_steps,
+        fullscan_steps,
+        sorts
+    );
+    (page, counts)
+}
+
+#[test]
+fn handle_query_work_depends_on_page_not_history_in_both_directions() {
+    let f = current_thread_fixture();
+    let mut observations = Vec::new();
+    for n in [100, 1000] {
+        for i in observations.last().map_or(0, |_| 100)..n {
+            append(&f, &format!("answer-{i}"));
+        }
+        let mut ends = Vec::new();
+        for direction in [HistoryDirection::Forward, HistoryDirection::Backward] {
+            let (first, count) = measured(&f, direction, None, 10);
+            assert_eq!(first.items.len(), 10);
+            assert_eq!(count.payload_decodes, 10);
+            assert_eq!(count.source_references, 10);
+            assert_eq!(count.fullscan_steps, 0);
+            // Receipt SQL retains its one empty sorter; no event sort occurs.
+            assert_eq!(count.sorts, 1);
+            assert!(count.message_headers <= 12);
+            let (middle, mid) = measured(&f, direction, first.next_cursor, 10);
+            assert_eq!(middle.items.len(), 10);
+            assert_eq!(mid.payload_decodes, 10);
+            assert!(mid.message_headers <= 12);
+            assert_eq!(mid.fullscan_steps, 0);
+            ends.push((count, mid));
+        }
+        observations.push(ends);
+    }
+    for (small, large) in observations[0].iter().zip(&observations[1]) {
+        assert_eq!(small.0, large.0);
+        assert_eq!(small.1, large.1);
+    }
+    let (_, larger) = measured(&f, HistoryDirection::Backward, None, 50);
+    assert_eq!(larger.payload_decodes, 50);
+    assert_eq!(larger.source_references, 50);
+    assert_eq!(larger.merge_candidates, 51);
+    assert!(larger.message_headers <= 52);
+    f.thread("unrelated", "other-run", "Unrelated");
+    for _ in 0..1000 {
+        f.store
+            .handle()
+            .append_event(
+                None,
+                &Event::new(MessageEvent::MessageCompleted {
+                    run_id: "other-run".into(),
+                    text: "outside".into(),
+                }),
+            )
+            .unwrap();
+    }
+    let (_, unchanged) = measured(&f, HistoryDirection::Backward, None, 50);
+    assert_eq!(larger, unchanged);
+}
+
+#[test]
+fn handle_query_accounts_for_runs_receipts_fingerprint_bytes_and_all_status_cost() {
+    let f = current_thread_fixture();
+    append(&f, "one");
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    for i in 1..624 {
+        db.execute("INSERT INTO thread_runs(thread_id,run_id,root_run_id,depth) VALUES ('thread-1',?1,'run-1',1)", [format!("child-{i}")]).unwrap();
+    }
+    let (_, runs) = measured(&f, HistoryDirection::Forward, None, 10);
+    assert_eq!(runs.payload_decodes, 1);
+    assert_eq!(runs.message_headers, 1);
+    assert_eq!(runs.cut_headers, 1);
+    for i in 0..10 {
+        db.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,acceptance_seq) VALUES (?1,'run-1','run-1',?2,'delivered',0,0,?3)",
+            rusqlite::params![format!("input-{i}"), "a".repeat(100), i + 1]).unwrap();
+    }
+    let (_, inputs) = measured(&f, HistoryDirection::Forward, None, 10);
+    assert_eq!(inputs.receipt_headers, 10);
+    assert_eq!(inputs.fingerprint_bytes, 1000);
+    assert_eq!(inputs.payload_decodes, 0);
+    db.execute("UPDATE host_input_receipts SET text=?1", ["b".repeat(1000)])
+        .unwrap();
+    let (_, bytes) = measured(&f, HistoryDirection::Forward, None, 10);
+    assert_eq!(bytes.receipt_headers, 10);
+    assert_eq!(bytes.fingerprint_bytes, 10000);
+    for i in 0..1000 {
+        db.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,acceptance_seq) VALUES (?1,'run-1','run-1','pending','accepted',0,0,?2)",
+            rusqlite::params![format!("pending-{i}"), i + 11]).unwrap();
+    }
+    let (_, all_status) = measured(&f, HistoryDirection::Forward, None, 10);
+    assert_eq!(all_status.receipt_headers, bytes.receipt_headers);
+    assert_eq!(all_status.fingerprint_bytes, bytes.fingerprint_bytes);
+    assert!(
+        all_status.vm_steps > bytes.vm_steps,
+        "first_in_run retains the all-status M cost"
+    );
+}
+
+#[test]
+fn all_indexed_pages_match_legacy_with_fixed_seed_parts_and_receipts() {
+    let f = current_thread_fixture();
+    let mut seed = 17u64;
+    for i in 0..240 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        match seed % 5 {
+            0 => {
+                for part in 0..3 {
+                    f.store
+                        .handle()
+                        .append_event(
+                            None,
+                            &Event::new(MessageEvent::MessagePart {
+                                run_id: "run-1".into(),
+                                response_id: format!("response-{i}"),
+                                index: part,
+                                total: 3,
+                                text: format!("part-{part}"),
+                            }),
+                        )
+                        .unwrap();
+                }
+            }
+            1 => {
+                f.store
+                    .handle()
+                    .append_event(
+                        None,
+                        &Event::new(MessageEvent::FinalResultPublished {
+                            run_id: "run-1".into(),
+                            text: "same".into(),
+                        }),
+                    )
+                    .unwrap();
+            }
+            _ => append(&f, "same"),
+        }
+    }
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    for i in 0..12 {
+        db.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,acceptance_seq) VALUES (?1,'run-1','run-1','input','delivered',?2,0,?3)",
+            rusqlite::params![format!("input-{i}"), i64::MAX - i, i + 1]).unwrap();
+    }
+    fn collect(f: &Fixture, direction: HistoryDirection, indexed: bool) -> serde_json::Value {
+        let mut result = Vec::new();
+        let mut cursor = None;
+        loop {
+            let Query::Conversation(ConversationQuery::ReadCommittedHistory(mut q)) =
+                history(PageRequest { cursor, limit: 7 })
+            else {
+                panic!()
+            };
+            q.direction = direction;
+            let QueryReply::Conversation(ConversationReply::CommittedHistory(p)) = f.query(
+                Query::Conversation(ConversationQuery::ReadCommittedHistory(q)),
+            ) else {
+                panic!()
+            };
+            assert_eq!(
+                f.host.projection().history_route() == Some(HistoryRoute::Indexed),
+                indexed
+            );
+            if direction == HistoryDirection::Backward {
+                result.splice(0..0, p.items);
+            } else {
+                result.extend(p.items);
+            }
+            cursor = p.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        serde_json::to_value(result).unwrap()
+    }
+    let forward = collect(&f, HistoryDirection::Forward, true);
+    let backward = collect(&f, HistoryDirection::Backward, true);
+    assert_eq!(forward, backward);
+    dirty(&f);
+    assert_eq!(forward, collect(&f, HistoryDirection::Forward, false));
+    assert_eq!(backward, collect(&f, HistoryDirection::Backward, false));
+}

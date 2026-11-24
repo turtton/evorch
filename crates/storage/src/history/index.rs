@@ -10,7 +10,7 @@ use std::{
 };
 
 pub(crate) const FORMAT_VERSION: i64 = 1;
-pub(crate) const REDUCER_VERSION: i64 = 1;
+pub(crate) const REDUCER_VERSION: i64 = 2;
 pub(crate) const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid() -> StorageError {

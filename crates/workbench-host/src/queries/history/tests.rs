@@ -265,6 +265,75 @@ fn per_run(messages: &[RawMessage]) -> BTreeMap<String, Vec<serde_json::Value>> 
 }
 
 #[test]
+fn fixed_digest_matches_vector_oracle_at_parts_boundaries() {
+    use sha2::{Digest, Sha256};
+    fn token(index: usize, len: u64) -> (String, bool) {
+        let hash = Sha256::digest(index.to_be_bytes());
+        let text = format!("\u{e000}evorch-body:v1:{hash:x}:{len}");
+        assert!(storage::BodyRef::from_token(&text).is_some());
+        (text, true)
+    }
+    for count in [0, 1, 2, 4096] {
+        let base: Vec<_> = (0..count).map(|i| token(i, 1)).collect();
+        let mut reversed = base.clone();
+        reversed.reverse();
+        let mut longer = base.clone();
+        if let Some(first) = longer.first_mut() {
+            *first = token(0, 2);
+        }
+        let mut extra = base.clone();
+        extra.push(token(0, 0));
+        let cases = [
+            base.clone(),
+            reversed,
+            longer,
+            extra,
+            vec![token(0, 0); count],
+            vec![("a".into(), false), ("bc".into(), false)],
+            vec![("abc".into(), false)],
+        ];
+        let mut old = LegacyScanner::default();
+        let mut new = storage::history::Reducer::default();
+        for parts in cases {
+            for (role, prompt, finish) in [
+                (MessageRole::Assistant, false, false),
+                (MessageRole::Assistant, false, true),
+                (MessageRole::User, true, false),
+                (MessageRole::User, true, false),
+            ] {
+                let expected = old.message("run", role, parts.clone(), prompt, finish);
+                let actual = new
+                    .message(
+                        match role {
+                            MessageRole::User => storage::history::Role::User,
+                            MessageRole::Assistant => storage::history::Role::Assistant,
+                            MessageRole::Tool => storage::history::Role::Tool,
+                        },
+                        parts.clone(),
+                        prompt,
+                        finish,
+                    )
+                    .map(|m| RawMessage {
+                        run: "run".into(),
+                        index: m.index,
+                        role,
+                        parts: m.parts,
+                        input: None,
+                    });
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "parts={count}, role={role:?}, finish={finish}"
+                );
+                assert!(serde_json::to_vec(&new).unwrap().len() < 512);
+            }
+        }
+        new.next = u64::MAX;
+        assert!(serde_json::to_vec(&new).unwrap().len() < 512);
+    }
+}
+
+#[test]
 fn initial_input_identity_uses_acceptance_sequence_not_delivery_or_clock_order() {
     use storage::HostInputStatus::*;
     for status in [Accepted, Withdrawn, Unknown, Delivered] {
