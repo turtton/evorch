@@ -17,9 +17,11 @@ use super::layout::{bounded_list, paged_list};
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Visibility,
 };
+use crate::core_client::run_tabs::RunPane;
 use crate::model::conversation_plan::{PlanState, ReadFailure, ReadKind};
 use crate::panes::conversation_plan::{PlanBand, PlanPanelAction};
 use crate::panes::goal_widgets::GoalAction;
+use crate::theme::{icons, text::muted, widgets::ghost};
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
     errors::ErrorCode,
@@ -82,6 +84,8 @@ pub struct ExecutionFeature {
     plan_shown: bool,
     goal_actions: Vec<GoalAction>,
     plan_actions: Vec<PlanPanelAction>,
+    /// The row whose Open pane was pressed last, until the shell opens its tab.
+    open_pane: Option<RunPane>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +123,10 @@ impl ExecutionFeature {
     pub fn plan_drawn(&mut self) -> bool {
         self.plan_drawn = true;
         !self.plan_shown
+    }
+
+    pub fn take_open_pane(&mut self) -> Option<RunPane> {
+        self.open_pane.take()
     }
 
     pub fn enqueue_goal(&mut self, action: GoalAction) {
@@ -171,6 +179,7 @@ impl ExecutionFeature {
         self.plan.set_thread(self.thread.clone());
         self.plan_actions.clear();
         self.goal_actions.clear();
+        self.open_pane = None;
     }
 
     /// Show the children of `run`: a new level below the current one.
@@ -272,6 +281,7 @@ impl ExecutionFeature {
         }
         let mut drill = None;
         let mut stop = None;
+        let mut open = None;
         let runs = &self.runs;
         let more = paged_list(
             ui,
@@ -291,6 +301,14 @@ impl ExecutionFeature {
                             if let Some(model) = &run.model {
                                 ui.label(model);
                             }
+                            if open_pane_button(ui) {
+                                open = Some(RunPane {
+                                    thread: thread.clone(),
+                                    run: run.summary.id.clone(),
+                                    name: run.name.clone(),
+                                    child: run.summary.parent_run.is_some(),
+                                });
+                            }
                             if run.child_count > 0
                                 && ui.button(format!("子 run ({})", run.child_count)).clicked()
                             {
@@ -306,6 +324,9 @@ impl ExecutionFeature {
         );
         if let Some(run) = drill {
             self.drill_into(run);
+        }
+        if open.is_some() {
+            self.open_pane = open;
         }
         if let Some(run) = stop {
             self.command(ctx, "run の停止", stop_run(thread, run));
@@ -398,6 +419,16 @@ impl ExecutionFeature {
     }
 }
 
+/// The embedded workbench's Open pane control of an agent row.
+fn open_pane_button(ui: &mut egui::Ui) -> bool {
+    let open = ui.add(ghost(muted(icons::with_icon(
+        icons::ARROW_SQUARE_OUT,
+        "Open pane",
+    ))));
+    open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open pane"));
+    open.clicked()
+}
+
 fn stop_run(thread: &ThreadId, run: RunId) -> Command {
     Command::Execution(ExecutionCommand::StopRun(StopRun {
         thread: thread.clone(),
@@ -485,6 +516,7 @@ impl Feature for ExecutionFeature {
         self.execution = None;
         self.execution_stale = self.thread.is_some();
         self.plan.restart_reads();
+        self.open_pane = None;
     }
 
     fn event(&mut self, event: &UiEvent) {

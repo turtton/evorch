@@ -419,7 +419,7 @@ fn a_thread_click_selects_it_and_loads_history() {
     assert!(
         actions
             .iter()
-            .any(|action| matches!(action, Action::History(thread, _) if *thread == thr_2)),
+            .any(|action| matches!(action, Action::History(thread, None, _) if *thread == thr_2)),
         "no history request for thr-2"
     );
     assert_eq!(screen.harness.state().selected, Some(thr_2));
@@ -460,7 +460,7 @@ fn notifications_tab_lists_the_pending_question_and_approval() {
     assert!(
         actions
             .iter()
-            .any(|action| matches!(action, Action::History(thread, _) if *thread == thr_4)),
+            .any(|action| matches!(action, Action::History(thread, None, _) if *thread == thr_4)),
         "no history request for thr-4"
     );
     assert_eq!(screen.harness.state().selected, Some(thr_4));
@@ -938,5 +938,502 @@ mod progress_band {
             .unwrap();
         assert_eq!(plan.node_path(), execution.node_path());
         assert_eq!(plan.tab.0, execution.tab.0 + 1);
+    }
+}
+
+mod run_tabs {
+    use super::*;
+    use workbench_protocol::commands::Command;
+    use workbench_protocol::ids::PageCursor;
+    use workbench_protocol::namespaces::{ExecutionCommand, ExecutionQuery, execution::RunScope};
+
+    const CHILD_TEXT: &str = "You: Write the redirect test first";
+
+    /// thr-1's root run-1 has a running subagent run-1a, which committed a message.
+    fn with_subagent() -> Screen {
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            let run: RunSummary = view(json!({
+                "id": "run-1a", "thread": "thr-1", "parent_run": "run-1", "role": "worker",
+                "phase": "running", "revision": "4",
+            }));
+            shared.cache.runs.insert("run-1a".into(), run);
+            let history = shared.cache.history.get_mut("thr-1").unwrap();
+            history.push(child_message());
+        }
+        screen.settle_runs();
+        screen
+    }
+
+    fn child_message() -> CommittedMessage {
+        view(json!({
+            "thread": "thr-1", "run": "run-1a", "index": "0", "role": "user",
+            "content": {"type": "inline", "payload": {"text": "Write the redirect test first"}},
+        }))
+    }
+
+    fn run_detail(id: &str, parent: Option<&str>, name: &str, children: u32) -> serde_json::Value {
+        json!({"summary": {"id": id, "thread": "thr-1", "parent_run": parent,
+                "role": "worker", "phase": "running", "revision": "4"},
+            "name": name, "lifecycle": "active", "source": "live",
+            "child_count": children, "revision": "4"})
+    }
+
+    impl Screen {
+        /// Settles the workspace and answers the execution feature's run listings of
+        /// thr-1 until none is left; returns the other actions.
+        fn settle_runs(&mut self) -> Vec<Action> {
+            let mut others = Vec::new();
+            for _ in 0..8 {
+                self.harness.run_steps(2);
+                let mut answered = false;
+                for action in self.settle() {
+                    let Action::Feature(FeatureAction {
+                        feature: FeatureId::Execution,
+                        tag,
+                        request:
+                            FeatureRequest::Query(Query::Execution(ExecutionQuery::ListRunDetails(q))),
+                    }) = action
+                    else {
+                        others.push(action);
+                        continue;
+                    };
+                    let items = match (&q.scope, q.thread.as_str()) {
+                        (RunScope::Roots, "thr-1") => vec![run_detail("run-1", None, "lead", 1)],
+                        (RunScope::Children { parent }, "thr-1") if parent.as_str() == "run-1" => {
+                            vec![run_detail("run-1a", Some("run-1"), "redirect-tester", 0)]
+                        }
+                        _ => Vec::new(),
+                    };
+                    let reply = view(json!({"type": "execution", "payload": {
+                        "type": "run_details",
+                        "payload": {"items": items, "snapshot_revision": "1"}}}));
+                    let mut shared = self.shared.lock().unwrap();
+                    shared.features.reply(
+                        FeatureId::Execution,
+                        tag,
+                        FeatureReply::Query(Ok(reply)),
+                    );
+                    answered = true;
+                }
+                if !answered {
+                    return others;
+                }
+            }
+            panic!("the execution feature kept asking");
+        }
+
+        /// Opens run-1a's tab from its Execution row; returns what was sent.
+        fn open_subagent(&mut self) -> Vec<Action> {
+            self.harness.get_by_label("子 run (1)").click();
+            self.settle_runs();
+            self.harness.get_by_label("Open pane").click();
+            self.settle_runs()
+        }
+
+        fn run_tabs(&self) -> Vec<CoreTab> {
+            self.harness
+                .state()
+                .dock
+                .iter_all_tabs()
+                .map(|(_, tab)| *tab)
+                .filter(|tab| matches!(tab, CoreTab::Run(_)))
+                .collect()
+        }
+    }
+
+    // Given: thr-1's root and its subagent run-1a each committed a message
+    // When: the window is drawn, then Open pane is pressed on run-1a's Execution row
+    // Then: the Conversation shows only the root's message; the run tab opens beside
+    //       Execution, asks for run-1a's history alone and shows its message
+    #[test]
+    fn child_messages_stay_out_of_the_conversation_and_show_in_their_run_tab() {
+        let mut screen = with_subagent();
+        screen.harness.get_by_label(
+            "You: The login page redirects to /home even when `next` is set. Fix it.",
+        );
+        assert!(screen.harness.query_by_label(CHILD_TEXT).is_none());
+        screen.capture("root-conversation");
+
+        let sent = screen.open_subagent();
+        let (thr_1, run_1a) = (
+            ThreadId::new("thr-1").unwrap(),
+            RunId::new("run-1a").unwrap(),
+        );
+        assert!(
+            sent.iter().any(|action| matches!(
+                action,
+                Action::History(thread, Some(run), false) if *thread == thr_1 && *run == run_1a
+            )),
+            "no history request for run-1a"
+        );
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("one run tab was expected");
+        };
+        let dock = &screen.harness.state().dock;
+        let path = dock.find_tab(&tab).unwrap();
+        let leaf = dock.leaf(path.node_path()).unwrap();
+        let execution = leaf
+            .tabs
+            .iter()
+            .position(|tab| *tab == CoreTab::Feature(FeatureId::Execution))
+            .expect("in Execution's leaf");
+        assert_eq!(path.tab.0, execution + 1);
+        assert_eq!(leaf.tabs[leaf.active.0], tab);
+        screen
+            .harness
+            .get_by_label("Transcript: redirect-tester tab");
+        screen
+            .harness
+            .get_by_label("No events for redirect-tester yet");
+
+        let page = Page {
+            items: vec![child_message()],
+            next_cursor: None,
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .run_history_page("run-1a", page, false);
+        screen.harness.run_steps(2);
+        screen.capture("run-tab");
+        // Conversation and the run tab are both on screen; only the run tab has it.
+        assert_eq!(screen.harness.get_all_by_label(CHILD_TEXT).count(), 1);
+        screen.harness.get_by_label("Copy run ID");
+    }
+
+    // Given: run-1a's tab open
+    // When: it is closed
+    // Then: its history is forgotten, and a later message of run-1a reaches only
+    //       the thread's history
+    #[test]
+    fn closing_a_run_tab_forgets_its_history() {
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        assert!(
+            screen
+                .shared
+                .lock()
+                .unwrap()
+                .cache
+                .run_history
+                .contains_key("run-1a")
+        );
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("one run tab was expected");
+        };
+        let dock = &mut screen.harness.state_mut().dock;
+        let path = dock.find_tab(&tab).unwrap();
+        dock.remove_tab(path);
+        screen.harness.run_steps(2);
+
+        let mut shared = screen.shared.lock().unwrap();
+        assert!(!shared.cache.run_history.contains_key("run-1a"));
+        shared.cache.at(EventCursor {
+            core_epoch: InstanceEpoch(7),
+            sequence: Sequence(0),
+        });
+        let mut message = child_message();
+        message.index = view(json!("1"));
+        let delivered = shared
+            .cache
+            .event(workbench_protocol::events::EventEnvelope {
+                subscription_id: workbench_protocol::ids::SubscriptionId::new("sub").unwrap(),
+                cursor: EventCursor {
+                    core_epoch: InstanceEpoch(7),
+                    sequence: Sequence(1),
+                },
+                caused_by_request_id: None,
+                event: workbench_protocol::events::UiEvent::Conversation(
+                    workbench_protocol::namespaces::ConversationEvent::MessageCommitted { message },
+                ),
+            });
+        assert!(delivered);
+        assert!(!shared.cache.run_history.contains_key("run-1a"));
+        assert_eq!(shared.cache.history["thr-1"].len(), 7);
+    }
+
+    fn history_of_run_1a(sent: &[Action]) -> usize {
+        sent.iter()
+            .filter(|action| {
+                matches!(action, Action::History(thread, Some(run), false)
+                    if thread.as_str() == "thr-1" && run.as_str() == "run-1a")
+            })
+            .count()
+    }
+
+    // Given: run-1a's tab open
+    // When: another thread is selected, then thr-1 again
+    // Then: the tab leaves the dock and its history is forgotten; back on thr-1 the
+    //       tab is beside Execution again, behind it, and reads run-1a's history again
+    #[test]
+    fn another_thread_hides_its_run_tabs_until_it_is_selected_again() {
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        screen
+            .harness
+            .get_by_label("Refactor storage writer")
+            .click();
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
+        assert!(
+            screen
+                .harness
+                .query_by_label("Transcript: redirect-tester tab")
+                .is_none()
+        );
+        assert!(screen.shared.lock().unwrap().cache.run_history.is_empty());
+
+        screen.harness.get_by_label("Fix login redirect").click();
+        let sent = screen.settle_runs();
+        assert_eq!(history_of_run_1a(&sent), 1);
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("the run tab was expected back");
+        };
+        let dock = &screen.harness.state().dock;
+        let path = dock.find_tab(&tab).unwrap();
+        let leaf = dock.leaf(path.node_path()).unwrap();
+        let execution = CoreTab::Feature(FeatureId::Execution);
+        assert_eq!(leaf.tabs[path.tab.0 - 1], execution);
+        assert_ne!(leaf.tabs[leaf.active.0], tab, "it comes back behind");
+        screen
+            .harness
+            .get_by_label("Transcript: redirect-tester tab");
+    }
+
+    // Given: run-1a's tab open with its history
+    // When: a new session replaces the projection (a reconnect or resync), and run-1a
+    //       commits a message afterwards
+    // Then: the tab reads run-1a's history again and the message reaches it
+    #[test]
+    fn a_new_session_reads_the_history_of_open_run_tabs_again() {
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            let mut cache = populated().cache;
+            cache
+                .runs
+                .insert("run-1a".into(), shared.cache.runs["run-1a"].clone());
+            cache.at(EventCursor {
+                core_epoch: InstanceEpoch(8),
+                sequence: Sequence(0),
+            });
+            shared.begin_session(cache, Capability::IMPLEMENTED.to_vec(), &[], Vec::new());
+            assert!(!shared.cache.run_history.contains_key("run-1a"));
+        }
+        let sent = screen.settle_runs();
+        assert_eq!(history_of_run_1a(&sent), 1);
+
+        let mut shared = screen.shared.lock().unwrap();
+        let delivered = shared
+            .cache
+            .event(workbench_protocol::events::EventEnvelope {
+                subscription_id: workbench_protocol::ids::SubscriptionId::new("sub").unwrap(),
+                cursor: EventCursor {
+                    core_epoch: InstanceEpoch(8),
+                    sequence: Sequence(1),
+                },
+                caused_by_request_id: None,
+                event: workbench_protocol::events::UiEvent::Conversation(
+                    workbench_protocol::namespaces::ConversationEvent::MessageCommitted {
+                        message: child_message(),
+                    },
+                ),
+            });
+        assert!(delivered);
+        assert_eq!(shared.cache.run_history["run-1a"].len(), 1);
+    }
+
+    fn new_session(screen: &mut Screen) {
+        let mut shared = screen.shared.lock().unwrap();
+        let mut cache = populated().cache;
+        cache
+            .runs
+            .insert("run-1a".into(), shared.cache.runs["run-1a"].clone());
+        shared.begin_session(cache, Capability::IMPLEMENTED.to_vec(), &[], Vec::new());
+    }
+
+    // Given: run-1a's tab shows a message whose text is a body, read once
+    // When: a new session replaces the projection, and run-1a's history is read again
+    // Then: the body is asked for again rather than left loading
+    #[test]
+    fn a_new_session_asks_for_the_bodies_of_a_run_tab_again() {
+        use workbench_protocol::views::{BodyRef, MessageContent};
+        use workbench_protocol::{ids::BodyId, wire::ByteOffset};
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        let body = BodyId::new("body-1").unwrap();
+        let mut message = child_message();
+        message.content = MessageContent::Body(BodyRef {
+            body_id: body.clone(),
+            total_bytes: ByteOffset(2048),
+        });
+        let page = || Page {
+            items: vec![message.clone()],
+            next_cursor: None,
+            snapshot_revision: Revision(1),
+        };
+        let bodies = |sent: &[Action]| {
+            sent.iter()
+                .filter(|action| matches!(action, Action::Body(id) if *id == body))
+                .count()
+        };
+        let set_page = |screen: &mut Screen| {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.run_history_page("run-1a", page(), false);
+        };
+        set_page(&mut screen);
+        assert_eq!(bodies(&screen.settle_runs()), 1);
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.bodies.insert("body-1".into(), "Long".into());
+        }
+        assert_eq!(bodies(&screen.settle_runs()), 0);
+
+        new_session(&mut screen);
+        assert_eq!(history_of_run_1a(&screen.settle_runs()), 1);
+        set_page(&mut screen);
+        assert_eq!(bodies(&screen.settle_runs()), 1);
+    }
+
+    // Given: run-1a's tab open, and its first page could not be read
+    // When: the window is drawn, and Retry is pressed
+    // Then: the tab says so and does not ask again by itself; Retry asks once
+    #[test]
+    fn a_run_tab_whose_history_failed_offers_retry() {
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        screen.shared.lock().unwrap().cache.run_failed("run-1a");
+        assert_eq!(history_of_run_1a(&screen.settle_runs()), 0);
+        screen
+            .harness
+            .get_by_label("Could not read this run's history");
+        screen.harness.get_by_label("Retry").click();
+        assert_eq!(history_of_run_1a(&screen.settle_runs()), 1);
+    }
+
+    // Given: run-1a's tab out of the dock while another thread is selected
+    // When: the layout is reset, and thr-1 is selected again
+    // Then: the tab does not come back into the reset layout
+    #[test]
+    fn reset_layout_drops_the_run_tabs_of_other_threads() {
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        screen
+            .harness
+            .get_by_label("Refactor storage writer")
+            .click();
+        screen.settle_runs();
+        screen.harness.get_by_label("⚙").click();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Reset layout").click();
+        screen.settle_runs();
+
+        screen.harness.get_by_label("Fix login redirect").click();
+        let sent = screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
+        assert_eq!(history_of_run_1a(&sent), 0);
+        assert!(screen.shared.lock().unwrap().cache.run_history.is_empty());
+    }
+
+    // Given: thr-1's newest page holds only run-1a's messages, older pages exist, and
+    //        nothing waits on the person
+    // When: the window is drawn, and older pages arrive
+    // Then: the Conversation does not claim the thread is new, and the older pages are
+    //       read one at a time until a root's message shows
+    #[test]
+    fn a_page_of_subagent_messages_reads_back_to_the_roots_message() {
+        let mut screen = with_subagent();
+        let page = |message: CommittedMessage, older: Option<&str>| Page {
+            items: vec![message],
+            next_cursor: older.map(|cursor| PageCursor::new(cursor).unwrap()),
+            snapshot_revision: Revision(1),
+        };
+        let older_reads = |sent: &[Action]| {
+            sent.iter()
+                .filter(|action| {
+                    matches!(action, Action::History(thread, None, true)
+                        if thread.as_str() == "thr-1")
+                })
+                .count()
+        };
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.questions.clear();
+            shared.cache.approvals.clear();
+            let newest = page(child_message(), Some("c1"));
+            shared.cache.history_page("thr-1", newest, false);
+        }
+        let sent = screen.settle_runs();
+        assert_eq!(older_reads(&sent), 1);
+        assert!(
+            screen
+                .harness
+                .query_by_label("Start the conversation")
+                .is_none()
+        );
+        screen
+            .harness
+            .get_by_label_contains("Load earlier messages");
+
+        let mut earlier = child_message();
+        earlier.index = view(json!("1"));
+        let older = page(earlier, Some("c2"));
+        let history = |screen: &mut Screen, page: Page<CommittedMessage>, older: bool| {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.history_page("thr-1", page, older);
+        };
+        history(&mut screen, older, true);
+        assert_eq!(older_reads(&screen.settle_runs()), 1);
+
+        let root = message(0, "user", "Where does the redirect go?");
+        history(&mut screen, page(root, Some("c3")), true);
+        assert_eq!(older_reads(&screen.settle_runs()), 0);
+        screen
+            .harness
+            .get_by_label("You: Where does the redirect go?");
+        assert!(screen.harness.query_by_label(CHILD_TEXT).is_none());
+    }
+
+    // Given: thr-1's root was stopped while run-1a still runs
+    // When: Stop subagents is pressed, then the root is done instead
+    // Then: the thread shows Stopped and one StopChat for thr-1 is sent; a finished
+    //       root offers neither Stop nor Stop subagents
+    #[test]
+    fn a_stopped_root_with_running_subagents_offers_stop_subagents() {
+        let mut screen = with_subagent();
+        let set_root = |screen: &mut Screen, phase| {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.runs.get_mut("run-1").unwrap().phase = phase;
+        };
+        set_root(&mut screen, RunPhase::Cancelled);
+        screen.settle_runs();
+        screen.capture("stopped");
+        screen.harness.get_by_label("Stopped");
+        assert!(screen.harness.query_by_label("Stop").is_none());
+        screen.harness.get_by_label("Stop subagents").click();
+        let sent = screen.settle_runs();
+        let commands: Vec<_> = sent
+            .iter()
+            .filter_map(|action| match action {
+                Action::Command { command, .. } => Some(command),
+                _ => None,
+            })
+            .collect();
+        let [Command::Execution(ExecutionCommand::StopChat(target))] = commands[..] else {
+            panic!("one StopChat was expected, got {} commands", commands.len());
+        };
+        assert_eq!(target.thread.as_str(), "thr-1");
+
+        set_root(&mut screen, RunPhase::Done);
+        screen.settle_runs();
+        assert!(screen.harness.query_by_label("Stop").is_none());
+        assert!(screen.harness.query_by_label("Stop subagents").is_none());
+        assert!(screen.harness.query_by_label("Stopped").is_none());
     }
 }

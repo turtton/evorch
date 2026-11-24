@@ -10,7 +10,9 @@ pub mod connection;
 pub mod conversation;
 pub mod features;
 pub mod notifications;
+pub mod run_tabs;
 pub mod shell;
+mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
 use connection::Action;
@@ -48,6 +50,9 @@ pub struct Shared {
     pub capabilities: Vec<Capability>,
     /// The per-area features, fed by the shared connection (`features/`).
     pub features: features::Features,
+    /// Counts the projections [`Self::replace_projection`] installed, so what was
+    /// asked of an earlier one (message bodies) is asked of the new one again.
+    pub projection: u64,
 }
 
 impl Shared {
@@ -135,6 +140,7 @@ impl Shared {
             }
         }
         self.cache = cache;
+        self.projection += 1;
     }
 }
 
@@ -261,6 +267,7 @@ pub struct CoreClientScreen {
     conversation: conversation::ConversationPane,
     dock: egui_dock::DockState<shell::CoreTab>,
     notifications: notifications::NotificationLog,
+    run_tabs: run_tabs::RunTabs,
 }
 
 impl CoreClientScreen {
@@ -278,6 +285,7 @@ impl CoreClientScreen {
             conversation: conversation::ConversationPane::default(),
             dock: shell::default_dock(),
             notifications: notifications::NotificationLog::default(),
+            run_tabs: run_tabs::RunTabs::default(),
         }
     }
 
@@ -376,7 +384,7 @@ fn apply_frame(
             } => {
                 *project = Some(id);
                 *selected = Some(thread.clone());
-                enqueue(tx, shared, Action::History(thread, false));
+                enqueue(tx, shared, Action::History(thread, None, false));
             }
             Navigation::NewConversation(id) => {
                 *project = Some(id);
@@ -467,6 +475,8 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
                     .attachment_draft(project, thread.as_str(), file)
                     .uploading = false;
             }
+            // The run's first page was not asked for: the next frame asks again.
+            Action::History(_, Some(run), false) => shared.cache.forget_run(run.as_str()),
             _ => (),
         }
         shared.status =
@@ -529,6 +539,7 @@ impl CoreClientScreen {
         for feature in shared.features.take_focus() {
             shell::focus(&mut self.dock, shell::CoreTab::Feature(feature));
         }
+        self.conversation.follow_projection(shared.projection);
         let titles = shared.features.titles();
         let placeholders = shared.features.placeholders();
         let unsupported = shared.features.unsupported_notes();
@@ -578,6 +589,7 @@ impl CoreClientScreen {
                 selection: &selection,
                 effects: &mut effects,
                 notifications: &mut self.notifications,
+                run_tabs: &self.run_tabs,
             };
             egui_dock::DockArea::new(&mut self.dock)
                 .style(crate::theme::dock::dock_style(ui.style()))
@@ -604,9 +616,30 @@ impl CoreClientScreen {
                 &self.actions,
                 &mut self.dock,
                 &mut self.conversation,
+                &mut self.run_tabs,
                 &mut shared,
                 effect,
             );
+        }
+        // Closing a tab, a reset layout or another thread drops its run's history.
+        for run in self.run_tabs.sweep(&mut self.dock, self.selected.as_ref()) {
+            shared.cache.forget_run(run.as_str());
+        }
+        if shared.connected {
+            // A tab opened or back in the dock reads its run's history, and so does one
+            // whose history a new session's projection (a reconnect or resync) lacks.
+            for (thread, run) in self.run_tabs.shown() {
+                if shared.cache.want_run(run.as_str()) {
+                    let action = Action::History(thread.clone(), Some(run.clone()), false);
+                    enqueue(&self.actions, &mut shared, action);
+                }
+            }
+            if let Some(thread) = &self.selected
+                && shared.cache.read_older_for_roots(thread.as_str())
+            {
+                let action = Action::History(thread.clone(), None, true);
+                enqueue(&self.actions, &mut shared, action);
+            }
         }
         if shared.features.focus_pending() {
             ui.ctx().request_repaint();
@@ -618,6 +651,7 @@ fn apply_effect(
     actions: &tokio::sync::mpsc::Sender<Action>,
     dock: &mut egui_dock::DockState<shell::CoreTab>,
     conversation: &mut conversation::ConversationPane,
+    run_tabs: &mut run_tabs::RunTabs,
     shared: &mut Shared,
     effect: shell::Effect,
 ) {
@@ -631,12 +665,24 @@ fn apply_effect(
                 shell::CoreTab::Feature(features::FeatureId::Execution),
             ),
             shell::Effect::Open(tab) => shell::focus(dock, tab),
+            // The frame's end reads the run's history once the tab is in the dock.
+            shell::Effect::OpenRun(pane) => shell::focus_beside(
+                dock,
+                shell::CoreTab::Run(run_tabs.open(pane)),
+                shell::CoreTab::Feature(features::FeatureId::Execution),
+            ),
             shell::Effect::Goal(action) => {
                 if let Some(execution) = shared.features.execution_mut() {
                     execution.enqueue_goal(action);
                 }
             }
-            shell::Effect::ResetLayout => *dock = shell::default_dock(),
+            // The run tabs of other threads, out of the dock, go with the layout too.
+            shell::Effect::ResetLayout => {
+                *dock = shell::default_dock();
+                for run in run_tabs.clear() {
+                    shared.cache.forget_run(run.as_str());
+                }
+            }
             shell::Effect::Status(status) => shared.status = status,
             shell::Effect::AttachRequested {
                 request,
@@ -807,7 +853,7 @@ mod navigation_tests {
             (Some(&id), Some(&thread))
         );
         // Selecting a thread loads its history, as the built-in selector does.
-        assert!(matches!(rx.try_recv(), Ok(Action::History(t, false)) if t == thread));
+        assert!(matches!(rx.try_recv(), Ok(Action::History(t, None, false)) if t == thread));
 
         apply_frame(
             &tx,
@@ -831,5 +877,24 @@ mod navigation_tests {
             rx.try_recv().is_err(),
             "only selecting a thread sends anything"
         );
+    }
+
+    // Given: a run tab wants run-a, and the client queue is full
+    // When: run-a's first page is enqueued
+    // Then: run-a is not kept as asked for, so the next frame asks again
+    #[test]
+    fn a_run_history_the_queue_refuses_is_asked_for_again() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut shared = Shared::default();
+        let (_, thread) = ids();
+        enqueue(
+            &tx,
+            &mut shared,
+            Action::History(thread.clone(), None, false),
+        );
+        assert!(shared.cache.want_run("run-a"));
+        let run = RunId::new("run-a").unwrap();
+        enqueue(&tx, &mut shared, Action::History(thread, Some(run), false));
+        assert!(shared.cache.want_run("run-a"));
     }
 }

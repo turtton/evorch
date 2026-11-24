@@ -166,3 +166,55 @@ pub fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
     });
     composing
 }
+
+/// The heading of one run's transcript; the run ID itself stays behind a copy button.
+pub fn run_transcript_title(ui: &mut Ui, run_id: &str, agent_name: Option<&str>) {
+    ui.horizontal(|ui| {
+        ui.label(crate::theme::text::h3(match agent_name {
+            Some(name) => format!("Transcript: {name}"),
+            None => "Transcript".to_owned(),
+        }));
+        crate::theme::widgets::copy_id_button(ui, "Copy run ID", run_id);
+    });
+}
+
+pub fn run_transcript_empty(ui: &mut Ui, agent_name: Option<&str>) {
+    crate::theme::widgets::empty_state(
+        ui,
+        &match agent_name {
+            Some(name) => format!("No events for {name} yet"),
+            None => "No events yet".to_owned(),
+        },
+        "Messages and tool activity will appear as this agent runs.",
+        None,
+    );
+}
+
+/// Stop halts only the current run; once it is stopped with subagents still
+/// running, the same button becomes Stop subagents and halts the whole subtree.
+pub fn stop_button(ui: &mut Ui, stopped: bool, running_children: usize) -> egui::Response {
+    let (label, color, fill, hover) = if stopped {
+        (
+            "Stop subagents",
+            palette().WARNING_FG,
+            palette().SURFACE_RAISED,
+            format!(
+                "Stop {} (Esc)",
+                if running_children == 1 {
+                    "the running subagent".to_owned()
+                } else {
+                    format!("all {running_children} running subagents")
+                }
+            ),
+        )
+    } else {
+        (
+            "Stop",
+            palette().ERROR_FG,
+            palette().ERROR_SURFACE,
+            "Stop the run (Esc). Its subagents keep running until stopped separately.".to_owned(),
+        )
+    };
+    ui.add(egui::Button::new(RichText::new(label).color(color)).fill(fill))
+        .on_hover_text(hover)
+}

@@ -721,7 +721,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
     runtime.wait(run).await.unwrap();
     bridge.flush().unwrap();
     reopened_actions
-        .send(Action::History(ThreadId::new("t").unwrap(), false))
+        .send(Action::History(ThreadId::new("t").unwrap(), None, false))
         .await
         .unwrap();
     changed(&reopened, |s| {

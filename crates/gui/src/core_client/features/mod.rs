@@ -1032,6 +1032,13 @@ impl<'a> DockPass<'a> {
             .flatten()
     }
 
+    /// The workspace feature while it is available.
+    pub fn workspace(&self) -> Option<&workspace::WorkspaceFeature> {
+        self.is_available(FeatureId::Workspace)
+            .then(|| self.features.iter().find_map(|f| f.as_workspace()))
+            .flatten()
+    }
+
     pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
         if !self.is_available(FeatureId::Execution) {
             return None;
