@@ -79,7 +79,7 @@ const LEAD: &str = "lead";
 /// The height at which the lanes screen's lists scroll (its own bound, to see the list from
 /// outside).
 const LIST_HEIGHT: f32 = 240.0;
-/// The vertical inner margin of an Execution run card (`SP_2`).
+/// The vertical inner margin of a Subagents run card (`SP_2`).
 const CARD_PADDING: f32 = 8.0;
 const OBJECTIVE: &str = "e2e objective";
 
@@ -256,6 +256,26 @@ async fn connect_gui(
         notification.await;
     }
     (shared, actions)
+}
+
+/// Until the GUI's projection holds every run of `runs`. A window drawn after that opens a
+/// subagent pane for each of them at once, as it does for subagents found running.
+async fn cached(shared: &Arc<Mutex<Shared>>, runs: &[runtime::RunId]) {
+    let changed = shared.lock().unwrap().changed.clone();
+    loop {
+        let notification = changed.notified();
+        tokio::pin!(notification);
+        notification.as_mut().enable();
+        let held = {
+            let state = shared.lock().unwrap();
+            runs.iter()
+                .all(|run| state.cache.runs.contains_key(&run.to_string()))
+        };
+        if held {
+            return;
+        }
+        notification.await;
+    }
 }
 
 /// Waits until `run` has finished its turn and waits for input, which is when its context is saved.
@@ -555,6 +575,26 @@ impl Desktop {
         self.flush().await;
     }
 
+    /// Brings the dock tab named `label` forward with a press near its start: a tab bar wider
+    /// than its leaf clips the tabs at its end, so a tab's centre may lie outside the window.
+    async fn click_tab(&mut self, label: &str) {
+        let rect = self.harness.get_by_label(label).rect();
+        let pos = egui::pos2(
+            (rect.left() + 10.0).min(Self::window().right() - 1.0),
+            rect.center().y,
+        );
+        self.harness.hover_at(pos);
+        for pressed in [true, false] {
+            self.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        self.flush().await;
+    }
+
     async fn click_button(&mut self, label: &str) {
         self.harness
             .get_by_role_and_label(egui::accesskit::Role::Button, label)
@@ -697,15 +737,9 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
         )
         .unwrap();
 
-    // The lead's roots, then a drill-down into its child, both as the Web client lists them.
+    // The lead's subagents are the first level, as the Web client lists them.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    desktop.until(|d| d.shows("Subagents (1)")).await;
-    // A card is taller than a row was: make sure the control is in the window first.
-    desktop
-        .scroll_window_to("Subagents (1)", &["Execution"])
-        .await;
-    desktop.click("Subagents (1)").await;
     let QueryReply::Execution(ExecutionReply::RunDetails(children)) = world
         .web(
             "web-children",
@@ -725,11 +759,9 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
     assert_eq!(children.items[0].summary.id.as_str(), child.to_string());
     let child_name = children.items[0].name.clone();
     desktop.until(|d| d.shows(&child_name)).await;
-    desktop.click("Root").await;
-    desktop.until(|d| d.shows("Subagents (1)")).await;
 
     // Goal review: the conversation band's toggle sends the command, the core flips the goal,
-    // and the band and Execution's status say so. The band is drawn by the whole window only;
+    // and the band and the Subagents tab's status say so. The band is drawn by the whole window only;
     // it shares the column's state, so the selection and the goal already read stay.
     let before = world.web_execution("goal-before").await.goal.unwrap();
     assert!(!before.review_enabled);
@@ -1562,18 +1594,15 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
 
     // The window is 1024x768 and the screen is used as a person does: every control is
     // reached by turning the wheel and clicked with the pointer.
+    // The lead's subagents are the tab's first level.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    let drill = format!("Subagents ({count})");
-    desktop.until(|d| d.shows(&drill)).await;
-    desktop.scroll_window_to(&drill, &["Execution"]).await;
-    desktop.click(&drill).await;
     desktop.until(|d| d.shows("Load more runs")).await;
     // One Open pane per card, drawn for the rows scrolled out of the list too.
     let rows = |d: &Desktop| d.harness.query_all_by_label("Open pane").count();
     let before = rows(&desktop);
     desktop
-        .scroll_window_to("Load more runs", &["Execution", "Root"])
+        .scroll_window_to("Load more runs", &["Subagents", "Teams"])
         .await;
     desktop.click("Load more runs").await;
     desktop.until(|d| rows(d) > before).await;
@@ -1587,6 +1616,10 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
         desktop.shows(far.summary.id.as_str()),
         "the path shows the run that was entered"
     );
+    // The path leads back to the lead's subagents.
+    desktop.click("Root").await;
+    desktop.until(|d| d.shows(&first_row)).await;
+    assert!(!desktop.shows(far.summary.id.as_str()));
 
     for run in kids.values().copied().chain([grandchild, world.lead]) {
         let _ = world.boot.runtime.cancel(run);
@@ -1739,6 +1772,9 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
             (0..8).map(|n| format!("criterion {n}")).collect(),
         )
         .unwrap();
+    // The window opens on every kid running: each gets a subagent pane below the Subagents
+    // tab, and the conversation beside them keeps its controls in view.
+    cached(&world.shared, &kids).await;
     // The window the client draws: the areas sit in tabs beside the conversation, so a long
     // list in one of them never pushes the conversation's controls out of view.
     let mut desktop = Desktop::page(
@@ -1753,8 +1789,9 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
     desktop.until(|d| d.shows_part("criterion 7")).await;
     // Folded again, the details leave the conversation's controls where they were.
     desktop.click("Hide goal details").await;
-    // Teams waits behind Execution; its tab brings the long task list forward.
-    desktop.click("Teams tab").await;
+    // Teams waits behind Subagents; its tab brings the long task list forward. The subagents'
+    // count widens the Subagents tab's title, which pushes Teams to the tab bar's edge.
+    desktop.click_tab("Teams tab").await;
     desktop.until(|d| d.shows("task-000")).await;
     let in_window = |d: &Desktop, control: &str| {
         d.harness

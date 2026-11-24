@@ -1,6 +1,8 @@
-//! Desktop feature of the `execution` area: the runs of the selected thread
-//! (roots, then the children of one run) as cards of the Subagents column, and
-//! the working note of its root.
+//! Desktop feature of the `execution` area, the Subagents tab: the subagents of
+//! the selected thread's current root (then, drilled into, the children of one
+//! of them) as cards of the Subagents column, and the working note of its root.
+//! A thread has one root the person converses with, so its subagents are the
+//! list's first level; lanes are other threads, chosen in the thread list.
 //!
 //! Everything shown is read from the core with a typed query; an event only
 //! says that something changed, and the answer is asked for again, so an event
@@ -13,7 +15,10 @@
 //! ([`ExecutionFeature::band`]); this tab does not draw the goal. What is
 //! pressed in the band or the Plan tab is queued here and leaves in the next
 //! `maintain`.
-use std::collections::{BTreeMap, HashSet};
+//!
+//! The names of runs, from the listings and from a run read on request
+//! ([`ExecutionFeature::want_name`]), title the subagent tabs the shell opens.
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod card;
 
@@ -35,18 +40,30 @@ use workbench_protocol::{
     ids::{PageCursor, RunId, ThreadId},
     namespaces::{
         ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
-        execution::{GoalView, RunDetail, RunDetailsQuery, RunScope, ThreadExecution},
+        execution::{GoalView, RunDetail, RunDetailsQuery, RunRef, RunScope, ThreadExecution},
     },
     queries::{PageRequest, Query, QueryReply},
 };
 
+const NAME_READS_PER_MAINTAIN: usize = 8;
+
 /// What a request in flight was for.
 #[derive(Debug, Clone)]
 enum Pending {
-    Runs { thread: ThreadId, path: Vec<RunId> },
-    Execution { thread: ThreadId },
+    Runs {
+        thread: ThreadId,
+        root: RunId,
+        path: Vec<RunId>,
+    },
+    Execution {
+        thread: ThreadId,
+    },
+    Name(RunRef),
     Command(&'static str),
-    Plan { kind: ReadKind, generation: u64 },
+    Plan {
+        kind: ReadKind,
+        generation: u64,
+    },
 }
 
 /// A cursor chain is read serially and published as one prefix. Keeping the old
@@ -68,7 +85,9 @@ pub struct ExecutionFeature {
     pending: BTreeMap<u64, Pending>,
     /// The thread the data below belongs to.
     thread: Option<ThreadId>,
-    /// The runs drilled into, outermost first; empty shows the roots.
+    /// The thread's current root, whose subagents are the first level.
+    root: Option<RunId>,
+    /// The runs drilled into, outermost first; empty shows the root's subagents.
     path: Vec<RunId>,
     runs: Vec<RunDetail>,
     next_cursor: Option<PageCursor>,
@@ -88,6 +107,12 @@ pub struct ExecutionFeature {
     plan_actions: Vec<PlanPanelAction>,
     /// The row whose Open pane was pressed last, until the shell opens its tab.
     open_pane: Option<RunPane>,
+    /// The display name of each run read so far, kept across `reset`.
+    names: BTreeMap<RunId, String>,
+    /// The runs whose names the shell wants and that were not asked for yet.
+    wanted_names: BTreeMap<RunId, ThreadId>,
+    /// The runs whose names were asked for, so each is asked once per session.
+    asked_names: BTreeSet<RunId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +154,62 @@ impl ExecutionFeature {
 
     pub fn take_open_pane(&mut self) -> Option<RunPane> {
         self.open_pane.take()
+    }
+
+    /// The display name of `run`, once a listing or a run read named it.
+    pub fn run_name(&self, run: &RunId) -> Option<&str> {
+        self.names.get(run).map(String::as_str)
+    }
+
+    /// Ask the core for `run`'s name in a later `maintain`, once.
+    pub fn want_name(&mut self, thread: ThreadId, run: RunId) {
+        if !self.names.contains_key(&run) && !self.asked_names.contains(&run) {
+            self.wanted_names.insert(run, thread);
+        }
+    }
+
+    /// Names are wanted that the next `maintain` asks for: the view draws again.
+    pub fn names_waiting(&self) -> bool {
+        !self.wanted_names.is_empty()
+    }
+
+    /// Asks for a few wanted names per pass, so a thread opened on many subagents
+    /// leaves room in the client's queue for everything else.
+    fn send_name_reads(&mut self, ctx: &mut FeatureContext<'_>) {
+        for _ in 0..NAME_READS_PER_MAINTAIN {
+            let Some((run, thread)) = self.wanted_names.pop_first() else {
+                break;
+            };
+            if !self.asked_names.insert(run.clone()) {
+                continue;
+            }
+            let target = RunRef { thread, run };
+            let tag = self.tag(Pending::Name(target.clone()));
+            ctx.query(tag, Query::Execution(ExecutionQuery::GetRun(target)));
+        }
+    }
+
+    fn learn_names<'r>(&mut self, runs: impl IntoIterator<Item = &'r RunDetail>) {
+        for run in runs {
+            if !run.name.is_empty() {
+                self.names.insert(run.summary.id.clone(), run.name.clone());
+            }
+        }
+    }
+
+    /// The thread's current root as the core's thread execution names it, else the
+    /// thread's only run without a parent. `None` while neither is known yet, so a
+    /// root shown stays until the core says otherwise.
+    fn resolve_root(&self, ctx: &FeatureContext<'_>) -> Option<Option<RunId>> {
+        let thread = self.thread.as_ref()?;
+        let fallback = || {
+            crate::core_client::conversation::current_root(ctx.cache(), thread, None)
+                .map(|run| run.id.clone())
+        };
+        match self.execution.as_ref().filter(|e| &e.thread == thread) {
+            Some(execution) => Some(execution.root_run.clone().or_else(fallback)),
+            None => fallback().map(Some),
+        }
     }
 
     pub fn enqueue_goal(&mut self, action: GoalAction) {
@@ -173,6 +254,7 @@ impl ExecutionFeature {
 
     fn switch_thread(&mut self, thread: Option<ThreadId>) {
         self.thread = thread;
+        self.root = None;
         self.path.clear();
         self.clear_runs();
         self.execution = None;
@@ -198,17 +280,16 @@ impl ExecutionFeature {
         self.runs_stale = self.thread.is_some();
     }
 
-    fn scope(&self) -> RunScope {
-        match self.path.last() {
-            Some(parent) => RunScope::Children {
-                parent: parent.clone(),
-            },
-            None => RunScope::Roots,
-        }
+    fn parent(&self) -> Option<&RunId> {
+        self.path.last().or(self.root.as_ref())
     }
 
     fn request_runs(&mut self, ctx: &mut FeatureContext<'_>) {
-        let Some(thread) = self.thread.clone() else {
+        let (Some(thread), Some(root), Some(parent)) = (
+            self.thread.clone(),
+            self.root.clone(),
+            self.parent().cloned(),
+        ) else {
             return;
         };
         if self.runs_read.is_none() {
@@ -240,6 +321,7 @@ impl ExecutionFeature {
         let cursor = read.next_cursor.clone();
         let tag = self.tag(Pending::Runs {
             thread: thread.clone(),
+            root,
             path: self.path.clone(),
         });
         self.runs_read.as_mut().unwrap().tag = Some(tag);
@@ -247,7 +329,7 @@ impl ExecutionFeature {
             tag,
             Query::Execution(ExecutionQuery::ListRunDetails(RunDetailsQuery {
                 thread,
-                scope: self.scope(),
+                scope: RunScope::Children { parent },
                 page: PageRequest {
                     cursor,
                     ..PageRequest::default()
@@ -261,11 +343,12 @@ impl ExecutionFeature {
         ctx.command(tag, command);
     }
 
-    fn draw_runs(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, thread: &ThreadId) {
+    fn draw_path(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Root").clicked() && !self.path.is_empty() {
+            if ui.button("Root").clicked() {
                 self.path.clear();
                 self.clear_runs();
+                return;
             }
             for index in 0..self.path.len() {
                 let id = self.path[index].clone();
@@ -277,12 +360,14 @@ impl ExecutionFeature {
                 }
             }
         });
+    }
+
+    fn draw_runs(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, thread: &ThreadId) {
+        if !self.path.is_empty() {
+            self.draw_path(ui);
+        }
         if self.runs.is_empty() && !self.runs_stale && self.runs_read.is_none() {
-            if self.path.is_empty() {
-                no_runs(ui);
-            } else {
-                ui.label(muted("No subagents of this run"));
-            }
+            ui.label(muted("No subagents of this run"));
         }
         let mut drill = None;
         let mut stop = None;
@@ -310,6 +395,9 @@ impl ExecutionFeature {
                 }
             },
         );
+        if self.path.is_empty() {
+            drill = drill.or_else(|| self.draw_earlier_roots(ui, ctx.cache(), thread));
+        }
         if let Some(run) = drill {
             self.drill_into(run);
         }
@@ -327,6 +415,47 @@ impl ExecutionFeature {
         {
             self.more_requested = true;
         }
+    }
+
+    /// The thread's other roots that have subagents, as a root stopped before the
+    /// person wrote again leaves them, whose subagents may still run: each drills into
+    /// its subagents, so every subagent the tab's title counts can be reached.
+    fn draw_earlier_roots(
+        &self,
+        ui: &mut egui::Ui,
+        cache: &crate::core_client::cache::Cache,
+        thread: &ThreadId,
+    ) -> Option<RunId> {
+        let mut children = BTreeMap::<&RunId, usize>::new();
+        for run in cache.runs.values().filter(|run| &run.thread == thread) {
+            if let Some(parent) = &run.parent_run {
+                *children.entry(parent).or_default() += 1;
+            }
+        }
+        let earlier: Vec<_> = cache
+            .runs
+            .values()
+            .filter(|run| {
+                &run.thread == thread
+                    && run.parent_run.is_none()
+                    && Some(&run.id) != self.root.as_ref()
+            })
+            .filter_map(|root| Some((&root.id, *children.get(&root.id)?)))
+            .collect();
+        if earlier.is_empty() {
+            return None;
+        }
+        ui.label(muted("Earlier roots"));
+        let mut drill = None;
+        for (root, count) in earlier {
+            if ui
+                .button(format!("{} · Subagents ({count})", root.as_str()))
+                .clicked()
+            {
+                drill = Some(root.clone());
+            }
+        }
+        drill
     }
 
     fn draw_working_note(&self, ui: &mut egui::Ui) {
@@ -383,7 +512,7 @@ impl Feature for ExecutionFeature {
     }
 
     fn title(&self) -> &'static str {
-        "Execution"
+        "Subagents"
     }
 
     fn availability(&self) -> Availability {
@@ -402,6 +531,9 @@ impl Feature for ExecutionFeature {
         self.execution_stale = self.thread.is_some();
         self.plan.restart_reads();
         self.open_pane = None;
+        // A name not read yet is asked for again from the new session.
+        let names = &self.names;
+        self.asked_names.retain(|run| names.contains_key(run));
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -436,10 +568,11 @@ impl Feature for ExecutionFeature {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
-        if let Pending::Runs { thread, path } = &pending {
+        if let Pending::Runs { thread, root, path } = &pending {
             // A navigation or reset invalidates the read, even when the user has
             // since returned to the same thread and breadcrumb.
             if self.thread.as_ref() != Some(thread)
+                || self.root.as_ref() != Some(root)
                 || self.path != *path
                 || self.runs_read.as_ref().and_then(|read| read.tag) != Some(tag)
             {
@@ -451,6 +584,7 @@ impl Feature for ExecutionFeature {
                 Pending::Runs { .. },
                 FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::RunDetails(page)))),
             ) => {
+                self.learn_names(&page.items);
                 let read = self.runs_read.as_mut().unwrap();
                 read.tag = None;
                 for run in page.items {
@@ -502,6 +636,16 @@ impl Feature for ExecutionFeature {
             (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
             }
+            (
+                Pending::Name(_),
+                FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::Run(run)))),
+            ) => self.learn_names([run.as_ref()]),
+            // A read the core never answered (the client's queue refused it, or the
+            // connection failed) is asked again; one the core refused is not.
+            (Pending::Name(target), FeatureReply::Query(Err(error))) if error.code.is_none() => {
+                self.asked_names.remove(&target.run);
+                self.want_name(target.thread, target.run);
+            }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
                 self.status = format!("{label}: accepted");
                 self.runs_stale = true;
@@ -524,6 +668,13 @@ impl Feature for ExecutionFeature {
         let selected = ctx.selection().thread.clone();
         if selected != self.thread {
             self.switch_thread(selected);
+        }
+        if let Some(root) = self.resolve_root(ctx)
+            && root != self.root
+        {
+            self.root = root;
+            self.path.clear();
+            self.clear_runs();
         }
         let drawn = std::mem::take(&mut self.plan_drawn);
         if drawn && !self.plan_shown {
@@ -561,10 +712,12 @@ impl Feature for ExecutionFeature {
             ctx.query(tag, Query::Execution(request.query));
         }
         self.send_goal_actions(ctx, &thread);
+        // After the feature's own reads, so those come first in the client's queue.
+        self.send_name_reads(ctx);
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        let Some(thread) = self.thread.clone() else {
+        let Some(thread) = self.thread.clone().filter(|_| self.root.is_some()) else {
             no_runs(ui);
             return;
         };
