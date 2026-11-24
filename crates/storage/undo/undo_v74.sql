@@ -1,0 +1,13 @@
+DROP TRIGGER IF EXISTS history_event_insert;
+DROP TRIGGER IF EXISTS history_event_update;
+DROP TRIGGER IF EXISTS history_event_delete;
+DROP TRIGGER IF EXISTS history_unknown_insert;
+DROP TRIGGER IF EXISTS history_unknown_update;
+DROP TRIGGER IF EXISTS history_unknown_delete;
+DROP TABLE IF EXISTS history_message_sources;
+DROP TABLE IF EXISTS history_pending_parts;
+DROP TABLE IF EXISTS history_messages;
+DROP TABLE IF EXISTS history_event_cuts;
+DROP TABLE IF EXISTS history_run_state;
+DROP TABLE IF EXISTS history_control;
+PRAGMA user_version = 73;

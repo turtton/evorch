@@ -1,5 +1,5 @@
 use super::{Pager, error, storage_error, text};
-use event_bus::{EventKind, LifecycleEvent, MessageEvent};
+use event_bus::{EventKind, MessageEvent};
 use runtime::AgentRuntime;
 use std::{collections::VecDeque, sync::Mutex};
 use workbench_protocol::{
@@ -28,6 +28,8 @@ struct Entry {
 struct Retained {
     entries: VecDeque<Entry>,
     bytes: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    history_route: Option<super::HistoryRoute>,
 }
 #[derive(Default)]
 pub(crate) struct Bodies(Mutex<Retained>);
@@ -35,6 +37,10 @@ impl Bodies {
     #[cfg(any(test, feature = "test-support"))]
     pub fn retained(&self) -> usize {
         self.0.lock().unwrap().entries.len()
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn history_route(&self) -> Option<super::HistoryRoute> {
+        self.0.lock().unwrap().history_route.clone()
     }
     fn register(
         &self,
@@ -183,54 +189,58 @@ impl Bodies {
         pager: &Pager,
         q: &ReadCommittedHistory,
     ) -> Result<Page<CommittedMessage>, WorkbenchError> {
-        let (runs, latest) = runtime
-            .with_storage_reader(|db| {
-                if db.thread(q.thread.as_str())?.is_none() {
-                    return Ok(None);
-                }
-                let runs: Vec<_> = db
-                    .runs_of_thread(q.thread.as_str())?
-                    .into_iter()
-                    .map(|r| r.run_id)
-                    .filter(|r| q.run.as_ref().is_none_or(|id| id.as_str() == r))
-                    .collect();
-                if q.run.is_some() && runs.is_empty() {
-                    return Ok(None);
-                }
-                Ok(Some((runs, db.last_event_id()?)))
-            })
-            .map_err(storage_error)?
-            .flatten()
-            .ok_or_else(|| error(ErrorCode::NotFound, "unknown thread or run"))?;
-        // Bind the frozen event cut to its live run membership too: deletion
-        // must revoke a cursor rather than shift the remaining message offsets.
         let key = format!(
-            "history:{:?}:{}:{:?}:{}",
+            "history:{:?}:{}:{:?}",
             q.direction,
             q.thread.as_str(),
-            q.run,
-            super::revision(&runs).get()
+            q.run
         );
-        let high_water = pager
-            .cursor_revision(&key, &q.page)?
-            .map_or(latest, |r| r.get() as i64);
-        let raw = runtime
-            .with_storage_reader(|db| committed_messages(db, &runs, high_water))
+        let read = runtime
+            .with_storage_reader(|db| Ok(read_history(db, pager, q, &key)))
             .map_err(storage_error)?
-            .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))?;
-        // Retention can remove rows below the frozen cut. Bind their deferred
-        // descriptors as well, without ever loading the referenced blobs.
-        let key = format!("{key}#{}", super::revision(&raw).get());
-        // Page the tokenized records before resolving or registering any bodies.
-        let page = match q.direction {
-            workbench_protocol::queries::HistoryDirection::Forward => {
-                pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
+            .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))??;
+        let (page, reason) = match read {
+            HistoryRead::Indexed {
+                page,
+                high_water,
+                freeze,
+            } => {
+                let next_cursor = page
+                    .next
+                    .map(|boundary| pager.history_next(&key, high_water, boundary, freeze));
+                (
+                    Page {
+                        items: page.items.into_iter().map(RawMessage::from).collect(),
+                        next_cursor,
+                        snapshot_revision: Revision(high_water as u64),
+                    },
+                    None,
+                )
             }
-            workbench_protocol::queries::HistoryDirection::Backward => {
-                pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
+            HistoryRead::Legacy {
+                runs,
+                high_water,
+                key,
+                reason,
+            } => {
+                let raw = runtime
+                    .with_storage_reader(|db| committed_messages(db, &runs, high_water))
+                    .map_err(storage_error)?
+                    .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))?;
+                let key = format!("{key}#{}", super::revision(&raw).get());
+                let page = match q.direction {
+                    workbench_protocol::queries::HistoryDirection::Forward => {
+                        pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
+                    }
+                    workbench_protocol::queries::HistoryDirection::Backward => {
+                        pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
+                    }
+                };
+                (page, Some(reason))
             }
         };
-        Ok(Page {
+        // The read snapshot is closed before selected bodies enter the capability cache.
+        let result = Page {
             items: page
                 .items
                 .into_iter()
@@ -238,33 +248,133 @@ impl Bodies {
                 .collect(),
             next_cursor: page.next_cursor,
             snapshot_revision: page.snapshot_revision,
-        })
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.0.lock().unwrap().history_route = Some(match reason {
+                None => super::HistoryRoute::Indexed,
+                Some(reason) => super::HistoryRoute::Legacy(reason),
+            });
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = reason;
+        Ok(result)
     }
 }
-pub(crate) fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
-    match kind {
-        EventKind::Message(
-            MessageEvent::MessageCompleted { run_id, text }
-            | MessageEvent::FinalResultPublished { run_id, text },
-        ) => Some((run_id, MessageRole::Assistant, text)),
-        EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
-            run_id,
-            prompt,
-            user_text,
-            ..
-        }) => Some((
-            run_id,
-            MessageRole::User,
-            user_text.as_deref().unwrap_or(prompt),
-        )),
-        EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
-            run_id: Some(run),
-            output: Some(output),
-            ..
-        }) => Some((run, MessageRole::Tool, output)),
+enum HistoryRead {
+    Indexed {
+        page: storage::history::read::HistoryPage,
+        high_water: i64,
+        freeze: [u8; 32],
+    },
+    Legacy {
+        runs: Vec<String>,
+        high_water: i64,
+        key: String,
+        reason: &'static str,
+    },
+}
+
+fn read_history(
+    db: &storage::Database,
+    pager: &Pager,
+    q: &ReadCommittedHistory,
+    key: &str,
+) -> Result<HistoryRead, WorkbenchError> {
+    use super::HistoryCursor;
+    use storage::history::read::{Availability, Direction};
+    let snapshot = db
+        .history_snapshot(q.thread.as_str(), q.run.as_ref().map(|r| r.as_str()))
+        .map_err(storage_error)?
+        .ok_or_else(|| error(ErrorCode::NotFound, "unknown thread or run"))?;
+    let cursor = pager.history_cursor(key, &q.page)?;
+    let legacy_key = format!("{key}:{}", super::revision(&snapshot.runs).get());
+    let high_water = match &cursor {
+        Some(HistoryCursor::Legacy(revision)) => {
+            pager.cursor_revision(&legacy_key, &q.page)?;
+            revision.get() as i64
+        }
+        Some(HistoryCursor::Indexed { high_water, .. }) => *high_water,
+        None => snapshot.latest,
+    };
+    q.page.validate()?;
+    if matches!(cursor, Some(HistoryCursor::Legacy(_))) {
+        return Ok(HistoryRead::Legacy {
+            runs: snapshot.runs.clone(),
+            high_water,
+            key: legacy_key,
+            reason: "legacy_cursor",
+        });
+    }
+    let direction = match q.direction {
+        workbench_protocol::queries::HistoryDirection::Forward => Direction::Forward,
+        workbench_protocol::queries::HistoryDirection::Backward => Direction::Backward,
+    };
+    let prepared = snapshot
+        .prepare(high_water, direction)
+        .map_err(storage_error)?;
+    let prepared = match prepared {
+        Availability::Indexed(prepared) => prepared,
+        Availability::Legacy(reason) => {
+            if cursor.is_some() {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "history index is no longer available",
+                ));
+            }
+            return Ok(HistoryRead::Legacy {
+                runs: snapshot.runs.clone(),
+                high_water,
+                key: legacy_key,
+                reason,
+            });
+        }
+    };
+    let boundary = match &cursor {
+        Some(HistoryCursor::Indexed {
+            boundary, freeze, ..
+        }) => {
+            if *freeze != prepared.freeze {
+                return Err(error(ErrorCode::Conflict, "history snapshot changed"));
+            }
+            Some(boundary)
+        }
         _ => None,
+    };
+    let page = prepared
+        .page(
+            direction,
+            boundary,
+            q.page.limit as usize,
+            super::PAGE_BYTES,
+        )
+        .map_err(storage_error)?;
+    if page.oversized {
+        return Err(error(
+            ErrorCode::InvalidRequest,
+            "one view exceeds page byte limit",
+        ));
+    }
+    Ok(HistoryRead::Indexed {
+        page,
+        high_water,
+        freeze: prepared.freeze,
+    })
+}
+
+#[cfg(test)]
+fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
+    storage::history::committed_text(kind).map(|(run, role, text)| (run, message_role(role), text))
+}
+
+fn message_role(role: storage::history::Role) -> MessageRole {
+    match role {
+        storage::history::Role::User => MessageRole::User,
+        storage::history::Role::Assistant => MessageRole::Assistant,
+        storage::history::Role::Tool => MessageRole::Tool,
     }
 }
+
 impl Source {
     fn retained_bytes(&self) -> usize {
         match self {
@@ -320,8 +430,21 @@ struct InputBody {
     id: String,
     bytes: u64,
 }
-type PendingParts = (usize, usize, Vec<(String, bool)>);
-type Key = Vec<([u8; 32], u64)>;
+impl From<storage::history::read::Descriptor> for RawMessage {
+    fn from(value: storage::history::read::Descriptor) -> Self {
+        Self {
+            run: value.run,
+            index: value.index,
+            role: message_role(value.role),
+            parts: value.parts,
+            input: value.input.map(|i| InputBody {
+                id: i.id,
+                bytes: i.bytes,
+            }),
+        }
+    }
+}
+type PendingParts = storage::history::PendingParts;
 type Digest = [u8; 32];
 
 /// Where a message sits among the messages of every run: the committed row that emitted
@@ -356,11 +479,8 @@ fn by_acceptance(
 #[derive(Clone)]
 struct RunFold {
     run: String,
-    next: u64,
+    reducer: storage::history::Reducer,
     parts: std::collections::BTreeMap<String, PendingParts>,
-    initial_receipt: bool,
-    first_prompt: Option<Key>,
-    last_assistant: Option<Key>,
     merge_max: i64,
     last_id: i64,
     consumed: std::collections::BTreeMap<String, (i64, bool)>,
@@ -370,11 +490,8 @@ impl RunFold {
     fn new(run: &str) -> Self {
         Self {
             run: run.to_owned(),
-            next: 0,
+            reducer: Default::default(),
             parts: Default::default(),
-            initial_receipt: false,
-            first_prompt: None,
-            last_assistant: None,
             merge_max: i64::MIN,
             last_id: 0,
             consumed: Default::default(),
@@ -437,58 +554,39 @@ impl RunFold {
         self.chain = extend(&self.chain, &message);
         emit(order, message, &self.chain);
     }
+    fn raw(&self, message: storage::history::Message) -> RawMessage {
+        RawMessage {
+            run: self.run.clone(),
+            index: message.index,
+            role: message_role(message.role),
+            parts: message.parts,
+            input: None,
+        }
+    }
     fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
-        let (role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
-            response_id,
-            text,
-            index,
-            total,
-            ..
-        }) = kind
-        {
-            if *index == 0 {
-                self.parts.insert(response_id.clone(), (0, *total, vec![]));
+        let response = match kind {
+            EventKind::Message(MessageEvent::MessagePart { response_id, .. }) => {
+                Some(response_id.clone())
             }
-            let pending = self.parts.get_mut(response_id)?;
-            if pending.0 != *index || pending.1 != *total || *total == 0 || *total > 4096 {
-                self.parts.remove(response_id);
-                return None;
-            }
-            pending.0 += 1;
-            pending.2.push((text.clone(), tokenized));
-            if pending.0 != *total {
-                return None;
-            }
-            let parts = self.parts.remove(response_id)?.2;
-            (MessageRole::Assistant, parts)
-        } else {
-            let (_, role, body) = committed_text(kind)?;
-            (role, vec![(body.to_owned(), tokenized)])
+            _ => None,
         };
-        let prompt = matches!(
-            kind,
-            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
-        );
-        self.message(
-            role,
-            parts,
-            prompt,
-            matches!(
-                kind,
-                EventKind::Message(MessageEvent::FinalResultPublished { .. })
-            ),
-        )
+        let mut pending = response.as_ref().and_then(|id| self.parts.remove(id));
+        let message = self.reducer.observe(kind, tokenized, &mut pending);
+        if let Some((id, pending)) = response.zip(pending) {
+            self.parts.insert(id, pending);
+        }
+        message.map(|message| self.raw(message))
     }
     fn input(&mut self, input: storage::host_input::DeliveredHostInput) -> Option<RawMessage> {
         if input.first_in_run {
-            self.initial_receipt = true;
+            self.reducer.initial_receipt = true;
         }
         if let Some(value) = input.text {
             return self.message(MessageRole::User, vec![(value, false)], false, false);
         }
         let raw = RawMessage {
             run: self.run.clone(),
-            index: self.next,
+            index: self.reducer.next,
             role: MessageRole::User,
             parts: vec![],
             input: Some(InputBody {
@@ -496,7 +594,7 @@ impl RunFold {
                 bytes: input.text_bytes,
             }),
         };
-        self.next += 1;
+        self.reducer.next += 1;
         Some(raw)
     }
     fn message(
@@ -506,58 +604,14 @@ impl RunFold {
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
-        use sha2::{Digest, Sha256};
-        let mut normalized: Vec<(String, bool)> = Vec::new();
-        for (part, tokenized) in parts {
-            let deferred = tokenized && storage::BodyRef::from_token(&part).is_some();
-            if !deferred && let Some((last, false)) = normalized.last_mut() {
-                last.push_str(&part);
-            } else {
-                normalized.push((part, deferred));
-            }
-        }
-        let key: Key = normalized
-            .iter()
-            .map(|(part, deferred)| {
-                if *deferred {
-                    let r = storage::BodyRef::from_token(part).unwrap();
-                    (r.hash, r.byte_len)
-                } else {
-                    (Sha256::digest(part.as_bytes()).into(), part.len() as u64)
-                }
-            })
-            .collect();
-        if (role == MessageRole::Assistant && key.iter().all(|(_, n)| *n == 0))
-            || (finish && self.last_assistant.as_ref() == Some(&key))
-        {
-            return None;
-        }
-        if prompt {
-            if self.first_prompt.as_ref() == Some(&key) {
-                return None;
-            }
-            if self.first_prompt.is_none() {
-                self.first_prompt = Some(key.clone());
-                // The first accepted receipt ID of this run, replayed before its
-                // first task, establishes identity without comparing bodies.
-                // Later changed instructions are not that initial submission.
-                if self.initial_receipt {
-                    return None;
-                }
-            }
-        }
-        if role == MessageRole::Assistant {
-            self.last_assistant = Some(key);
-        }
-        let raw = RawMessage {
-            run: self.run.clone(),
-            index: self.next,
-            role,
-            parts: normalized,
-            input: None,
+        let role = match role {
+            MessageRole::User => storage::history::Role::User,
+            MessageRole::Assistant => storage::history::Role::Assistant,
+            MessageRole::Tool => storage::history::Role::Tool,
         };
-        self.next += 1;
-        Some(raw)
+        self.reducer
+            .message(role, parts, prompt, finish)
+            .map(|message| self.raw(message))
     }
 }
 
@@ -600,11 +654,14 @@ type Input = storage::host_input::DeliveredHostInput;
 /// A message count and the prefix digest after that many messages.
 type Shown = (u64, Digest);
 
+// Keep the scanner's run state inline instead of adding an allocation on resync.
+#[allow(clippy::large_enum_variant)]
 enum Slot {
     Cold(Vec<Header>),
     Hot { fold: RunFold, published: Shown },
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Next {
     Hot(Option<RunFold>, Shown),
     Cold(Option<Vec<Header>>),
@@ -694,11 +751,11 @@ fn tentative(
     emit: &mut impl FnMut(Order, RawMessage, &Digest),
 ) -> Shown {
     if rest.is_empty() {
-        return (fold.next, fold.chain);
+        return (fold.reducer.next, fold.chain);
     }
     let mut tail = fold.clone();
     tail.trailing(rest, emit);
-    (tail.next, tail.chain)
+    (tail.reducer.next, tail.chain)
 }
 
 /// Emits nothing: clients read what precedes the cut through ReadCommittedHistory.
@@ -833,7 +890,7 @@ impl CommitScanner {
                         == fold.consumed =>
                 {
                     inputs.retain(|h| h.accepted_at_ns > fold.merge_max);
-                    (fold.next, fold.chain)
+                    (fold.reducer.next, fold.chain)
                 }
                 _ => {
                     rebuild.insert(run);
@@ -902,7 +959,7 @@ impl CommitScanner {
             .collect();
         for (run, baseline) in with_texts(db, baselines)? {
             let (mut fold, mut rest, published) = hydrate(db, run, cut, baseline)?;
-            collector.resume(run, published, (fold.next, fold.chain));
+            collector.resume(run, published, (fold.reducer.next, fold.chain));
             for row in woken.remove(run).unwrap_or_default() {
                 if row.id > fold.last_id {
                     fold.row(&row, &mut rest, &mut |o, m, c| collector.emit(o, m, c));
@@ -1001,5 +1058,7 @@ fn committed_messages(
     Ok(ordered.into_iter().map(|(_, message)| message).collect())
 }
 
+#[cfg(test)]
+mod paging_tests;
 #[cfg(test)]
 mod tests;

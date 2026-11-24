@@ -174,6 +174,18 @@ pub(super) fn run_writer_with_index(
         let idle = matches!(received, Err(RecvTimeoutError::Timeout));
         let ordinary = matches!(&received, Ok(command) if !matches!(command, Command::Index(_)));
         match received {
+            Ok(Command::History(command)) => {
+                let started = Instant::now();
+                crate::history::background::write(&state.conn, state.writes_suspended, command);
+                let micros = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                state.statistics.history_build_commands += 1;
+                state.statistics.history_build_total_micros = state
+                    .statistics
+                    .history_build_total_micros
+                    .saturating_add(micros);
+                state.statistics.max_history_build_micros =
+                    state.statistics.max_history_build_micros.max(micros);
+            }
             Ok(Command::Index(command)) => super::index::handle(
                 &mut state.index,
                 &state.conn,

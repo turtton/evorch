@@ -684,6 +684,79 @@ fn kept_snapshot(f: &Fixture) -> Vec<i64> {
 }
 
 #[test]
+fn reclaim_removes_all_history_rows_including_unfinished_parts_and_builder_cannot_recreate_them() {
+    use storage::history::build::{BuildBudget, Clock};
+    struct FrozenClock;
+    impl Clock for FrozenClock {
+        fn now_ns(&self) -> i64 {
+            0
+        }
+    }
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "archived");
+    let storage = Storage::open(config(&f.path)).unwrap();
+    for kind in [
+        event_bus::MessageEvent::MessageCompleted {
+            run_id: "ra".into(),
+            text: "completed".into(),
+        },
+        event_bus::MessageEvent::MessagePart {
+            run_id: "ra".into(),
+            response_id: "unfinished".into(),
+            index: 0,
+            total: 2,
+            text: "pending".into(),
+        },
+    ] {
+        storage
+            .handle()
+            .append_event(None, &Event::new(kind))
+            .unwrap();
+    }
+    let tables = [
+        "history_run_state",
+        "history_event_cuts",
+        "history_messages",
+        "history_message_sources",
+        "history_pending_parts",
+    ];
+    for table in tables {
+        assert!(
+            f.count(&format!("SELECT COUNT(*) FROM {table} WHERE run_id='ra'")) > 0,
+            "{table} must be populated before reclaim"
+        );
+    }
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM history_run_state WHERE run_id='ra' AND json_extract(reducer,'$.last_assistant') IS NOT NULL"),
+        1
+    );
+    confirm_all(&f, &["A"]);
+    assert_eq!(bounded_steps(&storage).jobs_db_pending, 0);
+    let db = f.database();
+    for table in tables {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    let progress = db
+        .history_build_step("ra", BuildBudget::default(), &FrozenClock)
+        .unwrap();
+    assert!(!progress.ready);
+    assert_eq!(progress.writes, 0);
+    for table in tables {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    storage.close();
+}
+
+#[test]
 fn a_confirmed_family_is_reclaimed_completely_and_the_rest_is_untouched() {
     // Given: a fork/escalation family with rows in every reclaimed table, an
     // unrelated live thread, and kept usage rows.

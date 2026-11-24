@@ -144,6 +144,7 @@ pub struct BootstrappedHost {
     evaluations: eval::evaluator::EvaluationService,
     #[cfg(any(test, feature = "test-support"))]
     pub composition: CompositionInventory,
+    history_owner: Option<storage::history::background::Owner>,
     bridge: Option<OwnedStorageBridge>,
     planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
@@ -730,6 +731,7 @@ impl BootstrappedHost {
             planned_exit: None,
             reclaim: None,
             thread_index_owner: None,
+            history_owner: None,
             executor,
             _leases: leases,
         };
@@ -875,6 +877,10 @@ impl BootstrappedHost {
             }
         }
 
+        self.history_owner = Some(storage::history::background::Owner::start(
+            deferred.storage.clone(),
+            deferred.writer.clone(),
+        )?);
         self.thread_index_owner = Some(thread_index::ThreadIndexOwner::start(
             deferred.writer.clone(),
         )?);
@@ -967,6 +973,9 @@ impl BootstrappedHost {
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         // Publish unavailability before stopping successor/owner validity.
         self.graph_collector.invalidate();
+        if let Some(mut history) = self.history_owner.take() {
+            history.stop();
+        }
         let mut failure = None;
         // Area tasks stop producing before the runtime drains; they are joined
         // below, with the other host-owned tasks.

@@ -372,6 +372,10 @@ impl Projection {
     pub fn retained_bodies(&self) -> usize {
         self.bodies.retained()
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn history_route(&self) -> Option<crate::queries::HistoryRoute> {
+        self.bodies.history_route()
+    }
 
     pub fn approval_registry(&self) -> &Arc<ApprovalRegistry> {
         &self.registry
