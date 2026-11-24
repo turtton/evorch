@@ -827,6 +827,11 @@ impl Hidden {
 
     /// One pass; what it asked for.
     fn maintain(&mut self) -> Vec<FeatureAction> {
+        self.maintain_available(true)
+    }
+
+    /// One pass with the area `available` or not; what it asked for.
+    fn maintain_available(&mut self, available: bool) -> Vec<FeatureAction> {
         let capabilities = [Capability::Queries, Capability::Commands];
         let mut frame = FeatureFrame::default();
         let mut ctx = FeatureContext {
@@ -841,7 +846,7 @@ impl Hidden {
             frame: &mut frame,
         };
         let visibility = super::super::Visibility {
-            available: true,
+            available,
             expanded: false,
             minimized: false,
         };
@@ -1488,38 +1493,69 @@ fn name_reads(screen: &mut Harness<'_, Screen>) -> Vec<(u64, String)> {
         .collect()
 }
 
-// Given: the root's subagents listed, and the shell wanting the names of ten more runs
-// When: frames pass, one read is refused by the client and one by the core
-// Then: at most a few are read per frame; the client's refusal is read again, the
-//       core's is not
+// Given: the root's subagents listed, and the shell wanting the names of eleven more runs
+// When: frames pass while the first reads are unanswered, a listing names one of the
+//       rest, then one read is refused by the client, one by the core for good, one by
+//       the busy core and one answered
+// Then: no more than NAME_READS_IN_FLIGHT are unanswered at once, however many frames
+//       pass; the listed name is not read; the client's and the busy core's refusals
+//       are read again with the rest, the one refused for good is not
 #[test]
-fn name_reads_go_out_a_few_per_frame_and_a_refused_one_is_asked_again() {
+fn name_reads_stay_few_in_flight_and_a_refused_one_is_asked_again() {
     let mut screen = rooted();
     let first = asked(&mut screen);
     answer(&mut screen, runs_tag(&first), runs_reply(Vec::new(), false));
     let t1 = ThreadId::new("t1").unwrap();
     {
         let execution = screen.state_mut().feature.as_execution_mut().unwrap();
-        for n in 0..10 {
-            execution.want_name(t1.clone(), RunId::new(format!("run-{n}")).unwrap());
+        for n in 0..11 {
+            execution.want_name(t1.clone(), RunId::new(format!("run-{n:02}")).unwrap());
         }
         assert!(execution.names_waiting());
     }
-    let mut reads = name_reads(&mut screen);
-    assert_eq!(reads.len(), NAME_READS_PER_MAINTAIN);
-    reads.extend(name_reads(&mut screen));
-    assert_eq!(reads.len(), 10, "the rest follow in the next frame");
+    let reads = name_reads(&mut screen);
+    assert_eq!(reads.len(), NAME_READS_IN_FLIGHT);
+    for _ in 0..3 {
+        assert!(
+            name_reads(&mut screen).is_empty(),
+            "the rest wait for answers"
+        );
+    }
     assert!(
         !screen
             .state_mut()
             .feature
             .as_execution_mut()
             .unwrap()
-            .names_waiting()
+            .names_waiting(),
+        "nothing to ask while the reads in flight are at the bound"
+    );
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Execution(ExecutionEvent::RunChanged {
+            run: serde_json::from_value(json!({"id": "run-10", "thread": "t1",
+                "parent_run": "root", "role": "worker", "phase": "running", "revision": "2"}))
+            .unwrap(),
+        }));
+    let relisted = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&relisted),
+        runs_reply(
+            vec![run("run-10", Some("root"), "active", "live", 0)],
+            false,
+        ),
     );
 
     let (refused, refused_run) = reads[0].clone();
     let (missing, _) = reads[1].clone();
+    let (named, _) = reads[2].clone();
+    let (busy, busy_run) = reads[3].clone();
+    screen.state_mut().feature.reply(
+        busy,
+        FeatureReply::Query(Err(FeatureError::new("busy").with_code(ErrorCode::Busy))),
+    );
     screen.state_mut().feature.reply(
         refused,
         FeatureReply::Query(Err(FeatureError::new("client queue is full or closed"))),
@@ -1530,10 +1566,208 @@ fn name_reads_go_out_a_few_per_frame_and_a_refused_one_is_asked_again() {
             FeatureError::new("no such run").with_code(ErrorCode::NotFound)
         )),
     );
+    let detail = run(&reads[2].1, Some("root"), "active", "live", 0);
+    screen.state_mut().feature.reply(
+        named,
+        query_reply(json!({"type": "execution", "payload": {"type": "run", "payload": detail}})),
+    );
     let again = name_reads(&mut screen);
     assert_eq!(
-        again.into_iter().map(|(_, run)| run).collect::<Vec<_>>(),
-        [refused_run]
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        [refused_run.as_str(), busy_run.as_str(), "run-08", "run-09"]
     );
-    assert!(name_reads(&mut screen).is_empty());
+    for (tag, run_id) in again {
+        let detail = run(&run_id, Some("root"), "active", "live", 0);
+        screen.state_mut().feature.reply(
+            tag,
+            query_reply(
+                json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
+            ),
+        );
+    }
+    assert!(
+        name_reads(&mut screen).is_empty(),
+        "run-10 was named by the listing"
+    );
+    assert!(
+        !screen
+            .state_mut()
+            .feature
+            .as_execution_mut()
+            .unwrap()
+            .names_waiting()
+    );
+}
+
+/// The run reads among `actions`, by tag and run.
+fn run_reads(actions: &[FeatureAction]) -> Vec<(u64, String)> {
+    actions
+        .iter()
+        .filter_map(|action| match query_of(action) {
+            Query::Execution(ExecutionQuery::GetRun(target)) => {
+                Some((action.tag, target.run.as_str().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn named_reply(run_id: &str) -> FeatureReply {
+    let detail = run(run_id, Some("root"), "active", "live", 0);
+    query_reply(json!({"type": "execution", "payload": {"type": "run", "payload": detail}}))
+}
+
+// Given: the names of more runs wanted than NAME_READS_IN_FLIGHT, the first reads out
+// When: the thread is deselected (or the area unavailable) while those are answered, one
+//       refused by the client
+// Then: names_waiting is false while no thread is selected and while the area is
+//       unavailable, so the view does not draw again for them; once t1 is selected and
+//       available again the rest and the refused one are read
+#[test]
+fn names_wait_quietly_while_none_can_be_asked_and_resume_on_reselect() {
+    let mut hidden = Hidden::new("t1");
+    let t1 = ThreadId::new("t1").unwrap();
+    for n in 0..10 {
+        hidden
+            .feature
+            .want_name(t1.clone(), RunId::new(format!("run-{n:02}")).unwrap());
+    }
+    let reads = run_reads(&hidden.maintain());
+    assert_eq!(reads.len(), NAME_READS_IN_FLIGHT);
+
+    hidden.selection.thread = None;
+    assert!(run_reads(&hidden.maintain()).is_empty());
+    let (refused, refused_run) = reads[0].clone();
+    hidden.feature.reply(
+        refused,
+        FeatureReply::Query(Err(FeatureError::new("client queue is full or closed"))),
+    );
+    for (tag, run_id) in &reads[1..] {
+        hidden.feature.reply(*tag, named_reply(run_id));
+    }
+    assert!(!hidden.feature.names_waiting(), "no thread is selected");
+    assert!(run_reads(&hidden.maintain()).is_empty());
+    assert!(!hidden.feature.names_waiting());
+
+    hidden.select("t1");
+    assert!(run_reads(&hidden.maintain_available(false)).is_empty());
+    assert!(!hidden.feature.names_waiting(), "the area is unavailable");
+
+    let again = run_reads(&hidden.maintain());
+    assert_eq!(
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        [refused_run.as_str(), "run-08", "run-09"]
+    );
+    assert!(!hidden.feature.names_waiting());
+}
+
+// Given: one name read per kind of refusal
+// When: the core refuses them
+// Then: a refusal for a while (busy or a fault without advice, any code whose advice
+//       allows asking again) is read again, NAME_READ_ATTEMPTS times in all per
+//       session; a missing or hidden run, or advice that forbids it, is not; a new
+//       session reads the run that was refused for a while again
+#[test]
+fn a_name_refused_for_a_while_is_read_again_a_few_times() {
+    let mut hidden = Hidden::new("t1");
+    let t1 = ThreadId::new("t1").unwrap();
+    let refusals = [
+        (
+            "run-a",
+            FeatureError::new("busy").with_code(ErrorCode::Busy),
+            true,
+        ),
+        (
+            "run-b",
+            FeatureError::new("draining").with_code(ErrorCode::Draining),
+            true,
+        ),
+        (
+            "run-c",
+            FeatureError::new("store").with_code(ErrorCode::StorageUnavailable),
+            true,
+        ),
+        (
+            "run-d",
+            FeatureError::new("odd")
+                .with_code(ErrorCode::Conflict)
+                .with_retry(RetryAdvice::SameRequest),
+            true,
+        ),
+        (
+            "run-e",
+            FeatureError::new("gone").with_code(ErrorCode::NotFound),
+            false,
+        ),
+        (
+            "run-f",
+            FeatureError::new("hidden")
+                .with_code(ErrorCode::PermissionDenied)
+                .with_retry(RetryAdvice::SameRequest),
+            false,
+        ),
+        (
+            "run-g",
+            FeatureError::new("never")
+                .with_code(ErrorCode::Busy)
+                .with_retry(RetryAdvice::Never),
+            false,
+        ),
+    ];
+    for (run_id, _, _) in &refusals {
+        hidden
+            .feature
+            .want_name(t1.clone(), RunId::new(*run_id).unwrap());
+    }
+    let reads = run_reads(&hidden.maintain());
+    assert_eq!(reads.len(), refusals.len());
+    for ((tag, _), (_, error, _)) in reads.iter().zip(&refusals) {
+        hidden
+            .feature
+            .reply(*tag, FeatureReply::Query(Err(error.clone())));
+    }
+    let again = run_reads(&hidden.maintain());
+    let expected: Vec<_> = refusals
+        .iter()
+        .filter(|(_, _, again)| *again)
+        .map(|(run_id, _, _)| *run_id)
+        .collect();
+    assert_eq!(
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let busy = || FeatureReply::Query(Err(FeatureError::new("busy").with_code(ErrorCode::Busy)));
+    let mut tag = again[0].0;
+    for attempt in 2..=NAME_READ_ATTEMPTS {
+        hidden.feature.reply(tag, busy());
+        let reads = run_reads(&hidden.maintain());
+        if attempt == NAME_READ_ATTEMPTS {
+            assert!(reads.is_empty(), "run-a was refused {attempt} times");
+        } else {
+            let [(next, run_id)] = &reads[..] else {
+                panic!("run-a alone was expected, got {reads:?}");
+            };
+            assert_eq!(run_id, "run-a");
+            tag = *next;
+        }
+    }
+    assert!(!hidden.feature.names_waiting());
+
+    hidden.feature.reset();
+    hidden.feature.want_name(t1, RunId::new("run-a").unwrap());
+    let reads = run_reads(&hidden.maintain());
+    assert!(
+        reads.iter().any(|(_, run_id)| run_id == "run-a"),
+        "a new session reads it again: {reads:?}"
+    );
 }

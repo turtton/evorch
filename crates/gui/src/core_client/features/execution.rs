@@ -34,7 +34,7 @@ use crate::panes::run_card_widgets::{NoteRevision, working_note};
 use crate::theme::{text::muted, widgets::empty_state};
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
-    errors::ErrorCode,
+    errors::{ErrorCode, RetryAdvice},
     events::UiEvent,
     handshake::Capability,
     ids::{PageCursor, RunId, ThreadId},
@@ -45,7 +45,15 @@ use workbench_protocol::{
     queries::{PageRequest, Query, QueryReply},
 };
 
-const NAME_READS_PER_MAINTAIN: usize = 8;
+/// How many name reads are in flight at once. One frame may run several passes, and each
+/// read is answered from the thread's whole run list, so the bound is on what is still
+/// unanswered rather than on what one pass asks.
+const NAME_READS_IN_FLIGHT: usize = 8;
+
+/// How many times one session asks for a run's name the core refused for a while (busy,
+/// draining, its storage away): a refusal that lasts leaves the tab untitled instead of
+/// asking again on every frame. The next session asks again.
+const NAME_READ_ATTEMPTS: u8 = 3;
 
 /// What a request in flight was for.
 #[derive(Debug, Clone)]
@@ -111,8 +119,14 @@ pub struct ExecutionFeature {
     names: BTreeMap<RunId, String>,
     /// The runs whose names the shell wants and that were not asked for yet.
     wanted_names: BTreeMap<RunId, ThreadId>,
-    /// The runs whose names were asked for, so each is asked once per session.
+    /// The runs whose names were asked for, so each is asked once per session unless the
+    /// read went unanswered or was refused for a while.
     asked_names: BTreeSet<RunId>,
+    /// How often this session's name read of a run was refused for a while.
+    name_refusals: BTreeMap<RunId, u8>,
+    /// The last `maintain` could ask for names: a thread was selected and the area was
+    /// available. Until one can, wanted names wait without drawing the view again.
+    names_askable: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -168,24 +182,39 @@ impl ExecutionFeature {
         }
     }
 
-    /// Names are wanted that the next `maintain` asks for: the view draws again.
+    /// Names are wanted that the next `maintain` may ask for: the view draws again. While
+    /// [`NAME_READS_IN_FLIGHT`] are unanswered, their answers draw it; while no thread is
+    /// selected or the area is unavailable, the `maintain` that can ask is drawn by the
+    /// selection or the connection that makes it so.
     pub fn names_waiting(&self) -> bool {
-        !self.wanted_names.is_empty()
+        self.names_askable
+            && !self.wanted_names.is_empty()
+            && self.name_reads_in_flight() < NAME_READS_IN_FLIGHT
     }
 
-    /// Asks for a few wanted names per pass, so a thread opened on many subagents
-    /// leaves room in the client's queue for everything else.
+    fn name_reads_in_flight(&self) -> usize {
+        self.pending
+            .values()
+            .filter(|pending| matches!(pending, Pending::Name(_)))
+            .count()
+    }
+
+    /// Asks for wanted names while fewer than [`NAME_READS_IN_FLIGHT`] are unanswered, so
+    /// a thread opened on many subagents leaves room in the client's queue (and the
+    /// core's) for everything else. A name a listing taught meanwhile is not asked for.
     fn send_name_reads(&mut self, ctx: &mut FeatureContext<'_>) {
-        for _ in 0..NAME_READS_PER_MAINTAIN {
+        let mut in_flight = self.name_reads_in_flight();
+        while in_flight < NAME_READS_IN_FLIGHT {
             let Some((run, thread)) = self.wanted_names.pop_first() else {
                 break;
             };
-            if !self.asked_names.insert(run.clone()) {
+            if self.names.contains_key(&run) || !self.asked_names.insert(run.clone()) {
                 continue;
             }
             let target = RunRef { thread, run };
             let tag = self.tag(Pending::Name(target.clone()));
             ctx.query(tag, Query::Execution(ExecutionQuery::GetRun(target)));
+            in_flight += 1;
         }
     }
 
@@ -534,6 +563,7 @@ impl Feature for ExecutionFeature {
         // A name not read yet is asked for again from the new session.
         let names = &self.names;
         self.asked_names.retain(|run| names.contains_key(run));
+        self.name_refusals.clear();
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -641,10 +671,22 @@ impl Feature for ExecutionFeature {
                 FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::Run(run)))),
             ) => self.learn_names([run.as_ref()]),
             // A read the core never answered (the client's queue refused it, or the
-            // connection failed) is asked again; one the core refused is not.
-            (Pending::Name(target), FeatureReply::Query(Err(error))) if error.code.is_none() => {
-                self.asked_names.remove(&target.run);
-                self.want_name(target.thread, target.run);
+            // connection failed) is asked again, and so, a few times, is one the core
+            // refused for a while; one it refused for good is not.
+            (Pending::Name(target), FeatureReply::Query(Err(error))) => {
+                let again = if error.code.is_none() {
+                    true
+                } else if refused_for_a_while(&error) {
+                    let refusals = self.name_refusals.entry(target.run.clone()).or_default();
+                    *refusals += 1;
+                    *refusals < NAME_READ_ATTEMPTS
+                } else {
+                    false
+                };
+                if again {
+                    self.asked_names.remove(&target.run);
+                    self.want_name(target.thread, target.run);
+                }
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
                 self.status = format!("{label}: accepted");
@@ -688,6 +730,7 @@ impl Feature for ExecutionFeature {
                 PlanPanelAction::HistoryPage(page) => self.plan.set_history_page(page),
             }
         }
+        self.names_askable = self.thread.is_some() && visibility.available;
         let Some(thread) = self.thread.clone().filter(|_| visibility.available) else {
             self.goal_actions.clear();
             return;
@@ -735,6 +778,32 @@ impl Feature for ExecutionFeature {
 
     fn as_execution_mut(&mut self) -> Option<&mut ExecutionFeature> {
         Some(self)
+    }
+}
+
+/// The core refused a read for a while rather than for good: its advice allows asking
+/// again, or, without advice, the refusal names a passing state (busy, draining, its
+/// storage or session away, a fault). A run it does not hold or does not show is final.
+fn refused_for_a_while(error: &FeatureError) -> bool {
+    match (error.code, error.retry) {
+        (Some(ErrorCode::NotFound | ErrorCode::PermissionDenied), _) => false,
+        (_, Some(RetryAdvice::Never | RetryAdvice::UserActionRequired)) => false,
+        (
+            _,
+            Some(RetryAdvice::SameRequest | RetryAdvice::AfterResync | RetryAdvice::AfterReconnect),
+        ) => true,
+        (code, None) => matches!(
+            code,
+            Some(
+                ErrorCode::Busy
+                    | ErrorCode::Draining
+                    | ErrorCode::LimitExceeded
+                    | ErrorCode::StorageUnavailable
+                    | ErrorCode::ResyncRequired
+                    | ErrorCode::StaleEpoch
+                    | ErrorCode::Internal
+            )
+        ),
     }
 }
 

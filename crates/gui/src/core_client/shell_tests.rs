@@ -297,7 +297,17 @@ fn screen_from(
     local: super::local::LocalPanes,
     patch: impl FnOnce(&mut Shared),
 ) -> Screen {
-    let (tx, actions) = tokio::sync::mpsc::channel(256);
+    screen_from_outbox(size, local, 256, patch)
+}
+
+/// [`screen_from`] whose client queue holds `capacity` actions.
+fn screen_from_outbox(
+    size: egui::Vec2,
+    local: super::local::LocalPanes,
+    capacity: usize,
+    patch: impl FnOnce(&mut Shared),
+) -> Screen {
+    let (tx, actions) = tokio::sync::mpsc::channel(capacity);
     let mut populated = populated();
     patch(&mut populated);
     let shared = Arc::new(Mutex::new(populated));
@@ -1879,47 +1889,6 @@ mod run_tabs {
         screen.harness.get_by_label("Subagents(1) tab");
     }
 
-    // Given: a 1024×768 window opened on thr-1 while many of its subagents run
-    // When: the window is drawn, then the Teams tab is pressed near its start
-    // Then: every subagent opens below the Subagents tab (past the split bound as tabs of
-    //       the last split), its title counts them, and Teams comes forward although the
-    //       wider title pushes its centre past the tab bar's edge
-    #[test]
-    fn a_window_opened_on_many_running_subagents_opens_them_and_keeps_teams_reachable() {
-        let count = 51;
-        let local = super::super::local::LocalPanes::new(
-            Arc::new(crate::diff::FixtureDiffSource::empty()),
-            None,
-        );
-        let mut screen = screen_from(egui::vec2(1024.0, 768.0), local, |shared| {
-            for index in 0..count {
-                let mut run = subagent("running");
-                run.id = RunId::new(format!("run-1-{index:02}")).unwrap();
-                shared.cache.runs.insert(run.id.as_str().into(), run);
-            }
-        });
-        screen.settle_runs();
-        assert_eq!(screen.run_tabs().len(), count);
-        screen
-            .harness
-            .get_by_label(&format!("Subagents({count}) tab"));
-
-        let teams = CoreTab::Feature(FeatureId::Teams);
-        let rect = screen.harness.get_by_label("Teams tab").rect();
-        let pos = egui::pos2(rect.left() + 10.0, rect.center().y);
-        screen.harness.hover_at(pos);
-        for pressed in [true, false] {
-            screen.harness.event(egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        screen.harness.run_steps(2);
-        assert_eq!(screen.front_of_leaf(teams), teams);
-    }
-
     // Given: run-1's subagent run-1a has a subagent of its own, run-1x
     // When: the Subagents tab is drawn, run-1a's Subagents button is pressed, then Root
     // Then: run-1a is listed first without a breadcrumb; drilled in, run-1x is listed
@@ -2441,6 +2410,7 @@ mod attention;
 
 mod lanes;
 
+mod many_subagents;
 mod pull_requests;
 
 // Given: the lane thr-4 asked its lead thr-1 a question the lead has not passed on
