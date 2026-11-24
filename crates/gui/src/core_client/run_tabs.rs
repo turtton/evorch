@@ -75,6 +75,11 @@ impl RunTabs {
         self.tabs.get(&id)
     }
 
+    /// Every tab, those out of the dock too.
+    pub fn iter(&self) -> impl Iterator<Item = (RunTabId, &RunTab)> {
+        self.tabs.iter().map(|(id, tab)| (*id, tab))
+    }
+
     /// What the layout file keeps of the tabs, those out of the dock too: the pane each
     /// was opened from, the most recently opened first, and at most [`MAX_RESTORED`], so
     /// the tabs opened last are the ones that come back.

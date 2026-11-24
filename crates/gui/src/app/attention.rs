@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-#[path = "../model/ack.rs"]
-pub mod ack;
+pub use crate::panes::tab_attention::ack;
+pub(super) use crate::panes::tab_attention::{PaneAttention, acknowledged_attention};
 
 use egui::Color32;
 use event_bus::AgentRunPhase;
@@ -9,24 +9,9 @@ use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
 
 use super::WorkbenchState;
 use crate::model::tasks::{AgentRunSource, TaskRow};
+use crate::panes::tab_attention::thread_phase_attention;
+#[cfg(test)]
 use crate::theme::tokens::palette;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum PaneAttention {
-    None,
-    Info,
-    Error,
-}
-
-impl PaneAttention {
-    pub(super) fn color(self) -> Option<Color32> {
-        match self {
-            PaneAttention::None => None,
-            PaneAttention::Info => Some(palette().INFO),
-            PaneAttention::Error => Some(palette().ERROR_FG),
-        }
-    }
-}
 
 pub(super) struct AttentionInputs<'a> {
     pub phases: &'a BTreeMap<String, ThreadRunPhase>,
@@ -83,16 +68,6 @@ const fn agent_run_attention(phase: AgentRunPhase) -> PaneAttention {
             PaneAttention::Info
         }
         AgentRunPhase::Error => PaneAttention::Error,
-    }
-}
-
-const fn thread_phase_attention(phase: ThreadRunPhase) -> PaneAttention {
-    match phase {
-        ThreadRunPhase::Pending | ThreadRunPhase::Running => PaneAttention::None,
-        ThreadRunPhase::Done | ThreadRunPhase::Waiting | ThreadRunPhase::Stopped => {
-            PaneAttention::Info
-        }
-        ThreadRunPhase::Error => PaneAttention::Error,
     }
 }
 
@@ -243,16 +218,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         )
         .color()
     }
-}
-
-pub(super) fn acknowledged_attention(
-    acks: &BTreeMap<(PanelId, String), ack::AttentionAck>,
-    panel: &PanelId,
-) -> PaneAttention {
-    acks.iter()
-        .filter(|((id, _), ack)| id == panel && ack.is_unread())
-        .map(|(_, ack)| thread_phase_attention(ack.phase()))
-        .fold(PaneAttention::None, PaneAttention::max)
 }
 
 #[cfg(test)]

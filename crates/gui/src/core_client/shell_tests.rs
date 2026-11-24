@@ -1538,6 +1538,85 @@ mod run_tabs {
         assert!(screen.harness.query_by_label("Stop subagents").is_none());
         assert!(screen.harness.query_by_label("Stopped").is_none());
     }
+
+    // Given: run-1a's tab open in front of the Execution leaf, the window unfocused
+    // When: run-1a fails and the root run-1 is done, then the window gains focus
+    // Then: the run tab is flagged as an error, the Conversation and Notifications tabs
+    //       as info (Execution never), under their unchanged accessible names, until
+    //       drawn with focus; the pane shows the Failed badge, filled until read
+    #[test]
+    fn a_run_tab_flags_its_run_until_drawn_with_focus() {
+        use super::attention::flagged;
+        use crate::panes::tab_attention::PaneAttention;
+        use crate::theme::icons::{self, with_icon};
+        use workspace_ui::ThreadRunPhase;
+        let mut screen = with_subagent();
+        screen.open_subagent();
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("one run tab was expected");
+        };
+        let attention = |screen: &Screen, tab| screen.harness.state().attention.of(tab);
+        assert_eq!(attention(&screen, tab), PaneAttention::None);
+        let flagged_run = format!(
+            "• {}",
+            with_icon(icons::SCROLL, "Transcript: redirect-tester")
+        );
+        assert!(!flagged(&screen).contains(&flagged_run));
+        let CoreTab::Run(id) = tab else {
+            panic!("a run tab was expected");
+        };
+        let badge = |screen: &Screen| screen.harness.state().attention.run_phase(id);
+        assert!(screen.harness.query_by_label("Failed").is_none());
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            shared.cache.runs.get_mut("run-1a").unwrap().phase = RunPhase::Failed;
+            shared.cache.runs.get_mut("run-1").unwrap().phase = RunPhase::Done;
+        }
+        screen.harness.run_steps(2);
+        assert_eq!(attention(&screen, tab), PaneAttention::Error);
+        assert_eq!(
+            attention(&screen, CoreTab::Conversation),
+            PaneAttention::Info
+        );
+        let execution = CoreTab::Feature(FeatureId::Execution);
+        assert_eq!(attention(&screen, execution), PaneAttention::None);
+        let mut expected = vec![
+            flagged_run,
+            format!("• {}", with_icon(icons::CHAT_CIRCLE_TEXT, "Conversation")),
+            format!("• {}", with_icon(icons::BELL, "Notifications")),
+        ];
+        expected.sort();
+        assert_eq!(flagged(&screen), expected);
+        assert_eq!(badge(&screen), Some((ThreadRunPhase::Error, true)));
+        screen.harness.get_by_label("Failed");
+        for name in [
+            "Transcript: redirect-tester tab",
+            "Conversation tab",
+            "Notifications tab",
+        ] {
+            screen.harness.get_by_label(name);
+        }
+        screen.capture("attention");
+
+        screen
+            .harness
+            .input_mut()
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .focused = Some(true);
+        screen.harness.run_steps(2);
+        assert_eq!(attention(&screen, tab), PaneAttention::None);
+        assert_eq!(
+            attention(&screen, CoreTab::Conversation),
+            PaneAttention::None
+        );
+        assert!(flagged(&screen).is_empty(), "{:?}", flagged(&screen));
+        // The pane keeps its run's phase, outlined once read.
+        assert_eq!(badge(&screen), Some((ThreadRunPhase::Error, false)));
+        screen.harness.get_by_label("Failed");
+    }
 }
 
 mod local_panes {
@@ -1961,3 +2040,5 @@ index 1111111..2222222 100644
 }
 
 mod session;
+
+mod attention;

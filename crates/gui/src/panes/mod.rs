@@ -43,6 +43,7 @@ pub mod shell_jobs;
 pub mod sidebar;
 pub mod sidebar_widgets;
 pub mod system_footer;
+pub mod tab_attention;
 pub mod team;
 pub mod terminal;
 pub mod thread_search;

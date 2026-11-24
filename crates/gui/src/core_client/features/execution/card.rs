@@ -2,6 +2,7 @@
 use crate::panes::run_card_widgets::{
     RunCardHeader, open_pane_button, role_label, run_card as card, run_card_header, stop_run_button,
 };
+use crate::panes::tab_attention::run_phase;
 use crate::theme::text::muted;
 use crate::theme::tokens::{palette, phase_color, phase_label};
 use crate::theme::widgets::ghost;
@@ -9,7 +10,6 @@ use workbench_protocol::{
     namespaces::execution::{RunDetail, RunLifecycle, RunSource},
     views::{RunPhase, RunRole},
 };
-use workspace_ui::ThreadRunPhase;
 
 const DRILL_HINT: &str = "Show this run's subagents";
 
@@ -71,7 +71,7 @@ pub(super) fn status_text(run: &RunDetail) -> String {
     let status = if run.lifecycle == RunLifecycle::Recovering {
         "Waiting for recovery"
     } else {
-        phase_label(thread_phase(run.summary.phase))
+        phase_label(run_phase(run.summary.phase))
     };
     match run.source {
         RunSource::Live => status.to_owned(),
@@ -83,7 +83,7 @@ fn status_color(run: &RunDetail) -> egui::Color32 {
     if run.lifecycle == RunLifecycle::Recovering {
         palette().WARNING_FG
     } else {
-        phase_color(thread_phase(run.summary.phase))
+        phase_color(run_phase(run.summary.phase))
     }
 }
 
@@ -95,18 +95,6 @@ fn role_name(role: RunRole) -> &'static str {
         RunRole::Reviewer => "reviewer",
         RunRole::Advisor => "advisor",
         RunRole::Other => "other",
-    }
-}
-
-/// The core reports a stopped run as cancelled.
-fn thread_phase(phase: RunPhase) -> ThreadRunPhase {
-    match phase {
-        RunPhase::Pending => ThreadRunPhase::Pending,
-        RunPhase::Running => ThreadRunPhase::Running,
-        RunPhase::WaitingForUser | RunPhase::WaitingForApproval => ThreadRunPhase::Waiting,
-        RunPhase::Done => ThreadRunPhase::Done,
-        RunPhase::Failed => ThreadRunPhase::Error,
-        RunPhase::Cancelled => ThreadRunPhase::Stopped,
     }
 }
 
