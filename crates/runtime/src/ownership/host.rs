@@ -93,9 +93,8 @@ impl OwnerHost {
         check_socket_path(root, &socket)?;
         std::fs::create_dir_all(root)?;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
-        let listener = UnixListener::bind(&socket)?;
+        let listener = core_instance::bind_private_socket(&socket)?;
         listener.set_nonblocking(true)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let metadata = std::fs::symlink_metadata(&socket)?;
         let socket_identity = (metadata.dev(), metadata.ino());
         let mut registry = Registry::open(&root.join("owners.db"))?;
@@ -491,9 +490,8 @@ impl OwnerHost {
             false,
         )?;
         let socket = socket_path(&self.root, &self.owner_id)?;
-        let listener = UnixListener::bind(&socket)?;
+        let listener = core_instance::bind_private_socket(&socket)?;
         listener.set_nonblocking(true)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let metadata = std::fs::symlink_metadata(&socket)?;
         let socket_identity = (metadata.dev(), metadata.ino());
         let (stop, receiver) = mpsc::channel();

@@ -246,6 +246,10 @@ impl Shared {
     /// A command the writer had started on may have reached the core, so it
     /// becomes `OutcomeUnknown`; it is never resent. Everything else
     /// definitely did not run, or can be repeated safely.
+    ///
+    /// The state reads `Closed` before any request or subscription is settled,
+    /// so whoever sees a subscription end or a request fail because of the
+    /// close also sees why, and can tell a lost connection from an ended stream.
     pub(crate) fn close(&self, reason: TransportError) {
         let (pending, subscriptions) = {
             let mut state = self.lock();
@@ -253,6 +257,10 @@ impl Shared {
                 return;
             }
             state.closed = Some(reason.clone());
+            // Under the state lock: `submit` and `complete` fail callers once
+            // they read `closed`, so the state must already say so.
+            self.connection
+                .send_replace(ConnectionState::Closed(reason.clone()));
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.subscriptions),
@@ -270,8 +278,6 @@ impl Shared {
         for entry in subscriptions.into_values() {
             entry.finish(SubscriptionEnd::Disconnected);
         }
-        self.connection
-            .send_replace(ConnectionState::Closed(reason));
     }
 
     /// Unregister generation `generation` of `id`. Returns false, touching
@@ -813,5 +819,40 @@ mod tests {
         assert_eq!(*end.lock().unwrap(), Some(SubscriptionEnd::Disconnected));
         // Releasing after the close finds nothing to release and sends nothing.
         drop(parts);
+    }
+
+    /// A subscriber that sees its stream end must be able to tell a lost
+    /// connection from an ended stream, so the state reads `Closed` before the
+    /// subscription is finished. Holding the subscription's end slot stops the
+    /// close just as it would finish it; the state must already be `Closed`.
+    /// Were the order reversed, the close would wait on the held slot before
+    /// publishing `Closed`, and this test would never finish (the runner ends it).
+    #[test]
+    fn the_state_is_closed_before_a_subscription_ends_with_the_connection() {
+        let (shared, _outgoing) = shared();
+        let Ok(Ok(Completed::Subscription(parts))) =
+            shared.complete(PendingKind::Subscribe, started("live"))
+        else {
+            panic!("registration should succeed on a live connection");
+        };
+        let mut state = shared.connection.subscribe();
+        let ended = parts.end.lock().unwrap();
+        let closing = std::thread::spawn({
+            let shared = shared.clone();
+            move || shared.close(TransportError::Disconnected)
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(state.wait_for(|s| matches!(s, ConnectionState::Closed(_))))
+            .map(|_| ())
+            .unwrap();
+        assert_eq!(*ended, None, "the subscription is not finished yet");
+        drop(ended);
+        closing.join().unwrap();
+        assert_eq!(
+            *parts.end.lock().unwrap(),
+            Some(SubscriptionEnd::Disconnected)
+        );
     }
 }

@@ -10,7 +10,7 @@ recovery-test-support = []
 
 [dependencies]
 libc = "0.2"
-rustix = { version = "1", features = ["process", "fs"] }
+rustix = { version = "1", features = ["process", "fs", "net"] }
 sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
