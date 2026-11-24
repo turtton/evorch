@@ -12,7 +12,7 @@ use egui_kittest::kittest::Queryable;
 use gui::core_client::{
     CoreClientScreen, Shared,
     connection::{Action, serve},
-    features::{FeatureAction, FeatureView, Selection},
+    features::{FeatureAction, FeatureRequest, FeatureView, Selection},
 };
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::commands::{Command, ComposerRole, ContinueChat, SendChat, ThreadTarget};
@@ -434,6 +434,9 @@ const FRAME: f32 = 1.0 / 60.0;
 /// is queued, as inside [`Desktop::until`].
 const FRAMES_PER_FLUSH: usize = 2;
 
+/// How many frames a click waits at most for its target to hold still under the pointer.
+const SETTLE_FRAMES: usize = 10;
+
 /// How many frames in a row a wait draws, the screen asking for each at once, before it
 /// names itself as a wait that may never end.
 const FRAMES_BEFORE_NOTICE: usize = 1000;
@@ -454,6 +457,8 @@ struct Desktop {
     inbox: Option<tokio::sync::mpsc::Receiver<Action>>,
     /// The commands the page asked for and that were not sent (the page's own controls).
     commands: Vec<&'static str>,
+    /// The commands the features sent to the core, by name, for a wait's report.
+    sent: Vec<String>,
 }
 
 impl Desktop {
@@ -484,6 +489,7 @@ impl Desktop {
             actions,
             inbox: Some(inbox),
             commands: Vec::new(),
+            sent: Vec::new(),
         }
     }
 
@@ -528,6 +534,7 @@ impl Desktop {
             actions,
             inbox: None,
             commands: Vec::new(),
+            sent: Vec::new(),
         }
     }
 
@@ -539,6 +546,9 @@ impl Desktop {
         self.harness.run_steps(FRAMES_PER_FLUSH);
         let asked = std::mem::take(&mut *self.asked.lock().unwrap());
         for action in asked {
+            if let FeatureRequest::Command(command) = &action.request {
+                self.sent.push(command_name(command));
+            }
             self.actions.send(Action::Feature(action)).await.unwrap();
         }
         if let Some(inbox) = self.inbox.as_mut() {
@@ -629,13 +639,14 @@ impl Desktop {
         &self,
         waited_at: &std::panic::Location<'_>,
         drawn: Option<usize>,
-        told: &mut Option<(bool, String, Vec<&'static str>)>,
+        told: &mut Option<(bool, String, Vec<&'static str>, Vec<String>)>,
         always: bool,
     ) {
         let now = (
             drawn.is_none(),
             self.shared.lock().unwrap().status.clone(),
             self.commands.clone(),
+            self.sent.clone(),
         );
         if always || told.as_ref() != Some(&now) {
             let doing = match drawn {
@@ -643,8 +654,8 @@ impl Desktop {
                 None => "waits on the connection".to_owned(),
             };
             eprintln!(
-                "the wait at {waited_at} {doing}; status: {:?}; commands: {:?}",
-                now.1, now.2
+                "the wait at {waited_at} {doing}; status: {:?}; commands: {:?}; sent: {:?}",
+                now.1, now.2, now.3
             );
             *told = Some(now);
         }
@@ -663,7 +674,35 @@ impl Desktop {
     }
 
     async fn click(&mut self, label: &str) {
-        self.harness.get_by_label(label).click();
+        self.press(|d| d.harness.get_by_label(label).rect().center())
+            .await;
+    }
+
+    /// Clicks where `at` finds the target once it holds still. A click queued at a centre
+    /// measured in the frame before lands wherever that point is when it is pressed, and a
+    /// reply arriving in between may move the layout (a line above appearing or going), so
+    /// the pointer rests on the target, re-measured each frame, until it stays put, and is
+    /// pressed there; pressing elsewhere than it rests would drag the column instead.
+    async fn press(&mut self, at: impl Fn(&Desktop) -> egui::Pos2) {
+        let mut pos = at(self);
+        for _ in 0..SETTLE_FRAMES {
+            self.harness.hover_at(pos);
+            self.harness.step();
+            let now = at(self);
+            if now == pos {
+                break;
+            }
+            pos = now;
+        }
+        for pressed in [true, false] {
+            self.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            self.harness.step();
+        }
         self.flush().await;
     }
 
@@ -688,10 +727,13 @@ impl Desktop {
     }
 
     async fn click_button(&mut self, label: &str) {
-        self.harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, label)
-            .click();
-        self.flush().await;
+        self.press(|d| {
+            d.harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, label)
+                .rect()
+                .center()
+        })
+        .await;
     }
 
     /// The window the screens are drawn in.
@@ -1939,4 +1981,14 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
     for run in kids.into_iter().chain([world.lead]) {
         let _ = world.boot.runtime.cancel(run);
     }
+}
+
+/// A command's name, such as `ResumeLaneDeliveries`, for a wait's report.
+fn command_name(command: &Command) -> String {
+    let debug = format!("{command:?}");
+    debug
+        .split(['(', ' ', '{'])
+        .nth(1)
+        .unwrap_or(&debug)
+        .to_owned()
 }

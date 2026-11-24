@@ -1304,6 +1304,14 @@ fn an_empty_thread_and_no_thread_read_like_the_subagents_column() {
     answer(&mut rooted, runs_tag(&first), runs_reply(vec![], false));
     rooted.get_by_label("No subagents of this run");
     assert!(rooted.query_by_label("Root").is_none());
+
+    // A run change re-reads the listing; the line stays while it is read, so what is
+    // drawn below it does not move.
+    run_changed(&mut rooted);
+    let again = asked(&mut rooted);
+    rooted.get_by_label("No subagents of this run");
+    answer(&mut rooted, runs_tag(&again), runs_reply(vec![], false));
+    rooted.get_by_label("No subagents of this run");
 }
 
 // Given: t1's current root without subagents, and an earlier root whose subagent runs

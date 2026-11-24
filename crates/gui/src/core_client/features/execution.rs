@@ -395,7 +395,8 @@ impl ExecutionFeature {
         if !self.path.is_empty() {
             self.draw_path(ui);
         }
-        if self.runs.is_empty() && !self.runs_stale && self.runs_read.is_none() {
+        let read_once = self.loaded_pages > 0;
+        if self.runs.is_empty() && (read_once || (!self.runs_stale && self.runs_read.is_none())) {
             ui.label(muted("No subagents of this run"));
         }
         let mut drill = None;
