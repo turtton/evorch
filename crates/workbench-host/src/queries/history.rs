@@ -28,6 +28,8 @@ struct Entry {
 struct Retained {
     entries: VecDeque<Entry>,
     bytes: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    history_route: Option<super::HistoryRoute>,
 }
 #[derive(Default)]
 pub(crate) struct Bodies(Mutex<Retained>);
@@ -35,6 +37,10 @@ impl Bodies {
     #[cfg(any(test, feature = "test-support"))]
     pub fn retained(&self) -> usize {
         self.0.lock().unwrap().entries.len()
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn history_route(&self) -> Option<super::HistoryRoute> {
+        self.0.lock().unwrap().history_route.clone()
     }
     fn register(
         &self,
@@ -183,54 +189,58 @@ impl Bodies {
         pager: &Pager,
         q: &ReadCommittedHistory,
     ) -> Result<Page<CommittedMessage>, WorkbenchError> {
-        let (runs, latest) = runtime
-            .with_storage_reader(|db| {
-                if db.thread(q.thread.as_str())?.is_none() {
-                    return Ok(None);
-                }
-                let runs: Vec<_> = db
-                    .runs_of_thread(q.thread.as_str())?
-                    .into_iter()
-                    .map(|r| r.run_id)
-                    .filter(|r| q.run.as_ref().is_none_or(|id| id.as_str() == r))
-                    .collect();
-                if q.run.is_some() && runs.is_empty() {
-                    return Ok(None);
-                }
-                Ok(Some((runs, db.last_event_id()?)))
-            })
-            .map_err(storage_error)?
-            .flatten()
-            .ok_or_else(|| error(ErrorCode::NotFound, "unknown thread or run"))?;
-        // Bind the frozen event cut to its live run membership too: deletion
-        // must revoke a cursor rather than shift the remaining message offsets.
         let key = format!(
-            "history:{:?}:{}:{:?}:{}",
+            "history:{:?}:{}:{:?}",
             q.direction,
             q.thread.as_str(),
-            q.run,
-            super::revision(&runs).get()
+            q.run
         );
-        let high_water = pager
-            .cursor_revision(&key, &q.page)?
-            .map_or(latest, |r| r.get() as i64);
-        let raw = runtime
-            .with_storage_reader(|db| committed_messages(db, &runs, high_water))
+        let read = runtime
+            .with_storage_reader(|db| Ok(read_history(db, pager, q, &key)))
             .map_err(storage_error)?
-            .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))?;
-        // Retention can remove rows below the frozen cut. Bind their deferred
-        // descriptors as well, without ever loading the referenced blobs.
-        let key = format!("{key}#{}", super::revision(&raw).get());
-        // Page the tokenized records before resolving or registering any bodies.
-        let page = match q.direction {
-            workbench_protocol::queries::HistoryDirection::Forward => {
-                pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
+            .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))??;
+        let (page, reason) = match read {
+            HistoryRead::Indexed {
+                page,
+                high_water,
+                freeze,
+            } => {
+                let next_cursor = page
+                    .next
+                    .map(|boundary| pager.history_next(&key, high_water, boundary, freeze));
+                (
+                    Page {
+                        items: page.items.into_iter().map(RawMessage::from).collect(),
+                        next_cursor,
+                        snapshot_revision: Revision(high_water as u64),
+                    },
+                    None,
+                )
             }
-            workbench_protocol::queries::HistoryDirection::Backward => {
-                pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
+            HistoryRead::Legacy {
+                runs,
+                high_water,
+                key,
+                reason,
+            } => {
+                let raw = runtime
+                    .with_storage_reader(|db| committed_messages(db, &runs, high_water))
+                    .map_err(storage_error)?
+                    .ok_or_else(|| error(ErrorCode::NotFound, "history is unavailable"))?;
+                let key = format!("{key}#{}", super::revision(&raw).get());
+                let page = match q.direction {
+                    workbench_protocol::queries::HistoryDirection::Forward => {
+                        pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
+                    }
+                    workbench_protocol::queries::HistoryDirection::Backward => {
+                        pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
+                    }
+                };
+                (page, Some(reason))
             }
         };
-        Ok(Page {
+        // The read snapshot is closed before selected bodies enter the capability cache.
+        let result = Page {
             items: page
                 .items
                 .into_iter()
@@ -238,9 +248,120 @@ impl Bodies {
                 .collect(),
             next_cursor: page.next_cursor,
             snapshot_revision: page.snapshot_revision,
-        })
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.0.lock().unwrap().history_route = Some(match reason {
+                None => super::HistoryRoute::Indexed,
+                Some(reason) => super::HistoryRoute::Legacy(reason),
+            });
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = reason;
+        Ok(result)
     }
 }
+enum HistoryRead {
+    Indexed {
+        page: storage::history::read::HistoryPage,
+        high_water: i64,
+        freeze: [u8; 32],
+    },
+    Legacy {
+        runs: Vec<String>,
+        high_water: i64,
+        key: String,
+        reason: &'static str,
+    },
+}
+
+fn read_history(
+    db: &storage::Database,
+    pager: &Pager,
+    q: &ReadCommittedHistory,
+    key: &str,
+) -> Result<HistoryRead, WorkbenchError> {
+    use super::HistoryCursor;
+    use storage::history::read::{Availability, Direction};
+    let snapshot = db
+        .history_snapshot(q.thread.as_str(), q.run.as_ref().map(|r| r.as_str()))
+        .map_err(storage_error)?
+        .ok_or_else(|| error(ErrorCode::NotFound, "unknown thread or run"))?;
+    let cursor = pager.history_cursor(key, &q.page)?;
+    let legacy_key = format!("{key}:{}", super::revision(&snapshot.runs).get());
+    let high_water = match &cursor {
+        Some(HistoryCursor::Legacy(revision)) => {
+            pager.cursor_revision(&legacy_key, &q.page)?;
+            revision.get() as i64
+        }
+        Some(HistoryCursor::Indexed { high_water, .. }) => *high_water,
+        None => snapshot.latest,
+    };
+    q.page.validate()?;
+    if matches!(cursor, Some(HistoryCursor::Legacy(_))) {
+        return Ok(HistoryRead::Legacy {
+            runs: snapshot.runs.clone(),
+            high_water,
+            key: legacy_key,
+            reason: "legacy_cursor",
+        });
+    }
+    let direction = match q.direction {
+        workbench_protocol::queries::HistoryDirection::Forward => Direction::Forward,
+        workbench_protocol::queries::HistoryDirection::Backward => Direction::Backward,
+    };
+    let prepared = snapshot
+        .prepare(high_water, direction)
+        .map_err(storage_error)?;
+    let prepared = match prepared {
+        Availability::Indexed(prepared) => prepared,
+        Availability::Legacy(reason) => {
+            if cursor.is_some() {
+                return Err(error(
+                    ErrorCode::Conflict,
+                    "history index is no longer available",
+                ));
+            }
+            return Ok(HistoryRead::Legacy {
+                runs: snapshot.runs.clone(),
+                high_water,
+                key: legacy_key,
+                reason,
+            });
+        }
+    };
+    let boundary = match &cursor {
+        Some(HistoryCursor::Indexed {
+            boundary, freeze, ..
+        }) => {
+            if *freeze != prepared.freeze {
+                return Err(error(ErrorCode::Conflict, "history snapshot changed"));
+            }
+            Some(boundary)
+        }
+        _ => None,
+    };
+    let page = prepared
+        .page(
+            direction,
+            boundary,
+            q.page.limit as usize,
+            super::PAGE_BYTES,
+        )
+        .map_err(storage_error)?;
+    if page.oversized {
+        return Err(error(
+            ErrorCode::InvalidRequest,
+            "one view exceeds page byte limit",
+        ));
+    }
+    Ok(HistoryRead::Indexed {
+        page,
+        high_water,
+        freeze: prepared.freeze,
+    })
+}
+
 #[cfg(test)]
 fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
     storage::history::committed_text(kind).map(|(run, role, text)| (run, message_role(role), text))
@@ -308,6 +429,20 @@ struct RawMessage {
 struct InputBody {
     id: String,
     bytes: u64,
+}
+impl From<storage::history::read::Descriptor> for RawMessage {
+    fn from(value: storage::history::read::Descriptor) -> Self {
+        Self {
+            run: value.run,
+            index: value.index,
+            role: message_role(value.role),
+            parts: value.parts,
+            input: value.input.map(|i| InputBody {
+                id: i.id,
+                bytes: i.bytes,
+            }),
+        }
+    }
 }
 type PendingParts = storage::history::PendingParts;
 type Digest = [u8; 32];
@@ -920,5 +1055,7 @@ fn committed_messages(
     Ok(ordered.into_iter().map(|(_, message)| message).collect())
 }
 
+#[cfg(test)]
+mod paging_tests;
 #[cfg(test)]
 mod tests;

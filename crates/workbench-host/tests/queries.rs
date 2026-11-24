@@ -1,4 +1,5 @@
 mod common;
+mod history_paging;
 
 use event_bus::{Event, MessageEvent, UserQuestion};
 use runtime::AgentRuntime;
