@@ -408,3 +408,35 @@ fn large_inputs_keep_only_references_and_do_not_read_full_bodies() {
     assert!(page.items[1].parts.is_empty());
     assert_eq!(bodies.counts(), Default::default());
 }
+
+#[test]
+fn page_seek_query_plans_use_composite_keys_without_event_scans_or_sorts() {
+    let db = Database::open_in_memory().unwrap();
+    scope(&db);
+    answer(&db, 10, "answer");
+    for sql in [
+        "SELECT output_event_id,ordinal,role,encoded_len FROM history_messages WHERE run_id=?1 AND output_event_id>?2 AND output_event_id<=?3 ORDER BY output_event_id LIMIT 1",
+        "SELECT event_id,after_count,merge_max FROM history_event_cuts WHERE run_id=?1 AND event_id>=?2 AND event_id<=?3 ORDER BY event_id DESC LIMIT 1",
+        "SELECT event_id,before_count FROM history_event_cuts WHERE run_id=?1 AND merge_max>=?2 AND event_id<=?3 ORDER BY merge_max,event_id LIMIT 1",
+        "SELECT event_id FROM history_message_sources WHERE run_id=?1 AND output_event_id=?2 AND part_index<?3 ORDER BY part_index",
+    ] {
+        let plans: Vec<String> = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params!["run", 0i64, i64::MAX], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plans.iter().any(|p| p.contains("SEARCH history_")),
+            "{plans:?}"
+        );
+        assert!(
+            plans
+                .iter()
+                .all(|p| !p.contains("SCAN history_") && !p.contains("TEMP B-TREE")),
+            "{plans:?}"
+        );
+    }
+}

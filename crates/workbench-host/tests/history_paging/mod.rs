@@ -339,6 +339,37 @@ fn handle_query_work_depends_on_page_not_history_in_both_directions() {
     for n in [100, 1000] {
         for i in observations.last().map_or(0, |_| 100)..n {
             append(&f, &format!("answer-{i}"));
+            // Neither ignored source rows nor incomplete responses may turn
+            // the page read into a history-length scan.
+            for event in [
+                MessageEvent::ReasoningDelta {
+                    run_id: Some("run-1".into()),
+                    delta: "ignored".into(),
+                },
+                MessageEvent::FinalResultPublished {
+                    run_id: "run-1".into(),
+                    text: format!("answer-{i}"),
+                },
+                MessageEvent::MessagePart {
+                    run_id: "run-1".into(),
+                    response_id: format!("pending-{i}"),
+                    index: 0,
+                    total: 2,
+                    text: "unfinished".into(),
+                },
+            ] {
+                f.store
+                    .handle()
+                    .append_event(None, &Event::new(event))
+                    .unwrap();
+            }
+        }
+        if observations.is_empty() {
+            let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+            let accepted: i64 = db.query_row("SELECT wall_clock_ns FROM events WHERE run_id='run-1' AND subkind='MessageCompleted' ORDER BY id LIMIT 1 OFFSET 49", [], |r| r.get(0)).unwrap();
+            for i in 0..10 {
+                db.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,acceptance_seq) VALUES (?1,'run-1','run-1','input','delivered',?2,0,?3)", rusqlite::params![format!("fixed-{i}"), accepted, i+1]).unwrap();
+            }
         }
         let mut ends = Vec::new();
         for direction in [HistoryDirection::Forward, HistoryDirection::Backward] {
@@ -347,8 +378,9 @@ fn handle_query_work_depends_on_page_not_history_in_both_directions() {
             assert_eq!(count.payload_decodes, 10);
             assert_eq!(count.source_references, 10);
             assert_eq!(count.fullscan_steps, 0);
-            // Receipt SQL retains its one empty sorter; no event sort occurs.
-            assert_eq!(count.sorts, 1);
+            // Receipt ordering / first-in-run retain two bounded sorters;
+            // neither scans the events or pending-parts history.
+            assert_eq!(count.sorts, 2);
             assert!(count.message_headers <= 12);
             let (middle, mid) = measured(&f, direction, first.next_cursor, 10);
             assert_eq!(middle.items.len(), 10);
@@ -363,6 +395,7 @@ fn handle_query_work_depends_on_page_not_history_in_both_directions() {
         assert_eq!(small.0, large.0);
         assert_eq!(small.1, large.1);
     }
+    eprintln!("HISTORY_SCALE N100/N1000 fixed I10: {observations:?}");
     let (_, larger) = measured(&f, HistoryDirection::Backward, None, 50);
     assert_eq!(larger.payload_decodes, 50);
     assert_eq!(larger.source_references, 50);
@@ -389,6 +422,7 @@ fn handle_query_work_depends_on_page_not_history_in_both_directions() {
 fn handle_query_accounts_for_runs_receipts_fingerprint_bytes_and_all_status_cost() {
     let f = current_thread_fixture();
     append(&f, "one");
+    let (_, one_run) = measured(&f, HistoryDirection::Forward, None, 10);
     let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
     for i in 1..624 {
         db.execute("INSERT INTO thread_runs(thread_id,run_id,root_run_id,depth) VALUES ('thread-1',?1,'run-1',1)", [format!("child-{i}")]).unwrap();
@@ -397,6 +431,10 @@ fn handle_query_accounts_for_runs_receipts_fingerprint_bytes_and_all_status_cost
     assert_eq!(runs.payload_decodes, 1);
     assert_eq!(runs.message_headers, 1);
     assert_eq!(runs.cut_headers, 1);
+    assert!(
+        runs.vm_steps > one_run.vm_steps,
+        "run discovery remains an explicit R cost"
+    );
     for i in 0..10 {
         db.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,acceptance_seq) VALUES (?1,'run-1','run-1',?2,'delivered',0,0,?3)",
             rusqlite::params![format!("input-{i}"), "a".repeat(100), i + 1]).unwrap();
@@ -420,6 +458,9 @@ fn handle_query_accounts_for_runs_receipts_fingerprint_bytes_and_all_status_cost
     assert!(
         all_status.vm_steps > bytes.vm_steps,
         "first_in_run retains the all-status M cost"
+    );
+    eprintln!(
+        "HISTORY_SCALE R1={one_run:?} R624={runs:?} I10={inputs:?} bytes10000={bytes:?} M1010={all_status:?}"
     );
 }
 
