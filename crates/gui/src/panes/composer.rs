@@ -1,6 +1,7 @@
 //! Composer strip rendering and action reporting without dispatch.
 
-use crate::model::composer::{CompletionItem, CompletionKind, ComposerModel};
+use crate::model::composer::{CompletionItem, ComposerModel};
+use crate::panes::completion_widgets::{completion_keys, completion_list};
 use crate::panes::transcript_widgets::{ime_composing, stop_button};
 use crate::theme::icons;
 use crate::theme::tokens::{
@@ -115,7 +116,8 @@ pub fn composer_strip_within(
             model.completion_selected = model.completion_selected.min(items.len().saturating_sub(1));
             // The workbench clears `model.focused` before rendering; egui keeps the real focus.
             let focused = ui.memory(|memory| memory.has_focus(input_id));
-            if let Some(item) = completion_keys(ui, model, &items, ime_composing, focused) {
+            let tabs = std::mem::take(&mut model.tab_presses);
+            if let Some(item) = completion_keys(ui, &items, &model.input, &mut model.completion_selected, tabs, ime_composing, focused) {
                 action = Some(ComposerAction::Complete(item));
             }
             if let Some(item) = completion_list(ui, &items, model.completion_selected) {
@@ -231,89 +233,6 @@ pub fn composer_strip_within(
         input_viewport: viewport,
         input_wanted: measured,
     }
-}
-
-/// Tab / Shift+Tab and arrows cycle the highlight, Tab accepts a sole
-/// candidate, and Enter accepts only when that changes the draft, so a fully
-/// typed `/new` still sends.
-fn completion_keys(
-    ui: &mut egui::Ui,
-    model: &mut ComposerModel,
-    items: &[CompletionItem],
-    ime_composing: bool,
-    focused: bool,
-) -> Option<CompletionItem> {
-    let tabs = std::mem::take(&mut model.tab_presses);
-    if items.is_empty() || ime_composing {
-        return None;
-    }
-    let len = items.len();
-    let mut selected = model.completion_selected;
-    let mut accept = len == 1 && tabs.iter().any(|shift| !shift);
-    if len > 1 {
-        for shift in tabs {
-            selected = if shift {
-                (selected + len - 1) % len
-            } else {
-                (selected + 1) % len
-            };
-        }
-    }
-    if focused && !accept {
-        ui.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                selected = (selected + 1) % len;
-            }
-            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                selected = (selected + len - 1) % len;
-            }
-            accept = items[selected].changes(&model.input)
-                && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-        });
-    }
-    model.completion_selected = selected;
-    accept.then(|| items[selected].clone())
-}
-
-fn completion_list(
-    ui: &mut egui::Ui,
-    items: &[CompletionItem],
-    selected: usize,
-) -> Option<CompletionItem> {
-    let mut picked = None;
-    for (index, item) in items.iter().enumerate() {
-        ui.push_id(("completion", index), |ui| {
-            ui.horizontal(|ui| {
-                let icon = match item.kind {
-                    CompletionKind::Command => icons::TERMINAL_WINDOW,
-                    CompletionKind::File => icons::FILE,
-                    CompletionKind::Dir => icons::FOLDER,
-                    CompletionKind::Skill => icons::SPARKLE,
-                };
-                ui.label(egui::RichText::new(icon).color(palette().TEXT_MUTED));
-                // The theme's selection fill hides default text; keep the label legible.
-                let response = ui.selectable_label(
-                    index == selected,
-                    egui::RichText::new(&item.label).color(palette().TEXT),
-                );
-                if index == selected {
-                    response.scroll_to_me(None);
-                }
-                if response.clicked() {
-                    picked = Some(item.clone());
-                }
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&item.detail)
-                            .small()
-                            .color(palette().TEXT_MUTED),
-                    )
-                    .truncate(),
-                );
-            });
-        });
-    }
-    picked
 }
 
 #[cfg(test)]

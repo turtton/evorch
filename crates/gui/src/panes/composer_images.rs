@@ -1,53 +1,34 @@
 //! Metadata-only generic attachment cards. Loading, clipboard access and upload
 //! happen in workers; corrupt images are valid files and never decoded here.
 use crate::model::composer::{AttachmentUploadState, ComposerModel};
+use crate::panes::attachment_widgets::{
+    AttachmentRowStatus, AttachmentRowView, attach_files_button, attachment_rows, preparing,
+};
 
 pub(super) fn render(ui: &mut egui::Ui, model: &mut ComposerModel) {
-    if ui
-        .button("Attach files…")
-        .on_hover_text("Choose ordinary files (up to 8 MiB each)")
-        .clicked()
-    {
+    if attach_files_button(ui).clicked() {
         model.pick_attachments = true;
     }
-    if model.attachment_imports != 0 {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(format!(
-                "Preparing {} attachment(s)…",
-                model.attachment_imports
-            ));
-        });
-    }
-    let mut remove = None;
-    for (index, attachment) in model.attachments.iter().enumerate() {
-        ui.push_id(&attachment.file.draft_id, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&attachment.file.filename);
-                ui.small(format!(
-                    "{} · {} bytes",
-                    attachment.file.media_type,
-                    attachment.file.bytes.len()
-                ));
-                match &attachment.upload {
-                    AttachmentUploadState::Pending | AttachmentUploadState::Uploading => {
-                        ui.spinner();
-                        ui.small("Uploading…");
-                    }
-                    AttachmentUploadState::Ready(_) => {
-                        ui.small("Ready");
-                    }
-                    AttachmentUploadState::Failed(error) => {
-                        ui.colored_label(crate::theme::tokens::palette().WARNING_FG, error);
-                    }
+    preparing(ui, model.attachment_imports);
+    let rows: Vec<_> = model
+        .attachments
+        .iter()
+        .map(|attachment| AttachmentRowView {
+            key: &attachment.file.draft_id,
+            filename: &attachment.file.filename,
+            media_type: &attachment.file.media_type,
+            bytes: attachment.file.bytes.len(),
+            status: match &attachment.upload {
+                AttachmentUploadState::Pending | AttachmentUploadState::Uploading => {
+                    AttachmentRowStatus::Uploading
                 }
-                if ui.small_button("Remove").clicked() {
-                    remove = Some(index);
-                }
-            });
-        });
-    }
-    if let Some(index) = remove {
+                AttachmentUploadState::Ready(_) => AttachmentRowStatus::Ready,
+                AttachmentUploadState::Failed(error) => AttachmentRowStatus::Failed(error),
+            },
+            removable: true,
+        })
+        .collect();
+    if let Some(index) = attachment_rows(ui, &rows) {
         model.remove_attachment(index);
     }
 }

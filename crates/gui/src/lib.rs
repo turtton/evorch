@@ -15,6 +15,7 @@ pub mod app;
 pub mod attachments;
 pub mod body;
 pub mod browser;
+pub mod composer_input;
 pub mod core_client;
 pub mod diff;
 pub mod dock;

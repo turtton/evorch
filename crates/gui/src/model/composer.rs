@@ -10,11 +10,9 @@ pub use mention::{
 };
 pub use role::ComposerRole;
 
-pub struct SlashCommandSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub argument_hint: Option<&'static str>,
-}
+pub use crate::composer_input::slash::{
+    ComposerInput, SLASH_COMMANDS, SlashCommandSpec, completions, help_text, parse_input,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalSlashCommand {
@@ -73,51 +71,6 @@ impl SlashCommandRegistry {
     }
 }
 
-const GOAL_COMMAND: SlashCommandSpec = SlashCommandSpec {
-    name: "goal",
-    description: "Track an objective in this conversation",
-    argument_hint: Some("<text>"),
-};
-
-pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
-    SlashCommandSpec {
-        name: "team",
-        description: "Submit a team goal with explicit delegation value",
-        argument_hint: Some("<delegation value> | <goal>"),
-    },
-    GOAL_COMMAND,
-    SlashCommandSpec {
-        name: "help",
-        description: "Show available commands",
-        argument_hint: None,
-    },
-    SlashCommandSpec {
-        name: "new",
-        description: "Start a new thread",
-        argument_hint: None,
-    },
-    SlashCommandSpec {
-        name: "compaction",
-        description: "Request context compaction at the next turn boundary",
-        argument_hint: None,
-    },
-    SlashCommandSpec {
-        name: "continue",
-        description: "Resume the current conversation after a stop or error",
-        argument_hint: None,
-    },
-    SlashCommandSpec {
-        name: "run",
-        description: "Start a background run without opening a pane",
-        argument_hint: Some("<text>"),
-    },
-    SlashCommandSpec {
-        name: "btw",
-        description: "Ask a side question without adding to the conversation",
-        argument_hint: Some("<question>"),
-    },
-];
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttachmentUploadState {
     Pending,
@@ -150,63 +103,6 @@ impl AttachmentDraft {
             _ => None,
         }
     }
-}
-
-pub enum ComposerInput<'a> {
-    Empty,
-    Chat(&'a str),
-    Command {
-        spec: &'static SlashCommandSpec,
-        args: &'a str,
-    },
-    UnknownCommand {
-        name: &'a str,
-    },
-}
-
-pub fn parse_input(raw: &str) -> ComposerInput<'_> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return ComposerInput::Empty;
-    }
-    let Some(command) = trimmed.strip_prefix('/') else {
-        return ComposerInput::Chat(trimmed);
-    };
-    let (name, rest) = command
-        .split_once(char::is_whitespace)
-        .unwrap_or((command, ""));
-    match SLASH_COMMANDS.iter().find(|spec| spec.name == name) {
-        Some(spec) => ComposerInput::Command {
-            spec,
-            args: rest.trim(),
-        },
-        None => ComposerInput::UnknownCommand { name },
-    }
-}
-
-pub fn completions(raw: &str) -> Vec<&'static SlashCommandSpec> {
-    let Some(prefix) = raw.strip_prefix('/') else {
-        return Vec::new();
-    };
-    if prefix.contains(char::is_whitespace) {
-        return Vec::new();
-    }
-    SLASH_COMMANDS
-        .iter()
-        .filter(|spec| spec.name.starts_with(prefix))
-        .collect()
-}
-
-/// Lists commands in declaration order, without a trailing newline.
-pub fn help_text() -> String {
-    SLASH_COMMANDS
-        .iter()
-        .map(|spec| match spec.argument_hint {
-            Some(hint) => format!("/{} {hint} — {}", spec.name, spec.description),
-            None => format!("/{} — {}", spec.name, spec.description),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub const PROVIDER_MISSING_GUIDANCE: &str = "No provider configured yet — open Settings to add an openai-compatible provider. /goal and /help still work.";
@@ -301,16 +197,7 @@ impl ComposerModel {
         let whole = 0..self.input.len();
         let commands: Vec<_> = completions(&self.input)
             .into_iter()
-            .map(|spec| CompletionItem {
-                kind: CompletionKind::Command,
-                label: match spec.argument_hint {
-                    Some(hint) => format!("/{} {hint}", spec.name),
-                    None => format!("/{}", spec.name),
-                },
-                detail: spec.description.into(),
-                range: whole.clone(),
-                replacement: format!("/{} ", spec.name),
-            })
+            .map(|spec| crate::composer_input::slash::slash_item(spec, whole.clone()))
             .chain(
                 self.registry
                     .completions(&self.input)
@@ -333,25 +220,13 @@ impl ComposerModel {
     }
 
     pub fn mention_query(&self) -> Option<MentionQuery<'_>> {
-        let cursor = self
-            .cursor
-            .and_then(|chars| self.input.char_indices().nth(chars).map(|(byte, _)| byte))
-            .unwrap_or(self.input.len());
-        mention_at(&self.input, cursor)
+        crate::composer_input::mention_query(&self.input, self.cursor)
     }
 
     pub fn apply_completion(&mut self, item: &CompletionItem) {
-        let Some(range) = self
-            .input
-            .get(item.range.clone())
-            .map(|_| item.range.clone())
-        else {
+        let Some(cursor) = crate::composer_input::apply_completion(&mut self.input, item) else {
             return;
         };
-        self.input.replace_range(range.clone(), &item.replacement);
-        let cursor = self.input[..range.start + item.replacement.len()]
-            .chars()
-            .count();
         self.cursor = Some(cursor);
         self.pending_cursor = Some(cursor);
         self.completion_selected = 0;

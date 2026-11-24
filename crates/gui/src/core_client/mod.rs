@@ -453,12 +453,17 @@ impl CoreClientScreen {
         self
     }
 
-    /// Before egui reads the input of a frame: a focused terminal takes the keys.
+    /// Before egui reads the input of a frame: a focused terminal takes the keys, a
+    /// focused composer Tab and the pasted or dropped files.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
         let keymap = &self.keymap;
         self.local.capture_input(raw_input, |key, modifiers| {
             keymap.passes_through_terminal(key, modifiers)
         });
+        if !self.local.terminals.focused {
+            let (project, thread) = (self.project.as_ref(), self.selected.as_ref());
+            self.conversation.capture_input(raw_input, project, thread);
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -638,6 +643,9 @@ fn restore_selection(
     apply_navigation(tx, shared, project, selected, navigation);
 }
 
+pub(crate) const WAIT_FOR_SEND_TO_ATTACH: &str =
+    "Wait for the message to be sent before attaching files";
+
 /// Register local input before making it visible to the asynchronous actor.
 pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, action: Action) {
     match &action {
@@ -657,6 +665,7 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             ..
         } => {
             if shared.sending.contains(thread.as_str()) {
+                WAIT_FOR_SEND_TO_ATTACH.clone_into(&mut shared.status);
                 return;
             }
             let drafts = shared.attachment_drafts.get(thread.as_str());
@@ -729,7 +738,11 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
 }
 
 impl eframe::App for CoreClientApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.screen
+            .conversation
+            .attachment_io
+            .configure_window(frame);
         self.screen.logic(ctx);
     }
 
@@ -743,6 +756,8 @@ impl eframe::App for CoreClientApp {
 
     /// As the window closes, before the connection is shut down.
     fn on_exit(&mut self) {
+        // The clipboard worker holds the window's display, which closes with it.
+        self.screen.conversation.attachment_io.shutdown_clipboard();
         self.screen.save_state();
     }
 }
@@ -878,6 +893,7 @@ impl CoreClientScreen {
             })
             .flatten();
         self.local.begin_frame(ui.ctx(), roots, projects);
+        self.conversation.begin_frame();
         let link_base = self.local.workspace().map(std::path::Path::to_path_buf);
         let frame = {
             let s = &mut *shared;
@@ -920,6 +936,7 @@ impl CoreClientScreen {
                 .show_inside(ui, &mut viewer);
             pass.finish(ui)
         };
+        self.conversation.end_frame();
         self.window_rects.track(&self.dock, ui.ctx());
         if !frame.lanes.is_empty() || !frame.pull_requests.is_empty() {
             // What a lane menu chose is sent in the lanes feature's next pass.
@@ -1096,24 +1113,19 @@ fn apply_effect(
                     );
                 }
             }
-            shell::Effect::DiscardAttachments(thread) => {
-                for file in shared
-                    .take_attachment_drafts(thread.as_str())
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(id) = file.upload_id {
-                        enqueue(
-                            actions,
-                            shared,
-                            Action::Command {
-                                command: Command::Conversation(
-                                    ConversationCommand::DiscardAttachment { attachment_id: id },
-                                ),
-                                draft: None,
-                            },
-                        );
-                    }
+            shell::Effect::RemoveAttachment { thread, id } => {
+                if let Some(Some(upload)) = shared.remove_attachment_draft(thread.as_str(), &id) {
+                    let command = Command::Conversation(ConversationCommand::DiscardAttachment {
+                        attachment_id: upload,
+                    });
+                    enqueue(
+                        actions,
+                        shared,
+                        Action::Command {
+                            command,
+                            draft: None,
+                        },
+                    );
                 }
             }
         }

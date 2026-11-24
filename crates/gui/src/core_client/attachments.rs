@@ -117,3 +117,90 @@ impl ClientAttachmentDraft {
         Ok(())
     }
 }
+
+impl super::Shared {
+    /// Whether the file `id` of `thread` may be removed now: not while the thread's
+    /// message is being sent, nor while the file's upload awaits its reply.
+    pub fn can_remove_attachment(&self, thread: &str, id: &str) -> bool {
+        !self.sending.contains(thread)
+            && self
+                .attachment_drafts
+                .get(thread)
+                .and_then(|drafts| drafts.iter().find(|draft| draft.id == id))
+                .is_some_and(|draft| !draft.uploading)
+    }
+
+    /// Removes the file `id` from `thread`'s pending attachments. `None` when it is
+    /// refused (see [`Self::can_remove_attachment`]) or gone; otherwise the core's
+    /// upload of it, if one began, which is the caller's to discard.
+    pub fn remove_attachment_draft(
+        &mut self,
+        thread: &str,
+        id: &str,
+    ) -> Option<Option<AttachmentId>> {
+        if !self.can_remove_attachment(thread, id) {
+            return None;
+        }
+        let drafts = self.attachment_drafts.get_mut(thread)?;
+        let position = drafts.iter().position(|draft| draft.id == id)?;
+        let removed = drafts.remove(position);
+        if drafts.is_empty() {
+            self.attachment_drafts.remove(thread);
+        }
+        Some(removed.upload_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Shared;
+    use super::*;
+
+    fn draft(id: &str, uploading: bool, upload_id: Option<&str>) -> ClientAttachmentDraft {
+        let mut draft = ClientAttachmentDraft::new(
+            ProjectId::new("p").unwrap(),
+            AttachmentFile {
+                draft_id: id.into(),
+                filename: format!("{id}.txt"),
+                media_type: "text/plain".into(),
+                bytes: b"hello".to_vec(),
+            },
+        );
+        draft.uploading = uploading;
+        draft.upload_id = upload_id.map(|id| AttachmentId::new(id).unwrap());
+        draft
+    }
+
+    // Given: a thread with an uploaded file, a file whose upload awaits its reply and a
+    //        file whose upload never began
+    // When: each is removed, and then the thread's message is being sent
+    // Then: the uploading one is refused, the others go and hand back the core's upload
+    //       to discard; nothing is removed while sending
+    #[test]
+    fn remove_refuses_an_uploading_file_and_a_sending_thread() {
+        let mut shared = Shared::default();
+        shared.attachment_drafts.insert(
+            "t".into(),
+            vec![
+                draft("ready", false, Some("up-1")),
+                draft("busy", true, Some("up-2")),
+                draft("local", false, None),
+            ],
+        );
+        assert_eq!(shared.remove_attachment_draft("t", "busy"), None);
+        assert_eq!(
+            shared.remove_attachment_draft("t", "ready"),
+            Some(Some(AttachmentId::new("up-1").unwrap()))
+        );
+        shared.sending.insert("t".into());
+        assert_eq!(shared.remove_attachment_draft("t", "local"), None);
+        shared.sending.clear();
+        assert_eq!(shared.remove_attachment_draft("t", "local"), Some(None));
+        assert_eq!(shared.remove_attachment_draft("t", "gone"), None);
+        let left: Vec<_> = shared.attachment_drafts["t"]
+            .iter()
+            .map(|draft| draft.id.as_str())
+            .collect();
+        assert_eq!(left, ["busy"]);
+    }
+}
