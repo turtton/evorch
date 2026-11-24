@@ -1,7 +1,7 @@
 //! Composer strip rendering and action reporting without dispatch.
 
 use crate::model::composer::{CompletionItem, CompletionKind, ComposerModel};
-use crate::panes::transcript_widgets::ime_composing;
+use crate::panes::transcript_widgets::{ime_composing, stop_button};
 use crate::theme::icons;
 use crate::theme::tokens::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
@@ -231,35 +231,6 @@ pub fn composer_strip_within(
         input_viewport: viewport,
         input_wanted: measured,
     }
-}
-
-/// Stop halts only the current run; once it is stopped with subagents still
-/// running, the same button becomes Stop subagents and halts the whole subtree.
-fn stop_button(ui: &mut egui::Ui, stopped: bool, running_children: usize) -> egui::Response {
-    let (label, color, fill, hover) = if stopped {
-        (
-            "Stop subagents",
-            palette().WARNING_FG,
-            palette().SURFACE_RAISED,
-            format!(
-                "Stop {} (Esc)",
-                if running_children == 1 {
-                    "the running subagent".to_owned()
-                } else {
-                    format!("all {running_children} running subagents")
-                }
-            ),
-        )
-    } else {
-        (
-            "Stop",
-            palette().ERROR_FG,
-            palette().ERROR_SURFACE,
-            "Stop the run (Esc). Its subagents keep running until stopped separately.".to_owned(),
-        )
-    };
-    ui.add(egui::Button::new(egui::RichText::new(label).color(color)).fill(fill))
-        .on_hover_text(hover)
 }
 
 /// Tab / Shift+Tab and arrows cycle the highlight, Tab accepts a sole

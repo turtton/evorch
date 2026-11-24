@@ -1077,3 +1077,37 @@ fn queued_goal_actions_send_review_and_pause_for_the_shown_goal() {
         "ゴールレビューの切替: 受け付けました"
     );
 }
+
+// Given: the roots of t1 listed
+// When: Open pane is pressed on run-a's row
+// Then: the shell is handed run-a with its name once
+#[test]
+fn open_pane_hands_the_row_to_the_shell_once() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], false),
+    );
+    screen.get_by_label("Open pane").click();
+    screen.run_steps(2);
+    let take = |screen: &mut Harness<'_, Screen>| {
+        screen
+            .state_mut()
+            .feature
+            .as_execution_mut()
+            .unwrap()
+            .take_open_pane()
+    };
+    assert_eq!(
+        take(&mut screen),
+        Some(RunPane {
+            thread: ThreadId::new("t1").unwrap(),
+            run: RunId::new("run-a").unwrap(),
+            name: "name-run-a".into(),
+            child: false,
+        })
+    );
+    assert_eq!(take(&mut screen), None);
+}

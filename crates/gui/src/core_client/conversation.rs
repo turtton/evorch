@@ -15,21 +15,22 @@ use super::cache::Cache;
 use super::connection::Action;
 use super::features::execution::ExecutionBand;
 use super::features::{FeatureId, Selection};
+use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
+use super::transcript::{self, Scope, byte_size};
 use super::{ClientAttachmentDraft, Draft};
 use crate::attachments::{AttachmentIo, Intake};
 use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, progress_band};
-use crate::panes::markdown_render::render_markdown_with_base;
 use crate::panes::phase_indicator::phase_circle;
 use crate::panes::transcript_widgets::{
-    code_block, diff_block, full_input, ime_composing, request_card, role_label, user_bubble,
+    full_input, ime_composing, request_card, run_transcript_empty, run_transcript_title,
+    stop_button as shared_stop_button,
 };
 use crate::theme::icons;
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::{
-    empty_state, fill_label, ghost, icon_button, pane_root, primary_icon_button, soft_frame,
-    surface_frame,
+    empty_state, fill_label, ghost, icon_button, pane_root, primary_icon_button, surface_frame,
 };
 
 const MAX_ANSWER_BYTES: usize = 4096;
@@ -40,7 +41,9 @@ pub struct ConversationPane {
     pub(super) attachment_imports: BTreeMap<String, (ProjectId, ThreadId)>,
     composer_role: ComposerRole,
     team: bool,
+    /// The message bodies asked of the projection numbered `projection`.
     requested_bodies: BTreeSet<String>,
+    projection: u64,
 }
 
 impl Default for ConversationPane {
@@ -52,6 +55,18 @@ impl Default for ConversationPane {
             composer_role: ComposerRole::Worker,
             team: false,
             requested_bodies: BTreeSet::new(),
+            projection: 0,
+        }
+    }
+}
+
+impl ConversationPane {
+    /// A new projection (a reconnect or resync) holds none of the bodies read before,
+    /// so its messages ask for them again.
+    pub(super) fn follow_projection(&mut self, projection: u64) {
+        if self.projection != projection {
+            self.projection = projection;
+            self.requested_bodies.clear();
         }
     }
 }
@@ -85,12 +100,14 @@ impl ConversationIo<'_> {
     }
 }
 
+/// `root` is the thread's current root run, as its detail names it.
 pub fn show(
     ui: &mut Ui,
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
     selection: &Selection,
     band: Option<ExecutionBand<'_>>,
+    root: Option<&RunId>,
     effects: &mut Vec<Effect>,
 ) {
     pane_root(ui, "Conversation", |ui| {
@@ -110,8 +127,17 @@ pub fn show(
                 "Not connected to the core. Nothing runs in this window in its place.",
             );
         }
+        let activity = activity(io.cache, &thread, root);
         ui.add_enabled_ui(io.connected, |ui| {
-            header(ui, io, &project, &thread, pane.composer_role, effects);
+            header(
+                ui,
+                io,
+                &project,
+                &thread,
+                activity,
+                pane.composer_role,
+                effects,
+            );
             let details_max = ui.available_height() * 0.3;
             egui::Panel::bottom(ui.id().with("composer"))
                 .resizable(false)
@@ -123,18 +149,61 @@ pub fn show(
                     let vertical_spacing = ui.spacing().item_spacing.y;
                     ui.spacing_mut().item_spacing.y = 0.0;
                     progress(ui, io.cache, &thread, band, details_max, effects);
-                    composer(ui, pane, io, &project, &thread, effects);
+                    composer(ui, pane, io, &project, &thread, activity, effects);
                     ui.spacing_mut().item_spacing.y = vertical_spacing;
-                    status_strip(ui, io.cache, &thread);
+                    status_strip(ui, io.cache, &thread, activity);
                 });
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| transcript(ui, pane, io, &thread, effects));
+                .show(ui, |ui| thread_transcript(ui, pane, io, &thread, effects));
         });
     });
 }
 
-fn thread_phase(cache: &Cache, thread: &ThreadId) -> Option<ThreadRunPhase> {
+/// One run tab: the committed messages of a single run, as the embedded workbench's
+/// transcript tab shows a subagent.
+pub fn run_tab(
+    ui: &mut Ui,
+    pane: &mut ConversationPane,
+    cache: &Cache,
+    connected: bool,
+    tab: Option<&RunTab>,
+    effects: &mut Vec<Effect>,
+) {
+    let Some(tab) = tab else {
+        pane_root(ui, "Transcript", |ui| run_transcript_empty(ui, None));
+        return;
+    };
+    pane_root(ui, &tab.title, |ui| {
+        if !connected {
+            ui.colored_label(
+                palette().WARNING_FG,
+                "Not connected to the core. Nothing runs in this window in its place.",
+            );
+        }
+        ui.add_enabled_ui(connected, |ui| {
+            let name = tab.name.as_deref();
+            run_transcript_title(ui, tab.run.as_str(), name);
+            transcript::transcript(
+                ui,
+                &mut pane.requested_bodies,
+                cache,
+                Scope::Run {
+                    thread: &tab.thread,
+                    run: &tab.run,
+                },
+                |ui| run_transcript_empty(ui, name),
+                |_, _| {},
+                effects,
+            );
+        });
+    });
+}
+
+fn thread_phase(cache: &Cache, thread: &ThreadId, activity: Activity) -> Option<ThreadRunPhase> {
+    if activity.stopped {
+        return Some(ThreadRunPhase::Stopped);
+    }
     let state = cache.threads.get(thread.as_str())?.state;
     Some(match state {
         ThreadState::Idle => return None,
@@ -144,17 +213,74 @@ fn thread_phase(cache: &Cache, thread: &ThreadId) -> Option<ThreadRunPhase> {
     })
 }
 
-fn is_running(cache: &Cache, thread: &ThreadId) -> bool {
-    cache.runs.values().any(|run| {
-        &run.thread == thread
-            && matches!(
-                run.phase,
-                RunPhase::Pending
-                    | RunPhase::Running
-                    | RunPhase::WaitingForUser
-                    | RunPhase::WaitingForApproval
-            )
-    })
+/// What the runs of a thread leave the person to stop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Activity {
+    /// A root run of the thread works, or waits on the person: Stop stops it.
+    pub root_active: bool,
+    /// The current root was stopped while subagents still run: Stop subagents
+    /// stops them.
+    pub stopped: bool,
+    pub running_children: usize,
+}
+
+fn is_active(phase: RunPhase) -> bool {
+    matches!(
+        phase,
+        RunPhase::Pending
+            | RunPhase::Running
+            | RunPhase::WaitingForUser
+            | RunPhase::WaitingForApproval
+    )
+}
+
+/// `root` is the thread's current root run; without it, the thread's only run without
+/// a parent is.
+/// Only the current root's own subagents count, as the core stops (and the embedded
+/// workbench counts) the live descendants of the thread's bound root alone.
+pub(super) fn activity(cache: &Cache, thread: &ThreadId, root: Option<&RunId>) -> Activity {
+    let runs = || cache.runs.values().filter(|run| &run.thread == thread);
+    let root_active = runs().any(|run| run.parent_run.is_none() && is_active(run.phase));
+    let current = match root {
+        Some(root) => cache.runs.get(root.as_str()),
+        None => {
+            let mut roots = runs().filter(|run| run.parent_run.is_none());
+            roots.next().filter(|_| roots.next().is_none())
+        }
+    };
+    let running_children = current.map_or(0, |current| {
+        cache
+            .runs
+            .values()
+            .filter(|run| is_active(run.phase) && descends_from(cache, run, &current.id))
+            .count()
+    });
+    Activity {
+        root_active,
+        stopped: !root_active
+            && running_children > 0
+            && current.is_some_and(|run| run.phase == RunPhase::Cancelled),
+        running_children,
+    }
+}
+
+/// Whether `root` is among the ancestors of `run`, walking the parents the cache knows.
+fn descends_from(cache: &Cache, run: &RunSummary, root: &RunId) -> bool {
+    let mut parent = run.parent_run.as_ref();
+    // A parent chain is at most as long as the runs known; this also ends a cycle.
+    for _ in 0..cache.runs.len() {
+        match parent {
+            Some(id) if id == root => return true,
+            Some(id) => {
+                parent = cache
+                    .runs
+                    .get(id.as_str())
+                    .and_then(|run| run.parent_run.as_ref())
+            }
+            None => return false,
+        }
+    }
+    false
 }
 
 fn header(
@@ -162,6 +288,7 @@ fn header(
     io: &ConversationIo<'_>,
     project: &ProjectId,
     thread: &ThreadId,
+    activity: Activity,
     role: ComposerRole,
     effects: &mut Vec<Effect>,
 ) {
@@ -175,11 +302,11 @@ fn header(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
-                phase_circle(ui, thread_phase(io.cache, thread));
+                phase_circle(ui, thread_phase(io.cache, thread, activity));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button(icons::DOTS_THREE, |ui| {
                         if ui.button("Refresh history").clicked() {
-                            effects.push(Effect::send(Action::History(thread.clone(), false)));
+                            effects.push(Effect::send(Action::History(thread.clone(), None, false)));
                             ui.close();
                         }
                         if ui.button("Deliver queued follow-ups next turn").clicked() {
@@ -220,10 +347,12 @@ fn header(
                     {
                         effects.push(Effect::Reveal(FeatureId::Artifacts));
                     }
-                    if is_running(io.cache, thread) {
+                    if activity.root_active {
                         if ui
                             .add(stop_button())
-                            .on_hover_text("Stop the run. Its subagents keep running.")
+                            .on_hover_text(
+                                "Stop the run. Its subagents keep running until stopped separately.",
+                            )
                             .clicked()
                         {
                             effects.push(Effect::send(stop(thread)));
@@ -273,59 +402,30 @@ fn command(command: Command) -> Action {
     }
 }
 
-enum Item<'a> {
-    Message(&'a CommittedMessage),
-    Tools(Vec<&'a CommittedMessage>),
-}
-
-fn items(history: &[CommittedMessage]) -> Vec<Item<'_>> {
-    let mut items: Vec<Item<'_>> = Vec::new();
-    for message in history {
-        match (message.role, items.last_mut()) {
-            (MessageRole::Tool, Some(Item::Tools(tools))) => tools.push(message),
-            (MessageRole::Tool, _) => items.push(Item::Tools(vec![message])),
-            _ => items.push(Item::Message(message)),
-        }
-    }
-    items
-}
-
-fn transcript(
+fn thread_transcript(
     ui: &mut Ui,
     pane: &mut ConversationPane,
     io: &ConversationIo<'_>,
     thread: &ThreadId,
     effects: &mut Vec<Effect>,
 ) {
-    let history = io.cache.history.get(thread.as_str());
-    egui::ScrollArea::vertical()
-        .id_salt(("core-transcript", thread.as_str()))
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add_space(SP_2);
-            if io
-                .cache
-                .older
-                .get(thread.as_str())
-                .is_some_and(Option::is_some)
-            {
-                ui.vertical_centered(|ui| {
-                    if ui
-                        .add(ghost(icons::with_icon(
-                            icons::ARROW_UP,
-                            "Load earlier messages",
-                        )))
-                        .clicked()
-                    {
-                        effects.push(Effect::send(Action::History(thread.clone(), true)));
-                    }
-                });
-            }
-            let history = history.map(Vec::as_slice).unwrap_or_default();
-            let questions = open_questions(io.cache, thread);
-            let approvals = pending_approvals(io.cache, thread);
-            if history.is_empty() && questions.is_empty() && approvals.is_empty() {
+    let questions = open_questions(io.cache, thread);
+    let approvals = pending_approvals(io.cache, thread);
+    let waiting = !questions.is_empty() || !approvals.is_empty();
+    // While older pages exist, the thread may have messages that are not read yet.
+    let older = io
+        .cache
+        .older
+        .get(thread.as_str())
+        .is_some_and(Option::is_some);
+    let answers = &mut pane.answers;
+    transcript::transcript(
+        ui,
+        &mut pane.requested_bodies,
+        io.cache,
+        Scope::Thread(thread),
+        |ui| {
+            if !waiting && !older {
                 empty_state(
                     ui,
                     "Start the conversation",
@@ -333,21 +433,17 @@ fn transcript(
                     None,
                 );
             }
-            for item in items(history) {
-                match item {
-                    Item::Message(message) => message_row(ui, pane, io, message, effects),
-                    Item::Tools(tools) => tool_group(ui, pane, io, &tools, effects),
-                }
-                ui.add_space(SP_2);
-            }
+        },
+        |ui, effects| {
             for question in questions {
-                question_card(ui, pane, thread, question, effects);
+                question_card(ui, answers, thread, question, effects);
             }
             for approval in approvals {
                 approval_card(ui, io.cache, approval, effects);
             }
-            ui.add_space(SP_2);
-        });
+        },
+        effects,
+    );
 }
 
 fn open_questions<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a QuestionView> {
@@ -370,243 +466,9 @@ fn pending_approvals<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a Approva
         .collect()
 }
 
-fn message_text<'a>(
-    ui: &mut Ui,
-    pane: &mut ConversationPane,
-    io: &'a ConversationIo<'_>,
-    message: &'a CommittedMessage,
-    effects: &mut Vec<Effect>,
-) -> Option<&'a str> {
-    match &message.content {
-        MessageContent::Inline { text } => Some(text),
-        MessageContent::Body(body) => {
-            if let Some(text) = io.cache.bodies.get(body.body_id.as_str()) {
-                return Some(text);
-            }
-            if pane.requested_bodies.insert(body.body_id.to_string()) {
-                effects.push(Effect::send(Action::Body(body.body_id.clone())));
-            }
-            ui.horizontal(|ui| {
-                ui.label(muted(format!(
-                    "Loading message ({})",
-                    byte_size(body.total_bytes.get())
-                )));
-                if ui.add(ghost("Retry")).clicked() {
-                    effects.push(Effect::send(Action::Body(body.body_id.clone())));
-                }
-            });
-            None
-        }
-    }
-}
-
-fn byte_size(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} bytes")
-    }
-}
-
-fn run_role(cache: &Cache, run: &RunId) -> Option<&'static str> {
-    let run = cache.runs.get(run.as_str())?;
-    run.parent_run.as_ref()?;
-    Some(match run.role {
-        RunRole::Orchestrator => "orchestrator",
-        RunRole::Worker => "worker",
-        RunRole::Planner => "planner",
-        RunRole::Reviewer => "reviewer",
-        RunRole::Advisor => "advisor",
-        RunRole::Other => "subagent",
-    })
-}
-
-fn message_row(
-    ui: &mut Ui,
-    pane: &mut ConversationPane,
-    io: &ConversationIo<'_>,
-    message: &CommittedMessage,
-    effects: &mut Vec<Effect>,
-) {
-    ui.push_id(
-        ("message", message.run.as_str(), message.index.get()),
-        |ui| match message.role {
-            MessageRole::User => {
-                if let Some(text) = message_text(ui, pane, io, message, effects) {
-                    user_bubble(ui, text, &[]);
-                }
-            }
-            MessageRole::Assistant | MessageRole::Tool => {
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(SP_1 as i8, SP_1 as i8))
-                    .show(ui, |ui| {
-                        if let Some(role) = run_role(io.cache, &message.run) {
-                            role_label(ui, role);
-                        }
-                        if let Some(text) = message_text(ui, pane, io, message, effects) {
-                            render_markdown_with_base(
-                                ui,
-                                text,
-                                &format!("msg-{}-{}", message.run, message.index.get()),
-                                None,
-                                None,
-                            );
-                        }
-                    });
-            }
-        },
-    );
-}
-
-fn tool_group(
-    ui: &mut Ui,
-    pane: &mut ConversationPane,
-    io: &ConversationIo<'_>,
-    tools: &[&CommittedMessage],
-    effects: &mut Vec<Effect>,
-) {
-    let first = tools[0];
-    let id = ui.make_persistent_id(("tools", first.run.as_str(), first.index.get()));
-    let failed = tools.iter().any(|tool| match &tool.content {
-        MessageContent::Inline { text } => ToolOutput::parse(text).failed(),
-        MessageContent::Body(_) => false,
-    });
-    let count = tools.len();
-    let mut title = if count == 1 {
-        "1 tool output".to_owned()
-    } else {
-        format!("{count} tool outputs")
-    };
-    if failed {
-        title.push_str(", some failed");
-    }
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| {
-            let color = if failed {
-                palette().ERROR_FG
-            } else {
-                palette().TEXT_MUTED
-            };
-            ui.label(
-                RichText::new(icons::with_icon(icons::WRENCH, &title))
-                    .size(FONT_SMALL)
-                    .color(color),
-            );
-        })
-        .body(|ui| {
-            for tool in tools {
-                ui.push_id(("tool", tool.run.as_str(), tool.index.get()), |ui| {
-                    if let Some(role) = run_role(io.cache, &tool.run) {
-                        role_label(ui, role);
-                    }
-                    if let Some(text) = message_text(ui, pane, io, tool, effects) {
-                        tool_card(ui, text);
-                    }
-                });
-                ui.add_space(SP_1);
-            }
-        });
-}
-
-/// What the shape of a committed tool output says about it. The core commits the output
-/// alone, without the tool's name, input or error flag, so this reads the formats the
-/// tools write: a shell result begins with its exit code, a change is a unified diff.
-#[derive(Debug, PartialEq, Eq)]
-enum ToolOutput<'a> {
-    Shell { exit_code: i64, body: &'a str },
-    Diff { added: usize, removed: usize },
-    Text,
-}
-
-impl<'a> ToolOutput<'a> {
-    fn parse(text: &'a str) -> Self {
-        if let Some(rest) = text.strip_prefix("exit_code:") {
-            let (code, body) = rest.split_once('\n').unwrap_or((rest, ""));
-            if let Ok(exit_code) = code.trim().parse() {
-                return Self::Shell { exit_code, body };
-            }
-        }
-        let is_diff = text
-            .lines()
-            .any(|line| line.starts_with("@@ ") || line.starts_with("+++ "));
-        if is_diff {
-            let added = text
-                .lines()
-                .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-                .count();
-            let removed = text
-                .lines()
-                .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-                .count();
-            return Self::Diff { added, removed };
-        }
-        Self::Text
-    }
-
-    fn failed(&self) -> bool {
-        matches!(self, Self::Shell { exit_code, .. } if *exit_code != 0)
-    }
-}
-
-fn tool_card(ui: &mut Ui, text: &str) {
-    let output = ToolOutput::parse(text);
-    let (icon, title, meta) = match &output {
-        ToolOutput::Shell { exit_code, .. } => {
-            (icons::TERMINAL, "Shell", Some(format!("exit {exit_code}")))
-        }
-        ToolOutput::Diff { added, removed } => (
-            icons::GIT_DIFF,
-            "Change",
-            Some(format!("+{added} −{removed}")),
-        ),
-        ToolOutput::Text => (icons::WRENCH, "Output", None),
-    };
-    let lines = text.lines().count();
-    let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    soft_frame(palette().SURFACE).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let id = ui.id().with("tool-card");
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-            .show_header(ui, |ui| {
-                let color = if output.failed() {
-                    palette().ERROR_FG
-                } else {
-                    palette().TEXT
-                };
-                ui.label(RichText::new(icons::with_icon(icon, title)).color(color));
-                let mut summary = String::new();
-                if let Some(meta) = &meta {
-                    summary.push_str(meta);
-                    summary.push_str(" · ");
-                }
-                summary.push_str(&format!(
-                    "{lines} line{}",
-                    if lines == 1 { "" } else { "s" }
-                ));
-                ui.label(muted(summary).size(FONT_SMALL));
-                ui.add(egui::Label::new(muted(first_line).size(FONT_SMALL).monospace()).truncate());
-            })
-            .body(|ui| match output {
-                ToolOutput::Diff { .. } => diff_block(ui, text),
-                ToolOutput::Shell { exit_code, body } => code_block(
-                    ui,
-                    body,
-                    if exit_code == 0 {
-                        palette().TEXT
-                    } else {
-                        palette().ERROR_FG
-                    },
-                ),
-                ToolOutput::Text => code_block(ui, text, palette().TEXT),
-            });
-    });
-}
-
 fn question_card(
     ui: &mut Ui,
-    pane: &mut ConversationPane,
+    answers: &mut BTreeMap<String, String>,
     thread: &ThreadId,
     question: &QuestionView,
     effects: &mut Vec<Effect>,
@@ -626,7 +488,7 @@ fn question_card(
                 )
                 .wrap(),
             );
-            let draft = pane.answers.entry(question.id.to_string()).or_default();
+            let draft = answers.entry(question.id.to_string()).or_default();
             for option in &question.options {
                 if ui
                     .add(egui::Button::selectable(draft == option, option).wrap())
@@ -845,9 +707,10 @@ fn composer(
     io: &mut ConversationIo<'_>,
     project: &ProjectId,
     thread: &ThreadId,
+    activity: Activity,
     effects: &mut Vec<Effect>,
 ) {
-    let running = is_running(io.cache, thread);
+    let can_stop = activity.root_active || activity.stopped;
     let input_id = ui.id().with("composer-input");
     let min_input = COMPOSER_MIN_HEIGHT - 2.0 * SP_2;
     // Wrapped rows are only known after layout, so the viewport follows the
@@ -888,15 +751,13 @@ fn composer(
                         let can_send = io.can_send(thread.as_str())
                             && (!draft_text.trim().is_empty() || has_attachments);
                         let mut send = false;
-                        if running
-                            && ui
-                                .add(stop_button())
-                                .on_hover_text("Stop the run (Esc). Its subagents keep running.")
+                        if can_stop
+                            && shared_stop_button(ui, activity.stopped, activity.running_children)
                                 .clicked()
                         {
                             effects.push(Effect::send(stop(thread)));
                         }
-                        let send_button = if running {
+                        let send_button = if activity.root_active {
                             ui.add_enabled(can_send, egui::Button::new("Queue"))
                                 .on_hover_text("Queue as a follow-up (Enter)")
                         } else if can_send {
@@ -957,7 +818,7 @@ fn composer(
                                     && !i.modifiers.command
                             });
                         ui.data_mut(|d| d.insert_temp(ime_id, ime && focused));
-                        if focused && running && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if focused && can_stop && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             effects.push(Effect::send(stop(thread)));
                         }
                         if (send || enter) && can_send {
@@ -1163,12 +1024,13 @@ fn submit(
     }));
 }
 
-fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId) {
+fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId, activity: Activity) {
     ui.horizontal(|ui| {
         ui.add_space(SP_2);
-        let phase = thread_phase(cache, thread);
+        let phase = thread_phase(cache, thread, activity);
         phase_circle(ui, phase);
         let state = match cache.threads.get(thread.as_str()).map(|t| t.state) {
+            _ if activity.stopped => "Stopped",
             None => "New",
             Some(ThreadState::Idle) => "Idle",
             Some(ThreadState::Running) => "Running",
@@ -1177,20 +1039,7 @@ fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId) {
             Some(ThreadState::Failed) => "Failed",
         };
         ui.label(muted(state).size(FONT_SMALL));
-        let subagents = cache
-            .runs
-            .values()
-            .filter(|r| &r.thread == thread && r.parent_run.is_some())
-            .filter(|r| {
-                matches!(
-                    r.phase,
-                    RunPhase::Pending
-                        | RunPhase::Running
-                        | RunPhase::WaitingForUser
-                        | RunPhase::WaitingForApproval
-                )
-            })
-            .count();
+        let subagents = activity.running_children;
         if subagents > 0 {
             ui.label(
                 muted(icons::with_icon(
@@ -1210,34 +1059,89 @@ fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_shell_result_is_read_from_its_exit_code_line() {
-        assert_eq!(
-            ToolOutput::parse("exit_code: 2\n--- stderr ---\nboom"),
-            ToolOutput::Shell {
-                exit_code: 2,
-                body: "--- stderr ---\nboom"
-            }
-        );
-        assert!(ToolOutput::parse("exit_code: 1\n").failed());
-        assert!(!ToolOutput::parse("exit_code: 0\nok").failed());
+    fn cache(runs: &[(&str, Option<&str>, &str)]) -> Cache {
+        let mut cache = Cache::default();
+        for (id, parent, phase) in runs {
+            let run: RunSummary = serde_json::from_value(serde_json::json!({
+                "id": id, "thread": "thr", "role": "worker", "phase": phase,
+                "revision": "1", "parent_run": parent,
+            }))
+            .unwrap();
+            cache.runs.insert((*id).into(), run);
+        }
+        cache
+    }
+
+    fn of(cache: &Cache, root: Option<&str>) -> Activity {
+        let root = root.map(|root| RunId::new(root).unwrap());
+        activity(cache, &ThreadId::new("thr").unwrap(), root.as_ref())
     }
 
     #[test]
-    fn a_unified_diff_is_counted_without_its_file_headers() {
-        let diff = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n+more\n context";
+    fn a_cancelled_root_with_a_running_child_is_stopped() {
+        let cache = cache(&[
+            ("root", None, "cancelled"),
+            ("child", Some("root"), "running"),
+        ]);
         assert_eq!(
-            ToolOutput::parse(diff),
-            ToolOutput::Diff {
-                added: 2,
-                removed: 1
+            of(&cache, None),
+            Activity {
+                root_active: false,
+                stopped: true,
+                running_children: 1
             }
         );
     }
 
     #[test]
-    fn plain_output_is_neither_a_shell_result_nor_a_diff() {
-        assert_eq!(ToolOutput::parse("exit_code: x\nhello"), ToolOutput::Text);
-        assert_eq!(ToolOutput::parse("just text"), ToolOutput::Text);
+    fn only_an_active_root_offers_stop() {
+        let waiting = cache(&[("root", None, "waiting_for_user")]);
+        assert!(of(&waiting, None).root_active);
+        // A finished root leaves its background subagents running, and nothing to stop.
+        let done = cache(&[("root", None, "done"), ("child", Some("root"), "running")]);
+        let activity = of(&done, None);
+        assert!(!activity.root_active && !activity.stopped);
+        assert_eq!(activity.running_children, 1);
+    }
+
+    // Given: an earlier cancelled root and the current root that finished, with a
+    //        subagent of the current root still running
+    // Then: the detail's root decides, so the thread is not stopped; without the
+    //       detail neither root is the current one
+    #[test]
+    fn the_detail_root_is_the_current_root() {
+        let cache = cache(&[
+            ("old", None, "cancelled"),
+            ("new", None, "done"),
+            ("child", Some("new"), "running"),
+        ]);
+        assert!(!of(&cache, Some("new")).stopped);
+        assert!(!of(&cache, None).stopped);
+        let mut cancelled = cache.clone();
+        cancelled.runs.get_mut("new").unwrap().phase = RunPhase::Cancelled;
+        assert!(of(&cancelled, Some("new")).stopped);
+    }
+
+    // Given: the current root "new" was stopped, an earlier root's subagent still
+    //        runs, and so do the current root's grandchild and a stale child of it
+    //        that finished
+    // Then: only the current root's live descendants count, as the core stops those
+    //       alone; with none left the thread is not offered Stop subagents
+    #[test]
+    fn only_the_current_roots_live_descendants_count() {
+        let mut runs = cache(&[
+            ("old", None, "cancelled"),
+            ("old-child", Some("old"), "running"),
+            ("new", None, "cancelled"),
+        ]);
+        let other = of(&runs, Some("new"));
+        assert_eq!((other.stopped, other.running_children), (false, 0));
+        let mut own = cache(&[
+            ("child", Some("new"), "done"),
+            ("grandchild", Some("child"), "running"),
+        ]);
+        runs.runs.append(&mut own.runs);
+        let own = of(&runs, Some("new"));
+        assert_eq!((own.stopped, own.running_children), (true, 1));
     }
 }

@@ -2,8 +2,7 @@ use crate::model::transcript::TranscriptModel;
 use std::path::Path;
 
 use crate::panes::agent::transcript_body_with_agents;
-use crate::theme::text::h3;
-use crate::theme::widgets::{copy_id_button, empty_state};
+use crate::panes::transcript_widgets::{run_transcript_empty, run_transcript_title};
 
 pub fn agent_transcript_pane(
     ui: &mut egui::Ui,
@@ -22,25 +21,9 @@ pub fn agent_transcript_pane_with_repo_root(
     repo_root: Option<&Path>,
     agents: &[crate::model::tasks::TaskRow],
 ) {
-    ui.horizontal(|ui| {
-        ui.label(h3(match agent_name {
-            Some(name) => format!("Transcript: {name}"),
-            None => "Transcript".to_owned(),
-        }));
-        copy_id_button(ui, "Copy run ID", run_id);
-    });
+    run_transcript_title(ui, run_id, agent_name);
     match transcript.filter(|model| !model.entries().is_empty()) {
         Some(model) => transcript_body_with_agents(ui, model, repo_root, agents),
-        None => {
-            empty_state(
-                ui,
-                &match agent_name {
-                    Some(name) => format!("No events for {name} yet"),
-                    None => "No events yet".to_owned(),
-                },
-                "Messages and tool activity will appear as this agent runs.",
-                None,
-            );
-        }
+        None => run_transcript_empty(ui, agent_name),
     }
 }

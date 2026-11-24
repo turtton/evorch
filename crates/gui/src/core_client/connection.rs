@@ -20,7 +20,7 @@ use workbench_protocol::{
     commands::{Command, CommandReply},
     conversation::{ConversationCommand, ConversationResult},
     events::{EventEnvelope, Subscribe, SubscriptionScope, UiEvent},
-    ids::{BodyId, ProjectId, RequestId, ThreadId},
+    ids::{BodyId, ProjectId, RequestId, RunId, ThreadId},
     queries::{
         CommandReceiptState, HistoryDirection, PageRequest, Query, QueryReply, ReadBody,
         ReadCommittedHistory, ReadSnapshot,
@@ -40,7 +40,9 @@ pub enum Action {
         command: Command,
         draft: Option<(String, u64)>,
     },
-    History(ThreadId, bool),
+    /// The newest (or, with `true`, the next older) page of a thread's committed
+    /// history, or of one run of it.
+    History(ThreadId, Option<RunId>, bool),
     Body(BodyId),
     ApprovalInput(workbench_protocol::views::ApprovalView),
     Upload {
@@ -374,18 +376,25 @@ pub async fn serve(
                                 }
                             },
                             Action::Data(action) => data.handle(action, &endpoint, &client, &shared, &ctx).await,
-                            Action::History(thread, older) => {
-                                let cursor = if older { shared.lock().unwrap().cache.older.get(thread.as_str()).cloned().flatten() } else { None };
+                            Action::History(thread, run, older) => {
+                                let cursor = if older {
+                                    let state = shared.lock().unwrap();
+                                    match &run { None => state.cache.older.get(thread.as_str()), Some(run) => state.cache.run_older.get(run.as_str()) }.cloned().flatten()
+                                } else { None };
                                 let reply = client.query(Query::Conversation(ConversationQuery::ReadCommittedHistory(ReadCommittedHistory {
-                                    thread: thread.clone(), run: None, direction: HistoryDirection::Backward,
+                                    thread: thread.clone(), run: run.clone(), direction: HistoryDirection::Backward,
                                     page: PageRequest { cursor, ..Default::default() },
                                 }))).await;
                                 match reply {
-                                    Ok(QueryReply::Conversation(ConversationReply::CommittedHistory(page))) => update(&shared, &ctx, |s| s.cache.history_page(thread.as_str(), page, older)),
-                                    other => update(&shared, &ctx, |s| s.status = format!("履歴取得: {other:?}")),
+                                    Ok(QueryReply::Conversation(ConversationReply::CommittedHistory(page))) => update(&shared, &ctx, |s| match &run { None => s.cache.history_page(thread.as_str(), page, older), Some(run) => s.cache.run_history_page(run.as_str(), page, older) }),
+                                    other => update(&shared, &ctx, |s| {
+                                        s.status = format!("履歴取得: {other:?}");
+                                        if let (Some(run), false) = (&run, older) { s.cache.run_failed(run.as_str()); }
+                                    }),
                                 }
+                                // Receipts belong to the thread, not to one run of it.
                                 let mut cursor = None;
-                                while let Ok(QueryReply::Conversation(ConversationReply::InputReceipts(page))) = client.query(Query::Conversation(ConversationQuery::GetInputReceipts(workbench_protocol::queries::ThreadQuery { thread: thread.clone(), page: PageRequest { cursor, ..Default::default() } }))).await {
+                                while run.is_none() && let Ok(QueryReply::Conversation(ConversationReply::InputReceipts(page))) = client.query(Query::Conversation(ConversationQuery::GetInputReceipts(workbench_protocol::queries::ThreadQuery { thread: thread.clone(), page: PageRequest { cursor, ..Default::default() } }))).await {
                                     cursor = page.next_cursor;
                                     update(&shared, &ctx, |s| { for receipt in page.items { s.cache.receipts.insert(receipt.submission_id.to_string(), receipt); } });
                                     if cursor.is_none() { break; }
