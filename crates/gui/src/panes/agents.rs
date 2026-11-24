@@ -2,15 +2,17 @@ use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::pricing::{PARTIAL_COST_HINT, partial_marker};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics, WaitingState};
 use crate::panes::agents_columns::fit_columns;
+use crate::panes::run_card_widgets::{
+    self, RunCardHeader, open_pane_button, run_card, run_card_header,
+};
 use crate::theme::icons;
-use crate::theme::text::{muted, semibold};
+use crate::theme::text::muted;
 use crate::theme::tokens::{
     CANCELLED_LABEL, CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color,
     agent_phase_label, cancelled_color, palette,
 };
 use crate::theme::widgets::{
-    copy_id_button, empty_state, ghost, halo_dot, metric, metric_detailed, pane_root, soft_frame,
-    status_dot,
+    copy_id_button, empty_state, metric, metric_detailed, pane_root, status_dot,
 };
 use egui::{Align, Button, Label, Layout};
 
@@ -280,88 +282,61 @@ pub fn subagents_pane<S: AgentRunSource>(
             .show(ui, |ui| {
                 for row in rows {
                     let run_id = row.run_id.to_string();
-                    ui.push_id(&run_id, |ui| {
-                        soft_frame(palette().SURFACE).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal_wrapped(|ui| {
-                                halo_dot(
-                                    ui,
-                                    status_color(row),
-                                    row.status == event_bus::AgentRunPhase::Running,
-                                );
-                                if ui
-                                    .add(egui::Link::new(semibold(&row.name).color(palette().TEXT)))
-                                    .on_hover_text(DRILL_DOWN_HINT)
-                                    .clicked()
-                                {
-                                    action = Some(AgentsAction::DrillDown(run_id.clone()));
-                                }
-                                copy_id_button(ui, "Copy run ID", &run_id);
-                                let status = ui.label(muted(format!(
-                                    "{} · {}",
-                                    role_label(row),
-                                    status_text(row, telemetry.row(&run_id))
-                                )));
-                                if let Some(waiting) = waiting_state(row, telemetry.row(&run_id)) {
-                                    status.on_hover_text(waiting.detail());
-                                }
-                                let value = telemetry.row(&run_id);
-                                let model = value
-                                    .and_then(|value| value.model.as_deref())
-                                    .unwrap_or_else(|| {
-                                        if row.model.is_empty() {
-                                            "unknown"
-                                        } else {
-                                            &row.model
-                                        }
-                                    });
-                                let provider = value
-                                    .and_then(TelemetryRow::provider_label)
-                                    .or_else(|| {
-                                        row.model.split_once('/').map(|(provider, _)| provider)
-                                    })
-                                    .unwrap_or("unknown");
-                                let response = ui.label(muted(format!("{model} · {provider}")));
-                                if let Some(kind) =
-                                    value.and_then(|value| value.provider.as_deref())
-                                {
-                                    response.on_hover_text(format!("Provider: {kind}"));
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                let open = ui.add(ghost(muted(icons::with_icon(
-                                    icons::ARROW_SQUARE_OUT,
-                                    "Open pane",
-                                ))));
-                                open.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Button,
-                                        true,
-                                        "Open pane",
-                                    )
-                                });
-                                if open.clicked() {
-                                    action = Some(AgentsAction::OpenPane(run_id.clone()));
-                                }
-                                team_task_labels(ui, &teams, &run_id);
-                                if stop_run_button(ui, &run_id, row.status) {
-                                    action = Some(AgentsAction::StopRun(run_id.clone()));
-                                }
-                            });
-                            if let Some(value) = telemetry.row(&run_id) {
-                                // Keep useful live activity (model/tool/compaction),
-                                // but let the lifecycle label speak for waiting/done.
-                                let activity = value.activity_label();
-                                if !matches!(activity.as_str(), "agents" | "idle" | "user input") {
-                                    ui.label(muted(activity));
-                                }
-                                render_token_metrics(ui, value);
+                    let value = telemetry.row(&run_id);
+                    let model = value
+                        .and_then(|value| value.model.as_deref())
+                        .unwrap_or_else(|| {
+                            if row.model.is_empty() {
+                                "unknown"
+                            } else {
+                                &row.model
                             }
-                            render_run_metrics(
-                                ui,
-                                telemetry.thread_metrics(std::slice::from_ref(&run_id)),
-                            );
                         });
+                    let provider = value
+                        .and_then(TelemetryRow::provider_label)
+                        .or_else(|| row.model.split_once('/').map(|(provider, _)| provider))
+                        .unwrap_or("unknown");
+                    let status = format!("{} · {}", role_label(row), status_text(row, value));
+                    let model = format!("{model} · {provider}");
+                    let header = RunCardHeader {
+                        run_id: &run_id,
+                        name: &row.name,
+                        drill_hint: Some(DRILL_DOWN_HINT),
+                        color: status_color(row),
+                        active: row.status == event_bus::AgentRunPhase::Running,
+                        status: &status,
+                        status_hover: waiting_state(row, value).map(WaitingState::detail),
+                        model: &model,
+                        model_hover: value
+                            .and_then(|value| value.provider.as_deref())
+                            .map(|kind| format!("Provider: {kind}")),
+                    };
+                    run_card(ui, &run_id, |ui| {
+                        if run_card_header(ui, &header) {
+                            action = Some(AgentsAction::DrillDown(run_id.clone()));
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            if open_pane_button(ui) {
+                                action = Some(AgentsAction::OpenPane(run_id.clone()));
+                            }
+                            team_task_labels(ui, &teams, &run_id);
+                            if stop_run_button(ui, &run_id, row.status) {
+                                action = Some(AgentsAction::StopRun(run_id.clone()));
+                            }
+                        });
+                        if let Some(value) = value {
+                            // Keep useful live activity (model/tool/compaction),
+                            // but let the lifecycle label speak for waiting/done.
+                            let activity = value.activity_label();
+                            if !matches!(activity.as_str(), "agents" | "idle" | "user input") {
+                                ui.label(muted(activity));
+                            }
+                            render_token_metrics(ui, value);
+                        }
+                        render_run_metrics(
+                            ui,
+                            telemetry.thread_metrics(std::slice::from_ref(&run_id)),
+                        );
                     });
                 }
             });
@@ -369,48 +344,18 @@ pub fn subagents_pane<S: AgentRunSource>(
     })
 }
 
-/// Each run has its own two-click confirmation, using egui's frame time.
+/// Each run has its own two-click confirmation, offered while it can still be stopped.
 fn stop_run_button(ui: &mut egui::Ui, run_id: &str, phase: event_bus::AgentRunPhase) -> bool {
-    let id = ui.make_persistent_id(("stop-run-confirmation", run_id));
-    if !matches!(
-        phase,
-        event_bus::AgentRunPhase::Pending
-            | event_bus::AgentRunPhase::Running
-            | event_bus::AgentRunPhase::Waiting
-    ) {
-        ui.ctx().data_mut(|data| data.remove::<f64>(id));
-        return false;
-    }
-    let now = ui.input(|input| input.time);
-    let deadline = ui.ctx().data_mut(|data| {
-        let deadline = data.get_temp::<f64>(id);
-        if deadline.is_some_and(|deadline| now >= deadline) {
-            data.remove::<f64>(id);
-            None
-        } else {
-            deadline
-        }
-    });
-    let text = if deadline.is_some() {
-        egui::RichText::new("Confirm?").color(palette().WARNING_FG)
-    } else {
-        muted("Stop")
-    };
-    let response = ui.add(ghost(text)).on_hover_text("Stop this agent run");
-    if response.clicked() {
-        if deadline.is_some() {
-            ui.ctx().data_mut(|data| data.remove::<f64>(id));
-            return true;
-        }
-        ui.ctx().data_mut(|data| data.insert_temp(id, now + 2.0));
-        ui.ctx().request_repaint();
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs(2));
-    } else if let Some(deadline) = deadline {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs_f64(deadline - now));
-    }
-    false
+    run_card_widgets::stop_run_button(
+        ui,
+        run_id,
+        matches!(
+            phase,
+            event_bus::AgentRunPhase::Pending
+                | event_bus::AgentRunPhase::Running
+                | event_bus::AgentRunPhase::Waiting
+        ),
+    )
 }
 
 /// Team tasks claimed by this run, shown by their author-chosen ID.
@@ -470,12 +415,7 @@ fn status_color(row: &TaskRow) -> egui::Color32 {
 }
 
 fn role_label(row: &TaskRow) -> String {
-    match &row.category {
-        Some(category) if row.role.eq_ignore_ascii_case("worker") => {
-            format!("Worker({category})")
-        }
-        _ => row.role.clone(),
-    }
+    run_card_widgets::role_label(&row.role, row.category.as_deref())
 }
 
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {

@@ -984,6 +984,11 @@ mod run_tabs {
         /// Settles the workspace and answers the execution feature's run listings of
         /// thr-1 until none is left; returns the other actions.
         fn settle_runs(&mut self) -> Vec<Action> {
+            self.settle_runs_with(&[run_detail("run-1a", Some("run-1"), "redirect-tester", 0)])
+        }
+
+        /// [`Screen::settle_runs`] with `children` as run-1's subagents.
+        fn settle_runs_with(&mut self, children: &[serde_json::Value]) -> Vec<Action> {
             let mut others = Vec::new();
             for _ in 0..8 {
                 self.harness.run_steps(2);
@@ -1000,9 +1005,12 @@ mod run_tabs {
                         continue;
                     };
                     let items = match (&q.scope, q.thread.as_str()) {
-                        (RunScope::Roots, "thr-1") => vec![run_detail("run-1", None, "lead", 1)],
+                        (RunScope::Roots, "thr-1") => {
+                            let count = u32::try_from(children.len()).unwrap();
+                            vec![run_detail("run-1", None, "lead", count)]
+                        }
                         (RunScope::Children { parent }, "thr-1") if parent.as_str() == "run-1" => {
-                            vec![run_detail("run-1a", Some("run-1"), "redirect-tester", 0)]
+                            children.to_vec()
                         }
                         _ => Vec::new(),
                     };
@@ -1026,7 +1034,7 @@ mod run_tabs {
 
         /// Opens run-1a's tab from its Execution row; returns what was sent.
         fn open_subagent(&mut self) -> Vec<Action> {
-            self.harness.get_by_label("子 run (1)").click();
+            self.harness.get_by_label("Subagents (1)").click();
             self.settle_runs();
             self.harness.get_by_label("Open pane").click();
             self.settle_runs()
@@ -1104,6 +1112,78 @@ mod run_tabs {
         // Conversation and the run tab are both on screen; only the run tab has it.
         assert_eq!(screen.harness.get_all_by_label(CHILD_TEXT).count(), 1);
         screen.harness.get_by_label("Copy run ID");
+    }
+
+    // Given: thr-1's root run-1 has subagents that run, wait for an approval and are done
+    // When: its Subagents button is pressed in Execution, at a wide and a narrow window
+    // Then: the breadcrumb leads back to Root and each subagent is a card of the
+    //       legacy Subagents column: name, role and status, model and provider,
+    //       Copy run ID and Open pane, and Stop only while it can still be stopped
+    #[test]
+    fn execution_draws_the_subagents_of_a_run_as_cards() {
+        let detail = |id: &str, name: &str, phase: &str, lifecycle: &str, model: &str| {
+            let mut run = run_detail(id, Some("run-1"), name, 0);
+            run["summary"]["phase"] = json!(phase);
+            run["lifecycle"] = json!(lifecycle);
+            run["model"] = json!(model);
+            run
+        };
+        let mut reviewer = detail(
+            "run-1b",
+            "auth-reviewer",
+            "waiting_for_approval",
+            "active",
+            "anthropic/claude-sonnet",
+        );
+        reviewer["summary"]["role"] = json!("reviewer");
+        let mut tester = detail(
+            "run-1a",
+            "redirect-tester",
+            "running",
+            "active",
+            "openai/gpt-5",
+        );
+        tester["category"] = json!("quick");
+        let children = [
+            tester,
+            reviewer,
+            detail(
+                "run-1c",
+                "docs-writer",
+                "done",
+                "terminal",
+                "local/worker-model",
+            ),
+        ];
+        for (width, height, suffix) in [(1440.0, 900.0, ""), (1024.0, 768.0, "narrow")] {
+            let mut screen = screen(egui::vec2(width, height));
+            screen.settle_runs_with(&children);
+            screen.harness.get_by_label("Subagents (3)").click();
+            screen.settle_runs_with(&children);
+            screen.harness.event(egui::Event::PointerGone);
+            screen.harness.run_steps(2);
+            screen.capture(suffix);
+            let harness = &screen.harness;
+            harness.get_by_label("Root");
+            harness.get_by_label("run-1");
+            for label in [
+                "redirect-tester",
+                "Worker(quick) · Running",
+                "openai/gpt-5 · openai",
+                "auth-reviewer",
+                "reviewer · Waiting for input",
+                "docs-writer",
+                "worker · Done",
+                "local/worker-model · local",
+            ] {
+                harness.get_by_label(label);
+            }
+            assert_eq!(harness.get_all_by_label("Copy run ID").count(), 3);
+            assert_eq!(harness.get_all_by_label("Open pane").count(), 3);
+            // The finished subagent offers no Stop; the other two are the
+            // conversation's, in its header and its composer.
+            assert_eq!(harness.get_all_by_label("Stop").count(), 2 + 2);
+        }
     }
 
     // Given: run-1a's tab open
@@ -1407,6 +1487,12 @@ mod run_tabs {
     #[test]
     fn a_stopped_root_with_running_subagents_offers_stop_subagents() {
         let mut screen = with_subagent();
+        // Execution's per-run Stop is not the conversation's: keep its cards out of sight.
+        shell::focus(
+            &mut screen.harness.state_mut().dock,
+            CoreTab::Feature(FeatureId::Teams),
+        );
+        screen.settle_runs();
         let set_root = |screen: &mut Screen, phase| {
             let mut shared = screen.shared.lock().unwrap();
             shared.cache.runs.get_mut("run-1").unwrap().phase = phase;

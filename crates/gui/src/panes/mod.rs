@@ -36,6 +36,7 @@ pub mod requests;
 pub mod role_profiles;
 pub mod role_settings;
 pub mod routing_settings;
+pub mod run_card_widgets;
 pub mod self_improvement;
 pub mod settings;
 pub mod shell_jobs;

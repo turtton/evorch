@@ -9,6 +9,13 @@
 /// The height at which a list starts to scroll in the stacked column, and at least in a tab.
 pub(super) const LIST_MAX_HEIGHT: f32 = 240.0;
 
+/// The share of a tab's height a list may take, leaving room for what follows it.
+const TAB_SHARE: f32 = 0.55;
+
+/// The share for the list of a tab that shows little else: a line above it, and its
+/// pager and a folded line below.
+const MAIN_LIST_TAB_SHARE: f32 = 0.75;
+
 #[derive(Clone, Copy)]
 struct TabHeight(f32);
 
@@ -38,11 +45,11 @@ pub(super) fn in_tab<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R
     inner
 }
 
-fn list_max_height(ui: &egui::Ui) -> f32 {
+fn list_max_height(ui: &egui::Ui, share: f32) -> f32 {
     ui.ctx()
         .data(|d| d.get_temp::<TabHeight>(tab_height_id()))
         .map_or(LIST_MAX_HEIGHT, |TabHeight(tab)| {
-            (tab * 0.55).max(LIST_MAX_HEIGHT)
+            (tab * share).max(LIST_MAX_HEIGHT)
         })
 }
 
@@ -52,9 +59,18 @@ pub(super) fn bounded_list<R>(
     id: &'static str,
     rows: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    bounded_list_sharing(ui, id, TAB_SHARE, rows)
+}
+
+fn bounded_list_sharing<R>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    share: f32,
+    rows: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::ScrollArea::vertical()
         .id_salt(id)
-        .max_height(list_max_height(ui))
+        .max_height(list_max_height(ui, share))
         .show(ui, rows)
         .inner
 }
@@ -69,6 +85,18 @@ pub(super) fn paged_list(
     rows: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     bounded_list(ui, id, rows);
+    next_page.is_some_and(|label| ui.button(label).clicked())
+}
+
+/// [`paged_list`] for the list a tab is about: in a tab it may take most of the
+/// height, and in the stacked column it is bounded as any other list.
+pub(super) fn main_paged_list(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    next_page: Option<&str>,
+    rows: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    bounded_list_sharing(ui, id, MAIN_LIST_TAB_SHARE, rows);
     next_page.is_some_and(|label| ui.button(label).clicked())
 }
 

@@ -19,7 +19,7 @@ use workbench_protocol::commands::{Command, ComposerRole, ContinueChat, SendChat
 use workbench_protocol::namespaces::{
     ConversationCommand, ExecutionCommand, ExecutionQuery, ExecutionReply, LanesQuery, LanesReply,
     WorkspaceQuery, WorkspaceReply,
-    execution::{RunDetailsQuery, RunScope},
+    execution::{GoalPhase, RunDetailsQuery, RunScope},
     lanes::ListLanes,
     teams::{TeamTaskRef, TeamsQuery, TeamsReply},
 };
@@ -79,6 +79,8 @@ const LEAD: &str = "lead";
 /// The height at which the lanes screen's lists scroll (its own bound, to see the list from
 /// outside).
 const LIST_HEIGHT: f32 = 240.0;
+/// The vertical inner margin of an Execution run card (`SP_2`).
+const CARD_PADDING: f32 = 8.0;
 const OBJECTIVE: &str = "e2e objective";
 
 struct World {
@@ -637,7 +639,20 @@ impl Desktop {
     /// Scrolls the list whose first row is `first_row` until the first label named `label`
     /// is inside the list's visible height.
     async fn scroll_list_to(&mut self, first_row: &str, label: &str) {
-        let list = self.list_of(first_row);
+        self.scroll_list_inset_to(first_row, 0.0, label).await;
+    }
+
+    /// [`Desktop::scroll_list_to`] for a list of cards: the first card's name sits
+    /// [`CARD_PADDING`] below the list's top, so the list ends that much sooner, and the
+    /// label's centre must also clear the card's bottom edge by a few points.
+    async fn scroll_cards_to(&mut self, first_card: &str, label: &str) {
+        self.scroll_list_inset_to(first_card, CARD_PADDING + 4.0, label)
+            .await;
+    }
+
+    async fn scroll_list_inset_to(&mut self, first_row: &str, inset: f32, label: &str) {
+        let mut list = self.list_of(first_row);
+        list.max.y -= inset;
         self.wheel_until(
             label,
             |_| list.min + egui::vec2(10.0, 10.0),
@@ -678,8 +693,12 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
     // The lead's roots, then a drill-down into its child, both as the Web client lists them.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    desktop.until(|d| d.shows_part("子 run (1)")).await;
-    desktop.click("子 run (1)").await;
+    desktop.until(|d| d.shows("Subagents (1)")).await;
+    // A card is taller than a row was: make sure the control is in the window first.
+    desktop
+        .scroll_window_to("Subagents (1)", &["Execution"])
+        .await;
+    desktop.click("Subagents (1)").await;
     let QueryReply::Execution(ExecutionReply::RunDetails(children)) = world
         .web(
             "web-children",
@@ -699,18 +718,34 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
     assert_eq!(children.items[0].summary.id.as_str(), child.to_string());
     let child_name = children.items[0].name.clone();
     desktop.until(|d| d.shows(&child_name)).await;
-    desktop.click("ルート").await;
-    desktop.until(|d| d.shows_part("子 run (1)")).await;
+    desktop.click("Root").await;
+    desktop.until(|d| d.shows("Subagents (1)")).await;
 
-    // Goal review: the checkbox sends the command, the core flips the goal, the screen says so.
-    desktop.until(|d| d.shows_part("ゴール: ship it")).await;
+    // Goal review: the conversation band's toggle sends the command, the core flips the goal,
+    // and the band and Execution's status say so. The band is drawn by the whole window only;
+    // it shares the column's state, so the selection and the goal already read stay.
     let before = world.web_execution("goal-before").await.goal.unwrap();
-    desktop.click("ゴールレビュー").await;
-    desktop
-        .until(|d| d.shows("ゴールレビューの切替: 受け付けました"))
+    assert!(!before.review_enabled);
+    assert_ne!(
+        before.phase,
+        GoalPhase::Complete,
+        "a completed goal's toggle is disabled"
+    );
+    let mut page = Desktop::page(
+        world.shared.clone(),
+        world.actions.clone(),
+        world.project.clone(),
+        LEAD,
+    );
+    page.until(|d| d.shows("Goal: ship it")).await;
+    page.click("Enable independent review before completion")
         .await;
+    page.until(|d| {
+        d.shows("Disable independent review before completion") && d.shows("Goal review: accepted")
+    })
+    .await;
     let after = world.web_execution("goal-after").await.goal.unwrap();
-    assert_ne!(after.review_enabled, before.review_enabled);
+    assert!(after.review_enabled);
 
     for run in [child, world.lead] {
         world.boot.runtime.cancel(run).unwrap();
@@ -1524,23 +1559,24 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
     // reached by turning the wheel and clicked with the pointer.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    let drill = format!("子 run ({count})");
+    let drill = format!("Subagents ({count})");
     desktop.until(|d| d.shows(&drill)).await;
     desktop.scroll_window_to(&drill, &["Execution"]).await;
     desktop.click(&drill).await;
-    desktop.until(|d| d.shows("さらに読み込む")).await;
-    let rows = |d: &Desktop| d.harness.query_all_by_label("Worker").count();
+    desktop.until(|d| d.shows("Load more runs")).await;
+    // One Open pane per card, drawn for the rows scrolled out of the list too.
+    let rows = |d: &Desktop| d.harness.query_all_by_label("Open pane").count();
     let before = rows(&desktop);
     desktop
-        .scroll_window_to("さらに読み込む", &["Execution", "ゴール"])
+        .scroll_window_to("Load more runs", &["Execution", "Root"])
         .await;
-    desktop.click("さらに読み込む").await;
+    desktop.click("Load more runs").await;
     desktop.until(|d| rows(d) > before).await;
 
     // The far run's own drill-down button is the only one: bring it into the list's view.
     let first_row = first.items[0].name.clone();
-    desktop.scroll_list_to(&first_row, "子 run (1)").await;
-    desktop.click("子 run (1)").await;
+    desktop.scroll_cards_to(&first_row, "Subagents (1)").await;
+    desktop.click("Subagents (1)").await;
     desktop.until(|d| d.shows(&grandchild_name)).await;
     assert!(
         desktop.shows(far.summary.id.as_str()),
@@ -1706,7 +1742,12 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
         world.project.clone(),
         LEAD,
     );
+    // The goal's criteria are in the conversation's band now: its details list them.
+    desktop.until(|d| d.shows("Show goal details")).await;
+    desktop.click("Show goal details").await;
     desktop.until(|d| d.shows_part("criterion 7")).await;
+    // Folded again, the details leave the conversation's controls where they were.
+    desktop.click("Hide goal details").await;
     // Teams waits behind Execution; its tab brings the long task list forward.
     desktop.click("Teams tab").await;
     desktop.until(|d| d.shows("task-000")).await;
