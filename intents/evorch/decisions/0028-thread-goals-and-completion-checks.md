@@ -49,7 +49,8 @@ Accepted（2026-10-04）。利用者との設計相談で合意し、実装・PR
 
 ### 永続化と既存機構
 
-- Goal状態、明示Pause、review設定、条件・証拠・指摘、反復・予算をイベントから復元する。保存内容だけで旧runや旧権限を自動復活させない（[ADR 0027](0027-restore-contract.md)）。
+- Goal状態、明示Pause、review設定、条件・証拠・指摘、反復・予算上限などの意味的状態は`ThreadGoalUpdated`のsnapshotで保持する。累積usage（要求数・入出力token）はgoalごと1行の絶対累積値（項目別`max`でUPSERT、commit ACK待ち）で保持し、復元時はsnapshotと行の項目別`max`で合成する（復元時はusage行へ書き込まない）。usage-onlyのsnapshot発行は16要求または8,000,000 tokensごととする（run storeなしでは従来頻度）。保存内容だけで旧runや旧権限を自動復活させない（[ADR 0027](0027-restore-contract.md)）。
+- クラッシュ時の損失上限は、commit ACK済みtokenの追加損失0（プロセスクラッシュ限定、OSクラッシュ・電源断は対象外）、要求数はgoal全体で最大15とする。ACK待ち中の応答分（実行中agentごとに1応答またはhosted search wave）は上限保証外とする。保存・読取り失敗時は`phase`/`reason`を変えずruntime latchとrunエラー終了で拒否し、再保存ACKまたは再読取り成功で解除する。
 - 既存のWorkerからOrchestratorへの引き継ぎでは、goal・Pause・累積予算・現在のownership・会話の継続性を保持する。旧root配下に残った子agentも、使用量と完了待ちの対象から外さない。
 - 汎用goalを旧PR delivery supervisorと分離する。旧PR経路のmerge承認・closeoutや過去のpacket/interviewは履歴として保持する。
 - Goal toolのschemaはrun開始時から安定させる。自己確認・修正指示は履歴末尾に追加し、送信済みprefixやsystem/toolsをgoal状態に応じて書き換えない。
