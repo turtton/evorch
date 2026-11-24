@@ -41,6 +41,15 @@ Serve が表示する実際のホスト名（scheme・port なし）を `allowed
 Tailscale の認証・ACL を信頼境界とし、公開リバースプロキシで露出しない。
 この PR の UI は既存 adapter の assets を使う。スマホ UI の P6 は別 PR。
 
+## メモリ（glibc arena 上限）
+
+Linux/glibc の `evorch-core` は起動直後（`at_entry()` の直後。planned 再起動の exec 後も同じ入口）に
+`mallopt(M_ARENA_MAX, 2)` を呼び、malloc arena を最大 2（main 含む）に制限する。履歴読み出しなど
+複数スレッドで確保した後の解放済みページを再利用しやすくし、常駐メモリを抑えるため。
+`MALLOC_ARENA_MAX` または `GLIBC_TUNABLES` の `glibc.malloc.arena_max` が指定されている場合
+（空・不正値を含む）は何も呼ばず glibc に委ね、環境変数も書き換えない。設定に失敗した場合は
+固定文言の警告を stderr に出して起動を続ける。GUI・CLI・非 glibc では何もしない。
+
 ## ライフサイクルと所有権
 
 Unix socket は検証済みの `$XDG_RUNTIME_DIR/evorch-core-<uid>/<config-identity-hash>.sock`

@@ -12,6 +12,8 @@ mod prepared;
 pub use prepared::{RecoveryReleaseOutcome, ValidatedPreparedClaim};
 mod inspection;
 pub use inspection::{RecoveryClaimSnapshot, RecoveryIntentObservation};
+#[cfg(test)]
+mod intent_load_tests;
 
 use crate::{Database, RunContextReceipt, StorageError};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -192,10 +194,20 @@ impl Database {
         Ok(result)
     }
     /// Recovery scanning keeps row decoding failures attached to their identity.
-    pub fn recovery_intent_loads(&self) -> Result<Vec<RecoveryIntentLoad>, StorageError> {
+    ///
+    /// Rows are handed to `visit` one at a time, in `run_id` order, and are dropped as soon
+    /// as it returns: no payload outlives its own visit, so a scan costs one row of memory,
+    /// not the whole table. A row that cannot be read reaches `visit` with the identity
+    /// that could be read and the error; only a failure of the statement or the cursor
+    /// aborts the scan (the rows already visited then stay with the caller, who must
+    /// discard them). `visit` runs while the connection is in use, and callers that reach this
+    /// through a shared handle hold its lock meanwhile: it must not call back into the database.
+    pub fn for_each_recovery_intent(
+        &self,
+        mut visit: impl FnMut(RecoveryIntentLoad),
+    ) -> Result<(), StorageError> {
         let mut q=self.conn.prepare("SELECT run_id,incarnation,payload FROM resume_intents WHERE NOT EXISTS(SELECT 1 FROM run_tombstones t WHERE t.run_id=resume_intents.run_id) ORDER BY run_id")?;
         let mut rows = q.query([])?;
-        let mut result = Vec::new();
         while let Some(row) = rows.next()? {
             let id = row.get::<_, String>(0).ok();
             let record = (|| {
@@ -205,8 +217,17 @@ impl Database {
                     payload: row.get(2)?,
                 })
             })();
-            result.push((id, record));
+            visit((id, record));
         }
+        Ok(())
+    }
+    /// Every row of [`Database::for_each_recovery_intent`] at once. Holding all payloads
+    /// is exactly what the streaming scan exists to avoid, so production code must not
+    /// call this.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn recovery_intent_loads(&self) -> Result<Vec<RecoveryIntentLoad>, StorageError> {
+        let mut result = Vec::new();
+        self.for_each_recovery_intent(|load| result.push(load))?;
         Ok(result)
     }
     pub fn recovery_claims(&self) -> Result<Vec<RecoveryClaim>, StorageError> {

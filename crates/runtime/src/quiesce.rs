@@ -17,6 +17,8 @@ mod recovery_06a_tests;
 mod recovery_06b_tests;
 #[cfg(test)]
 mod recovery_cache_tests;
+#[cfg(test)]
+mod recovery_startup_plan_tests;
 mod restart;
 mod stop_boundary;
 pub use host_restart::{
