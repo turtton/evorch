@@ -1,6 +1,8 @@
 //! Cross-thread accounting for decoded full-body reads through Database's read
 //! APIs. File-backed databases are keyed by SQLite's database path, so the meter
 //! also sees projection tasks using another thread/reader for the same store.
+pub use crate::history::meter::HistoryCounts;
+pub use crate::history::meter::support::{HistoryMeter, meter_history};
 use rusqlite::Connection;
 use std::{
     collections::HashMap,

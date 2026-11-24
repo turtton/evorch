@@ -4,6 +4,10 @@ pub mod build;
 pub(crate) mod index;
 #[cfg(test)]
 mod index_tests;
+pub(crate) mod meter;
+pub mod read;
+#[cfg(test)]
+mod read_tests;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +28,7 @@ pub fn part_progress(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Assistant,

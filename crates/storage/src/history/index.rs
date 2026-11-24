@@ -97,11 +97,17 @@ pub(crate) fn source_kind(conn: &Connection, id: i64) -> Result<(EventKind, bool
     let mut s = conn.prepare_cached("SELECT payload,body_format FROM events WHERE id=?1")?;
     let mut rows = s.query([id])?;
     let row = rows.next()?.ok_or_else(invalid)?;
+    super::meter::record(conn, |c| {
+        c.source_rows += 1;
+        c.payload_decodes += 1;
+    });
     let kind = decode_kind(row.get_ref(0)?)?;
     let format: i64 = row.get(1)?;
     if !matches!(format, 0 | 1) {
         return Err(invalid());
     }
+    drop(rows);
+    super::meter::statement(conn, &s);
     Ok((kind, format == 1))
 }
 fn text_part(kind: &EventKind, tokenized: bool) -> Result<(String, bool), StorageError> {

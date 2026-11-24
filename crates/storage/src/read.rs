@@ -38,6 +38,16 @@ pub struct RunContextMeta {
 }
 
 impl Database {
+    /// Hold scope resolution, readiness, H cuts, merge and selected source reads
+    /// in one SQLite snapshot. Drop it before registering bodies in the host.
+    pub fn history_snapshot(
+        &self,
+        thread: &str,
+        run: Option<&str>,
+    ) -> Result<Option<crate::history::read::HistorySnapshot<'_>>, StorageError> {
+        crate::history::read::HistorySnapshot::open(self, thread, run)
+    }
+
     /// Whether a published reindex request still has pending target work.
     /// Background discovery alone must not retain an otherwise idle core.
     pub fn has_pending_reindex(&self) -> Result<bool, StorageError> {
