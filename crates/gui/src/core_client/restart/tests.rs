@@ -235,10 +235,10 @@ fn a_conflict_reads_as_a_changed_target_and_the_banner_shows_stage_and_deadline(
     };
     let banner = panel.banner(Some(view), None);
     let text = banner.text().unwrap();
-    assert!(text.contains("120秒中 残り97秒"), "{text}");
-    assert!(text.contains("新しいコアは起動しません"), "{text}");
+    assert!(text.contains("97s of 120s left"), "{text}");
+    assert!(text.contains("no new core is started"), "{text}");
     let expired = panel.banner(Some(view), Some(Stage::ReadyToReconnect));
-    assert!(expired.text().unwrap().contains("30秒以内"));
+    assert!(expired.text().unwrap().contains("within 30 seconds"));
     assert_eq!(panel.banner(None, None).text(), None);
 }
 

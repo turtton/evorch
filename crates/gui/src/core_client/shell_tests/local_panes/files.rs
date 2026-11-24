@@ -330,3 +330,42 @@ fn an_image_link_opens_the_image_in_a_file_tab() {
     assert!(screen.harness.query_by_label("Loading file…").is_none());
     screen.capture("image");
 }
+
+// Given: a Markdown file open in a File tab in Graphite, whose selection stroke is its fill
+// When: the tab shows the Source/Preview toggle with Preview selected
+// Then: the selected label is drawn in the accent's foreground, so it reads on the accent
+#[test]
+fn the_selected_preview_toggle_is_readable_in_graphite() {
+    let project = tempfile::tempdir().unwrap();
+    let file = project.path().canonicalize().unwrap().join("notes.md");
+    std::fs::write(&file, "# Notes\n\nBody text.\n").unwrap();
+    let mut screen = screen_on(project.path(), "[Open notes](notes.md)");
+    screen.open_link("Open notes", &file);
+    screen.harness.get_by_label("Notes");
+
+    let [selected] = screen
+        .harness
+        .get_all_by_label("Preview")
+        .filter(|node| node.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+        .map(|node| node.rect())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one selected Preview toggle");
+    };
+    let image = screen.harness.render().unwrap();
+    let palette = crate::theme::tokens::palette();
+    let count = |color: egui::Color32| {
+        (selected.left() as u32..selected.right() as u32)
+            .flat_map(|x| (selected.top() as u32..selected.bottom() as u32).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                let [r, g, b, _] = image.get_pixel(x, y).0;
+                [(r, color.r()), (g, color.g()), (b, color.b())]
+                    .iter()
+                    .all(|&(drawn, wanted)| drawn.abs_diff(wanted) <= 24)
+            })
+            .count()
+    };
+    assert!(count(palette.ACCENT) > 0, "the selected pill is filled");
+    assert!(count(palette.ACCENT_FG) > 0, "the label reads on the fill");
+    screen.capture("file-toggle-graphite");
+}

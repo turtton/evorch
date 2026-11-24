@@ -114,7 +114,12 @@ impl LocalPanes {
             LocalRoot::Missing(path) => return not_available(ui, path),
             LocalRoot::Ready(path) => Some(path.clone()),
         };
-        let requested = diff_pane(ui, &self.diff);
+        let requested = ui
+            .scope(|ui| {
+                crate::theme::widgets::readable_selection(ui);
+                diff_pane(ui, &self.diff)
+            })
+            .inner;
         let Some(repo_root) = root else {
             return;
         };
@@ -163,7 +168,11 @@ impl LocalPanes {
 
     pub fn file_tab(&mut self, ui: &mut egui::Ui, id: files::FileTabId) {
         if let Some(tab) = self.files.get(id) {
-            file_viewer_pane(ui, &tab.path, self.roots.workspace.ready());
+            let workspace = self.roots.workspace.ready();
+            ui.scope(|ui| {
+                crate::theme::widgets::readable_selection(ui);
+                file_viewer_pane(ui, &tab.path, workspace);
+            });
         }
     }
 

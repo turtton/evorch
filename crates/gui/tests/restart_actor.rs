@@ -212,7 +212,7 @@ async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no
             notified.await;
         }
         predecessor.stop();
-        gui.until(|s| s.status.contains("再起動中")).await;
+        gui.until(|s| s.status.contains("Restarting")).await;
         let successor = world.core(8);
         gui.until(|s| Gui::epoch(s) == Some(8)).await;
         assert!(
@@ -255,7 +255,7 @@ async fn an_abnormal_loss_starts_a_core_once_within_the_budget_and_then_waits_fo
         // nothing is waited for connect-only; the launcher is asked once. The test
         // binary exits at once without a core, which the launcher reports.
         first.stop();
-        gui.until(|s| s.status.contains("接続失敗")).await;
+        gui.until(|s| s.status.contains("Connection failed")).await;
         assert_eq!(starts(&world), 1, "one automatic start, no more");
         let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
         assert_eq!(
@@ -281,7 +281,7 @@ async fn an_abnormal_loss_starts_a_core_once_within_the_budget_and_then_waits_fo
             }))
             .await
             .unwrap();
-        gui.until(|s| s.status.contains("明示的に再接続")).await;
+        gui.until(|s| s.status.contains("Not sent: the core is disconnected")).await;
         assert!(second.state().seen.is_empty(), "no one connected to it");
         gui.actions.send(Action::Reconnect).await.unwrap();
         gui.until(|s| Gui::epoch(s) == Some(8)).await;
@@ -316,13 +316,13 @@ async fn an_exhausted_budget_is_shown_with_its_reason_and_nothing_is_started_or_
         let gui = Gui::start(world.launcher());
         gui.until(|s| Gui::epoch(s) == Some(7)).await;
         first.stop();
-        gui.until(|s| s.status.contains("再試行しません")).await;
+        gui.until(|s| s.status.contains("not retried")).await;
         let shown = gui.shared.lock().unwrap().status.clone();
         assert!(
             shown.contains("3 core crashes"),
             "the reason is shown: {shown}"
         );
-        assert!(shown.contains("再接続"), "and what to do next: {shown}");
+        assert!(shown.contains("Reconnect"), "and what to do next: {shown}");
         assert_eq!(starts(&world), 0, "nothing was started");
         assert_eq!(
             core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
@@ -351,7 +351,8 @@ async fn a_goodbye_and_the_end_of_the_stream_arriving_together_is_still_a_goodby
                 },
             ));
             core.stop_after_flush();
-            gui.until(|s| s.status.contains("終了の通知あり")).await;
+            gui.until(|s| s.status.contains("announced its shutdown"))
+                .await;
             assert_eq!(starts(&world), 0, "a goodbye is not a crash");
             gui.actions.send(Action::Shutdown).await.unwrap();
             gui.actor.await.unwrap();
@@ -390,7 +391,7 @@ async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
             },
         ));
         core.stop_after_flush();
-        gui.until(|s| s.status.contains("終了の通知あり")).await;
+        gui.until(|s| s.status.contains("announced its shutdown")).await;
         assert_eq!(
             starts(&world),
             0,
@@ -418,7 +419,8 @@ async fn a_core_that_said_goodbye_is_not_started_again() {
         // The actor resyncs on the notice: its second subscribe proves it was read.
         first.wait_for(|s| s.subscribes.len() >= 2).await;
         first.stop_by_ref();
-        gui.until(|s| s.status.contains("終了の通知あり")).await;
+        gui.until(|s| s.status.contains("announced its shutdown"))
+            .await;
         assert_eq!(starts(&world), 0, "an orderly stop is not restarted");
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();

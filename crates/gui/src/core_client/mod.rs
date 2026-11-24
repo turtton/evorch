@@ -16,6 +16,7 @@ pub mod persistence;
 pub mod run_tabs;
 pub mod shell;
 mod subagent_panes;
+pub mod theme;
 mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
@@ -127,7 +128,7 @@ impl Shared {
         self.capabilities = capabilities;
         self.features.begin_session(delivered, held);
         self.connected = true;
-        self.status = "core-client: 接続済み".into();
+        self.status = CONNECTED.into();
     }
 
     /// Replace a disposable cut without discarding human input or uncertainty.
@@ -179,6 +180,10 @@ fn can_send(
             .any(|i| i.reference.is_none() || i.uploading)
 }
 
+pub(crate) const CONNECTED: &str = "Connected to the core";
+pub(crate) const QUEUE_FULL: &str =
+    "The client's send queue is full or disconnected. Your input is kept.";
+
 pub fn client_config() -> ClientConfig {
     let mut config = ClientConfig::new(
         ClientId::new(format!("desktop-{}", uuid::Uuid::new_v4())).expect("uuid fits"),
@@ -220,12 +225,14 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let options = crate::window::native_options(&title);
     let settings = ui_settings(&config_dir);
+    let ui_settings_path = config_dir.join("ui.toml");
+    let theme_preset = crate::theme::style::ThemePreset::from(settings.theme_preset);
     let keybinds = crate::keymap::configured_panel_keybinds(&settings.keybinds, &config_dir);
     eframe::run_native(
         &title,
         options,
         Box::new(move |cc| {
-            crate::theme::style::install_preset(&cc.egui_ctx, settings.theme_preset.into());
+            crate::theme::style::install_preset(&cc.egui_ctx, theme_preset);
             let shared = Arc::new(Mutex::new(Shared::default()));
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let task = runtime.spawn(connection::serve(
@@ -242,6 +249,8 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
                 screen: CoreClientScreen::new(shared, tx, None, None)
                     .with_local_panes(local)
                     .with_keymap(core_keymap(&keybinds))
+                    .with_ui_settings(ui_settings_path, theme_preset)
+                    .with_system_stats()
                     .with_state_store(persistence::ClientStateStore::in_config_dir(&config_dir)),
                 _runtime: runtime,
                 task,
@@ -251,8 +260,8 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// The workbench's UI settings (theme and keymap), shared with the embedded one and only
-/// read here: a file that does not load gives the defaults, as in the embedded workbench.
+/// The workbench's UI settings (theme and keymap), shared with the embedded one: a file
+/// that does not load gives the defaults, as in the embedded workbench.
 fn ui_settings(config_dir: &std::path::Path) -> workspace_ui::UiSettings {
     let path = config_dir.join("ui.toml");
     if !path.exists() {
@@ -310,6 +319,8 @@ pub struct CoreClientScreen {
     /// Whether the restored run tabs still wait for the first snapshot, which drops
     /// those of threads the core no longer has.
     pending_run_tab_prune: bool,
+    theme: theme::ThemePicker,
+    stats: Option<crate::panes::system_footer::SystemFooter>,
 }
 
 impl CoreClientScreen {
@@ -337,7 +348,27 @@ impl CoreClientScreen {
             restore: None,
             pending_selection: None,
             pending_run_tab_prune: false,
+            theme: theme::ThemePicker::default(),
+            stats: None,
         }
+    }
+
+    /// The `ui.toml` the theme picker saves to, and the preset the window started with.
+    #[must_use]
+    pub fn with_ui_settings(
+        mut self,
+        path: PathBuf,
+        preset: crate::theme::style::ThemePreset,
+    ) -> Self {
+        self.theme = theme::ThemePicker::new(Some(path), preset);
+        self
+    }
+
+    /// The footer's CPU and memory bars, read by a sampler thread started on the first frame.
+    #[must_use]
+    pub fn with_system_stats(mut self) -> Self {
+        self.stats = Some(crate::panes::system_footer::SystemFooter::default());
+        self
     }
 
     /// The chords from the UI settings; without this, the default ones.
@@ -543,7 +574,8 @@ fn apply_frame(
         ) {
             shared.features.open_preview(artifact);
         } else {
-            shared.status = "このコアはプレビューを提供していないため、開けません".into();
+            shared.status =
+                "This core does not offer previews, so the preview cannot be opened".into();
         }
     }
     for action in frame.actions {
@@ -683,7 +715,9 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
                                 > 64 * 1024 * 1024
                     }))
             {
-                shared.status = "添付の上限は 8 MiB/件、32件・64 MiB/thread です".into();
+                shared.status =
+                    "Attachment draft limit reached (8 MiB per file, 32 files / 64 MiB per thread)"
+                        .into();
                 return;
             }
             let image = shared.attachment_draft(project.clone(), thread.as_str(), file.clone());
@@ -732,8 +766,7 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             Action::History(_, Some(run), false) => shared.cache.forget_run(run.as_str()),
             _ => (),
         }
-        shared.status =
-            "クライアントの送信キューが満杯または切断中です。入力は保持されています。".into();
+        shared.status = QUEUE_FULL.into();
     }
 }
 
@@ -838,6 +871,20 @@ impl CoreClientScreen {
         let titles = shared.features.titles();
         let placeholders = shared.features.placeholders();
         let unsupported = shared.features.unsupported_notes();
+        let now = std::time::Instant::now();
+        let diagnostics = shared
+            .connected
+            .then(|| shared.features.diagnostics())
+            .flatten();
+        let today_cost = diagnostics.and_then(|diagnostics| diagnostics.today_cost());
+        if let Some(wait) = diagnostics.and_then(|diagnostics| diagnostics.today_refresh_in(now)) {
+            ui.ctx().request_repaint_after(wait);
+        }
+        let stats = self
+            .stats
+            .as_mut()
+            .and_then(|stats| stats.latest(ui.ctx()))
+            .cloned();
         egui::Panel::bottom("core-footer")
             .resizable(false)
             .frame(egui::Frame::NONE.inner_margin(egui::vec2(6.0, 3.0)))
@@ -845,6 +892,8 @@ impl CoreClientScreen {
                 shell::footer(
                     ui,
                     shell::FooterState {
+                        stats: stats.as_ref(),
+                        today_cost,
                         status: &shared.status,
                         connected: shared.connected,
                         outcome_unknown: &shared.outcome_unknown,
@@ -959,6 +1008,9 @@ impl CoreClientScreen {
             ui.ctx().request_repaint();
         }
         for effect in effects {
+            if matches!(effect, shell::Effect::ThemeSettings) {
+                self.theme.open = true;
+            }
             apply_effect(
                 &self.actions,
                 &mut self.dock,
@@ -968,6 +1020,7 @@ impl CoreClientScreen {
                 effect,
             );
         }
+        self.theme.show(ui.ctx());
         // Closing a file tab or a reset layout drops its preview.
         self.local.sweep_files(ui.ctx(), &self.dock);
         // Closing a tab, a reset layout or another thread drops its run's history.
@@ -1079,6 +1132,8 @@ fn apply_effect(
                 }
             }
             shell::Effect::Status(status) => shared.status = status,
+            // The screen opens its own theme picker; nothing shared changes.
+            shell::Effect::ThemeSettings => {}
             shell::Effect::AttachRequested {
                 request,
                 project,

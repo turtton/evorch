@@ -1,7 +1,8 @@
 //! The core client's own session file, `core-layout.json` in the configuration directory:
 //! the dock's layout, the run tabs and the selection, so the window opens as it was left.
 //! It is this machine's view of the core. Nothing of it is stored in the core, and the
-//! embedded workbench's `ui.toml` is only read (for the theme and the keymap).
+//! embedded workbench's `ui.toml` is read for the theme and the keymap, and written only
+//! for the theme preset (`theme.rs`).
 //!
 //! Each section is decoded on its own, so a selection that no longer decodes keeps a good
 //! layout. A layout that does not validate gives the default dock and is replaced by the

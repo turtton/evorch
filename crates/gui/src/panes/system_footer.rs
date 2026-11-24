@@ -1,8 +1,67 @@
 //! CPU, memory and storage bars at the right end of the footer, drawn like the quota bars.
 
-use crate::model::system_stats::{SystemSnapshot, Usage, format_bytes};
+pub mod stats;
+
+use std::path::PathBuf;
+
 use crate::panes::quota_footer::remaining_fill;
 use crate::theme::text::muted;
+use stats::{SystemSampler, SystemSnapshot, Usage, format_bytes};
+
+/// Starts the system sampler on the first footer frame and keeps its latest reading.
+#[derive(Default)]
+pub struct SystemFooter {
+    /// The directory holding the database; its filesystem is the one reported.
+    storage_directory: Option<PathBuf>,
+    sampler: Option<SystemSampler>,
+    started: bool,
+    #[cfg(test)]
+    reading: Option<SystemSnapshot>,
+}
+
+impl SystemFooter {
+    /// Repaint-policy fixtures must not start the machine's periodic sampler.
+    #[cfg(test)]
+    pub fn without_sampling() -> Self {
+        Self {
+            started: true,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_reading(reading: SystemSnapshot) -> Self {
+        Self {
+            started: true,
+            reading: Some(reading),
+            ..Default::default()
+        }
+    }
+
+    pub fn set_storage_directory(&mut self, directory: Option<PathBuf>) {
+        self.storage_directory = directory;
+    }
+
+    pub fn latest(&mut self, ctx: &egui::Context) -> Option<&SystemSnapshot> {
+        #[cfg(test)]
+        if self.reading.is_some() {
+            return self.reading.as_ref();
+        }
+        if !self.started {
+            self.started = true;
+            let ctx = ctx.clone();
+            // One coalesced repaint per reading; nothing repaints while no reading arrives.
+            self.sampler = SystemSampler::start(self.storage_directory.clone(), move || {
+                crate::repaint::coalesced(&ctx);
+            });
+        }
+        self.sampler.as_mut()?.latest()
+    }
+}
+
+pub fn usage_label(today_cost: Option<String>) -> String {
+    today_cost.map_or_else(|| "Usage".to_owned(), |cost| format!("{cost} today"))
+}
 
 /// A bar that fills as the machine gets busier, so the colour thresholds of the quota bars
 /// (which warn as the remaining share falls) read the free share.
@@ -105,9 +164,9 @@ pub fn with_right_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::system_stats::StorageUsage;
     use crate::theme::tokens::palette;
     use egui_kittest::kittest::Queryable as _;
+    use stats::StorageUsage;
     use std::path::PathBuf;
 
     fn snapshot(storage: bool) -> SystemSnapshot {

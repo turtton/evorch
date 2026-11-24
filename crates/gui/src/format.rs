@@ -115,6 +115,12 @@ pub fn usd(cost: f64) -> String {
     }
 }
 
+/// A cost as [`usd`], marked `*` when it is a lower bound (some usage had no price).
+pub fn cost_label(cost: f64, lower_bound: bool) -> String {
+    let marker = if lower_bound { "*" } else { "" };
+    format!("{}{marker}", usd(cost))
+}
+
 /// Identifier short enough to sit in running text: IDs up to 12 characters
 /// stay whole, longer ones keep their first 8 characters plus `…`.
 pub fn short_id(id: &str) -> String {
@@ -182,6 +188,8 @@ mod tests {
         assert_eq!(compact_count(1_234_567), "1.23M");
         assert_eq!(usd(0.0042), "$0.0042");
         assert_eq!(usd(1.5), "$1.50");
+        assert_eq!(cost_label(1.5, true), "$1.50*");
+        assert_eq!(cost_label(0.0042, false), "$0.0042");
         assert_eq!(latency(840.0), "840ms");
         assert_eq!(latency(1_234.0), "1.2s");
         assert_eq!(elapsed(Duration::from_millis(400)), "400ms");

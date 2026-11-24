@@ -420,10 +420,47 @@ pub fn paint_spinner(ui: &Ui, rect: egui::Rect, color: Option<Color32>) {
         .add(egui::Shape::line(arc, Stroke::new(3.0, color)));
 }
 
+/// egui paints a selected button's label and selected text in `selection.stroke`; where
+/// that equals the selection fill (Graphite: accent on accent) the label vanishes, so it
+/// takes the accent's foreground instead.
+pub fn selected_text_color(visuals: &egui::Visuals, on_accent: Color32) -> Color32 {
+    if visuals.selection.stroke.color == visuals.selection.bg_fill {
+        on_accent
+    } else {
+        visuals.selection.stroke.color
+    }
+}
+
+pub fn readable_selection(ui: &mut Ui) {
+    let color = selected_text_color(ui.visuals(), palette().ACCENT_FG);
+    ui.visuals_mut().selection.stroke.color = color;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::metric_parts;
+    use super::{metric_parts, selected_text_color};
     use crate::theme::icons;
+    use crate::theme::style::{ThemePreset, visuals_for};
+    use crate::theme::tokens::Palette;
+
+    // Given: each preset's visuals / When: a selected label's colour is chosen
+    // Then: only Graphite, whose stroke is its fill, switches to the accent's foreground
+    #[test]
+    fn selected_labels_stay_readable_in_every_preset() {
+        let on_accent = Palette::graphite().ACCENT_FG;
+        assert_eq!(
+            selected_text_color(&visuals_for(ThemePreset::Graphite), on_accent),
+            on_accent
+        );
+        for preset in [ThemePreset::TokyoNight, ThemePreset::HighContrast] {
+            let visuals = visuals_for(preset);
+            assert_eq!(
+                selected_text_color(&visuals, on_accent),
+                visuals.selection.stroke.color,
+                "{preset:?}"
+            );
+        }
+    }
 
     #[test]
     fn metric_parts_strip_textual_prefixes_into_icons() {

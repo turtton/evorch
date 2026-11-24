@@ -1,4 +1,5 @@
-//! Japanese wording. What is distinguished comes from
+//! The desktop's wording: the reconnect lines are English, the rest still Japanese
+//! (PR18). What is distinguished comes from
 //! `workbench_client::restart::view`; only the sentences are the desktop's.
 use std::time::Duration;
 use workbench_client::{
@@ -98,21 +99,21 @@ pub fn receipt(receipt: &AdminReceipt) -> Vec<String> {
 pub fn reconnect(stage: Stage, remaining: Duration) -> String {
     let (what, total) = match stage {
         Stage::RestartingToReady => (
-            "再起動中：接続のみ試行しています（新しいコアは起動しません）。後継コアを待っています",
+            "Restarting: connecting only (no new core is started). Waiting for the successor core",
             120,
         ),
-        Stage::ReadyToReconnect => ("後継コアが準備できました。この画面を再構築しています", 30),
+        Stage::ReadyToReconnect => ("The successor core is ready. Rebuilding this window", 30),
     };
-    format!("{what}（{total}秒中 残り{}秒）", remaining.as_secs())
+    format!("{what} ({}s of {total}s left)", remaining.as_secs())
 }
 
 pub fn expired(stage: Stage) -> &'static str {
     match stage {
         Stage::RestartingToReady => {
-            "120秒以内に後継コアへ接続できませんでした。コアは終了させておらず、別のコアも起動していません"
+            "Could not connect to the successor core within 120 seconds. The core was not stopped and no other core was started"
         }
         Stage::ReadyToReconnect => {
-            "後継コアは準備できましたが、30秒以内にこの画面を再構築できませんでした。何も再送していません"
+            "The successor core is ready, but this window could not be rebuilt within 30 seconds. Nothing was resent"
         }
     }
 }

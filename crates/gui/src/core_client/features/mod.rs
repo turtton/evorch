@@ -508,6 +508,11 @@ pub trait Feature: Send {
         None
     }
 
+    /// The diagnostics feature itself, for the footer's cost of today.
+    fn as_diagnostics(&self) -> Option<&diagnostics::DiagnosticsFeature> {
+        None
+    }
+
     /// The execution feature itself, for the conversation's goal and plan band
     /// and the Plan tab, which queue what is pressed in them into it.
     fn as_execution(&self) -> Option<&execution::ExecutionFeature> {
@@ -776,6 +781,10 @@ impl Features {
     /// The workspace feature, for what observes the sidebar it holds.
     pub fn workspace(&self) -> Option<&workspace::WorkspaceFeature> {
         self.features.iter().find_map(|f| f.as_workspace())
+    }
+
+    pub fn diagnostics(&self) -> Option<&diagnostics::DiagnosticsFeature> {
+        self.features.iter().find_map(|f| f.as_diagnostics())
     }
 
     pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
