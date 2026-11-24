@@ -306,6 +306,15 @@ pub fn wait_for_image_for_tests(ctx: &egui::Context, path: &Path) {
     wait_for_slot(&slot);
 }
 
+/// Blocks until the preview of `path`, drawn at least once, has been read.
+#[cfg(test)]
+pub(crate) fn wait_for_file_for_tests(ctx: &egui::Context, path: &Path) {
+    let cache = ctx
+        .data_mut(|data| data.get_temp::<FileCache>(cache_id(path)))
+        .expect("the preview was drawn");
+    wait_for_slot(&cache.slot);
+}
+
 /// Whether the loader has begun reading this file, which only drawing it does.
 #[doc(hidden)]
 pub fn image_load_started_for_tests(ctx: &egui::Context, path: &Path) -> bool {
