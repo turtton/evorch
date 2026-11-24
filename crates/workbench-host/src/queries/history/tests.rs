@@ -1,4 +1,5 @@
 use super::*;
+use event_bus::LifecycleEvent;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -261,6 +262,69 @@ fn per_run(messages: &[RawMessage]) -> BTreeMap<String, Vec<serde_json::Value>> 
             .push(serde_json::to_value(message).unwrap());
     }
     runs
+}
+
+#[test]
+fn initial_input_identity_uses_acceptance_sequence_not_delivery_or_clock_order() {
+    use storage::HostInputStatus::*;
+    for status in [Accepted, Withdrawn, Unknown, Delivered] {
+        for first_at in [9, 10, 11] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = storage::StorageConfig {
+                db_path: dir.path().join("host.db"),
+                ..Default::default()
+            };
+            let store = storage::Storage::open(config.clone()).unwrap();
+            receipt(&store, "run", "first", "initial", first_at, status);
+            // Earlier clock, but later acceptance sequence: never initial.
+            receipt(&store, "run", "followup", "later", 8, Delivered);
+            let prompt = || LifecycleEvent::TaskPromptPublished {
+                run_id: "run".into(),
+                agent_name: "worker".into(),
+                role: "worker".into(),
+                parent_run_id: None,
+                prompt: "task".into(),
+                user_text: None,
+                skills: vec![],
+            };
+            append(&store, 10, prompt());
+            append(&store, 12, prompt());
+            append(
+                &store,
+                13,
+                MessageEvent::MessageCompleted {
+                    run_id: "run".into(),
+                    text: "answer".into(),
+                },
+            );
+            let db = storage::Database::open(&config).unwrap();
+            // H before f: only receipts, even when their clock is in the future.
+            let before = committed_messages(&db, &["run".into()], 0).unwrap();
+            assert_eq!(before.len(), 1 + usize::from(status == Delivered));
+            let raw = committed_messages(&db, &["run".into()], i64::MAX).unwrap();
+            let mut expected = vec!["later"];
+            if status == Delivered && first_at <= 10 {
+                expected.push("initial");
+            } else {
+                expected.push("task");
+                if status == Delivered {
+                    expected.push("initial");
+                }
+            }
+            expected.push("answer");
+            assert_eq!(
+                raw.iter()
+                    .map(|m| m.parts[0].0.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{status:?}, first_at={first_at}"
+            );
+            assert_eq!(
+                raw.iter().map(|m| m.index).collect::<Vec<_>>(),
+                (0..expected.len() as u64).collect::<Vec<_>>()
+            );
+        }
+    }
 }
 
 fn seed_history(store: &storage::Storage, runs: &[String], rng: &mut Rng) {

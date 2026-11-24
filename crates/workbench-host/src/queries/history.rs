@@ -1,5 +1,5 @@
 use super::{Pager, error, storage_error, text};
-use event_bus::{EventKind, LifecycleEvent, MessageEvent};
+use event_bus::{EventKind, MessageEvent};
 use runtime::AgentRuntime;
 use std::{collections::VecDeque, sync::Mutex};
 use workbench_protocol::{
@@ -241,30 +241,19 @@ impl Bodies {
         })
     }
 }
-pub(crate) fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
-    match kind {
-        EventKind::Message(
-            MessageEvent::MessageCompleted { run_id, text }
-            | MessageEvent::FinalResultPublished { run_id, text },
-        ) => Some((run_id, MessageRole::Assistant, text)),
-        EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
-            run_id,
-            prompt,
-            user_text,
-            ..
-        }) => Some((
-            run_id,
-            MessageRole::User,
-            user_text.as_deref().unwrap_or(prompt),
-        )),
-        EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
-            run_id: Some(run),
-            output: Some(output),
-            ..
-        }) => Some((run, MessageRole::Tool, output)),
-        _ => None,
+#[cfg(test)]
+fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
+    storage::history::committed_text(kind).map(|(run, role, text)| (run, message_role(role), text))
+}
+
+fn message_role(role: storage::history::Role) -> MessageRole {
+    match role {
+        storage::history::Role::User => MessageRole::User,
+        storage::history::Role::Assistant => MessageRole::Assistant,
+        storage::history::Role::Tool => MessageRole::Tool,
     }
 }
+
 impl Source {
     fn retained_bytes(&self) -> usize {
         match self {
@@ -320,8 +309,7 @@ struct InputBody {
     id: String,
     bytes: u64,
 }
-type PendingParts = (usize, usize, Vec<(String, bool)>);
-type Key = Vec<([u8; 32], u64)>;
+type PendingParts = storage::history::PendingParts;
 type Digest = [u8; 32];
 
 /// Where a message sits among the messages of every run: the committed row that emitted
@@ -356,11 +344,8 @@ fn by_acceptance(
 #[derive(Clone)]
 struct RunFold {
     run: String,
-    next: u64,
+    reducer: storage::history::Reducer,
     parts: std::collections::BTreeMap<String, PendingParts>,
-    initial_receipt: bool,
-    first_prompt: Option<Key>,
-    last_assistant: Option<Key>,
     merge_max: i64,
     last_id: i64,
     consumed: std::collections::BTreeMap<String, (i64, bool)>,
@@ -370,11 +355,8 @@ impl RunFold {
     fn new(run: &str) -> Self {
         Self {
             run: run.to_owned(),
-            next: 0,
+            reducer: Default::default(),
             parts: Default::default(),
-            initial_receipt: false,
-            first_prompt: None,
-            last_assistant: None,
             merge_max: i64::MIN,
             last_id: 0,
             consumed: Default::default(),
@@ -437,58 +419,39 @@ impl RunFold {
         self.chain = extend(&self.chain, &message);
         emit(order, message, &self.chain);
     }
+    fn raw(&self, message: storage::history::Message) -> RawMessage {
+        RawMessage {
+            run: self.run.clone(),
+            index: message.index,
+            role: message_role(message.role),
+            parts: message.parts,
+            input: None,
+        }
+    }
     fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
-        let (role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
-            response_id,
-            text,
-            index,
-            total,
-            ..
-        }) = kind
-        {
-            if *index == 0 {
-                self.parts.insert(response_id.clone(), (0, *total, vec![]));
+        let response = match kind {
+            EventKind::Message(MessageEvent::MessagePart { response_id, .. }) => {
+                Some(response_id.clone())
             }
-            let pending = self.parts.get_mut(response_id)?;
-            if pending.0 != *index || pending.1 != *total || *total == 0 || *total > 4096 {
-                self.parts.remove(response_id);
-                return None;
-            }
-            pending.0 += 1;
-            pending.2.push((text.clone(), tokenized));
-            if pending.0 != *total {
-                return None;
-            }
-            let parts = self.parts.remove(response_id)?.2;
-            (MessageRole::Assistant, parts)
-        } else {
-            let (_, role, body) = committed_text(kind)?;
-            (role, vec![(body.to_owned(), tokenized)])
+            _ => None,
         };
-        let prompt = matches!(
-            kind,
-            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
-        );
-        self.message(
-            role,
-            parts,
-            prompt,
-            matches!(
-                kind,
-                EventKind::Message(MessageEvent::FinalResultPublished { .. })
-            ),
-        )
+        let mut pending = response.as_ref().and_then(|id| self.parts.remove(id));
+        let message = self.reducer.observe(kind, tokenized, &mut pending);
+        if let Some((id, pending)) = response.zip(pending) {
+            self.parts.insert(id, pending);
+        }
+        message.map(|message| self.raw(message))
     }
     fn input(&mut self, input: storage::host_input::DeliveredHostInput) -> Option<RawMessage> {
         if input.first_in_run {
-            self.initial_receipt = true;
+            self.reducer.initial_receipt = true;
         }
         if let Some(value) = input.text {
             return self.message(MessageRole::User, vec![(value, false)], false, false);
         }
         let raw = RawMessage {
             run: self.run.clone(),
-            index: self.next,
+            index: self.reducer.next,
             role: MessageRole::User,
             parts: vec![],
             input: Some(InputBody {
@@ -496,7 +459,7 @@ impl RunFold {
                 bytes: input.text_bytes,
             }),
         };
-        self.next += 1;
+        self.reducer.next += 1;
         Some(raw)
     }
     fn message(
@@ -506,58 +469,14 @@ impl RunFold {
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
-        use sha2::{Digest, Sha256};
-        let mut normalized: Vec<(String, bool)> = Vec::new();
-        for (part, tokenized) in parts {
-            let deferred = tokenized && storage::BodyRef::from_token(&part).is_some();
-            if !deferred && let Some((last, false)) = normalized.last_mut() {
-                last.push_str(&part);
-            } else {
-                normalized.push((part, deferred));
-            }
-        }
-        let key: Key = normalized
-            .iter()
-            .map(|(part, deferred)| {
-                if *deferred {
-                    let r = storage::BodyRef::from_token(part).unwrap();
-                    (r.hash, r.byte_len)
-                } else {
-                    (Sha256::digest(part.as_bytes()).into(), part.len() as u64)
-                }
-            })
-            .collect();
-        if (role == MessageRole::Assistant && key.iter().all(|(_, n)| *n == 0))
-            || (finish && self.last_assistant.as_ref() == Some(&key))
-        {
-            return None;
-        }
-        if prompt {
-            if self.first_prompt.as_ref() == Some(&key) {
-                return None;
-            }
-            if self.first_prompt.is_none() {
-                self.first_prompt = Some(key.clone());
-                // The first accepted receipt ID of this run, replayed before its
-                // first task, establishes identity without comparing bodies.
-                // Later changed instructions are not that initial submission.
-                if self.initial_receipt {
-                    return None;
-                }
-            }
-        }
-        if role == MessageRole::Assistant {
-            self.last_assistant = Some(key);
-        }
-        let raw = RawMessage {
-            run: self.run.clone(),
-            index: self.next,
-            role,
-            parts: normalized,
-            input: None,
+        let role = match role {
+            MessageRole::User => storage::history::Role::User,
+            MessageRole::Assistant => storage::history::Role::Assistant,
+            MessageRole::Tool => storage::history::Role::Tool,
         };
-        self.next += 1;
-        Some(raw)
+        self.reducer
+            .message(role, parts, prompt, finish)
+            .map(|message| self.raw(message))
     }
 }
 
@@ -694,11 +613,11 @@ fn tentative(
     emit: &mut impl FnMut(Order, RawMessage, &Digest),
 ) -> Shown {
     if rest.is_empty() {
-        return (fold.next, fold.chain);
+        return (fold.reducer.next, fold.chain);
     }
     let mut tail = fold.clone();
     tail.trailing(rest, emit);
-    (tail.next, tail.chain)
+    (tail.reducer.next, tail.chain)
 }
 
 /// Emits nothing: clients read what precedes the cut through ReadCommittedHistory.
@@ -833,7 +752,7 @@ impl CommitScanner {
                         == fold.consumed =>
                 {
                     inputs.retain(|h| h.accepted_at_ns > fold.merge_max);
-                    (fold.next, fold.chain)
+                    (fold.reducer.next, fold.chain)
                 }
                 _ => {
                     rebuild.insert(run);
@@ -902,7 +821,7 @@ impl CommitScanner {
             .collect();
         for (run, baseline) in with_texts(db, baselines)? {
             let (mut fold, mut rest, published) = hydrate(db, run, cut, baseline)?;
-            collector.resume(run, published, (fold.next, fold.chain));
+            collector.resume(run, published, (fold.reducer.next, fold.chain));
             for row in woken.remove(run).unwrap_or_default() {
                 if row.id > fold.last_id {
                     fold.row(&row, &mut rest, &mut |o, m, c| collector.emit(o, m, c));

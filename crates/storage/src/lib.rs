@@ -68,6 +68,7 @@ pub mod error;
 pub mod eval_sample;
 pub mod handoffs;
 mod harness_notice_history;
+pub mod history;
 pub use harness_notice_history::{AdoptedHarnessNotice, HarnessNoticeSnapshot};
 pub mod host_input;
 pub mod improvement;
