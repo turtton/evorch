@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use egui::{Align, Layout, Sense, Ui};
+use egui::{Align, Layout, Ui};
 use storage::thread_retention::{BlockReason, RetentionStatus};
 use workspace_ui::{
     LineageIndex, LineageKind, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase,
@@ -15,7 +15,7 @@ use crate::panes::sidebar_widgets::{
     limit_families, nest, restore_button, roll_up, title_label, trailing_controls, tree_row_lead,
 };
 use crate::theme::text::muted;
-use crate::theme::tokens::{FONT_SMALL, SP_1, SP_2, palette};
+use crate::theme::tokens::{SP_1, SP_2, palette};
 use crate::theme::widgets::{compact_row_with, ghost};
 
 use super::SidebarAction;
@@ -442,19 +442,7 @@ fn archived_row(
 /// `#12 ✓`: the pull request's number and its glyph. The glyph class also has a word, in the
 /// accessible name and the hover; merged reads `merged` outright.
 fn pull_request_badge(ui: &mut Ui, badge: crate::model::pull_requests::PullRequestBadge) {
-    use crate::model::pull_requests::PrGlyph;
-    let (icon, color) = crate::panes::agent::pull_request_glyph_style(badge.glyph);
-    let text = match badge.glyph {
-        PrGlyph::Merged => format!("#{} merged", badge.number),
-        _ => format!("#{} {icon}", badge.number),
-    };
-    let label = format!("Pull request #{}: {}", badge.number, badge.glyph.word());
-    let response = ui.add(
-        egui::Label::new(egui::RichText::new(text).size(FONT_SMALL).color(color))
-            .sense(Sense::hover()),
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    response.on_hover_text(label);
+    crate::panes::pull_request_widgets::pull_request_badge(ui, badge);
 }
 
 /// A pill saying the lane's close stands. It is the ledger's record, drawn next to the run's

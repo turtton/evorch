@@ -10,8 +10,10 @@ use super::tree::{self, ThreadRow};
 use super::{Dialog, Intent, Requests, SidebarModel, WorkspaceFeature};
 use crate::core_client::cache::Cache;
 use crate::core_client::features::lanes::{LaneIntent, LaneMenu, LaneMenuEntry};
+use crate::core_client::features::pull_requests::{PullRequestIntent, PullRequestMenu};
 use crate::core_client::features::{FeatureContext, Navigation, Selection};
 use crate::panes::lane_widgets::{LaneMenuChoice, lane_menu};
+use crate::panes::pull_request_widgets::pull_request_badge;
 use crate::panes::sidebar_widgets::{
     FAMILY_GAP, FAMILY_PAGE, Hidden, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
     ToolbarView, TrailingView, TreeRails, TreeRowLead, attention_note, family_gap_before,
@@ -35,6 +37,7 @@ struct Scope<'a> {
     selection: &'a Selection,
     project: &'a ProjectId,
     lanes: Option<&'a LaneMenu>,
+    pull_requests: Option<&'a PullRequestMenu>,
 }
 
 struct Rename<'a> {
@@ -59,6 +62,7 @@ impl WorkspaceFeature {
             notice,
             confirmation,
             lane_menu,
+            pull_request_menu,
             ..
         } = self;
         let cache = ctx.cache();
@@ -143,6 +147,7 @@ impl WorkspaceFeature {
                             selection,
                             project: &project.id,
                             lanes: lane_menu.as_ref(),
+                            pull_requests: pull_request_menu.as_ref(),
                         };
                         let mut rename = Rename {
                             editing: renaming,
@@ -315,11 +320,18 @@ fn draw_tree(
                                 .asks
                                 .push((row.id().to_owned(), Intent::Pin(!row.pinned)));
                         }
+                        if let Some(menu) = scope.pull_requests {
+                            pull_request_row(ui, menu, &row.summary.id, requests);
+                        }
                         attention_note(row.own, hidden.attention)
                     };
                     title(
                         ui,
-                        (scope.project, scope.lanes),
+                        (
+                            scope.project,
+                            scope.lanes,
+                            scope.pull_requests.filter(|_| !archived),
+                        ),
                         &row,
                         (note, colors.map(|(fg, _)| fg)),
                         rename,
@@ -350,7 +362,7 @@ fn draw_tree(
 /// The row's title, or the field its new title is typed in.
 fn title(
     ui: &mut Ui,
-    (project, lanes): (&ProjectId, Option<&LaneMenu>),
+    (project, lanes, pull_requests): (&ProjectId, Option<&LaneMenu>, Option<&PullRequestMenu>),
     row: &ThreadRow<'_>,
     (note, color): (Option<&str>, Option<egui::Color32>),
     rename: &mut Rename<'_>,
@@ -397,12 +409,38 @@ fn title(
             ui.ctx().copy_text(row.title.to_owned());
             ui.close();
         }
+        if pull_requests.is_some_and(PullRequestMenu::link_offered)
+            && ui.button("Link PR…").clicked()
+        {
+            requests
+                .pull_requests
+                .push(PullRequestIntent::OpenLink(row.summary.id.clone()));
+            ui.close();
+        }
     });
     if response.clicked() {
         requests.navigations.push(Navigation::SelectThread {
             project: project.clone(),
             thread: row.summary.id.clone(),
         });
+    }
+}
+
+/// The row's pull request badge, once read. A row on screen that was not read yet asks for its
+/// pull request; the hidden pass that only collects requests asks for nothing.
+fn pull_request_row(
+    ui: &mut Ui,
+    menu: &PullRequestMenu,
+    thread: &ThreadId,
+    requests: &mut Requests,
+) {
+    if let Some(badge) = menu.badge(thread) {
+        pull_request_badge(ui, badge);
+    }
+    if !menu.is_known(thread) && ui.is_visible() && ui.is_rect_visible(ui.max_rect()) {
+        requests
+            .pull_requests
+            .push(PullRequestIntent::Want(thread.clone()));
     }
 }
 

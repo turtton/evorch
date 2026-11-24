@@ -159,6 +159,7 @@ struct Requests {
     project: Vec<(String, ProjectIntent)>,
     register: Option<(String, String)>,
     lanes: Vec<super::lanes::LaneIntent>,
+    pull_requests: Vec<super::pull_requests::PullRequestIntent>,
 }
 
 #[derive(Default)]
@@ -202,11 +203,20 @@ pub struct WorkspaceFeature {
     refetch_access: BTreeSet<String>,
     /// What the lanes feature can offer in a lane thread's menu; `None` while it cannot.
     lane_menu: Option<super::lanes::LaneMenu>,
+    /// What the pull requests feature shows in the rows and menus; `None` while it cannot.
+    pull_request_menu: Option<super::pull_requests::PullRequestMenu>,
 }
 
 impl WorkspaceFeature {
     pub(super) fn set_lane_menu(&mut self, menu: Option<super::lanes::LaneMenu>) {
         self.lane_menu = menu;
+    }
+
+    pub(super) fn set_pull_request_menu(
+        &mut self,
+        menu: Option<super::pull_requests::PullRequestMenu>,
+    ) {
+        self.pull_request_menu = menu;
     }
 
     pub fn model(&self) -> &SidebarModel {
@@ -858,6 +868,7 @@ impl Feature for WorkspaceFeature {
             project,
             register,
             lanes,
+            pull_requests,
         } = requests;
         if let Some((name, path)) = register {
             self.register_project(&name, &path);
@@ -876,6 +887,9 @@ impl Feature for WorkspaceFeature {
         }
         for intent in lanes {
             ctx.lane(intent);
+        }
+        for intent in pull_requests {
+            ctx.pull_request(intent);
         }
         self.flush(ctx);
         true

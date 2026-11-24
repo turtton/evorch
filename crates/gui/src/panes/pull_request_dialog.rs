@@ -1,34 +1,11 @@
 //! The "Link PR…" dialog (ADR 0043): a URL or `owner/repo#N`, with a warning when the pull
 //! request's repository is not the project's. A warning never blocks the link.
 
-use egui::{Align, Layout};
-
 use crate::app::pull_requests::LinkDialog;
-use crate::theme::text::{h3, muted};
-use crate::theme::tokens::*;
-use crate::theme::widgets::{ghost, primary_button, surface_frame};
-
-pub const INPUT_LABEL: &str = "Pull request (URL or owner/repo#N)";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkDialogAction {
-    Link(String),
-    Close,
-}
-
-/// What the dialog says about the typed locator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reading {
-    /// Nothing typed yet.
-    Empty,
-    /// Not a github.com pull request; the text is the reason.
-    Invalid(String),
-    /// A pull request, with a warning when its repository differs from the project's.
-    Valid {
-        label: String,
-        warning: Option<String>,
-    },
-}
+pub use crate::panes::pull_request_widgets::{
+    DestinationDialogAction, INPUT_LABEL, LinkDialogAction, MOVE_LABEL, Reading,
+};
+use crate::panes::pull_request_widgets::{destination_dialog_view, link_dialog_view};
 
 /// Reads the typed locator against the project's repository (`owner/name`, when known).
 #[must_use]
@@ -62,103 +39,16 @@ pub fn link_dialog(
     dialog: &mut LinkDialog,
     thread_loaded: bool,
 ) -> Option<LinkDialogAction> {
-    let mut action = None;
     let reading = read_locator(&dialog.input, dialog.project_slug.as_deref());
-    let modal = egui::Modal::new(egui::Id::new("pull-request-link-dialog"))
-        .backdrop_color(palette().OVERLAY)
-        .frame(surface_frame(palette().SURFACE_RAISED))
-        .show(ctx, |ui| {
-            ui.set_width(
-                (ctx.viewport_rect().width() * 0.5).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
-            );
-            ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-            ui.label(h3("Link pull request"));
-            ui.label(muted(INPUT_LABEL));
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut dialog.input)
-                    .hint_text("https://github.com/owner/repo/pull/123")
-                    .desired_width(f32::INFINITY),
-            );
-            edit.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, INPUT_LABEL)
-            });
-            if !edit.has_focus() && dialog.input.is_empty() {
-                edit.request_focus();
-            }
-            match &reading {
-                Reading::Empty => {}
-                Reading::Invalid(reason) => {
-                    ui.colored_label(palette().ERROR_FG, reason);
-                }
-                Reading::Valid { label, warning } => {
-                    ui.label(label);
-                    if let Some(warning) = warning {
-                        ui.colored_label(palette().WARNING_FG, warning);
-                    }
-                }
-            }
-            let ready = thread_loaded && matches!(reading, Reading::Valid { .. });
-            let submitted =
-                edit.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let link = ui
-                    .add_enabled_ui(ready, |ui| primary_button(ui, "Link"))
-                    .inner;
-                if (link.clicked() || submitted) && ready {
-                    action = Some(LinkDialogAction::Link(dialog.input.trim().to_owned()));
-                }
-                if ui.add(ghost("Cancel")).clicked() {
-                    action = Some(LinkDialogAction::Close);
-                }
-            });
-        });
-    if action.is_none() && modal.should_close() {
-        action = Some(LinkDialogAction::Close);
-    }
-    action
+    link_dialog_view(ctx, &mut dialog.input, &reading, thread_loaded, None)
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestinationDialogAction {
-    Move,
-    Cancel,
-}
-
-pub const MOVE_LABEL: &str = "Move here";
 
 /// The confirmation before auto fix moves to this thread from the one that has it.
 pub fn destination_dialog(
     ctx: &egui::Context,
     dialog: &crate::app::pull_requests::DestinationDialog,
 ) -> Option<DestinationDialogAction> {
-    let mut action = None;
-    let modal = egui::Modal::new(egui::Id::new("pull-request-destination-dialog"))
-        .backdrop_color(palette().OVERLAY)
-        .frame(surface_frame(palette().SURFACE_RAISED))
-        .show(ctx, |ui| {
-            ui.set_width(
-                (ctx.viewport_rect().width() * 0.5).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
-            );
-            ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-            ui.label(h3("Move auto fix here?"));
-            ui.label(format!(
-                "This pull request's CI failures go to \u{201c}{}\u{201d}. Turning auto fix on \
-                 here sends them to this thread instead.",
-                dialog.previous_label
-            ));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if primary_button(ui, MOVE_LABEL).clicked() {
-                    action = Some(DestinationDialogAction::Move);
-                }
-                if ui.add(ghost("Cancel")).clicked() {
-                    action = Some(DestinationDialogAction::Cancel);
-                }
-            });
-        });
-    if action.is_none() && modal.should_close() {
-        action = Some(DestinationDialogAction::Cancel);
-    }
-    action
+    destination_dialog_view(ctx, &dialog.previous_label)
 }
 
 #[cfg(test)]
