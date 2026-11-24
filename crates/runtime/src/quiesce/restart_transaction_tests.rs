@@ -475,3 +475,60 @@ async fn preflight_proof_rejects_foreign_changed_and_unhealthy_runtime_before_at
         .unwrap();
     healthy.runtime.cancel_restart_quiesce(&attempt).unwrap();
 }
+
+/// A run commits each new snapshot first and names it in its live intent right
+/// after. A restart observation that lands between the two meets a durable
+/// snapshot the intent does not name yet. That is the run changing under the
+/// observation (observe again), never an unsupported run, which would cancel a
+/// restart asked while a turn is finishing.
+#[tokio::test]
+async fn a_snapshot_committed_but_not_yet_named_by_the_intent_is_an_observation_change() {
+    let f = Fixture::new(0);
+    let run = chat(&f);
+    f.model.entered.notified().await;
+    let recipes = BTreeMap::from([(run, recipe())]);
+    f.runtime.prepare_restart_quiesce(&recipes).unwrap();
+    let earlier = f.runtime.observe_restart_recipes();
+    let execution = f.runtime.execution_snapshot(run).unwrap();
+    let (seen, between) = tokio::sync::oneshot::channel();
+    let runtime = f.runtime.clone();
+    let observed = recipes.clone();
+    f.runtime.on_execution(
+        crate::runtime::HookPoint::SnapshotCommitted,
+        &execution,
+        move || {
+            let _ = seen.send((
+                runtime.prepare_restart_quiesce(&observed).err(),
+                runtime.restart_recipe_inventory(&BTreeMap::new()).err(),
+                runtime.observe_restart_recipes(),
+            ));
+        },
+    );
+    f.model.release.add_permits(1);
+    let (fresh, inventory, during) = between.await.unwrap();
+    assert!(
+        matches!(fresh, Some(RuntimeError::RestartObservationChanged)),
+        "a fresh preflight in the window: {fresh:?}"
+    );
+    assert!(
+        matches!(inventory, Some(RuntimeError::RestartObservationChanged)),
+        "the recipe inventory in the window: {inventory:?}"
+    );
+    // The run has named its snapshots and asks the provider again.
+    f.model.entered.notified().await;
+    // Observations taken before or inside the window do not carry over.
+    for observation in [earlier, during] {
+        assert!(matches!(
+            f.runtime
+                .prepare_restart_quiesce_observed(&recipes, observation)
+                .err(),
+            Some(RuntimeError::RestartObservationChanged)
+        ));
+    }
+    // A new observation of the settled run holds and the preflight passes.
+    let settled = f.runtime.observe_restart_recipes();
+    f.runtime
+        .prepare_restart_quiesce_observed(&recipes, settled)
+        .unwrap();
+    f.cleanup(run).await;
+}

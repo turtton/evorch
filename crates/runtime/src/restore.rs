@@ -744,6 +744,7 @@ fn write_snapshot_with_context(
         .get()
         .ok_or(SnapshotError::RevisionUnknown)?;
     let write = context.provenance.write(record, expected)?;
+    let _commit = runtime.shared.quiesce.begin_snapshot_commit();
     let (saved, applied) = if let Some((claim, now)) = lane {
         use crate::lane_delivery::outbox::DeliveryClaim;
         let saved = match claim {
@@ -782,6 +783,10 @@ fn write_snapshot_with_context(
     // Committed: later snapshots keep these IDs without delivering them again.
     state.host_inputs().committed(&host_inputs.delivered);
     runtime.emit_host_input_transitions(state.caller_run_id(), &applied);
+    #[cfg(test)]
+    if let Ok(execution) = runtime.execution_snapshot(state.task.run_id) {
+        runtime.execution_hook(crate::runtime::HookPoint::SnapshotCommitted, &execution);
+    }
     let reference = crate::checkpoint::SnapshotReference::RunContext { receipt };
     runtime
         .shared

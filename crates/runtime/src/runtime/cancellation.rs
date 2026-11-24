@@ -501,6 +501,7 @@ pub(crate) enum HookPoint {
     RecoveryActivated,
     RecoveryPublished,
     RecoveryGateOpened,
+    SnapshotCommitted,
 }
 #[cfg(test)]
 type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send>);
