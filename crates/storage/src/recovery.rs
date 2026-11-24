@@ -12,6 +12,8 @@ mod prepared;
 pub use prepared::{RecoveryReleaseOutcome, ValidatedPreparedClaim};
 mod inspection;
 pub use inspection::{RecoveryClaimSnapshot, RecoveryIntentObservation};
+#[cfg(test)]
+mod intent_load_tests;
 
 use crate::{Database, RunContextReceipt, StorageError};
 use rusqlite::{Connection, OptionalExtension, params};
