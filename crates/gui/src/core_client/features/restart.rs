@@ -28,6 +28,7 @@ use workbench_client::{
     restart::{
         intent::{BlockerSelector, cancellable},
         reconnect::PlannedEvidence,
+        view::approval_blocked_runs,
     },
 };
 use workbench_protocol::{
@@ -218,6 +219,12 @@ impl Feature for RestartFeature {
                     text::phase(status.status.phase),
                     status.status.revision
                 ));
+                for run in approval_blocked_runs(&status.status) {
+                    ui.colored_label(ui.visuals().warn_fg_color, text::approval_blocker(run));
+                }
+                if let Some(reason) = status.status.cancel_reason {
+                    ui.colored_label(ui.visuals().warn_fg_color, text::cancel_reason(reason));
+                }
                 if status.audit.denial_persistence_failures.get() > 0 {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,

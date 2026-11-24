@@ -8,8 +8,11 @@ use workbench_client::{
         view::{FailureKind, classify},
     },
 };
-use workbench_protocol::namespaces::lifecycle::{
-    AdminOperationState, AdminOutcome, AdminReceipt, RestartPhase,
+use workbench_protocol::{
+    ids::RunId,
+    namespaces::lifecycle::{
+        AdminOperationState, AdminOutcome, AdminReceipt, RestartCancelReason, RestartPhase,
+    },
 };
 
 pub fn phase(phase: RestartPhase) -> &'static str {
@@ -34,6 +37,13 @@ pub fn failure(error: &ClientError) -> String {
             "競合：確認した対象または状態がすでに古くなっています。何も変更していません。読み直してからもう一度判断してください".into()
         }
         FailureKind::Busy => "コアが混み合っています。何も変更していません".into(),
+        FailureKind::ActionRequired => match error {
+            ClientError::Server(e) => format!(
+                "先に対応が必要なため受け付けられませんでした（{}）。何も変更していません",
+                e.message
+            ),
+            other => other.to_string(),
+        },
         FailureKind::Unsupported => {
             "このコアは安全な再起動に対応していません。何も変更していません".into()
         }
@@ -45,6 +55,18 @@ pub fn failure(error: &ClientError) -> String {
             ClientError::Server(e) => e.message.clone(),
             other => other.to_string(),
         },
+    }
+}
+
+pub fn approval_blocker(run: &RunId) -> String {
+    format!("run {run} が承認待ちです。承認か拒否をするか run を停止してください")
+}
+
+pub fn cancel_reason(reason: RestartCancelReason) -> String {
+    match reason {
+        RestartCancelReason::ApprovalPending { pending } => format!(
+            "承認待ちが {pending} 件あるため再起動を取り消しました。承認か拒否をするか run を停止してから、もう一度要求してください"
+        ),
     }
 }
 

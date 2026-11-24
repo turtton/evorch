@@ -50,6 +50,25 @@ fn failures_are_told_apart() {
 }
 
 #[test]
+fn a_refusal_that_needs_the_person_keeps_the_servers_instruction() {
+    let refusal = ClientError::Server(WorkbenchError::new(
+        ErrorCode::Busy,
+        "approve or deny the pending approval(s), or stop the run, then retry",
+        RetryAdvice::UserActionRequired,
+    ));
+    assert_eq!(classify(&refusal), FailureKind::ActionRequired);
+    let text = describe_failure(&refusal);
+    assert!(text.contains("approve or deny"), "{text}");
+    assert!(text.contains("nothing was changed"), "{text}");
+    let transient = ClientError::Server(WorkbenchError::new(
+        ErrorCode::Busy,
+        "why",
+        RetryAdvice::SameRequest,
+    ));
+    assert_eq!(classify(&transient), FailureKind::Busy);
+}
+
+#[test]
 fn an_audit_failure_is_a_warning_on_the_receipt() {
     let mut receipt = AdminReceipt {
         operation_id: AdminId::new("op-1").unwrap(),
@@ -153,6 +172,17 @@ fn the_status_names_each_blocker_and_why_the_last_restart_was_cancelled() {
             .any(|l| l.contains("run-1") && l.contains("approval pending")),
         "{lines:?}"
     );
+    status.status.blockers.push(RestartBlocker {
+        run: RunId::new("run-2").unwrap(),
+        kind: RestartBlockerKind::AwaitingSafePoint,
+    });
+    assert_eq!(
+        approval_blocked_runs(&status.status)
+            .map(RunId::as_str)
+            .collect::<Vec<_>>(),
+        ["run-1"]
+    );
+    status.status.blockers.truncate(1);
     assert!(!lines.iter().any(|l| l.contains("cancelled")), "{lines:?}");
     status.status.phase = RestartPhase::Running;
     status.status.blockers.clear();

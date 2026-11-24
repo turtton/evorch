@@ -6,10 +6,11 @@ use super::reconnect::Stage;
 use crate::{ClientError, TransportError};
 use std::time::Duration;
 use workbench_protocol::{
-    ErrorCode,
+    ErrorCode, RetryAdvice,
+    ids::RunId,
     namespaces::lifecycle::{
         AdminOperationState, AdminOutcome, AdminReceipt, RestartBlockerKind, RestartCancelReason,
-        RestartPhase,
+        RestartPhase, RestartStatus,
         restart::{RestartManagementStatus, RestartTargets, ShellBlockers},
     },
 };
@@ -19,6 +20,7 @@ pub enum FailureKind {
     /// The target, epoch or revision shown is no longer the core's. Read again.
     Stale,
     Busy,
+    ActionRequired,
     /// The core does not offer restart (or not on this platform).
     Unsupported,
     Denied,
@@ -32,6 +34,9 @@ pub fn classify(error: &ClientError) -> FailureKind {
         ClientError::Server(e) => match e.code {
             ErrorCode::Conflict | ErrorCode::StaleRevision | ErrorCode::StaleEpoch => {
                 FailureKind::Stale
+            }
+            ErrorCode::Busy if e.retry == RetryAdvice::UserActionRequired => {
+                FailureKind::ActionRequired
             }
             ErrorCode::Busy | ErrorCode::LimitExceeded | ErrorCode::Draining => FailureKind::Busy,
             ErrorCode::UnsupportedCapability | ErrorCode::UnsupportedVersion => {
@@ -56,6 +61,7 @@ pub fn describe_failure(error: &ClientError) -> String {
             "conflict: the target or state you confirmed is no longer current ({detail}); nothing was changed. Read the targets and status again and decide again"
         ),
         FailureKind::Busy => format!("the core is busy ({detail}); nothing was changed"),
+        FailureKind::ActionRequired => format!("{detail}; nothing was changed"),
         FailureKind::Unsupported => {
             format!("this core does not offer safe restart ({detail}); nothing was changed")
         }
@@ -104,6 +110,14 @@ fn cancel_reason(reason: RestartCancelReason) -> String {
             "{pending} approval(s) were pending, and a restart would lose them; approve or deny the pending approval(s), or stop the run, then retry"
         ),
     }
+}
+
+pub fn approval_blocked_runs(status: &RestartStatus) -> impl Iterator<Item = &RunId> {
+    status
+        .blockers
+        .iter()
+        .filter(|blocker| blocker.kind == RestartBlockerKind::ApprovalPending)
+        .map(|blocker| &blocker.run)
 }
 
 pub fn describe_targets(targets: &RestartTargets) -> Vec<String> {
