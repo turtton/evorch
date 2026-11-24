@@ -122,6 +122,11 @@ struct Work {
 
 /// Run tables in deletion order: (table, predicate on `?1`). Ledger rows need a grant.
 const RUN_TABLES: &[(&str, &str)] = &[
+    ("history_message_sources", "run_id = ?1"),
+    ("history_pending_parts", "run_id = ?1"),
+    ("history_messages", "run_id = ?1"),
+    ("history_event_cuts", "run_id = ?1"),
+    ("history_run_state", "run_id = ?1"),
     ("run_ledger", "run_id = ?1"),
     ("host_input_receipts", "run_id = ?1"),
     ("resume_intents", "run_id = ?1"),
@@ -469,10 +474,15 @@ fn run_tables(
     if table == "run_message_provenance" {
         return provenance_entries(tx, family, cursor, &run);
     }
-    if matches!(
-        table,
-        "host_chat_submissions" | "resume_intents" | "recovery_members" | "recovery_claim_members"
-    ) {
+    if table.starts_with("history_")
+        || matches!(
+            table,
+            "host_chat_submissions"
+                | "resume_intents"
+                | "recovery_members"
+                | "recovery_claim_members"
+        )
+    {
         // A database converted from an older layout reaches this before it has the table.
         let present: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \

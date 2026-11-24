@@ -169,6 +169,11 @@ fn run(size: usize) -> Run {
     let storage = Storage::open(config(&path)).unwrap();
     let handle = storage.handle();
     let observer = Connection::open(&path).unwrap();
+    // Fresh migrations can leave a checkpointed WAL whose allocated bytes are
+    // reused by these appends. Start the file-length meter at an empty WAL.
+    observer
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
     let first = event(size, 7);
 
     // The first append stores the bodies; its cost follows their size.

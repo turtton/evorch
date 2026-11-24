@@ -761,6 +761,7 @@ fn opening_a_v69_database_adds_the_audit_tables_without_touching_other_data() {
     fixture.storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v73.sql"),
         include_str!("../undo/undo_v72.sql"),
         include_str!("../undo/undo_v71.sql"),
         include_str!("../undo/undo_v70.sql")
@@ -776,5 +777,5 @@ fn opening_a_v69_database_adds_the_audit_tables_without_touching_other_data() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 72);
+    assert_eq!(version, 73);
 }

@@ -75,6 +75,36 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         ConfirmDelete,
         "removed when the family is confirmed",
     ),
+    (
+        "history_control",
+        Keep,
+        "projection versions and discovery position; no run data",
+    ),
+    (
+        "history_message_sources",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
+    (
+        "history_pending_parts",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
+    (
+        "history_messages",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
+    (
+        "history_event_cuts",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
+    (
+        "history_run_state",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
     ("events", ReclaimRun, "by run_id; unattributable rows stay"),
     (
         "run_messages",

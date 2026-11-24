@@ -868,7 +868,8 @@ fn v50_outbox_upgrade_preserves_lane_wire_ids_and_title() {
     let undo = std::fs::read_to_string(root.join("undo/undo_v51.sql")).unwrap();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    let management_undo = std::fs::read_to_string(root.join("undo/undo_v72.sql")).unwrap()
+    let management_undo = std::fs::read_to_string(root.join("undo/undo_v73.sql")).unwrap()
+        + &std::fs::read_to_string(root.join("undo/undo_v72.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v71.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v70.sql")).unwrap()
         + &std::fs::read_to_string(root.join("undo/undo_v69.sql")).unwrap()
@@ -1190,6 +1191,7 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
         .unwrap();
     f.sql()
         .execute_batch(concat!(
+            include_str!("../undo/undo_v73.sql"),
             include_str!("../undo/undo_v72.sql"),
             include_str!("../undo/undo_v71.sql"),
             include_str!("../undo/undo_v70.sql"),

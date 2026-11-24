@@ -170,25 +170,24 @@ pub(crate) fn append_event_in_transaction(
             next_day_bytes,
             limits.max_daily_event_bytes,
         )?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO events \
              (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind, \
               run_id, body_format, blob_bytes) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                session_id,
-                schema_version,
-                monotonic_ns,
-                wall_clock_ns,
-                kind,
-                encoded,
-                subkind,
-                run_id,
-                body_format,
-                i64::try_from(blob_bytes)
-                    .map_err(|_| StorageError::OutOfRange("event blob bytes"))?
-            ],
-        )?;
+        )?
+        .execute(params![
+            session_id,
+            schema_version,
+            monotonic_ns,
+            wall_clock_ns,
+            kind,
+            encoded,
+            subkind,
+            run_id,
+            body_format,
+            i64::try_from(blob_bytes).map_err(|_| StorageError::OutOfRange("event blob bytes"))?
+        ])?;
         Ok(conn.last_insert_rowid())
     };
     // A payload below the token threshold, without the escape character, has no string
@@ -225,6 +224,14 @@ pub(crate) fn append_event_in_transaction(
             write(conn, &encoded, 0, 0)?
         }
     };
+
+    if committed::is_committed(&event.kind) {
+        let representation = match tokenized.as_ref() {
+            Some(containers) => crate::history::index::Representation::Tokenized(&containers[0]),
+            None => crate::history::index::Representation::Original(&event.kind),
+        };
+        crate::history::index::append_hook(conn, id, wall_clock_ns, representation);
+    }
 
     let next_session_bytes = next_accounting.session_bytes + event_len;
     let next_day_bytes = next_accounting.day_bytes + event_len;

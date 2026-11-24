@@ -59,6 +59,7 @@ fn upgrading_v68_preserves_references_and_adds_a_thread_cursor_seek() {
     drop(before);
     // Reconstruct v68, as the other historical migration fixtures do.
     sql.execute_batch(concat!(
+        include_str!("../undo/undo_v73.sql"),
         include_str!("../undo/undo_v72.sql"),
         include_str!("../undo/undo_v71.sql"),
         include_str!("../undo/undo_v70.sql"),

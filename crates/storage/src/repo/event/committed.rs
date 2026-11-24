@@ -57,7 +57,7 @@ pub(crate) const NEWEST_UNCONVERTED_SQL: &str =
     "SELECT id FROM events WHERE subkind IS NULL AND id > ?1 ORDER BY id DESC";
 const STAMP_SQL: &str = "SELECT session_id, monotonic_ns, wall_clock_ns FROM events WHERE id = ?1";
 
-fn is_committed(kind: &EventKind) -> bool {
+pub(crate) fn is_committed(kind: &EventKind) -> bool {
     COMMITTED_SUBKINDS.contains(&(kind_name(kind), kind.subkind_name()))
 }
 
