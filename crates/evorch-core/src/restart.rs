@@ -230,6 +230,9 @@ impl RestartCoordinator {
         self.0.changed.subscribe()
     }
     fn publish(&self, state: &mut State, phase: RestartPhase) {
+        if phase == RestartPhase::FailedClosed {
+            state.cancel_reason = None;
+        }
         state.phase = phase;
         state.revision = state.revision.wrapping_add(1);
         self.0.changed.send_replace(state.revision);

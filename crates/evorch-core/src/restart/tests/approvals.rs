@@ -54,6 +54,42 @@ async fn a_pending_approval_refuses_a_restart_and_releases_its_admission() {
 }
 
 #[tokio::test]
+async fn an_approval_cancel_that_fails_closed_does_not_ask_for_a_retry() {
+    let (_dir, mut host) = boot().await;
+    let evaluations = host.restart_preparing_services().evaluations;
+    let (release, returned) = tokio::sync::oneshot::channel::<()>();
+    evaluations
+        .spawn(async { returned.await.unwrap() })
+        .unwrap();
+    let core = RestartCoordinator::new(&host);
+    let id = core.request().unwrap();
+    let run = host.runtime.delegate_background(
+        runtime::Role::Worker,
+        "health failure".into(),
+        Default::default(),
+    );
+    let db = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_terminal_insert BEFORE INSERT ON resume_intents BEGIN SELECT RAISE(ABORT, 'terminal intent failure'); END; CREATE TRIGGER reject_terminal_update BEFORE UPDATE ON resume_intents BEGIN SELECT RAISE(ABORT, 'terminal intent failure'); END;").unwrap();
+    host.runtime.wait(run).await.unwrap();
+    assert!(matches!(
+        host.runtime.quiesce_state(),
+        runtime::quiesce::QuiesceState::Failed { .. }
+    ));
+    assert_eq!(core.snapshot().phase, RestartPhase::PreparingDrains);
+    let approval = raise(&host, "late");
+    phase(&core, RestartPhase::FailedClosed).await;
+    let snapshot = core.snapshot();
+    assert_eq!(snapshot.cancel_reason, None);
+    assert_eq!(snapshot.to_dto().cancel_reason, None);
+    assert!(core.cancel(id).is_err());
+    drop(approval);
+    let _ = release.send(());
+    db.execute_batch("DROP TRIGGER reject_terminal_insert; DROP TRIGGER reject_terminal_update;")
+        .unwrap();
+    assert!(host.shutdown().await.is_err());
+}
+
+#[tokio::test]
 async fn an_approval_raised_after_acceptance_cancels_the_restart_and_says_why() {
     for preparing in [true, false] {
         let (_dir, mut host) = boot().await;
