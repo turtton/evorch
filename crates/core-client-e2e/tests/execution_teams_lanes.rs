@@ -12,7 +12,7 @@ use egui_kittest::kittest::Queryable;
 use gui::core_client::{
     CoreClientScreen, Shared,
     connection::{Action, serve},
-    features::{FeatureAction, FeatureView, Selection},
+    features::{FeatureAction, FeatureRequest, FeatureView, Selection},
 };
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
 use workbench_protocol::commands::{Command, ComposerRole, ContinueChat, SendChat, ThreadTarget};
@@ -79,7 +79,7 @@ const LEAD: &str = "lead";
 /// The height at which the lanes screen's lists scroll (its own bound, to see the list from
 /// outside).
 const LIST_HEIGHT: f32 = 240.0;
-/// The vertical inner margin of an Execution run card (`SP_2`).
+/// The vertical inner margin of a Subagents run card (`SP_2`).
 const CARD_PADDING: f32 = 8.0;
 const OBJECTIVE: &str = "e2e objective";
 
@@ -258,6 +258,26 @@ async fn connect_gui(
     (shared, actions)
 }
 
+/// Until the GUI's projection holds every run of `runs`. A window drawn after that opens a
+/// subagent pane for each of them at once, as it does for subagents found running.
+async fn cached(shared: &Arc<Mutex<Shared>>, runs: &[runtime::RunId]) {
+    let changed = shared.lock().unwrap().changed.clone();
+    loop {
+        let notification = changed.notified();
+        tokio::pin!(notification);
+        notification.as_mut().enable();
+        let held = {
+            let state = shared.lock().unwrap();
+            runs.iter()
+                .all(|run| state.cache.runs.contains_key(&run.to_string()))
+        };
+        if held {
+            return;
+        }
+        notification.await;
+    }
+}
+
 /// Waits until `run` has finished its turn and waits for input, which is when its context is saved.
 async fn waiting(runtime: &runtime::AgentRuntime, run: runtime::RunId) {
     while runtime.inspect_agent(run).map(|agent| agent.phase).ok()
@@ -402,8 +422,31 @@ impl World {
     }
 }
 
+/// How long one drawn frame lasts, as a running app's. egui_kittest's default (a quarter
+/// of a second) is also each frame's predicted time, which egui takes off every delayed
+/// repaint: a delay under a quarter second, such as the theme spinner's
+/// (`theme::widgets::paint_spinner`) or a poll's, would read as a frame asked for at once,
+/// and a wait would draw for ever while subagents run.
+const FRAME: f32 = 1.0 / 60.0;
+
+/// How many steps [`Desktop::flush`] runs: the second lays out what the first measured.
+/// A step draws one frame per queued event, so this is the frame count only when nothing
+/// is queued, as inside [`Desktop::until`].
+const FRAMES_PER_FLUSH: usize = 2;
+
+/// How many frames a click waits at most for its target to hold still under the pointer.
+const SETTLE_FRAMES: usize = 10;
+
+/// How many frames in a row a wait draws, the screen asking for each at once, before it
+/// names itself as a wait that may never end.
+const FRAMES_BEFORE_NOTICE: usize = 1000;
+
 /// The desktop's feature screens, drawn and clicked with egui_kittest. Every wait is on a
-/// change the connection reported.
+/// change the connection reported or on a frame the screen asked for at once; a repaint
+/// the screen asked for after a delay (the theme spinner's, a poll's) is not followed, so
+/// no wait may depend on one. egui's own `egui::Spinner` (`ui.spinner()`) asks for its
+/// next frame at once instead, so a wait keeps drawing while one is on screen and names
+/// itself after [`FRAMES_BEFORE_NOTICE`] frames.
 struct Desktop {
     harness: Harness<'static>,
     shared: Arc<Mutex<Shared>>,
@@ -414,6 +457,8 @@ struct Desktop {
     inbox: Option<tokio::sync::mpsc::Receiver<Action>>,
     /// The commands the page asked for and that were not sent (the page's own controls).
     commands: Vec<&'static str>,
+    /// The commands the features sent to the core, by name, for a wait's report.
+    sent: Vec<String>,
 }
 
 impl Desktop {
@@ -434,6 +479,7 @@ impl Desktop {
         );
         let harness = Harness::builder()
             .with_size(egui::vec2(1024.0, 768.0))
+            .with_step_dt(FRAME)
             .build_ui(move |ui| screen.ui(ui));
         Self {
             harness,
@@ -443,6 +489,7 @@ impl Desktop {
             actions,
             inbox: Some(inbox),
             commands: Vec::new(),
+            sent: Vec::new(),
         }
     }
 
@@ -457,6 +504,7 @@ impl Desktop {
             let (shared, thread, asked) = (shared.clone(), thread.clone(), asked.clone());
             Harness::builder()
                 .with_size(egui::vec2(1024.0, 768.0))
+                .with_step_dt(FRAME)
                 .build_ui(move |ui| {
                     let selection = Selection {
                         project: Some(project.clone()),
@@ -486,6 +534,7 @@ impl Desktop {
             actions,
             inbox: None,
             commands: Vec::new(),
+            sent: Vec::new(),
         }
     }
 
@@ -494,9 +543,12 @@ impl Desktop {
     }
 
     async fn flush(&mut self) {
-        self.harness.run_steps(2);
+        self.harness.run_steps(FRAMES_PER_FLUSH);
         let asked = std::mem::take(&mut *self.asked.lock().unwrap());
         for action in asked {
+            if let FeatureRequest::Command(command) = &action.request {
+                self.sent.push(command_name(command));
+            }
             self.actions.send(Action::Feature(action)).await.unwrap();
         }
         if let Some(inbox) = self.inbox.as_mut() {
@@ -536,30 +588,152 @@ impl Desktop {
             .is_some()
     }
 
-    async fn until(&mut self, done: impl Fn(&Desktop) -> bool) {
-        let changed = self.shared.lock().unwrap().changed.clone();
-        loop {
-            let notification = changed.notified();
-            tokio::pin!(notification);
-            notification.as_mut().enable();
-            self.flush().await;
-            if done(self) {
-                return;
+    /// Draws the screen again on each change the connection reports, and again at once while
+    /// the screen asks for another frame at once (a layout that settles a frame later, a
+    /// tab opened by the frame before, a request that waited for room, egui's own
+    /// `egui::Spinner`), until `done`. A repaint asked for after a delay (the theme
+    /// spinner's, a poll's) is deliberately not followed: `done` must not depend on one.
+    /// It has no time limit of its own: a wait that is never met is stopped by the test runner, and so that the run then names it, the wait
+    /// prints its caller's line, the status and the commands recorded so far whenever it
+    /// blocks on the connection with those changed since it last printed them, and when
+    /// it has drawn [`FRAMES_BEFORE_NOTICE`] frames in a row without blocking.
+    #[track_caller]
+    fn until<'d>(
+        &'d mut self,
+        done: impl Fn(&Desktop) -> bool + 'd,
+    ) -> impl std::future::Future<Output = ()> + 'd {
+        let waited_at = std::panic::Location::caller();
+        async move {
+            let changed = self.shared.lock().unwrap().changed.clone();
+            let mut told = None;
+            let mut frames = 0;
+            loop {
+                let notification = changed.notified();
+                tokio::pin!(notification);
+                notification.as_mut().enable();
+                self.flush().await;
+                if done(self) {
+                    return;
+                }
+                if self.wants_frame() {
+                    frames += FRAMES_PER_FLUSH;
+                    if frames >= FRAMES_BEFORE_NOTICE {
+                        let first = frames < FRAMES_BEFORE_NOTICE + FRAMES_PER_FLUSH;
+                        self.tell(waited_at, Some(frames), &mut told, first);
+                    }
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                frames = 0;
+                self.tell(waited_at, None, &mut told, false);
+                notification.await;
             }
-            notification.await;
         }
     }
 
+    /// Prints what a wait is doing, with the status and the commands recorded so far, when
+    /// it switched between drawing and blocking or those changed since `told`, or `always`.
+    /// `drawn` is how many frames it has drawn in a row, or `None` when it blocks on the
+    /// connection.
+    fn tell(
+        &self,
+        waited_at: &std::panic::Location<'_>,
+        drawn: Option<usize>,
+        told: &mut Option<(bool, String, Vec<&'static str>, Vec<String>)>,
+        always: bool,
+    ) {
+        let now = (
+            drawn.is_none(),
+            self.shared.lock().unwrap().status.clone(),
+            self.commands.clone(),
+            self.sent.clone(),
+        );
+        if always || told.as_ref() != Some(&now) {
+            let doing = match drawn {
+                Some(frames) => format!("has drawn {frames} frames in a row"),
+                None => "waits on the connection".to_owned(),
+            };
+            eprintln!(
+                "the wait at {waited_at} {doing}; status: {:?}; commands: {:?}; sent: {:?}",
+                now.1, now.2, now.3
+            );
+            *told = Some(now);
+        }
+    }
+
+    /// The last frame asked for the next one at once, as a running app would draw it. Only
+    /// with a short [`FRAME`] does this tell such a frame from a delayed repaint: egui takes
+    /// the frame's predicted time off a repaint's delay, and egui_kittest predicts its own
+    /// step, a quarter second by default, so every shorter delay would read as zero.
+    fn wants_frame(&self) -> bool {
+        self.harness
+            .output()
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|viewport| viewport.repaint_delay.is_zero())
+    }
+
     async fn click(&mut self, label: &str) {
-        self.harness.get_by_label(label).click();
+        self.press(|d| d.harness.get_by_label(label).rect().center())
+            .await;
+    }
+
+    /// Clicks where `at` finds the target once it holds still. A click queued at a centre
+    /// measured in the frame before lands wherever that point is when it is pressed, and a
+    /// reply arriving in between may move the layout (a line above appearing or going), so
+    /// the pointer rests on the target, re-measured each frame, until it stays put, and is
+    /// pressed there; pressing elsewhere than it rests would drag the column instead.
+    async fn press(&mut self, at: impl Fn(&Desktop) -> egui::Pos2) {
+        let mut pos = at(self);
+        for _ in 0..SETTLE_FRAMES {
+            self.harness.hover_at(pos);
+            self.harness.step();
+            let now = at(self);
+            if now == pos {
+                break;
+            }
+            pos = now;
+        }
+        for pressed in [true, false] {
+            self.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            self.harness.step();
+        }
+        self.flush().await;
+    }
+
+    /// Brings the dock tab named `label` forward with a press near its start: a tab bar wider
+    /// than its leaf clips the tabs at its end, so a tab's centre may lie outside the window.
+    async fn click_tab(&mut self, label: &str) {
+        let rect = self.harness.get_by_label(label).rect();
+        let pos = egui::pos2(
+            (rect.left() + 10.0).min(Self::window().right() - 1.0),
+            rect.center().y,
+        );
+        self.harness.hover_at(pos);
+        for pressed in [true, false] {
+            self.harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
         self.flush().await;
     }
 
     async fn click_button(&mut self, label: &str) {
-        self.harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, label)
-            .click();
-        self.flush().await;
+        self.press(|d| {
+            d.harness
+                .get_by_role_and_label(egui::accesskit::Role::Button, label)
+                .rect()
+                .center()
+        })
+        .await;
     }
 
     /// The window the screens are drawn in.
@@ -568,7 +742,7 @@ impl Desktop {
     }
 
     /// The centre of the first label that contains one of `parts` and lies in the window: a
-    /// point outside every list, where the wheel moves the window's own scroll.
+    /// point outside every list, where a scroll moves the window itself.
     fn anchor(&self, parts: &[&str]) -> Option<egui::Pos2> {
         parts.iter().find_map(|part| {
             self.harness
@@ -602,24 +776,37 @@ impl Desktop {
             })
     }
 
-    /// Turns the mouse wheel over `hover` until `done`, as a person scrolls to a control.
+    /// Scrolls over `hover` until `done`, as a person scrolls to a control, and lets go
+    /// there, so nothing still scrolls under the click that follows.
+    ///
+    /// The scroll is a touchpad gesture (a start, moves, an end), not wheel notches: egui
+    /// spreads a notch over the frames after it, by each frame's length, so at [`FRAME`]
+    /// most of a notch would still be pending when `done` first holds and would move the
+    /// screen under the next click. A gesture's move is applied whole in the frame it
+    /// arrives, and its end leaves nothing pending, so the screen stays where `done` saw it.
     async fn wheel_until(
         &mut self,
         control: &str,
         hover: impl Fn(&Desktop) -> egui::Pos2,
         done: impl Fn(&Desktop) -> bool,
     ) {
+        let mut touching = false;
         for _ in 0..400 {
             if done(self) {
-                return;
+                if !touching {
+                    return;
+                }
+                self.scroll_event(egui::TouchPhase::End, 0.0);
+                touching = false;
+                self.flush().await;
+                continue;
             }
             self.harness.hover_at(hover(self));
-            self.harness.event(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, -120.0),
-                phase: egui::TouchPhase::Move,
-                modifiers: egui::Modifiers::NONE,
-            });
+            if !touching {
+                self.scroll_event(egui::TouchPhase::Start, 0.0);
+                touching = true;
+            }
+            self.scroll_event(egui::TouchPhase::Move, -120.0);
             self.flush().await;
         }
         let at = self
@@ -628,9 +815,18 @@ impl Desktop {
             .map(|node| node.rect())
             .collect::<Vec<_>>();
         panic!(
-            "the wheel did not bring \"{control}\" into view: it is at {at:?}, hovering at {:?}",
+            "scrolling did not bring \"{control}\" into view: it is at {at:?}, hovering at {:?}",
             hover(self)
         );
+    }
+
+    fn scroll_event(&mut self, phase: egui::TouchPhase, dy: f32) {
+        self.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase,
+            modifiers: egui::Modifiers::NONE,
+        });
     }
 
     /// Scrolls the window (not a list) until the first label named `label` is in view.
@@ -697,15 +893,9 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
         )
         .unwrap();
 
-    // The lead's roots, then a drill-down into its child, both as the Web client lists them.
+    // The lead's subagents are the first level, as the Web client lists them.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    desktop.until(|d| d.shows("Subagents (1)")).await;
-    // A card is taller than a row was: make sure the control is in the window first.
-    desktop
-        .scroll_window_to("Subagents (1)", &["Execution"])
-        .await;
-    desktop.click("Subagents (1)").await;
     let QueryReply::Execution(ExecutionReply::RunDetails(children)) = world
         .web(
             "web-children",
@@ -725,11 +915,9 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
     assert_eq!(children.items[0].summary.id.as_str(), child.to_string());
     let child_name = children.items[0].name.clone();
     desktop.until(|d| d.shows(&child_name)).await;
-    desktop.click("Root").await;
-    desktop.until(|d| d.shows("Subagents (1)")).await;
 
     // Goal review: the conversation band's toggle sends the command, the core flips the goal,
-    // and the band and Execution's status say so. The band is drawn by the whole window only;
+    // and the band and the Subagents tab's status say so. The band is drawn by the whole window only;
     // it shares the column's state, so the selection and the goal already read stay.
     let before = world.web_execution("goal-before").await.goal.unwrap();
     assert!(!before.review_enabled);
@@ -938,9 +1126,12 @@ impl Desktop {
     }
 
     /// The close dialog is open and has read the lane from the core.
-    async fn until_close_dialog_read(&mut self, title: &str) {
-        self.until(|d| d.shows(title) && !d.shows_part("Reading the lane from the ledger"))
-            .await;
+    #[track_caller]
+    fn until_close_dialog_read<'d>(
+        &'d mut self,
+        title: &'d str,
+    ) -> impl std::future::Future<Output = ()> + 'd {
+        self.until(move |d| d.shows(title) && !d.shows_part("Reading the lane from the ledger"))
     }
 }
 
@@ -1419,7 +1610,7 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
     );
     // The window is 1024x768, the screen lists 50 rows and its buttons are used as a person
     // does: the load button below the list is clicked with the pointer, the far lane's row is
-    // brought into view with the mouse wheel and its reattach button is clicked likewise.
+    // scrolled into view and its reattach button is clicked likewise.
     desktop.click("Load more detached lanes").await;
     desktop.until(|d| d.shows(&far_label)).await;
     assert_eq!(
@@ -1561,19 +1752,16 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
             .clone();
 
     // The window is 1024x768 and the screen is used as a person does: every control is
-    // reached by turning the wheel and clicked with the pointer.
+    // scrolled to and clicked with the pointer.
+    // The lead's subagents are the tab's first level.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    let drill = format!("Subagents ({count})");
-    desktop.until(|d| d.shows(&drill)).await;
-    desktop.scroll_window_to(&drill, &["Execution"]).await;
-    desktop.click(&drill).await;
     desktop.until(|d| d.shows("Load more runs")).await;
     // One Open pane per card, drawn for the rows scrolled out of the list too.
     let rows = |d: &Desktop| d.harness.query_all_by_label("Open pane").count();
     let before = rows(&desktop);
     desktop
-        .scroll_window_to("Load more runs", &["Execution", "Root"])
+        .scroll_window_to("Load more runs", &["Subagents", "Teams"])
         .await;
     desktop.click("Load more runs").await;
     desktop.until(|d| rows(d) > before).await;
@@ -1587,6 +1775,10 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
         desktop.shows(far.summary.id.as_str()),
         "the path shows the run that was entered"
     );
+    // The path leads back to the lead's subagents.
+    desktop.click("Root").await;
+    desktop.until(|d| d.shows(&first_row)).await;
+    assert!(!desktop.shows(far.summary.id.as_str()));
 
     for run in kids.values().copied().chain([grandchild, world.lead]) {
         let _ = world.boot.runtime.cancel(run);
@@ -1739,6 +1931,9 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
             (0..8).map(|n| format!("criterion {n}")).collect(),
         )
         .unwrap();
+    // The window opens on every kid running: each gets a subagent pane below the Subagents
+    // tab, and the conversation beside them keeps its controls in view.
+    cached(&world.shared, &kids).await;
     // The window the client draws: the areas sit in tabs beside the conversation, so a long
     // list in one of them never pushes the conversation's controls out of view.
     let mut desktop = Desktop::page(
@@ -1753,8 +1948,9 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
     desktop.until(|d| d.shows_part("criterion 7")).await;
     // Folded again, the details leave the conversation's controls where they were.
     desktop.click("Hide goal details").await;
-    // Teams waits behind Execution; its tab brings the long task list forward.
-    desktop.click("Teams tab").await;
+    // Teams waits behind Subagents; its tab brings the long task list forward. The subagents'
+    // count widens the Subagents tab's title, which pushes Teams to the tab bar's edge.
+    desktop.click_tab("Teams tab").await;
     desktop.until(|d| d.shows("task-000")).await;
     let in_window = |d: &Desktop, control: &str| {
         d.harness
@@ -1785,4 +1981,14 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
     for run in kids.into_iter().chain([world.lead]) {
         let _ = world.boot.runtime.cancel(run);
     }
+}
+
+/// A command's name, such as `ResumeLaneDeliveries`, for a wait's report.
+fn command_name(command: &Command) -> String {
+    let debug = format!("{command:?}");
+    debug
+        .split(['(', ' ', '{'])
+        .nth(1)
+        .unwrap_or(&debug)
+        .to_owned()
 }

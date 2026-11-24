@@ -56,6 +56,27 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
     )
 }
 
+/// A run without a parent, a root, of `thread` in the screen's cache.
+fn add_root(screen: &mut Harness<'_, Screen>, thread: &str, id: &str) {
+    let run = serde_json::from_value(json!({"id": id, "thread": thread, "role": "orchestrator",
+        "phase": "running", "revision": "1"}))
+    .unwrap();
+    screen.state_mut().cache.runs.insert(id.into(), run);
+}
+
+/// The tab for t1, whose current root is `root`.
+fn rooted() -> Harness<'static, Screen> {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    add_root(&mut screen, "t1", "root");
+    screen
+}
+
+fn root_scope() -> RunScope {
+    RunScope::Children {
+        parent: RunId::new("root").unwrap(),
+    }
+}
+
 /// What the screen asked for since the last call.
 pub(crate) fn asked(harness: &mut Harness<'_, Screen>) -> Vec<FeatureAction> {
     harness.run_steps(2);
@@ -108,7 +129,7 @@ fn runs_reply(items: Vec<Value>, more: bool) -> FeatureReply {
 }
 
 fn execution_reply(goal: bool) -> FeatureReply {
-    let mut body = json!({"thread": "t1", "root_run": "run-a",
+    let mut body = json!({"thread": "t1", "root_run": "root",
         "ledger": {"run": "run-a", "seq": "1", "body": "ledger-body", "truncated": false}});
     if goal {
         body["goal"] = json!({"goal": "g1", "root_run": "run-a", "objective": "ship it",
@@ -156,7 +177,7 @@ fn run_changed(screen: &mut Harness<'_, Screen>) {
 
 #[test]
 fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     // Pages may be short because of the byte bound, not just the row limit.
     answer(
@@ -201,7 +222,7 @@ fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced()
 
 #[test]
 fn a_run_change_during_load_more_waits_for_its_reply_then_refreshes_both_pages() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -244,7 +265,7 @@ fn a_run_change_during_load_more_waits_for_its_reply_then_refreshes_both_pages()
 
 #[test]
 fn load_more_during_a_refresh_is_kept_and_a_shorter_refresh_can_finish_early() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -284,7 +305,7 @@ fn load_more_during_a_refresh_is_kept_and_a_shorter_refresh_can_finish_early() {
 #[test]
 fn a_reset_or_a_revisited_level_drops_old_run_replies_including_errors() {
     for reset in [false, true] {
-        let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+        let mut screen = rooted();
         let first = asked(&mut screen);
         answer(
             &mut screen,
@@ -335,7 +356,7 @@ fn a_reset_or_a_revisited_level_drops_old_run_replies_including_errors() {
 
 #[test]
 fn a_failed_page_keeps_the_displayed_prefix_and_releases_the_read() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -368,7 +389,7 @@ fn a_failed_page_keeps_the_displayed_prefix_and_releases_the_read() {
 #[test]
 fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event() {
     for during_refresh in [false, true] {
-        let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+        let mut screen = rooted();
         let first = asked(&mut screen);
         answer(
             &mut screen,
@@ -437,7 +458,7 @@ fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event
 
 #[test]
 fn a_conflict_on_the_first_page_is_reported_without_restarting() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -452,7 +473,7 @@ fn a_conflict_on_the_first_page_is_reported_without_restarting() {
 
 #[test]
 fn repeated_run_ids_across_pages_keep_one_row_per_id() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -481,7 +502,7 @@ fn repeated_run_ids_across_pages_keep_one_row_per_id() {
 fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
     use workbench_protocol::limits::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
     let pages = MAX_PAGE_SIZE / DEFAULT_PAGE_SIZE + 1;
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let items = |page: u32| {
         (0..DEFAULT_PAGE_SIZE)
             .map(|row| run(&format!("run-{page}-{row}"), None, "active", "live", 0))
@@ -568,7 +589,7 @@ fn the_four_ends_of_a_run_and_history_only_are_told_apart() {
 
 #[test]
 fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     assert_eq!(
         first.len(),
@@ -577,7 +598,7 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     );
     let roots_tag = runs_tag(&first);
     let roots = first.iter().find(|a| a.tag == roots_tag).unwrap();
-    assert_eq!(scope_of(roots), RunScope::Roots);
+    assert_eq!(scope_of(roots), root_scope());
     answer(
         &mut screen,
         roots_tag,
@@ -611,7 +632,7 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     let refresh = asked(&mut screen);
     let refresh_tag = runs_tag(&refresh);
     let roots = refresh.iter().find(|a| a.tag == refresh_tag).unwrap();
-    assert_eq!(scope_of(roots), RunScope::Roots);
+    assert_eq!(scope_of(roots), root_scope());
     screen.get_by_label("Subagents (2)").click();
     let drill = asked(&mut screen);
     assert_eq!(drill.len(), 1);
@@ -645,7 +666,7 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
 
 #[test]
 fn stop_names_the_shown_thread_and_the_one_run_clicked() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -687,7 +708,7 @@ fn execution_tag(actions: &[FeatureAction]) -> u64 {
 #[test]
 fn the_goal_is_left_to_the_band_and_the_working_note_folds() {
     // Given: the thread's goal and its root's working note answered.
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(&mut screen, execution_tag(&first), execution_reply(true));
 
@@ -714,7 +735,7 @@ fn the_goal_is_left_to_the_band_and_the_working_note_folds() {
 
 #[test]
 fn a_changed_thread_starts_over_and_a_reset_asks_again_without_losing_tags() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -742,6 +763,7 @@ fn a_changed_thread_starts_over_and_a_reset_asks_again_without_losing_tags() {
     assert_eq!(again.len(), 3);
     assert!(screen.query_by_label("name-run-a").is_none());
 
+    add_root(&mut screen, "t2", "root-2");
     // A lost reply keeps its tag: the resolved reply later still lands.
     screen.state_mut().selection.thread = Some(ThreadId::new("t2").unwrap());
     let other = asked(&mut screen);
@@ -805,6 +827,11 @@ impl Hidden {
 
     /// One pass; what it asked for.
     fn maintain(&mut self) -> Vec<FeatureAction> {
+        self.maintain_available(true)
+    }
+
+    /// One pass with the area `available` or not; what it asked for.
+    fn maintain_available(&mut self, available: bool) -> Vec<FeatureAction> {
         let capabilities = [Capability::Queries, Capability::Commands];
         let mut frame = FeatureFrame::default();
         let mut ctx = FeatureContext {
@@ -819,7 +846,7 @@ impl Hidden {
             frame: &mut frame,
         };
         let visibility = super::super::Visibility {
-            available: true,
+            available,
             expanded: false,
             minimized: false,
         };
@@ -1101,7 +1128,7 @@ fn queued_goal_actions_send_review_and_pause_for_the_shown_goal() {
 // Then: the shell is handed run-a with its name once
 #[test]
 fn open_pane_hands_the_row_to_the_shell_once() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -1136,7 +1163,7 @@ fn open_pane_hands_the_row_to_the_shell_once() {
 // Then: each card reads like a row of the legacy Subagents column
 #[test]
 fn a_run_card_reads_like_the_subagents_column() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     let mut worker = run("run-a", None, "active", "live", 0);
     worker["category"] = json!("quick");
@@ -1179,7 +1206,7 @@ fn a_run_card_reads_like_the_subagents_column() {
 // Then: only a run with subagents drills in, and Root returns to the roots
 #[test]
 fn the_name_and_the_count_drill_in_and_root_returns() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let roots = |screen: &mut Harness<'_, Screen>, actions: &[FeatureAction]| {
         answer(
             screen,
@@ -1214,7 +1241,7 @@ fn the_name_and_the_count_drill_in_and_root_returns() {
 
     screen.get_by_label("Root").click();
     let back = asked(&mut screen);
-    assert_eq!(scope_of(&back[0]), RunScope::Roots);
+    assert_eq!(scope_of(&back[0]), root_scope());
     roots(&mut screen, &back);
     assert!(screen.query_by_label("run-a").is_none());
     screen.get_by_label("Subagents (2)");
@@ -1230,7 +1257,7 @@ fn frame_at(screen: &mut Harness<'_, Screen>, time: f64) {
 // Then: nothing was sent and Stop is offered again
 #[test]
 fn a_stop_confirmation_expires_without_a_command() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let mut screen = rooted();
     let first = asked(&mut screen);
     answer(
         &mut screen,
@@ -1250,18 +1277,505 @@ fn a_stop_confirmation_expires_without_a_command() {
     assert!(std::mem::take(&mut screen.state_mut().frame.actions).is_empty());
 }
 
-// Given: the thread has no runs
-// When: the roots answer empty, or no thread is selected
-// Then: the legacy empty state is shown
+// Given: a thread without runs, no thread, and a root without subagents
+// When: the tab is drawn
+// Then: without a root nothing is listed and the legacy empty state is shown; a root
+//       whose listing is empty says it has no subagents
 #[test]
 fn an_empty_thread_and_no_thread_read_like_the_subagents_column() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
-    let first = asked(&mut screen);
-    answer(&mut screen, runs_tag(&first), runs_reply(vec![], false));
-    screen.get_by_label("No runs in this thread");
-    screen.get_by_label("Start a conversation to see its agent runs.");
+    let mut empty = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut empty);
+    assert!(
+        !first.iter().any(|a| matches!(
+            query_of(a),
+            Query::Execution(ExecutionQuery::ListRunDetails(_))
+        )),
+        "no root, no listing"
+    );
+    empty.get_by_label("No runs in this thread");
+    empty.get_by_label("Start a conversation to see its agent runs.");
 
     let mut none = super::tests::screen(Box::<ExecutionFeature>::default(), None);
     none.run_steps(2);
     none.get_by_label("No runs in this thread");
+
+    let mut rooted = rooted();
+    let first = asked(&mut rooted);
+    answer(&mut rooted, runs_tag(&first), runs_reply(vec![], false));
+    rooted.get_by_label("No subagents of this run");
+    assert!(rooted.query_by_label("Root").is_none());
+
+    // A run change re-reads the listing; the line stays while it is read, so what is
+    // drawn below it does not move.
+    run_changed(&mut rooted);
+    let again = asked(&mut rooted);
+    rooted.get_by_label("No subagents of this run");
+    answer(&mut rooted, runs_tag(&again), runs_reply(vec![], false));
+    rooted.get_by_label("No subagents of this run");
+}
+
+// Given: t1's current root without subagents, and an earlier root whose subagent runs
+// When: the tab is drawn, the earlier root is pressed, then Root
+// Then: the earlier root is offered with its count; pressed, its subagents are listed;
+//       Root lists the current root's again
+#[test]
+fn an_earlier_roots_subagents_stay_reachable() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    add_root(&mut screen, "t1", "root");
+    add_root(&mut screen, "t1", "root-old");
+    let child = serde_json::from_value(
+        run("run-x", Some("root-old"), "active", "live", 0)["summary"].clone(),
+    )
+    .unwrap();
+    screen.state_mut().cache.runs.insert("run-x".into(), child);
+    let first = asked(&mut screen);
+    answer(&mut screen, execution_tag(&first), execution_reply(false));
+    let listing = asked(&mut screen);
+    let current = listing
+        .iter()
+        .find(|a| a.tag == runs_tag(&listing))
+        .unwrap();
+    assert_eq!(scope_of(current), root_scope());
+    answer(&mut screen, current.tag, runs_reply(vec![], false));
+    screen.get_by_label("No subagents of this run");
+
+    screen.get_by_label("root-old · Subagents (1)").click();
+    let earlier = asked(&mut screen);
+    let earlier = earlier
+        .iter()
+        .find(|a| a.tag == runs_tag(&earlier))
+        .unwrap();
+    assert_eq!(
+        scope_of(earlier),
+        RunScope::Children {
+            parent: RunId::new("root-old").unwrap()
+        }
+    );
+    answer(
+        &mut screen,
+        earlier.tag,
+        runs_reply(
+            vec![run("run-x", Some("root-old"), "active", "live", 0)],
+            false,
+        ),
+    );
+    screen.get_by_label("name-run-x");
+
+    screen.get_by_label("Root").click();
+    let back = asked(&mut screen);
+    let back = back.iter().find(|a| a.tag == runs_tag(&back)).unwrap();
+    assert_eq!(scope_of(back), root_scope());
+}
+
+// Given: t1 listed under the root the cache knows
+// When: the core's thread execution names another root, then that root is answered
+// Then: the listing moves to the named root's subagents and the old answer is dropped,
+//       and a drill-down taken under the old root is left
+#[test]
+fn the_thread_executions_root_wins_and_a_new_root_starts_over() {
+    let mut screen = rooted();
+    let first = asked(&mut screen);
+    let old = runs_tag(&first);
+    assert_eq!(
+        scope_of(first.iter().find(|a| a.tag == old).unwrap()),
+        root_scope()
+    );
+    answer(
+        &mut screen,
+        old,
+        runs_reply(vec![run("run-a", Some("root"), "active", "live", 1)], false),
+    );
+    screen.get_by_label("Subagents (1)").click();
+    let drill = asked(&mut screen);
+    screen.get_by_label("Root");
+
+    let execution = json!({"thread": "t1", "root_run": "root-new"});
+    answer(
+        &mut screen,
+        execution_tag(&first),
+        query_reply(json!({"type": "execution",
+            "payload": {"type": "thread_execution", "payload": execution}})),
+    );
+    let moved = asked(&mut screen);
+    let moved = moved
+        .iter()
+        .find(|a| a.tag == runs_tag(&moved))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        scope_of(&moved),
+        RunScope::Children {
+            parent: RunId::new("root-new").unwrap()
+        }
+    );
+    assert!(screen.query_by_label("Root").is_none(), "the path is left");
+    answer(
+        &mut screen,
+        drill[0].tag,
+        runs_reply(
+            vec![run("run-old", Some("run-a"), "active", "live", 0)],
+            false,
+        ),
+    );
+    answer(
+        &mut screen,
+        moved.tag,
+        runs_reply(
+            vec![run("run-new", Some("root-new"), "active", "live", 0)],
+            false,
+        ),
+    );
+    screen.get_by_label("name-run-new");
+    assert!(screen.query_by_label("name-run-old").is_none());
+}
+
+// Given: the root's subagents listed, with their names
+// When: the shell wants the names of a listed run and of one not listed, twice
+// Then: the listed name is known at once; the other is read with GetRun once, and its
+//       answer names it
+#[test]
+fn names_come_from_the_listing_and_from_one_run_read_each() {
+    let mut screen = rooted();
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", Some("root"), "active", "live", 0)], false),
+    );
+    let run_a = RunId::new("run-a").unwrap();
+    let run_x = RunId::new("run-x").unwrap();
+    let t1 = ThreadId::new("t1").unwrap();
+    {
+        let execution = screen.state_mut().feature.as_execution_mut().unwrap();
+        assert_eq!(execution.run_name(&run_a), Some("name-run-a"));
+        assert_eq!(execution.run_name(&run_x), None);
+        execution.want_name(t1.clone(), run_x.clone());
+        execution.want_name(t1.clone(), run_x.clone());
+    }
+    let reads = asked(&mut screen);
+    let [read] = &reads[..] else {
+        panic!("one run read was expected, got {reads:?}");
+    };
+    let Query::Execution(ExecutionQuery::GetRun(target)) = query_of(read) else {
+        panic!("a run read was expected");
+    };
+    assert_eq!(
+        (target.thread.as_str(), target.run.as_str()),
+        ("t1", "run-x")
+    );
+    screen
+        .state_mut()
+        .feature
+        .as_execution_mut()
+        .unwrap()
+        .want_name(t1, run_x.clone());
+    assert!(asked(&mut screen).is_empty(), "asked once");
+    let mut detail = run("run-x", Some("run-a"), "active", "live", 0);
+    detail["name"] = json!("redirect-tester");
+    answer(
+        &mut screen,
+        read.tag,
+        query_reply(json!({"type": "execution", "payload": {"type": "run", "payload": detail}})),
+    );
+    assert_eq!(
+        screen
+            .state_mut()
+            .feature
+            .as_execution_mut()
+            .unwrap()
+            .run_name(&run_x),
+        Some("redirect-tester")
+    );
+}
+
+fn name_reads(screen: &mut Harness<'_, Screen>) -> Vec<(u64, String)> {
+    screen.run_steps(1);
+    std::mem::take(&mut screen.state_mut().frame.actions)
+        .iter()
+        .filter_map(|action| match query_of(action) {
+            Query::Execution(ExecutionQuery::GetRun(target)) => {
+                Some((action.tag, target.run.as_str().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// Given: the root's subagents listed, and the shell wanting the names of eleven more runs
+// When: frames pass while the first reads are unanswered, a listing names one of the
+//       rest, then one read is refused by the client, one by the core for good, one by
+//       the busy core and one answered
+// Then: no more than NAME_READS_IN_FLIGHT are unanswered at once, however many frames
+//       pass; the listed name is not read; the client's and the busy core's refusals
+//       are read again with the rest, the one refused for good is not
+#[test]
+fn name_reads_stay_few_in_flight_and_a_refused_one_is_asked_again() {
+    let mut screen = rooted();
+    let first = asked(&mut screen);
+    answer(&mut screen, runs_tag(&first), runs_reply(Vec::new(), false));
+    let t1 = ThreadId::new("t1").unwrap();
+    {
+        let execution = screen.state_mut().feature.as_execution_mut().unwrap();
+        for n in 0..11 {
+            execution.want_name(t1.clone(), RunId::new(format!("run-{n:02}")).unwrap());
+        }
+        assert!(execution.names_waiting());
+    }
+    let reads = name_reads(&mut screen);
+    assert_eq!(reads.len(), NAME_READS_IN_FLIGHT);
+    for _ in 0..3 {
+        assert!(
+            name_reads(&mut screen).is_empty(),
+            "the rest wait for answers"
+        );
+    }
+    assert!(
+        !screen
+            .state_mut()
+            .feature
+            .as_execution_mut()
+            .unwrap()
+            .names_waiting(),
+        "nothing to ask while the reads in flight are at the bound"
+    );
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Execution(ExecutionEvent::RunChanged {
+            run: serde_json::from_value(json!({"id": "run-10", "thread": "t1",
+                "parent_run": "root", "role": "worker", "phase": "running", "revision": "2"}))
+            .unwrap(),
+        }));
+    let relisted = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&relisted),
+        runs_reply(
+            vec![run("run-10", Some("root"), "active", "live", 0)],
+            false,
+        ),
+    );
+
+    let (refused, refused_run) = reads[0].clone();
+    let (missing, _) = reads[1].clone();
+    let (named, _) = reads[2].clone();
+    let (busy, busy_run) = reads[3].clone();
+    screen.state_mut().feature.reply(
+        busy,
+        FeatureReply::Query(Err(FeatureError::new("busy").with_code(ErrorCode::Busy))),
+    );
+    screen.state_mut().feature.reply(
+        refused,
+        FeatureReply::Query(Err(FeatureError::new("client queue is full or closed"))),
+    );
+    screen.state_mut().feature.reply(
+        missing,
+        FeatureReply::Query(Err(
+            FeatureError::new("no such run").with_code(ErrorCode::NotFound)
+        )),
+    );
+    let detail = run(&reads[2].1, Some("root"), "active", "live", 0);
+    screen.state_mut().feature.reply(
+        named,
+        query_reply(json!({"type": "execution", "payload": {"type": "run", "payload": detail}})),
+    );
+    let again = name_reads(&mut screen);
+    assert_eq!(
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        [refused_run.as_str(), busy_run.as_str(), "run-08", "run-09"]
+    );
+    for (tag, run_id) in again {
+        let detail = run(&run_id, Some("root"), "active", "live", 0);
+        screen.state_mut().feature.reply(
+            tag,
+            query_reply(
+                json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
+            ),
+        );
+    }
+    assert!(
+        name_reads(&mut screen).is_empty(),
+        "run-10 was named by the listing"
+    );
+    assert!(
+        !screen
+            .state_mut()
+            .feature
+            .as_execution_mut()
+            .unwrap()
+            .names_waiting()
+    );
+}
+
+/// The run reads among `actions`, by tag and run.
+fn run_reads(actions: &[FeatureAction]) -> Vec<(u64, String)> {
+    actions
+        .iter()
+        .filter_map(|action| match query_of(action) {
+            Query::Execution(ExecutionQuery::GetRun(target)) => {
+                Some((action.tag, target.run.as_str().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn named_reply(run_id: &str) -> FeatureReply {
+    let detail = run(run_id, Some("root"), "active", "live", 0);
+    query_reply(json!({"type": "execution", "payload": {"type": "run", "payload": detail}}))
+}
+
+// Given: the names of more runs wanted than NAME_READS_IN_FLIGHT, the first reads out
+// When: the thread is deselected (or the area unavailable) while those are answered, one
+//       refused by the client
+// Then: names_waiting is false while no thread is selected and while the area is
+//       unavailable, so the view does not draw again for them; once t1 is selected and
+//       available again the rest and the refused one are read
+#[test]
+fn names_wait_quietly_while_none_can_be_asked_and_resume_on_reselect() {
+    let mut hidden = Hidden::new("t1");
+    let t1 = ThreadId::new("t1").unwrap();
+    for n in 0..10 {
+        hidden
+            .feature
+            .want_name(t1.clone(), RunId::new(format!("run-{n:02}")).unwrap());
+    }
+    let reads = run_reads(&hidden.maintain());
+    assert_eq!(reads.len(), NAME_READS_IN_FLIGHT);
+
+    hidden.selection.thread = None;
+    assert!(run_reads(&hidden.maintain()).is_empty());
+    let (refused, refused_run) = reads[0].clone();
+    hidden.feature.reply(
+        refused,
+        FeatureReply::Query(Err(FeatureError::new("client queue is full or closed"))),
+    );
+    for (tag, run_id) in &reads[1..] {
+        hidden.feature.reply(*tag, named_reply(run_id));
+    }
+    assert!(!hidden.feature.names_waiting(), "no thread is selected");
+    assert!(run_reads(&hidden.maintain()).is_empty());
+    assert!(!hidden.feature.names_waiting());
+
+    hidden.select("t1");
+    assert!(run_reads(&hidden.maintain_available(false)).is_empty());
+    assert!(!hidden.feature.names_waiting(), "the area is unavailable");
+
+    let again = run_reads(&hidden.maintain());
+    assert_eq!(
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        [refused_run.as_str(), "run-08", "run-09"]
+    );
+    assert!(!hidden.feature.names_waiting());
+}
+
+// Given: one name read per kind of refusal
+// When: the core refuses them
+// Then: a refusal for a while (busy or a fault without advice, any code whose advice
+//       allows asking again) is read again, NAME_READ_ATTEMPTS times in all per
+//       session; a missing or hidden run, or advice that forbids it, is not; a new
+//       session reads the run that was refused for a while again
+#[test]
+fn a_name_refused_for_a_while_is_read_again_a_few_times() {
+    let mut hidden = Hidden::new("t1");
+    let t1 = ThreadId::new("t1").unwrap();
+    let refusals = [
+        (
+            "run-a",
+            FeatureError::new("busy").with_code(ErrorCode::Busy),
+            true,
+        ),
+        (
+            "run-b",
+            FeatureError::new("draining").with_code(ErrorCode::Draining),
+            true,
+        ),
+        (
+            "run-c",
+            FeatureError::new("store").with_code(ErrorCode::StorageUnavailable),
+            true,
+        ),
+        (
+            "run-d",
+            FeatureError::new("odd")
+                .with_code(ErrorCode::Conflict)
+                .with_retry(RetryAdvice::SameRequest),
+            true,
+        ),
+        (
+            "run-e",
+            FeatureError::new("gone").with_code(ErrorCode::NotFound),
+            false,
+        ),
+        (
+            "run-f",
+            FeatureError::new("hidden")
+                .with_code(ErrorCode::PermissionDenied)
+                .with_retry(RetryAdvice::SameRequest),
+            false,
+        ),
+        (
+            "run-g",
+            FeatureError::new("never")
+                .with_code(ErrorCode::Busy)
+                .with_retry(RetryAdvice::Never),
+            false,
+        ),
+    ];
+    for (run_id, _, _) in &refusals {
+        hidden
+            .feature
+            .want_name(t1.clone(), RunId::new(*run_id).unwrap());
+    }
+    let reads = run_reads(&hidden.maintain());
+    assert_eq!(reads.len(), refusals.len());
+    for ((tag, _), (_, error, _)) in reads.iter().zip(&refusals) {
+        hidden
+            .feature
+            .reply(*tag, FeatureReply::Query(Err(error.clone())));
+    }
+    let again = run_reads(&hidden.maintain());
+    let expected: Vec<_> = refusals
+        .iter()
+        .filter(|(_, _, again)| *again)
+        .map(|(run_id, _, _)| *run_id)
+        .collect();
+    assert_eq!(
+        again
+            .iter()
+            .map(|(_, run)| run.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let busy = || FeatureReply::Query(Err(FeatureError::new("busy").with_code(ErrorCode::Busy)));
+    let mut tag = again[0].0;
+    for attempt in 2..=NAME_READ_ATTEMPTS {
+        hidden.feature.reply(tag, busy());
+        let reads = run_reads(&hidden.maintain());
+        if attempt == NAME_READ_ATTEMPTS {
+            assert!(reads.is_empty(), "run-a was refused {attempt} times");
+        } else {
+            let [(next, run_id)] = &reads[..] else {
+                panic!("run-a alone was expected, got {reads:?}");
+            };
+            assert_eq!(run_id, "run-a");
+            tag = *next;
+        }
+    }
+    assert!(!hidden.feature.names_waiting());
+
+    hidden.feature.reset();
+    hidden.feature.want_name(t1, RunId::new("run-a").unwrap());
+    let reads = run_reads(&hidden.maintain());
+    assert!(
+        reads.iter().any(|(_, run_id)| run_id == "run-a"),
+        "a new session reads it again: {reads:?}"
+    );
 }

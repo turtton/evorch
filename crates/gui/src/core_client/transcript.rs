@@ -15,7 +15,7 @@ use crate::panes::transcript_widgets::{code_block, diff_block, user_bubble};
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{ghost, soft_frame};
+use crate::theme::widgets::{ghost, ghost_icon_button, soft_frame};
 
 #[derive(Clone, Copy)]
 pub(super) enum Scope<'a> {
@@ -113,7 +113,16 @@ pub(super) fn transcript(
                     Item::Message(message) => {
                         message_row(ui, requested_bodies, cache, base, message, effects);
                     }
-                    Item::Tools(tools) => tool_group(ui, requested_bodies, cache, &tools, effects),
+                    Item::Tools {
+                        tools,
+                        folded: true,
+                    } => {
+                        tool_group(ui, requested_bodies, cache, &tools, effects);
+                    }
+                    Item::Tools {
+                        tools,
+                        folded: false,
+                    } => tool_cards(ui, requested_bodies, cache, &tools, effects),
                 }
                 ui.add_space(SP_2);
             }
@@ -122,17 +131,34 @@ pub(super) fn transcript(
         });
 }
 
+/// A run of one run's tool outputs folds under one header once the run's next message
+/// is a reply to the person, as the embedded workbench folds a turn's tool calls; until
+/// then (the agent still works, or a person's message came next) each stays in sight.
+#[derive(Debug, PartialEq, Eq)]
 enum Item<'a> {
     Message(&'a CommittedMessage),
-    Tools(Vec<&'a CommittedMessage>),
+    Tools {
+        tools: Vec<&'a CommittedMessage>,
+        folded: bool,
+    },
 }
 
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
     let mut items: Vec<Item<'a>> = Vec::new();
     for message in history {
+        let same_run = |tools: &[&CommittedMessage]| tools[0].run == message.run;
         match (message.role, items.last_mut()) {
-            (MessageRole::Tool, Some(Item::Tools(tools))) => tools.push(message),
-            (MessageRole::Tool, _) => items.push(Item::Tools(vec![message])),
+            (MessageRole::Tool, Some(Item::Tools { tools, .. })) if same_run(tools) => {
+                tools.push(message);
+            }
+            (MessageRole::Tool, _) => items.push(Item::Tools {
+                tools: vec![message],
+                folded: false,
+            }),
+            (MessageRole::Assistant, Some(Item::Tools { tools, folded })) if same_run(tools) => {
+                *folded = true;
+                items.push(Item::Message(message));
+            }
             _ => items.push(Item::Message(message)),
         }
     }
@@ -215,6 +241,8 @@ fn message_row(
     );
 }
 
+/// The header of a folded run of tool outputs, closed until the person opens it, as the
+/// embedded workbench draws its tool-call groups.
 fn tool_group(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
@@ -237,29 +265,35 @@ fn tool_group(
     if failed {
         title.push_str(", some failed");
     }
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-        .show_header(ui, |ui| {
-            let color = if failed {
-                palette().ERROR_FG
-            } else {
-                palette().TEXT_MUTED
-            };
-            ui.label(
-                RichText::new(icons::with_icon(icons::WRENCH, &title))
-                    .size(FONT_SMALL)
-                    .color(color),
-            );
-        })
-        .body(|ui| {
-            for tool in tools {
-                ui.push_id(("tool", tool.run.as_str(), tool.index.get()), |ui| {
-                    if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
-                        tool_card(ui, text);
-                    }
-                });
-                ui.add_space(SP_1);
-            }
-        });
+    let open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    let icon = if open {
+        icons::CARET_DOWN
+    } else {
+        icons::CARET_RIGHT
+    };
+    if ghost_icon_button(ui, icon, &title).clicked() {
+        ui.data_mut(|data| data.insert_temp(id, !open));
+    }
+    if open {
+        tool_cards(ui, requested_bodies, cache, tools, effects);
+    }
+}
+
+fn tool_cards(
+    ui: &mut Ui,
+    requested_bodies: &mut BTreeSet<String>,
+    cache: &Cache,
+    tools: &[&CommittedMessage],
+    effects: &mut Vec<Effect>,
+) {
+    for tool in tools {
+        // The same id folded or not, so a card opened while the agent worked stays open.
+        let id = ui.make_persistent_id(("tool-card", tool.run.as_str(), tool.index.get()));
+        if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
+            tool_card(ui, id, text);
+        }
+        ui.add_space(SP_1);
+    }
 }
 
 /// What the shape of a committed tool output says about it. The core commits the output
@@ -302,7 +336,7 @@ impl<'a> ToolOutput<'a> {
     }
 }
 
-fn tool_card(ui: &mut Ui, text: &str) {
+fn tool_card(ui: &mut Ui, id: egui::Id, text: &str) {
     let output = ToolOutput::parse(text);
     let (icon, title, meta) = match &output {
         ToolOutput::Shell { exit_code, .. } => {
@@ -319,7 +353,6 @@ fn tool_card(ui: &mut Ui, text: &str) {
     let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     soft_frame(palette().SURFACE).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let id = ui.id().with("tool-card");
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
                 let color = if output.failed() {
@@ -414,5 +447,108 @@ mod tests {
         assert!(cache.shows_in_thread(&message("root")));
         assert!(!cache.shows_in_thread(&message("child")));
         assert!(cache.shows_in_thread(&message("gone")));
+    }
+
+    fn committed(run: &str, index: u64, role: &str, text: &str) -> CommittedMessage {
+        serde_json::from_value(serde_json::json!({
+            "thread": "thr", "run": run, "index": index.to_string(), "role": role,
+            "content": {"type": "inline", "payload": {"text": text}},
+        }))
+        .unwrap()
+    }
+
+    fn shapes(history: &[CommittedMessage]) -> Vec<(usize, bool)> {
+        let history: Vec<_> = history.iter().collect();
+        items(&history)
+            .iter()
+            .filter_map(|item| match item {
+                Item::Tools { tools, folded } => Some((tools.len(), *folded)),
+                Item::Message(_) => None,
+            })
+            .collect()
+    }
+
+    // Given: tool outputs followed by the same run's reply, by nothing, by the person's
+    //        message, and by another run's reply after another run's tools
+    // Then: only those the same run replied after fold; each run's tools are a group
+    #[test]
+    fn tool_outputs_fold_once_their_run_replies() {
+        let tool = |run, index| committed(run, index, "tool", "exit_code: 0\nok");
+        let replied = [
+            tool("r", 0),
+            tool("r", 1),
+            committed("r", 2, "assistant", "done"),
+        ];
+        assert_eq!(shapes(&replied), [(2, true)]);
+        assert_eq!(shapes(&[tool("r", 0), tool("r", 1)]), [(2, false)]);
+        let interrupted = [tool("r", 0), committed("r", 1, "user", "stop")];
+        assert_eq!(shapes(&interrupted), [(1, false)]);
+        let mixed = [
+            tool("r", 0),
+            tool("s", 0),
+            committed("r", 1, "assistant", "not s's reply"),
+        ];
+        assert_eq!(shapes(&mixed), [(1, false), (1, false)]);
+    }
+
+    fn harness(cache: Cache) -> egui_kittest::Harness<'static, Cache> {
+        egui_kittest::Harness::new_ui_state(
+            |ui, cache: &mut Cache| {
+                let thread = ThreadId::new("thr").unwrap();
+                let mut bodies = BTreeSet::new();
+                let mut effects = Vec::new();
+                transcript(
+                    ui,
+                    &mut bodies,
+                    TranscriptView {
+                        cache,
+                        scope: Scope::Thread(&thread),
+                        base: None,
+                    },
+                    |_| {},
+                    |_, _| {},
+                    &mut effects,
+                );
+            },
+            cache,
+        )
+    }
+
+    // Given: a shell result and a change committed while the agent still works
+    // When: the agent's reply is committed, then the folded header is clicked
+    // Then: both cards are in sight without a header while it works; once it replied
+    //       only "2 tool outputs" shows; a click opens it and it stays open
+    #[test]
+    fn tool_outputs_stay_in_sight_until_the_reply_and_then_fold() {
+        use egui_kittest::kittest::Queryable;
+        let mut cache = Cache::default();
+        cache.history.insert(
+            "thr".into(),
+            vec![
+                committed("r", 0, "user", "fix it"),
+                committed("r", 1, "tool", "exit_code: 0\nsrc/lib.rs"),
+                committed("r", 2, "tool", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b"),
+            ],
+        );
+        let mut harness = harness(cache);
+        harness.run_steps(2);
+        harness.get_by_label_contains("Shell");
+        harness.get_by_label_contains("Change");
+        assert!(harness.query_by_label_contains("tool outputs").is_none());
+
+        harness
+            .state_mut()
+            .history
+            .get_mut("thr")
+            .unwrap()
+            .push(committed("r", 3, "assistant", "Fixed."));
+        harness.run_steps(2);
+        harness.get_by_label("2 tool outputs");
+        assert!(harness.query_by_label_contains("Shell").is_none());
+
+        harness.get_by_label("2 tool outputs").click();
+        harness.run_steps(4);
+        harness.get_by_label_contains("Shell");
+        harness.get_by_label_contains("Change");
     }
 }

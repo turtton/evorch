@@ -321,6 +321,19 @@ impl Viewer<'_, '_> {
             CoreTab::Plan => (icons::LIST_CHECKS, "Plan"),
             CoreTab::Diff => (icons::GIT_DIFF, "Diff"),
             CoreTab::Terminal => (icons::TERMINAL_WINDOW, "Terminal"),
+            // The embedded workbench counts finished subagents too.
+            CoreTab::Feature(FeatureId::Execution) => {
+                let thread = self.selection.thread.as_ref();
+                let count = self
+                    .io
+                    .cache
+                    .runs
+                    .values()
+                    .filter(|run| Some(&run.thread) == thread && run.parent_run.is_some())
+                    .count();
+                let title = format!("{}({count})", self.title_of(FeatureId::Execution));
+                return (feature_icon(FeatureId::Execution), Cow::Owned(title));
+            }
             CoreTab::Feature(feature) => (feature_icon(feature), self.title_of(feature)),
             CoreTab::Run(id) => {
                 let title = self.run_tabs.get(id).map(|tab| tab.title.as_str());
