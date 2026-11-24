@@ -20,10 +20,13 @@ use storage::pull_requests::{
     PullRequestState,
 };
 
-/// Facts older than this, in a window that tracks the thread, read as stale: the poll
-/// interval is at most five minutes, so a snapshot this old means polling is not working.
-pub const STALE_AFTER_SECONDS: i64 = 15 * 60;
+use crate::panes::pull_request_widgets::{self as widgets, AutoFixInput, BarMemory, NoticeState};
+pub use crate::panes::pull_request_widgets::{
+    AutoFixChip, AutoFixControls, ChipTone, Control, Mismatch, PrGlyph, PullRequestBadge,
+    STALE_AFTER_SECONDS, Status, now_ns, short_sha,
+};
 
+#[cfg(test)]
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 /// Everything shown about one thread's pull request, as one read of the database found it.
@@ -96,74 +99,71 @@ impl ThreadPullRequest {
     }
 }
 
-/// The wall clock, nanoseconds since the Unix epoch.
-#[must_use]
-pub fn now_ns() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
-        .unwrap_or(0)
-}
-
 /// `owner/repo#number` of a key.
 #[must_use]
 pub fn key_label(key: &PullRequestKey) -> String {
     format!("{}#{}", key.repository, key.number)
 }
 
-/// The glyph class of a pull request. Only [`PrGlyph::Passing`] means success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrGlyph {
-    Passing,
-    Failing,
-    Pending,
-    Merged,
-    Closed,
-    /// No facts, a failed fetch, no checks, a partial list or checks that neither passed
-    /// nor failed.
-    Unknown,
+/// The runtime's verdict of the facts, in the shared words.
+fn verdict(facts: &PullRequestFacts) -> widgets::Verdict {
+    match checks_verdict(facts) {
+        ChecksVerdict::Unknown => widgets::Verdict::Unknown,
+        ChecksVerdict::Pending => widgets::Verdict::Pending,
+        ChecksVerdict::Failing => widgets::Verdict::Failing,
+        ChecksVerdict::Passing => widgets::Verdict::Passing,
+        ChecksVerdict::Unsettled => widgets::Verdict::Unsettled,
+    }
 }
 
-impl PrGlyph {
-    /// The word that accompanies the glyph; colour is never the only signal.
-    #[must_use]
-    pub const fn word(self) -> &'static str {
-        match self {
-            Self::Passing => "passing",
-            Self::Failing => "failing",
-            Self::Pending => "running",
-            Self::Merged => "merged",
-            Self::Closed => "closed",
-            Self::Unknown => "unknown",
-        }
+pub(crate) const fn protocol_state(
+    state: PullRequestState,
+) -> workbench_protocol::namespaces::pull_requests::PullRequestState {
+    use workbench_protocol::namespaces::pull_requests::PullRequestState as Wire;
+    match state {
+        PullRequestState::Open => Wire::Open,
+        PullRequestState::Closed => Wire::Closed,
+        PullRequestState::Merged => Wire::Merged,
     }
+}
+
+pub(crate) const fn protocol_review(
+    decision: storage::pull_requests::ReviewDecision,
+) -> workbench_protocol::namespaces::pull_requests::ReviewDecision {
+    use storage::pull_requests::ReviewDecision as Stored;
+    use workbench_protocol::namespaces::pull_requests::ReviewDecision as Wire;
+    match decision {
+        Stored::Approved => Wire::Approved,
+        Stored::ChangesRequested => Wire::ChangesRequested,
+        Stored::ReviewRequired => Wire::ReviewRequired,
+        Stored::None => Wire::None,
+    }
+}
+
+/// The checks of the facts as the shared rows: their stored labels.
+pub(crate) fn check_rows(facts: &PullRequestFacts) -> Vec<widgets::CheckRow<'_>> {
+    facts
+        .checks
+        .iter()
+        .map(|check| widgets::CheckRow {
+            name: &check.name,
+            status: check.status.as_str(),
+            conclusion: check.conclusion.map(CheckConclusion::as_str),
+        })
+        .collect()
 }
 
 /// The glyph class of the thread's pull request; `None` without a link.
 #[must_use]
 pub fn glyph(view: &ThreadPullRequest) -> Option<PrGlyph> {
-    view.link.as_ref()?;
-    let Some(facts) = &view.facts else {
-        return Some(PrGlyph::Unknown);
-    };
-    Some(match facts.state {
-        PullRequestState::Merged => PrGlyph::Merged,
-        PullRequestState::Closed => PrGlyph::Closed,
-        PullRequestState::Open => {
-            if view.failure.is_some() {
-                // The newest answer is a failure: what was stored may be old.
-                PrGlyph::Unknown
-            } else {
-                match checks_verdict(facts) {
-                    ChecksVerdict::Passing => PrGlyph::Passing,
-                    ChecksVerdict::Failing => PrGlyph::Failing,
-                    ChecksVerdict::Pending => PrGlyph::Pending,
-                    ChecksVerdict::Unsettled | ChecksVerdict::Unknown => PrGlyph::Unknown,
-                }
-            }
-        }
-    })
+    widgets::glyph_from(
+        view.link.is_some(),
+        view.facts.as_ref().map(|facts| protocol_state(facts.state)),
+        view.failure.is_some(),
+        view.facts
+            .as_ref()
+            .map_or(widgets::Verdict::Unknown, verdict),
+    )
 }
 
 /// Whether the open pull request has a failed check (the condition that expands the bar).
@@ -175,38 +175,14 @@ pub fn is_failing(view: &ThreadPullRequest) -> bool {
 /// The one-line CI summary: `CI passing 5/5`, `CI failing 2/5`, `CI running 3/5 done`, …
 #[must_use]
 pub fn ci_summary(view: &ThreadPullRequest) -> String {
-    let Some(facts) = &view.facts else {
-        return if view.failure.is_some() {
-            "Not fetched".to_owned()
-        } else {
-            "Waiting for the first fetch".to_owned()
-        };
-    };
-    if facts.state != PullRequestState::Open {
-        return String::new();
-    }
-    let total = facts.checks.len();
-    let failed = facts
-        .checks
-        .iter()
-        .filter(|check| check.status == CheckStatus::Completed && failed(check.conclusion))
-        .count();
-    let finished = facts
-        .checks
-        .iter()
-        .filter(|check| check.status == CheckStatus::Completed)
-        .count();
-    if view.failure.is_some() && failed == 0 {
-        return "CI unknown".to_owned();
-    }
-    match checks_verdict(facts) {
-        ChecksVerdict::Failing => format!("CI failing {failed}/{total}"),
-        ChecksVerdict::Pending => format!("CI running {finished}/{total} done"),
-        ChecksVerdict::Passing => format!("CI passing {total}/{total}"),
-        ChecksVerdict::Unsettled => format!("CI unsettled {finished}/{total}"),
-        ChecksVerdict::Unknown if total == 0 => "No checks".to_owned(),
-        ChecksVerdict::Unknown => format!("CI incomplete {total} checks"),
-    }
+    let counts = view.facts.as_ref().map(|facts| {
+        widgets::CiCounts::of(
+            facts.state == PullRequestState::Open,
+            verdict(facts),
+            &check_rows(facts),
+        )
+    });
+    widgets::ci_words(counts, view.failure.is_some())
 }
 
 fn failed(conclusion: Option<CheckConclusion>) -> bool {
@@ -227,43 +203,7 @@ pub fn check_is_failed(check: &storage::pull_requests::PullRequestCheck) -> bool
 /// The words of a pull request's state.
 #[must_use]
 pub const fn state_word(state: PullRequestState) -> &'static str {
-    match state {
-        PullRequestState::Open => "Open",
-        PullRequestState::Closed => "Closed",
-        PullRequestState::Merged => "Merged",
-    }
-}
-
-/// A warning the linked pull request and the local checkout disagree. Computed from the stored
-/// facts and the local HEAD the owner recorded; a warning never blocks anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mismatch {
-    /// No single local checkout is on the pull request's head branch.
-    NoLocalCheckout { branch: String },
-    /// The local checkout's HEAD is not the pull request's head commit.
-    LocalHeadDiffers { local: String, remote: String },
-}
-
-impl Mismatch {
-    #[must_use]
-    pub fn text(&self) -> String {
-        match self {
-            Self::NoLocalCheckout { branch } => {
-                format!("No local checkout on branch {branch}")
-            }
-            Self::LocalHeadDiffers { local, remote } => format!(
-                "Local HEAD {} differs from the pull request head {}",
-                short_sha(local),
-                short_sha(remote)
-            ),
-        }
-    }
-}
-
-/// The first seven characters of a commit.
-#[must_use]
-pub fn short_sha(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
+    widgets::state_word(protocol_state(state))
 }
 
 /// The disagreements between the pull request and the local checkout. Only for an open pull
@@ -273,63 +213,31 @@ pub fn mismatches(view: &ThreadPullRequest) -> Vec<Mismatch> {
     let Some(facts) = &view.facts else {
         return Vec::new();
     };
-    if facts.state != PullRequestState::Open || view.failure.is_some() {
-        return Vec::new();
-    }
-    match &view.local_head {
-        None => vec![Mismatch::NoLocalCheckout {
-            branch: facts.head_branch.clone(),
-        }],
-        Some(head) if head.head_sha != facts.head_sha => vec![Mismatch::LocalHeadDiffers {
-            local: head.head_sha.clone(),
-            remote: facts.head_sha.clone(),
-        }],
-        Some(_) => Vec::new(),
-    }
-}
-
-/// One thing a person should know about how far the shown facts can be trusted. The three
-/// kinds are independent: each is shown whenever it holds, whatever the others say.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    /// This window does not poll the thread: another window owns it, or nobody does (after a
-    /// restart). What is shown is the last stored snapshot.
-    NotTracked,
-    /// Nothing newer than [`STALE_AFTER_SECONDS`] arrived.
-    Stale,
-    /// The newest fetch failed; the facts shown are the last ones that arrived.
-    FetchFailed {
-        /// The class of the failure (`unauthenticated`, `network`, …).
-        kind: String,
-        /// The stored, sanitized message.
-        message: String,
-    },
+    widgets::mismatches_of(
+        facts.state == PullRequestState::Open && view.failure.is_none(),
+        &facts.head_branch,
+        &facts.head_sha,
+        view.local_head.as_ref().map(|head| head.head_sha.as_str()),
+    )
 }
 
 /// Whether the last successful fetch is older than [`STALE_AFTER_SECONDS`], tracked here or not.
 #[must_use]
 pub fn is_stale(view: &ThreadPullRequest, now_ns: i64) -> bool {
-    view.fetched_at_ns
-        .is_some_and(|at| now_ns.saturating_sub(at) > STALE_AFTER_SECONDS * NANOS_PER_SECOND)
+    widgets::is_stale_at(view.fetched_at_ns, now_ns)
 }
 
 /// Every status that holds for the view, in the order they are shown.
 #[must_use]
 pub fn statuses(view: &ThreadPullRequest, now_ns: i64) -> Vec<Status> {
-    let mut found = Vec::new();
-    if !view.tracked_here {
-        found.push(Status::NotTracked);
-    }
-    if is_stale(view, now_ns) {
-        found.push(Status::Stale);
-    }
-    if let Some(failure) = &view.failure {
-        found.push(Status::FetchFailed {
-            kind: failure.kind.as_str().to_owned(),
-            message: failure.message.clone(),
-        });
-    }
-    found
+    widgets::statuses_of(
+        view.tracked_here,
+        view.fetched_at_ns,
+        view.failure
+            .as_ref()
+            .map(|failure| (failure.kind.as_str(), failure.message.as_str())),
+        now_ns,
+    )
 }
 
 /// A candidate chip as the transcript shows it.
@@ -379,73 +287,6 @@ pub fn chips_by_call(view: &ThreadPullRequest) -> HashMap<(String, String), Vec<
     chips
 }
 
-/// How a chip reads; colour is never the only signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipTone {
-    Muted,
-    Good,
-    Warning,
-}
-
-/// One status of the auto fix, with the hover that says why.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoFixChip {
-    pub text: String,
-    pub tone: ChipTone,
-    pub hover: Option<String>,
-}
-
-/// A button's state: when it cannot act, `hover` says why.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Control {
-    pub enabled: bool,
-    pub hover: String,
-}
-
-impl Control {
-    fn on(hover: &str) -> Self {
-        Self {
-            enabled: true,
-            hover: hover.to_owned(),
-        }
-    }
-
-    fn off(why: &str) -> Self {
-        Self {
-            enabled: false,
-            hover: why.to_owned(),
-        }
-    }
-}
-
-/// The auto fix controls and statuses of one thread's bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoFixControls {
-    /// Auto fix is on and this thread is the one it notifies.
-    pub on_here: bool,
-    pub toggle: Control,
-    pub send: Control,
-    /// Present only once the limit stopped auto fix.
-    pub reset: Option<Control>,
-    pub chips: Vec<AutoFixChip>,
-    pub link_revision: u64,
-    pub policy_revision: u64,
-    /// The head the "send" acts on (what the bar shows).
-    pub head_sha: Option<String>,
-    /// Turning auto fix on here moves it from this thread, which needs the person's
-    /// confirmation.
-    pub moves_from: Option<String>,
-}
-
-/// The reason stored when the third automatic notice stopped auto fix.
-const LIMIT_REACHED: &str = "limit_reached";
-
-/// Whole minutes left of a cooldown, rounded up.
-fn minutes_left(now_ns: i64, until_ns: i64) -> i64 {
-    let nanos = until_ns.saturating_sub(now_ns).max(0);
-    (nanos + 59 * NANOS_PER_SECOND) / (60 * NANOS_PER_SECOND)
-}
-
 /// The controls and statuses of the auto fix, as words. Pure: it says what the controls can
 /// do; the operations check their own revisions. `None` without a link or a read of the
 /// state.
@@ -454,166 +295,43 @@ pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFi
     let link = view.link.as_ref()?;
     let auto = view.auto_fix.as_ref()?;
     let state = &auto.state;
-    let this = view.thread_id.as_str();
-    let destination = state.destination_thread_id.as_deref();
-    let on_here = state.enabled
-        && destination == Some(this)
-        && state.link_revision == Some(link.link_revision);
-    let moves_from = destination.filter(|d| *d != this).map(str::to_owned);
     let open = view
         .facts
         .as_ref()
         .is_some_and(|facts| facts.state == PullRequestState::Open);
-    let failing = open && is_failing(view);
-    let limit_reached = state.used >= PR_AUTO_FIX_LIMIT && !state.enabled;
-    let mut chips = Vec::new();
-
-    let toggle = if !view.tracked_here {
-        Control::off("Not tracked in this window")
-    } else if !open {
-        Control::off("The pull request is not open")
-    } else if limit_reached {
-        Control::off("Limit reached; reset the count to turn auto fix on")
-    } else if on_here {
-        Control::on("Stop sending CI failures to the agent automatically")
-    } else if moves_from.is_some() {
-        Control::on("Send CI failures to this thread instead of the one that has it now")
-    } else {
-        Control::on("Send CI failures to the agent automatically")
-    };
-
-    if on_here {
-        let left = PR_AUTO_FIX_LIMIT.saturating_sub(state.used + state.reserved);
-        chips.push(AutoFixChip {
-            text: format!("{left} left"),
-            tone: if left == 0 {
-                ChipTone::Warning
-            } else {
-                ChipTone::Muted
-            },
-            hover: Some(format!(
-                "{} of {PR_AUTO_FIX_LIMIT} automatic sends used",
-                state.used + state.reserved
-            )),
+    let head_notice = auto
+        .head_notice
+        .as_ref()
+        .and_then(|notice| match notice.phase {
+            PrNoticePhase::Adopted => Some(NoticeState::Sent),
+            PrNoticePhase::Reserved | PrNoticePhase::Ready => Some(NoticeState::Sending),
+            PrNoticePhase::Cancelled => None,
         });
-    } else if state.enabled && moves_from.is_some() {
-        chips.push(AutoFixChip {
-            text: "On in another thread".to_owned(),
-            tone: ChipTone::Muted,
-            hover: Some("Another thread receives this pull request's CI failures".to_owned()),
-        });
-    }
-    if on_here && !auto.global_enabled {
-        chips.push(AutoFixChip {
-            text: "Off by settings".to_owned(),
-            tone: ChipTone::Warning,
-            hover: Some(
-                "Automatic sends are turned off in the settings; Send to agent still works"
-                    .to_owned(),
-            ),
-        });
-    }
-    if state.enabled
-        && let Some(until) = state.cooldown_until_ns.filter(|until| *until > now_ns)
-    {
-        chips.push(AutoFixChip {
-            text: format!("cooldown {}m", minutes_left(now_ns, until)),
-            tone: ChipTone::Muted,
-            hover: Some("The next automatic send waits for the cooldown".to_owned()),
-        });
-    }
-    if limit_reached {
-        let hover = (state.stop_reason.as_deref() == Some(LIMIT_REACHED))
-            .then(|| "Auto fix turned itself off".to_owned());
-        chips.push(AutoFixChip {
-            text: format!("Limit reached {}/{PR_AUTO_FIX_LIMIT}", state.used),
-            tone: ChipTone::Warning,
-            hover,
-        });
-    }
-
-    let head_notice = auto.head_notice.as_ref();
-    let sent = head_notice.is_some_and(|n| n.phase == PrNoticePhase::Adopted);
-    let sending = head_notice
-        .is_some_and(|n| matches!(n.phase, PrNoticePhase::Reserved | PrNoticePhase::Ready));
-    if sent {
-        chips.push(AutoFixChip {
-            text: "Sent".to_owned(),
-            tone: ChipTone::Good,
-            hover: Some("This commit's failure was sent to the agent".to_owned()),
-        });
-    } else if sending {
-        chips.push(AutoFixChip {
-            text: "Sending".to_owned(),
-            tone: ChipTone::Muted,
-            hover: Some("Preparing the failure for the agent".to_owned()),
-        });
-    } else if on_here && failing {
-        if is_pending(view.facts.as_ref()) {
-            chips.push(AutoFixChip {
-                text: "Waiting for checks".to_owned(),
-                tone: ChipTone::Muted,
-                hover: Some("Auto fix waits until every check has finished".to_owned()),
-            });
-        } else if auto.head_origin == HeadAttribution::Unknown {
-            chips.push(AutoFixChip {
-                text: "External commit".to_owned(),
-                tone: ChipTone::Warning,
-                hover: Some(
-                    "Not confirmed as the agent's push, so it is not sent automatically".to_owned(),
-                ),
-            });
-        }
-    }
-    if auto.this_stopped {
-        chips.push(AutoFixChip {
-            text: "Stopped".to_owned(),
-            tone: ChipTone::Warning,
-            hover: Some("Stopped by you; resume the thread to send again".to_owned()),
-        });
-    } else if auto.suppressed {
-        chips.push(AutoFixChip {
-            text: "Paused".to_owned(),
-            tone: ChipTone::Warning,
-            hover: Some("No progress after repeated sends; a message of yours resumes it".into()),
-        });
-    }
-
-    let send = if !view.tracked_here {
-        Control::off("Not tracked in this window")
-    } else if sent {
-        Control::off("Already sent for this commit")
-    } else if sending {
-        Control::off("Sending to the agent")
-    } else if !failing {
-        Control::off("No failed check to send")
-    } else if auto.this_stopped {
-        Control::off("Stopped; resume the thread first")
-    } else if auto.suppressed {
-        Control::off("Paused after repeated sends; a message of yours resumes it")
-    } else {
-        Control::on("Send this failure to the agent now")
-    };
-
-    let reset = limit_reached.then(|| {
-        if !view.tracked_here {
-            Control::off("Not tracked in this window")
-        } else {
-            Control::on("Start the count again and turn auto fix on")
-        }
-    });
-
-    Some(AutoFixControls {
-        on_here,
-        toggle,
-        send,
-        reset,
-        chips,
+    let input = AutoFixInput {
+        thread: &view.thread_id,
         link_revision: link.link_revision,
+        tracked: view.tracked_here,
+        open,
+        failing: is_failing(view),
+        checks_pending: is_pending(view.facts.as_ref()),
+        enabled: state.enabled,
+        destination: state.destination_thread_id.as_deref(),
+        policy_link_revision: state.link_revision,
         policy_revision: state.policy_revision,
-        head_sha: view.facts.as_ref().map(|facts| facts.head_sha.clone()),
-        moves_from,
-    })
+        used: state.used,
+        reserved: state.reserved,
+        limit: PR_AUTO_FIX_LIMIT,
+        limit_reached: state.used >= PR_AUTO_FIX_LIMIT && !state.enabled,
+        global_enabled: auto.global_enabled,
+        cooldown_until_ns: state.cooldown_until_ns,
+        stop_reason: state.stop_reason.as_deref(),
+        head_notice,
+        this_stopped: auto.this_stopped,
+        suppressed: auto.suppressed,
+        head_from_agent: auto.head_origin != HeadAttribution::Unknown,
+        head_sha: view.facts.as_ref().map(|facts| facts.head_sha.as_str()),
+    };
+    Some(widgets::auto_fix_controls_of(&input, now_ns))
 }
 
 /// The user's operations on the bar.
@@ -672,10 +390,7 @@ pub enum PullRequestAction {
 #[derive(Debug, Default, Clone)]
 pub struct BarState {
     pub expanded: bool,
-    /// The link revision the memory below is about.
-    link_revision: Option<u64>,
-    /// Whether the last view this state saw was failing; `None` before the first view.
-    was_failing: Option<bool>,
+    memory: BarMemory,
 }
 
 impl BarState {
@@ -694,20 +409,9 @@ impl BarState {
             *self = Self::default();
             return;
         };
-        if self.link_revision != Some(link.link_revision) {
-            self.link_revision = Some(link.link_revision);
-            self.was_failing = None;
-        }
-        // A view that cannot say how the checks stand (a failed fetch, no facts yet, no checks)
-        // keeps what was last established: recovering into the same failure is no transition.
-        if glyph(view) == Some(PrGlyph::Unknown) {
-            return;
-        }
-        let failing = is_failing(view);
-        if failing && self.was_failing == Some(false) {
+        if self.memory.observe(Some(link.link_revision), glyph(view)) {
             self.expanded = true;
         }
-        self.was_failing = Some(failing);
     }
 }
 
@@ -789,13 +493,6 @@ impl PullRequestsModel {
     }
 }
 
-/// What the sidebar row shows: the number and the glyph class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PullRequestBadge {
-    pub number: u64,
-    pub glyph: PrGlyph,
-}
-
 #[must_use]
 pub fn badge(view: &ThreadPullRequest) -> Option<PullRequestBadge> {
     Some(PullRequestBadge {
@@ -804,5 +501,7 @@ pub fn badge(view: &ThreadPullRequest) -> Option<PullRequestBadge> {
     })
 }
 
+#[cfg(test)]
+mod protocol_parity_tests;
 #[cfg(test)]
 pub(crate) mod tests;

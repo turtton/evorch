@@ -521,6 +521,18 @@ fn apply_frame(
             lanes.enqueue_sidebar(intent);
         }
     }
+    for intent in frame.pull_requests {
+        // The "Link PR…" dialog chosen from a thread's menu is drawn by the Pull requests tab.
+        if matches!(
+            intent,
+            features::pull_requests::PullRequestIntent::OpenLink(_)
+        ) {
+            shared.features.reveal(features::FeatureId::PullRequests);
+        }
+        if let Some(pull_requests) = shared.features.pull_requests_mut() {
+            pull_requests.enqueue_sidebar(intent);
+        }
+    }
     for navigation in frame.navigation {
         apply_navigation(tx, shared, project, selected, navigation);
     }
@@ -868,7 +880,7 @@ impl CoreClientScreen {
             pass.finish(ui)
         };
         self.window_rects.track(&self.dock, ui.ctx());
-        if !frame.lanes.is_empty() {
+        if !frame.lanes.is_empty() || !frame.pull_requests.is_empty() {
             // What a lane menu chose is sent in the lanes feature's next pass.
             ui.ctx().request_repaint();
         }
@@ -879,10 +891,12 @@ impl CoreClientScreen {
             &mut self.selected,
             frame,
         );
-        if effects
-            .iter()
-            .any(|effect| matches!(effect, shell::Effect::Goal(_) | shell::Effect::Lane(_)))
-        {
+        if effects.iter().any(|effect| {
+            matches!(
+                effect,
+                shell::Effect::Goal(_) | shell::Effect::Lane(_) | shell::Effect::PullRequest(_)
+            )
+        }) {
             // The goal or lane command leaves in its feature's next pass.
             ui.ctx().request_repaint();
         }
@@ -967,6 +981,16 @@ fn apply_effect(
             shell::Effect::Lane(action) => {
                 if let Some(lanes) = shared.features.lanes_mut() {
                     lanes.enqueue_card(action);
+                }
+            }
+            // Moving auto fix from another thread is confirmed in the Pull requests tab.
+            shell::Effect::PullRequest(action) => {
+                if shared
+                    .features
+                    .pull_requests_mut()
+                    .is_some_and(|pull_requests| pull_requests.enqueue_bar(action))
+                {
+                    shared.features.reveal(features::FeatureId::PullRequests);
                 }
             }
             // The run tabs of other threads, out of the dock, go with the layout too.
@@ -1128,6 +1152,7 @@ mod navigation_tests {
             previews: Vec::new(),
             observations: Vec::new(),
             lanes: Vec::new(),
+            pull_requests: Vec::new(),
             actions: vec![],
             navigation: vec![navigation],
         };

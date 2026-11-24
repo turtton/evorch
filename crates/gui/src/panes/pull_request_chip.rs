@@ -11,13 +11,11 @@ use egui::RichText;
 
 use crate::model::pull_requests::{CandidateChip, ChipState, PullRequestAction};
 use crate::model::transcript::TranscriptEntry;
+use crate::panes::pull_request_widgets::{CandidateChoice, candidate_offer};
+pub use crate::panes::pull_request_widgets::{IGNORE_LABEL, LINK_LABEL};
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::*;
-use crate::theme::widgets::ghost;
-
-pub const LINK_LABEL: &str = "Link PR";
-pub const IGNORE_LABEL: &str = "Ignore";
 
 /// Chips by `(run, call)` of the tool call that produced them.
 pub type ChipsByCall = HashMap<(String, String), Vec<CandidateChip>>;
@@ -77,27 +75,22 @@ pub fn show(ui: &mut egui::Ui, chips: &mut PullRequestChips<'_>, group: &[Transc
                         ui.label(muted(format!("Linked pull request {}", chip.label)));
                     }
                     ChipState::Offered => {
-                        ui.label(&chip.label);
-                        let link = ui.add(ghost(RichText::new(LINK_LABEL).color(palette().ACCENT)));
-                        link.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                format!("{LINK_LABEL} {}", chip.label),
-                            )
-                        });
-                        if link.clicked() {
-                            *chips.action = Some(PullRequestAction::Confirm {
-                                thread_id: chips.thread_id.to_owned(),
-                                candidate_id: chip.candidate_id,
-                            });
-                        }
-                        let ignore = ui.add(ghost(muted(IGNORE_LABEL)));
-                        if ignore.clicked() {
-                            *chips.action = Some(PullRequestAction::Dismiss {
-                                thread_id: chips.thread_id.to_owned(),
-                                candidate_id: chip.candidate_id,
-                            });
+                        let thread_id = chips.thread_id.to_owned();
+                        let candidate_id = chip.candidate_id;
+                        match candidate_offer(ui, &chip.label, true) {
+                            Some(CandidateChoice::Link) => {
+                                *chips.action = Some(PullRequestAction::Confirm {
+                                    thread_id,
+                                    candidate_id,
+                                });
+                            }
+                            Some(CandidateChoice::Ignore) => {
+                                *chips.action = Some(PullRequestAction::Dismiss {
+                                    thread_id,
+                                    candidate_id,
+                                });
+                            }
+                            None => {}
                         }
                     }
                 }

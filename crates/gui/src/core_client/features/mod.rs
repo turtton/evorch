@@ -289,6 +289,8 @@ pub struct FeatureFrame {
     pub observations: Vec<workbench_protocol::namespaces::browser::observation::ObservationTarget>,
     /// What a lane thread's menu asked of the lanes feature.
     pub lanes: Vec<lanes::LaneIntent>,
+    /// What a thread's row or menu asked of the pull requests feature.
+    pub pull_requests: Vec<pull_requests::PullRequestIntent>,
 }
 
 /// What asking the features for the selector came to.
@@ -373,6 +375,12 @@ impl FeatureContext<'_> {
     /// Ask the lanes feature for what a lane thread's menu chose, applied after the frame.
     pub fn lane(&mut self, intent: lanes::LaneIntent) {
         self.frame.lanes.push(intent);
+    }
+
+    /// Ask the pull requests feature for what a thread's row or menu chose, applied after
+    /// the frame.
+    pub fn pull_request(&mut self, intent: pull_requests::PullRequestIntent) {
+        self.frame.pull_requests.push(intent);
     }
 
     /// Typed View-to-run intent, processed once after this composition pass.
@@ -522,6 +530,16 @@ pub trait Feature: Send {
     }
 
     fn as_lanes_mut(&mut self) -> Option<&mut lanes::LanesFeature> {
+        None
+    }
+
+    /// The pull requests feature itself, for the sidebar's badges and menu item and the
+    /// conversation's bar, which queue what is pressed in them into it.
+    fn as_pull_requests(&self) -> Option<&pull_requests::PullRequestsFeature> {
+        None
+    }
+
+    fn as_pull_requests_mut(&mut self) -> Option<&mut pull_requests::PullRequestsFeature> {
         None
     }
 }
@@ -768,6 +786,12 @@ impl Features {
         self.features.iter_mut().find_map(|f| f.as_lanes_mut())
     }
 
+    pub fn pull_requests_mut(&mut self) -> Option<&mut pull_requests::PullRequestsFeature> {
+        self.features
+            .iter_mut()
+            .find_map(|f| f.as_pull_requests_mut())
+    }
+
     fn observe_selection(&mut self, selection: &Selection) -> bool {
         let changed = self.selection.as_ref() != Some(selection);
         if changed {
@@ -1003,8 +1027,16 @@ fn render_selector(
         .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
         .and_then(|f| f.as_lanes())
         .map(lanes::LanesFeature::menu);
+    // The badges and "Link PR…" are offered only while the pull requests feature can read.
+    let pull_requests = features
+        .iter()
+        .find(|f| f.id() == FeatureId::PullRequests)
+        .filter(|f| is_available(f.as_ref(), view.connected, view.capabilities))
+        .and_then(|f| f.as_pull_requests())
+        .map(pull_requests::PullRequestsFeature::menu);
     if let Some(workspace) = features.iter_mut().find_map(|f| f.as_workspace_mut()) {
         workspace.set_lane_menu(menu);
+        workspace.set_pull_request_menu(pull_requests);
     }
     for feature in features
         .iter_mut()
@@ -1088,6 +1120,13 @@ impl<'a> DockPass<'a> {
     pub fn lanes(&self) -> Option<&lanes::LanesFeature> {
         self.is_available(FeatureId::Lanes)
             .then(|| self.features.iter().find_map(|f| f.as_lanes()))
+            .flatten()
+    }
+
+    /// The pull requests feature while it is available.
+    pub fn pull_requests(&self) -> Option<&pull_requests::PullRequestsFeature> {
+        self.is_available(FeatureId::PullRequests)
+            .then(|| self.features.iter().find_map(|f| f.as_pull_requests()))
             .flatten()
     }
 
@@ -1181,6 +1220,7 @@ impl FeatureFrame {
         self.data.extend(other.data);
         self.previews.extend(other.previews);
         self.lanes.extend(other.lanes);
+        self.pull_requests.extend(other.pull_requests);
         if !other.observations.is_empty() {
             self.observations = other.observations;
         }

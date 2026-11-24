@@ -16,6 +16,7 @@ use super::cache::Cache;
 use super::connection::Action;
 use super::features::execution::ExecutionBand;
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
+use super::features::pull_requests::PullRequestBar;
 use super::features::{FeatureId, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
@@ -24,6 +25,7 @@ use super::{ClientAttachmentDraft, Draft};
 use crate::attachments::{AttachmentIo, Intake};
 use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, progress_band};
 use crate::panes::phase_indicator::phase_circle;
+use crate::panes::pull_request_widgets;
 use crate::panes::transcript_widgets::{
     full_input, ime_composing, request_card, run_transcript_empty, run_transcript_title,
     stop_button as shared_stop_button,
@@ -107,11 +109,13 @@ impl ConversationIo<'_> {
 }
 
 /// What the areas draw into the conversation: the execution feature's goal and plan band
-/// above the composer, and the lanes feature's card of a lane thread under the header. Each
-/// is drawn only for the thread it was read for.
+/// above the composer, the lanes feature's card of a lane thread under the header, and the
+/// pull requests feature's bar above the composer. Each is drawn only for the thread it was
+/// read for.
 pub struct Bands<'a> {
     pub band: Option<ExecutionBand<'a>>,
     pub lane: Option<(&'a ThreadId, LaneCardView<'a>)>,
+    pub pull_request: Option<PullRequestBar<'a>>,
 }
 
 /// `root` is the thread's current root run, as its detail names it.
@@ -120,7 +124,11 @@ pub fn show(
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
     selection: &Selection,
-    Bands { band, lane }: Bands<'_>,
+    Bands {
+        band,
+        lane,
+        pull_request,
+    }: Bands<'_>,
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
 ) {
@@ -155,7 +163,8 @@ pub fn show(
             if let Some((_, card)) = lane.filter(|(lane_thread, _)| *lane_thread == &thread) {
                 lane_card(ui, io.cache, &card, pane.composer_role, effects);
             }
-            let details_max = ui.available_height() * 0.3;
+            let conversation_height = ui.available_height();
+            let details_max = conversation_height * 0.3;
             egui::Panel::bottom(ui.id().with("composer"))
                 .resizable(false)
                 .show_separator_line(false)
@@ -170,6 +179,12 @@ pub fn show(
                     ui.spacing_mut().item_spacing.y = vertical_spacing;
                     status_strip(ui, io.cache, &thread, activity);
                 });
+            // The bar sits above the composer, as in the embedded workbench.
+            if let Some(bar) = pull_request.filter(|bar| bar.thread == &thread)
+                && let Some(choice) = pull_request_widgets::bar(ui, &bar.view, conversation_height)
+            {
+                effects.push(Effect::PullRequest(bar.action(choice)));
+            }
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| thread_transcript(ui, pane, io, &thread, effects));

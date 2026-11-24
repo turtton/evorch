@@ -53,6 +53,9 @@ pub enum Effect {
     Goal(GoalAction),
     /// A control pressed on the lane card of a lane's conversation, for the lanes feature.
     Lane(super::features::lanes::LaneCardAction),
+    /// A control pressed on the pull request bar of a conversation, for the pull requests
+    /// feature.
+    PullRequest(super::features::pull_requests::PullRequestBarAction),
     ResetLayout,
     Status(String),
     AttachRequested {
@@ -444,12 +447,17 @@ impl TabViewer for Viewer<'_, '_> {
                 let root = self.selected_root();
                 let band = self.pass.execution().and_then(|e| e.band());
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());
+                let pull_request = self.pass.pull_requests().and_then(|prs| prs.bar());
                 conversation::show(
                     ui,
                     self.conversation,
                     &mut self.io,
                     self.selection,
-                    conversation::Bands { band, lane },
+                    conversation::Bands {
+                        band,
+                        lane,
+                        pull_request,
+                    },
                     root.as_ref(),
                     self.effects,
                 );
