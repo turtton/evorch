@@ -16,11 +16,13 @@ use egui::{RichText, Ui};
 use workbench_protocol::lane_attention::{
     LaneAttentionAction, LaneAttentionKind, LaneNudgeState, LaneReadyState, LaneStallClassification,
 };
+use workbench_protocol::namespaces::lanes::LaneAttentionTag;
 
 use crate::model::lane_attention::{
     AttentionAction, AttentionBoard, AttentionOp, AttentionRow, Destination, LEAD_HANDLING_LABEL,
 };
 use crate::model::lane_close::{CloseChoice, MEANING};
+use crate::panes::lane_widgets::attention_tag_label;
 use crate::panes::requests::{ConversationRequests, RequestAction};
 use crate::theme::text::muted;
 use crate::theme::tokens::{R_SM, STATUS_STROKE, attention_color, palette};
@@ -36,17 +38,19 @@ pub struct AttentionPaneOutput {
 /// The one-line name of why an item is listed.
 #[must_use]
 pub fn kind_label(kind: &LaneAttentionKind) -> &'static str {
-    match kind {
-        LaneAttentionKind::QuestionPending { .. } => "Question",
-        LaneAttentionKind::Blocked { .. } => "Blocked",
-        LaneAttentionKind::Failed { .. } => "Failed",
-        LaneAttentionKind::RestoreFailed { .. } => "Restore failed",
-        LaneAttentionKind::ReadyUnclosed { .. } => "Ready (awaiting close)",
-        LaneAttentionKind::QuestionCapacityBlocked { .. } => "Question limit",
-        LaneAttentionKind::WakeSuppressed { .. } => "Wake paused",
-        LaneAttentionKind::StopPending { .. } => "Notices held",
-        LaneAttentionKind::Stall { .. } => "Stalled",
-    }
+    attention_tag_label(match kind {
+        LaneAttentionKind::QuestionPending { .. } => LaneAttentionTag::QuestionPending,
+        LaneAttentionKind::Blocked { .. } => LaneAttentionTag::Blocked,
+        LaneAttentionKind::Failed { .. } => LaneAttentionTag::Failed,
+        LaneAttentionKind::RestoreFailed { .. } => LaneAttentionTag::RestoreFailed,
+        LaneAttentionKind::ReadyUnclosed { .. } => LaneAttentionTag::ReadyUnclosed,
+        LaneAttentionKind::QuestionCapacityBlocked { .. } => {
+            LaneAttentionTag::QuestionCapacityBlocked
+        }
+        LaneAttentionKind::WakeSuppressed { .. } => LaneAttentionTag::WakeSuppressed,
+        LaneAttentionKind::StopPending { .. } => LaneAttentionTag::StopPending,
+        LaneAttentionKind::Stall { .. } => LaneAttentionTag::Stall,
+    })
 }
 
 /// What the item says beyond its summary, in one sentence; `None` when the summary is enough.

@@ -555,6 +555,13 @@ impl Desktop {
         self.flush().await;
     }
 
+    async fn click_button(&mut self, label: &str) {
+        self.harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, label)
+            .click();
+        self.flush().await;
+    }
+
     /// The window the screens are drawn in.
     fn window() -> egui::Rect {
         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0))
@@ -797,9 +804,9 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
 
     // Detach from the screen: the core's event, not a reload, brings the lane to the
     // detached section and takes it out of the lead's list.
-    desktop.click("切り離す").await;
+    desktop.click("Detach lane").await;
     desktop
-        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .until(|d| d.shows(&format!("Detached: {OBJECTIVE}")))
         .await;
     assert!(world.web_lanes("web-managed", false).await.items.is_empty());
     assert_eq!(world.web_lanes("web-detached", true).await.items.len(), 1);
@@ -807,22 +814,22 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
     // Another thread and back, then a new connection: the core still offers it.
     desktop.select("some-other-thread");
     desktop
-        .until(|d| !d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .until(|d| !d.shows(&format!("Detached: {OBJECTIVE}")))
         .await;
     desktop.select(LEAD);
     desktop
-        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .until(|d| d.shows(&format!("Detached: {OBJECTIVE}")))
         .await;
     let mut restarted = world.restarted_desktop().await;
     restarted.select(LEAD);
     restarted
-        .until(|d| d.shows(&format!("切り離し済み: {OBJECTIVE}")))
+        .until(|d| d.shows(&format!("Detached: {OBJECTIVE}")))
         .await;
 
     // Reattach from the screen: the lead's current root run is read first, then sent.
-    desktop.click("再接続").await;
+    desktop.click("Reattach").await;
     desktop
-        .until(|d| d.shows("切り離す") && !d.shows_part("切り離し済み"))
+        .until(|d| d.shows("Detach lane") && !d.shows_part("Detached: "))
         .await;
     assert_eq!(
         world.web_lanes("web-reattached", false).await.items.len(),
@@ -833,18 +840,18 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
     // The operator stops the lead: the open lane shows its notices held, and the refusal of a
     // resume while the stop stands comes back to the screen. Continuing frees them.
     desktop.click(OBJECTIVE).await;
-    desktop.until(|d| d.shows_part("管理 revision")).await;
+    desktop.until(|d| d.shows_part("management revision")).await;
     world
         .boot
         .runtime
         .stop(world.lead, runtime::StopScope::SelfOnly)
         .unwrap();
     desktop
-        .until(|d| d.shows_part("lead への通知が保留されています"))
+        .until(|d| d.shows_part("The lead was stopped"))
         .await;
-    desktop.click("保留中の通知を再配信").await;
+    desktop.click("Resume notifications").await;
     desktop
-        .until(|d| d.shows_part("通知の再配信: ") && d.shows_part("lead_stopped"))
+        .until(|d| d.shows_part("Resume notifications: ") && d.shows_part("lead_stopped"))
         .await;
     let ReplyPayload::Command(_) = request(
         &world.backend,
@@ -861,7 +868,7 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
         panic!("expected a command reply");
     };
     desktop
-        .until(|d| !d.shows_part("lead への通知が保留されています"))
+        .until(|d| !d.shows_part("The lead was stopped"))
         .await;
     for run in [lane.root_run_id, world.lead] {
         let _ = world.boot.runtime.cancel(run);
@@ -932,7 +939,7 @@ impl Desktop {
 
     /// The close dialog is open and has read the lane from the core.
     async fn until_close_dialog_read(&mut self, title: &str) {
-        self.until(|d| d.shows(title) && !d.shows_part("読み込んでいます"))
+        self.until(|d| d.shows(title) && !d.shows_part("Reading the lane from the ledger"))
             .await;
     }
 }
@@ -973,26 +980,24 @@ async fn a_lane_closed_from_the_screen_is_the_ledgers_record_for_every_client_an
     assert_eq!(seen.objective, OBJECTIVE);
 
     // Cancelling changes nothing.
-    desktop.click("人間の判断で閉じる…").await;
+    desktop.click("Close by human decision…").await;
     desktop
-        .until_close_dialog_read("lane を閉じる（未検証）")
+        .until_close_dialog_read("Close lane (unverified)")
         .await;
-    assert!(desktop.shows_part("Ready を報告していません"));
-    desktop.click("キャンセル").await;
-    desktop.until(|d| !d.shows("lane を閉じる（未検証）")).await;
+    assert!(desktop.shows_part("without a result to read"));
+    desktop.click("Cancel").await;
+    desktop.until(|d| !d.shows("Close lane (unverified)")).await;
     assert_eq!(ledger(&world, &lane.lane_id), (vec![], 0));
 
     // Close it with a reason.
-    desktop.click("人間の判断で閉じる…").await;
+    desktop.click("Close by human decision…").await;
     desktop
-        .until_close_dialog_read("lane を閉じる（未検証）")
+        .until_close_dialog_read("Close lane (unverified)")
         .await;
     desktop.type_reason("checked by hand").await;
-    desktop.click("lane を閉じる").await;
+    desktop.click("Close lane").await;
     desktop
-        .until(|d| {
-            d.shows_part("として記録しました") && d.shows("close 済み: 人の判断で完了（未検証）")
-        })
+        .until(|d| d.shows_part("Lane ended: ") && d.shows("Lane close: closed (unverified)"))
         .await;
     assert_eq!(
         ledger(&world, &lane.lane_id),
@@ -1038,7 +1043,7 @@ async fn a_lane_closed_from_the_screen_is_the_ledgers_record_for_every_client_an
     let mut restarted = world.restarted_desktop().await;
     restarted.select(LEAD);
     restarted
-        .until(|d| d.shows("close 済み: 人の判断で完了（未検証）"))
+        .until(|d| d.shows("Lane close: closed (unverified)"))
         .await;
     for run in [lane.root_run_id, world.lead] {
         let _ = world.boot.runtime.cancel(run);
@@ -1064,14 +1069,14 @@ async fn a_lane_discarded_from_the_screen_is_recorded_as_discarded_and_its_run_k
         .unwrap()
         .phase;
 
-    desktop.click("破棄する…").await;
-    desktop.until_close_dialog_read("lane の破棄").await;
+    desktop.click("Discard…").await;
+    desktop.until_close_dialog_read("Discard lane").await;
     // Discarding claims no completion, so the missing Ready is not warned about.
-    assert!(!desktop.shows_part("Ready を報告していません"));
+    assert!(!desktop.shows_part("without a result to read"));
     desktop.type_reason("not needed any more").await;
-    desktop.click("lane を破棄する").await;
+    desktop.click_button("Discard lane").await;
     desktop
-        .until(|d| d.shows_part("として記録しました") && d.shows("close 済み: 破棄"))
+        .until(|d| d.shows_part("Lane ended: ") && d.shows("Lane close: discarded"))
         .await;
     assert_eq!(
         ledger(&world, &lane.lane_id),
@@ -1122,7 +1127,7 @@ async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_t
     let mut window = world.restarted_desktop().await;
     window.select(LEAD);
     window.until(|d| d.shows(OBJECTIVE)).await;
-    assert!(!window.shows_part("close 済み"));
+    assert!(!window.shows_part("Lane close: "));
 
     let seen = world.web_close_preview("web-badge", &lane.lane_id).await;
     let ReplyPayload::Command(reply) = request(
@@ -1143,7 +1148,7 @@ async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_t
         reply.result.map(|r| *r),
         Some(CommandResult::Lanes(_))
     ));
-    window.until(|d| d.shows("close 済み: 破棄")).await;
+    window.until(|d| d.shows("Lane close: discarded")).await;
 
     // The lane reports again, as its run does: the ledger lifts the close and the core
     // announces the report.
@@ -1181,7 +1186,7 @@ async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_t
             .lane
             .report_appended_event(&appended.report, Some(lane.root_run_id.to_string())),
     ));
-    window.until(|d| !d.shows_part("close 済み")).await;
+    window.until(|d| !d.shows_part("Lane close: ")).await;
     assert!(
         world
             .web_close_preview("web-lifted", &lane.lane_id)
@@ -1401,12 +1406,12 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
     let far = second.items[0].clone();
 
     // The screen shows the first page only; the load button brings the far lane, and its own
-    // reconnect button attaches exactly that lane to the lead again.
+    // reattach button attaches exactly that lane to the lead again.
     let mut desktop = world.desktop();
     desktop.select(LEAD);
-    let far_label = format!("切り離し済み: {}", far.objective_preview);
+    let far_label = format!("Detached: {}", far.objective_preview);
     desktop
-        .until(|d| d.shows_part("切り離し済みをさらに読み込む"))
+        .until(|d| d.shows_part("Load more detached lanes"))
         .await;
     assert!(
         !desktop.shows(&far_label),
@@ -1414,33 +1419,33 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
     );
     // The window is 1024x768, the screen lists 50 rows and its buttons are used as a person
     // does: the load button below the list is clicked with the pointer, the far lane's row is
-    // brought into view with the mouse wheel and its reconnect button is clicked likewise.
-    desktop.click("切り離し済みをさらに読み込む").await;
+    // brought into view with the mouse wheel and its reattach button is clicked likewise.
+    desktop.click("Load more detached lanes").await;
     desktop.until(|d| d.shows(&far_label)).await;
     assert_eq!(
         desktop
             .harness
-            .query_all_by_label_contains("切り離し済み: ")
+            .query_all_by_label_contains("Detached: ")
             .count(),
         count
     );
-    // The far lane is drawn last, so its reconnect button is the last one. The screen is
+    // The far lane is drawn last, so its reattach button is the last one. The screen is
     // scrolled the way a person does: the window to the list, then the list to the row.
-    let first_row = format!("切り離し済み: {}", first.items[0].objective_preview);
+    let first_row = format!("Detached: {}", first.items[0].objective_preview);
     desktop
-        .scroll_window_to(&first_row, &["切り離し済みをさらに読み込む", "lane"])
+        .scroll_window_to(&first_row, &["Load more detached lanes", "lane"])
         .await;
     let list = desktop.list_of(&first_row);
     desktop
         .wheel_until(
-            "再接続",
+            "Reattach",
             |_| list.min + egui::vec2(10.0, 10.0),
             |d| {
                 let button = d
                     .harness
-                    .get_all_by_label("再接続")
+                    .get_all_by_label("Reattach")
                     .last()
-                    .expect("a reconnect button")
+                    .expect("a reattach button")
                     .rect()
                     .center();
                 list.contains(button) && Desktop::window().contains(button)
@@ -1449,9 +1454,9 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         .await;
     desktop
         .harness
-        .get_all_by_label("再接続")
+        .get_all_by_label("Reattach")
         .last()
-        .expect("a reconnect button")
+        .expect("a reattach button")
         .click();
     desktop.flush().await;
     // The lane is a managed one again: the screen says so only after the core's event.

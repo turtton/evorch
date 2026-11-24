@@ -460,17 +460,7 @@ fn pull_request_badge(ui: &mut Ui, badge: crate::model::pull_requests::PullReque
 /// A pill saying the lane's close stands. It is the ledger's record, drawn next to the run's
 /// own state and never in place of it.
 fn lane_close_badge(ui: &mut Ui, badge: &crate::model::lane_close::LaneCloseBadge) {
-    let label = format!("Lane close: {}", badge.text);
-    let response = ui.add(
-        egui::Label::new(
-            egui::RichText::new(badge.text)
-                .size(FONT_SMALL)
-                .color(palette().TEXT_MUTED),
-        )
-        .sense(Sense::hover()),
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    response.on_hover_text(&badge.hover);
+    crate::panes::lane_widgets::close_badge(ui, badge.text, &badge.hover);
 }
 
 /// What the archived-list hover says about the deletion of a thread; nothing when
@@ -559,51 +549,40 @@ fn thread_title(
     }
     title.context_menu(|ui| {
         if let Some(lane) = thread.lane.as_ref().filter(|lane| lane.policy.is_managed()) {
+            use crate::panes::lane_widgets::{LaneMenuChoice, lane_menu};
             use storage::lane_management::{
                 LaneManagementAction, LaneManagementRequest, ManagedLanePolicy,
             };
-            for (label, change) in [
-                (
-                    "Report milestones (attached)",
-                    LaneManagementAction::SetPolicy {
-                        policy: ManagedLanePolicy::Attached,
-                    },
-                ),
-                (
-                    "Report completion only (summary)",
-                    LaneManagementAction::SetPolicy {
-                        policy: ManagedLanePolicy::Summary,
-                    },
-                ),
-                ("Detach lane", LaneManagementAction::Detach),
-            ] {
-                if ui.button(label).clicked() {
-                    *action = Some(SidebarAction::ManageLane(LaneManagementRequest {
-                        operation_id: uuid::Uuid::new_v4().to_string(),
-                        lane_id: lane.lane_id.clone(),
-                        expected_management_revision: lane.management_revision,
-                        action: change,
-                    }));
-                    ui.close();
+            let manage = |change| {
+                SidebarAction::ManageLane(LaneManagementRequest {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    lane_id: lane.lane_id.clone(),
+                    expected_management_revision: lane.management_revision,
+                    action: change,
+                })
+            };
+            match lane_menu(ui, can_close) {
+                Some(LaneMenuChoice::Policy(policy)) => {
+                    let policy = match policy {
+                        workbench_protocol::lane_management::ManagedLanePolicy::Attached => {
+                            ManagedLanePolicy::Attached
+                        }
+                        workbench_protocol::lane_management::ManagedLanePolicy::Summary => {
+                            ManagedLanePolicy::Summary
+                        }
+                    };
+                    *action = Some(manage(LaneManagementAction::SetPolicy { policy }));
                 }
-            }
-            ui.separator();
-            if can_close {
-                use crate::model::lane_close::CloseChoice;
-                for choice in [CloseChoice::Complete, CloseChoice::Discard] {
-                    if ui
-                        .button(choice.menu_label())
-                        .on_hover_text(crate::model::lane_close::MEANING)
-                        .clicked()
-                    {
-                        *action = Some(SidebarAction::CloseLane {
-                            thread: thread.id.clone(),
-                            choice,
-                        });
-                        ui.close();
-                    }
+                Some(LaneMenuChoice::Detach) => {
+                    *action = Some(manage(LaneManagementAction::Detach));
                 }
-                ui.separator();
+                Some(LaneMenuChoice::Close(choice)) => {
+                    *action = Some(SidebarAction::CloseLane {
+                        thread: thread.id.clone(),
+                        choice,
+                    });
+                }
+                None => {}
             }
         }
         if ui.button("Copy thread ID").clicked() {

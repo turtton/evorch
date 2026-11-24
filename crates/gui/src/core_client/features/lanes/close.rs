@@ -7,84 +7,30 @@
 //! nothing is recorded. The dialog never sends a request again by itself.
 use workbench_protocol::{
     lane_attention::LaneId,
-    lane_management::{CloseLane, HumanLaneCloseKind, LaneCloseRecordKind, MAX_CLOSE_NOTE_BYTES},
-    namespaces::lanes::{LaneClosePreview, LaneCurrentClose},
+    lane_management::{CloseLane, LaneCloseRecordKind, MAX_CLOSE_NOTE_BYTES},
+    namespaces::lanes::{LaneArtifactRevisionKind, LaneClosePreview, LaneCurrentClose},
 };
 
-/// What closing means, shown in the confirmation.
-pub(super) const MEANING: &str = "これは台帳に lane の終了を記録するだけです。実行中の run の停止、スレッドや worktree の削除、切り離しは行いません。人の判断であり、検証ではありません。";
-
-/// What closing leaves as it is.
-pub(super) const REMAINS: &str = "未回答の質問は残ります。後から lane が Report を送ると、この close は解除され、lane は再び稼働中として扱われます。";
-
-/// Shown when a run of the lane's thread is live: a close does not stop it.
-pub(super) const RUNNING_WARNING: &str = "この lane の run は実行中です。ここで閉じても run は止まりません。止めたい場合は別に停止してください。";
-
-/// Shown when the lane has no Ready for its current management.
-pub(super) const NO_READY_WARNING: &str = "この lane は現在の brief に対する Ready を報告していません。読める結果がないまま終了することになります。";
-
-/// Shown when the latest Ready was reported for an earlier brief.
-pub(super) const OLDER_BRIEF_WARNING: &str = "最新の Ready は以前の brief に対する報告です。その後 brief が更新されているため参考表示であり、現在の brief に対する結果ではありません。";
-
-pub(super) const NOTE_LABEL: &str = "理由（必須）";
-
-/// Which ending the person chose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CloseChoice {
-    Complete,
-    Discard,
-}
-
-impl CloseChoice {
-    /// The button that opens the dialog.
-    pub(super) const fn button(self) -> &'static str {
-        match self {
-            Self::Complete => "人間の判断で閉じる…",
-            Self::Discard => "破棄する…",
-        }
-    }
-
-    pub(super) const fn title(self) -> &'static str {
-        match self {
-            Self::Complete => "lane を閉じる（未検証）",
-            Self::Discard => "lane の破棄",
-        }
-    }
-
-    pub(super) const fn confirm(self) -> &'static str {
-        match self {
-            Self::Complete => "lane を閉じる",
-            Self::Discard => "lane を破棄する",
-        }
-    }
-
-    pub(super) const fn recorded_as(self) -> &'static str {
-        match self {
-            Self::Complete => "記録される内容: 人の判断で完了（未検証）",
-            Self::Discard => "記録される内容: 破棄",
-        }
-    }
-
-    pub(super) const fn kind(self) -> HumanLaneCloseKind {
-        match self {
-            Self::Complete => HumanLaneCloseKind::Complete,
-            Self::Discard => HumanLaneCloseKind::Discard,
-        }
-    }
-}
+use crate::panes::lane_widgets::{self, CloseBodyView, CloseDialogView, ReadyView};
+pub(super) use crate::panes::lane_widgets::{
+    CloseChoice, CloseDialogAction as DialogAction, NO_READY_WARNING, OLDER_BRIEF_WARNING,
+};
+#[cfg(test)]
+pub(super) use crate::panes::lane_widgets::{MEANING, REMAINS, RUNNING_WARNING};
 
 /// The kind of a recorded close in words that never read like a verified one.
 pub(super) const fn close_label(kind: LaneCloseRecordKind) -> &'static str {
-    match kind {
-        LaneCloseRecordKind::LeadClosed => "lead が close",
-        LaneCloseRecordKind::HumanClosed => "人の判断で完了（未検証）",
-        LaneCloseRecordKind::Discarded => "破棄",
-    }
+    lane_widgets::close_kind_label(kind)
 }
 
-/// The badge of a lane whose close stands.
-pub(super) fn badge(close: &LaneCurrentClose) -> String {
-    format!("close 済み: {}", close_label(close.kind))
+/// The row's badge of a lane whose close stands, named "Lane close: …" for assistive
+/// technology as the sidebar's is.
+pub(super) fn badge(ui: &mut egui::Ui, close: &LaneCurrentClose) {
+    lane_widgets::close_badge(
+        ui,
+        lane_widgets::close_badge_text(close.kind),
+        close_label(close.kind),
+    );
 }
 
 /// The warning a person closing a lane as done reads about its Ready, if any. A Ready for an
@@ -95,13 +41,6 @@ pub(super) fn ready_warning(preview: &LaneClosePreview) -> Option<&'static str> 
         Some(ready) if ready.brief_revision != preview.brief_revision => Some(OLDER_BRIEF_WARNING),
         Some(_) => None,
     }
-}
-
-/// How many unanswered questions the lane still holds; `None` when none.
-pub(super) fn open_questions_line(count: u32) -> Option<String> {
-    (count > 0).then(|| {
-        format!("この lane には未回答の質問が {count} 件あります。close しても質問は残ります。")
-    })
 }
 
 /// What the dialog has read so far.
@@ -155,23 +94,18 @@ impl CloseDialog {
     /// change nothing, so a blocker is only ever a reason not to send.
     pub(super) fn blocker(&self, sending: bool) -> Option<String> {
         if sending {
-            return Some("close の結果を待っています。".to_owned());
+            return Some("Waiting for the close result…".to_owned());
         }
         if self.stale {
-            return Some(
-                "この画面を読んだ後に lane が変わりました。Reload してから決めてください。"
-                    .to_owned(),
-            );
+            return Some(lane_widgets::STALE_BLOCKER.to_owned());
         }
         match &self.phase {
-            ClosePhase::Loading => Some("台帳から lane を読み込んでいます…".to_owned()),
+            ClosePhase::Loading => Some(lane_widgets::LOADING_BLOCKER.to_owned()),
             ClosePhase::Unavailable(reason) => Some(reason.clone()),
-            ClosePhase::Loaded(preview) => preview.current_close.as_ref().map(|close| {
-                format!(
-                    "この lane は既に終了が記録されています（{}）。記録するものはありません。",
-                    close_label(close.kind)
-                )
-            }),
+            ClosePhase::Loaded(preview) => preview
+                .current_close
+                .as_ref()
+                .map(|close| lane_widgets::already_ended(close_label(close.kind))),
         }
     }
 
@@ -179,9 +113,9 @@ impl CloseDialog {
     pub(super) fn note_error(&self) -> Option<&'static str> {
         let note = self.note.trim();
         if note.is_empty() {
-            Some("理由は必須です。")
+            Some(lane_widgets::REASON_REQUIRED)
         } else if note.len() > MAX_CLOSE_NOTE_BYTES {
-            Some("理由が長すぎます（2KiB まで）。")
+            Some(lane_widgets::REASON_TOO_LONG)
         } else {
             None
         }
@@ -200,7 +134,7 @@ impl CloseDialog {
         };
         self.can_confirm(sending).then(|| CloseLane {
             lane_id: self.lane.clone(),
-            kind: self.choice.kind(),
+            kind: self.choice.human_kind(),
             ready_seq: preview.ready.as_ref().map(|ready| ready.report_seq),
             expected_management_revision: preview.management_revision,
             expected_request_revision: preview.request_revision,
@@ -222,132 +156,66 @@ impl CloseDialog {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DialogAction {
-    Confirm,
-    Reload,
-    Cancel,
-}
-
-fn warning(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(egui::RichText::new(text).color(ui.visuals().warn_fg_color)).wrap());
-}
-
 /// Draws the confirmation. It decides nothing: it returns what was pressed.
 pub(super) fn draw(
     ctx: &egui::Context,
     dialog: &mut CloseDialog,
     sending: bool,
 ) -> Option<DialogAction> {
-    let mut action = None;
-    let modal = egui::Modal::new(egui::Id::new("core-client-lane-close")).show(ctx, |ui| {
-        ui.set_width((ctx.viewport_rect().width() * 0.6).clamp(320.0, 640.0));
-        ui.heading(dialog.choice.title());
-        ui.strong(&dialog.title);
-        ui.add(egui::Label::new(MEANING).wrap());
-        ui.add(egui::Label::new(REMAINS).wrap());
-        if let Some(blocker) = dialog.blocker(sending) {
-            warning(ui, &blocker);
-        }
-        if let ClosePhase::Loaded(preview) = &dialog.phase {
-            if preview.running {
-                warning(ui, RUNNING_WARNING);
+    let blocker = dialog.blocker(sending);
+    let note_error = dialog.note_error();
+    let can_confirm = dialog.can_confirm(sending);
+    let loading = matches!(dialog.phase, ClosePhase::Loading);
+    let (running, body) = match &dialog.phase {
+        ClosePhase::Loaded(preview) => (preview.running, Some(body(preview))),
+        ClosePhase::Loading | ClosePhase::Unavailable(_) => (false, None),
+    };
+    lane_widgets::close_dialog(
+        ctx,
+        CloseDialogView {
+            id: "core-client-lane-close",
+            choice: dialog.choice,
+            title: &dialog.title,
+            running,
+            blocker,
+            loading,
+            body,
+            note: &mut dialog.note,
+            note_max_height: Some(120.0),
+            note_error,
+            notice: dialog.notice.as_deref(),
+            can_confirm,
+        },
+    )
+}
+
+/// What the core's preview says, as the shared confirmation shows it. The core sends no
+/// review state or pull request facts with it, so those lines are left out.
+fn body(preview: &LaneClosePreview) -> CloseBodyView<'_> {
+    CloseBodyView {
+        ready_warning: ready_warning(preview),
+        open_questions: lane_widgets::open_questions_line(u64::from(preview.open_question_count)),
+        objective: &preview.objective,
+        acceptance_criteria: &preview.acceptance_criteria,
+        ready: preview.ready.as_ref().map(|ready| {
+            let revision = ready.artifact_revision.as_ref().map(|revision| {
+                let kind = match revision.kind {
+                    LaneArtifactRevisionKind::CommitSha => "commit",
+                    LaneArtifactRevisionKind::Sha256 => "sha256",
+                };
+                (kind, revision.value.as_str())
+            });
+            let total = usize::try_from(ready.artifact_ref_count).unwrap_or(usize::MAX);
+            ReadyView {
+                seq: ready.report_seq.0,
+                for_reference: ready.brief_revision != preview.brief_revision,
+                summary: &ready.summary,
+                evidence: lane_widgets::evidence_line(revision.is_some(), total),
+                artifacts: lane_widgets::artifact_lines(revision, &ready.artifact_refs, total),
+                artifact_count: total + usize::from(revision.is_some()),
             }
-            if dialog.choice == CloseChoice::Complete
-                && let Some(text) = ready_warning(preview)
-            {
-                warning(ui, text);
-            }
-            if let Some(line) = open_questions_line(preview.open_question_count) {
-                warning(ui, &line);
-            }
-            egui::ScrollArea::vertical()
-                .id_salt("lane-close-body")
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    ui.strong("Brief");
-                    ui.add(egui::Label::new(&preview.objective).wrap());
-                    for criterion in &preview.acceptance_criteria {
-                        ui.add(egui::Label::new(format!("• {criterion}")).wrap());
-                    }
-                    ui.separator();
-                    match &preview.ready {
-                        Some(ready) => {
-                            let for_reference = ready.brief_revision != preview.brief_revision;
-                            ui.strong(if for_reference {
-                                format!(
-                                    "最新の Ready（#{}）— 参考（以前の brief）",
-                                    ready.report_seq.0
-                                )
-                            } else {
-                                format!("最新の Ready（#{}）", ready.report_seq.0)
-                            });
-                            ui.add(egui::Label::new(&ready.summary).wrap());
-                            if let Some(revision) = &ready.artifact_revision {
-                                ui.label(format!("成果物の revision: {}", revision.value));
-                            }
-                            for reference in &ready.artifact_refs {
-                                ui.add(egui::Label::new(reference).wrap());
-                            }
-                            let more = usize::try_from(ready.artifact_ref_count)
-                                .unwrap_or(usize::MAX)
-                                .saturating_sub(ready.artifact_refs.len());
-                            if more > 0 {
-                                ui.label(format!("ほか {more} 件の参照"));
-                            }
-                        }
-                        None => {
-                            ui.strong("Ready の報告なし");
-                        }
-                    }
-                });
-        }
-        ui.separator();
-        ui.label(NOTE_LABEL);
-        let edit = egui::ScrollArea::vertical()
-            .id_salt("lane-close-note")
-            .max_height(96.0)
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut dialog.note)
-                        .desired_rows(3)
-                        .hint_text("この lane を終了する理由")
-                        .desired_width(f32::INFINITY),
-                )
-            })
-            .inner;
-        edit.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, NOTE_LABEL)
-        });
-        if let Some(error) = dialog.note_error().filter(|_| !dialog.note.is_empty()) {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        if let Some(notice) = &dialog.notice {
-            ui.add(
-                egui::Label::new(egui::RichText::new(notice).color(ui.visuals().error_fg_color))
-                    .wrap(),
-            );
-        }
-        ui.label(dialog.choice.recorded_as());
-        ui.horizontal(|ui| {
-            let can = dialog.can_confirm(sending);
-            if ui
-                .add_enabled(can, egui::Button::new(dialog.choice.confirm()))
-                .clicked()
-                && can
-            {
-                action = Some(DialogAction::Confirm);
-            }
-            if ui.button("Reload").clicked() {
-                action = Some(DialogAction::Reload);
-            }
-            if ui.button("キャンセル").clicked() {
-                action = Some(DialogAction::Cancel);
-            }
-        });
-    });
-    if action.is_none() && modal.should_close() {
-        action = Some(DialogAction::Cancel);
+        }),
+        review: None,
+        pull_request: None,
     }
-    action
 }

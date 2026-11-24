@@ -18,6 +18,7 @@ pub mod goal_widgets;
 pub mod image_viewer;
 pub mod lane_attention;
 pub mod lane_close;
+pub mod lane_widgets;
 mod ledger;
 pub mod markdown_render;
 pub mod memory;

@@ -158,6 +158,7 @@ struct Requests {
     trust: Vec<(String, TrustLevel)>,
     project: Vec<(String, ProjectIntent)>,
     register: Option<(String, String)>,
+    lanes: Vec<super::lanes::LaneIntent>,
 }
 
 #[derive(Default)]
@@ -199,9 +200,15 @@ pub struct WorkspaceFeature {
     /// one replaces them, but nothing is decided on them.
     refetch_details: BTreeSet<String>,
     refetch_access: BTreeSet<String>,
+    /// What the lanes feature can offer in a lane thread's menu; `None` while it cannot.
+    lane_menu: Option<super::lanes::LaneMenu>,
 }
 
 impl WorkspaceFeature {
+    pub(super) fn set_lane_menu(&mut self, menu: Option<super::lanes::LaneMenu>) {
+        self.lane_menu = menu;
+    }
+
     pub fn model(&self) -> &SidebarModel {
         &self.model
     }
@@ -802,6 +809,10 @@ impl Feature for WorkspaceFeature {
         Some(self)
     }
 
+    fn as_workspace_mut(&mut self) -> Option<&mut WorkspaceFeature> {
+        Some(self)
+    }
+
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
         if let Some(thread) = &ctx.selection().thread {
             self.unread.remove(thread.as_str());
@@ -846,6 +857,7 @@ impl Feature for WorkspaceFeature {
             trust,
             project,
             register,
+            lanes,
         } = requests;
         if let Some((name, path)) = register {
             self.register_project(&name, &path);
@@ -861,6 +873,9 @@ impl Feature for WorkspaceFeature {
         }
         for navigation in navigations {
             ctx.navigate(navigation);
+        }
+        for intent in lanes {
+            ctx.lane(intent);
         }
         self.flush(ctx);
         true

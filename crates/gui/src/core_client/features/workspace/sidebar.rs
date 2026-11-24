@@ -9,7 +9,9 @@ use workspace_ui::ProjectSort;
 use super::tree::{self, ThreadRow};
 use super::{Dialog, Intent, Requests, SidebarModel, WorkspaceFeature};
 use crate::core_client::cache::Cache;
+use crate::core_client::features::lanes::{LaneIntent, LaneMenu, LaneMenuEntry};
 use crate::core_client::features::{FeatureContext, Navigation, Selection};
+use crate::panes::lane_widgets::{LaneMenuChoice, lane_menu};
 use crate::panes::sidebar_widgets::{
     FAMILY_GAP, FAMILY_PAGE, Hidden, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
     ToolbarView, TrailingView, TreeRails, TreeRowLead, attention_note, family_gap_before,
@@ -19,6 +21,7 @@ use crate::panes::sidebar_widgets::{
 use crate::theme::text::muted;
 use crate::theme::tokens::{SP_1, SP_2, palette};
 use crate::theme::widgets::{compact_row_with, empty_state, ghost, reason_label};
+use workbench_protocol::lane_management::LaneManagementAction;
 
 /// The orders the core client offers: the core does not say in which order projects
 /// were registered, so that one is left out.
@@ -31,6 +34,7 @@ struct Scope<'a> {
     model: &'a SidebarModel,
     selection: &'a Selection,
     project: &'a ProjectId,
+    lanes: Option<&'a LaneMenu>,
 }
 
 struct Rename<'a> {
@@ -54,6 +58,7 @@ impl WorkspaceFeature {
             dialog,
             notice,
             confirmation,
+            lane_menu,
             ..
         } = self;
         let cache = ctx.cache();
@@ -137,6 +142,7 @@ impl WorkspaceFeature {
                             model,
                             selection,
                             project: &project.id,
+                            lanes: lane_menu.as_ref(),
                         };
                         let mut rename = Rename {
                             editing: renaming,
@@ -153,6 +159,9 @@ impl WorkspaceFeature {
                 // While a modal is open it shows the outcome itself.
                 if dialog.is_none() {
                     if let Some(notice) = notice.as_deref() {
+                        reason_label(ui, palette().ERROR_FG, notice);
+                    }
+                    if let Some(notice) = lane_menu.as_ref().and_then(LaneMenu::notice) {
                         reason_label(ui, palette().ERROR_FG, notice);
                     }
                     if let Some(confirmation) = confirmation.as_deref() {
@@ -310,7 +319,7 @@ fn draw_tree(
                     };
                     title(
                         ui,
-                        scope.project,
+                        (scope.project, scope.lanes),
                         &row,
                         (note, colors.map(|(fg, _)| fg)),
                         rename,
@@ -341,7 +350,7 @@ fn draw_tree(
 /// The row's title, or the field its new title is typed in.
 fn title(
     ui: &mut Ui,
-    project: &ProjectId,
+    (project, lanes): (&ProjectId, Option<&LaneMenu>),
     row: &ThreadRow<'_>,
     (note, color): (Option<&str>, Option<egui::Color32>),
     rename: &mut Rename<'_>,
@@ -372,6 +381,9 @@ fn title(
     };
     let response = title_label(ui, row.title, color, !row.display_root, false, &hover);
     response.context_menu(|ui| {
+        if let (Some(lanes), Some(lead)) = (lanes, &row.summary.lead_thread) {
+            lane_items(ui, lanes, row, lead, requests);
+        }
         if ui.button("Rename…").clicked() {
             *rename.editing = Some((id.to_owned(), row.title.to_owned()));
             *rename.focus = true;
@@ -391,5 +403,59 @@ fn title(
             project: project.clone(),
             thread: row.summary.id.clone(),
         });
+    }
+}
+
+/// The lane items of a lane thread's menu: the operations its lead's lane offers, once the
+/// lanes feature found the lane; until then a disabled line, while the lane is looked up.
+fn lane_items(
+    ui: &mut Ui,
+    lanes: &LaneMenu,
+    row: &ThreadRow<'_>,
+    lead: &ThreadId,
+    requests: &mut Requests,
+) {
+    let thread = &row.summary.id;
+    match lanes.entry(thread) {
+        Some(LaneMenuEntry::Managed { lane, revision }) => {
+            let intent = match lane_menu(ui, true) {
+                Some(LaneMenuChoice::Policy(policy)) => Some(LaneIntent::Manage {
+                    lane: lane.clone(),
+                    revision: *revision,
+                    action: LaneManagementAction::SetPolicy { policy },
+                }),
+                Some(LaneMenuChoice::Detach) => Some(LaneIntent::Manage {
+                    lane: lane.clone(),
+                    revision: *revision,
+                    action: LaneManagementAction::Detach,
+                }),
+                Some(LaneMenuChoice::Close(choice)) => Some(LaneIntent::Close {
+                    lane: lane.clone(),
+                    title: row.title.to_owned(),
+                    choice,
+                }),
+                None => None,
+            };
+            requests.lanes.extend(intent);
+        }
+        Some(LaneMenuEntry::NotManaged) => {}
+        Some(LaneMenuEntry::Unreadable) => {
+            ui.add_enabled(false, egui::Button::new("Could not read lane"));
+            if ui.button("Read lane again").clicked() {
+                requests.lanes.push(LaneIntent::Retry {
+                    thread: thread.clone(),
+                    lead: lead.clone(),
+                });
+            }
+            ui.separator();
+        }
+        None => {
+            ui.add_enabled(false, egui::Button::new("Reading lane…"));
+            ui.separator();
+            requests.lanes.push(LaneIntent::Lookup {
+                thread: thread.clone(),
+                lead: lead.clone(),
+            });
+        }
     }
 }

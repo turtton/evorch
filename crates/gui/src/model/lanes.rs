@@ -14,20 +14,15 @@ use storage::lanes::LaneRecord;
 /// words must not promise more than that.
 #[must_use]
 pub const fn routing_notice(policy: LanePolicy, delivery_bound: bool) -> &'static str {
-    match (delivery_bound, policy) {
-        (false, _) => {
-            "Lane delivery is not running in this window: this lane's questions come to you, and its lead is neither notified nor woken."
-        }
-        (true, LanePolicy::Attached) => {
-            "Questions go to the lead first, which answers them or passes them to you. Questions, ready and failed reports are saved for the lead and wake it once it has finished."
-        }
-        (true, LanePolicy::Summary) => {
-            "Questions come to you. The lead only receives a short ready or failed report; questions do not wake it."
-        }
-        (true, LanePolicy::Detached) => {
-            "Questions come to you. This lane is detached: its lead receives no reports and is never woken."
-        }
-    }
+    use workbench_protocol::lane_management::LaneManagementPolicy;
+    crate::panes::lane_widgets::routing_notice(
+        match policy {
+            LanePolicy::Attached => LaneManagementPolicy::Attached,
+            LanePolicy::Summary => LaneManagementPolicy::Summary,
+            LanePolicy::Detached => LaneManagementPolicy::Detached,
+        },
+        delivery_bound,
+    )
 }
 
 /// What the runtime keeps about delivery for a lane, as last read. An observation only: the
@@ -82,12 +77,21 @@ pub struct LaneDetail {
 /// The status as the UI words it: `ready` is only a claim.
 #[must_use]
 pub const fn status_label(status: LaneStatus) -> &'static str {
+    crate::panes::lane_widgets::status_label(report_status(status))
+}
+
+/// The protocol's word for a Report status; the variants are the same.
+#[must_use]
+pub(crate) const fn report_status(
+    status: LaneStatus,
+) -> workbench_protocol::namespaces::lanes::LaneReportStatus {
+    use workbench_protocol::namespaces::lanes::LaneReportStatus;
     match status {
-        LaneStatus::Working => "working",
-        LaneStatus::Waiting => "waiting",
-        LaneStatus::Blocked => "blocked",
-        LaneStatus::Ready => "ready (unverified)",
-        LaneStatus::Failed => "failed",
+        LaneStatus::Working => LaneReportStatus::Working,
+        LaneStatus::Waiting => LaneReportStatus::Waiting,
+        LaneStatus::Blocked => LaneReportStatus::Blocked,
+        LaneStatus::Ready => LaneReportStatus::Ready,
+        LaneStatus::Failed => LaneReportStatus::Failed,
     }
 }
 

@@ -4,34 +4,16 @@
 //! `ready` is worded as unverified: the lane's claim, not a checked result. Delivery
 //! notices (capacity, paused wake, stopped lead) come with the operation that clears them.
 
-use event_bus::lane::{LaneBrief, LaneStatus};
+use event_bus::lane::LaneBrief;
 
 use super::{AgentPaneAction, LaneAction, LaneContext, LeadContext};
-use crate::model::lane_close::{close_detail, close_label};
-use crate::model::lanes::{LaneDeliveryView, routing_notice, status_label};
-use crate::theme::{text::muted, tokens::*, widgets::badge};
-
-/// Badge colors of a close. A person's completion stays a warning color: nothing verified it.
-fn close_colors(kind: event_bus::lane::LaneCloseKind) -> (egui::Color32, egui::Color32) {
-    use event_bus::lane::LaneCloseKind;
-    let p = palette();
-    match kind {
-        LaneCloseKind::LeadClosed => (p.TEXT_MUTED, p.SURFACE_RAISED),
-        LaneCloseKind::HumanClosed => (p.WARNING_FG, p.WARNING_SURFACE),
-        LaneCloseKind::Discarded => (p.TEXT_MUTED, p.SURFACE_RAISED),
-    }
-}
-
-/// Badge colors of a Report status; `ready` stays a warning color until verified.
-fn status_colors(status: LaneStatus) -> (egui::Color32, egui::Color32) {
-    let p = palette();
-    match status {
-        LaneStatus::Working => (p.RUNNING, p.SURFACE_RAISED),
-        LaneStatus::Waiting => (p.WAITING, p.SURFACE_RAISED),
-        LaneStatus::Blocked | LaneStatus::Ready => (p.WARNING_FG, p.WARNING_SURFACE),
-        LaneStatus::Failed => (p.ERROR_FG, p.ERROR_SURFACE),
-    }
-}
+use crate::model::lane_close::{close_detail, record_kind};
+use crate::model::lanes::{LaneDeliveryView, report_status, routing_notice};
+use crate::panes::lane_widgets::{
+    CONTINUE_LEAD, CONTINUE_LEAD_HOVER, LEAD_STOPPED, RESUME_HOVER, RESUME_NOTIFICATIONS,
+    close_record_badge, policy_badge, status_badge,
+};
+use crate::theme::{text::muted, tokens::*};
 
 pub(super) fn lane_card(
     ui: &mut egui::Ui,
@@ -41,28 +23,13 @@ pub(super) fn lane_card(
     let detail = lane.detail;
     let record = &detail.record;
     ui.horizontal_wrapped(|ui| {
-        let policy = badge(
-            ui,
-            format!("lane · {}", record.policy.as_str()),
-            palette().TEXT_MUTED,
-            palette().SURFACE_RAISED,
-        );
-        policy.on_hover_text(
-            "A lane is an independent Orchestrator thread. Its policy decides who manages it.",
-        );
+        policy_badge(ui, record.policy.as_str());
         match (&detail.close, detail.status()) {
             (Some(close), _) => {
-                let (fg, bg) = close_colors(close.kind);
-                badge(ui, close_label(close), fg, bg).on_hover_text(close_detail(close));
+                close_record_badge(ui, record_kind(close.kind)).on_hover_text(close_detail(close));
             }
             (None, Some(status)) => {
-                let (fg, bg) = status_colors(status);
-                let response = badge(ui, status_label(status), fg, bg);
-                if status == LaneStatus::Ready {
-                    response.on_hover_text(
-                        "The lane says its work is done. Nothing has verified it yet.",
-                    );
-                }
+                status_badge(ui, report_status(status));
             }
             (None, None) => {
                 ui.label(muted("no report yet"));
@@ -124,8 +91,8 @@ fn delivery_lines(
         if let Some(lead) = lead
             && resumable
             && ui
-                .small_button("Resume notifications")
-                .on_hover_text("Deliver this lane's held notices to its lead again")
+                .small_button(RESUME_NOTIFICATIONS)
+                .on_hover_text(RESUME_HOVER)
                 .clicked()
         {
             *action = Some(AgentPaneAction::Lane(LaneAction::ResumeDelivery {
@@ -134,14 +101,11 @@ fn delivery_lines(
         }
     }
     if delivery.lead_stopped {
-        ui.colored_label(
-            palette().WARNING_FG,
-            "The lead was stopped: its notices are held, not lost, and it is not woken.",
-        );
+        ui.colored_label(palette().WARNING_FG, LEAD_STOPPED);
         if let Some(lead) = lead
             && ui
-                .small_button("Continue lead")
-                .on_hover_text("Resume the lead's conversation; held notices are then delivered")
+                .small_button(CONTINUE_LEAD)
+                .on_hover_text(CONTINUE_LEAD_HOVER)
                 .clicked()
         {
             *action = Some(AgentPaneAction::Lane(LaneAction::ContinueLead {
@@ -187,28 +151,14 @@ pub(super) fn lead_card(
 }
 
 fn brief_body(ui: &mut egui::Ui, brief: &LaneBrief, workspace: &[String]) {
-    ui.label(format!("Objective: {}", brief.objective));
-    for (label, items) in [
-        ("Deliverables", &brief.deliverables),
-        ("Acceptance criteria", &brief.acceptance_criteria),
-        ("Constraints", &brief.constraints),
-    ] {
-        if items.is_empty() {
-            continue;
-        }
-        ui.label(muted(label));
-        for item in items {
-            ui.label(format!("• {item}"));
-        }
-    }
-    if workspace.is_empty() {
-        ui.label(muted("No branch or worktree declared"));
-    } else {
-        ui.label(muted(
-            "Declared workspace (a declaration, not a reservation)",
-        ));
-        for line in workspace {
-            ui.label(line);
-        }
-    }
+    crate::panes::lane_widgets::brief_body(
+        ui,
+        &brief.objective,
+        &[
+            ("Deliverables", &brief.deliverables),
+            ("Acceptance criteria", &brief.acceptance_criteria),
+            ("Constraints", &brief.constraints),
+        ],
+        Some(workspace),
+    );
 }

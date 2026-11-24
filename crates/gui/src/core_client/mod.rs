@@ -512,6 +512,15 @@ fn apply_frame(
     for action in frame.actions {
         enqueue(tx, shared, Action::Feature(action));
     }
+    for intent in frame.lanes {
+        // A confirmation chosen from a thread's menu is drawn by the Lanes tab.
+        if matches!(intent, features::lanes::LaneIntent::Close { .. }) {
+            shared.features.reveal(features::FeatureId::Lanes);
+        }
+        if let Some(lanes) = shared.features.lanes_mut() {
+            lanes.enqueue_sidebar(intent);
+        }
+    }
     for navigation in frame.navigation {
         apply_navigation(tx, shared, project, selected, navigation);
     }
@@ -859,6 +868,10 @@ impl CoreClientScreen {
             pass.finish(ui)
         };
         self.window_rects.track(&self.dock, ui.ctx());
+        if !frame.lanes.is_empty() {
+            // What a lane menu chose is sent in the lanes feature's next pass.
+            ui.ctx().request_repaint();
+        }
         apply_frame(
             &self.actions,
             &mut shared,
@@ -868,9 +881,9 @@ impl CoreClientScreen {
         );
         if effects
             .iter()
-            .any(|effect| matches!(effect, shell::Effect::Goal(_)))
+            .any(|effect| matches!(effect, shell::Effect::Goal(_) | shell::Effect::Lane(_)))
         {
-            // The goal command leaves in the execution feature's next pass.
+            // The goal or lane command leaves in its feature's next pass.
             ui.ctx().request_repaint();
         }
         for effect in effects {
@@ -949,6 +962,11 @@ fn apply_effect(
             shell::Effect::Goal(action) => {
                 if let Some(execution) = shared.features.execution_mut() {
                     execution.enqueue_goal(action);
+                }
+            }
+            shell::Effect::Lane(action) => {
+                if let Some(lanes) = shared.features.lanes_mut() {
+                    lanes.enqueue_card(action);
                 }
             }
             // The run tabs of other threads, out of the dock, go with the layout too.
@@ -1109,6 +1127,7 @@ mod navigation_tests {
             data: Vec::new(),
             previews: Vec::new(),
             observations: Vec::new(),
+            lanes: Vec::new(),
             actions: vec![],
             navigation: vec![navigation],
         };
