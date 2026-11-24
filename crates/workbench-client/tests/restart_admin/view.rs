@@ -118,3 +118,52 @@ fn a_blocker_is_listed_with_what_is_known_about_its_teardown() {
     assert!(lines[1].contains("teardown confirmed, result observed"));
     assert!(lines[2].contains("1 more not listed"));
 }
+
+#[test]
+fn the_status_names_each_blocker_and_why_the_last_restart_was_cancelled() {
+    use workbench_protocol::{
+        ids::RunId,
+        namespaces::lifecycle::{
+            RestartBlocker, RestartBlockerKind, RestartCancelReason, RestartPhase, RestartStatus,
+            restart::{AdminAuditDiagnostics, RestartManagementStatus},
+        },
+        wire::InstanceEpoch,
+    };
+    let mut status = RestartManagementStatus {
+        audit: AdminAuditDiagnostics::default(),
+        core_epoch: InstanceEpoch(7),
+        status: RestartStatus {
+            restart_id: None,
+            phase: RestartPhase::WaitingSafePoint,
+            revision: 4,
+            blockers: vec![RestartBlocker {
+                run: RunId::new("run-1").unwrap(),
+                kind: RestartBlockerKind::ApprovalPending,
+            }],
+            blocker_total: 1,
+            blocker_omitted: 0,
+            active_producers: 0,
+            cancel_reason: None,
+        },
+    };
+    let lines = describe_status(&status);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("run-1") && l.contains("approval pending")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("cancelled")), "{lines:?}");
+    status.status.phase = RestartPhase::Running;
+    status.status.blockers.clear();
+    status.status.blocker_total = 0;
+    status.status.cancel_reason = Some(RestartCancelReason::ApprovalPending { pending: 2 });
+    let lines = describe_status(&status);
+    let reason = lines
+        .iter()
+        .find(|l| l.contains("cancelled"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(reason.contains("2 approval(s)"), "{reason}");
+    assert!(reason.contains("approve or deny"), "{reason}");
+    assert!(reason.contains("stop the run"), "{reason}");
+}

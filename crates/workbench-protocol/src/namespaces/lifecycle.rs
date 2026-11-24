@@ -10,7 +10,8 @@ pub mod quarantine;
 pub mod restart;
 pub use contracts::*;
 pub use restart::{
-    MAX_RESTART_BLOCKERS, RestartBlocker, RestartBlockerKind, RestartPhase, RestartStatus,
+    MAX_RESTART_BLOCKERS, RestartBlocker, RestartBlockerKind, RestartCancelReason, RestartPhase,
+    RestartStatus,
 };
 pub const COMMAND_OPERATIONS: &[&str] = &["restart", "quarantine", "owned_graphs"];
 pub const QUERY_OPERATIONS: &[&str] = &[

@@ -68,6 +68,7 @@ fn status() -> AdminView {
             blocker_total: 0,
             blocker_omitted: 0,
             active_producers: 0,
+            cancel_reason: None,
         },
     }))
 }

@@ -348,6 +348,7 @@ const BLOCKER_TEXT = {
   shell_result_unobserved: "シェル結果が未観測",
   unconfirmed_run_js: "run_js が未確認",
   unfinished_tool_batch: "ツール実行が未完了",
+  approval_pending: "承認待ち",
 };
 
 /**
@@ -610,6 +611,14 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
           h("p", {
             class: "card-hint",
             text: "シェルへの割り込みは、コアが確認対象（blocker・run の識別）を返すまで Web からは行えません。",
+          }),
+        );
+      }
+      if (status.cancel_reason?.kind === "approval_pending") {
+        children.push(
+          h("p", {
+            class: "list-status",
+            text: `承認待ちが ${status.cancel_reason.pending} 件あるため再起動を取り消しました。承認か拒否をするか run を停止してから、もう一度要求してください。`,
           }),
         );
       }

@@ -36,6 +36,10 @@ pub enum RestartPhase {
     FailedClosed,
     ShuttingDown,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartCancelReason {
+    ApprovalPending { pending: usize },
+}
 impl RestartPhase {
     pub const fn retains_process(self) -> bool {
         !matches!(self, Self::Running)
@@ -67,6 +71,7 @@ pub struct RestartSnapshot {
     pub revision: u64,
     pub blockers: Vec<RestartBlocker>,
     pub active_producers: usize,
+    pub cancel_reason: Option<RestartCancelReason>,
 }
 struct State {
     #[cfg(target_os = "linux")]
@@ -92,6 +97,7 @@ struct State {
     suspension: Option<Arc<runtime::learning_suspend::LearningSuspension>>,
     evaluation_pause: Option<ProducerPause>,
     preparation_deadline: Option<tokio::time::Instant>,
+    cancel_reason: Option<RestartCancelReason>,
 }
 #[cfg(test)]
 type PreflightHook = Arc<dyn Fn(RestartId) + Send + Sync>;
@@ -188,6 +194,7 @@ impl RestartCoordinator {
                 suspension: None,
                 evaluation_pause: None,
                 preparation_deadline: None,
+                cancel_reason: None,
             }),
             changed: watch::channel(0).0,
             #[cfg(test)]
@@ -235,6 +242,7 @@ impl RestartCoordinator {
             revision: state.revision,
             blockers: self.0.runtime.restart_blockers(),
             active_producers: self.0.producers.iter().map(ProducerGate::active).sum(),
+            cancel_reason: state.cancel_reason,
         }
     }
     pub fn busy(&self) -> bool {
@@ -292,11 +300,17 @@ impl RestartCoordinator {
                 running: block.running,
             }
         })?;
+        let pending = self.0.runtime.pending_approvals().len();
+        if pending > 0 {
+            self.0.gate.release_restart_admission();
+            return Err(RuntimeError::RestartRefusedByApprovals { pending });
+        }
         // Runtime does its atomic storage-health preflight BEFORE any host gate changes.
         if let Err(error) = self.0.runtime.check_restart_preparation() {
             self.0.gate.release_restart_admission();
             return Err(error);
         }
+        state.cancel_reason = None;
         state.generation = state
             .generation
             .checked_add(1)
@@ -371,6 +385,10 @@ impl RestartCoordinator {
             .drain_learning_for_restart()
             .await
             .map_err(|reason| RuntimeError::Model { reason })?;
+        let pending = self.0.runtime.pending_approvals().len();
+        if pending > 0 {
+            return Err(RuntimeError::RestartRefusedByApprovals { pending });
+        }
         self.0
             .gate
             .sealed(&self.0.runtime, id.generation, fence)
@@ -446,6 +464,7 @@ impl RestartCoordinator {
         tokio::pin!(prepare);
         let mut prepared = false;
         let mut expired = false;
+        let mut refused = false;
         loop {
             {
                 let mut state = self.0.state.lock().unwrap();
@@ -465,23 +484,38 @@ impl RestartCoordinator {
                     expired = true;
                     let _ = self.cancel(id);
                 }
+                pending = approval_raised(&self.0.runtime), if !refused => {
+                    refused = true;
+                    self.cancel_for_approvals(id, pending);
+                }
                 result = &mut prepare, if !prepared => {
                     prepared = true;
-                    let mut state = self.0.state.lock().unwrap();
-                    if state.id != Some(id) { return; }
-                    if self.synchronize_attempt(&mut state, &attempt) == runtime::quiesce::RestartAttemptState::Active {
-                        match result {
-                            Ok(sealed) => {
-                                state.sealed = Some(sealed);
-                                self.publish(&mut state, RestartPhase::Sealed);
-                            }
-                            Err(error) => {
-                                // A concurrent direct Stop may have invalidated prepare.
-                                // Atomically fail only an active attempt, then observe again.
-                                let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
-                                self.synchronize_attempt(&mut state, &attempt);
+                    let approvals = {
+                        let mut state = self.0.state.lock().unwrap();
+                        if state.id != Some(id) { return; }
+                        if self.synchronize_attempt(&mut state, &attempt) != runtime::quiesce::RestartAttemptState::Active {
+                            None
+                        } else {
+                            match result {
+                                Ok(sealed) => {
+                                    state.sealed = Some(sealed);
+                                    self.publish(&mut state, RestartPhase::Sealed);
+                                    None
+                                }
+                                Err(RuntimeError::RestartRefusedByApprovals { pending }) => Some(pending),
+                                Err(error) => {
+                                    // A concurrent direct Stop may have invalidated prepare.
+                                    // Atomically fail only an active attempt, then observe again.
+                                    let _ = self.0.runtime.fail_restart_attempt(&attempt, error);
+                                    self.synchronize_attempt(&mut state, &attempt);
+                                    None
+                                }
                             }
                         }
+                    };
+                    if let Some(pending) = approvals {
+                        refused = true;
+                        self.cancel_for_approvals(id, pending);
                     }
                 }
                 _ = producer_change(&mut producer_changes) => {
@@ -579,9 +613,21 @@ impl RestartCoordinator {
         self.publish(state, RestartPhase::Running);
     }
     pub fn cancel(&self, id: RestartId) -> Result<(), RuntimeError> {
-        self.cancel_checked(id, None)
+        self.cancel_checked(id, None, None)
     }
-    fn cancel_checked(&self, id: RestartId, revision: Option<u64>) -> Result<(), RuntimeError> {
+    fn cancel_for_approvals(&self, id: RestartId, pending: usize) {
+        let _ = self.cancel_checked(
+            id,
+            None,
+            Some(RestartCancelReason::ApprovalPending { pending }),
+        );
+    }
+    fn cancel_checked(
+        &self,
+        id: RestartId,
+        revision: Option<u64>,
+        reason: Option<RestartCancelReason>,
+    ) -> Result<(), RuntimeError> {
         let mut state = self.0.state.lock().unwrap();
         if state.id != Some(id)
             || revision.is_some_and(|revision| revision != state.revision)
@@ -592,6 +638,9 @@ impl RestartCoordinator {
             )
         {
             return Err(RuntimeError::RestartBusy);
+        }
+        if reason.is_some() {
+            state.cancel_reason = reason;
         }
         if state.attempt.is_none() {
             Self::abort_worker(&mut state);
@@ -677,6 +726,7 @@ impl RestartSnapshot {
                         }
                         Kind::UnconfirmedRunJs => dto::RestartBlockerKind::UnconfirmedRunJs,
                         Kind::UnfinishedToolBatch => dto::RestartBlockerKind::UnfinishedToolBatch,
+                        Kind::ApprovalPending => dto::RestartBlockerKind::ApprovalPending,
                     },
                 }
             })
@@ -692,6 +742,27 @@ impl RestartSnapshot {
             blocker_omitted: (self.blockers.len() - blockers.len()) as u64,
             blockers,
             active_producers: self.active_producers as u64,
+            cancel_reason: self.cancel_reason.map(|reason| match reason {
+                RestartCancelReason::ApprovalPending { pending } => {
+                    dto::RestartCancelReason::ApprovalPending {
+                        pending: pending as u64,
+                    }
+                }
+            }),
+        }
+    }
+}
+
+async fn approval_raised(runtime: &AgentRuntime) -> usize {
+    let mut changes =
+        sandbox::approval::ApprovalRegistry::for_bus(&runtime.event_bus()).subscribe();
+    loop {
+        let pending = runtime.pending_approvals().len();
+        if pending > 0 {
+            return pending;
+        }
+        if let Err(tokio::sync::broadcast::error::RecvError::Closed) = changes.recv().await {
+            std::future::pending::<()>().await;
         }
     }
 }

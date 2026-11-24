@@ -8,7 +8,8 @@ use std::time::Duration;
 use workbench_protocol::{
     ErrorCode,
     namespaces::lifecycle::{
-        AdminOperationState, AdminOutcome, AdminReceipt, RestartPhase,
+        AdminOperationState, AdminOutcome, AdminReceipt, RestartBlockerKind, RestartCancelReason,
+        RestartPhase,
         restart::{RestartManagementStatus, RestartTargets, ShellBlockers},
     },
 };
@@ -82,6 +83,29 @@ pub fn phase_name(phase: RestartPhase) -> &'static str {
     }
 }
 
+fn blocker_kind_name(kind: RestartBlockerKind) -> &'static str {
+    match kind {
+        RestartBlockerKind::InFlightAdmission => "admission in flight",
+        RestartBlockerKind::AcceptedResumePending => "accepted resume pending",
+        RestartBlockerKind::AwaitingSafePoint => "awaiting a safe point",
+        RestartBlockerKind::ShellRunning => "shell running",
+        RestartBlockerKind::ShellResultUnobserved => "shell result not observed",
+        RestartBlockerKind::UnconfirmedRunJs => "run_js not confirmed",
+        RestartBlockerKind::UnfinishedToolBatch => "tool batch unfinished",
+        RestartBlockerKind::ApprovalPending => {
+            "approval pending (approve or deny it, or stop the run)"
+        }
+    }
+}
+
+fn cancel_reason(reason: RestartCancelReason) -> String {
+    match reason {
+        RestartCancelReason::ApprovalPending { pending } => format!(
+            "{pending} approval(s) were pending, and a restart would lose them; approve or deny the pending approval(s), or stop the run, then retry"
+        ),
+    }
+}
+
 pub fn describe_targets(targets: &RestartTargets) -> Vec<String> {
     let mut lines = vec![format!(
         "core epoch {}, targets revision {}",
@@ -121,6 +145,19 @@ pub fn describe_status(status: &RestartManagementStatus) -> Vec<String> {
             } else {
                 String::new()
             }
+        ));
+        for blocker in &s.blockers {
+            lines.push(format!(
+                "    run {}: {}",
+                blocker.run,
+                blocker_kind_name(blocker.kind)
+            ));
+        }
+    }
+    if let Some(reason) = s.cancel_reason {
+        lines.push(format!(
+            "  last restart cancelled: {}",
+            cancel_reason(reason)
         ));
     }
     let audit = &status.audit;

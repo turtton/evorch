@@ -1,3 +1,5 @@
+#[path = "approvals.rs"]
+mod approvals;
 #[path = "fixture.rs"]
 mod fixture;
 #[path = "invocation.rs"]

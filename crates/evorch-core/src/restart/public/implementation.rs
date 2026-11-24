@@ -188,6 +188,10 @@ impl PublicRestartCoordinator {
         if running > 0 {
             return Err(invocation_refusal(running));
         }
+        let pending = self.core.0.runtime.pending_approvals().len();
+        if pending > 0 {
+            return Err(approval_refusal(pending));
+        }
         let target = self.targets.prepare(binding).await?;
         let runtime = self.core.0.runtime.clone();
         let recipe_observation = runtime.observe_restart_recipes();
@@ -270,6 +274,9 @@ impl PublicRestartCoordinator {
                         .map_err(|error| match error {
                             runtime::RuntimeError::RestartRefusedByInvocations { running } => {
                                 invocation_refusal(running)
+                            }
+                            runtime::RuntimeError::RestartRefusedByApprovals { pending } => {
+                                approval_refusal(pending)
                             }
                             _ => conflict(),
                         })
@@ -380,7 +387,7 @@ impl AdminFacade for PublicRestartCoordinator {
             .map(|a| a.id)
             .ok_or_else(conflict)?;
         self.core
-            .cancel_checked(id, Some(request.expected_revision.get()))
+            .cancel_checked(id, Some(request.expected_revision.get()), None)
             .map_err(|_| conflict())?;
         state.cancelled = Some(request.clone());
         Ok(AdminOutcome::Cancelled)
@@ -442,6 +449,13 @@ fn invocation_refusal(running: usize) -> AdminFailure {
     WorkbenchError::new(
         ErrorCode::Busy,
         runtime::RuntimeError::RestartRefusedByInvocations { running }.to_string(),
+        RetryAdvice::UserActionRequired,
+    )
+}
+fn approval_refusal(pending: usize) -> AdminFailure {
+    WorkbenchError::new(
+        ErrorCode::Busy,
+        runtime::RuntimeError::RestartRefusedByApprovals { pending }.to_string(),
         RetryAdvice::UserActionRequired,
     )
 }

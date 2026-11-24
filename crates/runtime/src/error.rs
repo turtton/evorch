@@ -23,6 +23,10 @@ pub enum RuntimeError {
         "restart refused: {running} CLI invocation(s) are running and a restart cannot carry them over yet; wait for them to finish or stop them, then retry"
     )]
     RestartRefusedByInvocations { running: usize },
+    #[error(
+        "restart refused: {pending} approval request(s) are pending and a restart would lose them; approve or deny the pending approval(s), or stop the run, then retry"
+    )]
+    RestartRefusedByApprovals { pending: usize },
     /// The run set or its recipe metadata changed while a restart preparation was
     /// observing it. Nothing was committed: the observation may be taken again.
     #[error("restart preparation observed a changed run set")]

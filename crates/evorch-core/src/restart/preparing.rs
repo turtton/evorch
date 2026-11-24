@@ -216,7 +216,18 @@ impl RestartCoordinator {
             }
             state.preparation_deadline.unwrap()
         };
-        match tokio::time::timeout_at(deadline, self.prepare_drains(id)).await {
+        let drained = tokio::select! {
+            drained = tokio::time::timeout_at(deadline, self.prepare_drains(id)) => drained,
+            pending = approval_raised(&self.0.runtime) => {
+                let begun = self.0.state.lock().unwrap().attempt.clone();
+                match begun {
+                    Some(attempt) => self.drive(id, attempt).await,
+                    None => self.cancel_for_approvals(id, pending),
+                }
+                return;
+            }
+        };
+        match drained {
             Ok(Ok(Some(attempt))) => self.drive(id, attempt).await,
             Ok(Ok(None)) | Err(_) => {
                 let _ = self.cancel(id);

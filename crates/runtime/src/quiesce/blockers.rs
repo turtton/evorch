@@ -1,5 +1,6 @@
 //! Temporary safety exclusions are not storage-health failures.
 use super::*;
+use sandbox::approval::ApprovalSnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartBlockerKind {
@@ -10,6 +11,7 @@ pub enum RestartBlockerKind {
     ShellResultUnobserved,
     UnconfirmedRunJs,
     UnfinishedToolBatch,
+    ApprovalPending,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,8 +64,29 @@ impl Coordinator {
 }
 
 impl crate::AgentRuntime {
+    pub fn pending_approvals(&self) -> Vec<ApprovalSnapshot> {
+        use sandbox::approval::{ApprovalRegistry, PAGE_MAX};
+        let Some(registry) = ApprovalRegistry::existing(self.event_bus().as_ref()) else {
+            return Vec::new();
+        };
+        let mut pending: Vec<ApprovalSnapshot> = Vec::new();
+        loop {
+            let page = registry.list_pending(pending.last().map(|a| a.attempt), PAGE_MAX);
+            let last = page.len() < PAGE_MAX;
+            pending.extend(page);
+            if last {
+                return pending;
+            }
+        }
+    }
+
     /// Only bounded identities and categories, never tool arguments or output.
     pub fn restart_blockers(&self) -> Vec<RestartBlocker> {
+        let approvals: std::collections::BTreeSet<String> = self
+            .pending_approvals()
+            .into_iter()
+            .map(|approval| approval.run_id)
+            .collect();
         let accepted = self.accepted_chat_resumes();
         let inner = self.shared.quiesce.lock();
         if !inner.requested {
@@ -93,25 +116,27 @@ impl crate::AgentRuntime {
                 if acknowledged {
                     return None;
                 }
-                inner
+                let mut blocker = inner
                     .blockers
                     .get(&run)
                     .filter(|b| {
                         b.generation == inner.generation && b.incarnation == intent.incarnation
                     })
                     .cloned()
-                    .or_else(|| {
-                        Some(RestartBlocker {
-                            run,
-                            incarnation: intent.incarnation.clone(),
-                            generation: inner.generation,
-                            kind: if intent.wait == ResumeWait::Admission {
-                                RestartBlockerKind::InFlightAdmission
-                            } else {
-                                RestartBlockerKind::AwaitingSafePoint
-                            },
-                        })
-                    })
+                    .unwrap_or_else(|| RestartBlocker {
+                        run,
+                        incarnation: intent.incarnation.clone(),
+                        generation: inner.generation,
+                        kind: if intent.wait == ResumeWait::Admission {
+                            RestartBlockerKind::InFlightAdmission
+                        } else {
+                            RestartBlockerKind::AwaitingSafePoint
+                        },
+                    });
+                if approvals.contains(&run.to_string()) {
+                    blocker.kind = RestartBlockerKind::ApprovalPending;
+                }
+                Some(blocker)
             })
             .chain(accepted.iter().map(|(run, incarnation)| RestartBlocker {
                 run: *run,

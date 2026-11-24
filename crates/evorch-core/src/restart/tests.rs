@@ -1,4 +1,5 @@
 use super::*;
+mod approvals;
 pub(crate) mod finalization;
 mod learning;
 mod preparing;
@@ -252,6 +253,7 @@ fn dto_bounds_blockers_and_omits_internal_incarnations() {
         phase: RestartPhase::FailedClosed,
         revision: 9,
         active_producers: 0,
+        cancel_reason: None,
         blockers: (0..70)
             .map(|_| runtime::quiesce::RestartBlocker {
                 run: runtime::RunId::new(1),

@@ -1097,6 +1097,18 @@ async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continua
     let waiter = f.runtime.fence_dispatch_restart();
     tokio::pin!(waiter);
     assert!(futures_util::poll!(&mut waiter).is_pending());
+    let approval_blocker = |runtime: &crate::AgentRuntime| {
+        runtime
+            .restart_blockers()
+            .iter()
+            .any(|b| b.run == run && b.kind == crate::quiesce::RestartBlockerKind::ApprovalPending)
+    };
+    assert!(
+        approval_blocker(&f.runtime),
+        "{:?}",
+        f.runtime.restart_blockers()
+    );
+    assert_eq!(f.runtime.pending_approvals().len(), 1);
     assert!(!f.intent(run).tool_intent.is_empty());
     assert!(f.intent(run).checkpoint.is_none());
     assert!(
@@ -1114,6 +1126,7 @@ async fn tool_approval_pending_is_not_a_restart_safe_point_or_a_durable_continua
             },
         )
         .unwrap();
+    assert!(!approval_blocker(&f.runtime));
     assert_eq!(f.entered.recv().await, Some(0));
     assert!(
         futures_util::poll!(&mut waiter).is_pending(),

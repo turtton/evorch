@@ -381,6 +381,13 @@ impl LifecycleDriver {
                 },
             }
         };
+        let approvals = host.get().runtime.pending_approvals().len();
+        if approvals > 0 {
+            tracing::warn!(
+                approvals,
+                "core is shutting down with pending approvals; they are lost and are not restored"
+            );
+        }
         host.close_finalization();
         self.restart.transition_to_shutdown();
         drop(listener);
