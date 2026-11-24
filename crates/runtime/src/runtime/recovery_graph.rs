@@ -169,15 +169,24 @@ impl AgentRuntime {
                 .with_database(|db| {
                     let mut intents = BTreeMap::new();
                     let mut revisions = BTreeMap::new();
-                    for (id, row) in db.recovery_intent_loads()? {
+                    // The scan and the revision reads below stay in this one database
+                    // access. Only rows that can matter are kept: with an expected set that
+                    // is exactly its members (another row, however large or damaged, is
+                    // not this capture's business); without one, every row.
+                    let mut kept = Vec::new();
+                    db.for_each_recovery_intent(|load| {
                         if let Some(expected) = expected
-                            && !id
+                            && !load
+                                .0
                                 .as_ref()
                                 .and_then(|id| id.parse().ok())
                                 .is_some_and(|id| expected.contains_key(&id))
                         {
-                            continue;
+                            return;
                         }
+                        kept.push(load);
+                    })?;
+                    for (_, row) in kept {
                         if expected.is_some() && row.is_err() {
                             return Err(storage::StorageError::Serialization(
                                 "corrupt expected intent".into(),
