@@ -21,6 +21,8 @@ event-bus = { path = "../event-bus" }
 [features]
 # Read instrumentation for downstream regression tests; absent from product builds.
 test-support = []
+# Deterministic usage read/commit/ACK fault injection; absent from product builds.
+goal-usage-test-support = []
 # `plan_write_gate`: holds a conversation plan write before or after its commit, so a test
 # can stop it there. Enabled only through a dev-dependency; no product build has it.
 plan-write-gate = []

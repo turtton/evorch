@@ -27,6 +27,7 @@ mod pull_request_auto_fix;
 mod pull_requests;
 mod recovery;
 mod resume_intent;
+mod thread_goal_usage;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,
     LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
@@ -62,6 +63,7 @@ enum Command {
         crate::handoffs::HandoffTransition,
         ReplyTx<crate::handoffs::HandoffReceipt>,
     ),
+    UpsertThreadGoalUsage(String, String, String, event_bus::ThreadGoalUsage, ReplyTx),
     Usage(Vec<UsageBucket>),
     RecordUsageRequests(Vec<crate::usage::UsageRequestRecord>, ReplyTx),
     AttributeUsageRuns(Vec<crate::usage::RunAttribution>),

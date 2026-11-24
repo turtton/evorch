@@ -5,6 +5,11 @@ use std::time::Duration;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
 use storage::{Database, StorageConfig, StorageHandle};
 
+use super::improvement_widgets::{
+    ALL, DISABLED, DISMISS, EMPTY, EVIDENCE, MARK_REVIEWED, NO_PROJECT, STATUS_ACCESS,
+    STATUS_LABEL, evidence_runs, kind_badges, reopened_badge, seen_line, status_mark,
+};
+
 const POLL_INTERVAL_SECS: f64 = 1.0;
 
 mod triage;
@@ -75,13 +80,12 @@ impl Default for SelfImprovementPane {
     }
 }
 
-/// Icon and color that stand for a candidate's triage status.
-fn status_icon(status: ImprovementStatus) -> (&'static str, egui::Color32) {
-    use crate::theme::{icons, tokens::palette};
+fn protocol_status(status: ImprovementStatus) -> workbench_protocol::management::ImprovementStatus {
+    use workbench_protocol::management::ImprovementStatus as Shown;
     match status {
-        ImprovementStatus::New => (icons::SPARKLE, palette().ACCENT),
-        ImprovementStatus::Reviewed => (icons::CHECK_CIRCLE, palette().SUCCESS),
-        ImprovementStatus::Dismissed => (icons::PROHIBIT, palette().TEXT_MUTED),
+        ImprovementStatus::New => Shown::New,
+        ImprovementStatus::Reviewed => Shown::Reviewed,
+        ImprovementStatus::Dismissed => Shown::Dismissed,
     }
 }
 
@@ -117,7 +121,7 @@ impl SelfImprovementPane {
         project: Option<&str>,
     ) -> Option<SelfImprovementAction> {
         if !self.enabled {
-            ui.label("Self-improvement drafts are disabled ([self_improvement] enabled=false). Candidates are not collected.");
+            ui.label(DISABLED);
             return None;
         }
         if self.config.is_none() {
@@ -125,7 +129,7 @@ impl SelfImprovementPane {
             return None;
         }
         let Some(project) = project else {
-            ui.label("Select a project to browse improvement candidates.");
+            ui.label(NO_PROJECT);
             return None;
         };
         let path = &self.config.as_ref().unwrap().db_path;
@@ -144,11 +148,11 @@ impl SelfImprovementPane {
         let triage = self.triage_target();
         let mut triage_clicked = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label("Status");
+            ui.label(STATUS_LABEL);
             let status_response = egui::ComboBox::from_id_salt("self_improvement_status")
-                .selected_text(self.status.map_or("All", ImprovementStatus::as_str))
+                .selected_text(self.status.map_or(ALL, ImprovementStatus::as_str))
                 .show_ui(ui, |ui| {
-                    refresh |= ui.selectable_value(&mut self.status, None, "All").changed();
+                    refresh |= ui.selectable_value(&mut self.status, None, ALL).changed();
                     for status in [
                         ImprovementStatus::New,
                         ImprovementStatus::Reviewed,
@@ -160,7 +164,7 @@ impl SelfImprovementPane {
                     }
                 });
             status_response.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Candidate status")
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, STATUS_ACCESS)
             });
             let button = ui.add_enabled(triage.is_ok(), egui::Button::new(TRIAGE_BUTTON));
             triage_clicked = match &triage {
@@ -235,36 +239,14 @@ impl SelfImprovementPane {
             .id_salt("self_improvement_results")
             .show(ui, |ui| {
                 if self.entries.is_empty() && self.error.is_none() {
-                    ui.label("No improvement candidates yet.");
+                    ui.label(EMPTY);
                 }
                 for entry in &self.entries {
                     ui.push_id(&entry.id, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            let (icon, color) = status_icon(entry.status);
-                            let status = entry.status.as_str();
-                            let response = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(icon)
-                                        .size(crate::theme::tokens::FONT_ICON)
-                                        .color(color),
-                                )
-                                .sense(egui::Sense::hover()),
-                            );
-                            response.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status)
-                            });
-                            response.on_hover_text(format!("Status: {status}"));
+                            status_mark(ui, protocol_status(entry.status));
                             if entry.reopened_count > 0 {
-                                ui.label(
-                                    crate::theme::text::badge(format!(
-                                        "Reopened ×{}",
-                                        entry.reopened_count
-                                    ))
-                                    .color(crate::theme::tokens::palette().WARNING_FG)
-                                    .background_color(
-                                        crate::theme::tokens::palette().WARNING_SURFACE,
-                                    ),
-                                );
+                                reopened_badge(ui, entry.reopened_count);
                             }
                             ui.monospace(&entry.id);
                             let (created, absolute) = timestamp(entry.created_at_ns, wall_clock);
@@ -272,39 +254,25 @@ impl SelfImprovementPane {
                                 .on_hover_text(absolute);
                         });
                         ui.horizontal_wrapped(|ui| {
-                            for badge in
-                                [entry.source.as_str(), entry.severity.as_str(), &entry.code]
-                            {
-                                ui.label(crate::theme::text::badge(badge));
-                            }
+                            kind_badges(
+                                ui,
+                                entry.source.as_str(),
+                                entry.severity.as_str(),
+                                &entry.code,
+                            );
                         });
                         ui.label(&entry.title);
                         if entry.occurrences > 1 {
                             let (seen, absolute) = timestamp(entry.last_seen_at_ns, wall_clock);
-                            ui.label(crate::theme::text::muted(format!(
-                                "Seen {} times, last {seen}",
-                                entry.occurrences
+                            ui.label(crate::theme::text::muted(seen_line(
+                                entry.occurrences,
+                                &seen,
                             )))
                             .on_hover_text(absolute);
                         }
-                        ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
+                        ui.collapsing(crate::theme::text::badge(EVIDENCE), |ui| {
                             ui.monospace(&entry.evidence);
-                            if let Some(run_id) = &entry.run_id {
-                                ui.horizontal(|ui| {
-                                    ui.label(crate::theme::text::muted("Run"));
-                                    crate::theme::widgets::copy_id_button(
-                                        ui,
-                                        "Copy run ID",
-                                        run_id,
-                                    );
-                                });
-                            }
-                            if entry.recent_run_ids.len() > 1 {
-                                ui.monospace(format!(
-                                    "Recent runs: {}",
-                                    entry.recent_run_ids.join(", ")
-                                ));
-                            }
+                            evidence_runs(ui, entry.run_id.as_deref(), &entry.recent_run_ids);
                         });
                         if let Some(path) = &entry.draft_path {
                             ui.horizontal_wrapped(|ui| {
@@ -344,10 +312,10 @@ impl SelfImprovementPane {
                         }
                         if self.handle.is_some() {
                             ui.horizontal(|ui| {
-                                if ui.button("Mark reviewed").clicked() {
+                                if ui.button(MARK_REVIEWED).clicked() {
                                     action = Some((entry.id.clone(), ImprovementStatus::Reviewed));
                                 }
-                                if ui.button("Dismiss").clicked() {
+                                if ui.button(DISMISS).clicked() {
                                     action = Some((entry.id.clone(), ImprovementStatus::Dismissed));
                                 }
                             });
@@ -436,11 +404,7 @@ fn timestamp(ns: u64, now: std::time::SystemTime) -> (String, String) {
     let Ok(ns) = i64::try_from(ns) else {
         return ("unknown time".into(), "Unknown creation time".into());
     };
-    let at = storage::ns_to_system_time(ns);
-    (
-        crate::format::time_since(at, now),
-        crate::format::utc_timestamp(at.into()),
-    )
+    super::improvement_widgets::when(storage::ns_to_system_time(ns), now)
 }
 
 #[cfg(test)]

@@ -6,12 +6,13 @@ use crate::core_client::features::{
     FeatureAction, FeatureError, FeatureRequest,
     execution::tests::{answer, asked, command_of, query_of, screen},
 };
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use workbench_protocol::{
     errors::ErrorCode,
     ids::OperationId,
     management::MemoryState,
     namespaces::diagnostics::ReadOutcome,
+    namespaces::memory::MemoryScope,
     operation::{OperationState, OperationView},
     views::Page,
     wire::Revision,
@@ -84,7 +85,7 @@ fn a_list_is_asked_again_when_it_settles_and_a_row_opens_its_detail() {
     assert_eq!(list.project.as_str(), "p");
 
     answer(&mut screen, first[0].tag, pending_reply(&list.operation_id));
-    screen.get_by_label("読み込み中…");
+    screen.get_by_label("Loading…");
 
     settled(screen.state_mut().feature.as_mut(), &list.operation_id);
     let again = asked(&mut screen);
@@ -102,12 +103,15 @@ fn a_list_is_asked_again_when_it_settles_and_a_row_opens_its_detail() {
             vec![summary("lesson-a", true), summary("lesson-b", false)],
         ),
     );
-    screen.get_by_label("★ lesson-a · 候補 · preview of lesson-a");
-    screen.get_by_label("lesson-b · 候補 · preview of lesson-b");
+    screen.get_by_label("lesson-a");
+    screen.get_by_label("lesson-b");
+    screen.get_by_label("preview of lesson-a");
+    assert_eq!(screen.query_all_by_label("candidate").count(), 2);
+    assert_eq!(screen.query_all_by_label("Approved").count(), 1);
+    assert_eq!(screen.query_all_by_label("Unconfirmed").count(), 1);
+    screen.get_by_label("2 lessons");
 
-    screen
-        .get_by_label("lesson-b · 候補 · preview of lesson-b")
-        .click();
+    screen.get_by_label("lesson-b").click();
     let detail = asked(&mut screen);
     assert_eq!(detail.len(), 1);
     let Query::Memory(MemoryQuery::GetMemory(get)) = query_of(&detail[0]) else {
@@ -137,9 +141,14 @@ fn a_list_is_asked_again_when_it_settles_and_a_row_opens_its_detail() {
         ))))),
     );
     screen.get_by_label("always format");
+    screen.get_by_label("user");
+    // The evidence is folded, as in the legacy pane, until it is asked for.
+    assert!(screen.query_by_label("seen twice").is_none());
+    screen.get_by_label("Evidence").click();
+    screen.run();
     screen.get_by_label("seen twice");
-    screen.get_by_label("(先頭 10 バイトのみ表示 / 全体 4000 バイト)");
-    screen.get_by_label("タスク: task-9");
+    screen.get_by_label("Showing the first 10 of 4000 bytes.");
+    screen.get_by_label("task-9");
 }
 
 #[test]
@@ -165,7 +174,8 @@ fn an_answer_for_another_project_or_an_older_ask_is_dropped() {
         second[0].tag,
         list_reply(&new.operation_id, vec![summary("new-one", false)]),
     );
-    screen.get_by_label("new-one · 候補 · preview of new-one");
+    screen.get_by_label("new-one");
+    screen.get_by_label("preview of new-one");
 }
 
 #[test]
@@ -188,7 +198,7 @@ fn a_failed_read_is_shown_and_a_new_search_is_a_new_operation() {
             },
         ))))),
     );
-    screen.get_by_label("保存先を読み取れませんでした。");
+    screen.get_by_label("The storage could not be read.");
 
     // The search input is shut until it is asked for, and draws no text input before.
     assert!(
@@ -196,9 +206,9 @@ fn a_failed_read_is_shown_and_a_new_search_is_a_new_operation() {
             .query_by_role(egui::accesskit::Role::TextInput)
             .is_none()
     );
-    screen.get_by_label("検索語で絞り込む").click();
+    screen.get_by_label("Filter by words").click();
     screen.run();
-    screen.get_by_label("検索").click();
+    screen.get_by_label("Search").click();
     let next = asked(&mut screen);
     assert_eq!(next.len(), 1);
     assert_ne!(list_of(&next[0]).operation_id, list.operation_id);
@@ -211,42 +221,51 @@ fn without_a_project_nothing_is_asked() {
     screen.state_mut().frame.actions.clear();
     screen.state_mut().selection.project = None;
     assert!(asked(&mut screen).is_empty());
-    screen.get_by_label("プロジェクトを選択すると教訓を表示します。");
+    screen.get_by_label("Select a project to browse memory.");
 }
 
 /// A screen with `lesson-b` open: validated is offered, rejecting is refused
 /// because the lesson is a favorite.
 fn screen_with_detail()
 -> egui_kittest::Harness<'static, crate::core_client::features::execution::tests::Screen> {
+    screen_with_lesson(
+        true,
+        vec![
+            ActionAvailability {
+                action: MemoryAction::Validate,
+                state: ActionState::Allowed,
+            },
+            ActionAvailability {
+                action: MemoryAction::Reject,
+                state: ActionState::Denied {
+                    reason: DenialReason::FavoriteMustBeCleared,
+                },
+            },
+        ],
+    )
+}
+
+/// A screen with `lesson-b` (revision 7) open, offering `actions`.
+fn screen_with_lesson(
+    favorite: bool,
+    actions: Vec<ActionAvailability<MemoryAction>>,
+) -> egui_kittest::Harness<'static, crate::core_client::features::execution::tests::Screen> {
     let mut screen = screen(Box::<MemoryFeature>::default(), None);
     let first = asked(&mut screen);
     let list = list_of(&first[0]);
     answer(
         &mut screen,
         first[0].tag,
-        list_reply(&list.operation_id, vec![summary("lesson-b", true)]),
+        list_reply(&list.operation_id, vec![summary("lesson-b", favorite)]),
     );
-    screen
-        .get_by_label("★ lesson-b · 候補 · preview of lesson-b")
-        .click();
+    screen.get_by_label("lesson-b").click();
     let detail = asked(&mut screen);
     let Query::Memory(MemoryQuery::GetMemory(get)) = query_of(&detail[0]) else {
         panic!("a detail was expected");
     };
-    let mut state = summary("lesson-b", true).state;
+    let mut state = summary("lesson-b", favorite).state;
     state.revision = Revision(7);
-    state.actions = vec![
-        ActionAvailability {
-            action: MemoryAction::Validate,
-            state: ActionState::Allowed,
-        },
-        ActionAvailability {
-            action: MemoryAction::Reject,
-            state: ActionState::Denied {
-                reason: DenialReason::FavoriteMustBeCleared,
-            },
-        },
-    ];
+    state.actions = actions;
     let text = |text: &str| BoundedText {
         text: text.into(),
         total_bytes: text.len() as u64,
@@ -295,19 +314,19 @@ fn sent_update(action: &FeatureAction) -> &UpdateMemory {
 fn an_update_carries_the_revision_that_was_read_and_is_sent_once() {
     let mut screen = screen_with_detail();
     // What the core refuses is shown as a disabled button, never sent.
-    screen.get_by_label("却下する");
+    assert!(screen.get_by_label("Reject").accesskit_node().is_disabled());
 
-    screen.get_by_label("検証済みにする").click();
+    screen.get_by_label("Validate").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     let update = sent_update(&sent[0]);
     assert_eq!(update.project.as_str(), "p");
     assert_eq!(update.target.id.as_str(), "lesson-b");
     assert_eq!(update.target.expected_revision, Revision(7));
-    screen.get_by_label("更新中…");
+    screen.get_by_label("Updating…");
 
     // While it runs, a second click sends nothing.
-    screen.get_by_label("検証済みにする").click();
+    screen.get_by_label("Validate").click();
     assert!(asked(&mut screen).is_empty());
 
     // Its end arrives as an event and the lesson is read again, not guessed.
@@ -319,7 +338,7 @@ fn an_update_carries_the_revision_that_was_read_and_is_sent_once() {
             update: update_view(&id, OperationState::Ready, Some(true)),
         }));
     let again = asked(&mut screen);
-    screen.get_by_label("更新しました。");
+    screen.get_by_label("Updated.");
     assert!(
         again
             .iter()
@@ -335,7 +354,7 @@ fn an_update_carries_the_revision_that_was_read_and_is_sent_once() {
 #[test]
 fn a_stale_revision_asks_to_read_again_and_does_not_resend() {
     let mut screen = screen_with_detail();
-    screen.get_by_label("検証済みにする").click();
+    screen.get_by_label("Validate").click();
     let sent = asked(&mut screen);
     let id = sent_update(&sent[0]).operation_id.clone();
     let failed = update_view(
@@ -356,7 +375,7 @@ fn a_stale_revision_asks_to_read_again_and_does_not_resend() {
             reply
         })),
     );
-    screen.get_by_label_contains("他の場所で更新されていました");
+    screen.get_by_label_contains("changed elsewhere");
     let next = asked(&mut screen);
     assert!(
         next.iter()
@@ -369,7 +388,7 @@ fn a_stale_revision_asks_to_read_again_and_does_not_resend() {
 #[test]
 fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
     let mut screen = screen_with_detail();
-    screen.get_by_label("検証済みにする").click();
+    screen.get_by_label("Validate").click();
     let sent = asked(&mut screen);
     let id = sent_update(&sent[0]).operation_id.clone();
     answer(
@@ -392,12 +411,74 @@ fn an_update_of_unknown_outcome_is_asked_for_and_never_counted_as_done() {
             FeatureError::new("no such operation").with_code(ErrorCode::NotFound)
         )),
     );
-    screen.get_by_label_contains("成功とは扱いません");
-    assert!(screen.query_by_label("更新しました。").is_none());
+    screen.get_by_label_contains("not counted as done");
+    assert!(screen.query_by_label("Updated.").is_none());
     let reread = asked(&mut screen);
     assert!(
         reread
             .iter()
             .all(|action| matches!(action.request, FeatureRequest::Query(_)))
     );
+}
+
+#[test]
+fn the_approval_filter_and_refresh_each_begin_a_new_list() {
+    let mut screen = screen(Box::<MemoryFeature>::default(), None);
+    let first = list_of(&asked(&mut screen)[0]);
+    assert_eq!(first.favorite, None);
+
+    screen.get_by_label("Approval").click();
+    screen.run();
+    screen.get_by_label("Unconfirmed").click();
+    let filtered = asked(&mut screen);
+    assert_eq!(filtered.len(), 1);
+    let filtered = list_of(&filtered[0]);
+    assert_eq!(filtered.favorite, Some(false), "unconfirmed lessons only");
+    assert_ne!(filtered.operation_id, first.operation_id);
+
+    screen.get_by_label("Refresh").click();
+    let refreshed = asked(&mut screen);
+    assert_eq!(refreshed.len(), 1);
+    let refreshed = list_of(&refreshed[0]);
+    assert_eq!(refreshed.favorite, Some(false), "the filter is kept");
+    assert_ne!(refreshed.operation_id, filtered.operation_id);
+}
+
+#[test]
+fn a_reject_is_sent_only_once_confirmed_with_the_revision_that_was_read() {
+    let mut screen = screen_with_lesson(
+        false,
+        vec![
+            ActionAvailability {
+                action: MemoryAction::Reject,
+                state: ActionState::Allowed,
+            },
+            ActionAvailability {
+                action: MemoryAction::SetFavorite,
+                state: ActionState::Allowed,
+            },
+        ],
+    );
+    // The approval comes first, as in the legacy pane.
+    let approve = screen.get_by_label("Approve").rect().min.x;
+    assert!(approve < screen.get_by_label("Reject").rect().min.x);
+
+    screen.get_by_label("Reject").click();
+    assert!(asked(&mut screen).is_empty(), "one click sends nothing");
+    screen.get_by_label("Reject permanently?");
+    screen.get_by_label("Cancel").click();
+    assert!(asked(&mut screen).is_empty());
+    assert!(screen.query_by_label("Confirm reject").is_none());
+
+    screen.get_by_label("Reject").click();
+    asked(&mut screen);
+    screen.get_by_label("Confirm reject").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let Command::Memory(MemoryCommand::RejectMemory(update)) = command_of(&sent[0]) else {
+        panic!("a reject was expected");
+    };
+    assert_eq!(update.target.id.as_str(), "lesson-b");
+    assert_eq!(update.target.expected_revision, Revision(7));
+    assert!(screen.query_by_label("Confirm reject").is_none());
 }

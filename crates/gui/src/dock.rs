@@ -1,5 +1,7 @@
 //! `egui_dock` のレイアウトと永続化用 Workspace の相互変換。
 
+pub mod subagent_layout;
+
 use std::collections::BTreeMap;
 
 use egui_dock::{DockState, Node, NodeIndex, NodePath, Split as DockSplit, Surface, SurfaceIndex};

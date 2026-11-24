@@ -136,6 +136,15 @@ fn measure(path: &Path, observer: &Connection, operation: impl FnOnce()) -> Cost
     let page = observer
         .pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0).map(u64::from))
         .unwrap();
+    // Schema growth can leave a recycled WAL whose physical length is its old
+    // high-water mark, not its current frame count. Start each fixture measurement
+    // from a truncated WAL so size deltas still measure writes. Never a live DB.
+    let (busy, _, _): (i64, i64, i64) = observer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(busy, 0);
     observer.execute_batch("BEGIN").unwrap();
     let _: i64 = observer
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))

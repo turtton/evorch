@@ -15,6 +15,7 @@ pub mod notifications;
 pub mod persistence;
 pub mod run_tabs;
 pub mod shell;
+mod subagent_panes;
 mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
@@ -281,6 +282,9 @@ pub struct CoreClientApp {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// How many run tabs ask for their history in one frame.
+const RUN_READS_PER_FRAME: usize = 8;
+
 /// What the window draws, apart from the runtime that serves the connection: the features, the
 /// selector and the conversation controls, over the shared projection. It is the whole page,
 /// so a test can draw exactly what the window draws.
@@ -293,6 +297,7 @@ pub struct CoreClientScreen {
     dock: egui_dock::DockState<shell::CoreTab>,
     notifications: notifications::NotificationLog,
     run_tabs: run_tabs::RunTabs,
+    subagents: subagent_panes::SubagentWatch,
     attention: attention::TabAttention,
     local: local::LocalPanes,
     keymap: crate::keymap::Keymap,
@@ -323,6 +328,7 @@ impl CoreClientScreen {
             dock: shell::default_dock(),
             notifications: notifications::NotificationLog::default(),
             run_tabs: run_tabs::RunTabs::default(),
+            subagents: subagent_panes::SubagentWatch::default(),
             attention: attention::TabAttention::default(),
             local: local::LocalPanes::default(),
             keymap: core_keymap(&workspace_ui::KeybindSettings::default()),
@@ -403,6 +409,32 @@ impl CoreClientScreen {
                 .is_some_and(|summary| summary.project == project)
         });
         Some(persistence::SavedSelection { project, thread })
+    }
+
+    fn follow_subagents(
+        subagents: &mut subagent_panes::SubagentWatch,
+        run_tabs: &mut run_tabs::RunTabs,
+        dock: &mut egui_dock::DockState<shell::CoreTab>,
+        selected: Option<&ThreadId>,
+        shared: &mut Shared,
+    ) {
+        for change in subagents.observe(&shared.cache.runs) {
+            run_tabs.apply(dock, &change, selected);
+        }
+        let Some(execution) = shared.features.execution_mut() else {
+            return;
+        };
+        let unnamed: Vec<_> = run_tabs
+            .shown_tabs()
+            .filter(|(_, tab)| tab.name.is_none())
+            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone()))
+            .collect();
+        for (id, thread, run) in unnamed {
+            match execution.run_name(&run) {
+                Some(name) => run_tabs.set_name(id, name),
+                None => execution.want_name(thread, run),
+            }
+        }
     }
 
     fn apply_restore(&mut self, state: persistence::SavedState) {
@@ -775,6 +807,15 @@ impl CoreClientScreen {
             self.run_tabs
                 .prune_hidden(|thread| threads.contains_key(thread.as_str()));
         }
+        if shared.connected {
+            Self::follow_subagents(
+                &mut self.subagents,
+                &mut self.run_tabs,
+                &mut self.dock,
+                self.selected.as_ref(),
+                &mut shared,
+            );
+        }
         for feature in shared.features.take_focus() {
             shell::focus(&mut self.dock, shell::CoreTab::Feature(feature));
         }
@@ -913,19 +954,32 @@ impl CoreClientScreen {
         // Closing a file tab or a reset layout drops its preview.
         self.local.sweep_files(ui.ctx(), &self.dock);
         // Closing a tab, a reset layout or another thread drops its run's history.
-        for run in self.run_tabs.sweep(&mut self.dock, self.selected.as_ref()) {
+        let runs = &shared.cache.runs;
+        let phase_of = |run: &RunId| runs.get(run.as_str()).map(|run| run.phase);
+        for run in self
+            .run_tabs
+            .sweep(&mut self.dock, self.selected.as_ref(), phase_of)
+        {
             shared.cache.forget_run(run.as_str());
         }
         if save_now {
             self.save_with(&shared, true);
         }
         if shared.connected {
-            // A tab opened or back in the dock reads its run's history, and so does one
-            // whose history a new session's projection (a reconnect or resync) lacks.
-            for (thread, run) in self.run_tabs.shown() {
+            // A tab drawn reads its run's history, and so does one whose history a new
+            // session's projection (a reconnect or resync) lacks. A window opened on
+            // many subagents asks a few per frame, so the client's queue keeps room for
+            // everything else.
+            let mut reads = 0;
+            for (thread, run) in self.run_tabs.drawn(&self.dock) {
+                if reads == RUN_READS_PER_FRAME {
+                    ui.ctx().request_repaint();
+                    break;
+                }
                 if shared.cache.want_run(run.as_str()) {
                     let action = Action::History(thread.clone(), Some(run.clone()), false);
                     enqueue(&self.actions, &mut shared, action);
+                    reads += 1;
                 }
             }
             if let Some(thread) = &self.selected
@@ -933,6 +987,13 @@ impl CoreClientScreen {
             {
                 let action = Action::History(thread.clone(), None, true);
                 enqueue(&self.actions, &mut shared, action);
+            }
+            if shared
+                .features
+                .execution_mut()
+                .is_some_and(|execution| execution.names_waiting())
+            {
+                ui.ctx().request_repaint();
             }
         }
         if shared.features.focus_pending() {

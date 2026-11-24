@@ -8,14 +8,20 @@ use std::collections::BTreeMap;
 
 use super::layout::{bounded_list, paged_list};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use crate::panes::team_widgets::{
+    COORDINATOR, EMPTY, HEADING, TaskCardView, owner_tip, state_word, task_card,
+};
+use crate::theme::text::{h3, muted};
+use crate::theme::tokens::{ROW_DENSE, palette};
+use crate::theme::widgets::{badge, compact_row, reason_label};
 use workbench_protocol::{
     commands::ThreadTarget,
+    errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::{PageCursor, ThreadId},
     namespaces::teams::{
-        TeamOverview, TeamSource, TeamTaskRef, TeamTaskState, TeamTaskView, TeamsEvent, TeamsQuery,
-        TeamsReply,
+        TeamOverview, TeamSource, TeamTaskRef, TeamTaskView, TeamsEvent, TeamsQuery, TeamsReply,
     },
     queries::{PageRequest, Query, QueryReply, ThreadQuery},
 };
@@ -63,19 +69,71 @@ impl TeamsFeature {
     }
 }
 
-pub(crate) fn task_state_label(state: TeamTaskState) -> &'static str {
-    match state {
-        TeamTaskState::Ready => "待機",
-        TeamTaskState::Claimed => "担当中",
-        TeamTaskState::Complete => "完了",
+fn source_badge(ui: &mut egui::Ui, source: TeamSource) {
+    match source {
+        TeamSource::Live => {
+            badge(ui, "Live board", palette().CANVAS, palette().SUCCESS);
+        }
+        TeamSource::Persisted => {
+            badge(ui, "Saved board", palette().CANVAS, palette().TEXT_MUTED)
+                .on_hover_text("Only the saved snapshot remains (history only).");
+        }
     }
 }
 
-fn source_label(source: TeamSource) -> &'static str {
-    match source {
-        TeamSource::Live => "実行中のボード",
-        TeamSource::Persisted => "保存済みのボード（履歴のみ）",
-    }
+fn board(ui: &mut egui::Ui, team: &TeamOverview) {
+    ui.label(h3(HEADING));
+    ui.horizontal_wrapped(|ui| {
+        if let Some(run) = &team.coordinator_run {
+            ui.label(muted(COORDINATOR));
+            ui.label(run.as_str());
+        }
+        source_badge(ui, team.source);
+    });
+    ui.label(muted(format!(
+        "{} ready · {} claimed · {} complete",
+        team.ready, team.claimed, team.complete
+    )));
+    bounded_list(ui, "teams-members", |ui| {
+        for member in &team.members {
+            ui.label(format!(
+                "{} · {} {} claimed{}",
+                member.owner,
+                member.claimed_tasks,
+                if member.claimed_tasks == 1 {
+                    "task"
+                } else {
+                    "tasks"
+                },
+                member
+                    .run
+                    .as_ref()
+                    .map_or(String::new(), |run| format!(" · run {}", run.as_str()))
+            ));
+        }
+    });
+}
+
+fn task_detail(ui: &mut egui::Ui, task: &TeamTaskView) {
+    let title = format!("Task {}", task.task_id);
+    let owner = task.owner.as_ref().map(|owner| format!("Owner: {owner}"));
+    let generation = task.claim_generation.0;
+    task_card(
+        ui,
+        &TaskCardView {
+            title: &title,
+            state: task.state,
+            owner: owner.as_deref(),
+            owner_tip: owner.is_some().then(|| owner_tip(generation, None)),
+            paths: &task.paths,
+        },
+        |ui| {
+            ui.label(muted(format!("Generation {generation}")));
+            if let Some(run) = &task.owner_run {
+                ui.label(format!("Owner run: {}", run.as_str()));
+            }
+        },
+    );
 }
 
 impl Feature for TeamsFeature {
@@ -122,6 +180,15 @@ impl Feature for TeamsFeature {
         let reply = match result {
             Ok(QueryReply::Teams(reply)) => reply,
             Ok(_) => return,
+            // A thread that never started a team: the ordinary empty board, not a failure.
+            Err(error)
+                if error.code == Some(ErrorCode::NotFound)
+                    && matches!(&pending, Pending::Team(thread) if self.thread.as_ref() == Some(thread)) =>
+            {
+                self.team = None;
+                self.status.clear();
+                return;
+            }
             Err(error) => {
                 self.status = error.message;
                 return;
@@ -165,7 +232,7 @@ impl Feature for TeamsFeature {
             self.switch_thread(selected);
         }
         let Some(thread) = self.thread.clone() else {
-            ui.label("会話を選択するとチームボードを表示します。");
+            ui.label(muted("Select a conversation to show its team board."));
             return;
         };
         if self.stale {
@@ -223,49 +290,37 @@ impl Feature for TeamsFeature {
             }
         }
         if !self.status.is_empty() {
-            ui.label(&self.status);
+            reason_label(ui, palette().ERROR_FG, &self.status);
         }
         let Some(team) = &self.team else {
-            ui.label("このスレッドにチームボードはありません。");
+            ui.label(muted(EMPTY));
             return;
         };
-        ui.label(format!(
-            "{} — 待機 {} / 担当中 {} / 完了 {}",
-            source_label(team.source),
-            team.ready,
-            team.claimed,
-            team.complete
-        ));
-        bounded_list(ui, "teams-members", |ui| {
-            for member in &team.members {
-                ui.label(format!(
-                    "メンバー {} ({} 件担当){}",
-                    member.owner,
-                    member.claimed_tasks,
-                    member
-                        .run
-                        .as_ref()
-                        .map_or(String::new(), |run| format!(" run {}", run.as_str()))
-                ));
-            }
-        });
+        board(ui, team);
         ui.separator();
         let mut open = None;
         let tasks = &self.tasks;
+        let opened = self.opened.as_deref();
         let more = paged_list(
             ui,
             "teams-tasks",
-            self.next_cursor.is_some().then_some("さらに読み込む"),
+            self.next_cursor.is_some().then_some("Load more tasks"),
             |ui| {
                 for task in tasks {
                     ui.push_id(&task.task_id, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button(&task.task_id).clicked() {
+                        // No paths here: a path is shown in the opened task alone.
+                        compact_row(ui, opened == Some(task.task_id.as_str()), |ui| {
+                            let id = egui::RichText::new(&task.task_id).strong();
+                            // As tall as the row, so the list starts where its first id does.
+                            let button = egui::Button::new(id)
+                                .frame(false)
+                                .min_size(egui::vec2(0.0, ROW_DENSE));
+                            if ui.add(button).clicked() {
                                 open = Some(task.task_id.clone());
                             }
-                            ui.label(task_state_label(task.state));
+                            ui.label(state_word(task.state));
                             if let Some(owner) = &task.owner {
-                                ui.label(owner);
+                                ui.label(muted(owner));
                             }
                         });
                     });
@@ -282,23 +337,7 @@ impl Feature for TeamsFeature {
         }
         if let Some(task) = &self.detail {
             ui.separator();
-            ui.strong(format!("タスク {}", task.task_id));
-            ui.label(format!(
-                "{} / claim 世代 {}",
-                task_state_label(task.state),
-                task.claim_generation.0
-            ));
-            if let Some(owner) = &task.owner {
-                ui.label(format!("担当: {owner}"));
-            }
-            if let Some(run) = &task.owner_run {
-                ui.label(format!("担当 run: {}", run.as_str()));
-            }
-            bounded_list(ui, "teams-task-paths", |ui| {
-                for path in &task.paths {
-                    ui.label(path);
-                }
-            });
+            task_detail(ui, task);
         }
     }
 }

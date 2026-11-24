@@ -241,6 +241,51 @@ pub fn validate_socket(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Listen on a Unix socket at `path` whose file is 0600 from the moment it exists.
+///
+/// bind(2) creates the socket file with a mode masked by the umask, so binding
+/// and then chmod-ing leaves a window in which the file is wider (0755 under the
+/// usual umask) at its public path. A peer that connects in that window refuses
+/// it as an unsafe path ([`validate_socket`]). The umask is process-wide and not
+/// safe to change while other threads create files, so the socket's own mode is
+/// narrowed before bind instead, which bind then uses. Like a plain bind, this
+/// fails if `path` already exists.
+pub fn bind_private_socket(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    let listener = bind_owner_only(path)?;
+    // A umask that also clears owner bits still narrows the mode: widen it back
+    // to 0600 (never beyond), as the socket's peers require exactly that.
+    if fs::symlink_metadata(path)?.mode() & 0o7777 != 0o600 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(listener)
+}
+
+/// socket, fchmod 0600, bind, listen: on Linux the file is created with the
+/// socket's mode (masked by the umask), so it never appears wider than 0600.
+#[cfg(target_os = "linux")]
+fn bind_owner_only(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    rustix::fs::fchmod(&socket, rustix::fs::Mode::from_raw_mode(0o600))?;
+    rustix::net::bind(&socket, &SocketAddrUnix::new(path)?)?;
+    // As std's UnixListener::bind on Linux: the system's maximum backlog.
+    rustix::net::listen(&socket, -1)?;
+    Ok(std::os::unix::net::UnixListener::from(socket))
+}
+
+/// Elsewhere bind(2) ignores the socket's own mode (and fchmod on a socket
+/// fails), so the file is narrowed after bind, as before.
+#[cfg(not(target_os = "linux"))]
+fn bind_owner_only(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    std::os::unix::net::UnixListener::bind(path)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointRecord {
@@ -369,9 +414,7 @@ impl Instance {
         Self::acquire_with_runtime_dir(launch, runtime.as_deref(), Path::new("/tmp"))
     }
     pub fn bind(&self) -> io::Result<std::os::unix::net::UnixListener> {
-        let l = std::os::unix::net::UnixListener::bind(&self.socket)?;
-        fs::set_permissions(&self.socket, fs::Permissions::from_mode(0o600))?;
-        Ok(l)
+        bind_private_socket(&self.socket)
     }
     /// Publish only after listener bind. Atomic rename prevents partial hints.
     pub fn publish(&self, epoch: u64) -> io::Result<()> {
@@ -409,5 +452,30 @@ impl Drop for Instance {
         if validate_socket(&self.socket).is_ok() {
             let _ = fs::remove_file(&self.socket);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Under an empty umask a plain bind creates the file 0777; this one must
+    /// still create it 0600, with no chmod afterwards to hide a window.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_private_socket_is_created_owner_only_whatever_the_umask() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let previous = rustix::process::umask(rustix::fs::Mode::empty());
+        let bound = bind_owner_only(&path);
+        rustix::process::umask(previous);
+        let _listener = bound.unwrap();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert!(
+            bind_private_socket(&path).is_err(),
+            "an existing path is never replaced"
+        );
     }
 }

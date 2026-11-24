@@ -66,10 +66,13 @@ impl HostRecipeSource {
             .iter()
             .filter_map(|(thread, run)| bindings.permits.get(thread).map(|p| (*run, p.clone())))
             .collect();
-        let members = self
-            .runtime
-            .restart_recipe_inventory(&held)
-            .map_err(|_| unsupported("unknown member"))?;
+        let members =
+            self.runtime
+                .restart_recipe_inventory(&held)
+                .map_err(|error| match error {
+                    runtime::RuntimeError::RestartObservationChanged => conflict(),
+                    _ => unsupported("unknown member"),
+                })?;
         for member in &members {
             if member.lane {
                 return Err(unsupported("lane"));

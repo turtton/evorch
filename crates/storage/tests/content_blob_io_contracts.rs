@@ -142,8 +142,12 @@ const C_GC: u64 = 24;
 // the clock seed row. The same probe measured 434/681 frames for 10/100,000 rows (421/657
 // at v71); reserve exactly the 24 fixed schema frames seen with 100,000 rows. The VM-step
 // scaling assertion is unchanged and still passes: the migration reads no existing row.
-// v73 adds six events-only history tables and minimal invalidation triggers.
-// The identical v39 -> latest probe measured 456/721 frames for 10/100,000 rows
+// v73 adds only the empty goal usage table and its primary-key index. The fixed-main
+// probe measured 434/681 frames and 218,557 VM steps; v73 measures 441/691 frames
+// and 218,608 steps, identical steps at both row counts. Account for the 10 fixed
+// schema frames without relaxing collection or unrelated-row scaling contracts.
+// v74 adds six events-only history tables and minimal invalidation triggers.
+// The history-only v39 -> latest probe measured 456/721 frames for 10/100,000 rows
 // (434/681 at v72), with 218,982 VM steps at both sizes. Reserve the 40 fixed
 // schema frames at 100,000 rows; collection and VM scaling budgets are unchanged.
 const MIGRATION_FRAMES: u64 = 24
@@ -168,6 +172,7 @@ const MIGRATION_FRAMES: u64 = 24
     + 24
     + 24
     + 24
+    + 10
     + 40;
 
 const REF_TABLE: &str = "
@@ -405,6 +410,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v74.sql"),
                     include_str!("../undo/undo_v73.sql"),
                     include_str!("../undo/undo_v72.sql"),
                     include_str!("../undo/undo_v71.sql"),

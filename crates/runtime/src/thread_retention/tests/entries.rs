@@ -59,7 +59,7 @@ fn table() -> BTreeMap<&'static str, Guard> {
         (
             "thread_goals.rs::create_thread_goal",
             Guarded {
-                via: &["create_goal_inner"],
+                via: &["create_goal_inner", "create_goal_random"],
             },
         ),
         (

@@ -224,7 +224,7 @@ mod tests {
 
         // When: another thread is selected, so the tab leaves the dock
         let mut dock = DockState::new(vec![CoreTab::Run(id)]);
-        tabs.sweep(&mut dock, Some(&ThreadId::new("thr-2").unwrap()));
+        tabs.sweep(&mut dock, Some(&ThreadId::new("thr-2").unwrap()), |_| None);
         assert_eq!(tabs.shown().count(), 0);
         attention.observe(None, None, &cache, &tabs);
 

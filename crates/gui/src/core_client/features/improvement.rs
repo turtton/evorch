@@ -10,10 +10,20 @@
 //! its operation id (see the memory feature, which words them the same way).
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::diagnostics::read::{Phase, Read, phase_line};
+use std::time::SystemTime;
+
+use super::diagnostics::read::{Phase, Read, cut_note, phase_label};
 use super::layout::paged_list;
-use super::memory::{UNKNOWN_LINE, denial_label, update_line};
+use super::memory::{
+    CHECKING, UNKNOWN_LINE, UPDATING, denial_label, draw_update_line, update_failed, update_line,
+};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use crate::panes::improvement_widgets::{
+    ALL, DISABLED, DISMISS, EMPTY, EVIDENCE, MARK_REVIEWED, NO_PROJECT, STATUS_ACCESS,
+    STATUS_LABEL, evidence_runs, kind_badges, reopened_badge, seen_line, severity_word,
+    source_word, status_mark, status_word, when,
+};
+use crate::theme::text::{badge, muted};
 use workbench_protocol::{
     commands::{Command, CommandResult},
     errors::ErrorCode,
@@ -28,20 +38,18 @@ use workbench_protocol::{
         diagnostics::OperationTarget,
         improvement::{
             GetImprovement, ImprovementCommand, ImprovementDetail, ImprovementEvent,
-            ImprovementQuery, ImprovementReply, ImprovementResult, ImprovementSeverity,
-            ImprovementSource, ImprovementSummary, ImprovementUpdateView, ListImprovement,
-            TriageImprovement, UpdateImprovement,
+            ImprovementQuery, ImprovementReply, ImprovementResult, ImprovementSummary,
+            ImprovementUpdateView, ListImprovement, TriageImprovement, UpdateImprovement,
         },
     },
     operation::OperationState,
     queries::{PageRequest, Query, QueryReply},
 };
 
-const STATUSES: [(Option<ImprovementStatus>, &str); 4] = [
-    (None, "すべて"),
-    (Some(ImprovementStatus::New), "未確認"),
-    (Some(ImprovementStatus::Reviewed), "確認済み"),
-    (Some(ImprovementStatus::Dismissed), "却下"),
+const STATUSES: [ImprovementStatus; 3] = [
+    ImprovementStatus::New,
+    ImprovementStatus::Reviewed,
+    ImprovementStatus::Dismissed,
 ];
 
 #[derive(Debug, Clone)]
@@ -82,40 +90,43 @@ pub struct ImprovementFeature {
     /// The updates whose outcome is unknown, asked for at the next frame.
     to_check: BTreeSet<OperationId>,
     update_line: String,
+    update_failed: bool,
 }
 
 fn new_operation() -> OperationId {
     OperationId::new(format!("gui-improvement-{}", uuid::Uuid::new_v4())).expect("a uuid fits")
 }
 
-fn action_label(action: ImprovementAction) -> &'static str {
+fn action_label(action: ImprovementAction) -> (&'static str, Option<&'static str>) {
     match action {
-        ImprovementAction::MarkReviewed => "確認済みにする",
-        ImprovementAction::Dismiss => "却下する",
-        ImprovementAction::Triage => "下書きを作る",
+        ImprovementAction::MarkReviewed => (MARK_REVIEWED, None),
+        ImprovementAction::Dismiss => (DISMISS, None),
+        ImprovementAction::Triage => (
+            "Create draft",
+            Some("Writes an issue draft for this candidate. Nothing is sent."),
+        ),
     }
 }
 
-fn status_label(status: ImprovementStatus) -> &'static str {
-    STATUSES
-        .iter()
-        .find(|(candidate, _)| *candidate == Some(status))
-        .map_or("", |(_, label)| label)
-}
-
-fn severity_label(severity: ImprovementSeverity) -> &'static str {
-    match severity {
-        ImprovementSeverity::Info => "情報",
-        ImprovementSeverity::Warning => "警告",
-        ImprovementSeverity::Error => "エラー",
+/// The core's milliseconds as the legacy pane's relative and absolute text. The
+/// wire allows any u64: a value chrono cannot hold reads as unknown, never panics.
+fn when_ms(ms: u64, now: SystemTime, unknown: &str) -> (String, String) {
+    match i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+    {
+        Some(at) => when(at.into(), now),
+        None => ("unknown time".into(), unknown.into()),
     }
 }
 
-fn source_label(source: ImprovementSource) -> &'static str {
-    match source {
-        ImprovementSource::Diagnostic => "診断",
-        ImprovementSource::Lesson => "教訓",
-    }
+fn badges(ui: &mut egui::Ui, summary: &ImprovementSummary) {
+    kind_badges(
+        ui,
+        source_word(summary.source),
+        severity_word(summary.severity),
+        &summary.code,
+    );
 }
 
 impl ImprovementFeature {
@@ -144,9 +155,10 @@ impl ImprovementFeature {
             if view.operation.state == OperationState::Ready
                 && let Some(draft) = &view.draft_file
             {
-                line = format!("{line} 下書き: {draft}（送信はされません）");
+                line = format!("{line} Draft: {draft} (nothing is sent).");
             }
             self.update_line = line;
+            self.update_failed = update_failed(view.operation.state);
         }
         if self.project.as_ref() == Some(&view.project) {
             self.list_due = true;
@@ -159,6 +171,7 @@ impl ImprovementFeature {
         self.in_flight.remove(id);
         self.to_check.remove(id);
         UNKNOWN_LINE.clone_into(&mut self.update_line);
+        self.update_failed = true;
         self.list_due = true;
         self.detail_due = self.selected.is_some();
     }
@@ -193,7 +206,8 @@ impl ImprovementFeature {
             }),
         };
         self.in_flight.insert(operation_id.clone());
-        "更新中…".clone_into(&mut self.update_line);
+        UPDATING.clone_into(&mut self.update_line);
+        self.update_failed = false;
         let tag = self.tag(Pending::Command(operation_id));
         ctx.command(tag, Command::Improvement(command));
     }
@@ -281,7 +295,7 @@ impl Feature for ImprovementFeature {
     }
 
     fn title(&self) -> &'static str {
-        "Improvement"
+        "Self-improvement drafts"
     }
 
     fn availability(&self) -> Availability {
@@ -347,11 +361,13 @@ impl Feature for ImprovementFeature {
                     }
                     Err(error) if error.outcome_unknown => {
                         // It may have been applied: asked for, not sent again.
-                        "更新の結果を確認しています…".clone_into(&mut self.update_line);
+                        CHECKING.clone_into(&mut self.update_line);
+                        self.update_failed = false;
                         self.to_check.insert(id);
                     }
                     Err(error) => {
                         self.in_flight.remove(&id);
+                        self.update_failed = true;
                         self.update_line = if error.code == Some(ErrorCode::StaleRevision) {
                             update_line(
                                 OperationState::Failed {
@@ -362,7 +378,7 @@ impl Feature for ImprovementFeature {
                                 None,
                             )
                         } else {
-                            format!("更新できませんでした: {}", error.message)
+                            format!("Could not update: {}", error.message)
                         };
                         self.list_due = true;
                         self.detail_due = self.selected.is_some();
@@ -453,25 +469,27 @@ impl Feature for ImprovementFeature {
             self.switch_project(selected_project);
         }
         let Some(project) = self.project.clone() else {
-            ui.label("プロジェクトを選択すると改善候補を表示します。");
+            ui.label(NO_PROJECT);
             return;
         };
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let before = self.status;
-            egui::ComboBox::from_id_salt("improvement-status")
-                .selected_text(
-                    STATUSES
-                        .iter()
-                        .find(|(status, _)| *status == self.status)
-                        .map_or("", |(_, label)| label),
-                )
+            ui.label(STATUS_LABEL);
+            let status = egui::ComboBox::from_id_salt("improvement-status")
+                .selected_text(self.status.map_or(ALL, status_word))
                 .show_ui(ui, |ui| {
-                    for (status, label) in STATUSES {
-                        ui.selectable_value(&mut self.status, status, label);
+                    ui.selectable_value(&mut self.status, None, ALL);
+                    for status in STATUSES {
+                        ui.selectable_value(&mut self.status, Some(status), status_word(status));
                     }
                 });
-            if before != self.status || ui.button("再読み込み").clicked() {
+            status.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, STATUS_ACCESS)
+            });
+            // Drawn every frame, also when the filter just changed.
+            let refresh = ui.button("Refresh").clicked();
+            if refresh || before != self.status {
                 self.list_due = true;
             }
         });
@@ -500,105 +518,147 @@ impl Feature for ImprovementFeature {
         }
 
         if self.enabled == Some(false) {
-            ui.label("自己改善は設定で無効です。記録済みの候補だけを表示します。");
+            // The core still lists what was collected before it was switched off.
+            ui.label(muted(format!(
+                "{DISABLED} Earlier candidates are still listed."
+            )));
         }
-        if let Some(line) = phase_line(self.list_read.phase()) {
-            ui.label(line);
+        phase_label(ui, self.list_read.phase());
+        if self.list_read.phase() == &Phase::Ready {
+            if self.items.is_empty() {
+                ui.label(EMPTY);
+            } else {
+                let more = if self.next_cursor.is_some() {
+                    " (more available)"
+                } else {
+                    ""
+                };
+                ui.label(muted(format!("{} candidates{more}", self.items.len())));
+            }
         }
-        if self.list_read.phase() == &Phase::Ready && self.items.is_empty() {
-            ui.label("改善候補はありません。");
-        }
-        let mut open = None;
-        let items = &self.items;
-        let more = paged_list(
-            ui,
-            "improvement-list",
-            self.next_cursor.is_some().then_some("さらに読み込む"),
-            |ui| {
-                for item in items {
-                    let label = format!(
-                        "{} · {} · {} · {} 回 · {}",
-                        item.state.id.as_str(),
-                        status_label(item.state.status),
-                        severity_label(item.severity),
-                        item.occurrences,
-                        item.title
-                    );
-                    if ui.button(label).clicked() {
-                        open = Some(item.state.id.clone());
-                    }
-                }
-            },
-        );
-        if more {
-            self.more_requested = true;
-        }
-        if let Some(id) = open {
+        let now = SystemTime::now();
+        if let Some(id) = self.candidate_list(ui, now) {
             self.selected = Some(id);
             self.detail_due = true;
         }
 
         if self.selected.is_some() {
             ui.separator();
-            if let Some(line) = phase_line(self.detail_read.phase()) {
-                ui.label(line);
+            phase_label(ui, self.detail_read.phase());
+            if let Some((state, action)) = self.candidate_detail(ui, now) {
+                self.send(ctx, project.clone(), &state, action);
             }
-            if let Some(detail) = &self.detail {
-                let summary = &detail.summary;
-                ui.strong(format!(
-                    "{} · {} · {} · {}",
-                    summary.state.id.as_str(),
-                    source_label(summary.source),
-                    summary.code,
-                    summary.title
-                ));
-                if detail.reopened_count > 0 {
-                    ui.label(format!("再オープン {} 回", detail.reopened_count));
-                }
-                if let Some(draft) = &detail.draft_file {
-                    ui.label(format!("下書き: {draft}"));
-                }
-                if let Some(run) = &detail.run {
-                    ui.label(format!("最初の run: {}", run.as_str()));
-                }
-                ui.strong("根拠");
-                ui.label(&detail.evidence.text);
-                if detail.evidence.truncated {
-                    ui.label(format!(
-                        "(先頭 {} バイトのみ表示 / 全体 {} バイト)",
-                        detail.evidence.text.len(),
-                        detail.evidence.total_bytes
-                    ));
-                }
-                let busy = !self.in_flight.is_empty();
-                let mut chosen = None;
-                ui.horizontal_wrapped(|ui| {
-                    for ActionAvailability { action, state } in &summary.state.actions {
-                        match state {
-                            ActionState::Allowed => {
-                                if ui
-                                    .add_enabled(!busy, egui::Button::new(action_label(*action)))
-                                    .clicked()
-                                {
-                                    chosen = Some(*action);
-                                }
+        }
+        draw_update_line(ui, &self.update_line, self.update_failed);
+    }
+}
+
+impl ImprovementFeature {
+    /// The candidates as the legacy pane lists them; returns the one whose id was clicked.
+    fn candidate_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        now: SystemTime,
+    ) -> Option<ImprovementCandidateId> {
+        let mut open = None;
+        let items = &self.items;
+        let more = paged_list(
+            ui,
+            "improvement-list",
+            self.next_cursor.is_some().then_some("Load more candidates"),
+            |ui| {
+                for item in items {
+                    ui.push_id(item.state.id.as_str(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            status_mark(ui, item.state.status);
+                            let id = egui::RichText::new(item.state.id.as_str()).monospace();
+                            if ui.add(egui::Button::new(id).frame(false)).clicked() {
+                                open = Some(item.state.id.clone());
                             }
-                            ActionState::Denied { reason } => {
-                                ui.add_enabled(false, egui::Button::new(action_label(*action)))
-                                    .on_disabled_hover_text(denial_label(*reason));
-                            }
+                            badges(ui, item);
+                        });
+                        ui.label(&item.title);
+                        if item.occurrences > 1 {
+                            let (seen, absolute) =
+                                when_ms(item.last_seen_ms, now, "Unknown last-seen time");
+                            ui.label(muted(seen_line(item.occurrences, &seen)))
+                                .on_hover_text(absolute);
+                        }
+                        ui.separator();
+                    });
+                }
+            },
+        );
+        if more {
+            self.more_requested = true;
+        }
+        open
+    }
+
+    /// The opened candidate as the legacy pane draws an entry; returns the update chosen.
+    fn candidate_detail(
+        &self,
+        ui: &mut egui::Ui,
+        now: SystemTime,
+    ) -> Option<(ImprovementState, ImprovementAction)> {
+        let detail = self.detail.as_ref()?;
+        let summary = &detail.summary;
+        ui.horizontal_wrapped(|ui| {
+            status_mark(ui, summary.state.status);
+            if detail.reopened_count > 0 {
+                reopened_badge(ui, detail.reopened_count);
+            }
+            ui.monospace(summary.state.id.as_str());
+            let (created, absolute) = when_ms(detail.created_ms, now, "Unknown creation time");
+            ui.label(muted(created)).on_hover_text(absolute);
+        });
+        ui.horizontal_wrapped(|ui| badges(ui, summary));
+        ui.label(&summary.title);
+        ui.collapsing(badge(EVIDENCE), |ui| {
+            ui.monospace(&detail.evidence.text);
+            if detail.evidence.truncated {
+                ui.label(muted(cut_note(
+                    detail.evidence.text.len(),
+                    detail.evidence.total_bytes,
+                )));
+            }
+            evidence_runs(
+                ui,
+                detail.run.as_ref().map(|run| run.as_str()),
+                &detail
+                    .recent_runs
+                    .iter()
+                    .map(|run| run.as_str())
+                    .collect::<Vec<_>>(),
+            );
+        });
+        if let Some(draft) = &detail.draft_file {
+            ui.label(format!("Draft: {draft}"));
+        }
+        let busy = !self.in_flight.is_empty();
+        let mut chosen = None;
+        ui.horizontal_wrapped(|ui| {
+            for ActionAvailability { action, state } in &summary.state.actions {
+                let (label, tip) = action_label(*action);
+                match state {
+                    ActionState::Allowed => {
+                        let response = ui.add_enabled(!busy, egui::Button::new(label));
+                        let response = match tip {
+                            Some(tip) => response.on_hover_text(tip),
+                            None => response,
+                        };
+                        if response.clicked() {
+                            chosen = Some(*action);
                         }
                     }
-                });
-                if let Some(action) = chosen {
-                    let state = summary.state.clone();
-                    self.send(ctx, project.clone(), &state, action);
+                    ActionState::Denied { reason } => {
+                        ui.add_enabled(false, egui::Button::new(label))
+                            .on_disabled_hover_text(denial_label(*reason));
+                    }
                 }
             }
-        }
-        if !self.update_line.is_empty() {
-            ui.label(&self.update_line);
-        }
+        });
+        chosen.map(|action| (summary.state.clone(), action))
     }
 }
 

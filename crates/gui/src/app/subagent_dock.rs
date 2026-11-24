@@ -1,8 +1,9 @@
-use egui_dock::{Node, NodeIndex, NodePath, SurfaceIndex, TabIndex};
+use egui_dock::{Node, NodeIndex, TabIndex};
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use workspace_ui::{Panel, PanelId, PanelKind};
 
 use super::WorkbenchState;
+use crate::dock::subagent_layout::{self, equalize_subagent_fractions};
 use crate::model::tasks::AgentRunSource;
 
 const REGION_HOME: &str = "subagents-home";
@@ -111,14 +112,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// right of the workbench when there is none yet.
     fn dock_subagent_pane(&mut self, id: PanelId) {
         let bottom = self.subagent_leaves().last().copied();
-        let tree = self.dock.main_surface_mut();
-        if tree.is_empty() {
-            *tree = egui_dock::Tree::new(vec![id]);
-        } else if let Some(node) = bottom {
-            tree.split_below(node, 0.5, vec![id]);
-        } else {
-            tree.split_right(NodeIndex::root(), 0.7, vec![id]);
-        }
+        subagent_layout::dock_below(self.dock.main_surface_mut(), bottom, id);
     }
 
     /// A finished subagent that the runtime resumed leaves its parked tab and
@@ -253,21 +247,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.dock.remove_tab(path);
             }
         }
-        if let Some(path) = self.dock.find_tab(&target)
-            && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
-        {
-            leaf.active = path.tab;
-            let index = leaf
-                .tabs
-                .iter()
-                .position(|id| id.as_str() == "agent-main")
-                .map_or(leaf.tabs.len(), |index| index + 1);
-            if leaf.active.0 >= index {
-                leaf.active.0 += parked.len();
-            }
-            leaf.tabs
-                .splice(index..index, parked.into_iter().map(|(_, id)| id));
-        }
+        subagent_layout::splice_parked(
+            &mut self.dock,
+            &target,
+            parked.into_iter().map(|(_, id)| id).collect(),
+            |id| id.as_str() == "agent-main",
+        );
         self.restore_subagent_focus(focus);
         self.equalize_subagent_panes();
     }
@@ -333,102 +318,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn subagent_leaves(&self) -> Vec<NodeIndex> {
-        let tree = self.dock.main_surface();
-        let mut pending = vec![NodeIndex::root()];
-        let mut leaves = Vec::new();
-        while let Some(node) = pending.pop() {
-            match tree.iter().nth(node.0) {
-                Some(Node::Horizontal(_) | Node::Vertical(_)) => {
-                    pending.push(node.right());
-                    pending.push(node.left());
-                }
-                Some(Node::Leaf(leaf)) => {
-                    if leaf.tabs.iter().any(|id| {
-                        id.as_str() == REGION_HOME
-                            || self.panels.get(id).is_some_and(|panel| {
-                                matches!(
-                                    panel.kind,
-                                    PanelKind::SubagentTranscript
-                                        | PanelKind::ParkedAgentTranscript(_)
-                                )
-                            })
-                    }) {
-                        leaves.push(node);
-                    }
-                }
-                Some(Node::Empty) | None => {}
-            }
-        }
-        leaves
+        subagent_layout::subagent_leaves(self.dock.main_surface(), |id| {
+            id.as_str() == REGION_HOME
+                || self.panels.get(id).is_some_and(|panel| {
+                    matches!(
+                        panel.kind,
+                        PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_)
+                    )
+                })
+        })
     }
 
     pub(super) fn subagent_focus_snapshot(&self) -> Option<Vec<PanelId>> {
-        self.dock
-            .focused_leaf()
-            .or_else(|| {
-                self.dock
-                    .main_surface()
-                    .focused_leaf()
-                    .map(|node| NodePath {
-                        surface: SurfaceIndex::main(),
-                        node,
-                    })
-            })
-            .and_then(|path| self.dock.leaf(path).ok())
-            .map(|leaf| leaf.tabs.clone())
+        subagent_layout::focus_snapshot(&self.dock)
     }
 
     pub(super) fn restore_subagent_focus(&mut self, focus: Option<Vec<PanelId>>) {
         // Resolve saved tab identities after reindexing; a vanished leaf stays
         // unfocused rather than transferring focus to a new or parked pane.
-        match focus {
-            None => self.dock.set_focused_node_and_surface(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(usize::MAX),
-            }),
-            Some(tabs) => {
-                if let Some(path) =
-                    tabs.iter()
-                        .filter(|id| {
-                            !self.panels.get(*id).is_some_and(|p| {
-                                matches!(p.kind, PanelKind::ParkedAgentTranscript(_))
-                            })
-                        })
-                        .find_map(|id| self.dock.find_tab(id))
-                {
-                    self.dock.set_focused_node_and_surface(path.node_path());
-                } else {
-                    self.dock.set_focused_node_and_surface(NodePath {
-                        surface: SurfaceIndex::main(),
-                        node: NodeIndex(usize::MAX),
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn equalize_subagent_fractions(tree: &mut egui_dock::Tree<PanelId>, leaves: &[NodeIndex]) {
-    let Some((&bottom, above)) = leaves.split_last() else {
-        return;
-    };
-    let mut subtree = bottom;
-    let mut count = 1.0;
-    for &leaf in above.iter().rev() {
-        let Some(parent) = subtree.parent() else {
-            break;
-        };
-        if parent.left() != leaf || parent.right() != subtree {
-            break;
-        }
-        match &mut tree[parent] {
-            Node::Vertical(split) => {
-                count += 1.0;
-                split.fraction = 1.0 / count;
-                subtree = parent;
-            }
-            Node::Horizontal(_) | Node::Leaf(_) | Node::Empty => break,
-        }
+        let panels = &self.panels;
+        subagent_layout::restore_focus(&mut self.dock, focus, |id| {
+            panels
+                .get(id)
+                .is_some_and(|p| matches!(p.kind, PanelKind::ParkedAgentTranscript(_)))
+        });
     }
 }
 

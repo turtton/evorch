@@ -3,12 +3,13 @@
 //! trial. It draws what [`EvaluationsModel`] holds and changes only the
 //! model's selection; reading is the model's job on its workers.
 
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use eval::inspection::{
     Artifact, ArtifactProblem, EvaluationGroupSnapshot, EvaluationMemberSnapshot,
     EvaluationTrialSnapshot, GroupPhase, MemberPhase, Purpose, TrialState,
 };
 
+use super::evaluation_widgets::{self, phase_color};
 use crate::model::evaluations::present;
 use crate::model::evaluations::{EvaluationsModel, Loaded, ReplayData, ReplayView};
 use crate::theme::text::{h3, h4, muted};
@@ -103,53 +104,15 @@ fn member_of(model: &EvaluationsModel, index: usize) -> Option<&EvaluationMember
 }
 
 fn problem_label(ui: &mut Ui, problem: &ArtifactProblem) {
-    ui.colored_label(palette().WARNING_FG, format!("Artifact problem: {problem}"));
-}
-
-fn phase_color(running: bool, bad: bool, unverified: bool) -> Color32 {
-    if running {
-        palette().RUNNING
-    } else if bad {
-        palette().ERROR_FG
-    } else if unverified {
-        palette().WARNING_FG
-    } else {
-        palette().SUCCESS
-    }
+    evaluation_widgets::problem_line(ui, &problem.to_string());
 }
 
 fn group_badge(ui: &mut Ui, phase: GroupPhase) {
-    let color = phase_color(
-        phase == GroupPhase::Running,
-        phase == GroupPhase::Incomplete,
-        matches!(phase, GroupPhase::Unverified | GroupPhase::Partial),
-    );
-    badge(
-        ui,
-        present::group_phase_label(phase),
-        palette().CANVAS,
-        color,
-    );
+    evaluation_widgets::group_badge(ui, present::shown_group_phase(phase));
 }
 
 fn member_badge(ui: &mut Ui, phase: MemberPhase) {
-    let color = phase_color(
-        phase.is_active(),
-        matches!(
-            phase,
-            MemberPhase::Failed | MemberPhase::FinishedWithoutReport
-        ),
-        phase == MemberPhase::Unverified,
-    );
-    let response = badge(
-        ui,
-        present::member_phase_label(phase),
-        palette().CANVAS,
-        color,
-    );
-    if phase == MemberPhase::Unverified {
-        response.on_hover_text(present::UNVERIFIED_HINT);
-    }
+    evaluation_widgets::member_badge(ui, present::shown_member_phase(phase));
 }
 
 fn group_list(ui: &mut Ui, model: &mut EvaluationsModel) {

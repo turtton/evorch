@@ -3,6 +3,7 @@ mod boundary;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;
+mod usage;
 
 use crate::{AgentRunPhase, AgentRuntime, RunId};
 use event_bus::{
@@ -30,6 +31,7 @@ pub(crate) struct ThreadGoals {
 pub(crate) struct GoalEntry {
     // Runtime-only identity for new human input, including epoch saturation.
     input_revision: std::sync::Arc<()>,
+    persistence: usage::UsageState,
     snapshot: ThreadGoalSnapshot,
     reviewer: Option<RunId>,
     review_result: Option<GoalReview>,
@@ -198,6 +200,25 @@ impl AgentRuntime {
         criteria: Vec<String>,
         replace_blocked: bool,
     ) -> Result<ThreadGoalSnapshot, String> {
+        self.create_goal_random(
+            thread_id,
+            run_id,
+            objective,
+            criteria,
+            replace_blocked,
+            |bytes| getrandom::fill(bytes).map_err(|e| e.to_string()),
+        )
+    }
+
+    fn create_goal_random(
+        &self,
+        thread_id: &str,
+        run_id: RunId,
+        objective: String,
+        criteria: Vec<String>,
+        replace_blocked: bool,
+        random: impl FnOnce(&mut [u8]) -> Result<(), String>,
+    ) -> Result<ThreadGoalSnapshot, String> {
         self.deny_deleted_thread(thread_id)
             .and_then(|()| self.deny_deleted_run(&run_id.to_string()))
             .map_err(|deleted| deleted.to_string())?;
@@ -258,11 +279,17 @@ impl AgentRuntime {
             .goals
             .get(thread_id)
             .map_or(0, |entry| entry.snapshot.epoch.saturating_add(1));
+        tracing::debug!(
+            durable_usage = self.shared.run_store.get().is_some(),
+            "thread goal usage mode (no store uses legacy full snapshots without durability guarantees)"
+        );
         let snapshot = ThreadGoalSnapshot {
-            goal_id: handoff_incarnation.map_or_else(
-                || format!("thread-goal-{run_id}-{sequence}"),
-                |incarnation| format!("thread-goal-{run_id}-{incarnation}-{sequence}"),
-            ),
+            goal_id: new_goal_id(
+                &run_id.to_string(),
+                handoff_incarnation.map(|id| id.to_string()).as_deref(),
+                sequence,
+                random,
+            )?,
             thread_id: thread_id.into(),
             root_run_id: run_id.to_string(),
             related_root_run_ids,
@@ -289,15 +316,9 @@ impl AgentRuntime {
                 .get(),
             max_tokens: None,
         };
-        let previous = goals.goals.insert(
-            thread_id.into(),
-            GoalEntry {
-                input_revision: std::sync::Arc::new(()),
-                snapshot: snapshot.clone(),
-                reviewer: None,
-                review_result: None,
-            },
-        );
+        let previous = goals
+            .goals
+            .insert(thread_id.into(), GoalEntry::new(snapshot.clone(), false));
         self.publish_thread_goal(&snapshot);
         drop(goals);
         self.cancel_goal_reviewer(previous.and_then(|entry| entry.reviewer));
@@ -327,6 +348,7 @@ impl AgentRuntime {
 
     /// Rehydrate event-sourced state without starting work or granting new authority.
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
+        let usage_read_failed = self.restore_goal_usage(&mut snapshot);
         let plan_gate = self.shared.plan_authority.get(&snapshot.thread_id);
         let _plan_authority = plan_gate
             .lock()
@@ -416,12 +438,7 @@ impl AgentRuntime {
         self.publish_thread_goal(&snapshot);
         goals.goals.insert(
             snapshot.thread_id.clone(),
-            GoalEntry {
-                input_revision: std::sync::Arc::new(()),
-                snapshot,
-                reviewer: None,
-                review_result: None,
-            },
+            GoalEntry::new(snapshot, usage_read_failed),
         );
         Ok(())
     }
@@ -834,26 +851,34 @@ impl AgentRuntime {
             return Ok(());
         }
         let thread = event_bus::escalation_thread_id(&target.to_string());
+        let mut goal = receipt
+            .goal_json
+            .as_deref()
+            .map(serde_json::from_str::<ThreadGoalSnapshot>)
+            .transpose()
+            .map_err(|e| e.to_string());
+        let usage_read_failed = goal
+            .as_mut()
+            .ok()
+            .and_then(Option::as_mut)
+            .is_some_and(|snapshot| self.restore_goal_usage(snapshot));
         let plan_gate = self.shared.plan_authority.get(&thread);
         let _plan_authority = plan_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let goal = receipt
-            .goal_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<ThreadGoalSnapshot>(json).ok());
         let scratch_keys = self.scratch_root_publication_keys(
             &thread,
             target,
-            goal.as_ref().map(|goal| goal.goal_id.as_str()),
+            goal.as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|goal| goal.goal_id.as_str()),
         );
         let mut goals = self.goal_lock();
         self.advance_scratch_epochs(&scratch_keys);
         if !goals.goals.contains_key(&thread)
-            && let Some(json) = receipt.goal_json
+            && let Some(snapshot) = goal?
         {
-            let snapshot: ThreadGoalSnapshot =
-                serde_json::from_str(&json).map_err(|e| e.to_string())?;
             if snapshot.thread_id != thread || snapshot.root_run_id != target.to_string() {
                 return Err("handoff goal belongs to a different target".into());
             }
@@ -863,15 +888,9 @@ impl AgentRuntime {
                 .goals
                 .retain(|_, e| e.snapshot.goal_id != snapshot.goal_id);
             self.publish_thread_goal(&snapshot);
-            goals.goals.insert(
-                thread.clone(),
-                GoalEntry {
-                    input_revision: std::sync::Arc::new(()),
-                    snapshot,
-                    reviewer: None,
-                    review_result: None,
-                },
-            );
+            goals
+                .goals
+                .insert(thread.clone(), GoalEntry::new(snapshot, usage_read_failed));
         }
         goals.roots.insert(target, thread);
         Ok(())
@@ -1046,103 +1065,6 @@ impl AgentRuntime {
                 snapshot: snapshot.clone(),
             }));
     }
-
-    /// Track worker and reviewer usage and enforce the shared cumulative token budget.
-    pub(crate) fn goal_model_request(
-        &self,
-        run: RunId,
-        purpose: crate::RunPurpose,
-        token_limit: Option<u64>,
-    ) -> bool {
-        let root = match purpose {
-            crate::RunPurpose::ThreadGoalReview { root_run_id, .. } => root_run_id,
-            _ => self.goal_owner_for_run(run).unwrap_or(run),
-        };
-        let mut goals = self.goal_lock();
-        let Some(thread) = goals.roots.get(&root).cloned() else {
-            return true;
-        };
-        let Some(entry) = goals.goals.get_mut(&thread) else {
-            return true;
-        };
-        if entry.snapshot.phase == ThreadGoalPhase::Complete {
-            return true;
-        }
-        if run == root
-            && purpose == crate::RunPurpose::General
-            && let Some(limit) = token_limit
-        {
-            entry.snapshot.max_tokens = Some(
-                entry
-                    .snapshot
-                    .max_tokens
-                    .map_or(limit, |previous| previous.min(limit)),
-            );
-        }
-        let used_tokens = entry
-            .snapshot
-            .usage
-            .input_tokens
-            .saturating_add(entry.snapshot.usage.output_tokens);
-        if entry
-            .snapshot
-            .max_tokens
-            .is_some_and(|limit| used_tokens >= limit)
-        {
-            entry.snapshot.phase = ThreadGoalPhase::Blocked;
-            entry.snapshot.reason = Some(format!(
-                "Goal cumulative token budget exhausted; automatic checking is stopped.{RECOVERY_HINT}"
-            ));
-            self.publish_thread_goal(&entry.snapshot);
-            return false;
-        }
-        entry.snapshot.usage.model_requests = entry.snapshot.usage.model_requests.saturating_add(1);
-        self.publish_thread_goal(&entry.snapshot);
-        true
-    }
-
-    pub(crate) fn goal_usage(
-        &self,
-        run: RunId,
-        purpose: crate::RunPurpose,
-        usage: providers::Usage,
-    ) {
-        let root = match purpose {
-            crate::RunPurpose::ThreadGoalReview { root_run_id, .. } => root_run_id,
-            _ => self.goal_owner_for_run(run).unwrap_or(run),
-        };
-        let mut goals = self.goal_lock();
-        let Some(thread) = goals.roots.get(&root).cloned() else {
-            return;
-        };
-        if let Some(entry) = goals.goals.get_mut(&thread) {
-            if entry.snapshot.phase == ThreadGoalPhase::Complete {
-                return;
-            }
-            entry.snapshot.usage.input_tokens = entry
-                .snapshot
-                .usage
-                .input_tokens
-                .saturating_add(usage.input_tokens);
-            entry.snapshot.usage.output_tokens = entry
-                .snapshot
-                .usage
-                .output_tokens
-                .saturating_add(usage.output_tokens);
-            let total = entry
-                .snapshot
-                .usage
-                .input_tokens
-                .saturating_add(entry.snapshot.usage.output_tokens);
-            if entry.snapshot.max_tokens.is_some_and(|limit| total > limit) {
-                entry.snapshot.phase = ThreadGoalPhase::Blocked;
-                entry.snapshot.reason = Some(format!(
-                    "Goal cumulative token budget exhausted; automatic checking is stopped.{RECOVERY_HINT}"
-                ));
-            }
-            self.publish_thread_goal(&entry.snapshot);
-        }
-    }
 }
 
 fn matching<'a>(
@@ -1224,4 +1146,35 @@ fn validate_checks(
         validate_text(&check.evidence)?;
     }
     Ok(())
+}
+
+impl GoalEntry {
+    fn new(snapshot: ThreadGoalSnapshot, read_failed: bool) -> Self {
+        Self {
+            input_revision: std::sync::Arc::new(()),
+            persistence: usage::UsageState::new(&snapshot.usage, read_failed),
+            snapshot,
+            reviewer: None,
+            review_result: None,
+        }
+    }
+}
+
+fn new_goal_id(
+    run: &str,
+    incarnation: Option<&str>,
+    sequence: u64,
+    random: impl FnOnce(&mut [u8]) -> Result<(), String>,
+) -> Result<String, String> {
+    let mut nonce = [0_u8; 16];
+    random(&mut nonce).map_err(|e| format!("Cannot generate goal nonce: {e}"))?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let id = incarnation.map_or_else(
+        || format!("thread-goal-{run}-{sequence}-{nonce}"),
+        |incarnation| format!("thread-goal-{run}-{incarnation}-{sequence}-{nonce}"),
+    );
+    if id.len() > 128 || id.chars().any(char::is_control) {
+        return Err("generated goal id exceeds protocol constraints".into());
+    }
+    Ok(id)
 }

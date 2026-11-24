@@ -193,6 +193,16 @@ pub(super) fn run_writer_with_index(
                 state.writes_suspended,
                 command,
             ),
+            Ok(Command::UpsertThreadGoalUsage(id, thread, root, usage, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "goal usage writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::thread_goal_usage::upsert(&state.conn, &id, &thread, &root, &usage)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
             Ok(Command::RecordUsageRequests(records, reply)) => {
                 let result = if state.writes_suspended {

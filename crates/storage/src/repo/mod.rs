@@ -30,6 +30,7 @@ pub mod run_ledger;
 pub(crate) mod run_messages;
 pub mod session;
 pub mod task;
+pub(crate) mod thread_goal_usage;
 pub(crate) mod thread_index;
 #[cfg(test)]
 mod thread_index_tests;

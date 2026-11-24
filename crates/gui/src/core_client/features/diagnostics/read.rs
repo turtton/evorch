@@ -136,27 +136,49 @@ impl Read {
 
 fn failure_text(code: ErrorCode) -> String {
     match code {
-        ErrorCode::NotFound => "見つかりませんでした。".into(),
-        ErrorCode::StorageUnavailable => "保存先を読み取れませんでした。".into(),
-        other => format!("読み取りに失敗しました ({other:?})。"),
+        ErrorCode::NotFound => "Not found.".into(),
+        ErrorCode::StorageUnavailable => "The storage could not be read.".into(),
+        other => format!("The read failed ({other:?})."),
     }
 }
 
 fn cancel_text(reason: CancelReason) -> String {
     match reason {
-        CancelReason::Requested => "読み取りは取り消されました。".into(),
-        CancelReason::Restart => "コアの再起動で読み取りが中断されました。".into(),
-        CancelReason::Shutdown => "コアの停止で読み取りが中断されました。".into(),
+        CancelReason::Requested => "The read was cancelled.".into(),
+        CancelReason::Restart => "The read was interrupted by a core restart.".into(),
+        CancelReason::Shutdown => "The read was interrupted because the core stopped.".into(),
     }
 }
 
 /// One line for what a read is doing, `None` once it holds data (or nothing was asked).
 pub(crate) fn phase_line(phase: &Phase) -> Option<&str> {
     match phase {
-        Phase::Waiting => Some("読み込み中…"),
+        Phase::Waiting => Some(LOADING),
         Phase::Failed(text) => Some(text),
         Phase::Idle | Phase::Ready => None,
     }
+}
+
+/// What a read shows while it waits for the core.
+pub(crate) const LOADING: &str = "Loading…";
+
+/// [`phase_line`] drawn in the legacy panes' style: a muted line while waiting, and a
+/// failure in the error colour.
+pub(crate) fn phase_label(ui: &mut egui::Ui, phase: &Phase) {
+    match phase {
+        Phase::Waiting => {
+            ui.label(crate::theme::text::muted(LOADING));
+        }
+        Phase::Failed(text) => {
+            crate::theme::widgets::reason_label(ui, crate::theme::tokens::palette().ERROR_FG, text);
+        }
+        Phase::Idle | Phase::Ready => {}
+    }
+}
+
+/// The note under a text the core cut for the wire.
+pub(crate) fn cut_note(shown: usize, total: u64) -> String {
+    format!("Showing the first {shown} of {total} bytes.")
 }
 
 #[cfg(test)]
@@ -247,7 +269,7 @@ mod tests {
             ),
             None,
         );
-        assert!(matches!(read.phase(), Phase::Failed(text) if text.contains("見つかり")));
+        assert!(matches!(read.phase(), Phase::Failed(text) if text.contains("Not found")));
         let id = read.begin("memory");
         read.accept::<u8>(
             read.generation(),

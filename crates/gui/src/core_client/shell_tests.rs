@@ -288,8 +288,29 @@ fn screen(size: egui::Vec2) -> Screen {
 }
 
 fn screen_with(size: egui::Vec2, local: super::local::LocalPanes) -> Screen {
-    let (tx, actions) = tokio::sync::mpsc::channel(256);
-    let shared = Arc::new(Mutex::new(populated()));
+    screen_from(size, local, |_| ())
+}
+
+/// [`screen_with`] with `patch` applied to the shared state before the first frame.
+fn screen_from(
+    size: egui::Vec2,
+    local: super::local::LocalPanes,
+    patch: impl FnOnce(&mut Shared),
+) -> Screen {
+    screen_from_outbox(size, local, 256, patch)
+}
+
+/// [`screen_from`] whose client queue holds `capacity` actions.
+fn screen_from_outbox(
+    size: egui::Vec2,
+    local: super::local::LocalPanes,
+    capacity: usize,
+    patch: impl FnOnce(&mut Shared),
+) -> Screen {
+    let (tx, actions) = tokio::sync::mpsc::channel(capacity);
+    let mut populated = populated();
+    patch(&mut populated);
+    let shared = Arc::new(Mutex::new(populated));
     let screen = CoreClientScreen::new(
         shared.clone(),
         tx,
@@ -458,6 +479,9 @@ fn notifications_tab_lists_the_pending_question_and_approval() {
     let harness = &screen.harness;
     harness.get_by_label("Notifications tab");
     harness.get_by_label("Lanes tab");
+    // The read features keep the legacy panels' titles.
+    harness.get_by_label("Memory tab");
+    harness.get_by_label("Self-improvement drafts tab");
     harness.get_by_label("Question: Should an invalid `next` fall back to /home or to /?");
     assert_eq!(
         harness
@@ -481,6 +505,11 @@ fn notifications_tab_lists_the_pending_question_and_approval() {
     );
     assert_eq!(screen.harness.state().selected, Some(thr_4));
     assert_eq!(front_of_conversation_leaf(&screen), CoreTab::Conversation);
+
+    // The toolbar opens the on-demand Evaluations tab under the legacy panel's title.
+    screen.harness.get_by_label("Evaluations").click();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("Evaluations tab");
 }
 
 fn front_of_conversation_leaf(screen: &Screen) -> CoreTab {
@@ -965,20 +994,39 @@ mod run_tabs {
 
     const CHILD_TEXT: &str = "You: Write the redirect test first";
 
-    /// thr-1's root run-1 has a running subagent run-1a, which committed a message.
+    fn subagent(phase: &str) -> RunSummary {
+        view(json!({
+            "id": "run-1a", "thread": "thr-1", "parent_run": "run-1", "role": "worker",
+            "phase": phase, "revision": "4",
+        }))
+    }
+
+    /// thr-1's root run-1 has a running subagent run-1a, which committed a message. The
+    /// window opens on it already running, which gives it a split of its own as the
+    /// embedded workbench restores it; the person closed that tab.
     fn with_subagent() -> Screen {
-        let mut screen = screen(egui::vec2(1440.0, 900.0));
-        {
-            let mut shared = screen.shared.lock().unwrap();
-            let run: RunSummary = view(json!({
-                "id": "run-1a", "thread": "thr-1", "parent_run": "run-1", "role": "worker",
-                "phase": "running", "revision": "4",
-            }));
-            shared.cache.runs.insert("run-1a".into(), run);
+        let local = super::super::local::LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            None,
+        );
+        let mut screen = screen_from(egui::vec2(1440.0, 900.0), local, |shared| {
+            shared
+                .cache
+                .runs
+                .insert("run-1a".into(), subagent("running"));
             let history = shared.cache.history.get_mut("thr-1").unwrap();
             history.push(child_message());
-        }
+        });
         screen.settle_runs();
+        let [split] = screen.run_tabs()[..] else {
+            panic!("run-1a's split was expected, got {:?}", screen.run_tabs());
+        };
+        let dock = &mut screen.harness.state_mut().dock;
+        let path = dock.find_tab(&split).unwrap();
+        assert_eq!(dock.leaf(path.node_path()).unwrap().tabs, [split]);
+        dock.remove_tab(path);
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
         screen
     }
 
@@ -1004,7 +1052,22 @@ mod run_tabs {
         }
 
         /// [`Screen::settle_runs`] with `children` as run-1's subagents.
-        fn settle_runs_with(&mut self, children: &[serde_json::Value]) -> Vec<Action> {
+        pub(super) fn settle_runs_with(&mut self, children: &[serde_json::Value]) -> Vec<Action> {
+            self.settle_runs_by(&|parent| {
+                if parent == "run-1" {
+                    children.to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+        }
+
+        /// [`Screen::settle_runs`] with `children_of(parent)` as the subagents of each
+        /// run of thr-1.
+        fn settle_runs_by(
+            &mut self,
+            children_of: &dyn Fn(&str) -> Vec<serde_json::Value>,
+        ) -> Vec<Action> {
             let mut others = Vec::new();
             for _ in 0..8 {
                 self.harness.run_steps(2);
@@ -1021,13 +1084,7 @@ mod run_tabs {
                         continue;
                     };
                     let items = match (&q.scope, q.thread.as_str()) {
-                        (RunScope::Roots, "thr-1") => {
-                            let count = u32::try_from(children.len()).unwrap();
-                            vec![run_detail("run-1", None, "lead", count)]
-                        }
-                        (RunScope::Children { parent }, "thr-1") if parent.as_str() == "run-1" => {
-                            children.to_vec()
-                        }
+                        (RunScope::Children { parent }, "thr-1") => children_of(parent.as_str()),
                         _ => Vec::new(),
                     };
                     let reply = view(json!({"type": "execution", "payload": {
@@ -1050,8 +1107,6 @@ mod run_tabs {
 
         /// Opens run-1a's tab from its Execution row; returns what was sent.
         fn open_subagent(&mut self) -> Vec<Action> {
-            self.harness.get_by_label("Subagents (1)").click();
-            self.settle_runs();
             self.harness.get_by_label("Open pane").click();
             self.settle_runs()
         }
@@ -1131,8 +1186,8 @@ mod run_tabs {
     }
 
     // Given: thr-1's root run-1 has subagents that run, wait for an approval and are done
-    // When: its Subagents button is pressed in Execution, at a wide and a narrow window
-    // Then: the breadcrumb leads back to Root and each subagent is a card of the
+    // When: the Subagents tab is drawn, at a wide and a narrow window
+    // Then: they are its first level, without a breadcrumb, and each subagent is a card of the
     //       legacy Subagents column: name, role and status, model and provider,
     //       Copy run ID and Open pane, and Stop only while it can still be stopped
     #[test]
@@ -1174,14 +1229,11 @@ mod run_tabs {
         for (width, height, suffix) in [(1440.0, 900.0, ""), (1024.0, 768.0, "narrow")] {
             let mut screen = screen(egui::vec2(width, height));
             screen.settle_runs_with(&children);
-            screen.harness.get_by_label("Subagents (3)").click();
-            screen.settle_runs_with(&children);
             screen.harness.event(egui::Event::PointerGone);
             screen.harness.run_steps(2);
             screen.capture(suffix);
             let harness = &screen.harness;
-            harness.get_by_label("Root");
-            harness.get_by_label("run-1");
+            assert!(harness.query_by_label("Root").is_none());
             for label in [
                 "redirect-tester",
                 "Worker(quick) · Running",
@@ -1266,6 +1318,7 @@ mod run_tabs {
     // When: another thread is selected, then thr-1 again
     // Then: the tab leaves the dock and its history is forgotten; back on thr-1 the
     //       tab is beside Execution again, behind it, and reads run-1a's history again
+    //       once it is brought to the front
     #[test]
     fn another_thread_hides_its_run_tabs_until_it_is_selected_again() {
         let mut screen = with_subagent();
@@ -1286,7 +1339,7 @@ mod run_tabs {
 
         screen.harness.get_by_label("Fix login redirect").click();
         let sent = screen.settle_runs();
-        assert_eq!(history_of_run_1a(&sent), 1);
+        assert_eq!(history_of_run_1a(&sent), 0, "a tab behind is not drawn");
         let [tab] = screen.run_tabs()[..] else {
             panic!("the run tab was expected back");
         };
@@ -1298,7 +1351,10 @@ mod run_tabs {
         assert_ne!(leaf.tabs[leaf.active.0], tab, "it comes back behind");
         screen
             .harness
-            .get_by_label("Transcript: redirect-tester tab");
+            .get_by_label("Transcript: redirect-tester tab")
+            .click();
+        let sent = screen.settle_runs();
+        assert_eq!(history_of_run_1a(&sent), 1);
     }
 
     // Given: run-1a's tab open with its history
@@ -1539,8 +1595,9 @@ mod run_tabs {
         assert!(screen.harness.query_by_label("Stopped").is_none());
     }
 
-    // Given: run-1a's tab open in front of the Execution leaf, the window unfocused
-    // When: run-1a fails and the root run-1 is done, then the window gains focus
+    // Given: run-1a's tab open in front of the Subagents leaf, the window unfocused
+    // When: run-1a fails (its tab is parked behind Subagents) and the root run-1 is done,
+    //       then its tab is brought forward and the window gains focus
     // Then: the run tab is flagged as an error, the Conversation and Notifications tabs
     //       as info (Execution never), under their unchanged accessible names, until
     //       drawn with focus; the pane shows the Failed badge, filled until read
@@ -1589,7 +1646,6 @@ mod run_tabs {
         expected.sort();
         assert_eq!(flagged(&screen), expected);
         assert_eq!(badge(&screen), Some((ThreadRunPhase::Error, true)));
-        screen.harness.get_by_label("Failed");
         for name in [
             "Transcript: redirect-tester tab",
             "Conversation tab",
@@ -1597,6 +1653,18 @@ mod run_tabs {
         ] {
             screen.harness.get_by_label(name);
         }
+        // The failed subagent was parked at the end of the Subagents leaf, behind it; the
+        // person brings its tab forward.
+        assert_eq!(screen.front_of_leaf(tab), execution);
+        shell::focus(&mut screen.harness.state_mut().dock, tab);
+        screen.harness.run_steps(2);
+        assert_eq!(screen.front_of_leaf(tab), tab);
+        assert_eq!(
+            attention(&screen, tab),
+            PaneAttention::Error,
+            "not read unfocused"
+        );
+        screen.harness.get_by_label("Failed");
         screen.capture("attention");
 
         screen
@@ -1616,6 +1684,311 @@ mod run_tabs {
         // The pane keeps its run's phase, outlined once read.
         assert_eq!(badge(&screen), Some((ThreadRunPhase::Error, false)));
         screen.harness.get_by_label("Failed");
+    }
+
+    fn leaf_of(screen: &Screen, tab: CoreTab) -> Vec<CoreTab> {
+        let dock = &screen.harness.state().dock;
+        let path = dock.find_tab(&tab).expect("the tab is in the dock");
+        dock.leaf(path.node_path()).unwrap().tabs.clone()
+    }
+
+    fn focused(screen: &Screen) -> Option<Vec<CoreTab>> {
+        let dock = &screen.harness.state().dock;
+        dock.focused_leaf()
+            .and_then(|path| dock.leaf(path).ok())
+            .map(|leaf| leaf.tabs.clone())
+    }
+
+    fn set_subagent(screen: &Screen, phase: &str) {
+        let mut shared = screen.shared.lock().unwrap();
+        shared.cache.runs.insert("run-1a".into(), subagent(phase));
+    }
+
+    /// The window drawn on thr-1 with the Conversation focused, before run-1a exists.
+    fn before_subagent() -> Screen {
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.settle_runs();
+        shell::focus(&mut screen.harness.state_mut().dock, CoreTab::Conversation);
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
+        screen
+    }
+
+    // Given: thr-1 drawn with the Conversation focused
+    // When: its subagent run-1a starts, then ends
+    // Then: run-1a's tab opens by itself in a split of its own below the Subagents tab,
+    //       reads its history and takes its agent's name, while the Conversation keeps the
+    //       focus; once it ends, the tab is parked behind the Subagents tab in its leaf
+    #[test]
+    fn a_subagent_opens_below_subagents_when_it_starts_and_is_parked_when_it_ends() {
+        let mut screen = before_subagent();
+        let conversation = focused(&screen);
+        assert!(conversation.is_some_and(|tabs| tabs.contains(&CoreTab::Conversation)));
+        let execution = CoreTab::Feature(FeatureId::Execution);
+
+        set_subagent(&screen, "running");
+        let sent = screen.settle_runs();
+        assert_eq!(history_of_run_1a(&sent), 1);
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-1a's tab was expected");
+        };
+        assert_eq!(leaf_of(&screen, tab), [tab], "a split of its own");
+        assert!(!leaf_of(&screen, execution).contains(&tab));
+        assert_eq!(
+            focused(&screen),
+            Some(leaf_of(&screen, CoreTab::Conversation))
+        );
+        screen
+            .harness
+            .get_by_label("Transcript: redirect-tester tab");
+        screen.harness.get_by_label("Subagents(1) tab");
+        let page = Page {
+            items: vec![child_message()],
+            next_cursor: None,
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .run_history_page("run-1a", page, false);
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label(CHILD_TEXT);
+        screen.capture("subagent-started");
+
+        set_subagent(&screen, "done");
+        screen.settle_runs();
+        let leaf = leaf_of(&screen, tab);
+        assert!(
+            leaf.contains(&execution),
+            "parked in the Subagents leaf: {leaf:?}"
+        );
+        assert_eq!(leaf.last(), Some(&tab));
+        assert_eq!(screen.front_of_leaf(tab), execution);
+        assert_eq!(
+            focused(&screen),
+            Some(leaf_of(&screen, CoreTab::Conversation))
+        );
+        screen.harness.get_by_label("Subagents(1) tab");
+        screen.capture("subagent-parked");
+    }
+
+    // Given: run-1a's tab opened by itself while it runs
+    // When: another thread is selected, then thr-1 again
+    // Then: the tab leaves the dock and comes back in a split of its own
+    #[test]
+    fn a_running_subagents_split_comes_back_with_its_thread() {
+        let mut screen = before_subagent();
+        set_subagent(&screen, "running");
+        screen.settle_runs();
+        screen
+            .harness
+            .get_by_label("Refactor storage writer")
+            .click();
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
+        screen.harness.get_by_label("Subagents(0) tab");
+
+        screen.harness.get_by_label("Fix login redirect").click();
+        screen.settle_runs();
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-1a's tab was expected back");
+        };
+        assert_eq!(leaf_of(&screen, tab), [tab]);
+    }
+
+    // Given: thr-1 drawn before run-1a exists, then run-1a's tab opened and closed
+    // When: a new session's projection has run-1a ended (it ran while disconnected), and
+    //       likewise for a run never seen at all
+    // Then: each gets a parked tab behind the Subagents tab, as a closed one does
+    #[test]
+    fn a_subagent_that_ended_while_disconnected_is_parked() {
+        let mut screen = before_subagent();
+        set_subagent(&screen, "running");
+        screen.settle_runs();
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-1a's tab was expected");
+        };
+        let dock = &mut screen.harness.state_mut().dock;
+        let path = dock.find_tab(&tab).unwrap();
+        dock.remove_tab(path);
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty(), "closed");
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            let mut cache = populated().cache;
+            cache.runs.insert("run-1a".into(), subagent("failed"));
+            let mut unseen = subagent("done");
+            unseen.id = RunId::new("run-1b").unwrap();
+            cache.runs.insert("run-1b".into(), unseen);
+            shared.begin_session(cache, Capability::IMPLEMENTED.to_vec(), &[], Vec::new());
+        }
+        screen.settle_runs();
+        let execution = CoreTab::Feature(FeatureId::Execution);
+        let tabs = screen.run_tabs();
+        assert_eq!(tabs.len(), 2, "{tabs:?}");
+        let leaf = leaf_of(&screen, execution);
+        assert!(tabs.iter().all(|tab| leaf.contains(tab)), "{leaf:?}");
+        assert_eq!(screen.front_of_leaf(execution), execution);
+        screen.harness.get_by_label("Subagents(2) tab");
+    }
+
+    // Given: run-1a's tab opened by itself, then closed by the person while it runs
+    // When: run-1a ends, then starts again
+    // Then: it comes back parked behind the Subagents tab, then in a split of its own
+    #[test]
+    fn a_closed_subagent_tab_comes_back_parked_then_split_again() {
+        let mut screen = before_subagent();
+        set_subagent(&screen, "running");
+        screen.settle_runs();
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-1a's tab was expected");
+        };
+        let dock = &mut screen.harness.state_mut().dock;
+        let path = dock.find_tab(&tab).unwrap();
+        dock.remove_tab(path);
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty(), "closed");
+
+        set_subagent(&screen, "done");
+        screen.settle_runs();
+        let execution = CoreTab::Feature(FeatureId::Execution);
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-1a's tab was expected back");
+        };
+        assert_eq!(leaf_of(&screen, execution).last(), Some(&tab));
+        assert_eq!(screen.front_of_leaf(tab), execution);
+
+        set_subagent(&screen, "running");
+        screen.settle_runs();
+        assert_eq!(leaf_of(&screen, tab), [tab], "unparked into a split");
+        assert!(!leaf_of(&screen, execution).contains(&tab));
+    }
+
+    // Given: thr-1 drawn with the Conversation focused
+    // When: a subagent of thr-6 starts, then thr-6 is selected
+    // Then: no tab opens on thr-1; on thr-6 the subagent's tab is in a split of its own
+    #[test]
+    fn another_threads_subagent_opens_only_once_its_thread_is_selected() {
+        let mut screen = before_subagent();
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            let mut run = subagent("running");
+            run.id = RunId::new("run-6a").unwrap();
+            run.thread = ThreadId::new("thr-6").unwrap();
+            run.parent_run = Some(RunId::new("run-6").unwrap());
+            shared.cache.runs.insert("run-6a".into(), run);
+        }
+        screen.settle_runs();
+        assert!(screen.run_tabs().is_empty());
+        screen.harness.get_by_label("Subagents(0) tab");
+
+        screen
+            .harness
+            .get_by_label("Rebuild the search index")
+            .click();
+        screen.settle_runs();
+        let [tab] = screen.run_tabs()[..] else {
+            panic!("run-6a's tab was expected on thr-6");
+        };
+        assert_eq!(leaf_of(&screen, tab), [tab]);
+        screen.harness.get_by_label("Subagents(1) tab");
+    }
+
+    // Given: run-1's subagent run-1a has a subagent of its own, run-1x
+    // When: the Subagents tab is drawn, run-1a's Subagents button is pressed, then Root
+    // Then: run-1a is listed first without a breadcrumb; drilled in, run-1x is listed
+    //       under Root › run-1a; Root lists run-1a again
+    #[test]
+    fn the_subagents_tab_lists_the_roots_subagents_and_drills_in_and_out() {
+        let children_of = |parent: &str| match parent {
+            "run-1" => vec![run_detail("run-1a", Some("run-1"), "redirect-tester", 1)],
+            "run-1a" => vec![run_detail("run-1x", Some("run-1a"), "fixture-writer", 0)],
+            _ => Vec::new(),
+        };
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.settle_runs_by(&children_of);
+        screen.harness.get_by_label("redirect-tester");
+        assert!(screen.harness.query_by_label("Root").is_none());
+        assert!(screen.harness.query_by_label("fixture-writer").is_none());
+
+        screen.harness.get_by_label("Subagents (1)").click();
+        screen.settle_runs_by(&children_of);
+        screen.harness.get_by_label("Root");
+        screen.harness.get_by_label("run-1a");
+        screen.harness.get_by_label("fixture-writer");
+        assert!(screen.harness.query_by_label("redirect-tester").is_none());
+
+        screen.harness.get_by_label("Root").click();
+        screen.settle_runs_by(&children_of);
+        screen.harness.get_by_label("redirect-tester");
+        assert!(screen.harness.query_by_label("Root").is_none());
+        assert!(screen.harness.query_by_label("fixture-writer").is_none());
+    }
+}
+
+mod tool_outputs {
+    use super::*;
+
+    const SHELL: &str = "exit code: 0";
+    const CHANGE: &str = "--- a/src/auth/login.rs";
+    const FOLDED: &str = "2 tool outputs";
+
+    // Given: thr-1's root committed two tool outputs and has not replied yet
+    // When: the window is drawn, then the root's reply is committed, then the folded
+    //       header is pressed and more of the conversation arrives
+    // Then: both outputs stay in sight without a header while it works; once it
+    //       replied only "2 tool outputs" shows; pressed, they show again and stay
+    //       shown over later frames and messages
+    #[test]
+    fn tool_outputs_stay_in_sight_while_the_root_works_and_fold_once_it_replies() {
+        let local = super::super::local::LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            None,
+        );
+        let mut screen = screen_from(egui::vec2(1440.0, 900.0), local, |shared| {
+            let history = shared.cache.history.get_mut("thr-1").unwrap();
+            history.pop();
+        });
+        screen.settle_runs_with(&[]);
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label(SHELL);
+        screen.harness.get_by_label(CHANGE);
+        assert!(
+            screen
+                .harness
+                .query_by_label_contains("tool outputs")
+                .is_none()
+        );
+        screen.harness.get_by_label("No subagents of this run");
+        screen.capture("working");
+
+        let reply = |screen: &Screen, index, role, text| {
+            let mut shared = screen.shared.lock().unwrap();
+            let history = shared.cache.history.get_mut("thr-1").unwrap();
+            history.push(message(index, role, text));
+        };
+        reply(
+            &screen,
+            4,
+            "assistant",
+            "The handler ignored `next`; it is fixed.",
+        );
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label(FOLDED);
+        assert!(screen.harness.query_by_label(SHELL).is_none());
+        assert!(screen.harness.query_by_label(CHANGE).is_none());
+        screen.capture("done");
+
+        screen.harness.get_by_label(FOLDED).click();
+        screen.harness.run_steps(4);
+        reply(&screen, 5, "user", "Thanks, run the tests too.");
+        screen.harness.run_steps(4);
+        screen.harness.get_by_label(SHELL);
+        screen.harness.get_by_label(CHANGE);
+        screen.harness.get_by_label(FOLDED);
     }
 }
 
@@ -2045,7 +2418,9 @@ mod attention;
 
 mod lanes;
 
+mod many_subagents;
 mod pull_requests;
+mod read_panes;
 
 // Given: the lane thr-4 asked its lead thr-1 a question the lead has not passed on
 // When: the lead thread thr-1 is shown
