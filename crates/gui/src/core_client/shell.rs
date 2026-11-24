@@ -89,21 +89,41 @@ const SIDEBAR_FRACTION: f32 = 0.30;
 /// embedded workbench.
 const TERMINAL_FRACTION: f32 = 0.7;
 
+/// The tabs of each leaf of the default layout: the projects, the notifications and the
+/// local panes below them, the conversation, the two areas on the right and the Terminal.
+/// A closed tab of a leaf reopens beside the tabs it had there.
+pub fn default_leaves() -> [Vec<CoreTab>; 6] {
+    let with = |head: &[CoreTab], features: &[FeatureId]| {
+        let mut tabs = head.to_vec();
+        tabs.extend(features.iter().copied().map(CoreTab::Feature));
+        tabs
+    };
+    [
+        vec![CoreTab::Projects],
+        with(&[CoreTab::Notifications, CoreTab::Diff], &LEFT),
+        with(&[CoreTab::Conversation], &CENTRE),
+        with(&[], &RIGHT_TOP),
+        with(&[], &RIGHT_BOTTOM),
+        vec![CoreTab::Terminal],
+    ]
+}
+
 pub fn default_dock() -> DockState<CoreTab> {
-    let mut centre = vec![CoreTab::Conversation];
-    centre.extend(CENTRE.map(CoreTab::Feature));
+    let [
+        projects,
+        bottom_left,
+        centre,
+        right_top,
+        right_bottom,
+        terminal,
+    ] = default_leaves();
     let mut dock = DockState::new(centre);
     let surface = dock.main_surface_mut();
-    let [middle, left] =
-        surface.split_left(NodeIndex::root(), SIDEBAR_FRACTION, vec![CoreTab::Projects]);
-    let mut bottom_left = vec![CoreTab::Notifications, CoreTab::Diff];
-    bottom_left.extend(LEFT.map(CoreTab::Feature));
+    let [middle, left] = surface.split_left(NodeIndex::root(), SIDEBAR_FRACTION, projects);
     surface.split_below(left, 0.65, bottom_left);
-    let [conversation, right] =
-        surface.split_right(middle, 0.7, RIGHT_TOP.map(CoreTab::Feature).to_vec());
-    surface.split_below(right, 0.5, RIGHT_BOTTOM.map(CoreTab::Feature).to_vec());
-    let [_, terminal] =
-        surface.split_below(conversation, TERMINAL_FRACTION, vec![CoreTab::Terminal]);
+    let [conversation, right] = surface.split_right(middle, 0.7, right_top);
+    surface.split_below(right, 0.5, right_bottom);
+    let [_, terminal] = surface.split_below(conversation, TERMINAL_FRACTION, terminal);
     // Folded to its tab bar until opened, as in the embedded workbench: no shell starts
     // before the person asks for one, and the conversation keeps its height.
     if let Ok(leaf) = surface.leaf_mut(terminal) {
@@ -112,8 +132,11 @@ pub fn default_dock() -> DockState<CoreTab> {
     dock
 }
 
+/// Bring `tab` forward. A tab not in the dock goes back to its leaf of the default
+/// layout, beside the nearest of that leaf's tabs still in the dock; a tab without one
+/// opens at the end of the conversation's leaf.
 pub fn focus(dock: &mut DockState<CoreTab>, tab: CoreTab) {
-    if dock.find_tab(&tab).is_none() {
+    if dock.find_tab(&tab).is_none() && !place_home(dock, tab) {
         match dock.find_tab(&CoreTab::Conversation) {
             Some(conversation) => {
                 dock.set_focused_node_and_surface(conversation.node_path());
@@ -127,6 +150,60 @@ pub fn focus(dock: &mut DockState<CoreTab>, tab: CoreTab) {
         dock.set_focused_node_and_surface(path.node_path());
         if let Ok(leaf) = dock.leaf_mut(path.node_path()) {
             leaf.collapsed = false;
+        }
+    }
+}
+
+/// Put `tab`, not in the dock, back in its default leaf: after the nearest tab before it
+/// there that is in the dock, else before the nearest one after it. Returns false when
+/// the tab has no default leaf or none of the leaf's other tabs is in the dock.
+fn place_home(dock: &mut DockState<CoreTab>, tab: CoreTab) -> bool {
+    let Some(group) = default_leaves()
+        .into_iter()
+        .find(|tabs| tabs.contains(&tab))
+    else {
+        return false;
+    };
+    let at = group.iter().position(|other| *other == tab).unwrap_or(0);
+    let before = group[..at].iter().rev().map(|anchor| (anchor, true));
+    let after = group[at + 1..].iter().map(|anchor| (anchor, false));
+    for (anchor, after) in before.chain(after) {
+        if insert_near(dock, tab, *anchor, after) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Insert `tab` right after (or before) `anchor` in the anchor's leaf, leaving the tab in
+/// front of the leaf as it was. Returns false, inserting nothing, when `anchor` is not in
+/// the dock.
+fn insert_near(dock: &mut DockState<CoreTab>, tab: CoreTab, anchor: CoreTab, after: bool) -> bool {
+    let Some(path) = dock.find_tab(&anchor) else {
+        return false;
+    };
+    insert_in_leaf(
+        dock,
+        path.node_path(),
+        Some(path.tab.0 + usize::from(after)),
+        tab,
+    );
+    true
+}
+
+/// Insert `tab` at `index` of the leaf at `path` (its end when `None`), leaving the tab
+/// in front as it was.
+fn insert_in_leaf(
+    dock: &mut DockState<CoreTab>,
+    path: egui_dock::NodePath,
+    index: Option<usize>,
+    tab: CoreTab,
+) {
+    if let Ok(leaf) = dock.leaf_mut(path) {
+        let index = index.map_or(leaf.tabs.len(), |index| index.min(leaf.tabs.len()));
+        leaf.tabs.insert(index, tab);
+        if leaf.active.0 >= index && leaf.tabs.len() > 1 {
+            leaf.active = TabIndex(leaf.active.0 + 1);
         }
     }
 }
@@ -151,26 +228,12 @@ pub fn open_local(dock: &mut DockState<CoreTab>, tab: CoreTab) {
 /// Put a tab not in the dock right after `anchor` in the anchor's leaf (else at the
 /// end of the conversation's leaf), leaving the tab in front of each leaf as it was.
 pub fn place_beside(dock: &mut DockState<CoreTab>, tab: CoreTab, anchor: CoreTab) {
-    if dock.find_tab(&tab).is_some() {
+    if dock.find_tab(&tab).is_some() || insert_near(dock, tab, anchor, true) {
         return;
     }
-    let (path, index) = match (
-        dock.find_tab(&anchor),
-        dock.find_tab(&CoreTab::Conversation),
-    ) {
-        (Some(path), _) => (path, Some(path.tab.0 + 1)),
-        (None, Some(path)) => (path, None),
-        (None, None) => {
-            dock.push_to_first_leaf(tab);
-            return;
-        }
-    };
-    if let Ok(leaf) = dock.leaf_mut(path.node_path()) {
-        let index = index.map_or(leaf.tabs.len(), |index| index.min(leaf.tabs.len()));
-        leaf.tabs.insert(index, tab);
-        if leaf.active.0 >= index && leaf.tabs.len() > 1 {
-            leaf.active = TabIndex(leaf.active.0 + 1);
-        }
+    match dock.find_tab(&CoreTab::Conversation) {
+        Some(path) => insert_in_leaf(dock, path.node_path(), None, tab),
+        None => dock.push_to_first_leaf(tab),
     }
 }
 
@@ -433,6 +496,12 @@ impl TabViewer for Viewer<'_, '_> {
         )
     }
 
+    // A tab that cannot be closed stays on the main surface, so a saved layout always
+    // has a main surface to restore.
+    fn allowed_in_windows(&self, tab: &mut CoreTab) -> bool {
+        self.is_closeable(tab)
+    }
+
     fn scroll_bars(&self, _tab: &CoreTab) -> [bool; 2] {
         [false, false]
     }
@@ -649,4 +718,107 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remove(dock: &mut DockState<CoreTab>, tab: CoreTab) {
+        let path = dock.find_tab(&tab).expect("the tab is in the dock");
+        dock.remove_tab(path);
+    }
+
+    fn leaf_of(dock: &DockState<CoreTab>, tab: CoreTab) -> Vec<CoreTab> {
+        let path = dock.find_tab(&tab).expect("the tab is in the dock");
+        dock.leaf(path.node_path()).unwrap().tabs.clone()
+    }
+
+    fn front(dock: &DockState<CoreTab>, tab: CoreTab) -> CoreTab {
+        let path = dock.find_tab(&tab).expect("the tab is in the dock");
+        let leaf = dock.leaf(path.node_path()).unwrap();
+        leaf.tabs[leaf.active.0]
+    }
+
+    #[test]
+    fn the_default_dock_has_the_default_leaves() {
+        let dock = default_dock();
+        let mut leaves: Vec<_> = dock
+            .iter_leaves()
+            .map(|(_, leaf)| leaf.tabs.clone())
+            .collect();
+        let mut expected = default_leaves().to_vec();
+        leaves.sort_by_key(|tabs| format!("{tabs:?}"));
+        expected.sort_by_key(|tabs| format!("{tabs:?}"));
+        assert_eq!(leaves, expected);
+    }
+
+    // Given: the default dock with Lanes closed
+    // When: Lanes is focused again
+    // Then: it is back in the notifications' leaf between Diff and Memory, in front
+    #[test]
+    fn a_closed_default_tab_reopens_in_its_leaf() {
+        let mut dock = default_dock();
+        let lanes = CoreTab::Feature(FeatureId::Lanes);
+        remove(&mut dock, lanes);
+
+        focus(&mut dock, lanes);
+
+        assert_eq!(
+            leaf_of(&dock, lanes),
+            [
+                CoreTab::Notifications,
+                CoreTab::Diff,
+                lanes,
+                CoreTab::Feature(FeatureId::Memory),
+                CoreTab::Feature(FeatureId::Improvement),
+            ]
+        );
+        assert_eq!(front(&dock, lanes), lanes);
+    }
+
+    // Given: Teams closed, and then Execution too
+    // When: Teams is focused each time
+    // Then: it goes back beside Execution; without Execution, to the conversation's leaf
+    #[test]
+    fn a_tab_whose_leaf_is_gone_opens_beside_the_conversation() {
+        let teams = CoreTab::Feature(FeatureId::Teams);
+        let execution = CoreTab::Feature(FeatureId::Execution);
+        let mut dock = default_dock();
+        remove(&mut dock, teams);
+        focus(&mut dock, teams);
+        assert_eq!(leaf_of(&dock, teams), [execution, teams]);
+
+        remove(&mut dock, teams);
+        remove(&mut dock, execution);
+        focus(&mut dock, teams);
+        assert_eq!(
+            leaf_of(&dock, teams),
+            [
+                CoreTab::Conversation,
+                CoreTab::Feature(FeatureId::Browser),
+                teams
+            ]
+        );
+    }
+
+    // Given: the default dock
+    // When: Settings, which has no default leaf, is focused
+    // Then: it opens at the end of the conversation's leaf
+    #[test]
+    fn an_on_demand_tab_opens_beside_the_conversation() {
+        let settings = CoreTab::Feature(FeatureId::Settings);
+        let mut dock = default_dock();
+
+        focus(&mut dock, settings);
+
+        assert_eq!(
+            leaf_of(&dock, settings),
+            [
+                CoreTab::Conversation,
+                CoreTab::Feature(FeatureId::Browser),
+                settings
+            ]
+        );
+    }
 }

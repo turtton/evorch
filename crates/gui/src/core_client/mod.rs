@@ -11,6 +11,7 @@ pub mod conversation;
 pub mod features;
 pub mod local;
 pub mod notifications;
+pub mod persistence;
 pub mod run_tabs;
 pub mod shell;
 mod transcript;
@@ -29,6 +30,7 @@ use workbench_protocol::{
     handshake::{BuildInfo, Capability},
     ids::*,
 };
+use workspace_ui::KeyAction;
 
 #[derive(Default)]
 pub struct Draft {
@@ -215,12 +217,13 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let options = crate::window::native_options(&title);
-    let config_dir = config_dir.clone();
+    let settings = ui_settings(&config_dir);
+    let keybinds = crate::keymap::configured_panel_keybinds(&settings.keybinds, &config_dir);
     eframe::run_native(
         &title,
         options,
         Box::new(move |cc| {
-            crate::theme::style::install_preset(&cc.egui_ctx, theme_preset(&config_dir));
+            crate::theme::style::install_preset(&cc.egui_ctx, settings.theme_preset.into());
             let shared = Arc::new(Mutex::new(Shared::default()));
             let (tx, rx) = tokio::sync::mpsc::channel(64);
             let task = runtime.spawn(connection::serve(
@@ -234,7 +237,10 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
                 Some(Arc::new(crate::pty::ShellSpawner::from_env())),
             );
             Ok(Box::new(CoreClientApp {
-                screen: CoreClientScreen::new(shared, tx, None, None).with_local_panes(local),
+                screen: CoreClientScreen::new(shared, tx, None, None)
+                    .with_local_panes(local)
+                    .with_keymap(core_keymap(&keybinds))
+                    .with_state_store(persistence::ClientStateStore::in_config_dir(&config_dir)),
                 _runtime: runtime,
                 task,
             }))
@@ -243,16 +249,29 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// The theme the person chose in the workbench's UI settings, shared with the embedded one.
-fn theme_preset(config_dir: &std::path::Path) -> crate::theme::style::ThemePreset {
+/// The workbench's UI settings (theme and keymap), shared with the embedded one and only
+/// read here: a file that does not load gives the defaults, as in the embedded workbench.
+fn ui_settings(config_dir: &std::path::Path) -> workspace_ui::UiSettings {
     let path = config_dir.join("ui.toml");
     if !path.exists() {
-        return crate::theme::style::ThemePreset::Graphite;
+        return workspace_ui::UiSettings::default();
     }
-    workspace_ui::load_settings(&path)
-        .map_or(crate::theme::style::ThemePreset::Graphite, |settings| {
-            settings.theme_preset.into()
-        })
+    workspace_ui::load_settings(&path).unwrap_or_else(|error| {
+        tracing::warn!(%error, "UI settings load failed; using Graphite defaults");
+        workspace_ui::UiSettings::default()
+    })
+}
+
+/// The embedded workbench's keymap without the composer role switch, which the core
+/// client has no use for: a chord bound to it is left to the terminal and the widgets.
+/// `settings` are those of `ui.toml` with `config.toml`'s `[panel.keybinds]` over them,
+/// as the embedded workbench merges them.
+fn core_keymap(settings: &workspace_ui::KeybindSettings) -> crate::keymap::Keymap {
+    let mut settings = settings.clone();
+    settings
+        .bindings
+        .remove(&workspace_ui::KeyAction::CycleAgentRole);
+    crate::keymap::Keymap::from_settings(&settings)
 }
 
 pub struct CoreClientApp {
@@ -274,6 +293,16 @@ pub struct CoreClientScreen {
     notifications: notifications::NotificationLog,
     run_tabs: run_tabs::RunTabs,
     local: local::LocalPanes,
+    keymap: crate::keymap::Keymap,
+    store: Option<persistence::ClientStateStore>,
+    window_rects: persistence::WindowRects,
+    /// The file's state, applied when the first frame is drawn.
+    restore: Option<persistence::SavedState>,
+    /// The file's selection, applied once the first snapshot is in.
+    pending_selection: Option<persistence::SavedSelection>,
+    /// Whether the restored run tabs still wait for the first snapshot, which drops
+    /// those of threads the core no longer has.
+    pending_run_tab_prune: bool,
 }
 
 impl CoreClientScreen {
@@ -293,7 +322,92 @@ impl CoreClientScreen {
             notifications: notifications::NotificationLog::default(),
             run_tabs: run_tabs::RunTabs::default(),
             local: local::LocalPanes::default(),
+            keymap: core_keymap(&workspace_ui::KeybindSettings::default()),
+            store: None,
+            window_rects: persistence::WindowRects::default(),
+            restore: None,
+            pending_selection: None,
+            pending_run_tab_prune: false,
         }
+    }
+
+    /// The chords from the UI settings; without this, the default ones.
+    #[must_use]
+    pub fn with_keymap(mut self, keymap: crate::keymap::Keymap) -> Self {
+        self.keymap = keymap;
+        self
+    }
+
+    /// The session file the layout and the selection are restored from and saved to;
+    /// without one nothing is read or written.
+    #[must_use]
+    pub fn with_state_store(mut self, store: persistence::ClientStateStore) -> Self {
+        self.restore = store.load();
+        self.store = Some(store);
+        self
+    }
+
+    /// Saves the layout, the run tabs and the selection to the session file, if any, as
+    /// the window closes. A file this build could not read is left as it is.
+    pub fn save_state(&self) {
+        let shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.save_with(&shared, false);
+    }
+
+    /// `explicit` for the save chord, which also replaces a file this build could not read.
+    fn save_with(&self, shared: &Shared, explicit: bool) {
+        // Before the first frame the file was not applied, and stays as it is.
+        let Some(store) = self.store.as_ref().filter(|_| self.restore.is_none()) else {
+            return;
+        };
+        let state = persistence::SavedState {
+            layout: persistence::extract(&self.dock, &self.local.files, &self.window_rects),
+            run_tabs: self.run_tabs.panes(),
+            selection: self.saved_selection(shared),
+        };
+        let saved = if explicit {
+            store.save(&state).map(|()| true)
+        } else {
+            store.autosave(&state)
+        };
+        match saved {
+            Ok(true) => {}
+            Ok(false) => tracing::info!(
+                path = %store.path().display(),
+                "kept the layout file this build could not read; save the layout to replace it"
+            ),
+            Err(error) => {
+                tracing::warn!(path = %store.path().display(), %error, "failed to save layout");
+            }
+        }
+    }
+
+    /// The restored selection until it is applied; then the selected project, with its
+    /// thread only when the core has it (a new conversation is not kept).
+    fn saved_selection(&self, shared: &Shared) -> Option<persistence::SavedSelection> {
+        if let Some(pending) = &self.pending_selection {
+            return Some(pending.clone());
+        }
+        let project = self.project.clone()?;
+        let thread = self.selected.clone().filter(|thread| {
+            shared
+                .cache
+                .threads
+                .get(thread.as_str())
+                .is_some_and(|summary| summary.project == project)
+        });
+        Some(persistence::SavedSelection { project, thread })
+    }
+
+    fn apply_restore(&mut self, state: persistence::SavedState) {
+        self.dock = persistence::restore_dock(state.layout.as_ref(), &mut self.local.files);
+        self.window_rects = persistence::WindowRects::default();
+        self.pending_run_tab_prune = !state.run_tabs.is_empty();
+        self.run_tabs.restore_hidden(state.run_tabs);
+        self.pending_selection = state.selection;
     }
 
     /// The Diff's source and the Terminal's shell; without this the Diff reads git and
@@ -306,7 +420,10 @@ impl CoreClientScreen {
 
     /// Before egui reads the input of a frame: a focused terminal takes the keys.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
-        self.local.capture_input(raw_input);
+        let keymap = &self.keymap;
+        self.local.capture_input(raw_input, |key, modifiers| {
+            keymap.passes_through_terminal(key, modifiers)
+        });
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -393,25 +510,76 @@ fn apply_frame(
         enqueue(tx, shared, Action::Feature(action));
     }
     for navigation in frame.navigation {
-        match navigation {
-            Navigation::SelectProject(id) => {
-                *project = Some(id);
-                *selected = None;
-            }
-            Navigation::SelectThread {
-                project: id,
-                thread,
-            } => {
-                *project = Some(id);
-                *selected = Some(thread.clone());
-                enqueue(tx, shared, Action::History(thread, None, false));
-            }
-            Navigation::NewConversation(id) => {
-                *project = Some(id);
-                *selected = Some(ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap());
-            }
+        apply_navigation(tx, shared, project, selected, navigation);
+    }
+}
+
+/// Change the selection as a click on the built-in selector would.
+fn apply_navigation(
+    tx: &tokio::sync::mpsc::Sender<Action>,
+    shared: &mut Shared,
+    project: &mut Option<ProjectId>,
+    selected: &mut Option<ThreadId>,
+    navigation: Navigation,
+) {
+    match navigation {
+        Navigation::SelectProject(id) => {
+            *project = Some(id);
+            *selected = None;
+        }
+        Navigation::SelectThread {
+            project: id,
+            thread,
+        } => {
+            *project = Some(id);
+            *selected = Some(thread.clone());
+            enqueue(tx, shared, Action::History(thread, None, false));
+        }
+        Navigation::NewConversation(id) => {
+            *project = Some(id);
+            *selected = Some(ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap());
         }
     }
+}
+
+/// Once connected with nothing selected, select what the session file kept: its thread
+/// when the core still has it in that project, else its project, else nothing. A
+/// selection made first wins, and the kept one is dropped.
+fn restore_selection(
+    tx: &tokio::sync::mpsc::Sender<Action>,
+    shared: &mut Shared,
+    project: &mut Option<ProjectId>,
+    selected: &mut Option<ThreadId>,
+    pending: &mut Option<persistence::SavedSelection>,
+) {
+    if project.is_some() || selected.is_some() {
+        *pending = None;
+        return;
+    }
+    if !shared.connected {
+        return;
+    }
+    let Some(saved) = pending.take() else {
+        return;
+    };
+    let thread = saved.thread.filter(|thread| {
+        shared
+            .cache
+            .threads
+            .get(thread.as_str())
+            .is_some_and(|summary| summary.project == saved.project)
+    });
+    let navigation = match thread {
+        Some(thread) => Navigation::SelectThread {
+            project: saved.project,
+            thread,
+        },
+        None if shared.cache.projects.contains_key(saved.project.as_str()) => {
+            Navigation::SelectProject(saved.project)
+        }
+        None => return,
+    };
+    apply_navigation(tx, shared, project, selected, navigation);
 }
 
 /// Register local input before making it visible to the asynchronous actor.
@@ -516,6 +684,11 @@ impl eframe::App for CoreClientApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.screen.ui(ui);
     }
+
+    /// As the window closes, before the connection is shut down.
+    fn on_exit(&mut self) {
+        self.screen.save_state();
+    }
 }
 
 impl CoreClientScreen {
@@ -554,12 +727,30 @@ impl CoreClientScreen {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
+        if let Some(state) = self.restore.take() {
+            self.apply_restore(state);
+        }
         let minimized = ui.input(|input| input.viewport().minimized.unwrap_or(false));
         let mut effects = Vec::new();
         let mut shared = self
             .shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The snapshot is in the cache before `connected` is set, and the selection is
+        // read below, so the features see it in this frame.
+        restore_selection(
+            &self.actions,
+            &mut shared,
+            &mut self.project,
+            &mut self.selected,
+            &mut self.pending_selection,
+        );
+        if self.pending_run_tab_prune && shared.connected {
+            self.pending_run_tab_prune = false;
+            let threads = &shared.cache.threads;
+            self.run_tabs
+                .prune_hidden(|thread| threads.contains_key(thread.as_str()));
+        }
         for feature in shared.features.take_focus() {
             shell::focus(&mut self.dock, shell::CoreTab::Feature(feature));
         }
@@ -584,6 +775,19 @@ impl CoreClientScreen {
                     &mut effects,
                 );
             });
+        let mut save_now = false;
+        match ui.input(|input| self.keymap.action_for_input(input)) {
+            Some(KeyAction::FocusAgentPane) => {
+                effects.push(shell::Effect::Open(shell::CoreTab::Conversation));
+            }
+            // The Terminal starts folded, so its chord also opens it.
+            Some(KeyAction::FocusTerminalPane) => {
+                effects.push(shell::Effect::Open(shell::CoreTab::Terminal));
+            }
+            Some(KeyAction::ResetLayout) => effects.push(shell::Effect::ResetLayout),
+            Some(KeyAction::SaveLayout) => save_now = true,
+            Some(KeyAction::CycleAgentRole) | None => {}
+        }
         let selection = Selection {
             project: self.project.clone(),
             thread: self.selected.clone(),
@@ -644,6 +848,7 @@ impl CoreClientScreen {
                 .show_inside(ui, &mut viewer);
             pass.finish(ui)
         };
+        self.window_rects.track(&self.dock, ui.ctx());
         apply_frame(
             &self.actions,
             &mut shared,
@@ -673,6 +878,9 @@ impl CoreClientScreen {
         // Closing a tab, a reset layout or another thread drops its run's history.
         for run in self.run_tabs.sweep(&mut self.dock, self.selected.as_ref()) {
             shared.cache.forget_run(run.as_str());
+        }
+        if save_now {
+            self.save_with(&shared, true);
         }
         if shared.connected {
             // A tab opened or back in the dock reads its run's history, and so does one
@@ -953,5 +1161,65 @@ mod navigation_tests {
         let run = RunId::new("run-a").unwrap();
         enqueue(&tx, &mut shared, Action::History(thread, Some(run), false));
         assert!(shared.cache.want_run("run-a"));
+    }
+}
+
+#[cfg(test)]
+mod keymap_tests {
+    use egui::{Key, Modifiers};
+
+    use super::*;
+
+    fn action(keymap: &crate::keymap::Keymap, key: Key, modifiers: Modifiers) -> Option<KeyAction> {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut action = None;
+        let mut output = ctx.run_ui(raw, |ui| {
+            action = ui.input(|input| keymap.action_for_input(input));
+        });
+        output.textures_delta.clear();
+        action
+    }
+
+    // Given: a ui.toml binding SaveLayout to Alt+S and the role switch to Alt+R
+    // When: the core client's keymap is built from it
+    // Then: Alt+S saves; Alt+R is no action and stays with a focused terminal
+    #[test]
+    fn the_keymap_follows_ui_settings_without_the_role_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ui.toml"),
+            "[keybinds.bindings]\nsave_layout = \"Alt+S\"\ncycle_agent_role = \"Alt+R\"\n",
+        )
+        .unwrap();
+
+        let keymap = core_keymap(&ui_settings(dir.path()).keybinds);
+
+        assert_eq!(
+            action(&keymap, Key::S, Modifiers::ALT),
+            Some(KeyAction::SaveLayout)
+        );
+        assert_eq!(action(&keymap, Key::R, Modifiers::ALT), None);
+        assert!(!keymap.passes_through_terminal(Key::R, Modifiers::ALT));
+    }
+
+    // Given: a ui.toml that does not parse
+    // When: the settings are read
+    // Then: the defaults are used
+    #[test]
+    fn unreadable_ui_settings_give_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ui.toml"), "version = \"x\"").unwrap();
+
+        assert_eq!(ui_settings(dir.path()), workspace_ui::UiSettings::default());
     }
 }

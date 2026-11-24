@@ -185,16 +185,20 @@ impl LocalPanes {
     }
 
     /// Before egui reads the input: a focused terminal takes the keys, so no shortcut
-    /// and no focus move steals one the shell needs. The core client has no keymap,
-    /// so no key passes through.
-    pub fn capture_input(&mut self, raw: &mut egui::RawInput) {
+    /// and no focus move steals one the shell needs. Only the keys `passes_through`
+    /// accepts (the keymap's workbench chords) stay with the window.
+    pub fn capture_input(
+        &mut self,
+        raw: &mut egui::RawInput,
+        passes_through: impl Fn(egui::Key, egui::Modifiers) -> bool,
+    ) {
         if !self.terminals.focused {
             return;
         }
         // An empty paste is the platform's image paste, never text for a shell.
         raw.events
             .retain(|event| !matches!(event, egui::Event::Paste(text) if text.is_empty()));
-        self.terminals.capture_input(raw, |_, _| false);
+        self.terminals.capture_input(raw, passes_through);
     }
 }
 
@@ -288,11 +292,39 @@ mod tests {
             ..RawInput::default()
         };
 
-        local.capture_input(&mut raw);
+        local.capture_input(&mut raw, |_, _| false);
 
         let expected = batch();
         assert_eq!(local.terminals.pending_events, expected[..3]);
         assert_eq!(raw.events, expected[4..]);
+    }
+
+    // Given: a focused terminal and the default keymap
+    // When: Ctrl+1, Ctrl+Shift+R, Ctrl+S and Ctrl+C arrive
+    // Then: the workbench chords Ctrl+1 and Ctrl+Shift+R stay with the window, while the
+    //       control letters Ctrl+S and Ctrl+C go to the shell, as in the embedded workbench
+    #[test]
+    fn the_keymap_keeps_workbench_chords_out_of_a_focused_terminal() {
+        let keymap = crate::keymap::Keymap::from_settings(&Default::default());
+        let mut local = LocalPanes::new(Arc::new(crate::diff::FixtureDiffSource::empty()), None);
+        local.terminals.focused = true;
+        let events = vec![
+            key(Key::Num1, Modifiers::CTRL),
+            key(Key::R, Modifiers::CTRL | Modifiers::SHIFT),
+            key(Key::S, Modifiers::CTRL),
+            key(Key::C, Modifiers::CTRL),
+        ];
+        let mut raw = RawInput {
+            events: events.clone(),
+            ..RawInput::default()
+        };
+
+        local.capture_input(&mut raw, |key, modifiers| {
+            keymap.passes_through_terminal(key, modifiers)
+        });
+
+        assert_eq!(raw.events, events[..2]);
+        assert_eq!(local.terminals.pending_events, events[2..]);
     }
 
     /// Records where each shell would start, and starts none.
@@ -352,7 +384,7 @@ mod tests {
             ..RawInput::default()
         };
 
-        local.capture_input(&mut raw);
+        local.capture_input(&mut raw, |_, _| false);
 
         assert!(local.terminals.pending_events.is_empty());
         assert_eq!(raw.events, batch());
