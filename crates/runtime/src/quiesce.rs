@@ -78,6 +78,30 @@ struct Inner {
     blockers: BTreeMap<RunId, RestartBlocker>,
     intents: BTreeMap<RunId, ResumeIntent>,
     persisted: BTreeSet<RunId>,
+    snapshot_commits: SnapshotCommits,
+}
+/// A run commits a snapshot first and names it in its live intent after. In
+/// between, the stored snapshot and the intent disagree. Restart observation
+/// reads these counts to tell that passing state from a missing or replaced
+/// snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotCommits {
+    started: u64,
+    finished: u64,
+}
+impl SnapshotCommits {
+    /// No commit is between its write and its intent now, and none began after `earlier`.
+    pub(crate) fn settled_since(self, earlier: Self) -> bool {
+        self.started == earlier.started && self.finished == self.started
+    }
+}
+/// Held from before a snapshot is committed until its intent names it.
+pub(crate) struct SnapshotCommit<'a>(&'a Coordinator);
+impl Drop for SnapshotCommit<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.0.lock();
+        inner.snapshot_commits.finished = inner.snapshot_commits.finished.wrapping_add(1);
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StorageStep {
@@ -154,6 +178,14 @@ impl Coordinator {
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.version.subscribe()
+    }
+    pub(crate) fn begin_snapshot_commit(&self) -> SnapshotCommit<'_> {
+        let mut inner = self.lock();
+        inner.snapshot_commits.started = inner.snapshot_commits.started.wrapping_add(1);
+        SnapshotCommit(self)
+    }
+    pub(crate) fn snapshot_commits(&self) -> SnapshotCommits {
+        self.lock().snapshot_commits
     }
     pub(crate) fn state(&self) -> QuiesceState {
         self.lock().phase.clone()

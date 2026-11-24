@@ -41,6 +41,7 @@ pub struct RestartRecipeMember {
 /// Memory-only recipe-collection observation; never admission or capture authority.
 pub struct RestartRecipeObservation {
     runtime: Weak<Shared>,
+    commits: SnapshotCommits,
     intents: BTreeMap<RunId, ResumeIntent>,
     metadata: BTreeMap<RunId, String>,
 }
@@ -229,23 +230,37 @@ impl AgentRuntime {
         &self,
         recipes: &BTreeMap<RunId, RecoveryRecipe>,
     ) -> Result<RestartPreflight, RuntimeError> {
+        let commits = self.shared.quiesce.snapshot_commits();
         let intents = self.shared.quiesce.live_capture_intents();
         let metadata = self.restart_recipe_metadata();
-        self.preflight_restart_capture(recipes)?;
-        if let Some(store) = self.shared.run_store.get()
-            && store
-                .with_database(|db| db.has_pending_adopted_restart())
-                .map_err(error)?
-        {
-            return Err(error(
-                "previous adopted restart has RetryPending components",
-            ));
-        }
+        let checked = self.preflight_restart_capture(recipes).and_then(|()| {
+            let pending = match self.shared.run_store.get() {
+                Some(store) => store
+                    .with_database(|db| db.has_pending_adopted_restart())
+                    .map_err(error)?,
+                None => false,
+            };
+            if pending {
+                return Err(error(
+                    "previous adopted restart has RetryPending components",
+                ));
+            }
+            Ok(())
+        });
+        // A run that changed while it was inspected (a snapshot committed but
+        // not yet in its intent, for one) is observed again, whatever the
+        // inspection of the older state concluded.
         if intents != self.shared.quiesce.live_capture_intents()
             || metadata != self.restart_recipe_metadata()
+            || !self
+                .shared
+                .quiesce
+                .snapshot_commits()
+                .settled_since(commits)
         {
             return Err(RuntimeError::RestartObservationChanged);
         }
+        checked?;
         Ok(RestartPreflight {
             runtime: Arc::downgrade(&self.shared),
             intents,
@@ -338,6 +353,7 @@ impl AgentRuntime {
     pub fn observe_restart_recipes(&self) -> RestartRecipeObservation {
         RestartRecipeObservation {
             runtime: Arc::downgrade(&self.shared),
+            commits: self.shared.quiesce.snapshot_commits(),
             intents: self.shared.quiesce.live_capture_intents(),
             metadata: self.restart_recipe_metadata(),
         }
@@ -349,6 +365,11 @@ impl AgentRuntime {
         if !Weak::ptr_eq(&observed.runtime, &Arc::downgrade(&self.shared))
             || observed.intents != self.shared.quiesce.live_capture_intents()
             || observed.metadata != self.restart_recipe_metadata()
+            || !self
+                .shared
+                .quiesce
+                .snapshot_commits()
+                .settled_since(observed.commits)
         {
             return Err(RuntimeError::RestartObservationChanged);
         }
