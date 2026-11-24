@@ -92,6 +92,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 uuid = { workspace = true }
 rustix = { version = "1", features = ["process"] }
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 libc = "0.2"
 browser = { path = "../browser" }

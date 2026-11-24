@@ -36,6 +36,8 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<(), BootstrapError> {
     #[cfg(target_os = "linux")]
     let mask = Arc::new(core_instance::handoff::BlockedShutdownSignals::at_entry()?);
+    // Before the planned/cold split and before any thread exists; the exec'd image re-enters here.
+    evorch_core::allocator::configure_at_entry();
     #[cfg(target_os = "linux")]
     let entry = core_instance::handoff::entry::EntryOptions::parse(std::env::args_os().skip(1))?;
     // Inspect before config/DB/runtime/any new ShutdownInbox. Never fall back to Cold.
@@ -225,4 +227,19 @@ async fn serve(
     drop(instance);
     outcome?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn the_arena_cap_is_set_once_right_after_the_signal_mask_and_before_any_entry_branch() {
+        let source = include_str!("main.rs");
+        let (production, _) = source.split_once("#[cfg(all(test").unwrap();
+        let call = "evorch_core::allocator::configure_at_entry()";
+        assert_eq!(production.matches(call).count(), 1);
+        let position = |needle: &str| production.find(needle).unwrap();
+        assert!(position("BlockedShutdownSignals::at_entry()") < position(call));
+        assert!(position(call) < position("EntryOptions::parse("));
+        assert!(position(call) < position("planned_entry::run("));
+    }
 }
