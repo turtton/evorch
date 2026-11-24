@@ -164,14 +164,14 @@ fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced()
         runs_tag(&first),
         runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
     );
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     let more = asked(&mut screen);
     answer(
         &mut screen,
         runs_tag(&more),
         runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
     );
-    screen.get_by_label("子 run (1)");
+    screen.get_by_label("Subagents (1)");
 
     // A delayed run event must not collapse the already loaded second page.
     run_changed(&mut screen);
@@ -182,7 +182,7 @@ fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced()
         runs_reply(vec![run("run-c", None, "active", "live", 0)], true),
     );
     screen.get_by_label("name-run-a");
-    screen.get_by_label("子 run (1)");
+    screen.get_by_label("Subagents (1)");
     let next = asked(&mut screen);
     let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&next[0]) else {
         panic!("the refreshed prefix's next page");
@@ -194,9 +194,9 @@ fn a_run_refresh_keeps_loaded_pages_visible_until_the_whole_prefix_is_replaced()
         runs_reply(vec![run("run-b", None, "active", "live", 2)], false),
     );
     screen.get_by_label("name-run-c");
-    screen.get_by_label("子 run (2)");
+    screen.get_by_label("Subagents (2)");
     assert!(screen.query_by_label("name-run-a").is_none());
-    assert!(screen.query_by_label("さらに読み込む").is_none());
+    assert!(screen.query_by_label("Load more runs").is_none());
 }
 
 #[test]
@@ -208,10 +208,10 @@ fn a_run_change_during_load_more_waits_for_its_reply_then_refreshes_both_pages()
         runs_tag(&first),
         runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
     );
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     let more = asked(&mut screen);
     run_changed(&mut screen);
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     assert!(
         asked(&mut screen).is_empty(),
         "no duplicate or competing read"
@@ -231,14 +231,14 @@ fn a_run_change_during_load_more_waits_for_its_reply_then_refreshes_both_pages()
         runs_tag(&refresh),
         runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
     );
-    screen.get_by_label("子 run (1)");
+    screen.get_by_label("Subagents (1)");
     let next = asked(&mut screen);
     answer(
         &mut screen,
         runs_tag(&next),
         runs_reply(vec![run("run-b", None, "active", "live", 1)], false),
     );
-    screen.get_by_label("子 run (1)");
+    screen.get_by_label("Subagents (1)");
     assert!(asked(&mut screen).is_empty());
 }
 
@@ -253,7 +253,7 @@ fn load_more_during_a_refresh_is_kept_and_a_shorter_refresh_can_finish_early() {
     );
     run_changed(&mut screen);
     let refresh = asked(&mut screen);
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     assert!(asked(&mut screen).is_empty());
     answer(
         &mut screen,
@@ -296,9 +296,9 @@ fn a_reset_or_a_revisited_level_drops_old_run_replies_including_errors() {
         if reset {
             screen.state_mut().feature.reset();
         } else {
-            screen.get_by_label("子 run (1)").click();
+            screen.get_by_label("Subagents (1)").click();
             let _children = asked(&mut screen);
-            screen.get_by_label("ルート").click();
+            screen.get_by_label("Root").click();
         }
         let current = asked(&mut screen);
         answer(
@@ -342,7 +342,7 @@ fn a_failed_page_keeps_the_displayed_prefix_and_releases_the_read() {
         runs_tag(&first),
         runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
     );
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     let more = asked(&mut screen);
     answer(
         &mut screen,
@@ -375,7 +375,7 @@ fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event
             runs_tag(&first),
             runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
         );
-        screen.get_by_label("さらに読み込む").click();
+        screen.get_by_label("Load more runs").click();
         let more = asked(&mut screen);
         let conflicting = if during_refresh {
             answer(
@@ -405,7 +405,7 @@ fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event
         );
         screen.get_by_label("name-run-a");
         if during_refresh {
-            screen.get_by_label("子 run (1)");
+            screen.get_by_label("Subagents (1)");
         }
         let restarted = asked(&mut screen);
         let Query::Execution(ExecutionQuery::ListRunDetails(query)) = query_of(&restarted[0])
@@ -429,7 +429,7 @@ fn a_cursor_conflict_restarts_the_prefix_without_waiting_for_a_run_changed_event
             runs_reply(vec![run("run-b", None, "active", "live", 2)], false),
         );
         screen.get_by_label("name-run-new");
-        screen.get_by_label("子 run (2)");
+        screen.get_by_label("Subagents (2)");
         assert!(screen.query_by_label("name-run-a").is_none());
         assert!(asked(&mut screen).is_empty());
     }
@@ -459,7 +459,7 @@ fn repeated_run_ids_across_pages_keep_one_row_per_id() {
         runs_tag(&first),
         runs_reply(vec![run("run-a", None, "active", "live", 0)], true),
     );
-    screen.get_by_label("さらに読み込む").click();
+    screen.get_by_label("Load more runs").click();
     let more = asked(&mut screen);
     answer(
         &mut screen,
@@ -495,11 +495,11 @@ fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
             runs_reply(items(page), page + 1 < pages),
         );
         if page + 1 < pages {
-            screen.get_by_label("さらに読み込む").click();
+            screen.get_by_label("Load more runs").click();
         }
     }
     let count = (pages * DEFAULT_PAGE_SIZE) as usize;
-    assert_eq!(screen.query_all_by_label("Worker").count(), count);
+    assert_eq!(screen.query_all_by_label("Open pane").count(), count);
     run_changed(&mut screen);
     let mut queries = 0;
     let mut events = 1;
@@ -528,7 +528,7 @@ fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
                 runs_tag(&actions),
                 runs_reply(items(page), page + 1 < pages),
             );
-            assert_eq!(screen.query_all_by_label("Worker").count(), count);
+            assert_eq!(screen.query_all_by_label("Open pane").count(), count);
         }
     }
     assert_eq!(queries, (pages * refreshes) as usize);
@@ -536,24 +536,33 @@ fn a_refresh_follows_cursors_for_a_prefix_larger_than_the_maximum_page_size() {
     eprintln!("{count} rows / {pages} pages / {events} events: {queries} refresh queries");
 }
 
+fn detail(lifecycle: &str, phase: &str, source: &str) -> RunDetail {
+    let mut value = run("run-a", None, lifecycle, source, 0);
+    value["summary"]["phase"] = json!(phase);
+    serde_json::from_value(value).unwrap()
+}
+
 #[test]
 fn the_four_ends_of_a_run_and_history_only_are_told_apart() {
-    let all: Vec<_> = [
-        RunLifecycle::Active,
-        RunLifecycle::Terminal,
-        RunLifecycle::Stopped,
-        RunLifecycle::Recovering,
-    ]
-    .into_iter()
-    .map(|l| lifecycle_label(l, RunSource::Live))
-    .collect();
-    let distinct: std::collections::BTreeSet<_> = all.iter().collect();
-    assert_eq!(distinct.len(), 4);
-    for lifecycle in [RunLifecycle::Terminal, RunLifecycle::Stopped] {
-        let live = lifecycle_label(lifecycle, RunSource::Live);
-        let history = lifecycle_label(lifecycle, RunSource::HistoryOnly);
-        assert_ne!(live, history);
-        assert!(history.contains("履歴のみ"));
+    let ends = [
+        ("active", "running"),
+        ("terminal", "done"),
+        ("stopped", "cancelled"),
+        ("recovering", "running"),
+    ];
+    let live: std::collections::BTreeSet<_> = ends
+        .iter()
+        .map(|(lifecycle, phase)| card::status_text(&detail(lifecycle, phase, "live")))
+        .collect();
+    assert_eq!(
+        live,
+        ["Running", "Done", "Stopped", "Waiting for recovery"]
+            .map(String::from)
+            .into()
+    );
+    for (lifecycle, phase) in ends {
+        let history = card::status_text(&detail(lifecycle, phase, "history_only"));
+        assert!(history.ends_with(" (history only)"), "{history}");
     }
 }
 
@@ -584,8 +593,8 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     // active one can be stopped.
     screen.get_by_label("name-run-a");
     screen.get_by_label("name-run-b");
-    screen.get_by_label("停止・中止（履歴のみ）");
-    assert_eq!(screen.query_all_by_label("停止").count(), 1);
+    screen.get_by_label("worker · Stopped (history only)");
+    assert_eq!(screen.query_all_by_label("Stop").count(), 1);
 
     // A refresh asks for the roots again (the answer comes later), then the
     // drill-down asks for the children of run-a.
@@ -603,7 +612,7 @@ fn a_drill_down_asks_for_the_children_and_drops_an_answer_for_a_level_left() {
     let refresh_tag = runs_tag(&refresh);
     let roots = refresh.iter().find(|a| a.tag == refresh_tag).unwrap();
     assert_eq!(scope_of(roots), RunScope::Roots);
-    screen.get_by_label("子 run (2)").click();
+    screen.get_by_label("Subagents (2)").click();
     let drill = asked(&mut screen);
     assert_eq!(drill.len(), 1);
     assert_eq!(
@@ -649,7 +658,10 @@ fn stop_names_the_shown_thread_and_the_one_run_clicked() {
             false,
         ),
     );
-    screen.get_by_label("停止").click();
+    // The first click only asks for confirmation.
+    screen.get_by_label("Stop").click();
+    assert!(asked(&mut screen).is_empty());
+    screen.get_by_label("Confirm?").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
     let Command::Execution(ExecutionCommand::StopRun(stop)) = command_of(&sent[0]) else {
@@ -659,11 +671,8 @@ fn stop_names_the_shown_thread_and_the_one_run_clicked() {
     assert_eq!(stop.run.as_str(), "run-a");
 }
 
-#[test]
-fn the_goal_review_and_the_checks_pause_send_their_own_commands() {
-    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
-    let first = asked(&mut screen);
-    let execution_tag = first
+fn execution_tag(actions: &[FeatureAction]) -> u64 {
+    actions
         .iter()
         .find(|a| {
             matches!(
@@ -671,27 +680,36 @@ fn the_goal_review_and_the_checks_pause_send_their_own_commands() {
                 Query::Execution(ExecutionQuery::GetThreadExecution(_))
             )
         })
-        .unwrap()
-        .tag;
-    answer(&mut screen, execution_tag, execution_reply(true));
-    screen.get_by_label("ゴール: ship it");
-    screen.get_by_label("✔ tests pass");
-    screen.get_by_label("指摘: fix the docs");
+        .expect("the thread execution was asked for")
+        .tag
+}
 
-    screen.get_by_label("ゴールレビュー").click();
-    let sent = asked(&mut screen);
-    let Command::Execution(ExecutionCommand::SetGoalReview(review)) = command_of(&sent[0]) else {
-        panic!("a review toggle was expected");
-    };
-    assert_eq!((review.goal.as_str(), review.enabled), ("g1", false));
+#[test]
+fn the_goal_is_left_to_the_band_and_the_working_note_folds() {
+    // Given: the thread's goal and its root's working note answered.
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(&mut screen, execution_tag(&first), execution_reply(true));
 
-    screen.get_by_label("チェックを一時停止").click();
-    let sent = asked(&mut screen);
-    let Command::Execution(ExecutionCommand::SetGoalChecksPaused(paused)) = command_of(&sent[0])
-    else {
-        panic!("a pause toggle was expected");
-    };
-    assert_eq!((paused.goal.as_str(), paused.paused), ("g1", true));
+    // Then: the goal is not drawn here, and the note stays folded.
+    assert!(screen.query_by_label_contains("ship it").is_none());
+    assert!(
+        screen
+            .query_by_label("Current revision 1: ledger-body")
+            .is_none()
+    );
+
+    // When: the note is opened.
+    screen.get_by_label("> Working note").click();
+    screen.run_steps(2);
+
+    // Then: its current revision shows, without a truncation line.
+    screen.get_by_label("Current revision 1: ledger-body");
+    assert!(
+        screen
+            .query_by_label("Only the start of this note is shown.")
+            .is_none()
+    );
 }
 
 #[test]
@@ -743,18 +761,21 @@ fn a_changed_thread_starts_over_and_a_reset_asks_again_without_losing_tags() {
 #[test]
 fn an_unknown_command_outcome_is_shown_and_never_resent() {
     let mut feature = ExecutionFeature::default();
-    let tag = feature.tag(Pending::Command("run の停止"));
+    let tag = feature.tag(Pending::Command("Stop run"));
     feature.reply(
         tag,
         FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
     );
-    assert!(feature.status.contains("結果不明"));
+    assert_eq!(
+        feature.status,
+        "Stop run: outcome unknown (not resent) — connection lost"
+    );
     assert!(
         feature.pending.contains_key(&tag),
         "the resolved reply is awaited"
     );
     feature.reply(tag, ok_command());
-    assert!(feature.status.contains("受け付けました"));
+    assert_eq!(feature.status, "Stop run: accepted");
     assert!(!feature.pending.contains_key(&tag));
 }
 
@@ -1072,10 +1093,7 @@ fn queued_goal_actions_send_review_and_pause_for_the_shown_goal() {
     };
     assert_eq!((paused.goal.as_str(), paused.paused), ("g1", true));
     hidden.feature.reply(sent[0].tag, ok_command());
-    assert_eq!(
-        hidden.feature.status,
-        "ゴールレビューの切替: 受け付けました"
-    );
+    assert_eq!(hidden.feature.status, "Goal review: accepted");
 }
 
 // Given: the roots of t1 listed
@@ -1110,4 +1128,140 @@ fn open_pane_hands_the_row_to_the_shell_once() {
         })
     );
     assert_eq!(take(&mut screen), None);
+}
+
+// Given: a worker with a category and a model, one without a model, and one
+//   waiting for recovery
+// When: the roots are drawn
+// Then: each card reads like a row of the legacy Subagents column
+#[test]
+fn a_run_card_reads_like_the_subagents_column() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    let mut worker = run("run-a", None, "active", "live", 0);
+    worker["category"] = json!("quick");
+    worker["model"] = json!("openai/gpt-5");
+    let mut recovering = run("run-c", None, "recovering", "live", 0);
+    recovering["summary"]["role"] = json!("reviewer");
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(
+            vec![
+                worker,
+                run("run-b", None, "terminal", "live", 0),
+                recovering,
+            ],
+            false,
+        ),
+    );
+    screen.get_by_label("name-run-a");
+    screen.get_by_label("Worker(quick) · Running");
+    screen.get_by_label("openai/gpt-5 · openai");
+    screen.get_by_label("reviewer · Waiting for recovery");
+    assert_eq!(
+        screen.query_all_by_label("unknown · unknown").count(),
+        2,
+        "a run without a model names neither it nor its provider"
+    );
+    assert_eq!(screen.query_all_by_label("Copy run ID").count(), 3);
+    assert_eq!(screen.query_all_by_label("Open pane").count(), 3);
+    assert_eq!(screen.query_all_by_label("Stop").count(), 1);
+    assert!(
+        screen.query_by_label("run-a").is_none(),
+        "the id is copied, not shown"
+    );
+    assert!(screen.query_by_label_contains("Subagents (").is_none());
+}
+
+// Given: a root with subagents and one without
+// When: a name or the breadcrumb is clicked
+// Then: only a run with subagents drills in, and Root returns to the roots
+#[test]
+fn the_name_and_the_count_drill_in_and_root_returns() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let roots = |screen: &mut Harness<'_, Screen>, actions: &[FeatureAction]| {
+        answer(
+            screen,
+            runs_tag(actions),
+            runs_reply(
+                vec![
+                    run("run-a", None, "active", "live", 2),
+                    run("run-b", None, "terminal", "live", 0),
+                ],
+                false,
+            ),
+        );
+    };
+    let first = asked(&mut screen);
+    roots(&mut screen, &first);
+
+    screen.get_by_label("name-run-b").click();
+    assert!(asked(&mut screen).is_empty(), "a run without subagents");
+
+    screen.get_by_label("name-run-a").click();
+    let drill = asked(&mut screen);
+    assert_eq!(drill.len(), 1);
+    assert_eq!(
+        scope_of(&drill[0]),
+        RunScope::Children {
+            parent: RunId::new("run-a").unwrap()
+        }
+    );
+    screen.get_by_label("run-a");
+    answer(&mut screen, drill[0].tag, runs_reply(vec![], false));
+    screen.get_by_label("No subagents of this run");
+
+    screen.get_by_label("Root").click();
+    let back = asked(&mut screen);
+    assert_eq!(scope_of(&back[0]), RunScope::Roots);
+    roots(&mut screen, &back);
+    assert!(screen.query_by_label("run-a").is_none());
+    screen.get_by_label("Subagents (2)");
+}
+
+fn frame_at(screen: &mut Harness<'_, Screen>, time: f64) {
+    screen.input_mut().time = Some(time);
+    screen.step();
+}
+
+// Given: Stop pressed once on an active run
+// When: two seconds pass without the confirmation
+// Then: nothing was sent and Stop is offered again
+#[test]
+fn a_stop_confirmation_expires_without_a_command() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(vec![run("run-a", None, "active", "live", 0)], false),
+    );
+    frame_at(&mut screen, 100.0);
+    screen.get_by_label("Stop").click();
+    frame_at(&mut screen, 100.0);
+    frame_at(&mut screen, 100.5);
+    screen.get_by_label("Confirm?");
+
+    frame_at(&mut screen, 102.5);
+    frame_at(&mut screen, 102.5);
+    assert!(screen.query_by_label("Confirm?").is_none());
+    screen.get_by_label("Stop");
+    assert!(std::mem::take(&mut screen.state_mut().frame.actions).is_empty());
+}
+
+// Given: the thread has no runs
+// When: the roots answer empty, or no thread is selected
+// Then: the legacy empty state is shown
+#[test]
+fn an_empty_thread_and_no_thread_read_like_the_subagents_column() {
+    let mut screen = screen(Box::<ExecutionFeature>::default(), Some("t1"));
+    let first = asked(&mut screen);
+    answer(&mut screen, runs_tag(&first), runs_reply(vec![], false));
+    screen.get_by_label("No runs in this thread");
+    screen.get_by_label("Start a conversation to see its agent runs.");
+
+    let mut none = super::tests::screen(Box::<ExecutionFeature>::default(), None);
+    none.run_steps(2);
+    none.get_by_label("No runs in this thread");
 }

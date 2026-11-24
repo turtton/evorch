@@ -1,53 +1,12 @@
-use crate::theme::tokens::palette;
-use crate::theme::widgets::surface_frame;
+use crate::panes::run_card_widgets::{NoteRevision, working_note};
 
 pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage::RunLedgerEntry]) {
-    if entries.is_empty() {
-        return;
-    }
-    let id = ui.id().with(("ledger-expanded", run_id));
-    let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
-    surface_frame(palette().SURFACE).show(ui, |ui| {
-        let arrow = if expanded { "v" } else { ">" };
-        if ui
-            .add(
-                egui::Button::new(crate::theme::text::badge(format!("{arrow} Working note")))
-                    .frame(false)
-                    .wrap(),
-            )
-            .clicked()
-        {
-            expanded = !expanded;
-            ui.data_mut(|data| data.insert_temp(id, expanded));
-        }
-        if expanded {
-            let current = entries.last().expect("nonempty revisions");
-            ui.label(if current.body.is_empty() {
-                "Current note cleared".into()
-            } else {
-                format!("Current revision {}: {}", current.seq, current.body)
-            });
-            if entries.len() > 1 {
-                ui.collapsing("Previous revisions", |ui| {
-                    for entry in entries[..entries.len() - 1].iter().rev() {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!(
-                                    "Revision {}: {}",
-                                    entry.seq,
-                                    if entry.body.is_empty() {
-                                        "(cleared)"
-                                    } else {
-                                        &entry.body
-                                    }
-                                ))
-                                .color(palette().TEXT),
-                            )
-                            .wrap(),
-                        );
-                    }
-                });
-            }
-        }
-    });
+    let revisions: Vec<_> = entries
+        .iter()
+        .map(|entry| NoteRevision {
+            seq: entry.seq,
+            body: &entry.body,
+        })
+        .collect();
+    working_note(ui, run_id, &revisions, false);
 }

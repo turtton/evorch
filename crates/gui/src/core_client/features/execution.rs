@@ -1,5 +1,6 @@
 //! Desktop feature of the `execution` area: the runs of the selected thread
-//! (roots, then the children of one run), its goal and ledger.
+//! (roots, then the children of one run) as cards of the Subagents column, and
+//! the working note of its root.
 //!
 //! Everything shown is read from the core with a typed query; an event only
 //! says that something changed, and the answer is asked for again, so an event
@@ -9,11 +10,14 @@
 //!
 //! The goal and the plan of the selected thread are read in `maintain`, while
 //! the tab is hidden too, because the conversation's composer band shows them
-//! ([`ExecutionFeature::band`]). What is pressed in the band or the Plan tab is
-//! queued here and leaves in the next `maintain`.
+//! ([`ExecutionFeature::band`]); this tab does not draw the goal. What is
+//! pressed in the band or the Plan tab is queued here and leaves in the next
+//! `maintain`.
 use std::collections::{BTreeMap, HashSet};
 
-use super::layout::{bounded_list, paged_list};
+mod card;
+
+use super::layout::main_paged_list;
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Visibility,
 };
@@ -21,7 +25,8 @@ use crate::core_client::run_tabs::RunPane;
 use crate::model::conversation_plan::{PlanState, ReadFailure, ReadKind};
 use crate::panes::conversation_plan::{PlanBand, PlanPanelAction};
 use crate::panes::goal_widgets::GoalAction;
-use crate::theme::{icons, text::muted, widgets::ghost};
+use crate::panes::run_card_widgets::{NoteRevision, working_note};
+use crate::theme::{text::muted, widgets::empty_state};
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
     errors::ErrorCode,
@@ -30,10 +35,7 @@ use workbench_protocol::{
     ids::{PageCursor, RunId, ThreadId},
     namespaces::{
         ExecutionCommand, ExecutionEvent, ExecutionQuery, ExecutionReply,
-        execution::{
-            GoalPhase, GoalView, RunDetail, RunDetailsQuery, RunLifecycle, RunScope, RunSource,
-            ThreadExecution,
-        },
+        execution::{GoalView, RunDetail, RunDetailsQuery, RunScope, ThreadExecution},
     },
     queries::{PageRequest, Query, QueryReply},
 };
@@ -148,16 +150,15 @@ impl ExecutionFeature {
                     goal_id,
                     enabled,
                 } if thread_id == thread.as_str() && goal_id == goal.goal.as_str() => {
-                    ("ゴールレビューの切替", goal_review(thread, goal, enabled))
+                    ("Goal review", goal_review(thread, goal, enabled))
                 }
                 GoalAction::ChecksPaused {
                     thread_id,
                     goal_id,
                     paused,
-                } if thread_id == thread.as_str() && goal_id == goal.goal.as_str() => (
-                    "ゴールチェックの一時停止",
-                    goal_checks_paused(thread, goal, paused),
-                ),
+                } if thread_id == thread.as_str() && goal_id == goal.goal.as_str() => {
+                    ("Goal checks", goal_checks_paused(thread, goal, paused))
+                }
                 _ => continue,
             };
             self.command(ctx, label, command);
@@ -262,7 +263,7 @@ impl ExecutionFeature {
 
     fn draw_runs(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, thread: &ThreadId) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("ルート").clicked() && !self.path.is_empty() {
+            if ui.button("Root").clicked() && !self.path.is_empty() {
                 self.path.clear();
                 self.clear_runs();
             }
@@ -277,48 +278,35 @@ impl ExecutionFeature {
             }
         });
         if self.runs.is_empty() && !self.runs_stale && self.runs_read.is_none() {
-            ui.label("この階層に run はありません。");
+            if self.path.is_empty() {
+                no_runs(ui);
+            } else {
+                ui.label(muted("No subagents of this run"));
+            }
         }
         let mut drill = None;
         let mut stop = None;
         let mut open = None;
         let runs = &self.runs;
-        let more = paged_list(
+        let more = main_paged_list(
             ui,
             "execution-runs",
-            self.next_cursor.is_some().then_some("さらに読み込む"),
+            self.next_cursor.is_some().then_some("Load more runs"),
             |ui| {
                 for run in runs {
-                    ui.push_id(run.summary.id.as_str(), |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.strong(&run.name);
-                            ui.label(format!("{:?}", run.summary.role));
-                            ui.colored_label(
-                                lifecycle_color(run.lifecycle),
-                                lifecycle_label(run.lifecycle, run.source),
-                            );
-                            ui.label(format!("{:?}", run.summary.phase));
-                            if let Some(model) = &run.model {
-                                ui.label(model);
-                            }
-                            if open_pane_button(ui) {
-                                open = Some(RunPane {
-                                    thread: thread.clone(),
-                                    run: run.summary.id.clone(),
-                                    name: run.name.clone(),
-                                    child: run.summary.parent_run.is_some(),
-                                });
-                            }
-                            if run.child_count > 0
-                                && ui.button(format!("子 run ({})", run.child_count)).clicked()
-                            {
-                                drill = Some(run.summary.id.clone());
-                            }
-                            if is_stoppable(run) && ui.button("停止").clicked() {
-                                stop = Some(run.summary.id.clone());
-                            }
-                        });
-                    });
+                    match card::run_card(ui, run) {
+                        Some(card::CardAction::Drill) => drill = Some(run.summary.id.clone()),
+                        Some(card::CardAction::Stop) => stop = Some(run.summary.id.clone()),
+                        Some(card::CardAction::Open) => {
+                            open = Some(RunPane {
+                                thread: thread.clone(),
+                                run: run.summary.id.clone(),
+                                name: run.name.clone(),
+                                child: run.summary.parent_run.is_some(),
+                            });
+                        }
+                        None => {}
+                    }
                 }
             },
         );
@@ -329,7 +317,7 @@ impl ExecutionFeature {
             self.open_pane = open;
         }
         if let Some(run) = stop {
-            self.command(ctx, "run の停止", stop_run(thread, run));
+            self.command(ctx, "Stop run", stop_run(thread, run));
         }
         if more
             && !self
@@ -341,92 +329,29 @@ impl ExecutionFeature {
         }
     }
 
-    fn draw_goal(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, thread: &ThreadId) {
-        let Some(goal) = self.execution.as_ref().and_then(|e| e.goal.clone()) else {
-            ui.label("ゴールは設定されていません。");
+    fn draw_working_note(&self, ui: &mut egui::Ui) {
+        let Some(ledger) = self.execution.as_ref().and_then(|e| e.ledger.as_ref()) else {
             return;
         };
-        ui.strong(format!("ゴール: {}", goal.objective));
-        ui.label(format!(
-            "状態: {} / レビュー {}/{} 回{}{}",
-            goal_phase_label(goal.phase),
-            goal.review_round,
-            goal.max_review_rounds,
-            if goal.checks_paused {
-                " / チェック一時停止中"
-            } else {
-                ""
-            },
-            if goal.work_stopped {
-                " / 作業停止済み"
-            } else {
-                ""
-            },
-        ));
-        if let Some(reason) = &goal.reason {
-            ui.label(format!("理由: {reason}"));
-        }
-        bounded_list(ui, "execution-criteria", |ui| {
-            for (index, criterion) in goal.criteria.iter().enumerate() {
-                let met = goal
-                    .checks
-                    .iter()
-                    .find(|check| usize::try_from(check.criterion).is_ok_and(|c| c == index))
-                    .map(|check| check.met);
-                let mark = match met {
-                    Some(true) => "✔",
-                    Some(false) => "✘",
-                    None => "·",
-                };
-                ui.label(format!("{mark} {criterion}"));
-            }
-            for finding in &goal.findings {
-                ui.label(format!("指摘: {finding}"));
-            }
-        });
-        let mut review = goal.review_enabled;
-        if ui.checkbox(&mut review, "ゴールレビュー").changed() {
-            self.command(
-                ctx,
-                "ゴールレビューの切替",
-                goal_review(thread, &goal, review),
-            );
-        }
-        let mut paused = goal.checks_paused;
-        if ui.checkbox(&mut paused, "チェックを一時停止").changed() {
-            self.command(
-                ctx,
-                "ゴールチェックの一時停止",
-                goal_checks_paused(thread, &goal, paused),
-            );
-        }
-    }
-
-    fn draw_ledger(&self, ui: &mut egui::Ui) {
-        let Some(execution) = &self.execution else {
-            return;
-        };
-        if let Some(ledger) = &execution.ledger {
-            ui.collapsing("台帳 (ledger)", |ui| {
-                bounded_list(ui, "execution-ledger", |ui| {
-                    ui.label(&ledger.body);
-                });
-                if ledger.truncated {
-                    ui.label("（長いため先頭のみ表示）");
-                }
-            });
-        }
+        working_note(
+            ui,
+            ledger.run.as_str(),
+            &[NoteRevision {
+                seq: ledger.seq.get(),
+                body: &ledger.body,
+            }],
+            ledger.truncated,
+        );
     }
 }
 
-/// The embedded workbench's Open pane control of an agent row.
-fn open_pane_button(ui: &mut egui::Ui) -> bool {
-    let open = ui.add(ghost(muted(icons::with_icon(
-        icons::ARROW_SQUARE_OUT,
-        "Open pane",
-    ))));
-    open.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open pane"));
-    open.clicked()
+fn no_runs(ui: &mut egui::Ui) {
+    empty_state(
+        ui,
+        "No runs in this thread",
+        "Start a conversation to see its agent runs.",
+        None,
+    );
 }
 
 fn stop_run(thread: &ThreadId, run: RunId) -> Command {
@@ -450,46 +375,6 @@ fn goal_checks_paused(thread: &ThreadId, goal: &GoalView, paused: bool) -> Comma
         goal: goal.goal.clone(),
         paused,
     }))
-}
-
-/// Whether Stop is offered: only a run the runtime still holds and that is
-/// active. Anything else cannot be stopped from here.
-pub(crate) fn is_stoppable(run: &RunDetail) -> bool {
-    run.source == RunSource::Live && run.lifecycle == RunLifecycle::Active
-}
-
-/// The four ends a run can be in, and whether only its record remains.
-pub(crate) fn lifecycle_label(lifecycle: RunLifecycle, source: RunSource) -> String {
-    let state = match lifecycle {
-        RunLifecycle::Active => "実行中",
-        RunLifecycle::Terminal => "終了",
-        RunLifecycle::Stopped => "停止・中止",
-        RunLifecycle::Recovering => "復旧待ち",
-    };
-    match source {
-        RunSource::Live => state.to_owned(),
-        RunSource::HistoryOnly => format!("{state}（履歴のみ）"),
-    }
-}
-
-fn lifecycle_color(lifecycle: RunLifecycle) -> egui::Color32 {
-    match lifecycle {
-        RunLifecycle::Active => egui::Color32::LIGHT_GREEN,
-        RunLifecycle::Terminal => egui::Color32::GRAY,
-        RunLifecycle::Stopped => egui::Color32::LIGHT_RED,
-        RunLifecycle::Recovering => egui::Color32::YELLOW,
-    }
-}
-
-pub(crate) fn goal_phase_label(phase: GoalPhase) -> &'static str {
-    match phase {
-        GoalPhase::Working => "作業中",
-        GoalPhase::Checking => "チェック中",
-        GoalPhase::Reviewing => "レビュー中",
-        GoalPhase::Repairing => "修正中",
-        GoalPhase::Complete => "完了",
-        GoalPhase::Blocked => "ブロック中",
-    }
 }
 
 impl Feature for ExecutionFeature {
@@ -618,7 +503,7 @@ impl Feature for ExecutionFeature {
                 self.status = error.message;
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
-                self.status = format!("{label}: 受け付けました");
+                self.status = format!("{label}: accepted");
                 self.runs_stale = true;
                 self.execution_stale = true;
             }
@@ -680,7 +565,7 @@ impl Feature for ExecutionFeature {
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         let Some(thread) = self.thread.clone() else {
-            ui.label("会話を選択すると run・ゴール・台帳を表示します。");
+            no_runs(ui);
             return;
         };
         self.request_runs(ctx);
@@ -688,9 +573,7 @@ impl Feature for ExecutionFeature {
             ui.label(&self.status);
         }
         self.draw_runs(ui, ctx, &thread);
-        ui.separator();
-        self.draw_goal(ui, ctx, &thread);
-        self.draw_ledger(ui);
+        self.draw_working_note(ui);
     }
 
     fn as_execution(&self) -> Option<&ExecutionFeature> {
@@ -712,7 +595,7 @@ fn read_failure(error: &FeatureError) -> ReadFailure {
 
 fn command_failure(label: &str, error: &FeatureError) -> String {
     if error.outcome_unknown {
-        format!("{label}: 結果不明（再送していません）— {}", error.message)
+        format!("{label}: outcome unknown (not resent) — {}", error.message)
     } else {
         format!("{label}: {}", error.message)
     }
