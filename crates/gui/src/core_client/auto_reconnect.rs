@@ -56,18 +56,20 @@ pub fn is_orderly_shutdown(event: &UiEvent) -> bool {
 }
 
 pub fn retrying(attempt: usize) -> String {
-    format!("コアとの接続が異常に切れました。自動で再接続します（{attempt}/{MAX_ATTEMPTS}）…")
+    format!(
+        "Lost the connection to the core unexpectedly. Reconnecting automatically ({attempt}/{MAX_ATTEMPTS})…"
+    )
 }
 
 pub fn gave_up() -> String {
     format!(
-        "コアとの接続が {} 分に {MAX_ATTEMPTS} 回を超えて切れたため、自動再接続を止めました。原因を確認してから「再接続」を押してください",
+        "The connection to the core was lost more than {MAX_ATTEMPTS} times in {} minutes, so automatic reconnection stopped. Check the cause, then press Reconnect.",
         WINDOW.as_secs() / 60
     )
 }
 
 pub fn orderly_stop() -> String {
-    "コアが停止しました（終了の通知あり）。自動では起動しません。再開するには「再接続」を押してください"
+    "The core stopped (it announced its shutdown). It is not started automatically; press Reconnect to start it again."
         .into()
 }
 
@@ -76,12 +78,12 @@ pub fn orderly_stop() -> String {
 pub fn launch_failure(error: &LaunchError) -> String {
     if error.is_budget_blocked() {
         format!(
-            "コアを自動では起動できません（再試行しません）: {error}。復旧してから「再接続」を押してください"
+            "The core cannot be started automatically (not retried): {error}. Fix the cause, then press Reconnect."
         )
     } else if error.is_incompatible() {
-        format!("稼働中のコアとは接続できません（コアは停止していません）: {error}")
+        format!("Cannot connect to the running core (the core was not stopped): {error}")
     } else {
-        format!("接続失敗（fallback しません）: {error}")
+        format!("Connection failed (no fallback): {error}")
     }
 }
 
@@ -121,13 +123,13 @@ mod tests {
         });
         let text = launch_failure(&refused);
         assert!(
-            text.contains("再試行しません") && text.contains("not parseable"),
+            text.contains("not retried") && text.contains("not parseable"),
             "{text}"
         );
         let incompatible = LaunchError::Incompatible {
             detail: "UnsupportedVersion".into(),
             advice: "Update this client.",
         };
-        assert!(launch_failure(&incompatible).contains("停止していません"));
+        assert!(launch_failure(&incompatible).contains("was not stopped"));
     }
 }

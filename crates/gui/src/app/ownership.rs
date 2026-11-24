@@ -130,9 +130,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .response
             .on_hover_text("Workbench settings");
-            let usage_label = self.usage.today_totals_snapshot().map_or_else(
-                || "Usage".to_owned(),
-                |totals| format!("{} today", crate::panes::usage::format_cost(&totals)),
+            let usage_label = crate::panes::system_footer::usage_label(
+                self.usage
+                    .today_totals_snapshot()
+                    .map(|totals| crate::panes::usage::format_cost(&totals)),
             );
             if crate::theme::widgets::ghost_icon_button(
                 ui,

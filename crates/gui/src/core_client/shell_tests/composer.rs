@@ -672,10 +672,7 @@ fn a_refused_command_keeps_its_draft_and_the_pending_files() {
     let shared = screen.shared.lock().unwrap();
     assert!(!shared.sending.contains("thr-1"));
     assert_eq!(shared.attachment_drafts["thr-1"].len(), 1);
-    assert_eq!(
-        shared.status,
-        "クライアントの送信キューが満杯または切断中です。入力は保持されています。"
-    );
+    assert_eq!(shared.status, crate::core_client::QUEUE_FULL);
 }
 
 // Given: proj-1's files on this machine and "see @READ" typed, so @README.md is offered

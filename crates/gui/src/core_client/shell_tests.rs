@@ -2416,6 +2416,8 @@ mod session;
 
 mod attention;
 
+mod footer;
+
 mod lanes;
 
 mod composer;

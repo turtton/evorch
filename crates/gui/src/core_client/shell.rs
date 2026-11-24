@@ -57,6 +57,7 @@ pub enum Effect {
     /// feature.
     PullRequest(super::features::pull_requests::PullRequestBarAction),
     ResetLayout,
+    ThemeSettings,
     Status(String),
     AttachRequested {
         request: String,
@@ -632,6 +633,8 @@ fn builtin_selector(ui: &mut Ui, pass: &mut DockPass<'_>, selection: &Selection)
 }
 
 pub struct FooterState<'a> {
+    pub stats: Option<&'a crate::panes::system_footer::stats::SystemSnapshot>,
+    pub today_cost: Option<String>,
     pub status: &'a str,
     pub connected: bool,
     pub outcome_unknown: &'a BTreeSet<String>,
@@ -641,6 +644,12 @@ pub struct FooterState<'a> {
 }
 
 pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
+    crate::panes::system_footer::with_right_stats(ui, state.stats, |ui| {
+        footer_content(ui, state, effects);
+    });
+}
+
+fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
     let title = |feature: FeatureId| {
         state
             .titles
@@ -650,6 +659,10 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
     };
     ui.horizontal_wrapped(|ui| {
         ui.menu_button("⚙", |ui| {
+            if ui.button("Theme").clicked() {
+                effects.push(Effect::ThemeSettings);
+                ui.close();
+            }
             for feature in ON_DEMAND {
                 if state.placeholders.contains(&feature) {
                     continue;
@@ -705,8 +718,9 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
         })
         .response
         .on_hover_text("Workbench settings");
-        if ghost_icon_button(ui, icons::CHART_BAR, "Usage")
-            .on_hover_text("Token usage and run diagnostics")
+        let usage = crate::panes::system_footer::usage_label(state.today_cost.clone());
+        if ghost_icon_button(ui, icons::CHART_BAR, &usage)
+            .on_hover_text("Token usage statistics")
             .clicked()
         {
             effects.push(Effect::Open(CoreTab::Feature(FeatureId::Diagnostics)));

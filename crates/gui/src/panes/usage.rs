@@ -765,6 +765,5 @@ pub use crate::format::compact_count as compact_tokens;
 
 /// USD with a `*` when part of the usage has no known price.
 pub fn format_cost(totals: &UsageTotals) -> String {
-    let marker = if totals.unpriced { "*" } else { "" };
-    format!("{}{marker}", crate::format::usd(totals.cost))
+    crate::format::cost_label(totals.cost, totals.unpriced)
 }

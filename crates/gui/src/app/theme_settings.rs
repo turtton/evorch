@@ -2,9 +2,8 @@ use std::path::PathBuf;
 
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
+use crate::panes::theme_widgets::{NO_SETTINGS_PATH, ThemeModal, theme_settings_modal};
 use crate::theme::style::ThemePreset;
-use crate::theme::tokens::{PROVIDER_MODAL_MAX_WIDTH, SP_2, SP_4, palette};
-use crate::theme::widgets::surface_frame;
 
 pub(super) struct ThemeSettings {
     pub open: bool,
@@ -77,41 +76,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !self.theme_settings.open {
             return;
         }
-        let mut selected = None;
-        let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("theme-settings"))
-            .backdrop_color(palette().OVERLAY)
-            .frame(surface_frame(palette().SURFACE_RAISED))
-            .show(ctx, |ui| {
-                ui.set_width(
-                    (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
-                );
-                ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-                ui.label(crate::theme::text::h3("Theme settings"));
-                for (id, label, preset) in [
-                    ("graphite", "Graphite", ThemePreset::Graphite),
-                    ("tokyo-night", "Tokyo Night", ThemePreset::TokyoNight),
-                    ("high-contrast", "High Contrast", ThemePreset::HighContrast),
-                ] {
-                    ui.push_id(id, |ui| {
-                        if ui.radio(self.theme_preset == preset, label).clicked() {
-                            selected = Some(preset);
-                        }
-                    });
-                }
-                if let Some(error) = &self.theme_settings.error {
-                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
-                }
-                close = ui.button("Close").clicked();
-            });
+        let ThemeModal { selected, close } =
+            theme_settings_modal(ctx, self.theme_preset, self.theme_settings.error.as_deref());
         if let Some(preset) = selected {
             self.reload_theme(ctx, preset);
             self.theme_settings.settings.theme_preset = preset.into();
-            self.theme_settings.error = self.save_ui_settings().unwrap_or_else(|| {
-                Some("No UI settings path is configured; theme is not saved".into())
-            });
+            self.theme_settings.error = self
+                .save_ui_settings()
+                .unwrap_or_else(|| Some(NO_SETTINGS_PATH.into()));
         }
-        if close || modal.should_close() {
+        if close {
             self.close_theme_settings();
         }
     }

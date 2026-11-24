@@ -4,10 +4,14 @@
 //! Both are read operations ([`read`]): the screen asks, the core answers at once
 //! with the operation, and the data arrives when the area's event says it
 //! settled. Nothing here sends a command.
+//!
+//! The footer's cost of today is a read of its own, asked whether or not the tab is
+//! drawn and again every [`TODAY_REFRESH`], as the embedded workbench refreshes it.
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use super::layout::{bounded_list, paged_list};
-use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use read::{Read, phase_line};
 use workbench_protocol::{
     events::UiEvent,
@@ -22,6 +26,8 @@ use workbench_protocol::{
 
 pub(crate) mod read;
 
+pub const TODAY_REFRESH: Duration = Duration::from_secs(60);
+
 const RANGES: [(UsageRange, &str); 6] = [
     (UsageRange::Today, "今日"),
     (UsageRange::Last7Days, "直近 7 日"),
@@ -34,6 +40,7 @@ const RANGES: [(UsageRange, &str); 6] = [
 #[derive(Debug, Clone, Copy)]
 enum Pending {
     Usage { generation: u64 },
+    Today { generation: u64 },
     Context { generation: u64, append: bool },
 }
 
@@ -53,6 +60,10 @@ pub struct DiagnosticsFeature {
     next_cursor: Option<PageCursor>,
     context_due: bool,
     more_requested: bool,
+    today_read: Read,
+    today_request: Option<GetUsageSummary>,
+    today: Option<UsageTotals>,
+    today_next: Option<Instant>,
 }
 
 impl Default for DiagnosticsFeature {
@@ -73,6 +84,10 @@ impl Default for DiagnosticsFeature {
             next_cursor: None,
             context_due: false,
             more_requested: false,
+            today_read: Read::default(),
+            today_request: None,
+            today: None,
+            today_next: None,
         }
     }
 }
@@ -132,6 +147,48 @@ fn totals_line(totals: &UsageTotals) -> String {
 }
 
 impl DiagnosticsFeature {
+    pub fn today_cost(&self) -> Option<String> {
+        self.today.as_ref().map(|totals| {
+            #[allow(clippy::cast_precision_loss)]
+            let dollars = totals.recorded_cost_micro_usd as f64 / 1_000_000.0;
+            crate::format::cost_label(
+                dollars,
+                totals.unpriced_tokens > 0 || totals.unreported_requests > 0,
+            )
+        })
+    }
+
+    /// How long until the cost of today is asked again, so the screen wakes for it.
+    pub fn today_refresh_in(&self, now: Instant) -> Option<Duration> {
+        self.today_next
+            .map(|next| next.saturating_duration_since(now))
+    }
+
+    fn keep_today(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility, now: Instant) {
+        if !visibility.available {
+            return;
+        }
+        if self.today_next.is_none_or(|next| now >= next) {
+            self.today_next = Some(now + TODAY_REFRESH);
+            let request = GetUsageSummary {
+                operation_id: self.today_read.begin("diagnostics-today"),
+                range: UsageRange::Today,
+            };
+            self.today_request = Some(request);
+        } else if !self.today_read.take_ask_again() {
+            return;
+        }
+        if let Some(request) = self.today_request.clone() {
+            let tag = self.tag(Pending::Today {
+                generation: self.today_read.generation(),
+            });
+            ctx.query(
+                tag,
+                Query::Diagnostics(DiagnosticsQuery::GetUsageSummary(request)),
+            );
+        }
+    }
+
     fn tag(&mut self, pending: Pending) -> u64 {
         self.next_tag += 1;
         self.pending.insert(self.next_tag, pending);
@@ -226,8 +283,19 @@ impl Feature for DiagnosticsFeature {
         }
     }
 
+    fn as_diagnostics(&self) -> Option<&DiagnosticsFeature> {
+        Some(self)
+    }
+
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        self.keep_today(ctx, visibility, Instant::now());
+    }
+
     fn reset(&mut self) {
         self.pending.clear();
+        self.today_read.forget();
+        self.today = None;
+        self.today_next = None;
         self.usage_read.forget();
         self.context_read.forget();
         self.usage = None;
@@ -245,6 +313,7 @@ impl Feature for DiagnosticsFeature {
         };
         self.usage_read.event(view);
         self.context_read.event(view);
+        self.today_read.event(view);
     }
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
@@ -262,6 +331,9 @@ impl Feature for DiagnosticsFeature {
                     Pending::Usage { generation } => {
                         self.usage_read.fail(generation, error.message);
                     }
+                    Pending::Today { generation } => {
+                        self.today_read.fail(generation, error.message);
+                    }
                     Pending::Context { generation, .. } => {
                         self.context_read.fail(generation, error.message);
                     }
@@ -276,6 +348,14 @@ impl Feature for DiagnosticsFeature {
                         .accept(generation, &outcome.operation, outcome.data)
                 {
                     self.usage = Some(summary);
+                }
+            }
+            (Pending::Today { generation }, DiagnosticsReply::Usage(outcome)) => {
+                if let Some(summary) =
+                    self.today_read
+                        .accept(generation, &outcome.operation, outcome.data)
+                {
+                    self.today = Some(summary.totals);
                 }
             }
             (Pending::Context { generation, append }, DiagnosticsReply::Context(outcome)) => {

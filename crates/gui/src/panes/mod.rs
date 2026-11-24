@@ -54,6 +54,7 @@ pub mod tab_attention;
 pub mod team;
 pub mod team_widgets;
 pub mod terminal;
+pub mod theme_widgets;
 pub mod thread_search;
 pub mod transcript_tool;
 pub mod transcript_widgets;

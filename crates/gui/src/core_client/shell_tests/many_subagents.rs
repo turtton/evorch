@@ -2,11 +2,11 @@
 //! page lists, drawn as the core-client e2e draws it: a 1024×768 window over a client
 //! queue of 64, every request answered between two frames.
 use super::*;
+use crate::core_client::QUEUE_FULL;
 use workbench_protocol::namespaces::{ExecutionQuery, execution::RunScope, teams::TeamsQuery};
 
 const COUNT: usize = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
 const OUTBOX: usize = 64;
-const QUEUE_FULL: &str = "クライアントの送信キューが満杯または切断中です。入力は保持されています。";
 
 fn subagent(index: usize) -> RunSummary {
     view(json!({

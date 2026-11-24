@@ -608,7 +608,7 @@ fn a_preview_the_core_cannot_show_is_refused_with_a_message_not_queued() {
         },
     );
     assert!(take(&log).is_empty(), "nothing reached the feature");
-    assert!(shared.status.contains("プレビュー"), "{}", shared.status);
+    assert!(shared.status.contains("preview"), "{}", shared.status);
 }
 
 #[test]

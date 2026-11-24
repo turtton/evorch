@@ -17,7 +17,7 @@ use workbench_protocol::namespaces::{
     ProjectionReply,
 };
 use workbench_protocol::{
-    commands::{Command, CommandReply},
+    commands::{Command, CommandDisposition, CommandReply},
     conversation::{ConversationCommand, ConversationResult},
     events::{EventEnvelope, Subscribe, SubscriptionScope, UiEvent},
     ids::{BodyId, ProjectId, RequestId, RunId, ThreadId},
@@ -123,6 +123,10 @@ impl Pending {
         }
     }
 }
+
+pub(crate) const CONNECTING: &str = "Connecting to the core…";
+pub(crate) const NOT_SENT: &str =
+    "Not sent: the core is disconnected. Your input is kept; press Reconnect to connect again.";
 
 const SNAPSHOT_BUFFER_EVENTS: usize = 256;
 const SNAPSHOT_BUFFER_BYTES: usize = 2 * 1024 * 1024;
@@ -282,7 +286,7 @@ pub async fn serve(
             None => {
                 update(&shared, &ctx, |s| {
                     s.disconnect();
-                    s.status = "コアへ接続中…".into();
+                    s.status = CONNECTING.into();
                 });
                 launcher.connect_or_start_with_endpoint().await
             }
@@ -397,7 +401,7 @@ pub async fn serve(
                                 match reply {
                                     Ok(QueryReply::Conversation(ConversationReply::CommittedHistory(page))) => update(&shared, &ctx, |s| match &run { None => s.cache.history_page(thread.as_str(), page, older), Some(run) => s.cache.run_history_page(run.as_str(), page, older) }),
                                     other => update(&shared, &ctx, |s| {
-                                        s.status = format!("履歴取得: {other:?}");
+                                        s.status = format!("Could not read the history: {}", failure_reason(&other));
                                         if let (Some(run), false) = (&run, older) { s.cache.run_failed(run.as_str()); }
                                     }),
                                 }
@@ -426,7 +430,7 @@ pub async fn serve(
                                             if text.len() > 1024 * 1024 { break; }
                                             match chunk.next_offset { Some(next) if next > offset => offset = next, None => { update(&shared, &ctx, |s| { s.cache.approval_inputs.insert(approval.id.to_string(), text); }); break; }, _ => break }
                                         }
-                                        other => { update(&shared, &ctx, |s| s.status = format!("承認入力: {other:?}")); break; }
+                                        other => { update(&shared, &ctx, |s| s.status = format!("Could not read the approval input: {}", failure_reason(&other))); break; }
                                     }
                                 }
                             }
@@ -630,7 +634,7 @@ async fn wait_for_successor(
             update(shared, ctx, |s| {
                 s.status = match &error {
                     ReconnectError::Expired(stage) => text::expired(*stage).to_owned(),
-                    other => format!("再起動の完了を確認できませんでした: {other}"),
+                    other => format!("Could not confirm that the restart finished: {other}"),
                 };
             });
             Waited::Failed
@@ -687,7 +691,7 @@ async fn reconcile_uncertain(
                     }),
                     CommandReceiptState::Unknown => {
                         update(shared, ctx, |s| {
-                            s.status = format!("OutcomeUnknown: {request}。再送していません。")
+                            s.status = format!("Outcome unknown: {request}. Not resent.")
                         });
                         uncertain.push((request, pending));
                     }
@@ -695,7 +699,10 @@ async fn reconcile_uncertain(
             }
             result => {
                 update(shared, ctx, |s| {
-                    s.status = format!("receipt 照合失敗（再送なし）: {result:?}")
+                    s.status = format!(
+                        "Could not check the receipt (not resent): {}",
+                        failure_reason(&result)
+                    )
                 });
                 uncertain.push((request, pending));
             }
@@ -737,7 +744,9 @@ async fn send_command(
                 {
                     draft.uncertain = true;
                 }
-                s.status = format!("OutcomeUnknown: {request_id}。再接続後 receipt を照合します。");
+                s.status = format!(
+                    "Outcome unknown: {request_id}. Its receipt is checked after reconnecting."
+                );
                 if let Pending::Feature { feature, tag } = &pending {
                     s.features.reply(
                         *feature,
@@ -876,7 +885,13 @@ async fn accepted(
             draft.text.clear();
             draft.revision += 1;
         }
-        s.status = reply_error.unwrap_or_else(|| format!("受付済み: {:?}", reply.disposition));
+        s.status = reply_error.unwrap_or_else(|| {
+            match reply.disposition {
+                CommandDisposition::Accepted => "Accepted",
+                CommandDisposition::AlreadyApplied => "Already applied",
+            }
+            .into()
+        });
     });
     for id in discarded {
         // Discard never deletes committed files or replays user input.
@@ -976,10 +991,16 @@ fn refuse_while_disconnected(
             _ => (),
         }
         if say {
-            s.status =
-                "切断中のため未送信です。入力を保持しました。明示的に再接続してください。".into();
+            s.status = NOT_SENT.into();
         }
     });
+}
+
+fn failure_reason<T>(result: &Result<T, impl std::fmt::Display>) -> String {
+    match result {
+        Ok(_) => "unexpected reply".into(),
+        Err(error) => error.to_string(),
+    }
 }
 
 async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
@@ -998,7 +1019,7 @@ async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
                 if chunk.body_id == id && chunk.offset == offset =>
             {
                 if text.len() + chunk.text.len() > 4 * 1024 * 1024 {
-                    return Err("本文は 4 MiB を超えています（Unsupported）".into());
+                    return Err("The message body is larger than 4 MiB (unsupported)".into());
                 }
                 text.push_str(&chunk.text);
                 match chunk.next_offset {
@@ -1007,7 +1028,12 @@ async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
                     _ => return Err("body offset did not advance".into()),
                 }
             }
-            other => return Err(format!("本文取得: {other:?}")),
+            other => {
+                return Err(format!(
+                    "Could not read the message body: {}",
+                    failure_reason(&other)
+                ));
+            }
         }
     }
 }

@@ -330,3 +330,48 @@ fn an_image_link_opens_the_image_in_a_file_tab() {
     assert!(screen.harness.query_by_label("Loading file…").is_none());
     screen.capture("image");
 }
+
+// Given: a Markdown file open in a File tab in Graphite, whose selection stroke is its fill
+// When: the tab shows the Source/Preview toggle with Preview selected
+// Then: the selected label is drawn in the accent's foreground, so it reads on the accent
+#[test]
+fn the_selected_preview_toggle_is_readable_in_graphite() {
+    let project = tempfile::tempdir().unwrap();
+    let file = project.path().canonicalize().unwrap().join("notes.md");
+    std::fs::write(&file, "# Notes\n\nBody text.\n").unwrap();
+    let mut screen = screen_on(project.path(), "[Open notes](notes.md)");
+    screen.open_link("Open notes", &file);
+    screen.harness.get_by_label("Notes");
+
+    let [selected] = screen
+        .harness
+        .get_all_by_label("Preview")
+        .filter(|node| node.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+        .map(|node| node.rect())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one selected Preview toggle");
+    };
+    let palette = crate::theme::tokens::palette();
+    let shapes = &screen.harness.output().shapes;
+    let filled = shapes.iter().any(|clipped| {
+        matches!(&clipped.shape, egui::Shape::Rect(rect)
+            if rect.fill == palette.ACCENT && selected.contains_rect(rect.rect))
+    });
+    let label = shapes.iter().find_map(|clipped| match &clipped.shape {
+        egui::Shape::Text(text)
+            if text.galley.text() == "Preview"
+                && selected.contains(text.galley.rect.translate(text.pos.to_vec2()).center()) =>
+        {
+            Some(text.override_text_color.unwrap_or(text.fallback_color))
+        }
+        _ => None,
+    });
+    assert!(filled, "the selected pill is filled with the accent");
+    assert_eq!(
+        label,
+        Some(palette.ACCENT_FG),
+        "the label reads on the fill"
+    );
+    screen.capture("file-toggle-graphite");
+}
