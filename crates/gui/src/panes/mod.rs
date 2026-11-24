@@ -35,6 +35,7 @@ pub mod phase_indicator;
 pub mod project_dialog;
 pub mod provider_models;
 pub mod provider_settings;
+pub mod provider_widgets;
 pub mod pull_request_chip;
 pub mod pull_request_dialog;
 pub mod pull_request_widgets;

@@ -1,6 +1,7 @@
 //! Desktop feature of the `settings` area: the configuration as the core holds
-//! it, the providers in it, an editor for the whole document, and the reload
-//! that makes the running core follow a save.
+//! it, the legacy settings modal (Providers, Routing, Agent roles) on top of it,
+//! an editor for the whole document, and the reload that makes the running core
+//! follow a save.
 //!
 //! The screen never writes a file. It sends commands that quote the revision
 //! the draft was made from, so a save over a newer file is refused by the core
@@ -14,8 +15,13 @@
 //! was not seen (after a reconnect, or when a reply was lost).
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::layout::bounded_list;
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use crate::model::settings_document::new_provider_defaults;
+use crate::panes::provider_widgets::{
+    EDIT_IN_CONFIG_FILE, ProviderRowAction, provider_kind_label, provider_list_row,
+};
+use crate::panes::settings::{SettingsModalAction, SettingsTab, settings_modal};
+use crate::theme::{text::muted, tokens::palette};
 use workbench_protocol::{
     commands::{Command, CommandResult, SetAgentWebToolsEnabled},
     errors::ErrorCode,
@@ -33,8 +39,10 @@ use workbench_protocol::{
     queries::{Query, QueryReply},
 };
 
+mod modal;
 mod provider_form;
-use provider_form::{FormAction, ProviderForm};
+use modal::{Modal, ModalSave};
+use provider_form::{FormAction, FormKind, ProviderForm};
 
 #[derive(Debug, Clone)]
 enum Pending {
@@ -63,6 +71,14 @@ impl Draft {
     }
 }
 
+enum ProviderAction {
+    Edit(ProviderView),
+    Delete(String),
+    Add(FormKind),
+    Reread,
+    Form(FormAction),
+}
+
 pub struct SettingsFeature {
     next_tag: u64,
     pending: BTreeMap<u64, Pending>,
@@ -88,6 +104,14 @@ pub struct SettingsFeature {
     saving_form: Option<u64>,
     form_serial: u64,
     web_tools_status: String,
+    modal: Option<Modal>,
+    modal_saves: BTreeMap<OperationId, ModalSave>,
+    confirm_delete: Option<String>,
+    /// A modal or provider save was refused as stale against the snapshot this screen holds.
+    refresh_after_stale: bool,
+    quiet_refreshes: BTreeSet<OperationId>,
+    /// The revision each running provider save or delete quoted.
+    provider_quoted: BTreeMap<OperationId, SettingsRevision>,
 }
 
 impl Default for SettingsFeature {
@@ -109,6 +133,12 @@ impl Default for SettingsFeature {
             saving_form: None,
             form_serial: 0,
             web_tools_status: String::new(),
+            modal: None,
+            modal_saves: BTreeMap::new(),
+            confirm_delete: None,
+            refresh_after_stale: false,
+            quiet_refreshes: BTreeSet::new(),
+            provider_quoted: BTreeMap::new(),
         }
     }
 }
@@ -119,57 +149,44 @@ fn new_operation() -> OperationId {
 
 fn problem_label(problem: SettingsProblem) -> &'static str {
     match problem {
-        SettingsProblem::Unreadable => "設定ファイルを読めません。",
-        SettingsProblem::InvalidConfig => "設定ファイルの内容が不正です。",
-        SettingsProblem::DocumentTooLarge => "設定ファイルが大きすぎて編集できません。",
+        SettingsProblem::Unreadable => "The settings file cannot be read.",
+        SettingsProblem::InvalidConfig => "The settings file is not a valid configuration.",
+        SettingsProblem::DocumentTooLarge => "The settings file is too large to edit here.",
     }
 }
+
+const STALE_REREAD: &str =
+    "The settings were changed elsewhere. Reading them again; your edits are kept.";
 
 fn failure_label(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::StaleRevision => {
-            "他の場所で設定が変更されました。読み込み直してから保存してください。"
+            "The settings were changed elsewhere. Re-read them before saving."
         }
         ErrorCode::PermissionDenied => {
-            "再起動対象（core.restart.targets）はこの画面から変更できません。コアを動かしているマシンの設定ファイルで変更してください。"
+            "Restart targets (core.restart.targets) cannot be changed from this screen. Change them in the settings file on the machine that runs the core."
         }
-        ErrorCode::InvalidRequest => "設定を保存できませんでした（内容が不正です）。",
-        ErrorCode::StorageUnavailable => "設定ファイルに書き込めません。",
-        _ => "操作に失敗しました。",
+        ErrorCode::InvalidRequest => "The settings could not be saved (they are not valid).",
+        ErrorCode::StorageUnavailable => "The settings file cannot be written.",
+        _ => "The operation failed.",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowAction {
-    None,
-    Edit,
-    Delete,
-}
-
-fn provider_row(ui: &mut egui::Ui, provider: &ProviderView) -> RowAction {
-    let mut action = RowAction::None;
-    ui.horizontal_wrapped(|ui| {
-        ui.strong(&provider.name);
-        ui.label(format!(
-            "{} / {} / モデル {} 件 / 既定 {}",
-            provider.base_url,
-            format!("{:?}", provider.kind).to_lowercase(),
-            provider.models.len(),
-            provider.default_model
-        ));
-        let editable = ProviderForm::from_view(provider).is_some();
-        if ui
-            .add_enabled(editable, egui::Button::new("編集"))
-            .on_disabled_hover_text("この種類のプロバイダーは設定ファイルで編集してください。")
-            .clicked()
-        {
-            action = RowAction::Edit;
+fn applied_label(snapshot: &SettingsSnapshot) -> String {
+    // Unknown (a reload failed part-way) is not "applied", whatever the
+    // saved file looks like: the models may be a mixture.
+    if snapshot.applied_revision.is_none() {
+        match &snapshot.apply_failure {
+            Some(reason) => format!(
+                "The applied state is unknown (the last reload failed: {reason}). Reload models."
+            ),
+            None => "The applied state is unknown. Reload models.".to_owned(),
         }
-        if ui.button("削除").clicked() {
-            action = RowAction::Delete;
-        }
-    });
-    action
+    } else if snapshot.pending_apply() {
+        "Saved settings are not applied to the running core yet.".to_owned()
+    } else {
+        "Saved settings are applied.".to_owned()
+    }
 }
 
 impl SettingsFeature {
@@ -185,6 +202,27 @@ impl SettingsFeature {
             .any(|(id, view)| !view.operation.state.is_final() && !self.lost.contains(id))
     }
 
+    /// Opens the settings modal on `tab`, or shows `tab` in the open one. A running save keeps
+    /// an open modal where it is.
+    pub fn open_modal(&mut self, tab: SettingsTab) {
+        let running = self.running();
+        match &mut self.modal {
+            Some(_) if running => {}
+            Some(modal) => modal.select(tab),
+            None => self.modal = Some(Modal::new(tab)),
+        }
+    }
+
+    pub fn modal_tab(&self) -> Option<SettingsTab> {
+        self.modal.as_ref().map(|modal| modal.tab)
+    }
+
+    fn close_modal(&mut self) {
+        self.modal = None;
+        self.form = None;
+        self.confirm_delete = None;
+    }
+
     /// The core answers `not_found` for an operation whose end was not seen.
     /// The save may or may not have been written: the busy state is cleared,
     /// the draft is kept as it is, and the snapshot is read again (a draft
@@ -196,12 +234,15 @@ impl SettingsFeature {
         }
         self.lost.insert(id.clone());
         self.saving.remove(id);
+        self.quiet_refreshes.remove(id);
+        self.provider_quoted.remove(id);
+        self.modal_saves.remove(id);
         if self.provider_saving.as_ref() == Some(id) {
             self.provider_saving = None;
         }
         self.stale = true;
         self.status =
-            "操作の結果を確認できませんでした（コアが再起動した可能性があります）。保存済みの内容を確認してください。編集中の内容は残してあります。"
+            "The result of the operation could not be confirmed (the core may have restarted). Check what was saved; your edits are kept."
                 .into();
     }
 
@@ -246,6 +287,17 @@ impl SettingsFeature {
         if state.is_final() && !matches!(state, OperationState::Ready) {
             self.saving.remove(&id);
         }
+        let quiet_refresh = state.is_final() && self.quiet_refreshes.remove(&id);
+        let provider_quoted = if state.is_final() {
+            self.provider_quoted.remove(&id)
+        } else {
+            None
+        };
+        let modal_save = if state.is_final() {
+            self.modal_saves.remove(&id)
+        } else {
+            None
+        };
         if state.is_final() && self.provider_saving.as_ref() == Some(&id) {
             self.provider_saving = None;
             // A saved provider closes the form; a refused one keeps what was typed.
@@ -259,15 +311,25 @@ impl SettingsFeature {
         match state {
             OperationState::Pending => {}
             OperationState::Ready => {
-                self.status = match kind {
-                    SettingsOperationKind::ReloadModels => {
-                        "モデルを再読込しました。以降のリクエストから反映されます（送信済みの内容は変わりません）。".into()
+                self.status = match (kind, &modal_save) {
+                    (SettingsOperationKind::ReloadModels, _) => {
+                        "Models reloaded. Requests from now on use them (what was already sent does not change).".into()
                     }
-                    SettingsOperationKind::Refresh => String::new(),
-                    _ => "保存しました。反映するにはモデルを再読込してください。".into(),
+                    (SettingsOperationKind::Refresh, _) if quiet_refresh => {
+                        std::mem::take(&mut self.status)
+                    }
+                    (SettingsOperationKind::Refresh, _) => String::new(),
+                    (_, Some(save)) => save.job.notice(),
+                    (SettingsOperationKind::SaveProvider | SettingsOperationKind::DeleteProvider, None) => {
+                        "Provider settings updated. Reload models to apply them.".into()
+                    }
+                    _ => "Saved. Reload models to apply it.".into(),
                 };
                 if kind == SettingsOperationKind::SaveDocument {
-                    self.saved_document(&id, revision);
+                    self.saved_document(&id, revision.clone());
+                }
+                if let (Some(save), Some(modal)) = (&modal_save, &mut self.modal) {
+                    modal.saved(&save.job, &save.text, revision);
                 }
                 self.stale = true;
             }
@@ -278,13 +340,34 @@ impl SettingsFeature {
                     }
                     _ => failure_label(code).to_owned(),
                 };
+                if code == ErrorCode::StaleRevision
+                    && let (Some(save), Some(modal)) = (&modal_save, &mut self.modal)
+                {
+                    modal.stale(save);
+                }
+                // The core keeps its cached snapshot until it re-reads the file, and the modal
+                // hides the tab's re-read button; a whole-file save is left to that button.
+                let quoted = modal_save
+                    .as_ref()
+                    .map(|save| save.expected_revision.clone())
+                    .or(provider_quoted);
+                if code == ErrorCode::StaleRevision
+                    && let Some(quoted) = quoted
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_none_or(|snapshot| snapshot.revision == quoted)
+                {
+                    self.refresh_after_stale = true;
+                    self.status = STALE_REREAD.into();
+                }
                 self.stale = true;
             }
             OperationState::Cancelled { reason } => {
                 self.status = match reason {
-                    CancelReason::Requested => "操作を取り消しました。",
+                    CancelReason::Requested => "The operation was cancelled.",
                     CancelReason::Restart | CancelReason::Shutdown => {
-                        "再起動または終了のため操作は行われませんでした。"
+                        "The operation did not run because of a restart or shutdown."
                     }
                 }
                 .into();
@@ -307,8 +390,10 @@ impl SettingsFeature {
             && draft.based_on != snapshot.revision
         {
             self.status =
-                "他の場所で設定が変更されました。編集中の内容を保存するには読み込み直してください。"
-                    .into();
+                "The settings were changed elsewhere. Re-read them to save your edits.".into();
+        }
+        if let Some(modal) = &mut self.modal {
+            modal.follow(&snapshot);
         }
         self.snapshot = Some(snapshot);
     }
@@ -316,6 +401,17 @@ impl SettingsFeature {
     fn send(&mut self, ctx: &mut FeatureContext<'_>, command: SettingsCommand) {
         let id = command.operation_id().clone();
         let kind = command.kind();
+        match &command {
+            SettingsCommand::SaveProvider(save) => {
+                self.provider_quoted
+                    .insert(id.clone(), save.expected_revision.clone());
+            }
+            SettingsCommand::DeleteProvider(delete) => {
+                self.provider_quoted
+                    .insert(id.clone(), delete.expected_revision.clone());
+            }
+            _ => {}
+        }
         self.operations.insert(
             id.clone(),
             SettingsOperationView {
@@ -332,6 +428,257 @@ impl SettingsFeature {
         );
         let tag = self.tag(Pending::Command(id));
         ctx.command(tag, Command::Settings(command));
+    }
+
+    fn send_document(
+        &mut self,
+        ctx: &mut FeatureContext<'_>,
+        expected_revision: SettingsRevision,
+        text: String,
+    ) -> OperationId {
+        let operation_id = new_operation();
+        self.send(
+            ctx,
+            SettingsCommand::SaveDocument(SaveDocument {
+                operation_id: operation_id.clone(),
+                expected_revision,
+                text,
+            }),
+        );
+        operation_id
+    }
+
+    fn reload_models(&mut self, ctx: &mut FeatureContext<'_>) {
+        let operation_id = new_operation();
+        self.send(
+            ctx,
+            SettingsCommand::ReloadModels(ReloadModels { operation_id }),
+        );
+    }
+
+    fn providers_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &SettingsSnapshot,
+        busy: bool,
+    ) -> Option<ProviderAction> {
+        let mut action = None;
+        let Some(form) = &mut self.form else {
+            if snapshot.providers.is_empty() {
+                ui.label(muted("No provider profiles."));
+            }
+            ui.add_enabled_ui(!busy, |ui| {
+                for provider in &snapshot.providers {
+                    let editable = ProviderForm::from_view(provider).is_some();
+                    match provider_list_row(
+                        ui,
+                        &provider.name,
+                        provider_kind_label(provider.kind),
+                        &provider.default_model,
+                        (!editable).then_some(EDIT_IN_CONFIG_FILE),
+                        &mut self.confirm_delete,
+                    ) {
+                        Some(ProviderRowAction::Edit) => {
+                            action = Some(ProviderAction::Edit(provider.clone()));
+                        }
+                        Some(ProviderRowAction::Delete) => {
+                            action = Some(ProviderAction::Delete(provider.name.clone()));
+                        }
+                        None => {}
+                    }
+                }
+                for kind in FormKind::ALL {
+                    if ui.button(kind.add_label()).clicked() {
+                        action = Some(ProviderAction::Add(kind));
+                    }
+                }
+            });
+            return action;
+        };
+        if form
+            .based_on
+            .as_ref()
+            .is_some_and(|based| based != &snapshot.revision)
+        {
+            ui.colored_label(
+                palette().WARNING_FG,
+                "The settings file changed after this form was opened; saving will be refused.",
+            );
+            if ui.button("Reopen with the latest settings").clicked() {
+                action = Some(ProviderAction::Reread);
+            }
+        }
+        let height = (ui.ctx().viewport_rect().height() - 240.0).max(100.0);
+        egui::ScrollArea::vertical()
+            .id_salt("provider-editor")
+            .auto_shrink([false, false])
+            .min_scrolled_height(height)
+            .max_height(height)
+            .show(ui, |ui| form.draw(ui));
+        let drawn = form.footer(ui, busy);
+        action.or(Some(ProviderAction::Form(drawn)))
+    }
+
+    fn apply_provider_action(
+        &mut self,
+        ctx: &mut FeatureContext<'_>,
+        snapshot: &SettingsSnapshot,
+        action: ProviderAction,
+    ) {
+        match action {
+            ProviderAction::Edit(provider) => {
+                // The form is opened from the revision this snapshot has; the save quotes
+                // that one. A form is not replaced while its save runs.
+                if self.provider_saving.is_none() {
+                    self.form_serial += 1;
+                    self.form = ProviderForm::from_view(&provider).map(|mut form| {
+                        form.based_on = Some(snapshot.revision.clone());
+                        form.serial = self.form_serial;
+                        form
+                    });
+                }
+            }
+            ProviderAction::Delete(name) => {
+                self.confirm_delete = None;
+                let operation_id = new_operation();
+                self.send(
+                    ctx,
+                    SettingsCommand::DeleteProvider(DeleteProvider {
+                        operation_id,
+                        expected_revision: snapshot.revision.clone(),
+                        name,
+                    }),
+                );
+            }
+            ProviderAction::Add(kind) => {
+                if self.provider_saving.is_none() {
+                    self.form_serial += 1;
+                    let defaults = new_provider_defaults(kind.new_provider(), |name| {
+                        snapshot.providers.iter().any(|p| p.name == name)
+                    });
+                    self.form = Some(ProviderForm {
+                        based_on: Some(snapshot.revision.clone()),
+                        serial: self.form_serial,
+                        ..ProviderForm::new(kind, defaults)
+                    });
+                }
+            }
+            ProviderAction::Reread => {
+                let current = self.form.take();
+                self.form_serial += 1;
+                self.form = current.and_then(|old| {
+                    let mut form = match &old.original {
+                        Some(name) => snapshot
+                            .providers
+                            .iter()
+                            .find(|provider| &provider.name == name)
+                            .and_then(ProviderForm::from_view)?,
+                        None => ProviderForm {
+                            based_on: None,
+                            ..old
+                        },
+                    };
+                    form.based_on = Some(snapshot.revision.clone());
+                    form.serial = self.form_serial;
+                    Some(form)
+                });
+            }
+            ProviderAction::Form(FormAction::None) => {}
+            ProviderAction::Form(FormAction::Cancel) => self.form = None,
+            ProviderAction::Form(FormAction::Save) => {
+                let Some(form) = &mut self.form else {
+                    return;
+                };
+                match form.to_input() {
+                    Ok(provider) => {
+                        form.error = None;
+                        let operation_id = new_operation();
+                        self.provider_saving = Some(operation_id.clone());
+                        self.saving_form = Some(form.serial);
+                        let expected_revision = form
+                            .based_on
+                            .clone()
+                            .unwrap_or_else(|| snapshot.revision.clone());
+                        let original_name = form.original.clone();
+                        self.send(
+                            ctx,
+                            SettingsCommand::SaveProvider(Box::new(SaveProvider {
+                                operation_id,
+                                expected_revision,
+                                original_name,
+                                provider,
+                            })),
+                        );
+                    }
+                    Err(missing) => form.error = Some(missing),
+                }
+            }
+        }
+    }
+
+    fn render_modal(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &mut FeatureContext<'_>,
+        snapshot: Option<&SettingsSnapshot>,
+    ) {
+        let Some(tab) = self.modal_tab() else {
+            return;
+        };
+        let busy = self.running();
+        let egui_ctx = ui.ctx().clone();
+        let mut provider_action = None;
+        let mut save = None;
+        let mut reload = false;
+        let (modal_action, _) = settings_modal(&egui_ctx, tab, busy, |ui| {
+            match (tab, snapshot) {
+                (SettingsTab::Providers, Some(snapshot)) => {
+                    provider_action = self.providers_body(ui, snapshot, busy);
+                }
+                (SettingsTab::Providers, None) => {
+                    ui.label("Loading settings…");
+                }
+                _ => {
+                    if let Some(modal) = &mut self.modal {
+                        save = modal.body(ui, snapshot, busy);
+                    }
+                }
+            }
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
+            if busy {
+                ui.label("Working…");
+            }
+            if let Some(snapshot) = snapshot.filter(|s| s.pending_apply()) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(applied_label(snapshot));
+                    reload = ui
+                        .add_enabled(!busy, egui::Button::new("Reload models"))
+                        .clicked();
+                });
+            }
+            None::<()>
+        });
+        if reload {
+            self.reload_models(ctx);
+        }
+        match modal_action {
+            Some(SettingsModalAction::SelectTab(tab)) => {
+                if let Some(modal) = &mut self.modal {
+                    modal.select(tab);
+                }
+            }
+            Some(SettingsModalAction::Close) => self.close_modal(),
+            None => {}
+        }
+        if let (Some(action), Some(snapshot)) = (provider_action, snapshot) {
+            self.apply_provider_action(ctx, snapshot, action);
+        }
+        if let Some(save) = save {
+            let id = self.send_document(ctx, save.expected_revision.clone(), save.text.clone());
+            self.modal_saves.insert(id, save);
+        }
     }
 }
 
@@ -407,7 +754,12 @@ impl Feature for SettingsFeature {
                 }
                 Ok(_) => {}
                 Err(error) if error.code == Some(ErrorCode::NotFound) => self.operation_lost(&id),
-                Err(error) => self.status = error.message,
+                Err(error) => {
+                    // Nothing asks for this operation again, so it is not left holding the
+                    // modal busy until a reconnect.
+                    self.operation_lost(&id);
+                    self.status = format!("{} {}", self.status, error.message);
+                }
             },
             (Pending::Command(id), FeatureReply::Command(result)) => match result {
                 Ok(reply) => {
@@ -426,6 +778,9 @@ impl Feature for SettingsFeature {
                     } else {
                         self.operations.remove(&id);
                         self.saving.remove(&id);
+                        self.quiet_refreshes.remove(&id);
+                        self.provider_quoted.remove(&id);
+                        self.modal_saves.remove(&id);
                         if self.provider_saving.as_ref() == Some(&id) {
                             self.provider_saving = None;
                         }
@@ -436,10 +791,10 @@ impl Feature for SettingsFeature {
                 Pending::WebTools(enabled) | Pending::WebToolsUnknown(enabled),
                 FeatureReply::Command(result),
             ) => {
-                let word = if enabled { "有効" } else { "無効" };
+                let word = if enabled { "enable" } else { "disable" };
                 self.web_tools_status = match result {
                     Ok(_) => format!(
-                        "Agent の Web ツールを{word}にしました（実行中のコアへの設定です。すでに開始した run が送ったツール定義は変わりません）。"
+                        "Agent web tools {word}d on the running core (tool definitions a started run already sent do not change)."
                     ),
                     Err(error) if error.outcome_unknown => {
                         // The core's recorded result for this tag follows after a reconnect, if it
@@ -447,14 +802,11 @@ impl Feature for SettingsFeature {
                         // command is not sent again by this screen.
                         self.pending.insert(tag, Pending::WebToolsUnknown(enabled));
                         format!(
-                            "Agent の Web ツールの切り替えは結果不明です（再送していません）。必要なら選び直してください — {}",
+                            "The result of switching Agent web tools is unknown (not resent). Choose again if needed — {}",
                             error.message
                         )
                     }
-                    Err(error) => format!(
-                        "Agent の Web ツールを{word}にできませんでした: {}",
-                        error.message
-                    ),
+                    Err(error) => format!("Could not {word} Agent web tools: {}", error.message),
                 };
             }
             _ => {}
@@ -468,6 +820,14 @@ impl Feature for SettingsFeature {
             let tag = self.tag(Pending::Snapshot);
             ctx.query(tag, Query::Settings(SettingsQuery::GetSettingsSnapshot {}));
         }
+        if std::mem::take(&mut self.refresh_after_stale) {
+            let operation_id = new_operation();
+            self.quiet_refreshes.insert(operation_id.clone());
+            self.send(
+                ctx,
+                SettingsCommand::RefreshSettings(RefreshSettings { operation_id }),
+            );
+        }
         for id in std::mem::take(&mut self.to_check) {
             let tag = self.tag(Pending::Operation(id.clone()));
             ctx.query(
@@ -475,177 +835,64 @@ impl Feature for SettingsFeature {
                 Query::Settings(SettingsQuery::GetSettingsOperation { operation_id: id }),
             );
         }
+        let snapshot = self.snapshot.clone();
+        if self.modal.is_some() {
+            // The modal carries the status and the applied state while it is open, so the
+            // tab behind it does not repeat them.
+            self.render_modal(ui, ctx, snapshot.as_ref());
+            return;
+        }
         if !self.status.is_empty() {
             ui.label(&self.status);
         }
-        let Some(snapshot) = self.snapshot.clone() else {
-            ui.label("設定を読み込んでいます。");
+        let Some(snapshot) = snapshot else {
+            ui.label("Loading settings…");
             return;
         };
         if let Some(problem) = snapshot.problem {
             ui.colored_label(ui.visuals().warn_fg_color, problem_label(problem));
         }
         let busy = self.running();
+        let mut reload = false;
+        let mut reread = false;
         ui.horizontal_wrapped(|ui| {
-            // Unknown (a reload failed part-way) is not "applied", whatever the
-            // saved file looks like: the models may be a mixture.
-            ui.label(if snapshot.applied_revision.is_none() {
-                match &snapshot.apply_failure {
-                    Some(reason) => format!(
-                        "適用状態が不明です（直近の再読込が失敗しました: {reason}）。モデルを再読込してください。"
-                    ),
-                    None => "適用状態が不明です。モデルを再読込してください。".to_owned(),
-                }
-            } else if snapshot.pending_apply() {
-                "保存済みの設定は、まだ実行中のコアに適用されていません。".to_owned()
-            } else {
-                "保存済みの設定は適用済みです。".to_owned()
-            });
-            if ui
-                .add_enabled(!busy, egui::Button::new("モデルを再読込"))
-                .clicked()
-            {
-                let operation_id = new_operation();
-                self.send(
-                    ctx,
-                    SettingsCommand::ReloadModels(ReloadModels { operation_id }),
-                );
-            }
-            if ui
-                .add_enabled(!busy, egui::Button::new("読み直す"))
-                .clicked()
-            {
-                self.draft = None;
-                self.stale = true;
-                let operation_id = new_operation();
-                self.send(
-                    ctx,
-                    SettingsCommand::RefreshSettings(RefreshSettings { operation_id }),
-                );
-            }
+            ui.label(applied_label(&snapshot));
+            reload = ui
+                .add_enabled(!busy, egui::Button::new("Reload models"))
+                .clicked();
+            reread = ui
+                .add_enabled(!busy, egui::Button::new("Re-read file"))
+                .clicked();
         });
-        if busy {
-            ui.label("実行中…");
+        if reload {
+            self.reload_models(ctx);
         }
-        ui.separator();
-        ui.strong("プロバイダー");
-        let mut delete = None;
-        let mut edit = None;
-        bounded_list(ui, "settings-providers", |ui| {
-            if snapshot.providers.is_empty() {
-                ui.label("プロバイダーはありません。");
-            }
-            for provider in &snapshot.providers {
-                ui.push_id(&provider.name, |ui| match provider_row(ui, provider) {
-                    RowAction::None => {}
-                    RowAction::Edit => edit = Some(provider.clone()),
-                    RowAction::Delete => delete = Some(provider.name.clone()),
-                });
-            }
-        });
-        if let Some(name) = delete {
+        if reread {
+            self.draft = None;
+            self.stale = true;
             let operation_id = new_operation();
             self.send(
                 ctx,
-                SettingsCommand::DeleteProvider(DeleteProvider {
-                    operation_id,
-                    expected_revision: snapshot.revision.clone(),
-                    name,
-                }),
+                SettingsCommand::RefreshSettings(RefreshSettings { operation_id }),
             );
         }
-        // The form is opened from the revision this snapshot has; the save quotes that one.
-        // A form is not replaced while its save runs.
-        if let Some(provider) = edit.filter(|_| self.provider_saving.is_none()) {
-            self.form_serial += 1;
-            self.form = ProviderForm::from_view(&provider).map(|mut form| {
-                form.based_on = Some(snapshot.revision.clone());
-                form.serial = self.form_serial;
-                form
-            });
-        }
-        if self.form.is_none()
-            && ui
-                .add_enabled(!busy, egui::Button::new("プロバイダーを追加"))
-                .clicked()
-        {
-            self.form_serial += 1;
-            self.form = Some(ProviderForm {
-                based_on: Some(snapshot.revision.clone()),
-                serial: self.form_serial,
-                ..ProviderForm::default()
-            });
-        }
-        let mut reread = false;
-        if let Some(form) = &self.form
-            && form
-                .based_on
-                .as_ref()
-                .is_some_and(|based| based != &snapshot.revision)
-        {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "設定ファイルがこのフォームを開いた後に更新されています。保存は拒否されます。",
-            );
-            reread = ui.button("最新の内容で開き直す").clicked();
-        }
-        if reread {
-            let current = self.form.take();
-            self.form_serial += 1;
-            self.form = current.and_then(|old| {
-                let mut form = match &old.original {
-                    Some(name) => snapshot
-                        .providers
-                        .iter()
-                        .find(|provider| &provider.name == name)
-                        .and_then(ProviderForm::from_view)?,
-                    None => ProviderForm {
-                        based_on: None,
-                        ..old
-                    },
-                };
-                form.based_on = Some(snapshot.revision.clone());
-                form.serial = self.form_serial;
-                Some(form)
-            });
-        }
-        let mut form_action = FormAction::None;
-        if let Some(form) = &mut self.form {
-            form_action = form.draw(ui, busy);
-        }
-        match form_action {
-            FormAction::None => {}
-            FormAction::Cancel => self.form = None,
-            FormAction::Save => {
-                if let Some(form) = &self.form {
-                    match form.to_input() {
-                        Ok(provider) => {
-                            let operation_id = new_operation();
-                            self.provider_saving = Some(operation_id.clone());
-                            self.saving_form = Some(form.serial);
-                            let expected_revision = form
-                                .based_on
-                                .clone()
-                                .unwrap_or_else(|| snapshot.revision.clone());
-                            let original_name = form.original.clone();
-                            self.send(
-                                ctx,
-                                SettingsCommand::SaveProvider(Box::new(SaveProvider {
-                                    operation_id,
-                                    expected_revision,
-                                    original_name,
-                                    provider,
-                                })),
-                            );
-                        }
-                        Err(missing) => self.status = missing,
-                    }
-                }
-            }
+        if busy {
+            ui.label("Working…");
         }
         ui.separator();
-        ui.strong("Agent の Web ツール");
-        ui.label("実行中のコアに設定します。設定ファイルは変更せず、コアを再起動すると設定ファイルの値に戻ります。現在の値はこの画面では読み取れません。");
+        ui.horizontal_wrapped(|ui| {
+            for tab in SettingsTab::ALL {
+                if ui
+                    .add_enabled(!busy, egui::Button::new(tab.label()))
+                    .clicked()
+                {
+                    self.open_modal(tab);
+                }
+            }
+        });
+        ui.separator();
+        ui.strong("Agent web tools");
+        ui.label("Applies to the running core only. The settings file is not changed, and a core restart goes back to the file's value. The current value cannot be read here.");
         let web_waiting = self
             .pending
             .values()
@@ -653,13 +900,13 @@ impl Feature for SettingsFeature {
         let mut web_tools = None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!web_waiting, egui::Button::new("Web ツールを有効にする"))
+                .add_enabled(!web_waiting, egui::Button::new("Enable web tools"))
                 .clicked()
             {
                 web_tools = Some(true);
             }
             if ui
-                .add_enabled(!web_waiting, egui::Button::new("Web ツールを無効にする"))
+                .add_enabled(!web_waiting, egui::Button::new("Disable web tools"))
                 .clicked()
             {
                 web_tools = Some(false);
@@ -678,7 +925,7 @@ impl Feature for SettingsFeature {
             );
         }
         ui.separator();
-        ui.strong("設定ファイル");
+        ui.strong("Settings file");
         let mut save = None;
         let mut discard = false;
         if let Some(draft) = &mut self.draft {
@@ -694,13 +941,13 @@ impl Feature for SettingsFeature {
                 });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(draft.dirty() && !busy, egui::Button::new("保存"))
+                    .add_enabled(draft.dirty() && !busy, egui::Button::new("Save file"))
                     .clicked()
                 {
                     save = Some((draft.text.clone(), draft.based_on.clone()));
                 }
                 if ui
-                    .add_enabled(draft.dirty(), egui::Button::new("変更を破棄"))
+                    .add_enabled(draft.dirty(), egui::Button::new("Discard changes"))
                     .clicked()
                 {
                     discard = true;
@@ -712,19 +959,17 @@ impl Feature for SettingsFeature {
             self.stale = true;
         }
         if let Some((text, expected_revision)) = save {
-            let operation_id = new_operation();
-            self.saving.insert(operation_id.clone(), text.clone());
-            self.send(
-                ctx,
-                SettingsCommand::SaveDocument(SaveDocument {
-                    operation_id,
-                    expected_revision,
-                    text,
-                }),
-            );
+            let id = self.send_document(ctx, expected_revision, text.clone());
+            self.saving.insert(id, text);
         }
+    }
+
+    fn as_settings_mut(&mut self) -> Option<&mut SettingsFeature> {
+        Some(self)
     }
 }
 
+#[cfg(test)]
+mod modal_tests;
 #[cfg(test)]
 mod tests;

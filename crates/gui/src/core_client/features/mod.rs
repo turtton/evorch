@@ -547,6 +547,11 @@ pub trait Feature: Send {
     fn as_pull_requests_mut(&mut self) -> Option<&mut pull_requests::PullRequestsFeature> {
         None
     }
+
+    /// The settings feature itself, for the ⚙ menu that opens its modal.
+    fn as_settings_mut(&mut self) -> Option<&mut settings::SettingsFeature> {
+        None
+    }
 }
 
 /// Sections the composition was asked to open, and the ones moved to the top of the column.
@@ -799,6 +804,10 @@ impl Features {
         self.features
             .iter_mut()
             .find_map(|f| f.as_pull_requests_mut())
+    }
+
+    pub fn settings_mut(&mut self) -> Option<&mut settings::SettingsFeature> {
+        self.features.iter_mut().find_map(|f| f.as_settings_mut())
     }
 
     fn observe_selection(&mut self, selection: &Selection) -> bool {

@@ -2418,6 +2418,8 @@ mod attention;
 
 mod footer;
 
+mod settings;
+
 mod lanes;
 
 mod composer;

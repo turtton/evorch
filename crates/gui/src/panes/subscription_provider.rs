@@ -1,4 +1,5 @@
 use super::provider_settings::ProviderSettingsAction;
+use crate::format::token_expiry;
 use crate::{
     model::{
         model_metadata::MetadataSources,
@@ -149,29 +150,6 @@ pub fn subscription_body(
             .labelled_by(label.id);
     });
     action
-}
-
-/// Relative expiry for the label, with the absolute UTC time for its tooltip.
-fn token_expiry(expires_at: u64, now: u64) -> (String, Option<String>) {
-    let at = |seconds: u64| {
-        i64::try_from(seconds)
-            .ok()
-            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-    };
-    match (at(expires_at), at(now)) {
-        (Some(expiry), Some(now)) if expiry > now => (
-            format!(
-                "Signed in · token expires {}",
-                crate::format::time_until(expiry, now)
-            ),
-            Some(crate::format::utc_timestamp(expiry)),
-        ),
-        (Some(expiry), _) => (
-            "Signed in · token expired".into(),
-            Some(crate::format::utc_timestamp(expiry)),
-        ),
-        (None, _) => ("Signed in · token expiry unknown".into(), None),
-    }
 }
 
 #[cfg(test)]

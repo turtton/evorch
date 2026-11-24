@@ -13,7 +13,7 @@ use crate::model::tasks::AgentRunSource;
 use crate::panes::provider_settings::{ProviderSettingsAction, provider_settings_body};
 use crate::panes::role_settings::{RoleSettingsAction, role_settings_body};
 use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_body};
-use crate::panes::settings::{SettingsModalAction, SettingsTab, settings_modal};
+use crate::panes::settings::{SettingsModalAction, SettingsTab, settings_modal, unavailable_tab};
 
 /// Which tab is visible, and which tabs hold a draft seeded in this session.
 #[derive(Debug, Default)]
@@ -247,24 +247,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         };
         if self.settings.routing_seeded {
-            if !self.routing_settings.is_dirty() {
-                let origin = self.routing_settings.origin_role_settings;
-                self.routing_settings =
-                    crate::model::routing_settings::RoutingSettingsModel::seed_from_config(&view);
-                self.routing_settings.profiles = picker;
-                self.routing_settings.origin_role_settings = origin;
-            } else {
-                let unchanged = view.routing.routes == self.routing_settings.base_routes;
-                self.routing_settings.refresh_references(&view);
-                if !unchanged {
-                    self.routing_settings.conflict = Some(
-                        "Routing was changed by another save while this draft had unsaved edits. \
-                         Saving is disabled so the newer routes are not overwritten; close settings \
-                         and open them again to start from the saved routing."
-                            .to_owned(),
-                    );
-                }
-            }
+            crate::model::settings_tabs::refresh_routing_after_save(
+                &mut self.routing_settings,
+                &view,
+                picker,
+            );
         }
         if self.settings.roles_seeded {
             self.role_settings.refresh_references(&view);
@@ -355,13 +342,4 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             )
         )
     }
-}
-
-/// Shown instead of a tab whose config could not be read; editing would save an empty draft.
-fn unavailable_tab(ui: &mut egui::Ui, error: Option<&str>) {
-    crate::theme::widgets::reason_label(
-        ui,
-        crate::theme::tokens::palette().ERROR_FG,
-        error.unwrap_or("This tab could not be loaded. Close settings and open them again."),
-    );
 }

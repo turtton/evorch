@@ -177,31 +177,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let return_to_roles = self.routing_settings.origin_role_settings;
         let profile = self.routing_settings.profiles.selected.clone();
         let renames = self.routing_settings.route_renames();
-        let expanded = self
-            .routing_settings
-            .expanded
-            .iter()
-            .map(|name| {
-                self.routing_settings
-                    .route_name_edits
-                    .get(name)
-                    .unwrap_or(name)
-                    .clone()
-            })
-            .collect();
+        let expanded = crate::model::settings_tabs::expanded_after_save(&self.routing_settings);
         let (view, picker) = self.profile_settings_from(config, Some(&profile));
-        self.routing_settings = RoutingSettingsModel::seed_from_config(&view);
-        self.routing_settings.profiles = picker;
-        self.routing_settings.expanded = expanded;
+        let roles = self
+            .settings
+            .roles_seeded
+            .then_some(&mut self.role_settings);
+        crate::model::settings_tabs::carry_routing_save(
+            &mut self.routing_settings,
+            roles,
+            &view,
+            picker,
+            &renames,
+            expanded,
+        );
         if self.settings.roles_seeded {
-            if !renames.is_empty() {
-                config::types::agents::rename_route_refs(&mut self.role_settings.agents, &renames);
-                config::types::agents::rename_route_refs(
-                    &mut self.role_settings.base_agents,
-                    &renames,
-                );
-            }
-            self.role_settings.refresh_references(&view);
             self.refresh_role_previews();
         }
         if return_to_roles && self.settings.tab == Some(SettingsTab::Routing) {

@@ -210,6 +210,58 @@ fn a_new_session_says_it_is_connected_in_english() {
     );
 }
 
+// Given: a connected window whose Settings tab is not open
+// When: ⚙ → Routing is chosen and the core answers the settings snapshot
+// Then: the Settings tab is focused and shows the settings modal on its Routing tab
+#[test]
+fn the_settings_menu_opens_the_settings_modal_on_the_chosen_tab() {
+    use workbench_protocol::namespaces::settings::{
+        SettingsQuery, SettingsReply, SettingsRevision, SettingsSnapshot,
+    };
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.harness.get_by_label("⚙").click();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("Routing").click();
+    screen.harness.run_steps(2);
+    let tag = screen
+        .settle()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Feature(FeatureAction {
+                feature: FeatureId::Settings,
+                tag,
+                request:
+                    FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {})),
+            }) => Some(tag),
+            _ => None,
+        })
+        .expect("the settings snapshot was asked");
+    assert_eq!(
+        screen.front_of_leaf(CoreTab::Feature(FeatureId::Settings)),
+        CoreTab::Feature(FeatureId::Settings)
+    );
+    let revision = SettingsRevision::new("a".repeat(64)).unwrap();
+    let snapshot = SettingsSnapshot {
+        revision: revision.clone(),
+        applied_revision: Some(revision),
+        apply_failure: None,
+        document: "version = 3\n".into(),
+        providers: vec![],
+        problem: None,
+    };
+    screen.shared.lock().unwrap().features.reply(
+        FeatureId::Settings,
+        tag,
+        FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::Settings(Box::new(
+            snapshot,
+        ))))),
+    );
+    screen.harness.run_steps(4);
+    screen.harness.get_by_label("Routing settings");
+    screen.harness.get_by_label("Save routing");
+}
+
 mod theme {
     use super::*;
 

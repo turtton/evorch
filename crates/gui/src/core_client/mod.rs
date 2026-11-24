@@ -1134,6 +1134,12 @@ fn apply_effect(
             shell::Effect::Status(status) => shared.status = status,
             // The screen opens its own theme picker; nothing shared changes.
             shell::Effect::ThemeSettings => {}
+            shell::Effect::Settings(tab) => {
+                shell::focus(dock, shell::CoreTab::Feature(features::FeatureId::Settings));
+                if let Some(settings) = shared.features.settings_mut() {
+                    settings.open_modal(tab);
+                }
+            }
             shell::Effect::AttachRequested {
                 request,
                 project,

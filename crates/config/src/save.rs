@@ -334,16 +334,17 @@ pub(crate) fn remove_original_profile(
 }
 
 pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
-    let mut doc = match std::fs::read_to_string(path) {
-        Ok(text) => text.parse::<DocumentMut>().map_err(|_| {
-            invalid_field(
-                &path.display().to_string(),
-                "file is not valid TOML; fix it before saving",
-            )
-        })?,
-        Err(error) if error.kind() == ErrorKind::NotFound => DocumentMut::new(),
-        Err(error) => return Err(error.into()),
-    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_document(&text, &path.display().to_string()),
+        Err(error) if error.kind() == ErrorKind::NotFound => parse_document("", ""),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn parse_document(text: &str, origin: &str) -> Result<DocumentMut, ConfigError> {
+    let mut doc = text
+        .parse::<DocumentMut>()
+        .map_err(|_| invalid_field(origin, "file is not valid TOML; fix it before saving"))?;
     match doc.get("version") {
         Some(raw) => {
             let found = raw
@@ -556,6 +557,30 @@ fn checked_text_for_save_text(
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
     };
+    let config = checked_beside(&previous, &text, |text| scope.compose(path, text))?;
+    Ok(ValidatedSave {
+        text,
+        path: path.to_owned(),
+        config,
+    })
+}
+
+/// # Errors
+/// The first check that fails: the file's structure, a change of the restart targets of
+/// `previous`, or a model kind problem of the configuration composed from the document on
+/// top of the built-in layer only.
+pub fn checked_standalone_text(previous: &str, doc: &DocumentMut) -> Result<String, ConfigError> {
+    let text = doc.to_string();
+    check_file_structure(&text)?;
+    checked_beside(previous, &text, Config::load_standalone_text)?;
+    Ok(text)
+}
+
+fn checked_beside(
+    previous: &str,
+    text: &str,
+    compose: impl FnOnce(&str) -> Result<Config, ConfigError>,
+) -> Result<Config, ConfigError> {
     let targets = |text: &str| -> Result<toml::Value, ConfigError> {
         let doc: toml::Value = toml::from_str(text)
             .map_err(|e: toml::de::Error| ConfigError::Migration(e.to_string()))?;
@@ -566,23 +591,19 @@ fn checked_text_for_save_text(
             .cloned()
             .unwrap_or_else(|| toml::Value::Table(Default::default())))
     };
-    if targets(&previous)? != targets(&text)? {
+    if targets(previous)? != targets(text)? {
         return Err(invalid_field(
             "core.restart.targets",
             "restart targets may only be changed in local config files",
         ));
     }
-    let config = scope.compose(path, &text)?;
+    let config = compose(text)?;
     config
         .model_kind_problems()
         .into_iter()
         .next()
         .map_or(Ok(()), Err)?;
-    Ok(ValidatedSave {
-        text,
-        path: path.to_owned(),
-        config,
-    })
+    Ok(config)
 }
 
 /// Validate file-local structure only. Cross-layer model registrations and chains

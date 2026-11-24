@@ -59,6 +59,7 @@ pub fn settings_modal<A>(
             ui.label(h3(active.title()));
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    crate::theme::widgets::readable_selection(ui);
                     for tab in SettingsTab::ALL {
                         let selected = tab == active;
                         if ui.selectable_label(selected, tab.label()).clicked() && !selected {
@@ -77,4 +78,43 @@ pub fn settings_modal<A>(
             });
         });
     (modal_action, body_action)
+}
+
+/// Shown instead of a tab whose config could not be read; editing would save an empty draft.
+pub fn unavailable_tab(ui: &mut egui::Ui, error: Option<&str>) {
+    crate::theme::widgets::reason_label(
+        ui,
+        crate::theme::tokens::palette().ERROR_FG,
+        error.unwrap_or("This tab could not be loaded. Close settings and open them again."),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SettingsTab, settings_modal};
+    use crate::theme::style::{ThemePreset, install_preset};
+    use crate::theme::tokens::palette;
+
+    // Given: the settings modal in Graphite, whose selection stroke is its fill
+    // When: the Routing tab is active
+    // Then: its label is drawn in the accent's foreground, so it reads on the accent
+    #[test]
+    fn the_active_tab_label_reads_on_the_accent_in_graphite() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            install_preset(ui.ctx(), ThemePreset::Graphite);
+            settings_modal::<()>(ui.ctx(), SettingsTab::Routing, false, |_| None);
+        });
+        harness.run_steps(2);
+        let label = harness
+            .output()
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Routing" => {
+                    Some(text.override_text_color.unwrap_or(text.fallback_color))
+                }
+                _ => None,
+            });
+        assert_eq!(label, Some(palette().ACCENT_FG));
+    }
 }

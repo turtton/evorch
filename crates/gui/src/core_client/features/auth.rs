@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::layout::bounded_list;
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use crate::format::token_expiry;
+use crate::panes::provider_widgets::{
+    API_KEY_EMPTY_HINT, API_KEY_STORED_HINT, provider_kind_label, provider_type_badge,
+};
 use workbench_protocol::{
     commands::{Command, CommandResult},
     errors::ErrorCode,
@@ -73,6 +77,8 @@ pub struct AuthFeature {
     status_in_flight: bool,
     login_stale: bool,
     login_in_flight: bool,
+    confirm_delete: Option<String>,
+    now: fn() -> u64,
 }
 
 impl Default for AuthFeature {
@@ -92,6 +98,8 @@ impl Default for AuthFeature {
             status_in_flight: false,
             login_stale: false,
             login_in_flight: false,
+            confirm_delete: None,
+            now: unix_now,
         }
     }
 }
@@ -108,48 +116,58 @@ fn method_label(method: LoginMethod) -> &'static str {
     }
 }
 
-fn state_label(state: CredentialState) -> String {
-    match state {
-        CredentialState::Unknown => "未確認".into(),
-        CredentialState::Missing => "未設定".into(),
+/// What a slot's state reads as: the label, the absolute expiry for its tooltip, and a note
+/// under an expired sign-in.
+fn state_label(slot: &CredentialSlot, now: u64) -> (String, Option<String>, Option<&'static str>) {
+    match slot.state {
+        CredentialState::Unknown => ("Not checked".into(), None, None),
+        CredentialState::Missing => ("Missing".into(), None, None),
         CredentialState::Present {
             expires_at_unix: Some(at),
-        } => format!("設定済み（期限 UNIX 秒 {at}）"),
+        } => {
+            let (label, absolute) = token_expiry(at, now);
+            let note =
+                (at <= now).then_some("Token expired; it will renew automatically when used.");
+            (label, absolute, note)
+        }
         CredentialState::Present {
             expires_at_unix: None,
-        } => "設定済み".into(),
-        CredentialState::Unavailable => {
-            "読み取れません（キーチェーンがロックされていませんか）".into()
-        }
+        } if slot.login.is_some() => ("Signed in".into(), None, None),
+        CredentialState::Present {
+            expires_at_unix: None,
+        } => ("Stored".into(), None, None),
+        CredentialState::Unavailable => ("Unreadable (is the keychain locked?)".into(), None, None),
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 fn rejection_label(reason: LoginInputRejection) -> &'static str {
     match reason {
-        LoginInputRejection::UnknownLogin => "このログインは見つかりません。",
-        LoginInputRejection::NotWaiting => "このログインは入力を待っていません。",
-        LoginInputRejection::AlreadyUsed => "このログインでは既に入力が使われています。",
-        LoginInputRejection::Expired => "ログインの有効期限が切れました。もう一度始めてください。",
+        LoginInputRejection::UnknownLogin => "This sign-in was not found.",
+        LoginInputRejection::NotWaiting => "This sign-in is not waiting for input.",
+        LoginInputRejection::AlreadyUsed => "This sign-in already used its input.",
+        LoginInputRejection::Expired => "The sign-in expired. Start again.",
         LoginInputRejection::StateMismatch => {
-            "このログインのものではない入力です。表示中のリンクからやり直してください。"
+            "This input belongs to another sign-in. Start again from the link shown."
         }
-        LoginInputRejection::Malformed => {
-            "リダイレクト先のアドレス、または表示されたコードを貼り付けてください。"
-        }
+        LoginInputRejection::Malformed => "Paste the authorization code or final callback URL.",
     }
 }
 
 fn failure_label(code: ErrorCode) -> &'static str {
     match code {
-        ErrorCode::Busy => {
-            "ログインを完了できませんでした（ポートが使用中、または接続できません）。"
-        }
+        ErrorCode::Busy => "Sign-in could not complete (the port is busy or unreachable).",
         ErrorCode::InvalidRequest => {
-            "この操作はできません（認証が拒否されたか、対象外のプロファイルです）。"
+            "This is not possible (authorization was refused or the profile does not support it)."
         }
-        ErrorCode::NotFound => "プロファイルが見つかりません。",
-        ErrorCode::StorageUnavailable => "資格情報を保存または削除できません。",
-        _ => "操作に失敗しました。",
+        ErrorCode::NotFound => "The profile was not found.",
+        ErrorCode::StorageUnavailable => "The credential could not be saved or deleted.",
+        _ => "The operation failed.",
     }
 }
 
@@ -183,7 +201,7 @@ impl AuthFeature {
         }
         self.status_stale = true;
         self.message =
-            "操作の結果を確認できませんでした（コアが再起動した可能性があります）。資格情報の状態を確認してください。".into();
+            "The result of the operation could not be confirmed (the core may have restarted). Check the credential status.".into();
     }
 
     fn login_active(&self) -> bool {
@@ -215,9 +233,9 @@ impl AuthFeature {
         }
         self.message = match state {
             OperationState::Ready => match kind {
-                AuthOperationKind::Login => "ログインしました。".into(),
-                AuthOperationKind::SaveApiKey => "API キーを保存しました。".into(),
-                AuthOperationKind::DeleteCredential => "資格情報を削除しました。".into(),
+                AuthOperationKind::Login => "Signed in.".into(),
+                AuthOperationKind::SaveApiKey => "API key saved.".into(),
+                AuthOperationKind::DeleteCredential => "Credential deleted.".into(),
                 AuthOperationKind::RefreshStatus => String::new(),
             },
             OperationState::Failed { code } => match detail {
@@ -225,9 +243,9 @@ impl AuthFeature {
                 None => failure_label(code).to_owned(),
             },
             OperationState::Cancelled { reason } => match reason {
-                CancelReason::Requested => "ログインを取り消しました。".into(),
+                CancelReason::Requested => "Sign-in cancelled.".into(),
                 CancelReason::Restart | CancelReason::Shutdown => {
-                    "再起動または終了のため中断しました。ログインはやり直してください。".into()
+                    "Interrupted by a restart or shutdown. Sign in again.".into()
                 }
             },
             OperationState::Pending => String::new(),
@@ -261,13 +279,32 @@ impl AuthFeature {
 
     fn slot_row(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, slot: &CredentialSlot) {
         let busy = self.running();
+        let (state, absolute, note) = state_label(slot, (self.now)());
         ui.horizontal_wrapped(|ui| {
             ui.strong(&slot.profile);
-            ui.label(state_label(slot.state));
+            provider_type_badge(ui, provider_kind_label(slot.kind));
+            let expiry = matches!(
+                slot.state,
+                CredentialState::Present {
+                    expires_at_unix: Some(_)
+                }
+            );
+            let label = if expiry {
+                ui.label(crate::theme::text::muted(state))
+            } else {
+                ui.label(state)
+            };
+            if let Some(absolute) = absolute {
+                label.on_hover_text(absolute);
+            }
         });
+        if let Some(note) = note {
+            ui.label(crate::theme::text::muted(note));
+        }
+        let mut delete = false;
         ui.horizontal_wrapped(|ui| {
             if let Some(method) = slot.login {
-                let label = format!("{} でログイン", method_label(method));
+                let label = format!("Sign in to {}", method_label(method));
                 if ui
                     .add_enabled(!self.login_active() && !busy, egui::Button::new(label))
                     .clicked()
@@ -286,21 +323,27 @@ impl AuthFeature {
             }
             match &slot.storage {
                 CredentialRef::Env { var } => {
-                    ui.label(format!("環境変数 {var} から読み込みます。"));
+                    ui.label(format!("Read from environment variable {var}."));
                 }
                 CredentialRef::Keyring { .. } => {
+                    let present = matches!(slot.state, CredentialState::Present { .. });
                     // A Cursor profile signs in with a dashboard API key too (the
                     // core exchanges it); the other logins have no key to type.
                     if slot.login.is_none() || slot.login == Some(LoginMethod::Cursor) {
                         let typed = self.keys.entry(slot.profile.clone()).or_default();
+                        let hint = if present {
+                            API_KEY_STORED_HINT
+                        } else {
+                            API_KEY_EMPTY_HINT
+                        };
                         ui.add(
                             egui::TextEdit::singleline(typed)
                                 .password(true)
-                                .hint_text("API キー"),
+                                .hint_text(hint),
                         );
                         let empty = typed.trim().is_empty();
                         if ui
-                            .add_enabled(!empty && !busy, egui::Button::new("キーを保存"))
+                            .add_enabled(!empty && !busy, egui::Button::new("Save API key"))
                             .clicked()
                         {
                             let value = SecretValue::new(std::mem::take(typed));
@@ -317,25 +360,39 @@ impl AuthFeature {
                             );
                         }
                     }
-                    let present = matches!(slot.state, CredentialState::Present { .. });
                     if ui
-                        .add_enabled(present && !busy, egui::Button::new("削除"))
+                        .add_enabled(present && !busy, egui::Button::new("Delete credential"))
                         .clicked()
                     {
-                        let id = new_operation();
-                        self.send(
-                            ctx,
-                            id.clone(),
-                            AuthOperationKind::DeleteCredential,
-                            AuthCommand::DeleteCredential(DeleteCredential {
-                                operation_id: id,
-                                profile: slot.profile.clone(),
-                            }),
-                        );
+                        self.confirm_delete = Some(slot.profile.clone());
                     }
                 }
             }
         });
+        if self.confirm_delete.as_deref() == Some(&slot.profile) {
+            ui.horizontal(|ui| {
+                ui.label(format!("Delete the credential of {}?", slot.profile));
+                delete = ui
+                    .add_enabled(!busy, egui::Button::new("Confirm delete"))
+                    .clicked();
+                if ui.button("Keep credential").clicked() {
+                    self.confirm_delete = None;
+                }
+            });
+        }
+        if delete {
+            self.confirm_delete = None;
+            let id = new_operation();
+            self.send(
+                ctx,
+                id.clone(),
+                AuthOperationKind::DeleteCredential,
+                AuthCommand::DeleteCredential(DeleteCredential {
+                    operation_id: id,
+                    profile: slot.profile.clone(),
+                }),
+            );
+        }
     }
 
     fn login_panel(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
@@ -345,40 +402,43 @@ impl AuthFeature {
         let id = session.id.clone();
         ui.separator();
         let Some(view) = session.view.clone() else {
-            ui.label("ログインを準備しています。");
+            ui.label("Preparing browser sign-in…");
             return;
         };
         ui.strong(format!(
-            "{} のログイン（{}）",
+            "{} sign-in ({})",
             view.profile,
             method_label(view.method)
         ));
         match view.phase {
             LoginPhase::Completing => {
-                ui.label("認証情報を取得して保存しています…");
+                ui.label("Completing sign-in…");
             }
             LoginPhase::Settled => {
-                ui.label("ログインは終了しました。");
+                ui.label("Sign-in finished.");
             }
             LoginPhase::Waiting => {
                 if let Some(url) = &view.authorize_url {
-                    ui.label("次のリンクをブラウザで開き、ログインしてください。");
-                    ui.hyperlink_to("ログインページを開く", url);
-                    if ui.button("リンクをコピー").clicked() {
+                    ui.label("Waiting for browser sign-in…");
+                    ui.hyperlink_to("Open login page", url);
+                    if ui.button("Copy link").clicked() {
                         ui.ctx().copy_text(url.clone());
                     }
                 }
                 if view.accepts_input {
                     ui.label(
-                        "ブラウザがこのコアと別のマシンで動いている場合は、ログイン後に表示されたアドレス（またはコード）をここに貼り付けてください。",
+                        "The browser callback completes sign-in automatically when the browser runs on the core's machine. Otherwise paste the authorization code or final callback URL below.",
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut self.paste)
                             .password(true)
-                            .hint_text("リダイレクト先のアドレスまたはコード"),
+                            .hint_text("Authorization code / callback URL"),
                     );
                     if ui
-                        .add_enabled(!self.paste.trim().is_empty(), egui::Button::new("送信"))
+                        .add_enabled(
+                            !self.paste.trim().is_empty(),
+                            egui::Button::new("Complete sign-in"),
+                        )
                         .clicked()
                     {
                         let input = SecretValue::new(std::mem::take(&mut self.paste));
@@ -394,7 +454,7 @@ impl AuthFeature {
                 }
             }
         }
-        if ui.button("ログインを取り消す").clicked() {
+        if ui.button("Cancel sign-in").clicked() {
             let tag = self.tag(Pending::Command(Sent::Login(id.clone())));
             ctx.command(
                 tag,
@@ -530,7 +590,7 @@ impl Feature for AuthFeature {
                     Some(CommandResult::Auth(AuthResult::LoginInput(
                         LoginInputOutcome::Accepted,
                     ))) => {
-                        self.message = "入力を受け付けました。ログインを完了しています…".into();
+                        self.message = "Code accepted. Completing sign-in…".into();
                         self.login_stale = true;
                     }
                     Some(CommandResult::Auth(AuthResult::LoginInput(
@@ -582,7 +642,7 @@ impl Feature for AuthFeature {
             ui.label(&self.message);
         }
         if ui
-            .add_enabled(!self.running(), egui::Button::new("資格情報を読み直す"))
+            .add_enabled(!self.running(), egui::Button::new("Refresh credentials"))
             .clicked()
         {
             let id = new_operation();
@@ -594,12 +654,12 @@ impl Feature for AuthFeature {
             );
         }
         let Some(status) = self.status.clone() else {
-            ui.label("資格情報を読み込んでいます。");
+            ui.label("Loading credentials…");
             self.login_panel(ui, ctx);
             return;
         };
         if status.slots.is_empty() {
-            ui.label("プロバイダーが設定されていません。");
+            ui.label("No providers configured.");
         }
         bounded_list(ui, "auth-slots", |ui| {
             for slot in &status.slots {
