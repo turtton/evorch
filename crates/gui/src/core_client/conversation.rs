@@ -508,7 +508,8 @@ fn thread_transcript(
 ) {
     let questions = open_questions(io.cache, thread);
     let approvals = pending_approvals(io.cache, thread);
-    let waiting = !questions.is_empty() || !approvals.is_empty();
+    let routed = lead_routed_count(io.cache, thread);
+    let waiting = !questions.is_empty() || !approvals.is_empty() || routed > 0;
     // While older pages exist, the thread may have messages that are not read yet.
     let older = io
         .cache
@@ -535,6 +536,9 @@ fn thread_transcript(
             }
         },
         |ui, effects| {
+            if routed > 0 {
+                ui.add(egui::Label::new(muted(lead_routed_notice(routed))).wrap());
+            }
             for question in questions {
                 question_card(ui, answers, thread, question, effects);
             }
@@ -546,16 +550,34 @@ fn thread_transcript(
     );
 }
 
+/// The open questions the person answers here. A lane's question routed to its lead is the
+/// lead's to answer or pass on (as in the embedded workbench), so it is not offered to the
+/// person in either thread until the lead passes it to them.
 fn open_questions<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a QuestionView> {
     cache
         .questions
         .values()
         .filter(|q| {
-            q.answer.is_none()
-                && (&q.requester.thread == thread
-                    || matches!(&q.target, QuestionTarget::Lead { lead_thread, .. } if lead_thread == thread))
+            q.answer.is_none() && q.target == QuestionTarget::User && &q.requester.thread == thread
         })
         .collect()
+}
+
+fn lead_routed_count(cache: &Cache, thread: &ThreadId) -> usize {
+    cache
+        .questions
+        .values()
+        .filter(|q| {
+            q.answer.is_none()
+                && matches!(&q.target, QuestionTarget::Lead { lead_thread, .. } if lead_thread == thread)
+        })
+        .count()
+}
+
+fn lead_routed_notice(count: usize) -> String {
+    format!(
+        "{count} lane question(s) wait for your answer here. Read them with lane_questions; they are not in your question list."
+    )
 }
 
 fn pending_approvals<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a ApprovalView> {
@@ -1243,5 +1265,47 @@ mod tests {
         runs.runs.append(&mut own.runs);
         let own = of(&runs, Some("new"));
         assert_eq!((own.stopped, own.running_children), (true, 1));
+    }
+
+    fn question(id: &str, thread: &str, target: serde_json::Value, answered: bool) -> QuestionView {
+        let mut value = serde_json::json!({
+            "id": id,
+            "requester": {"run": format!("run-{thread}"), "thread": thread, "root_run": format!("run-{thread}")},
+            "target": target,
+            "management_revision": "1", "routing_revision": "1", "blocking": true,
+            "title": id, "options": [], "revision": "1",
+            "raised_by": {"actor": "agent", "agent_run_id": format!("run-{thread}"), "surface": "none"},
+        });
+        if answered {
+            value["answer"] = serde_json::json!({"text": "ok"});
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    // Given: a lane's question routed to its lead, a lane question for the person,
+    //        and an answered lead-routed question
+    // Then: only the question for the person is offered, on the lane's thread; the
+    //       lead thread counts the open lead-routed one
+    #[test]
+    fn only_questions_for_the_person_are_offered() {
+        let lead = serde_json::json!({"type": "lead", "payload": {"lead_thread": "lead", "lead_run": "run-lead"}});
+        let mut cache = Cache::default();
+        for question in [
+            question("routed", "lane", lead.clone(), false),
+            question("answered", "lane", lead, true),
+            question("mine", "lane", serde_json::json!({"type": "user"}), false),
+        ] {
+            cache.questions.insert(question.id.to_string(), question);
+        }
+        let lane = ThreadId::new("lane").unwrap();
+        let lead_thread = ThreadId::new("lead").unwrap();
+        let offered: Vec<_> = open_questions(&cache, &lane)
+            .iter()
+            .map(|q| q.id.to_string())
+            .collect();
+        assert_eq!(offered, ["mine"]);
+        assert!(open_questions(&cache, &lead_thread).is_empty());
+        assert_eq!(lead_routed_count(&cache, &lead_thread), 1);
+        assert_eq!(lead_routed_count(&cache, &lane), 0);
     }
 }
