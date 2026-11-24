@@ -279,7 +279,15 @@ struct Screen {
     actions: tokio::sync::mpsc::Receiver<Action>,
 }
 
+/// The window at `size`, whose Diff never runs git and whose Terminal starts no shell.
 fn screen(size: egui::Vec2) -> Screen {
+    screen_with(
+        size,
+        super::local::LocalPanes::new(Arc::new(crate::diff::FixtureDiffSource::empty()), None),
+    )
+}
+
+fn screen_with(size: egui::Vec2, local: super::local::LocalPanes) -> Screen {
     let (tx, actions) = tokio::sync::mpsc::channel(256);
     let shared = Arc::new(Mutex::new(populated()));
     let screen = CoreClientScreen::new(
@@ -287,7 +295,8 @@ fn screen(size: egui::Vec2) -> Screen {
         tx,
         Some(ProjectId::new("proj-1").unwrap()),
         Some(ThreadId::new("thr-1").unwrap()),
-    );
+    )
+    .with_local_panes(local);
     let harness = Harness::builder()
         .with_size(size)
         .build_ui_state(|ui, screen: &mut CoreClientScreen| screen.ui(ui), screen);
@@ -302,6 +311,11 @@ fn screen(size: egui::Vec2) -> Screen {
 impl Screen {
     /// Answers the workspace queries from the fixture until settled; returns the other actions.
     fn settle(&mut self) -> Vec<Action> {
+        self.settle_with(&|_, _| ())
+    }
+
+    /// [`Self::settle`], with each answer changed by `patch` first.
+    fn settle_with(&mut self, patch: &dyn Fn(&WorkspaceQuery, &mut WorkspaceReply)) -> Vec<Action> {
         let mut others = Vec::new();
         for _ in 0..16 {
             self.harness.run_steps(1);
@@ -313,7 +327,9 @@ impl Screen {
                         tag,
                         request: FeatureRequest::Query(Query::Workspace(query)),
                     }) => {
-                        let reply = FeatureReply::Query(Ok(QueryReply::Workspace(answer(&query))));
+                        let mut answer = answer(&query);
+                        patch(&query, &mut answer);
+                        let reply = FeatureReply::Query(Ok(QueryReply::Workspace(answer)));
                         let mut shared = self.shared.lock().unwrap();
                         shared.features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;
@@ -1521,5 +1537,423 @@ mod run_tabs {
         assert!(screen.harness.query_by_label("Stop").is_none());
         assert!(screen.harness.query_by_label("Stop subagents").is_none());
         assert!(screen.harness.query_by_label("Stopped").is_none());
+    }
+}
+
+mod local_panes {
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::core_client::local::LocalPanes;
+    use crate::diff::{DiffError, DiffRequest, DiffSource};
+    use crate::pty::{PtySession, TerminalError, TerminalSpawner, Wake};
+
+    /// Reports the root of each fetch and finds no changes there.
+    struct RecordingDiffSource(Mutex<mpsc::Sender<PathBuf>>);
+
+    impl DiffSource for RecordingDiffSource {
+        fn fetch(&self, req: &DiffRequest) -> Result<String, DiffError> {
+            let _ = self.0.lock().unwrap().send(req.repo_root.clone());
+            Ok(String::new())
+        }
+    }
+
+    /// Records where each shell would start, and starts none.
+    #[derive(Default)]
+    struct RecordingSpawner(Mutex<Vec<PathBuf>>);
+
+    impl TerminalSpawner for RecordingSpawner {
+        fn spawn(&self, cwd: &Path, _: u16, _: u16, _: Wake) -> Result<PtySession, TerminalError> {
+            self.0.lock().unwrap().push(cwd.to_path_buf());
+            Err(TerminalError::Spawn("test spawner".into()))
+        }
+    }
+
+    impl RecordingSpawner {
+        fn cwds(&self) -> Vec<PathBuf> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// Answers with these project roots and thread active roots.
+    fn roots(
+        projects: Vec<(&'static str, PathBuf)>,
+        threads: Vec<(&'static str, PathBuf)>,
+    ) -> impl Fn(&WorkspaceQuery, &mut WorkspaceReply) {
+        move |_, reply| match reply {
+            WorkspaceReply::ProjectAccess(access) => {
+                if let Some((_, root)) = projects
+                    .iter()
+                    .find(|(id, _)| *id == access.project.as_str())
+                {
+                    access.root = root.to_string_lossy().into_owned();
+                }
+            }
+            WorkspaceReply::ThreadDetail(detail) => {
+                if let Some((_, root)) =
+                    threads.iter().find(|(id, _)| *id == detail.thread.as_str())
+                {
+                    detail.active_root = Some(root.to_string_lossy().into_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    impl Screen {
+        fn open_panel(&mut self, label: &str) {
+            self.harness.get_by_label("⚙").click();
+            self.harness.run_steps(2);
+            self.harness.get_by_label("Panels ⏵").click();
+            self.harness.run_steps(2);
+            self.harness.get_by_label(label).click();
+            self.harness.run_steps(2);
+        }
+
+        /// Clicks `title` in the Projects tab and settles; the frames after draw the
+        /// panes for the new selection, which a click applies only at its frame's end.
+        fn select(&mut self, title: &str, patch: &dyn Fn(&WorkspaceQuery, &mut WorkspaceReply)) {
+            self.harness.get_by_label(title).click();
+            self.settle_with(patch);
+            self.harness.run_steps(2);
+        }
+
+        fn front_of_leaf(&self, tab: CoreTab) -> CoreTab {
+            let dock = &self.harness.state().dock;
+            let path = dock.find_tab(&tab).expect("the tab is in the dock");
+            let leaf = dock.leaf(path.node_path()).expect("a leaf");
+            leaf.tabs[leaf.active.0]
+        }
+
+        fn terminal_collapsed(&self) -> bool {
+            let dock = &self.harness.state().dock;
+            let path = dock.find_tab(&CoreTab::Terminal).expect("the Terminal tab");
+            dock.leaf(path.node_path()).expect("a leaf").collapsed
+        }
+    }
+
+    // Given: proj-1's root and thr-2's own working tree exist on this machine
+    // When: the Diff tab is opened on thr-1, then thr-2 is selected
+    // Then: the diff is read in proj-1's root (thr-1 has no active root), then in thr-2's
+    #[test]
+    fn the_diff_follows_the_selected_threads_root() {
+        let project = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let (tx, fetched) = mpsc::channel();
+        let local = LocalPanes::new(Arc::new(RecordingDiffSource(Mutex::new(tx))), None);
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        let patch = roots(
+            vec![("proj-1", project.path().into())],
+            vec![("thr-2", worktree.path().into())],
+        );
+        screen.settle_with(&patch);
+
+        screen.harness.get_by_label("Diff tab").click();
+        screen.harness.run_steps(2);
+        assert_eq!(fetched.recv().unwrap(), project.path());
+        while screen.harness.query_by_label("no changes").is_none() {
+            screen.harness.step();
+        }
+
+        screen.select("Refactor storage writer", &patch);
+        // A refresh of proj-1's root may be due before the new root is read.
+        let root = fetched
+            .iter()
+            .find(|root| root != project.path())
+            .expect("a fetch in thr-2's root");
+        assert_eq!(root, worktree.path());
+    }
+
+    // Given: the core names a project root this machine does not have
+    // When: the Diff and the Terminal are opened from ⚙ → Panels
+    // Then: both say the workspace is not available here; Diff is in front of its leaf
+    //       and no shell is started
+    #[test]
+    fn a_root_missing_on_this_machine_shows_workspace_not_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let spawner = Arc::new(RecordingSpawner::default());
+        let local = LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            Some(spawner.clone()),
+        );
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        screen.settle_with(&roots(vec![("proj-1", gone)], Vec::new()));
+
+        screen.open_panel("Diff");
+        assert_eq!(screen.front_of_leaf(CoreTab::Diff), CoreTab::Diff);
+        screen
+            .harness
+            .get_by_label("Workspace not available on this machine");
+
+        screen.open_panel("Terminal");
+        assert!(!screen.terminal_collapsed());
+        assert_eq!(
+            screen
+                .harness
+                .get_all_by_label("Workspace not available on this machine")
+                .count(),
+            2
+        );
+        assert!(spawner.cwds().is_empty());
+    }
+
+    // Given: the Terminal opened before the core has said where proj-1 is
+    // When: the roots arrive, proj-2's thread is selected, then thr-1 again, and the
+    //       layout is reset
+    // Then: no shell waits on an unknown root, each project starts one shell in its root,
+    //       a project selected again keeps its shell, and a reset folds the Terminal
+    //       without ending the shells
+    #[test]
+    fn the_terminal_runs_one_shell_per_project_and_survives_reset_layout() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let spawner = Arc::new(RecordingSpawner::default());
+        let local = LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            Some(spawner.clone()),
+        );
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        assert!(screen.terminal_collapsed());
+        screen.harness.run_steps(1);
+        screen.open_panel("Terminal");
+        screen.harness.get_by_label("Loading workspace…");
+        assert!(spawner.cwds().is_empty());
+
+        let patch = roots(
+            vec![
+                ("proj-1", first.path().into()),
+                ("proj-2", second.path().into()),
+            ],
+            Vec::new(),
+        );
+        screen.settle_with(&patch);
+        // The shell is started while its pane is drawn, after the header.
+        screen.harness.run_steps(2);
+        assert_eq!(spawner.cwds(), [first.path()]);
+        screen
+            .harness
+            .get_by_label("Failed to start shell: PTY spawn failed: test spawner");
+
+        screen.select("Landing page copy", &patch);
+        assert_eq!(spawner.cwds(), [first.path(), second.path()]);
+
+        screen.select("Fix login redirect", &patch);
+        assert_eq!(spawner.cwds().len(), 2);
+
+        screen.harness.get_by_label("⚙").click();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Reset layout").click();
+        screen.settle_with(&patch);
+        assert!(screen.terminal_collapsed());
+        assert_eq!(screen.harness.state().local.terminals.len(), 2);
+
+        screen.open_panel("Terminal");
+        screen
+            .harness
+            .get_by_label("Failed to start shell: PTY spawn failed: test spawner");
+        assert_eq!(spawner.cwds().len(), 2);
+    }
+
+    // Given: proj-2 listed by the core but added after the snapshot, so the cache lacks it
+    // When: its thread is selected with the Terminal open and frames keep coming
+    // Then: proj-2's shell is started once and kept
+    #[test]
+    fn a_project_listed_after_the_snapshot_keeps_its_shell() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let spawner = Arc::new(RecordingSpawner::default());
+        let local = LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            Some(spawner.clone()),
+        );
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .projects
+            .remove("proj-2");
+        let patch = roots(
+            vec![
+                ("proj-1", first.path().into()),
+                ("proj-2", second.path().into()),
+            ],
+            Vec::new(),
+        );
+        screen.settle_with(&patch);
+        screen.shared.lock().unwrap().features.event(
+            &workbench_protocol::events::UiEvent::Workspace(
+                workbench_protocol::namespaces::WorkspaceEvent::WorkspaceChanged {
+                    revision: Revision(2),
+                },
+            ),
+        );
+        screen.settle_with(&patch);
+        screen.open_panel("Terminal");
+        assert_eq!(spawner.cwds(), [first.path()]);
+
+        screen.select("Landing page copy", &patch);
+        screen.harness.run_steps(4);
+
+        assert_eq!(spawner.cwds(), [first.path(), second.path()]);
+        assert_eq!(screen.harness.state().local.terminals.len(), 2);
+    }
+
+    // Given: proj-1's shell started in its root
+    // When: the Diff and the Terminal are closed with a middle click, then opened from
+    //       ⚙ → Panels
+    // Then: the Diff returns beside Notifications and the Terminal below the
+    //       conversation, with the shell it had
+    #[test]
+    fn the_local_tabs_close_and_reopen_from_panels() {
+        let project = tempfile::tempdir().unwrap();
+        let spawner = Arc::new(RecordingSpawner::default());
+        let local = LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            Some(spawner.clone()),
+        );
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        screen.settle_with(&roots(vec![("proj-1", project.path().into())], Vec::new()));
+        screen.open_panel("Terminal");
+        assert_eq!(spawner.cwds(), [project.path()]);
+
+        for (tab, label) in [
+            (CoreTab::Diff, "Diff tab"),
+            (CoreTab::Terminal, "Terminal tab"),
+        ] {
+            screen
+                .harness
+                .get_by_label(label)
+                .click_button(egui::PointerButton::Middle);
+            screen.harness.run_steps(2);
+            assert!(
+                screen.harness.state().dock.find_tab(&tab).is_none(),
+                "{label}"
+            );
+        }
+
+        screen.open_panel("Diff");
+        let dock = &screen.harness.state().dock;
+        let diff = dock.find_tab(&CoreTab::Diff).expect("the Diff tab");
+        let notifications = dock.find_tab(&CoreTab::Notifications).unwrap();
+        assert_eq!(diff.node_path(), notifications.node_path());
+        assert_eq!(diff.tab.0, notifications.tab.0 + 1);
+        assert_eq!(screen.front_of_leaf(CoreTab::Diff), CoreTab::Diff);
+
+        screen.open_panel("Terminal");
+        assert!(!screen.terminal_collapsed());
+        let terminal = screen.harness.get_by_label("Terminal tab").rect();
+        let conversation = screen.harness.get_by_label("Conversation tab").rect();
+        assert!(terminal.top() > conversation.bottom());
+        assert!((terminal.left() - conversation.left()).abs() < 1.0);
+        screen
+            .harness
+            .get_by_label("Failed to start shell: PTY spawn failed: test spawner");
+        assert_eq!(spawner.cwds().len(), 1);
+    }
+
+    const DIFF: &str = "\
+diff --git a/src/auth/redirect.rs b/src/auth/redirect.rs
+index 1111111..2222222 100644
+--- a/src/auth/redirect.rs
++++ b/src/auth/redirect.rs
+@@ -1,5 +1,6 @@
+ use crate::session::Session;
+
+-pub fn redirect(session: &Session) -> &str {
+-    \"/\"
++pub fn redirect(session: &Session) -> String {
++    let next = session.next.as_deref().unwrap_or(\"/\");
++    next.to_owned()
+ }
+";
+
+    // Given: proj-1's working tree has changes
+    // When: the Diff tab is opened
+    // Then: the changed files are listed with their lines
+    #[test]
+    fn the_diff_tab_shows_the_changes_in_the_selected_root() {
+        let project = tempfile::tempdir().unwrap();
+        let local = LocalPanes::new(Arc::new(crate::diff::FixtureDiffSource::ready(DIFF)), None);
+        let mut screen = screen_with(egui::vec2(1440.0, 900.0), local);
+        screen.settle_with(&roots(vec![("proj-1", project.path().into())], Vec::new()));
+
+        screen.harness.get_by_label("Diff tab").click();
+        while screen.harness.query_by_label("1 changed files").is_none() {
+            screen.harness.step();
+        }
+        screen.harness.run_steps(1);
+        screen.capture("diff");
+    }
+
+    const OUTPUT: &str = concat!(
+        "\x1b[1;32m~/evorch\x1b[0m $ cargo test -p auth --test redirect\r\n",
+        "   Compiling auth v0.1.0\r\n",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.31s\r\n",
+        "     Running tests/redirect.rs\r\n",
+        "\r\n",
+        "running 2 tests\r\n",
+        "test keeps_the_next_path ... \x1b[32mok\x1b[0m\r\n",
+        "test falls_back_to_the_root ... \x1b[32mok\x1b[0m\r\n",
+        "\r\n",
+        "test result: \x1b[32mok\x1b[0m. 2 passed; 0 failed\r\n",
+        "\x1b[1;32m~/evorch\x1b[0m $ ",
+    );
+
+    // Given: the Terminal open on proj-1, whose session has written output
+    // When: the frame is drawn
+    // Then: the grid shows that output under the root it runs in
+    #[test]
+    fn the_terminal_draws_its_sessions_output() {
+        let project = tempfile::tempdir().unwrap();
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.settle_with(&roots(vec![("proj-1", project.path().into())], Vec::new()));
+        screen.open_panel("Terminal");
+
+        let key = Some(ProjectId::new("proj-1").unwrap());
+        let local = &mut screen.harness.state_mut().local;
+        let session = local.terminals.get(&key).expect("proj-1's session");
+        assert_eq!(session.cwd(), project.path());
+        local
+            .terminals
+            .session_mut(&key, project.path())
+            .emulator_mut()
+            .feed(OUTPUT.as_bytes());
+        screen.harness.run_steps(2);
+        let grid = screen.harness.get_by_label("Terminal");
+        assert!(grid.value().unwrap().contains("test result: ok. 2 passed"));
+        screen.capture("terminal");
+    }
+
+    // Given: a 1024×768 window on thr-1, whose root run is running
+    // When: the Terminal is folded, as by default, and then opened
+    // Then: the conversation's Stop, Message and Queue stay inside the window
+    #[test]
+    fn the_conversation_controls_stay_in_view_with_the_terminal_open() {
+        let size = egui::vec2(1024.0, 768.0);
+        let project = tempfile::tempdir().unwrap();
+        let mut screen = screen(size);
+        screen.settle_with(&roots(vec![("proj-1", project.path().into())], Vec::new()));
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        for open in [false, true] {
+            if open {
+                screen.open_panel("Terminal");
+            }
+            for control in ["Stop", "Message", "Queue"] {
+                let mut nodes = screen.harness.query_all_by_label(control).peekable();
+                assert!(nodes.peek().is_some(), "{control}");
+                for node in nodes {
+                    let centre = node.rect().center();
+                    assert!(
+                        window.contains(centre),
+                        "{control} at {centre:?}, open: {open}"
+                    );
+                }
+            }
+        }
+        screen.capture("terminal-narrow");
     }
 }

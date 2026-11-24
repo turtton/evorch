@@ -11,6 +11,7 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
 use super::features::{DockPass, FeatureId, Navigation, Selection};
+use super::local::LocalPanes;
 use super::notifications::{self, NotificationLog};
 use super::run_tabs::{RunPane, RunTabId, RunTabs};
 use crate::panes::conversation_plan::plan_panel;
@@ -31,6 +32,10 @@ pub enum CoreTab {
     Feature(FeatureId),
     /// One run's transcript, opened from an Execution row.
     Run(RunTabId),
+    /// The changes in the selected thread's working tree.
+    Diff,
+    /// The selected project's shell.
+    Terminal,
 }
 
 /// What a frame asks the screen to do once the dock is drawn and the shared state is free.
@@ -78,6 +83,9 @@ pub const ON_DEMAND: [FeatureId; 7] = [
 ];
 
 const SIDEBAR_FRACTION: f32 = 0.30;
+/// The conversation's share of the centre column above the Terminal, as in the
+/// embedded workbench.
+const TERMINAL_FRACTION: f32 = 0.7;
 
 pub fn default_dock() -> DockState<CoreTab> {
     let mut centre = vec![CoreTab::Conversation];
@@ -86,11 +94,19 @@ pub fn default_dock() -> DockState<CoreTab> {
     let surface = dock.main_surface_mut();
     let [middle, left] =
         surface.split_left(NodeIndex::root(), SIDEBAR_FRACTION, vec![CoreTab::Projects]);
-    let mut bottom_left = vec![CoreTab::Notifications];
+    let mut bottom_left = vec![CoreTab::Notifications, CoreTab::Diff];
     bottom_left.extend(LEFT.map(CoreTab::Feature));
     surface.split_below(left, 0.65, bottom_left);
-    let [_, right] = surface.split_right(middle, 0.7, RIGHT_TOP.map(CoreTab::Feature).to_vec());
+    let [conversation, right] =
+        surface.split_right(middle, 0.7, RIGHT_TOP.map(CoreTab::Feature).to_vec());
     surface.split_below(right, 0.5, RIGHT_BOTTOM.map(CoreTab::Feature).to_vec());
+    let [_, terminal] =
+        surface.split_below(conversation, TERMINAL_FRACTION, vec![CoreTab::Terminal]);
+    // Folded to its tab bar until opened, as in the embedded workbench: no shell starts
+    // before the person asks for one, and the conversation keeps its height.
+    if let Ok(leaf) = surface.leaf_mut(terminal) {
+        leaf.collapsed = true;
+    }
     dock
 }
 
@@ -107,7 +123,27 @@ pub fn focus(dock: &mut DockState<CoreTab>, tab: CoreTab) {
     if let Some(path) = dock.find_tab(&tab) {
         let _ = dock.set_active_tab(path);
         dock.set_focused_node_and_surface(path.node_path());
+        if let Ok(leaf) = dock.leaf_mut(path.node_path()) {
+            leaf.collapsed = false;
+        }
     }
+}
+
+/// Bring a local pane forward. A closed Diff opens beside the notifications, and a
+/// closed Terminal below the conversation again, where the default layout has them.
+pub fn open_local(dock: &mut DockState<CoreTab>, tab: CoreTab) {
+    if tab == CoreTab::Terminal
+        && dock.find_tab(&tab).is_none()
+        && let Some(conversation) = dock.find_tab(&CoreTab::Conversation)
+    {
+        dock.split(
+            conversation.node_path(),
+            egui_dock::Split::Below,
+            TERMINAL_FRACTION,
+            egui_dock::Node::leaf(tab),
+        );
+    }
+    focus_beside(dock, tab, CoreTab::Notifications);
 }
 
 /// Put a tab not in the dock right after `anchor` in the anchor's leaf (else at the
@@ -179,6 +215,7 @@ pub struct Viewer<'v, 'p> {
     pub effects: &'v mut Vec<Effect>,
     pub notifications: &'v mut NotificationLog,
     pub run_tabs: &'v RunTabs,
+    pub local: &'v mut LocalPanes,
 }
 
 impl Viewer<'_, '_> {
@@ -195,6 +232,8 @@ impl Viewer<'_, '_> {
             CoreTab::Conversation => (icons::CHAT_CIRCLE_TEXT, "Conversation"),
             CoreTab::Notifications => (icons::BELL, "Notifications"),
             CoreTab::Plan => (icons::LIST_CHECKS, "Plan"),
+            CoreTab::Diff => (icons::GIT_DIFF, "Diff"),
+            CoreTab::Terminal => (icons::TERMINAL_WINDOW, "Terminal"),
             CoreTab::Feature(feature) => (feature_icon(feature), self.title_of(feature)),
             CoreTab::Run(id) => {
                 let title = self.run_tabs.get(id).map(|tab| tab.title.as_str());
@@ -336,6 +375,8 @@ impl TabViewer for Viewer<'_, '_> {
                 );
             }
             CoreTab::Plan => self.plan(ui),
+            CoreTab::Diff => self.local.diff_tab(ui),
+            CoreTab::Terminal => self.local.terminal_tab(ui),
             CoreTab::Run(id) => conversation::run_tab(
                 ui,
                 self.conversation,
@@ -360,7 +401,14 @@ impl TabViewer for Viewer<'_, '_> {
     }
 
     fn is_closeable(&self, tab: &CoreTab) -> bool {
-        matches!(tab, CoreTab::Feature(_) | CoreTab::Plan | CoreTab::Run(_))
+        matches!(
+            tab,
+            CoreTab::Feature(_)
+                | CoreTab::Plan
+                | CoreTab::Run(_)
+                | CoreTab::Diff
+                | CoreTab::Terminal
+        )
     }
 
     fn scroll_bars(&self, _tab: &CoreTab) -> [bool; 2] {
@@ -479,11 +527,15 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
                     CoreTab::Conversation,
                     CoreTab::Notifications,
                     CoreTab::Plan,
+                    CoreTab::Diff,
+                    CoreTab::Terminal,
                 ] {
                     let label = match tab {
                         CoreTab::Projects => "Projects",
                         CoreTab::Notifications => "Notifications",
                         CoreTab::Plan => "Plan",
+                        CoreTab::Diff => "Diff",
+                        CoreTab::Terminal => "Terminal",
                         _ => "Conversation",
                     };
                     if ui.button(label).clicked() {

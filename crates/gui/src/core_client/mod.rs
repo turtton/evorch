@@ -9,6 +9,7 @@ pub use attachments::ClientAttachmentDraft;
 pub mod connection;
 pub mod conversation;
 pub mod features;
+pub mod local;
 pub mod notifications;
 pub mod run_tabs;
 pub mod shell;
@@ -228,8 +229,12 @@ pub fn run(config_dir: PathBuf, title: String) -> Result<(), String> {
                 shared.clone(),
                 cc.egui_ctx.clone(),
             ));
+            let local = local::LocalPanes::new(
+                Arc::new(crate::diff::GitCliDiffSource),
+                Some(Arc::new(crate::pty::ShellSpawner::from_env())),
+            );
             Ok(Box::new(CoreClientApp {
-                screen: CoreClientScreen::new(shared, tx, None, None),
+                screen: CoreClientScreen::new(shared, tx, None, None).with_local_panes(local),
                 _runtime: runtime,
                 task,
             }))
@@ -268,6 +273,7 @@ pub struct CoreClientScreen {
     dock: egui_dock::DockState<shell::CoreTab>,
     notifications: notifications::NotificationLog,
     run_tabs: run_tabs::RunTabs,
+    local: local::LocalPanes,
 }
 
 impl CoreClientScreen {
@@ -286,7 +292,21 @@ impl CoreClientScreen {
             dock: shell::default_dock(),
             notifications: notifications::NotificationLog::default(),
             run_tabs: run_tabs::RunTabs::default(),
+            local: local::LocalPanes::default(),
         }
+    }
+
+    /// The Diff's source and the Terminal's shell; without this the Diff reads git and
+    /// the Terminal starts no shell.
+    #[must_use]
+    pub fn with_local_panes(mut self, local: local::LocalPanes) -> Self {
+        self.local = local;
+        self
+    }
+
+    /// Before egui reads the input of a frame: a focused terminal takes the keys.
+    pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
+        self.local.capture_input(raw_input);
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -489,6 +509,10 @@ impl eframe::App for CoreClientApp {
         self.screen.logic(ctx);
     }
 
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.screen.raw_input_hook(raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.screen.ui(ui);
     }
@@ -565,6 +589,26 @@ impl CoreClientScreen {
             thread: self.selected.clone(),
         };
         self.notifications.observe(&shared.cache);
+        let roots = local::LocalRoots::resolve(
+            &selection,
+            shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.model()),
+            &shared.cache,
+        );
+        // Shells are ended against the projects the sidebar lists, and only once a
+        // listing completed: the snapshot's projects miss those added since.
+        let projects = shared
+            .connected
+            .then(|| {
+                shared
+                    .features
+                    .workspace()
+                    .and_then(|workspace| workspace.model().projects.as_deref())
+            })
+            .flatten();
+        self.local.begin_frame(ui.ctx(), roots, projects);
         let frame = {
             let s = &mut *shared;
             let view = FeatureView {
@@ -590,6 +634,7 @@ impl CoreClientScreen {
                 effects: &mut effects,
                 notifications: &mut self.notifications,
                 run_tabs: &self.run_tabs,
+                local: &mut self.local,
             };
             egui_dock::DockArea::new(&mut self.dock)
                 .style(crate::theme::dock::dock_style(ui.style()))
@@ -664,6 +709,9 @@ fn apply_effect(
                 shell::CoreTab::Plan,
                 shell::CoreTab::Feature(features::FeatureId::Execution),
             ),
+            shell::Effect::Open(tab @ (shell::CoreTab::Diff | shell::CoreTab::Terminal)) => {
+                shell::open_local(dock, tab);
+            }
             shell::Effect::Open(tab) => shell::focus(dock, tab),
             // The frame's end reads the run's history once the tab is in the dock.
             shell::Effect::OpenRun(pane) => shell::focus_beside(

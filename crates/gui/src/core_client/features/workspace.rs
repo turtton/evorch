@@ -368,6 +368,25 @@ impl WorkspaceFeature {
 
     /// Asks for the details of `thread` unless they are known or on their way.
     pub fn want_detail(&mut self, thread: &str) {
+        self.ask_detail(thread, DETAILS_IN_FLIGHT);
+    }
+
+    /// The selection's project access and thread detail are asked for first, so the
+    /// local panes and the conversation's root never queue behind other threads.
+    pub fn want_selection(&mut self, selection: &Selection, cache: &Cache) {
+        if let Some(project) = &selection.project {
+            self.want_access(project.as_str());
+        }
+        if let Some(thread) = &selection.thread
+            && cache.threads.contains_key(thread.as_str())
+        {
+            // One above the cap: the other threads' queries never hold this one back.
+            self.ask_detail(thread.as_str(), DETAILS_IN_FLIGHT + 1);
+        }
+    }
+
+    /// Asks for the details of `thread` while fewer than `cap` detail queries wait.
+    fn ask_detail(&mut self, thread: &str, cap: usize) {
         let waiting = self
             .inflight
             .values()
@@ -377,7 +396,7 @@ impl WorkspaceFeature {
             .inflight
             .values()
             .any(|f| matches!(f, Inflight::Detail(t) if t == thread));
-        if known || waiting >= DETAILS_IN_FLIGHT || self.current_detail(thread) {
+        if known || waiting >= cap || self.current_detail(thread) {
             return;
         }
         let Ok(id) = ThreadId::new(thread) else {
@@ -800,6 +819,7 @@ impl Feature for WorkspaceFeature {
 
     fn render_selector(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) -> bool {
         self.refresh_if_stale();
+        self.want_selection(ctx.selection(), ctx.cache());
         let threads: Vec<String> = ctx.cache().threads.keys().cloned().collect();
         for thread in &threads {
             self.want_detail(thread);
@@ -1662,6 +1682,59 @@ mod tests {
         harness.state_mut().invisible = false;
         harness.run();
         assert!(harness.query_by_label("New project").is_some());
+    }
+
+    // Given: twenty threads in project p, so the first pass, which asks for p's access,
+    //        leaves the detail queries at their cap
+    // When: the last of the threads is selected
+    // Then: the next pass asks for its detail anyway
+    #[test]
+    fn the_selected_thread_is_asked_for_past_the_other_threads() {
+        let mut harness = screen(true);
+        let ids: Vec<String> = (0..20).map(|n| format!("t{n:02}")).collect();
+        for id in &ids {
+            harness
+                .state_mut()
+                .cache
+                .threads
+                .insert(id.clone(), summary(id, ThreadState::Idle));
+        }
+        harness.run();
+        let asked = |screen: &Screen| -> Vec<Query> {
+            screen
+                .frame
+                .actions
+                .iter()
+                .filter_map(|action| match &action.request {
+                    super::super::FeatureRequest::Query(query) => Some(query.clone()),
+                    super::super::FeatureRequest::Command(_) => None,
+                })
+                .collect()
+        };
+        let details = |queries: &[Query]| -> Vec<String> {
+            queries
+                .iter()
+                .filter_map(|query| match query {
+                    Query::Workspace(WorkspaceQuery::GetThreadDetail(target)) => {
+                        Some(target.thread.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = asked(harness.state());
+        assert!(first.iter().any(|query| matches!(
+            query,
+            Query::Workspace(WorkspaceQuery::GetProjectAccess(target)) if target.project.as_str() == "p"
+        )));
+        assert_eq!(details(&first).len(), DETAILS_IN_FLIGHT);
+        assert!(!details(&first).contains(&ids[19]));
+
+        harness.state_mut().frame.actions.clear();
+        harness.state_mut().selection = showing(Some(&ids[19]));
+        harness.run();
+
+        assert_eq!(details(&asked(harness.state())), [ids[19].clone()]);
     }
 
     /// Lists the families once and answers with `items`, leaving the project listing

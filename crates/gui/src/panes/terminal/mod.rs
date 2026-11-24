@@ -1,8 +1,9 @@
 //! Terminal ペインの描画と入力処理。
 //!
 //! 選択中プロジェクトのシェルセッションを、ペインの大きさに合わせたグリッドとして描きます。
-//! キーボード入力は `WorkbenchState::raw_input_hook` が取り分けた
-//! [`TerminalSessions::pending_events`] から読み、PTY へ直接送ります。
+//! キーボード入力は、ホスト (レガシー Workbench か core client) の `raw_input_hook` が
+//! [`TerminalSessionsOf::capture_input`] で取り分けた `pending_events` から読み、
+//! PTY へ直接送ります。
 
 mod paint;
 mod pointer;
@@ -17,9 +18,9 @@ use egui::{
     UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 
-use crate::terminal::{
-    GridSize, TerminalKey, TerminalSession, TerminalSessions, TerminalStatus, input,
-};
+#[cfg(test)]
+use crate::terminal::TerminalSessions;
+use crate::terminal::{GridSize, TerminalSession, TerminalSessionsOf, TerminalStatus, input};
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::{R_MD, SP_1, SP_2, palette};
@@ -27,10 +28,10 @@ use crate::theme::widgets::{empty_state, icon_button, surface_frame};
 use paint::CellMetrics;
 
 /// Terminal ペインを描画します。
-pub fn terminal_pane(
+pub fn terminal_pane<K: Ord + Clone>(
     ui: &mut egui::Ui,
-    sessions: &mut TerminalSessions,
-    key: &TerminalKey,
+    sessions: &mut TerminalSessionsOf<K>,
+    key: &K,
     cwd: &Path,
 ) {
     let spawner = sessions.spawner();
