@@ -22,6 +22,7 @@ pub mod markdown_render;
 pub mod memory;
 pub mod model_metadata;
 pub mod model_picker;
+pub mod notification_widgets;
 pub mod notifications;
 pub mod phase_indicator;
 pub mod project_dialog;

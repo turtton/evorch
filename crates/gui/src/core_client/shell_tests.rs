@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::json;
 use workbench_protocol::{
+    events::EventCursor,
     handshake::Capability,
     ids::{ProjectId, RunId, ThreadId},
     namespaces::{
@@ -11,14 +12,15 @@ use workbench_protocol::{
     },
     queries::{Query, QueryReply},
     views::{
-        ApprovalView, CommittedMessage, Page, ProjectSummary, QuestionView, RunSummary,
+        ApprovalView, CommittedMessage, Page, ProjectSummary, QuestionView, RunPhase, RunSummary,
         ThreadSummary,
     },
-    wire::Revision,
+    wire::{InstanceEpoch, Revision, Sequence},
 };
 
 use super::connection::Action;
 use super::features::{FeatureAction, FeatureId, FeatureReply, FeatureRequest};
+use super::shell::{self, CoreTab};
 use super::{CoreClientScreen, Shared};
 
 fn view<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> T {
@@ -421,4 +423,135 @@ fn a_thread_click_selects_it_and_loads_history() {
         "no history request for thr-2"
     );
     assert_eq!(screen.harness.state().selected, Some(thr_2));
+}
+
+// Given: a core with a pending question on thr-1 and pending approvals on thr-1 and thr-4,
+//        and the Browser tab in front of the conversation
+// When: the window opens and the second approval's notification is clicked
+// Then: the Notifications tab, in front at the bottom left, lists each once, and the
+//       click brings the Conversation tab to front on thr-4 and asks for its history
+#[test]
+fn notifications_tab_lists_the_pending_question_and_approval() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    shell::focus(
+        &mut screen.harness.state_mut().dock,
+        CoreTab::Feature(FeatureId::Browser),
+    );
+    assert_ne!(front_of_conversation_leaf(&screen), CoreTab::Conversation);
+    let harness = &screen.harness;
+    harness.get_by_label("Notifications tab");
+    harness.get_by_label("Lanes tab");
+    harness.get_by_label("Question: Should an invalid `next` fall back to /home or to /?");
+    assert_eq!(
+        harness
+            .get_all_by_label("Approval requested: shell")
+            .count(),
+        2
+    );
+    screen
+        .harness
+        .get_all_by_label("Approval requested: shell")
+        .nth(1)
+        .unwrap()
+        .click();
+    let actions = screen.settle();
+    let thr_4 = ThreadId::new("thr-4").unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::History(thread, _) if *thread == thr_4)),
+        "no history request for thr-4"
+    );
+    assert_eq!(screen.harness.state().selected, Some(thr_4));
+    assert_eq!(front_of_conversation_leaf(&screen), CoreTab::Conversation);
+}
+
+fn front_of_conversation_leaf(screen: &Screen) -> CoreTab {
+    let dock = &screen.harness.state().dock;
+    let path = dock
+        .find_tab(&CoreTab::Conversation)
+        .expect("the Conversation tab");
+    let leaf = dock.leaf(path.node_path()).expect("a leaf");
+    leaf.tabs[leaf.active.0]
+}
+
+// Given: the Notifications tab listing the pending question and approvals, unread
+// When: thr-6's root run finishes and thr-1's fails, then the window gains focus
+// Then: both outcomes are listed after the requests, and the rows drawn while the
+//       window has focus become read
+#[test]
+fn notifications_tab_lists_root_run_outcomes_and_reads_them_when_focused() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        for (run, phase) in [("run-6", RunPhase::Done), ("run-1", RunPhase::Failed)] {
+            shared.cache.runs.get_mut(run).unwrap().phase = phase;
+        }
+    }
+    screen.harness.run_steps(2);
+    screen.capture("");
+    let harness = &screen.harness;
+    harness.get_by_label("Rebuild the search index completed");
+    harness.get_by_label("Fix login redirect failed");
+    assert_eq!(harness.get_all_by_label("Unread").count(), 5);
+
+    screen
+        .harness
+        .input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .focused = Some(true);
+    screen.harness.run_steps(2);
+    screen.capture("read");
+    assert_eq!(screen.harness.state().notifications.unread_count(), 0);
+    assert_eq!(screen.harness.get_all_by_label("Read").count(), 5);
+}
+
+// Given: the Notifications tab drawn once, then the window minimized
+// When: the core restarts and thr-6's root run, running in the new snapshot, finishes,
+//       with eframe running only logic passes; then the window is restored
+// Then: the restored tab lists the outcome, as the log kept watching while minimized
+#[test]
+fn notifications_keep_watching_runs_while_the_window_is_minimized() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    let ctx = screen.harness.ctx.clone();
+    let mut minimized = egui::RawInput::default();
+    minimized
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .minimized = Some(true);
+    let logic_pass = |screen: &mut Screen| {
+        let before = ctx.cumulative_pass_nr();
+        let _ = ctx.run_logic(&minimized, |ctx| screen.harness.state_mut().logic(ctx));
+        assert_eq!(
+            ctx.cumulative_pass_nr(),
+            before,
+            "a logic pass draws nothing"
+        );
+    };
+    screen.shared.lock().unwrap().cache.at(EventCursor {
+        core_epoch: InstanceEpoch(8),
+        sequence: Sequence(0),
+    });
+    logic_pass(&mut screen);
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .cache
+        .runs
+        .get_mut("run-6")
+        .unwrap()
+        .phase = RunPhase::Done;
+    logic_pass(&mut screen);
+
+    screen.harness.run_steps(2);
+    screen
+        .harness
+        .get_by_label("Rebuild the search index completed");
 }

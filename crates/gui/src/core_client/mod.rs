@@ -9,6 +9,7 @@ pub use attachments::ClientAttachmentDraft;
 pub mod connection;
 pub mod conversation;
 pub mod features;
+pub mod notifications;
 pub mod shell;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
@@ -259,6 +260,7 @@ pub struct CoreClientScreen {
     project: Option<ProjectId>,
     conversation: conversation::ConversationPane,
     dock: egui_dock::DockState<shell::CoreTab>,
+    notifications: notifications::NotificationLog,
 }
 
 impl CoreClientScreen {
@@ -275,6 +277,7 @@ impl CoreClientScreen {
             project,
             conversation: conversation::ConversationPane::default(),
             dock: shell::default_dock(),
+            notifications: notifications::NotificationLog::default(),
         }
     }
 
@@ -505,6 +508,8 @@ impl CoreClientScreen {
             selection: &selection,
         };
         let frame = s.features.maintain_minimized(view);
+        // The log diffs the cache once per pass, so it sees what changes while minimized.
+        self.notifications.observe(&s.cache);
         apply_frame(
             &self.actions,
             &mut shared,
@@ -548,6 +553,7 @@ impl CoreClientScreen {
             project: self.project.clone(),
             thread: self.selected.clone(),
         };
+        self.notifications.observe(&shared.cache);
         let frame = {
             let s = &mut *shared;
             let view = FeatureView {
@@ -571,6 +577,7 @@ impl CoreClientScreen {
                 },
                 selection: &selection,
                 effects: &mut effects,
+                notifications: &mut self.notifications,
             };
             egui_dock::DockArea::new(&mut self.dock)
                 .style(crate::theme::dock::dock_style(ui.style()))
