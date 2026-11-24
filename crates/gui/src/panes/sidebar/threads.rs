@@ -1,30 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use egui::{Align, Layout, Rect, Sense, Stroke, Ui};
+use egui::{Align, Layout, Sense, Ui};
 use storage::thread_retention::{BlockReason, RetentionStatus};
 use workspace_ui::{
-    LineageIndex, LineageKind, ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord,
-    ThreadRunPhase, ThreadState,
+    LineageIndex, LineageKind, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase,
+    ThreadState,
 };
 
-use crate::theme::icons;
+#[cfg(test)]
+use crate::panes::sidebar_widgets::RowAttention;
+use crate::panes::sidebar_widgets::{
+    Attention, BranchKind, FAMILY_GAP, FAMILY_PAGE, Hidden, RowStatus, TrailingView, TreeRails,
+    TreeRowLead, attention_note, family_gap_before, family_limit_id, hidden_count_badge,
+    limit_families, nest, restore_button, roll_up, title_label, trailing_controls, tree_row_lead,
+};
 use crate::theme::text::muted;
-use crate::theme::tokens::{FONT_ICON, FONT_SMALL, Palette, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{RowTone, compact_row_with, ghost, icon_text, row_title};
+use crate::theme::tokens::{FONT_SMALL, SP_1, SP_2, palette};
+use crate::theme::widgets::{compact_row_with, ghost};
 
 use super::SidebarAction;
-
-/// Side of the square pin/archive action buttons.
-const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
-
-/// Top-level families a project shows before, and per, "See more".
-const FAMILY_PAGE: usize = 5;
-
-/// Horizontal step per tree level; also the width of the caret and kind slots.
-const INDENT: f32 = 16.0;
-
-/// Extra space separating a family with children from its neighbours.
-const FAMILY_GAP: f32 = SP_1;
 
 /// A root's family, including every rewound version and their forks.
 pub(crate) fn thread_family(lineage: &LineageIndex<'_>, root: &ThreadId) -> BTreeSet<ThreadId> {
@@ -150,118 +144,6 @@ pub(super) struct ThreadIndicators<'a> {
     pub lane_close: super::LaneCloseView<'a>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Attention {
-    question: bool,
-    approval: bool,
-    unread: bool,
-    /// Another process works on the thread.
-    external: bool,
-}
-
-/// What a row asks of the user, strongest first: an unanswered question, then
-/// an approval, then an unread report, then work another process does. The
-/// derived order is the priority, so resolving takes the maximum.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RowAttention {
-    #[default]
-    Normal,
-    ExternalWorking,
-    Unread,
-    Approval,
-    Question,
-}
-
-impl Attention {
-    fn merge(self, other: Self) -> Self {
-        Self {
-            question: self.question || other.question,
-            approval: self.approval || other.approval,
-            unread: self.unread || other.unread,
-            external: self.external || other.external,
-        }
-    }
-
-    fn resolve(self) -> RowAttention {
-        [
-            (self.question, RowAttention::Question),
-            (self.approval, RowAttention::Approval),
-            (self.unread, RowAttention::Unread),
-            (self.external, RowAttention::ExternalWorking),
-        ]
-        .into_iter()
-        .find_map(|(set, level)| set.then_some(level))
-        .unwrap_or_default()
-    }
-}
-
-impl RowAttention {
-    /// The title color, surface and stripe of a row in this state; none for a
-    /// normal row, which keeps the shared row style.
-    fn colors(self, p: &Palette) -> Option<(egui::Color32, RowTone)> {
-        let (fg, surface) = match self {
-            Self::Normal => return None,
-            Self::ExternalWorking => (p.EXTERNAL_WORKING_FG, p.EXTERNAL_WORKING_SURFACE),
-            Self::Unread => (p.UNREAD_FG, p.UNREAD_SURFACE),
-            Self::Approval => (p.WARNING_FG, p.WARNING_SURFACE),
-            Self::Question => (p.QUESTION_FG, p.QUESTION_SURFACE),
-        };
-        Some((
-            fg,
-            RowTone {
-                surface,
-                stripe: fg,
-            },
-        ))
-    }
-}
-
-const QUESTION_NOTE: &str = "Answer needed: this thread has an unanswered question";
-const QUESTION_HIDDEN_NOTE: &str =
-    "Answer needed: a collapsed child thread has an unanswered question";
-const APPROVAL_NOTE: &str = "Approval needed: a tool call is waiting";
-const APPROVAL_HIDDEN_NOTE: &str =
-    "Approval needed: a tool call is waiting in a collapsed child thread";
-const UNREAD_NOTE: &str = "Unread report";
-const UNREAD_HIDDEN_NOTE: &str = "Unread report in a collapsed child thread";
-const EXTERNAL_NOTE: &str = "Working in another window or process";
-const EXTERNAL_HIDDEN_NOTE: &str =
-    "A collapsed child thread is working in another window or process";
-
-/// The words for a row's state, for its tooltip and accessible name: the
-/// strongest state, saying whether it is the row's own or a collapsed child's.
-fn attention_note(own: Attention, hidden: Attention) -> Option<&'static str> {
-    [
-        (
-            own.question,
-            hidden.question,
-            QUESTION_NOTE,
-            QUESTION_HIDDEN_NOTE,
-        ),
-        (
-            own.approval,
-            hidden.approval,
-            APPROVAL_NOTE,
-            APPROVAL_HIDDEN_NOTE,
-        ),
-        (own.unread, hidden.unread, UNREAD_NOTE, UNREAD_HIDDEN_NOTE),
-        (
-            own.external,
-            hidden.external,
-            EXTERNAL_NOTE,
-            EXTERNAL_HIDDEN_NOTE,
-        ),
-    ]
-    .into_iter()
-    .find_map(|(own, hidden, note, hidden_note)| {
-        if own {
-            Some(note)
-        } else {
-            hidden.then_some(hidden_note)
-        }
-    })
-}
-
 /// What a thread row shows besides its title: its own states, what its
 /// collapsed descendants hide, and the title color its state calls for.
 #[derive(Clone, Copy, Debug, Default)]
@@ -280,40 +162,23 @@ struct LaneRowView<'a> {
     can_close: bool,
     badge: Option<&'a crate::model::lane_close::LaneCloseBadge>,
 }
-
-/// What a collapsed row hides, so collapsing a family never hides work that
-/// needs the user.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Hidden {
-    count: usize,
-    running: bool,
-    attention: Attention,
-}
-
 /// Rolls up the descendants of `rows[index]`: the following rows deeper than it.
 fn hidden_descendants(
     rows: &[(&ThreadRecord, usize)],
     index: usize,
     indicators: &ThreadIndicators<'_>,
 ) -> Hidden {
-    let depth = rows[index].1;
-    rows[index + 1..]
-        .iter()
-        .take_while(|(_, next)| *next > depth)
-        .fold(Hidden::default(), |hidden, (thread, _)| Hidden {
-            count: hidden.count + 1,
-            running: hidden.running
-                || matches!(thread.state(indicators.phases), ThreadState::Running),
-            attention: Attention {
-                question: hidden.attention.question
-                    || indicators.question_threads.contains(&thread.id),
-                approval: hidden.attention.approval
-                    || indicators.approval_threads.contains(&thread.id),
-                unread: hidden.attention.unread || indicators.unread_threads.contains(&thread.id),
-                external: hidden.attention.external
-                    || indicators.externally_working.contains(&thread.id),
+    roll_up(rows, index, |thread| {
+        (
+            matches!(thread.state(indicators.phases), ThreadState::Running),
+            Attention {
+                question: indicators.question_threads.contains(&thread.id),
+                approval: indicators.approval_threads.contains(&thread.id),
+                unread: indicators.unread_threads.contains(&thread.id),
+                external: indicators.externally_working.contains(&thread.id),
             },
-        })
+        )
+    })
 }
 
 fn render_tree(
@@ -365,72 +230,20 @@ fn render_tree(
         };
         ui.push_id(&thread.id, |ui| {
             let row = compact_row_with(ui, active, row_colors.map(|(_, tone)| tone), |ui| {
-                ui.spacing_mut().item_spacing.x = SP_1;
-                ui.spacing_mut().button_padding.x = SP_1;
-                ui.add_space(depth as f32 * INDENT);
-                let (rect, toggle) = ui.allocate_exact_size(
-                    egui::vec2(INDENT, ROW_DENSE),
-                    if has_children {
-                        Sense::click()
-                    } else {
-                        Sense::hover()
+                tree_row_lead(
+                    ui,
+                    &TreeRowLead {
+                        rails: &rails,
+                        index,
+                        depth,
+                        has_children,
+                        kind,
+                        clip,
+                        row_gap,
                     },
+                    &mut expansion,
+                    &thread.id,
                 );
-                // Rows scrolled out of view need no guides.
-                if rect.bottom() + row_gap >= clip.top() && rect.top() - row_gap <= clip.bottom() {
-                    paint_rails(ui, rect, depth, &rails, index, row_gap);
-                }
-                if has_children {
-                    if toggle.clicked() {
-                        expansion.toggle(ui);
-                    }
-                    let label = if expansion.is_open() {
-                        "Collapse"
-                    } else {
-                        "Expand"
-                    };
-                    toggle.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("{label} children of {}", thread.id),
-                        )
-                    });
-                    let caret = if expansion.is_open() {
-                        icons::CARET_DOWN
-                    } else {
-                        icons::CARET_RIGHT
-                    };
-                    let color = if toggle.hovered() {
-                        palette().TEXT
-                    } else {
-                        palette().TEXT_MUTED
-                    };
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        caret,
-                        egui::FontId::proportional(FONT_SMALL),
-                        color,
-                    );
-                    if expansion.is_open() {
-                        // Starts the children's rail just below the caret.
-                        ui.painter().vline(
-                            ui.painter().round_to_pixel_center(rect.center().x),
-                            rect.center().y + FONT_SMALL / 2.0..=rect.bottom() + row_gap / 2.0,
-                            rail_stroke(),
-                        );
-                    }
-                }
-                if let Some(kind) = kind {
-                    // A leaf reuses its empty caret slot; a parent needs its own.
-                    let (slot, response) = if has_children {
-                        ui.allocate_exact_size(egui::vec2(INDENT, ROW_DENSE), Sense::hover())
-                    } else {
-                        (rect, toggle)
-                    };
-                    branch_kind_icon(ui, slot, response, kind);
-                }
                 let lane_view = LaneRowView {
                     can_close: indicators.lane_close.can_close,
                     badge: indicators
@@ -518,17 +331,6 @@ fn render_tree(
     }
 }
 
-/// Why a thread hangs under its parent in the tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BranchKind {
-    /// A worker run escalated its task to this orchestrator conversation.
-    Escalation,
-    /// The user forked the parent conversation.
-    Fork,
-    /// An independent Orchestrator thread its lead manages (ADR 0044).
-    Lane,
-}
-
 /// A rewind replaces its source in place, so the kind comes from the original
 /// conversation of the thread's version group.
 fn branch_kind(lineage: &LineageIndex<'_>, thread: &ThreadRecord) -> Option<BranchKind> {
@@ -550,143 +352,6 @@ fn branch_kind(lineage: &LineageIndex<'_>, thread: &ThreadRecord) -> Option<Bran
     }
 }
 
-fn branch_kind_icon(ui: &Ui, slot: Rect, response: egui::Response, kind: BranchKind) {
-    let (icon, label, hint) = match kind {
-        BranchKind::Escalation => (
-            icons::ARROW_FAT_LINE_UP,
-            "Escalated thread",
-            "Escalated: a worker run handed its task to this orchestrator thread",
-        ),
-        BranchKind::Fork => (
-            icons::GIT_FORK,
-            "Forked thread",
-            "Forked from its parent thread",
-        ),
-        BranchKind::Lane => (
-            icons::STACK,
-            "Lane thread",
-            "Lane: an independent Orchestrator thread managed by its lead. It follows the lead's pin and archive.",
-        ),
-    };
-    ui.painter().text(
-        slot.center(),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(FONT_SMALL),
-        palette().TEXT_MUTED,
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
-    response.on_hover_text(hint);
-}
-
-/// A family with children is set apart from the rows around it; childless
-/// roots stay packed together.
-fn family_gap_before(rows: &[(&ThreadRecord, usize)], index: usize) -> bool {
-    let starts_family = rows.get(index).is_some_and(|(_, depth)| *depth == 0);
-    let has_children = rows.get(index + 1).is_some_and(|(_, depth)| *depth > 0);
-    let follows_children = index
-        .checked_sub(1)
-        .and_then(|previous| rows.get(previous))
-        .is_some_and(|(_, depth)| *depth > 0);
-    starts_family && index > 0 && (has_children || follows_children)
-}
-
-/// Tree guides per row. At `level` (1..=depth) the branch continues below a row
-/// when a later row at that level follows before the tree climbs above it.
-///
-/// Built in O(rows). A row's guides are read sparsely: whether its own branch
-/// continues in O(1), and the ancestor levels that continue by walking only
-/// those levels, so the work follows the lines drawn rather than the depth,
-/// and rows that are not drawn cost nothing.
-struct TreeRails {
-    depths: Vec<usize>,
-    /// Next later row at the same depth or shallower.
-    next_at_most: Vec<Option<usize>>,
-    /// Next later row strictly shallower.
-    next_shallower: Vec<Option<usize>>,
-}
-
-impl TreeRails {
-    fn new(rows: &[(&ThreadRecord, usize)]) -> Self {
-        let depths: Vec<usize> = rows.iter().map(|(_, depth)| *depth).collect();
-        // Monotonic stacks from the end: the top is the nearest candidate.
-        let next = |pops: fn(usize, usize) -> bool| {
-            let mut stack: Vec<usize> = Vec::new();
-            let mut next = vec![None; depths.len()];
-            for index in (0..depths.len()).rev() {
-                while stack
-                    .last()
-                    .is_some_and(|&top| pops(depths[top], depths[index]))
-                {
-                    stack.pop();
-                }
-                next[index] = stack.last().copied();
-                stack.push(index);
-            }
-            next
-        };
-        Self {
-            next_at_most: next(|top, row| top > row),
-            next_shallower: next(|top, row| top >= row),
-            depths,
-        }
-    }
-
-    /// Whether the row's own branch (its deepest level) continues below it.
-    fn own_continues(&self, index: usize) -> bool {
-        let depth = self.depths[index];
-        depth > 0 && self.next_at_most[index].is_some_and(|next| self.depths[next] == depth)
-    }
-
-    /// The ancestor levels (shallower than the row, at least 1) whose branch
-    /// continues below the row, deepest first. For a level, the first later row
-    /// at or above it lies on the chain of strictly shallower rows, and the
-    /// level continues exactly when that row sits on it, so the levels are the
-    /// depths on the chain.
-    fn continuing_ancestors(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
-        std::iter::successors(self.next_shallower[index], |&row| self.next_shallower[row])
-            .map(|row| self.depths[row])
-            .take_while(|&level| level >= 1)
-    }
-}
-
-fn rail_stroke() -> Stroke {
-    // BORDER nearly vanishes on the black sidebar; a dimmed muted text tone
-    // stays visible in both palettes without competing with titles.
-    Stroke::new(1.0, palette().TEXT_MUTED.gamma_multiply(0.45))
-}
-
-/// Paints the rails left of `slot` (the row's caret slot): pass-through lines
-/// for ancestor branches that continue, and an elbow joining this row to its
-/// parent's rail.
-fn paint_rails(ui: &Ui, slot: Rect, depth: usize, rails: &TreeRails, index: usize, row_gap: f32) {
-    if depth == 0 {
-        return;
-    }
-    let painter = ui.painter();
-    let stroke = rail_stroke();
-    let top = slot.top() - row_gap / 2.0;
-    let bottom = slot.bottom() + row_gap / 2.0;
-    let middle = painter.round_to_pixel_center(slot.center().y);
-    let rail_x = |level: usize| {
-        painter.round_to_pixel_center(slot.left() - (depth - level) as f32 * INDENT - INDENT / 2.0)
-    };
-    for level in rails.continuing_ancestors(index) {
-        painter.vline(rail_x(level), top..=bottom, stroke);
-    }
-    let x = rail_x(depth);
-    painter.vline(
-        x,
-        top..=if rails.own_continues(index) {
-            bottom
-        } else {
-            middle
-        },
-        stroke,
-    );
-    painter.hline(x..=slot.left(), middle, stroke);
-}
-
 fn active_row(
     ui: &mut Ui,
     (thread, display_root): (&ThreadRecord, bool),
@@ -704,84 +369,29 @@ fn active_row(
         link_pr,
     } = marks;
     let note = attention_note(attention, hidden.attention);
+    let status = match state {
+        ThreadState::Running => RowStatus::Running,
+        ThreadState::Error => RowStatus::Failed,
+        _ => RowStatus::Other,
+    };
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // Runtime/question indicators stay at the trailing edge.
-        ui.spacing_mut().item_spacing.x = SP_1;
-        thread_status_icon(ui, state, attention, hidden.attention);
-        ui.add_space(SP_1);
-        ui.spacing_mut().item_spacing.x = 0.0;
-        // The slot before Pin holds Archive, or the running spinner in its
-        // place, so Pin stays put when a run starts or ends. A running family
-        // cannot be archived, so the two never compete for the slot.
-        if display_root && !family_running {
-            let can_archive = !thread.pinned;
-            let archive = ui
-                .add_enabled(
-                    can_archive,
-                    ghost(icon_text(icons::ARCHIVE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
-                )
-                .on_hover_text("Archive")
-                .on_disabled_hover_text("Unpin this thread before archiving");
-            archive.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
-            });
-            if archive.clicked() {
-                *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
-            }
-        } else if matches!(state, ThreadState::Running) {
-            if attention.external {
-                running_spinner(
-                    ui,
-                    "Thread status: Running in another window or process",
-                    palette().EXTERNAL_WORKING_FG,
-                );
-            } else {
-                running_spinner(ui, "Thread status: Running", palette().RUNNING);
-            }
-        } else if hidden.running {
-            if hidden.attention.external {
-                running_spinner(
-                    ui,
-                    "Running in another window or process in a collapsed child thread",
-                    palette().EXTERNAL_WORKING_FG,
-                );
-            } else {
-                running_spinner(ui, "Running in a collapsed child thread", palette().RUNNING);
-            }
-        } else {
-            ui.add_space(ACTION_SIZE);
+        let clicks = trailing_controls(
+            ui,
+            TrailingView {
+                status,
+                own: attention,
+                hidden,
+                display_root,
+                family_running,
+                pinned: thread.pinned,
+            },
+        );
+        if clicks.archive {
+            *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
-        // A child hangs under its parent, so pinning it would do nothing: only
-        // the displayed root has a Pin button. Children keep the slot empty so
-        // the trailing columns stay aligned.
-        if display_root {
-            let (pin_icon, pin_label, pin_hint) = if thread.pinned {
-                (
-                    icons::filled(ui, icons::PUSH_PIN)
-                        .size(FONT_ICON)
-                        .color(palette().TEXT),
-                    "★",
-                    "Unpin",
-                )
-            } else {
-                (
-                    icon_text(icons::PUSH_PIN).color(palette().TEXT_MUTED),
-                    "☆",
-                    "Pin",
-                )
-            };
-            let pin = ui.add(ghost(pin_icon).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)));
-            pin.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pin_label)
-            });
-            if pin.on_hover_text(pin_hint).clicked() {
-                *action = Some(SidebarAction::TogglePin(thread.id.clone()));
-            }
-        } else {
-            ui.add_space(ACTION_SIZE);
+        if clicks.pin {
+            *action = Some(SidebarAction::TogglePin(thread.id.clone()));
         }
-        ui.add_space(SP_1);
-        hidden_count_badge(ui, hidden.count);
         if let Some(badge) = pull_request {
             pull_request_badge(ui, badge);
         }
@@ -863,42 +473,6 @@ fn lane_close_badge(ui: &mut Ui, badge: &crate::model::lane_close::LaneCloseBadg
     response.on_hover_text(&badge.hover);
 }
 
-/// A pill counting a collapsed row's descendants; nothing when none are hidden.
-fn hidden_count_badge(ui: &mut Ui, count: usize) {
-    if count == 0 {
-        return;
-    }
-    let galley = ui.painter().layout_no_wrap(
-        count.to_string(),
-        egui::FontId::proportional(FONT_SMALL),
-        palette().TEXT_MUTED,
-    );
-    let size = egui::vec2(
-        (galley.size().x + SP_2).max(galley.size().y + SP_1),
-        galley.size().y + SP_1,
-    );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-    ui.add_space(SP_1);
-    ui.painter().rect_stroke(
-        rect,
-        egui::CornerRadius::same((size.y / 2.0) as u8),
-        rail_stroke(),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        palette().TEXT_MUTED,
-    );
-    let label = if count == 1 {
-        "1 hidden child thread".to_owned()
-    } else {
-        format!("{count} hidden child threads")
-    };
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    response.on_hover_text(label);
-}
-
 /// What the archived-list hover says about the deletion of a thread; nothing when
 /// deletion is off or the thread is not archived.
 pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
@@ -951,14 +525,6 @@ fn block_reason_text(reason: &BlockReason) -> String {
     }
 }
 
-fn restore_button(ui: &mut Ui) -> egui::Response {
-    let response = ui.add(
-        ghost(icon_text(icons::ARROW_U_UP_LEFT)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
-    );
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restore"));
-    response.on_hover_text("Restore from archive")
-}
-
 fn thread_title(
     ui: &mut Ui,
     thread: &ThreadRecord,
@@ -967,39 +533,30 @@ fn thread_title(
     sidebar: &SidebarState,
     action: &mut Option<SidebarAction>,
 ) {
-    // Indentation and the caret already show nesting; "↳" stays in the
-    // accessible name only.
-    let title = match color {
-        Some(color) => row_title(ui, egui::RichText::new(thread.title.as_str()).color(color)),
-        None => row_title(ui, thread.title.as_str()),
-    };
-    // Use the title's existing widget ID so selection and right-click menus
-    // keep their pointer ownership. A separate full-row drag overlay steals it.
-    let title = if thread.lane.is_some() {
-        let title = title.interact(Sense::click_and_drag());
-        // Resolve a family once per gesture, not once per lane per frame.
-        if title.drag_started()
-            && let Some(intent) = sidebar.lane_drag_intent(&thread.id)
-        {
-            title.dnd_set_drag_payload(intent);
-        }
-        title
-    } else {
-        title
-    };
-    if child {
-        let label = format!("↳ {}", thread.title);
-        title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    }
     let lane = thread
         .lane
         .as_ref()
         .map(|lane| format!("Lane · {}\n", lane.policy.label()))
         .unwrap_or_default();
-    let title = title.on_hover_text(match note {
+    let hover = match note {
         Some(note) => format!("{lane}{note}\nthread ID: {}", thread.id),
         None => format!("{lane}thread ID: {}", thread.id),
-    });
+    };
+    let title = title_label(
+        ui,
+        thread.title.as_str(),
+        color,
+        child,
+        thread.lane.is_some(),
+        &hover,
+    );
+    // Resolve a family once per gesture, not once per lane per frame.
+    if thread.lane.is_some()
+        && title.drag_started()
+        && let Some(intent) = sidebar.lane_drag_intent(&thread.id)
+    {
+        title.dnd_set_drag_payload(intent);
+    }
     title.context_menu(|ui| {
         if let Some(lane) = thread.lane.as_ref().filter(|lane| lane.policy.is_managed()) {
             use storage::lane_management::{
@@ -1067,178 +624,19 @@ fn thread_title(
     }
 }
 
-/// Keeps the first `limit` top-level families plus any later family with a
-/// member matching `keep`; returns the kept rows and the hidden family count.
-fn limit_families<'a>(
-    rows: &[(&'a ThreadRecord, usize)],
-    limit: usize,
-    keep: impl Fn(&ThreadRecord) -> bool,
-) -> (Vec<(&'a ThreadRecord, usize)>, usize) {
-    let mut kept = Vec::with_capacity(rows.len());
-    let mut hidden = 0;
-    let families = rows.chunk_by(|_, (_, depth)| *depth > 0);
-    for (index, family) in families.enumerate() {
-        if index < limit || family.iter().any(|(thread, _)| keep(thread)) {
-            kept.extend_from_slice(family);
-        } else {
-            hidden += 1;
-        }
-    }
-    (kept, hidden)
-}
-
-pub(super) fn family_limit_id(project: &ProjectId) -> egui::Id {
-    egui::Id::new(("sidebar-project-family-limit", project))
-}
-
 fn nested_threads<'a>(
     threads: &[&'a ThreadRecord],
     lineage: &LineageIndex<'_>,
 ) -> Vec<(&'a ThreadRecord, usize)> {
     // Rewound versions are hidden; children hang under their parent's visible version.
-    let parents: Vec<Option<&ThreadId>> = threads
-        .iter()
-        .map(|thread| lineage.display_parent(&thread.id))
-        .collect();
-    let shown: HashSet<&ThreadId> = threads.iter().map(|thread| &thread.id).collect();
-    let mut children: HashMap<&ThreadId, Vec<usize>> = HashMap::new();
-    for (row, parent) in parents.iter().enumerate() {
-        if let Some(parent) = parent {
-            children.entry(parent).or_default().push(row);
-        }
-    }
-
-    let mut seen = HashSet::new();
-    let mut output = Vec::with_capacity(threads.len());
-    let mut pending = Vec::new();
-    // Depth-first in row order; a thread already placed is skipped, which also
-    // keeps cyclic parent links from looping.
-    let mut place = |start: usize| {
-        if seen.contains(&threads[start].id) {
-            return;
-        }
-        pending.push((start, 0));
-        while let Some((row, depth)) = pending.pop() {
-            let thread = threads[row];
-            if !seen.insert(&thread.id) {
-                continue;
-            }
-            output.push((thread, depth));
-            if let Some(rows) = children.get(&thread.id) {
-                pending.extend(rows.iter().rev().map(|&child| (child, depth + 1)));
-            }
-        }
-    };
-    for (row, parent) in parents.iter().enumerate() {
-        if parent.is_none_or(|parent| !shown.contains(parent)) {
-            place(row);
-        }
-    }
-    // Corrupt or cyclic parent links still leave every thread reachable.
-    for row in 0..threads.len() {
-        place(row);
-    }
-    output
-}
-
-fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hidden: Attention) {
-    // Runtime status retains the display aggregation; questions and approvals
-    // are independent and must remain visible alongside either the spinner or
-    // the error icon. The running spinner lives in the Archive slot instead
-    // (see `running_spinner`); an unread report appears here once the work
-    // has finished. `hidden` is what collapsed descendants need; the row's own
-    // state takes precedence, and the labels say where the rest comes from.
-    let unread = if attention.unread {
-        Some("Thread status: Unread report")
-    } else if hidden.unread {
-        Some("Unread report in a collapsed child thread")
-    } else {
-        None
-    };
-    let status = if matches!(state, ThreadState::Running) {
-        None
-    } else if matches!(state, ThreadState::Error) {
-        let response = ui.add(
-            egui::Label::new(
-                egui::RichText::new(icons::WARNING)
-                    .size(FONT_SMALL + 2.0)
-                    .color(palette().ERROR_FG),
-            )
-            .sense(Sense::hover()),
-        );
-        Some((response, "Thread status: Failed"))
-    } else if let Some(label) = unread {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), SP_1 + 1.0, palette().ACCENT);
-        Some((response, label))
-    } else {
-        None
-    };
-    if let Some((response, label)) = status {
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
-        });
-        response.on_hover_text(label);
-    }
-    let question = if attention.question {
-        Some(QUESTION_NOTE)
-    } else if hidden.question {
-        Some(QUESTION_HIDDEN_NOTE)
-    } else {
-        None
-    };
-    if let Some(label) = question {
-        attention_dot(ui, label);
-    }
-    let approval = if attention.approval {
-        Some(APPROVAL_NOTE)
-    } else if hidden.approval {
-        Some(APPROVAL_HIDDEN_NOTE)
-    } else {
-        None
-    };
-    if let Some(label) = approval {
-        if question.is_some() {
-            // Two identical dots would be indistinguishable, so an approval
-            // beside a question uses its own glyph.
-            let response = ui.add(
-                egui::Label::new(
-                    egui::RichText::new(icons::SHIELD_WARNING)
-                        .size(FONT_SMALL + 2.0)
-                        .color(palette().WARNING_FG),
-                )
-                .sense(Sense::hover()),
-            );
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
-            });
-            response.on_hover_text(label);
-        } else {
-            attention_dot(ui, label);
-        }
-    }
-}
-
-fn running_spinner(ui: &mut Ui, label: &str, color: egui::Color32) {
-    // add_sized reserves the whole Archive slot and centers the spinner in it.
-    let response = ui.add_sized(egui::vec2(ACTION_SIZE, ACTION_SIZE), |ui: &mut Ui| {
-        crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(color))
-    });
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
-    response.on_hover_text(label);
-}
-
-fn attention_dot(ui: &mut Ui, label: &str) {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), SP_1, palette().WARNING_FG);
-    response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
-    response.on_hover_text(label);
+    nest(
+        threads,
+        |thread| &thread.id,
+        |thread| lineage.display_parent(&thread.id),
+    )
+    .into_iter()
+    .map(|(row, depth)| (threads[row], depth))
+    .collect()
 }
 
 #[cfg(test)]

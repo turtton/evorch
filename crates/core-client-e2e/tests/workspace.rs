@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
-use workbench_protocol::ids::ProjectId;
+use workbench_protocol::{ids::ProjectId, namespaces::workspace::TrustLevel};
 use workspace_state::{SidebarDocument, SidebarStore, ThreadId, ThreadRecord, TrustState};
 
 struct Idle;
@@ -115,8 +115,21 @@ async fn click(window: &mut Window, label: &str, nth: usize) {
     click_nth(window, label, nth);
 }
 
+/// Whether any element's name contains `text` (a title can also name its row).
 fn shows(window: &Window, text: &str) -> bool {
-    window.query_by_label_contains(text).is_some()
+    window.query_all_by_label_contains(text).next().is_some()
+}
+
+/// The trust of the project as the window last read it; the settings modal shows it.
+fn trust(window: &Window) -> Option<TrustLevel> {
+    let shared = window.state().shared.lock().unwrap();
+    let feature = shared.features.workspace().unwrap();
+    feature.model().access.get("p1").map(|access| access.trust)
+}
+
+fn pinned(window: &Window, thread: &str) -> bool {
+    let shared = window.state().shared.lock().unwrap();
+    shared.features.workspace().unwrap().model().pinned(thread)
 }
 
 /// Draw until `shown` holds; each wait ends on a change of the shared client.
@@ -282,13 +295,16 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
 
     eprintln!("STAGE initial");
     both(&mut a, &mut b, |w| {
-        shows(w, "first") && shows(w, "second") && shows(w, "Trust: Unapproved")
+        shows(w, "first") && shows(w, "second") && trust(w) == Some(TrustLevel::Unapproved)
     })
     .await;
 
     eprintln!("STAGE Rename in A");
-    // Rename in A: the title the core holds shows in both windows.
-    click(&mut a, "Rename", 0).await;
+    // Rename in A from the title's menu: the title the core holds shows in both windows.
+    until(&mut a, |w| ready(w) && w.query_by_label("first").is_some()).await;
+    a.get_by_label("first").click_secondary();
+    a.run_steps(4);
+    click(&mut a, "Rename…", 0).await;
     a.get_all_by_role(Role::TextInput).next().unwrap().click();
     a.run_steps(4);
     a.get_all_by_role(Role::TextInput)
@@ -301,26 +317,35 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
     both(&mut a, &mut b, |w| shows(w, "first v2")).await;
 
     eprintln!("STAGE Pin in A");
-    // Pin in A.
-    click(&mut a, "Pin", 0).await;
-    both(&mut a, &mut b, |w| shows(w, "📌 first v2")).await;
+    // Pin in A: "first v2" is the newest thread, so its row comes first.
+    click(&mut a, "☆", 0).await;
+    both(&mut a, &mut b, |w| shows(w, "★") && pinned(w, "t1")).await;
 
     eprintln!("STAGE Trust in A");
-    // Trust in A.
+    // Trust in A, from the project's settings.
+    click(&mut a, "Project settings", 0).await;
     click(&mut a, "Approve project", 0).await;
-    both(&mut a, &mut b, |w| shows(w, "Trust: Approved")).await;
+    both(&mut a, &mut b, |w| trust(w) == Some(TrustLevel::Approved)).await;
+    click(&mut a, "Close", 0).await;
 
     eprintln!("STAGE Unpin in B");
     // Unpin in B.
-    click(&mut b, "Unpin", 0).await;
-    both(&mut a, &mut b, |w| shows(w, "first v2") && !shows(w, "📌")).await;
+    click(&mut b, "★", 0).await;
+    both(&mut a, &mut b, |w| {
+        shows(w, "first v2") && !shows(w, "★") && !pinned(w, "t1")
+    })
+    .await;
 
     eprintln!("STAGE Trust revoked in B");
     // Trust revoked in B, approved again in A.
+    click(&mut b, "Project settings", 0).await;
     click(&mut b, "Revoke trust", 0).await;
-    both(&mut a, &mut b, |w| shows(w, "Trust: Unapproved")).await;
+    both(&mut a, &mut b, |w| trust(w) == Some(TrustLevel::Unapproved)).await;
+    click(&mut b, "Close", 0).await;
+    click(&mut a, "Project settings", 0).await;
     click(&mut a, "Approve project", 0).await;
-    both(&mut a, &mut b, |w| shows(w, "Trust: Approved")).await;
+    both(&mut a, &mut b, |w| trust(w) == Some(TrustLevel::Approved)).await;
+    click(&mut a, "Close", 0).await;
 
     eprintln!("STAGE Archive in A");
     // Archive in A: the thread leaves both windows, the other one stays.
@@ -370,17 +395,16 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
         fresh
             && ready(w)
             && shows(w, "second")
-            && shows(w, "Trust: Approved")
+            && trust(w) == Some(TrustLevel::Approved)
             && !shows(w, "first v2")
     })
     .await;
 
     eprintln!("STAGE Restore after the restart");
-    // The archived conversation is listed on request and restored from there.
-    until(&mut a, |w| shows(w, "Show archived")).await;
-    a.get_by_label("Show archived").click();
-    a.run_steps(4);
-    until(&mut a, |w| shows(w, "(archived) first v2")).await;
+    // The archived conversation is listed under the project's "Archived" section and
+    // restored from there.
+    click(&mut a, "Archived (1)", 0).await;
+    until(&mut a, |w| shows(w, "first v2")).await;
     click(&mut a, "Restore", 0).await;
     both(&mut a, &mut b, |w| shows(w, "first v2")).await;
     let document = SidebarStore::new(config.join("sidebar.json"))

@@ -1,10 +1,9 @@
-use egui::{Align, Layout, RichText, Sense, Ui};
+use egui::Ui;
 use workspace_ui::{ProjectRecord, SidebarState, SidebarView};
 
-use crate::theme::icons;
-use crate::theme::text::{medium, muted};
-use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{compact_row, empty_state, icon_button, icon_text, row_title};
+use crate::panes::sidebar_widgets::{self, ProjectRowView};
+use crate::theme::tokens::palette;
+use crate::theme::widgets::empty_state;
 
 use super::{SidebarAction, SidebarUiState};
 
@@ -39,7 +38,7 @@ pub fn render(
         if open {
             ui.push_id(("threads", &project.id), |ui| threads(ui, project, action));
         } else {
-            let limit = super::threads::family_limit_id(&project.id);
+            let limit = sidebar_widgets::family_limit_id(&project.id);
             ui.ctx().data_mut(|data| data.remove::<usize>(limit));
         }
     }
@@ -57,81 +56,40 @@ fn project_row(
     open: bool,
     action: &mut Option<SidebarAction>,
 ) {
-    compact_row(ui, selected_project, |ui| {
-        ui.spacing_mut().item_spacing.x = SP_2;
-        let (rect, toggle) = ui.allocate_exact_size(egui::vec2(16.0, ROW_DENSE), Sense::click());
-        if toggle.clicked() {
-            *action = Some(SidebarAction::SetProjectCollapsed {
-                project: project.id.clone(),
-                collapsed: open,
-            });
-        }
-        toggle.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
-                true,
-                format!(
-                    "{} threads of {}",
-                    if open { "Collapse" } else { "Expand" },
-                    project.name
-                ),
-            )
+    let count = sidebar
+        .threads
+        .iter()
+        .filter(|thread| thread.project_id == project.id && !thread.archived)
+        .count();
+    let root = project.repo_root.display().to_string();
+    let clicks = sidebar_widgets::project_row(
+        ui,
+        ProjectRowView {
+            name: &project.name,
+            hover_root: Some(&root),
+            selected: selected_project,
+            open,
+            count,
+            search: true,
+            settings: true,
+        },
+    );
+    if clicks.toggle {
+        *action = Some(SidebarAction::SetProjectCollapsed {
+            project: project.id.clone(),
+            collapsed: open,
         });
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            if open {
-                icons::CARET_DOWN
-            } else {
-                icons::CARET_RIGHT
-            },
-            egui::FontId::proportional(FONT_SMALL),
-            if toggle.hovered() {
-                palette().TEXT
-            } else {
-                palette().TEXT_MUTED
-            },
-        );
-        let (icon, color) = if selected_project {
-            (icons::FOLDER_OPEN, palette().ACCENT)
-        } else {
-            (icons::FOLDER_SIMPLE, palette().TEXT_MUTED)
-        };
-        ui.label(icon_text(icon).color(color));
-        let count = sidebar
-            .threads
-            .iter()
-            .filter(|thread| thread.project_id == project.id && !thread.archived)
-            .count();
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = SP_1;
-            if icon_button(ui, icons::GEAR_SIX, "Project settings").clicked() {
-                *action = Some(SidebarAction::OpenProjectSettings(project.id.clone()));
-            }
-            let new_thread = format!("New thread in {}", project.name);
-            if icon_button(ui, icons::PLUS, &new_thread).clicked() {
-                *action = Some(SidebarAction::CreateThreadIn(project.id.clone()));
-            }
-            if count > 0 {
-                ui.label(muted(count.to_string()));
-            }
-            // Drawn after the count in this right-to-left layout, so it sits to
-            // its left on screen. It stays for a project without threads.
-            let search = format!("Search threads in {}", project.name);
-            if icon_button(ui, icons::MAGNIFYING_GLASS, &search).clicked() {
-                *action = Some(SidebarAction::OpenThreadSearch(project.id.clone()));
-            }
-            let title = if selected_project {
-                medium(&project.name).color(palette().TEXT)
-            } else {
-                RichText::new(&project.name).color(palette().TEXT)
-            };
-            if row_title(ui, title)
-                .on_hover_text(project.repo_root.display().to_string())
-                .clicked()
-            {
-                *action = Some(SidebarAction::SelectProject(project.id.clone()));
-            }
-        });
-    });
+    }
+    if clicks.settings {
+        *action = Some(SidebarAction::OpenProjectSettings(project.id.clone()));
+    }
+    if clicks.new_thread {
+        *action = Some(SidebarAction::CreateThreadIn(project.id.clone()));
+    }
+    if clicks.search {
+        *action = Some(SidebarAction::OpenThreadSearch(project.id.clone()));
+    }
+    if clicks.select {
+        *action = Some(SidebarAction::SelectProject(project.id.clone()));
+    }
 }
