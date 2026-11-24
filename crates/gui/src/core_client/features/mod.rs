@@ -106,8 +106,10 @@ use workbench_protocol::{
     queries::{Query, QueryReply},
 };
 
-/// The features, which are the areas of `crate::areas` in the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The features, which are the areas of `crate::areas` in the host. The serde names
+/// are what the core client's layout file keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FeatureId {
     Workspace,
     Mcp,

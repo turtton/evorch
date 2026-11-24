@@ -1619,14 +1619,14 @@ mod local_panes {
             self.harness.run_steps(2);
         }
 
-        fn front_of_leaf(&self, tab: CoreTab) -> CoreTab {
+        pub(super) fn front_of_leaf(&self, tab: CoreTab) -> CoreTab {
             let dock = &self.harness.state().dock;
             let path = dock.find_tab(&tab).expect("the tab is in the dock");
             let leaf = dock.leaf(path.node_path()).expect("a leaf");
             leaf.tabs[leaf.active.0]
         }
 
-        fn terminal_collapsed(&self) -> bool {
+        pub(super) fn terminal_collapsed(&self) -> bool {
             let dock = &self.harness.state().dock;
             let path = dock.find_tab(&CoreTab::Terminal).expect("the Terminal tab");
             dock.leaf(path.node_path()).expect("a leaf").collapsed
@@ -1959,3 +1959,5 @@ index 1111111..2222222 100644
 
     mod files;
 }
+
+mod session;

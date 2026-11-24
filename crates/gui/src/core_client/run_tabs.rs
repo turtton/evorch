@@ -10,6 +10,9 @@ use workbench_protocol::ids::{RunId, ThreadId};
 use super::features::FeatureId;
 use super::shell::{self, CoreTab};
 
+/// How many run tabs a layout file restores.
+pub const MAX_RESTORED: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RunTabId(u32);
 
@@ -26,6 +29,7 @@ pub struct RunTab {
     pub thread: ThreadId,
     pub run: RunId,
     pub name: Option<String>,
+    pub child: bool,
     pub title: String,
 }
 
@@ -45,6 +49,7 @@ impl RunTabs {
             self.hidden.remove(id);
             return *id;
         }
+        let child = pane.child;
         let name = (!pane.name.is_empty()).then_some(pane.name);
         let title = match (&name, pane.child) {
             (Some(name), true) => format!("Transcript: {name}"),
@@ -59,6 +64,7 @@ impl RunTabs {
                 thread: pane.thread,
                 run: pane.run,
                 name,
+                child,
                 title,
             },
         );
@@ -67,6 +73,49 @@ impl RunTabs {
 
     pub fn get(&self, id: RunTabId) -> Option<&RunTab> {
         self.tabs.get(&id)
+    }
+
+    /// What the layout file keeps of the tabs, those out of the dock too: the pane each
+    /// was opened from, the most recently opened first, and at most [`MAX_RESTORED`], so
+    /// the tabs opened last are the ones that come back.
+    pub fn panes(&self) -> Vec<RunPane> {
+        self.tabs
+            .values()
+            .rev()
+            .take(MAX_RESTORED)
+            .map(|tab| RunPane {
+                thread: tab.thread.clone(),
+                run: tab.run.clone(),
+                name: tab.name.clone().unwrap_or_default(),
+                child: tab.child,
+            })
+            .collect()
+    }
+
+    /// The tabs restored from the layout file, most recently opened first as
+    /// [`Self::panes`] gives them: the first [`MAX_RESTORED`] are kept, in the order they
+    /// were opened, so the next save keeps the newest again. Each is out of the dock until
+    /// [`Self::sweep`] sees its thread selected and puts it beside Execution.
+    pub fn restore_hidden(&mut self, panes: Vec<RunPane>) {
+        let mut panes = panes;
+        panes.truncate(MAX_RESTORED);
+        for pane in panes.into_iter().rev() {
+            let id = self.open(pane);
+            self.hidden.insert(id);
+        }
+    }
+
+    /// Drops the tabs out of the dock whose thread `exists` no longer knows, as the
+    /// restored tabs of a thread the core removed: no selection can bring them back.
+    pub fn prune_hidden(&mut self, exists: impl Fn(&ThreadId) -> bool) {
+        let hidden = &mut self.hidden;
+        self.tabs.retain(|id, tab| {
+            if !hidden.contains(id) || exists(&tab.thread) {
+                return true;
+            }
+            hidden.remove(id);
+            false
+        });
     }
 
     /// The thread and run of each tab in the dock, whose history it shows.
@@ -194,6 +243,108 @@ mod tests {
         let path = dock.find_tab(&CoreTab::Conversation).unwrap();
         let leaf = dock.leaf(path.node_path()).unwrap();
         assert_eq!(leaf.tabs[leaf.active.0], CoreTab::Conversation);
+    }
+
+    // Given: run tabs of t1 and t2 restored from the layout file, into a dock without them
+    // When: the tabs are swept with no thread selected, then with t1 selected
+    // Then: neither is in the dock nor read at first; once t1 is selected its tab is back
+    //       right after Execution and read, while t2's stays out and is kept
+    #[test]
+    fn restored_tabs_stay_hidden_until_their_thread_is_selected() {
+        let mut tabs = RunTabs::default();
+        tabs.restore_hidden(vec![
+            pane("t1", "run-a", "a", true),
+            pane("t2", "run-b", "b", false),
+        ]);
+        let mut dock = DockState::new(vec![
+            CoreTab::Feature(FeatureId::Execution),
+            CoreTab::Feature(FeatureId::Teams),
+        ]);
+        assert!(tabs.sweep(&mut dock, None).is_empty());
+        assert_eq!(tabs.shown().count(), 0);
+        assert_eq!(dock.iter_all_tabs().count(), 2);
+
+        let t1 = ThreadId::new("t1").unwrap();
+        assert!(tabs.sweep(&mut dock, Some(&t1)).is_empty());
+        let shown: Vec<_> = tabs.shown().map(|(_, run)| run.as_str()).collect();
+        assert_eq!(shown, ["run-a"]);
+        let leaf: Vec<_> = dock.iter_all_tabs().map(|(_, tab)| *tab).collect();
+        let restored = leaf[1];
+        assert!(matches!(restored, CoreTab::Run(_)));
+        assert_eq!(
+            [leaf[0], leaf[2]],
+            [
+                CoreTab::Feature(FeatureId::Execution),
+                CoreTab::Feature(FeatureId::Teams)
+            ]
+        );
+        let mut panes = tabs.panes();
+        panes.sort_by(|a, b| a.run.cmp(&b.run));
+        assert_eq!(
+            panes,
+            [
+                pane("t1", "run-a", "a", true),
+                pane("t2", "run-b", "b", false)
+            ]
+        );
+    }
+
+    // Given: more tabs in the layout file than are restored, newest first
+    // When: they are restored, and the panes are taken for the file again
+    // Then: only the newest MAX_RESTORED are kept, in the same order
+    #[test]
+    fn restoring_keeps_the_newest_up_to_the_cap() {
+        let saved: Vec<_> = (0..MAX_RESTORED + 3)
+            .map(|index| pane("t1", &format!("run-{index}"), "", true))
+            .collect();
+        let mut tabs = RunTabs::default();
+        tabs.restore_hidden(saved.clone());
+        assert_eq!(tabs.panes(), saved[..MAX_RESTORED]);
+    }
+
+    // Given: a full layout file's worth of tabs restored, then a tab opened in the session
+    // When: the panes are taken for the file and restored from it, as a restart does
+    // Then: the new tab comes first and is restored; the oldest restored one is dropped
+    #[test]
+    fn a_tab_opened_after_a_full_restore_survives_the_next_restart() {
+        let saved: Vec<_> = (0..MAX_RESTORED)
+            .map(|index| pane("t1", &format!("run-{index}"), "", true))
+            .collect();
+        let mut tabs = RunTabs::default();
+        tabs.restore_hidden(saved.clone());
+        let new = pane("t2", "run-new", "new", true);
+        tabs.open(new.clone());
+
+        let mut restarted = RunTabs::default();
+        restarted.restore_hidden(tabs.panes());
+        let panes = restarted.panes();
+        assert_eq!(panes.len(), MAX_RESTORED);
+        assert_eq!(panes[0], new);
+        assert_eq!(panes[1..], saved[..MAX_RESTORED - 1]);
+    }
+
+    // Given: restored tabs of t1 and t2, and a tab of t3 opened in the session
+    // When: the hidden tabs are pruned with only t1 and t3 known
+    // Then: t2's tab is dropped; t1's stays restorable and t3's stays open
+    #[test]
+    fn prune_drops_hidden_tabs_of_unknown_threads() {
+        let mut tabs = RunTabs::default();
+        tabs.restore_hidden(vec![
+            pane("t1", "run-a", "a", true),
+            pane("t2", "run-b", "b", true),
+        ]);
+        let open = tabs.open(pane("t3", "run-c", "c", true));
+        tabs.prune_hidden(|thread| thread.as_str() != "t2");
+        let runs: Vec<_> = tabs.panes().into_iter().map(|pane| pane.run).collect();
+        assert_eq!(
+            runs,
+            [RunId::new("run-c").unwrap(), RunId::new("run-a").unwrap()]
+        );
+        assert!(tabs.get(open).is_some());
+        let mut dock = DockState::new(vec![CoreTab::Feature(FeatureId::Execution)]);
+        let t1 = ThreadId::new("t1").unwrap();
+        tabs.sweep(&mut dock, Some(&t1));
+        assert_eq!(tabs.shown().count(), 1);
     }
 
     // Given: a run tab of t1 in the dock and one of t2 out of it, t1 selected

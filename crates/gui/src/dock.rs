@@ -60,9 +60,15 @@ pub fn enforce_sidebar_min_fraction(dock: &mut DockState<PanelId>, workspace: &W
     if sidebar_ids.is_empty() {
         return;
     }
+    enforce_min_fraction_left_of(dock, |tab| sidebar_ids.contains(&tab));
+}
+
+/// Raises to [`MIN_SIDEBAR_FRACTION`] the fraction of each horizontal split of the main
+/// surface whose left subtree holds a tab `is_sidebar` accepts.
+pub fn enforce_min_fraction_left_of<T>(dock: &mut DockState<T>, is_sidebar: impl Fn(&T) -> bool) {
     let root = NodePath::new(SurfaceIndex::main(), NodeIndex::root());
     let mut targets = Vec::new();
-    collect_sidebar_split_paths(dock, root, &sidebar_ids, &mut targets);
+    collect_sidebar_split_paths(dock, root, &is_sidebar, &mut targets);
     for path in targets {
         if let Ok(Node::Horizontal(split)) = dock.node_mut(path) {
             split.fraction = split.fraction.max(MIN_SIDEBAR_FRACTION);
@@ -70,36 +76,36 @@ pub fn enforce_sidebar_min_fraction(dock: &mut DockState<PanelId>, workspace: &W
     }
 }
 
-fn collect_sidebar_split_paths(
-    dock: &DockState<PanelId>,
+fn collect_sidebar_split_paths<T>(
+    dock: &DockState<T>,
     path: NodePath,
-    sidebar_ids: &[&PanelId],
+    is_sidebar: &impl Fn(&T) -> bool,
     targets: &mut Vec<NodePath>,
 ) {
     let Ok(node) = dock.node(path) else {
         return;
     };
     if matches!(node, Node::Horizontal(_))
-        && subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
+        && subtree_contains_sidebar(dock, child_path(path, true), is_sidebar)
     {
         targets.push(path);
     }
     if matches!(node, Node::Horizontal(_) | Node::Vertical(_)) {
-        collect_sidebar_split_paths(dock, child_path(path, true), sidebar_ids, targets);
-        collect_sidebar_split_paths(dock, child_path(path, false), sidebar_ids, targets);
+        collect_sidebar_split_paths(dock, child_path(path, true), is_sidebar, targets);
+        collect_sidebar_split_paths(dock, child_path(path, false), is_sidebar, targets);
     }
 }
 
-fn subtree_contains_sidebar(
-    dock: &DockState<PanelId>,
+fn subtree_contains_sidebar<T>(
+    dock: &DockState<T>,
     path: NodePath,
-    sidebar_ids: &[&PanelId],
+    is_sidebar: &impl Fn(&T) -> bool,
 ) -> bool {
     match dock.node(path) {
-        Ok(Node::Leaf(leaf)) => leaf.tabs.iter().any(|tab| sidebar_ids.contains(&tab)),
+        Ok(Node::Leaf(leaf)) => leaf.tabs.iter().any(is_sidebar),
         Ok(Node::Horizontal(_)) | Ok(Node::Vertical(_)) => {
-            subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
-                || subtree_contains_sidebar(dock, child_path(path, false), sidebar_ids)
+            subtree_contains_sidebar(dock, child_path(path, true), is_sidebar)
+                || subtree_contains_sidebar(dock, child_path(path, false), is_sidebar)
         }
         _ => false,
     }
@@ -233,7 +239,8 @@ fn extract_node(dock: &DockState<PanelId>, path: NodePath) -> Result<LayoutNode,
     }
 }
 
-fn child_path(path: NodePath, first: bool) -> NodePath {
+/// The path of a split's first (left or upper) or second child.
+pub fn child_path(path: NodePath, first: bool) -> NodePath {
     let offset = if first { 1 } else { 2 };
     NodePath::new(path.surface, NodeIndex(path.node.0 * 2 + offset))
 }

@@ -37,6 +37,40 @@ pub fn panel_keybinds(
     Ok(settings)
 }
 
+/// `base` with the `[panel.keybinds]` of the configuration in `config_dir` over it, read
+/// as the embedded workbench reads them (its user layer and the environment; a project
+/// layer cannot set them). A configuration that does not load leaves `base`, as the
+/// embedded workbench then uses the default configuration. A binding that does not
+/// resolve also leaves `base`, with a warning, where the embedded workbench refuses to
+/// start.
+#[must_use]
+pub fn configured_panel_keybinds(
+    base: &KeybindSettings,
+    config_dir: &std::path::Path,
+) -> KeybindSettings {
+    panel_keybinds_from(
+        base,
+        &config::LoadOptions {
+            user_config_dir: Some(config_dir.to_owned()),
+            ..Default::default()
+        },
+    )
+}
+
+fn panel_keybinds_from(base: &KeybindSettings, options: &config::LoadOptions) -> KeybindSettings {
+    let panel = match config::Config::load(options) {
+        Ok(config) => config.panel,
+        Err(error) => {
+            tracing::warn!(%error, "configuration load failed; panel keybinds not applied");
+            return base.clone();
+        }
+    };
+    panel_keybinds(base, &panel).unwrap_or_else(|error| {
+        tracing::warn!(%error, "panel keybinds not applied");
+        base.clone()
+    })
+}
+
 /// 設定されたキーバインドを egui 入力に解決するマッパーです。
 #[derive(Debug, Clone)]
 pub struct Keymap {
@@ -168,6 +202,50 @@ mod tests {
             };
             // When / Then: no silently ignored binding is accepted.
             assert!(super::panel_keybinds(&KeybindSettings::default(), &panel).is_err());
+        }
+    }
+
+    fn panel_keybinds_in(config_toml: Option<&str>) -> KeybindSettings {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(text) = config_toml {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        }
+        let base = KeybindSettings::default();
+        super::panel_keybinds_from(
+            &base,
+            &config::LoadOptions {
+                user_config_dir: Some(dir.path().to_owned()),
+                env: Some(Default::default()),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn configured_panel_keybinds_read_the_user_config_and_fall_back_on_errors() {
+        // Given / When: a config.toml that rebinds Save Layout.
+        let resolved = panel_keybinds_in(Some("[panel.keybinds]\nsave_layout = \"Alt+S\"\n"));
+        // Then: it overrides that chord only.
+        assert_eq!(
+            resolved.bindings[&KeyAction::SaveLayout].to_string(),
+            "Alt+S"
+        );
+        assert_eq!(
+            resolved.bindings[&KeyAction::FocusAgentPane].to_string(),
+            "Ctrl+1"
+        );
+        // Given / When: no file, a file that does not parse, an unknown key.
+        // Then: the base bindings, without failing.
+        for text in [
+            None,
+            Some("[panel.keybinds\n"),
+            Some("[panel.keybinds]\nsave_layout = \"Ctrl+Unknown\"\n"),
+        ] {
+            assert_eq!(
+                panel_keybinds_in(text),
+                KeybindSettings::default(),
+                "{text:?}"
+            );
         }
     }
 
