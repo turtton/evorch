@@ -69,6 +69,8 @@ pub mod eval_sample;
 pub mod handoffs;
 mod harness_notice_history;
 pub use harness_notice_history::{AdoptedHarnessNotice, HarnessNoticeSnapshot};
+#[cfg(feature = "goal-usage-test-support")]
+pub mod goal_usage_test_support;
 pub mod host_input;
 pub mod improvement;
 pub mod inspect;

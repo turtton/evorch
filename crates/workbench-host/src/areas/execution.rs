@@ -496,3 +496,31 @@ fn thread_execution(
         ledger,
     })
 }
+
+#[cfg(test)]
+mod goal_id_tests {
+    use super::*;
+
+    #[test]
+    fn longest_nonce_goal_id_reaches_the_core_client_view() {
+        let root = format!("run-{}", "z".repeat(26));
+        let id = format!(
+            "thread-goal-{root}-inc-{}-{}-{}",
+            "z".repeat(26),
+            u64::MAX,
+            "f".repeat(32)
+        );
+        assert_eq!(id.len(), 127);
+        assert!(GoalId::new(&id).is_ok());
+        let snapshot: event_bus::ThreadGoalSnapshot = serde_json::from_value(serde_json::json!({
+            "goal_id":id, "thread_id":"thread", "root_run_id":root,
+            "related_root_run_ids":[], "objective":"Research", "original_request":"Research",
+            "criteria":["Evidence"], "checks":[], "phase":"working", "review_enabled":false,
+            "checks_paused":true, "work_stopped":false, "epoch":0, "review_round":0,
+            "findings":[], "reason":null, "max_review_rounds":3, "max_tokens":null,
+            "usage":{"model_requests":0,"input_tokens":0,"output_tokens":0}
+        }))
+        .unwrap();
+        assert_eq!(goal_view(&snapshot).unwrap().goal.as_str(), id);
+    }
+}

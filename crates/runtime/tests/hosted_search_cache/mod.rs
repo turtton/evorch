@@ -15,6 +15,131 @@ use wiremock::{
 
 mod support;
 
+#[tokio::test]
+async fn failed_goal_usage_commit_drains_and_records_the_entire_hosted_search_wave() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let server = MockServer::start().await;
+    let bus = Arc::new(EventBus::new(512));
+    let trace = Arc::new(Mutex::new(Trace::default()));
+    let record = trace.clone();
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let hosted = body["tools"].as_array().unwrap().iter().any(|tool| tool["type"] == "web_search");
+            let mut trace = record.lock().unwrap();
+            let (input, cached) = trace.usage(&body);
+            if hosted { return reply(true, 0, input, cached); }
+            trace.chats += 1;
+            let mut events = Vec::new();
+            for index in 0..2 {
+                let id = format!("parallel-{index}");
+                let arguments = json!({"query":format!("independent source {index}"),"max_results":1}).to_string();
+                events.push(json!({"type":"response.output_item.added","output_index":index,"item":{"id":id,"type":"function_call","call_id":id,"name":"web_search","arguments":""}}));
+                events.push(json!({"type":"response.function_call_arguments.delta","item_id":id,"output_index":index,"delta":arguments}));
+                events.push(json!({"type":"response.function_call_arguments.done","item_id":id,"output_index":index,"arguments":arguments}));
+                events.push(json!({"type":"response.output_item.done","output_index":index,"item":{"id":id,"type":"function_call","call_id":id,"name":"web_search","arguments":arguments,"status":"completed"}}));
+            }
+            events.push(json!({"type":"response.completed","response":{"id":"parallel-chat","status":"completed","usage":{"input_tokens":input,"output_tokens":4,"input_tokens_details":{"cached_tokens":cached}}}}));
+            sse(events)
+        }).expect(3).mount(&server).await;
+    let (model, directory) = support::model(&server, bus.clone()).await;
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor
+        .register(Arc::new(
+            WebSearch::for_providers(Arc::new(UnexpectedFallback), Arc::new(UnexpectedFallback))
+                .with_hosted_search_fallback(Arc::new(UnexpectedFallback)),
+        ))
+        .unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("usage.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime = AgentRuntime::new(bus, Arc::new(executor), model)
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    runtime.set_web_tools_enabled(true);
+    let root = runtime.reserve_run_id();
+    runtime.bind_thread_root("wave", root).unwrap();
+    let goal = runtime
+        .create_thread_goal(
+            "wave",
+            root,
+            "Research two sources".into(),
+            vec!["Citations".into()],
+        )
+        .unwrap();
+    runtime
+        .set_goal_checks_paused("wave", &goal.goal_id, true)
+        .unwrap();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let _fault = storage::goal_usage_test_support::install(&goal.goal_id, {
+        let writes = writes.clone();
+        move |point| {
+            if point == storage::goal_usage_test_support::Point::BeforeCommit
+                && writes.fetch_add(1, Ordering::SeqCst) >= 1
+            {
+                Err(storage::StorageError::Io(
+                    "injected search usage failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    });
+    runtime.spawn_reserved(
+        root,
+        None,
+        Role::WebResearcher,
+        "Research two independent sources",
+        RunConfig::default(),
+    );
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Error);
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        3,
+        "chat plus both completed searches"
+    );
+    let trace = trace.lock().unwrap();
+    assert_eq!(
+        trace.requests.len(),
+        3,
+        "no following model request or wave"
+    );
+    let snapshot = runtime.thread_goal("wave").unwrap();
+    assert_eq!(
+        snapshot.usage.input_tokens,
+        trace
+            .requests
+            .iter()
+            .map(|(_, input, _)| input)
+            .sum::<u64>()
+    );
+    assert_eq!(snapshot.usage.output_tokens, 12);
+    assert_eq!(snapshot.phase, event_bus::ThreadGoalPhase::Working);
+    let record = storage::Database::open_read_only(&config.db_path)
+        .unwrap()
+        .run_context(&root.to_string())
+        .unwrap()
+        .unwrap();
+    let messages: Vec<providers::Message> = serde_json::from_str(&record.messages_json).unwrap();
+    let ids: std::collections::BTreeSet<_> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|block| {
+            if let providers::ContentBlock::ToolResult { tool_call_id, .. } = block {
+                Some(tool_call_id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        ids.contains("parallel-0") && ids.contains("parallel-1"),
+        "executed results survive persistence failure"
+    );
+}
+
 struct UnexpectedFallback;
 #[async_trait::async_trait]
 impl SearchProvider for UnexpectedFallback {

@@ -1142,14 +1142,18 @@ impl LoopState {
                 // Drain every completed request in the wave before any individual
                 // result can exhaust a budget or terminate this run. The sidecar
                 // survives tool formatting failures, panic, and cancellation.
+                let mut goal_usage_error = None;
                 for usage in std::mem::take(
                     &mut *search_usage
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 ) {
                     self.budget.usage(usage);
-                    if let Some(runtime) = self.runtime() {
-                        runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage);
+                    if let Some(runtime) = self.runtime()
+                        && let Err(error) =
+                            runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage)
+                    {
+                        goal_usage_error.get_or_insert(error);
                     }
                 }
                 completed.sort_by_key(|(index, ..)| *index);
@@ -1384,6 +1388,10 @@ impl LoopState {
                 }
                 // Results are recorded first, so the model-facing history keeps the
                 // run_js text; then nothing else runs.
+                if let Some(error) = goal_usage_error {
+                    self.finish_error(error);
+                    return false;
+                }
                 if self.stop_for_run_js_unconfirmed() {
                     return false;
                 }
