@@ -352,20 +352,26 @@ fn the_selected_preview_toggle_is_readable_in_graphite() {
     else {
         panic!("one selected Preview toggle");
     };
-    let image = screen.harness.render().unwrap();
     let palette = crate::theme::tokens::palette();
-    let count = |color: egui::Color32| {
-        (selected.left() as u32..selected.right() as u32)
-            .flat_map(|x| (selected.top() as u32..selected.bottom() as u32).map(move |y| (x, y)))
-            .filter(|&(x, y)| {
-                let [r, g, b, _] = image.get_pixel(x, y).0;
-                [(r, color.r()), (g, color.g()), (b, color.b())]
-                    .iter()
-                    .all(|&(drawn, wanted)| drawn.abs_diff(wanted) <= 24)
-            })
-            .count()
-    };
-    assert!(count(palette.ACCENT) > 0, "the selected pill is filled");
-    assert!(count(palette.ACCENT_FG) > 0, "the label reads on the fill");
+    let shapes = &screen.harness.output().shapes;
+    let filled = shapes.iter().any(|clipped| {
+        matches!(&clipped.shape, egui::Shape::Rect(rect)
+            if rect.fill == palette.ACCENT && selected.contains_rect(rect.rect))
+    });
+    let label = shapes.iter().find_map(|clipped| match &clipped.shape {
+        egui::Shape::Text(text)
+            if text.galley.text() == "Preview"
+                && selected.contains(text.galley.rect.translate(text.pos.to_vec2()).center()) =>
+        {
+            Some(text.override_text_color.unwrap_or(text.fallback_color))
+        }
+        _ => None,
+    });
+    assert!(filled, "the selected pill is filled with the accent");
+    assert_eq!(
+        label,
+        Some(palette.ACCENT_FG),
+        "the label reads on the fill"
+    );
     screen.capture("file-toggle-graphite");
 }
