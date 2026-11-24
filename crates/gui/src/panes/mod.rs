@@ -14,6 +14,7 @@ pub mod conversation_plan;
 pub mod diff;
 pub mod evaluations;
 pub mod file_viewer;
+pub mod goal_widgets;
 pub mod image_viewer;
 pub mod lane_attention;
 pub mod lane_close;

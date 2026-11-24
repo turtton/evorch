@@ -6,10 +6,20 @@
 //! that arrives late never moves the screen back to an older state. A run that
 //! left the runtime stays listed, with what became of it. Stop goes out for one
 //! run of the shown thread only; the core refuses a run it no longer holds.
+//!
+//! The goal and the plan of the selected thread are read in `maintain`, while
+//! the tab is hidden too, because the conversation's composer band shows them
+//! ([`ExecutionFeature::band`]). What is pressed in the band or the Plan tab is
+//! queued here and leaves in the next `maintain`.
 use std::collections::{BTreeMap, HashSet};
 
 use super::layout::{bounded_list, paged_list};
-use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply};
+use super::{
+    Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Visibility,
+};
+use crate::model::conversation_plan::{PlanState, ReadFailure, ReadKind};
+use crate::panes::conversation_plan::{PlanBand, PlanPanelAction};
+use crate::panes::goal_widgets::GoalAction;
 use workbench_protocol::{
     commands::{Command, SetGoalChecksPaused, SetGoalReview, StopRun, ThreadTarget},
     errors::ErrorCode,
@@ -32,7 +42,7 @@ enum Pending {
     Runs { thread: ThreadId, path: Vec<RunId> },
     Execution { thread: ThreadId },
     Command(&'static str),
-    Plan { thread: ThreadId },
+    Plan { kind: ReadKind, generation: u64 },
 }
 
 /// A cursor chain is read serially and published as one prefix. Keeping the old
@@ -65,10 +75,87 @@ pub struct ExecutionFeature {
     runs_stale: bool,
     execution_stale: bool,
     more_requested: bool,
-    plan: plan::PlanLine,
+    plan: PlanState,
+    /// The Plan tab was drawn since the last `maintain`.
+    plan_drawn: bool,
+    /// The Plan tab was drawn before the last `maintain`: its reads are due.
+    plan_shown: bool,
+    goal_actions: Vec<GoalAction>,
+    plan_actions: Vec<PlanPanelAction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionBand<'a> {
+    pub thread: &'a ThreadId,
+    pub goal: Option<&'a GoalView>,
+    pub plan: PlanBand<'a>,
 }
 
 impl ExecutionFeature {
+    pub fn band(&self) -> Option<ExecutionBand<'_>> {
+        let thread = self.thread.as_ref()?;
+        Some(ExecutionBand {
+            thread,
+            goal: self
+                .execution
+                .as_ref()
+                .filter(|execution| &execution.thread == thread)
+                .and_then(|execution| execution.goal.as_ref()),
+            plan: PlanBand {
+                summary: self
+                    .plan
+                    .summary()
+                    .filter(|summary| &summary.thread == thread),
+            },
+        })
+    }
+
+    pub fn plan_state(&self) -> &PlanState {
+        &self.plan
+    }
+
+    /// The Plan tab was drawn this frame. Returns whether it was hidden
+    /// before, so its reads wait for one more frame.
+    pub fn plan_drawn(&mut self) -> bool {
+        self.plan_drawn = true;
+        !self.plan_shown
+    }
+
+    pub fn enqueue_goal(&mut self, action: GoalAction) {
+        self.goal_actions.push(action);
+    }
+
+    pub fn enqueue_plan(&mut self, action: PlanPanelAction) {
+        self.plan_actions.push(action);
+    }
+
+    fn send_goal_actions(&mut self, ctx: &mut FeatureContext<'_>, thread: &ThreadId) {
+        for action in std::mem::take(&mut self.goal_actions) {
+            let Some(goal) = self.execution.as_ref().and_then(|e| e.goal.as_ref()) else {
+                continue;
+            };
+            let (label, command) = match action {
+                GoalAction::Review {
+                    thread_id,
+                    goal_id,
+                    enabled,
+                } if thread_id == thread.as_str() && goal_id == goal.goal.as_str() => {
+                    ("ゴールレビューの切替", goal_review(thread, goal, enabled))
+                }
+                GoalAction::ChecksPaused {
+                    thread_id,
+                    goal_id,
+                    paused,
+                } if thread_id == thread.as_str() && goal_id == goal.goal.as_str() => (
+                    "ゴールチェックの一時停止",
+                    goal_checks_paused(thread, goal, paused),
+                ),
+                _ => continue,
+            };
+            self.command(ctx, label, command);
+        }
+    }
+
     fn tag(&mut self, pending: Pending) -> u64 {
         self.next_tag += 1;
         self.pending.insert(self.next_tag, pending);
@@ -81,7 +168,9 @@ impl ExecutionFeature {
         self.clear_runs();
         self.execution = None;
         self.execution_stale = self.thread.is_some();
-        self.plan.switch(self.thread.is_some());
+        self.plan.set_thread(self.thread.clone());
+        self.plan_actions.clear();
+        self.goal_actions.clear();
     }
 
     /// Show the children of `run`: a new level below the current one.
@@ -395,7 +484,7 @@ impl Feature for ExecutionFeature {
         self.loaded_pages = loaded_pages;
         self.execution = None;
         self.execution_stale = self.thread.is_some();
-        self.plan.reset(self.thread.is_some());
+        self.plan.restart_reads();
     }
 
     fn event(&mut self, event: &UiEvent) {
@@ -419,8 +508,8 @@ impl Feature for ExecutionFeature {
                     }
                 }
                 ExecutionEvent::ThreadExecutionChanged { .. } => self.execution_stale = true,
-                ExecutionEvent::ConversationPlanChanged { revision, .. } => {
-                    self.plan.changed(*revision);
+                ExecutionEvent::ConversationPlanChanged { thread, revision } => {
+                    self.plan.invalidate(thread, *revision);
                 }
             }
         }
@@ -485,17 +574,15 @@ impl Feature for ExecutionFeature {
                     self.status = error.message;
                 }
             }
-            (
-                Pending::Plan { thread },
-                FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::ConversationPlan(
-                    summary,
-                )))),
-            ) => {
-                if self.thread.as_ref() == Some(&thread) {
-                    self.plan.answered(*summary);
-                }
+            (Pending::Plan { kind, generation }, reply) => {
+                let answer = match reply {
+                    FeatureReply::Query(Ok(QueryReply::Execution(reply))) => Ok(reply),
+                    FeatureReply::Query(Err(error)) => Err(read_failure(&error)),
+                    _ => Err(ReadFailure::Other("unexpected reply".into())),
+                };
+                self.plan.apply(kind, generation, answer);
             }
-            (Pending::Execution { .. } | Pending::Plan { .. }, FeatureReply::Query(Err(error))) => {
+            (Pending::Execution { .. }, FeatureReply::Query(Err(error))) => {
                 self.status = error.message;
             }
             (Pending::Command(label), FeatureReply::Command(Ok(_))) => {
@@ -516,16 +603,27 @@ impl Feature for ExecutionFeature {
         }
     }
 
-    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
         let selected = ctx.selection().thread.clone();
         if selected != self.thread {
             self.switch_thread(selected);
         }
-        let Some(thread) = self.thread.clone() else {
-            ui.label("会話を選択すると run・ゴール・台帳を表示します。");
+        let drawn = std::mem::take(&mut self.plan_drawn);
+        if drawn && !self.plan_shown {
+            // A tab shown again may have missed changes while it was hidden.
+            self.plan.refresh();
+        }
+        self.plan_shown = drawn;
+        for action in std::mem::take(&mut self.plan_actions) {
+            match action {
+                PlanPanelAction::Select(task) => self.plan.select(&task),
+                PlanPanelAction::HistoryPage(page) => self.plan.set_history_page(page),
+            }
+        }
+        let Some(thread) = self.thread.clone().filter(|_| visibility.available) else {
+            self.goal_actions.clear();
             return;
         };
-        self.request_runs(ctx);
         if self.execution_stale {
             self.execution_stale = false;
             let tag = self.tag(Pending::Execution {
@@ -538,25 +636,45 @@ impl Feature for ExecutionFeature {
                 })),
             );
         }
-        if self.plan.take_stale() {
+        for request in self.plan.requests(self.plan_shown) {
             let tag = self.tag(Pending::Plan {
-                thread: thread.clone(),
+                kind: request.kind,
+                generation: request.generation,
             });
-            ctx.query(
-                tag,
-                Query::Execution(ExecutionQuery::GetConversationPlan(ThreadTarget {
-                    thread: thread.clone(),
-                })),
-            );
+            ctx.query(tag, Query::Execution(request.query));
         }
+        self.send_goal_actions(ctx, &thread);
+    }
+
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        let Some(thread) = self.thread.clone() else {
+            ui.label("会話を選択すると run・ゴール・台帳を表示します。");
+            return;
+        };
+        self.request_runs(ctx);
         if !self.status.is_empty() {
             ui.label(&self.status);
         }
         self.draw_runs(ui, ctx, &thread);
         ui.separator();
         self.draw_goal(ui, ctx, &thread);
-        self.plan.draw(ui);
         self.draw_ledger(ui);
+    }
+
+    fn as_execution(&self) -> Option<&ExecutionFeature> {
+        Some(self)
+    }
+
+    fn as_execution_mut(&mut self) -> Option<&mut ExecutionFeature> {
+        Some(self)
+    }
+}
+
+fn read_failure(error: &FeatureError) -> ReadFailure {
+    match error.code {
+        Some(ErrorCode::Conflict) => ReadFailure::Conflict,
+        Some(ErrorCode::NotFound) => ReadFailure::NotFound,
+        _ => ReadFailure::Other(error.message.clone()),
     }
 }
 
@@ -567,8 +685,6 @@ fn command_failure(label: &str, error: &FeatureError) -> String {
         format!("{label}: {}", error.message)
     }
 }
-
-mod plan;
 
 #[cfg(test)]
 pub(crate) mod tests;

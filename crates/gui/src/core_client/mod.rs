@@ -592,6 +592,13 @@ impl CoreClientScreen {
             &mut self.selected,
             frame,
         );
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, shell::Effect::Goal(_)))
+        {
+            // The goal command leaves in the execution feature's next pass.
+            ui.ctx().request_repaint();
+        }
         for effect in effects {
             apply_effect(
                 &self.actions,
@@ -618,7 +625,17 @@ fn apply_effect(
         match effect {
             shell::Effect::Send(action) => enqueue(actions, shared, *action),
             shell::Effect::Reveal(feature) => shared.features.reveal(feature),
+            shell::Effect::Open(shell::CoreTab::Plan) => shell::focus_beside(
+                dock,
+                shell::CoreTab::Plan,
+                shell::CoreTab::Feature(features::FeatureId::Execution),
+            ),
             shell::Effect::Open(tab) => shell::focus(dock, tab),
+            shell::Effect::Goal(action) => {
+                if let Some(execution) = shared.features.execution_mut() {
+                    execution.enqueue_goal(action);
+                }
+            }
             shell::Effect::ResetLayout => *dock = shell::default_dock(),
             shell::Effect::Status(status) => shared.status = status,
             shell::Effect::AttachRequested {

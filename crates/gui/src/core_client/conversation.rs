@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{RichText, Ui};
+use workbench_protocol::namespaces::execution::{GoalPhase, GoalView};
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ConversationCommand, ExecutionCommand, QuestionsCommand,
 };
@@ -12,10 +13,12 @@ use workspace_ui::ThreadRunPhase;
 
 use super::cache::Cache;
 use super::connection::Action;
+use super::features::execution::ExecutionBand;
 use super::features::{FeatureId, Selection};
-use super::shell::Effect;
+use super::shell::{CoreTab, Effect};
 use super::{ClientAttachmentDraft, Draft};
 use crate::attachments::{AttachmentIo, Intake};
+use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, progress_band};
 use crate::panes::markdown_render::render_markdown_with_base;
 use crate::panes::phase_indicator::phase_circle;
 use crate::panes::transcript_widgets::{
@@ -87,6 +90,7 @@ pub fn show(
     pane: &mut ConversationPane,
     io: &mut ConversationIo<'_>,
     selection: &Selection,
+    band: Option<ExecutionBand<'_>>,
     effects: &mut Vec<Effect>,
 ) {
     pane_root(ui, "Conversation", |ui| {
@@ -108,13 +112,19 @@ pub fn show(
         }
         ui.add_enabled_ui(io.connected, |ui| {
             header(ui, io, &project, &thread, pane.composer_role, effects);
+            let details_max = ui.available_height() * 0.3;
             egui::Panel::bottom(ui.id().with("composer"))
                 .resizable(false)
                 .show_separator_line(false)
                 .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, SP_1 as i8)))
                 .show(ui, |ui| {
-                    queue_band(ui, io.cache, &thread, effects);
+                    let band = band.filter(|band| band.thread == &thread);
+                    // The band sits flush on the composer, as in the embedded workbench.
+                    let vertical_spacing = ui.spacing().item_spacing.y;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    progress(ui, io.cache, &thread, band, details_max, effects);
                     composer(ui, pane, io, &project, &thread, effects);
+                    ui.spacing_mut().item_spacing.y = vertical_spacing;
                     status_strip(ui, io.cache, &thread);
                 });
             egui::CentralPanel::default()
@@ -706,8 +716,75 @@ fn approval_card(ui: &mut Ui, cache: &Cache, approval: &ApprovalView, effects: &
     });
 }
 
-fn queue_band(ui: &mut Ui, cache: &Cache, thread: &ThreadId, effects: &mut Vec<Effect>) {
-    let receipts: Vec<_> = cache
+/// The queued follow-ups, the goal and the plan of `thread` in one band above
+/// the composer, as the embedded workbench draws them.
+fn progress(
+    ui: &mut Ui,
+    cache: &Cache,
+    thread: &ThreadId,
+    band: Option<ExecutionBand<'_>>,
+    details_max: f32,
+    effects: &mut Vec<Effect>,
+) {
+    let receipts = queued_receipts(cache, thread);
+    let goal = band
+        .and_then(|band| band.goal)
+        .map(|goal| goal_view(thread, goal));
+    let queue = (!receipts.is_empty()).then_some(|ui: &mut Ui| queue_rows(ui, &receipts, thread));
+    let output = progress_band(
+        ui,
+        thread.as_str(),
+        goal.as_ref(),
+        queue,
+        details_max,
+        band.map(|band| band.plan),
+    );
+    effects.extend(output.queue_action);
+    effects.extend(output.action.map(Effect::Goal));
+    if output.open_plan {
+        effects.push(Effect::Open(CoreTab::Plan));
+    }
+}
+
+fn goal_view<'a>(thread: &'a ThreadId, goal: &'a GoalView) -> GoalBandView<'a> {
+    GoalBandView {
+        thread_id: thread.as_str(),
+        goal_id: goal.goal.as_str(),
+        objective: &goal.objective,
+        phase: match goal.phase {
+            GoalPhase::Working => GoalPhaseView::Working,
+            GoalPhase::Checking => GoalPhaseView::Checking,
+            GoalPhase::Reviewing => GoalPhaseView::Reviewing,
+            GoalPhase::Repairing => GoalPhaseView::Repairing,
+            GoalPhase::Complete => GoalPhaseView::Complete,
+            GoalPhase::Blocked => GoalPhaseView::Blocked,
+        },
+        review_enabled: goal.review_enabled,
+        checks_paused: goal.checks_paused,
+        work_stopped: goal.work_stopped,
+        reason: goal.reason.as_deref(),
+        review_round: goal.review_round,
+        max_review_rounds: goal.max_review_rounds,
+        criteria: &goal.criteria,
+        checks: goal
+            .checks
+            .iter()
+            .filter_map(|check| {
+                Some(GoalCheckRow {
+                    criterion: usize::try_from(check.criterion).ok()?,
+                    met: check.met,
+                    evidence: &check.evidence,
+                })
+            })
+            .collect(),
+        findings: &goal.findings,
+        original_request: None,
+        usage: None,
+    }
+}
+
+fn queued_receipts<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a InputReceipt> {
+    cache
         .receipts
         .values()
         .filter(|r| {
@@ -719,49 +796,47 @@ fn queue_band(ui: &mut Ui, cache: &Cache, thread: &ThreadId, effects: &mut Vec<E
                         | InputReceiptState::Unknown
                 )
         })
-        .collect();
-    if receipts.is_empty() {
-        return;
-    }
-    soft_frame(palette().SURFACE).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        for receipt in receipts {
-            ui.horizontal(|ui| {
-                let (icon, text, color) = match receipt.state {
-                    InputReceiptState::Accepted => {
-                        (icons::QUEUE, "Queued follow-up", palette().TEXT_MUTED)
-                    }
-                    InputReceiptState::Dropped => {
-                        (icons::WARNING, "Follow-up dropped", palette().WARNING_FG)
-                    }
-                    _ => (
-                        icons::QUESTION,
-                        "Follow-up state unknown",
-                        palette().WARNING_FG,
-                    ),
-                };
-                ui.label(
-                    RichText::new(icons::with_icon(icon, text))
-                        .size(FONT_SMALL)
-                        .color(color),
-                )
-                .on_hover_text(receipt.submission_id.as_str());
-                if receipt.state == InputReceiptState::Accepted
-                    && let Some(run) = &receipt.run
-                    && ui.add(ghost("Withdraw")).clicked()
-                {
-                    effects.push(Effect::send(command(Command::Conversation(
-                        ConversationCommand::WithdrawFollowUp(WithdrawFollowUp {
-                            thread: thread.clone(),
-                            run: run.clone(),
-                            submission_id: receipt.submission_id.clone(),
-                        }),
-                    ))));
+        .collect()
+}
+
+fn queue_rows(ui: &mut Ui, receipts: &[&InputReceipt], thread: &ThreadId) -> Option<Effect> {
+    let mut withdraw = None;
+    for receipt in receipts {
+        ui.horizontal(|ui| {
+            let (icon, text, color) = match receipt.state {
+                InputReceiptState::Accepted => {
+                    (icons::QUEUE, "Queued follow-up", palette().TEXT_MUTED)
                 }
-            });
-        }
-    });
-    ui.add_space(SP_1);
+                InputReceiptState::Dropped => {
+                    (icons::WARNING, "Follow-up dropped", palette().WARNING_FG)
+                }
+                _ => (
+                    icons::QUESTION,
+                    "Follow-up state unknown",
+                    palette().WARNING_FG,
+                ),
+            };
+            ui.label(
+                RichText::new(icons::with_icon(icon, text))
+                    .size(FONT_SMALL)
+                    .color(color),
+            )
+            .on_hover_text(receipt.submission_id.as_str());
+            if receipt.state == InputReceiptState::Accepted
+                && let Some(run) = &receipt.run
+                && ui.add(ghost("Withdraw")).clicked()
+            {
+                withdraw = Some(Effect::send(command(Command::Conversation(
+                    ConversationCommand::WithdrawFollowUp(WithdrawFollowUp {
+                        thread: thread.clone(),
+                        run: run.clone(),
+                        submission_id: receipt.submission_id.clone(),
+                    }),
+                ))));
+            }
+        });
+    }
+    withdraw
 }
 
 fn composer(

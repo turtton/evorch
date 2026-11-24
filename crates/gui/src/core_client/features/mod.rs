@@ -490,6 +490,16 @@ pub trait Feature: Send {
     fn as_workspace(&self) -> Option<&workspace::WorkspaceFeature> {
         None
     }
+
+    /// The execution feature itself, for the conversation's goal and plan band
+    /// and the Plan tab, which queue what is pressed in them into it.
+    fn as_execution(&self) -> Option<&execution::ExecutionFeature> {
+        None
+    }
+
+    fn as_execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
+        None
+    }
 }
 
 /// Sections the composition was asked to open, and the ones moved to the top of the column.
@@ -724,6 +734,10 @@ impl Features {
     /// The workspace feature, for what observes the sidebar it holds.
     pub fn workspace(&self) -> Option<&workspace::WorkspaceFeature> {
         self.features.iter().find_map(|f| f.as_workspace())
+    }
+
+    pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
+        self.features.iter_mut().find_map(|f| f.as_execution_mut())
     }
 
     fn observe_selection(&mut self, selection: &Selection) -> bool {
@@ -1009,6 +1023,20 @@ impl<'a> DockPass<'a> {
             f.id() == feature
                 && is_available(f.as_ref(), self.view.connected, self.view.capabilities)
         })
+    }
+
+    /// The execution feature while it is available.
+    pub fn execution(&self) -> Option<&execution::ExecutionFeature> {
+        self.is_available(FeatureId::Execution)
+            .then(|| self.features.iter().find_map(|f| f.as_execution()))
+            .flatten()
+    }
+
+    pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
+        if !self.is_available(FeatureId::Execution) {
+            return None;
+        }
+        self.features.iter_mut().find_map(|f| f.as_execution_mut())
     }
 
     /// Draw the body of `feature` in its tab. Returns `false` when nothing was drawn: the
