@@ -41,6 +41,11 @@ BEGIN
  WHERE NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id)
  ON CONFLICT(run_id) DO UPDATE SET
  source=CASE WHEN source < 9223372036854775807 THEN source + 1 END,
+ -- A scan can pass non-committed rows beyond the last reduced cut. Reusing
+ -- one of those IDs must replay that tail, including when no cut exists yet.
+ -- This changes only the existing committed INSERT write; non-committed
+ -- appends still do not update run state.
+ checkpoint=CASE WHEN NEW.id <= checkpoint THEN last_indexed_id ELSE checkpoint END,
  generation=CASE WHEN NEW.id <= last_indexed_id THEN CASE WHEN generation < 9223372036854775807 THEN generation + 1 END ELSE generation END,
  phase=CASE WHEN NEW.id <= last_indexed_id THEN 0 ELSE phase END;
 END;

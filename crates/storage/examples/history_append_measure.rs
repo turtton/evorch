@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! AB_N=5000 AB_PRODUCERS=1,8 [AB_DB=<copy of a database>] [AB_OUT=file.jsonl] \
-//!   cargo run --release --offline -p storage --example append_baseline
+//!   cargo run --release --offline -p storage --example history_append_measure
 //! ```
 //! Without `AB_DB` a fresh database in a temp dir is used; with it, the writer opens that
 //! file (it is WRITTEN: pass a copy). Each phase: 1 cold append and `AB_WARMUP` warm-up

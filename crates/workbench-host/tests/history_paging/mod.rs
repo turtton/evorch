@@ -84,6 +84,176 @@ fn indexed_handle_query_keeps_h_after_append_and_exposes_the_selected_route() {
     assert_eq!(page(&f, None, 50).items.len(), 4);
 }
 
+fn reuse_scanned_noncommitted_id(with_hook: bool, paused: bool) {
+    use storage::history::build::{BuildBudget, Clock};
+    struct FrozenClock;
+    impl Clock for FrozenClock {
+        fn now_ns(&self) -> i64 {
+            0
+        }
+    }
+    let f = current_thread_fixture();
+    append(&f, "first");
+    append(&f, "second");
+    f.store
+        .handle()
+        .append_event(
+            None,
+            &Event::new(MessageEvent::MessageDelta {
+                run_id: Some("run-1".into()),
+                delta: "not committed".into(),
+            }),
+        )
+        .unwrap();
+    let sql = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    let tail: i64 = sql
+        .query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
+        .unwrap();
+    dirty(&f);
+    if paused {
+        let db = storage::Database::open(&storage::StorageConfig {
+            db_path: f.dir.path().join("host.db"),
+            ..Default::default()
+        })
+        .unwrap();
+        for _ in 0..3 {
+            assert!(
+                !db.history_build_step(
+                    "run-1",
+                    BuildBudget {
+                        rows: 1,
+                        ..Default::default()
+                    },
+                    &FrozenClock,
+                )
+                .unwrap()
+                .ready
+            );
+        }
+    } else {
+        rebuild(&f);
+    }
+    let state: (i64, i64, i64, i64) = sql
+        .query_row(
+            "SELECT phase,checkpoint,last_indexed_id,generation FROM history_run_state WHERE run_id='run-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (state.0, state.1, state.2),
+        (if paused { 1 } else { 2 }, tail, tail - 1)
+    );
+    let old_cursor = if paused {
+        None
+    } else {
+        let first = page(&f, None, 1);
+        assert_eq!(
+            f.host.projection().history_route(),
+            Some(HistoryRoute::Indexed)
+        );
+        assert_eq!(first.snapshot_revision, Revision(tail as u64));
+        Some(first.next_cursor.unwrap())
+    };
+    sql.execute("DELETE FROM events WHERE id=?1", [tail])
+        .unwrap();
+    if with_hook {
+        append(&f, "reused");
+    } else {
+        let payload = serde_json::to_string(&event_bus::EventKind::from(
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: "reused".into(),
+            },
+        ))
+        .unwrap();
+        sql.execute(
+            "INSERT INTO events(id,schema_version,monotonic_ns,wall_clock_ns,kind,subkind,run_id,payload) \
+             VALUES (?1,1,0,0,'Message','MessageCompleted','run-1',?2)",
+            rusqlite::params![tail, payload],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        sql.query_row::<i64, _, _>("SELECT MAX(id) FROM events", [], |r| r.get(0))
+            .unwrap(),
+        tail
+    );
+    // Tail replay is incremental, not a destructive invalidation. In the Ready
+    // cases below, only the changed H cut can revoke the old cursor.
+    assert_eq!(
+        sql.query_row::<i64, _, _>(
+            "SELECT generation FROM history_run_state WHERE run_id='run-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+        state.3
+    );
+    if paused || !with_hook {
+        assert_eq!(
+            sql.query_row::<i64, _, _>(
+                "SELECT checkpoint FROM history_run_state WHERE run_id='run-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+            tail - 1
+        );
+    }
+    rebuild(&f);
+    if let Some(cursor) = old_cursor {
+        assert_eq!(
+            query_error(
+                &f,
+                history(PageRequest {
+                    cursor: Some(cursor),
+                    limit: 1
+                })
+            ),
+            ErrorCode::Conflict
+        );
+    }
+    let indexed = page(&f, None, 50);
+    assert_eq!(
+        f.host.projection().history_route(),
+        Some(HistoryRoute::Indexed)
+    );
+    assert_eq!(indexed.items.len(), 3);
+    assert_eq!(
+        indexed
+            .items
+            .iter()
+            .map(|m| m.index.get())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    dirty(&f);
+    let legacy = page(&f, None, 50);
+    assert_eq!(
+        f.host.projection().history_route(),
+        Some(HistoryRoute::Legacy("dirty"))
+    );
+    assert_eq!(
+        serde_json::to_value(indexed.items).unwrap(),
+        serde_json::to_value(legacy.items).unwrap()
+    );
+}
+
+#[test]
+fn direct_sql_id_reuse_replays_the_scanned_tail_and_revokes_h_cut_cursors() {
+    for paused in [false, true] {
+        reuse_scanned_noncommitted_id(false, paused);
+    }
+}
+
+#[test]
+fn ordinary_append_id_reuse_replays_the_scanned_tail_and_revokes_h_cut_cursors() {
+    for paused in [false, true] {
+        reuse_scanned_noncommitted_id(true, paused);
+    }
+}
+
 #[test]
 fn unavailable_run_falls_back_as_a_whole_and_cursor_paths_never_switch() {
     let f = current_thread_fixture();

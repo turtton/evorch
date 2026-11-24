@@ -195,6 +195,81 @@ fn competing_preparations_and_hook_free_tail_compare_durable_source_and_checkpoi
 }
 
 #[test]
+fn reused_scanned_ids_rewind_even_without_a_cut_and_reject_prepared_ready() {
+    for committed_prefix in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("history.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let writer = storage.handle();
+        if committed_prefix {
+            append(&writer, "first");
+        }
+        writer
+            .append_event(
+                None,
+                &Event::new(MessageEvent::MessageDelta {
+                    run_id: Some("run".into()),
+                    delta: "not committed".into(),
+                }),
+            )
+            .unwrap();
+        let peer = Database::open(&config).unwrap();
+        let reader = Database::open_read_only(&config.db_path).unwrap();
+        peer.conn
+            .execute("UPDATE history_run_state SET phase=0", [])
+            .unwrap();
+        let budget = BuildBudget {
+            rows: 1,
+            ..Default::default()
+        };
+        for _ in 0..if committed_prefix { 2 } else { 1 } {
+            assert!(
+                !peer
+                    .history_build_step("run", budget, &At(0))
+                    .unwrap()
+                    .ready
+            );
+        }
+        let before = super::index::state(&peer.conn, "run").unwrap().unwrap();
+        let tail = before.checkpoint.unwrap();
+        assert_eq!(before.phase, 1);
+        assert_eq!(before.last_indexed, committed_prefix.then_some(tail - 1));
+        let start = writer.history_start("run", BuildBudget::default()).unwrap();
+        let stale = super::build::prepare(&reader, "run", BuildBudget::default(), &At(0), start)
+            .unwrap()
+            .unwrap();
+        peer.conn
+            .execute("DELETE FROM events WHERE id=?1", [tail])
+            .unwrap();
+        append(&writer, "reused");
+        let after = super::index::state(&peer.conn, "run").unwrap().unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.checkpoint, before.last_indexed);
+        assert!(writer.history_apply(stale).unwrap().conflicted);
+        assert_eq!(phase(&peer), 1);
+        let mut driver = Driver::default();
+        complete(&mut driver, &reader, &writer, 1_000_000_000);
+        assert_eq!(
+            peer.conn
+                .query_row::<i64, _, _>(
+                    "SELECT COUNT(*) FROM history_messages WHERE run_id='run'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            if committed_prefix { 2 } else { 1 },
+        );
+        let ready = super::index::state(&peer.conn, "run").unwrap().unwrap();
+        assert_eq!(ready.source, ready.applied);
+        assert_eq!(ready.last_indexed, Some(tail));
+        storage.close();
+    }
+}
+
+#[test]
 fn compressed_source_and_completed_parts_obey_decode_and_source_budgets() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
