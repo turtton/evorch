@@ -164,9 +164,11 @@ impl TerminalSession {
 }
 
 /// すべての端末セッションと、キーボード入力の受け渡し状態です。
-#[derive(Default)]
-pub struct TerminalSessions {
-    sessions: BTreeMap<TerminalKey, TerminalSession>,
+///
+/// セッションの識別子 `K` はホストごとに異なります。レガシーの Workbench は
+/// [`TerminalKey`]、core client はプロトコルのプロジェクト ID を使います。
+pub struct TerminalSessionsOf<K> {
+    sessions: BTreeMap<K, TerminalSession>,
     spawner: Option<Arc<dyn TerminalSpawner>>,
     /// 前フレームで端末がキーボードフォーカスを持っていたかどうかです。
     pub(crate) focused: bool,
@@ -177,7 +179,22 @@ pub struct TerminalSessions {
     pub(crate) pending_events: Vec<egui::Event>,
 }
 
-impl TerminalSessions {
+/// レガシー Workbench の端末セッションです。
+pub type TerminalSessions = TerminalSessionsOf<TerminalKey>;
+
+impl<K> Default for TerminalSessionsOf<K> {
+    fn default() -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            spawner: None,
+            focused: false,
+            grid_rect: None,
+            pending_events: Vec::new(),
+        }
+    }
+}
+
+impl<K> TerminalSessionsOf<K> {
     pub fn set_spawner(&mut self, spawner: Arc<dyn TerminalSpawner>) {
         self.spawner = Some(spawner);
     }
@@ -186,12 +203,58 @@ impl TerminalSessions {
         self.spawner.clone()
     }
 
-    pub fn get(&self, key: &TerminalKey) -> Option<&TerminalSession> {
+    /// Routes keyboard input to the focused terminal before egui sees it.
+    ///
+    /// Tab, arrows and Escape would otherwise move or drop focus, and global shortcuts
+    /// would steal control keys the shell needs. Keys for which `passes_through` returns
+    /// `true` (host shortcuts a terminal has no use for) still reach the host.
+    ///
+    /// A button press outside the terminal grid hands input ownership back: it and every
+    /// later event of the batch stay with egui (so Ctrl+C right after it copies a selection),
+    /// while earlier events still belong to the terminal.
+    pub fn capture_input(
+        &mut self,
+        raw_input: &mut egui::RawInput,
+        passes_through: impl Fn(egui::Key, egui::Modifiers) -> bool,
+    ) {
+        let pending = &mut self.pending_events;
+        let grid = self.grid_rect;
+        let mut released = false;
+        raw_input.events.retain(|event| {
+            if let egui::Event::PointerButton {
+                pos, pressed: true, ..
+            } = event
+                && grid.is_some_and(|grid| !grid.contains(*pos))
+            {
+                released = true;
+            }
+            if released {
+                return true;
+            }
+            let captured = match event {
+                egui::Event::Key { key, modifiers, .. } => !passes_through(*key, *modifiers),
+                egui::Event::Text(_)
+                | egui::Event::Paste(_)
+                | egui::Event::Copy
+                | egui::Event::Cut
+                | egui::Event::Ime(_) => true,
+                _ => false,
+            };
+            if captured {
+                pending.push(event.clone());
+            }
+            !captured
+        });
+    }
+}
+
+impl<K: Ord + Clone> TerminalSessionsOf<K> {
+    pub fn get(&self, key: &K) -> Option<&TerminalSession> {
         self.sessions.get(key)
     }
 
     /// セッションを返します。未作成なら `cwd` で作成します (シェルは起動しません)。
-    pub fn session_mut(&mut self, key: &TerminalKey, cwd: &Path) -> &mut TerminalSession {
+    pub fn session_mut(&mut self, key: &K, cwd: &Path) -> &mut TerminalSession {
         self.sessions
             .entry(key.clone())
             .or_insert_with(|| TerminalSession::new(cwd.to_path_buf()))
@@ -206,18 +269,20 @@ impl TerminalSessions {
         changed
     }
 
-    /// 削除されたプロジェクトのセッションを終了します。
-    pub fn retain_projects(&mut self, exists: impl Fn(&ProjectId) -> bool) {
-        self.sessions
-            .retain(|key, _| key.as_ref().is_none_or(&exists));
-    }
-
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
+    }
+}
+
+impl<P: Ord + Clone> TerminalSessionsOf<Option<P>> {
+    /// 削除されたプロジェクトのセッションを終了します。
+    pub fn retain_projects(&mut self, exists: impl Fn(&P) -> bool) {
+        self.sessions
+            .retain(|key, _| key.as_ref().is_none_or(&exists));
     }
 }
 

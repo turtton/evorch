@@ -64,7 +64,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         if self.terminals.focused {
-            self.capture_terminal_input(raw_input);
+            let keymap = &self.keymap;
+            self.terminals.capture_input(raw_input, |key, modifiers| {
+                keymap.passes_through_terminal(key, modifiers)
+            });
             return;
         }
         if !self.composer.focused {
@@ -89,49 +92,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 false
             }
             _ => true,
-        });
-    }
-
-    /// Routes keyboard input to the focused terminal before egui sees it.
-    ///
-    /// Tab, arrows and Escape would otherwise move or drop focus, and global shortcuts
-    /// would steal control keys the shell needs. Workbench shortcuts that a terminal has no
-    /// use for (see [`crate::keymap::Keymap::passes_through_terminal`]) still reach the keymap.
-    ///
-    /// A button press outside the terminal grid hands input ownership back: it and every
-    /// later event of the batch stay with egui (so Ctrl+C right after it copies a selection),
-    /// while earlier events still belong to the terminal.
-    fn capture_terminal_input(&mut self, raw_input: &mut egui::RawInput) {
-        let keymap = &self.keymap;
-        let pending = &mut self.terminals.pending_events;
-        let grid = self.terminals.grid_rect;
-        let mut released = false;
-        raw_input.events.retain(|event| {
-            if let egui::Event::PointerButton {
-                pos, pressed: true, ..
-            } = event
-                && grid.is_some_and(|grid| !grid.contains(*pos))
-            {
-                released = true;
-            }
-            if released {
-                return true;
-            }
-            let captured = match event {
-                egui::Event::Key { key, modifiers, .. } => {
-                    !keymap.passes_through_terminal(*key, *modifiers)
-                }
-                egui::Event::Text(_)
-                | egui::Event::Paste(_)
-                | egui::Event::Copy
-                | egui::Event::Cut
-                | egui::Event::Ime(_) => true,
-                _ => false,
-            };
-            if captured {
-                pending.push(event.clone());
-            }
-            !captured
         });
     }
 }
