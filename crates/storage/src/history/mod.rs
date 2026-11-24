@@ -1,5 +1,8 @@
 //! Pure transcript semantics shared by live scanning and the events-only index.
 //! No protocol dependency and no storage reads; callers own pending response state.
+pub mod background;
+#[cfg(all(test, feature = "test-support"))]
+mod background_tests;
 pub mod build;
 pub(crate) mod index;
 #[cfg(test)]

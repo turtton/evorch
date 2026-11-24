@@ -654,11 +654,14 @@ type Input = storage::host_input::DeliveredHostInput;
 /// A message count and the prefix digest after that many messages.
 type Shown = (u64, Digest);
 
+// Keep the scanner's run state inline instead of adding an allocation on resync.
+#[allow(clippy::large_enum_variant)]
 enum Slot {
     Cold(Vec<Header>),
     Hot { fold: RunFold, published: Shown },
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Next {
     Hot(Option<RunFold>, Shown),
     Cold(Option<Vec<Header>>),

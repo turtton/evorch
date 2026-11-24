@@ -53,6 +53,7 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 // 増やすためサイズを許容する。
 #[allow(clippy::large_enum_variant)]
 enum Command {
+    History(crate::history::background::Write),
     ConversationPlan(
         crate::repo::conversation_plan::WriteRequest,
         ReplyTx<crate::conversation_plan::PlanApplied>,
@@ -251,6 +252,9 @@ pub struct StorageStatistics {
     pub usage_flushes: u64,
     pub usage_buckets_written: u64,
     pub maintenance_runs: u64,
+    pub history_build_commands: u64,
+    pub history_build_total_micros: u64,
+    pub max_history_build_micros: u64,
 }
 
 /// single-writer スレッドの所有権と終了処理を保持します。
@@ -371,6 +375,41 @@ thread_local! {
 }
 
 impl StorageHandle {
+    pub(crate) fn history_start(
+        &self,
+        run: &str,
+        budget: crate::history::build::BuildBudget,
+    ) -> Result<crate::history::build::BuildProgress, StorageError> {
+        self.request(|reply| {
+            Command::History(crate::history::background::Write::Start(
+                run.into(),
+                budget,
+                reply,
+            ))
+        })
+    }
+    pub(crate) fn history_apply(
+        &self,
+        batch: crate::history::build::PreparedStep,
+    ) -> Result<crate::history::build::BuildProgress, StorageError> {
+        self.request(|reply| {
+            Command::History(crate::history::background::Write::Apply(
+                Box::new(batch),
+                reply,
+            ))
+        })
+    }
+    pub(crate) fn history_discover(
+        &self,
+        after: i64,
+        rows: Vec<(i64, Option<String>)>,
+    ) -> Result<usize, StorageError> {
+        self.request(|reply| {
+            Command::History(crate::history::background::Write::Discover(
+                after, rows, reply,
+            ))
+        })
+    }
     /// Poll a memory-only synchronous scope. The prohibition never crosses an
     /// await or thread boundary, and unwinding restores the prior scope.
     #[cfg(any(test, feature = "test-support"))]

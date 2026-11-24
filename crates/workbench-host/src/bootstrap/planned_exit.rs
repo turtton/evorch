@@ -98,6 +98,9 @@ impl BootstrappedHost {
             return Err("planned exit requires this host's sealed admission".into());
         }
         drop(command);
+        if let Some(mut history) = self.history_owner.take() {
+            history.stop();
+        }
         let bridge = self
             .bridge
             .take()

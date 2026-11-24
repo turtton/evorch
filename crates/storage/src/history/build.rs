@@ -60,8 +60,12 @@ fn live(conn: &rusqlite::Connection, run: &str) -> Result<bool, StorageError> {
     )?)
 }
 
-fn start(db: &Database, run: &str, budget: BuildBudget) -> Result<BuildProgress, StorageError> {
-    let tx = Transaction::new_unchecked(&db.conn, TransactionBehavior::Immediate)?;
+pub(crate) fn start(
+    conn: &rusqlite::Connection,
+    run: &str,
+    budget: BuildBudget,
+) -> Result<BuildProgress, StorageError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let mut progress = BuildProgress::default();
     if !index::version_ok(&tx)? || !live(&tx, run)? {
         return Ok(progress);
@@ -143,20 +147,41 @@ pub fn step(
     if budget.rows == 0 || budget.writes == 0 || budget.bytes == 0 {
         return Ok(BuildProgress::default());
     }
-    let start_at = clock.now_ns();
-    let mut progress = start(writer, run, budget)?;
+    let progress = start(&writer.conn, run, budget)?;
     if progress.ready || progress.writes >= budget.writes {
         return Ok(progress);
     }
-    let snapshot = reader.conn.unchecked_transaction()?;
-    if !index::version_ok(&snapshot)? || !live(&snapshot, run)? {
-        return Ok(progress);
-    }
-    let Some(prior) = index::state(&snapshot, run)? else {
+    let Some(batch) = prepare(reader, run, budget, clock, progress)? else {
         return Ok(progress);
     };
+    apply(&writer.conn, batch)
+}
+
+pub(crate) struct PreparedStep {
+    prior: State,
+    checkpoint: Option<i64>,
+    prepared: Option<index::Prepared>,
+    exhausted: bool,
+    progress: BuildProgress,
+}
+
+pub(crate) fn prepare(
+    reader: &Database,
+    run: &str,
+    budget: BuildBudget,
+    clock: &impl Clock,
+    mut progress: BuildProgress,
+) -> Result<Option<PreparedStep>, StorageError> {
+    let start_at = clock.now_ns();
+    let snapshot = reader.conn.unchecked_transaction()?;
+    if !index::version_ok(&snapshot)? || !live(&snapshot, run)? {
+        return Ok(None);
+    }
+    let Some(prior) = index::state(&snapshot, run)? else {
+        return Ok(None);
+    };
     if prior.phase != 1 || prior.generation.is_none() || prior.source.is_none() {
-        return Ok(progress);
+        return Ok(None);
     }
     let mut checkpoint = prior.checkpoint;
     let mut prepared = None;
@@ -196,23 +221,34 @@ pub fn step(
             if crate::COMMITTED_SUBKINDS
                 .contains(&(kind.as_str(), subkind.as_deref().unwrap_or("")))
             {
-                let (kind, tokenized) = index::source_kind(&snapshot, id)?;
+                progress.bytes -= bytes;
+                let mut remaining = budget.bytes - progress.bytes;
+                let (kind, tokenized) = index::source_kind_limited(&snapshot, id, &mut remaining)?;
                 let at: i64 = row.get(1)?;
-                let p = index::prepare(
+                let p = index::prepare_budgeted(
                     &snapshot,
                     prior.clone(),
                     id,
                     at.max(-i64::MAX),
                     &kind,
                     tokenized,
+                    &mut remaining,
+                    budget.rows - progress.rows,
                 )?;
+                progress.bytes = budget.bytes - remaining;
                 progress.rows += p.sources.len().saturating_sub(1);
                 if progress.rows > budget.rows {
                     return Err(StorageError::Io(
                         "history message exceeds source row budget".into(),
                     ));
                 }
-                if p.sources.len().saturating_add(8) > budget.writes - progress.writes {
+                if p.write_bound > budget.writes - progress.writes {
+                    // Cleanup may have consumed this step's write allowance.
+                    // Its checkpoint is durable; retry source preparation with a
+                    // fresh budget rather than treating a partial tick as corrupt.
+                    if progress.writes > 0 {
+                        return Ok(None);
+                    }
                     return Err(StorageError::Io(
                         "history message exceeds write budget".into(),
                     ));
@@ -222,6 +258,8 @@ pub fn step(
             }
             if clock.now_ns().saturating_sub(start_at)
                 >= i64::try_from(budget.elapsed.as_nanos()).unwrap_or(i64::MAX)
+                || progress.rows >= budget.rows.saturating_sub(4095).max(1)
+                || progress.bytes >= budget.bytes.saturating_sub(16 * 1024 * 1024).max(1)
             {
                 break;
             }
@@ -229,7 +267,28 @@ pub fn step(
     }
     snapshot.commit()?;
 
-    let tx = Transaction::new_unchecked(&writer.conn, TransactionBehavior::Immediate)?;
+    Ok(Some(PreparedStep {
+        prior,
+        checkpoint,
+        prepared,
+        exhausted,
+        progress,
+    }))
+}
+
+pub(crate) fn apply(
+    conn: &rusqlite::Connection,
+    batch: PreparedStep,
+) -> Result<BuildProgress, StorageError> {
+    let PreparedStep {
+        prior,
+        checkpoint,
+        prepared,
+        exhausted,
+        mut progress,
+    } = batch;
+    let run = &prior.run;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let current = index::state(&tx, run)?;
     if !index::version_ok(&tx)?
         || !live(&tx, run)?

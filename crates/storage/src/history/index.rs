@@ -74,26 +74,38 @@ pub(crate) fn state(conn: &Connection, run: &str) -> Result<Option<State>, Stora
 }
 
 /// Bounded decompression is separate from the scanner's existing event meter.
-pub(crate) fn decode_kind(value: ValueRef<'_>) -> Result<EventKind, StorageError> {
+fn decode_kind(value: ValueRef<'_>, limit: usize) -> Result<(EventKind, usize), StorageError> {
+    let limit = limit.min(MAX_DESCRIPTOR_BYTES);
     let bytes: Cow<'_, [u8]> = match value {
         ValueRef::Text(s) => Cow::Borrowed(s),
         ValueRef::Blob(s) => {
             let decoder = zstd::stream::read::Decoder::new(s).map_err(|_| invalid())?;
             let mut out = Vec::new();
             decoder
-                .take((MAX_DESCRIPTOR_BYTES + 1) as u64)
+                .take((limit + 1) as u64)
                 .read_to_end(&mut out)
                 .map_err(|_| invalid())?;
             Cow::Owned(out)
         }
         _ => return Err(invalid()),
     };
-    if bytes.len() > MAX_DESCRIPTOR_BYTES {
+    if bytes.len() > limit {
         return Err(invalid());
     }
-    serde_json::from_slice(&bytes).map_err(|_| invalid())
+    Ok((
+        serde_json::from_slice(&bytes).map_err(|_| invalid())?,
+        bytes.len(),
+    ))
 }
 pub(crate) fn source_kind(conn: &Connection, id: i64) -> Result<(EventKind, bool), StorageError> {
+    let mut remaining = usize::MAX;
+    source_kind_limited(conn, id, &mut remaining)
+}
+pub(crate) fn source_kind_limited(
+    conn: &Connection,
+    id: i64,
+    remaining: &mut usize,
+) -> Result<(EventKind, bool), StorageError> {
     let mut s = conn.prepare_cached("SELECT payload,body_format FROM events WHERE id=?1")?;
     let mut rows = s.query([id])?;
     let row = rows.next()?.ok_or_else(invalid)?;
@@ -101,7 +113,8 @@ pub(crate) fn source_kind(conn: &Connection, id: i64) -> Result<(EventKind, bool
         c.source_rows += 1;
         c.payload_decodes += 1;
     });
-    let kind = decode_kind(row.get_ref(0)?)?;
+    let (kind, bytes) = decode_kind(row.get_ref(0)?, *remaining)?;
+    *remaining -= bytes;
     let format: i64 = row.get(1)?;
     if !matches!(format, 0 | 1) {
         return Err(invalid());
@@ -129,6 +142,7 @@ pub(crate) struct Prepared {
     pub response: Option<String>,
     pub clear_pending: bool,
     pub pending: Option<(usize, usize)>,
+    pub write_bound: usize,
 }
 
 #[derive(Debug)]
@@ -146,6 +160,30 @@ pub(crate) fn prepare(
     kind: &EventKind,
     tokenized: bool,
 ) -> Result<Prepared, StorageError> {
+    let mut remaining = usize::MAX;
+    prepare_budgeted(
+        conn,
+        prior,
+        id,
+        at,
+        kind,
+        tokenized,
+        &mut remaining,
+        usize::MAX,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_budgeted(
+    conn: &Connection,
+    prior: State,
+    id: i64,
+    at: i64,
+    kind: &EventKind,
+    tokenized: bool,
+    remaining: &mut usize,
+    remaining_rows: usize,
+) -> Result<Prepared, StorageError> {
     if kind.primary_run_id() != Some(prior.run.as_str()) {
         return Err(invalid());
     }
@@ -155,6 +193,7 @@ pub(crate) fn prepare(
     let mut response = None;
     let mut clear_pending = false;
     let mut pending = None;
+    let mut pending_rows = 0;
     let message = if let EventKind::Message(MessageEvent::MessagePart {
         response_id,
         index,
@@ -165,10 +204,16 @@ pub(crate) fn prepare(
         response = Some(response_id.clone());
         let previous:Option<(usize,usize)>=conn.prepare_cached("SELECT part_index+1,total FROM history_pending_parts WHERE run_id=?1 AND response_id=?2 ORDER BY part_index DESC LIMIT 1")?.query_row(params![prior.run,response_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let progress = part_progress(previous, *index, *total);
+        pending_rows = previous.map_or(0, |p| p.0);
         clear_pending = *index == 0 || progress.is_none();
         if let Some((count, total)) = progress {
             if count == total {
                 if *index > 0 {
+                    if *index > remaining_rows {
+                        return Err(StorageError::Io(
+                            "history message exceeds source row budget".into(),
+                        ));
+                    }
                     let mut s=conn.prepare_cached("SELECT event_id FROM history_pending_parts WHERE run_id=?1 AND response_id=?2 ORDER BY part_index")?;
                     sources = s
                         .query_map(params![prior.run, response_id], |r| r.get(0))?
@@ -184,7 +229,7 @@ pub(crate) fn prepare(
                     let part = if *source == id {
                         text_part(kind, tokenized)?
                     } else {
-                        let (kind, format) = source_kind(conn, *source)?;
+                        let (kind, format) = source_kind_limited(conn, *source, remaining)?;
                         text_part(&kind, format)?
                     };
                     bytes = bytes.saturating_add(part.0.len());
@@ -224,6 +269,14 @@ pub(crate) fn prepare(
             })
         })
         .transpose()?;
+    let write_bound = 2
+        + if clear_pending { pending_rows } else { 0 }
+        + usize::from(pending.is_some())
+        + if message.is_some() {
+            sources.len() + 1
+        } else {
+            0
+        };
     Ok(Prepared {
         prior,
         next,
@@ -233,6 +286,7 @@ pub(crate) fn prepare(
         response,
         clear_pending,
         pending,
+        write_bound,
     })
 }
 
