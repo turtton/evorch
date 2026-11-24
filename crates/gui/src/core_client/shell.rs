@@ -11,7 +11,7 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
 use super::features::{DockPass, FeatureId, Navigation, Selection};
-use super::local::LocalPanes;
+use super::local::{self, LocalPanes, files::FileTabId};
 use super::notifications::{self, NotificationLog};
 use super::run_tabs::{RunPane, RunTabId, RunTabs};
 use crate::panes::conversation_plan::plan_panel;
@@ -36,6 +36,8 @@ pub enum CoreTab {
     Diff,
     /// The selected project's shell.
     Terminal,
+    /// A read-only preview of a local file, opened from a link.
+    File(FileTabId),
 }
 
 /// What a frame asks the screen to do once the dock is drawn and the shared state is free.
@@ -239,6 +241,10 @@ impl Viewer<'_, '_> {
                 let title = self.run_tabs.get(id).map(|tab| tab.title.as_str());
                 return (icons::SCROLL, Cow::Borrowed(title.unwrap_or("Transcript")));
             }
+            CoreTab::File(id) => {
+                let title = self.local.file_title(id).unwrap_or("File");
+                return (icons::FILE_TEXT, Cow::Borrowed(title));
+            }
         };
         (icon, Cow::Borrowed(title))
     }
@@ -358,6 +364,7 @@ impl TabViewer for Viewer<'_, '_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut CoreTab) {
+        let start = ui.ctx().output(|output| output.commands.len());
         match *tab {
             CoreTab::Projects => self.projects(ui),
             CoreTab::Notifications => self.notifications(ui),
@@ -377,11 +384,13 @@ impl TabViewer for Viewer<'_, '_> {
             CoreTab::Plan => self.plan(ui),
             CoreTab::Diff => self.local.diff_tab(ui),
             CoreTab::Terminal => self.local.terminal_tab(ui),
+            CoreTab::File(id) => self.local.file_tab(ui, id),
             CoreTab::Run(id) => conversation::run_tab(
                 ui,
                 self.conversation,
                 self.io.cache,
                 self.io.connected,
+                self.io.link_base,
                 self.run_tabs.get(id),
                 self.effects,
             ),
@@ -398,6 +407,18 @@ impl TabViewer for Viewer<'_, '_> {
                 }
             }
         }
+        let base = match *tab {
+            CoreTab::File(id) => self.local.file_base(id),
+            _ => self.io.link_base,
+        };
+        let links = local::take_links(ui.ctx(), start, base);
+        if !links.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        for link in links {
+            let file = self.local.open_file(ui.ctx(), link);
+            self.effects.push(Effect::Open(CoreTab::File(file)));
+        }
     }
 
     fn is_closeable(&self, tab: &CoreTab) -> bool {
@@ -408,6 +429,7 @@ impl TabViewer for Viewer<'_, '_> {
                 | CoreTab::Run(_)
                 | CoreTab::Diff
                 | CoreTab::Terminal
+                | CoreTab::File(_)
         )
     }
 

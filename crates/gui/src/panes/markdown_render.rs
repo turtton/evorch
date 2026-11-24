@@ -117,10 +117,46 @@ pub fn render_markdown_with_base(
     base: Option<&Path>,
     root: Option<&Path>,
 ) {
+    render(ui, source, id_salt, base, root, false);
+}
+
+/// Markdown whose relative links resolve against `workspace`, the working tree on
+/// this machine, and are never handed to the desktop. While there is no workspace,
+/// a relative link's menu says it cannot open instead of offering the browser.
+pub fn render_markdown_in_workspace(
+    ui: &mut Ui,
+    source: &str,
+    id_salt: &str,
+    workspace: Option<&Path>,
+) {
+    render(
+        ui,
+        source,
+        id_salt,
+        workspace,
+        workspace,
+        workspace.is_none(),
+    );
+}
+
+fn render(
+    ui: &mut Ui,
+    source: &str,
+    id_salt: &str,
+    base: Option<&Path>,
+    root: Option<&Path>,
+    missing_workspace: bool,
+) {
     super::file_viewer::install_image_loader(ui.ctx());
     let (link_base, link_root) = (base.map(Path::to_path_buf), root.map(Path::to_path_buf));
     let link_menu = move |ui: &mut Ui, destination: &str| {
-        show_link_menu(ui, destination, link_base.as_deref(), link_root.as_deref());
+        show_link_menu(
+            ui,
+            destination,
+            link_base.as_deref(),
+            link_root.as_deref(),
+            missing_workspace,
+        );
     };
     ui.push_id(id_salt, |ui| {
         let color = ui.visuals().override_text_color.unwrap_or(palette().TEXT);
@@ -304,13 +340,32 @@ fn prepare(source: &str, base: Option<&Path>) -> Prepared {
     }
 }
 
-fn show_link_menu(ui: &mut Ui, destination: &str, base: Option<&Path>, root: Option<&Path>) {
+fn show_link_menu(
+    ui: &mut Ui,
+    destination: &str,
+    base: Option<&Path>,
+    root: Option<&Path>,
+    missing_workspace: bool,
+) {
     if let Some(link) = super::file_viewer::resolve_file_link(destination, base) {
         if ui.button("Open").clicked() {
             ui.ctx().open_url(egui::OpenUrl::same_tab(destination));
             ui.close();
         }
         super::file_viewer::copy_path_items(ui, &link.path, root);
+        return;
+    }
+    // A link that would resolve against any base is a relative path, which only the
+    // missing workspace could open.
+    if missing_workspace
+        && super::file_viewer::resolve_file_link(destination, Some(Path::new("/"))).is_some()
+    {
+        ui.add_enabled(false, egui::Button::new("Open"))
+            .on_disabled_hover_text("The workspace is not available on this machine.");
+        if ui.button("Copy link").clicked() {
+            ui.ctx().copy_text(destination.to_owned());
+            ui.close();
+        }
         return;
     }
     if ui.button("Open in browser").clicked() {

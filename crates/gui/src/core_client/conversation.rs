@@ -2,6 +2,7 @@
 //! conversation pane: a header, the committed transcript, the cards that wait for the
 //! person, and the composer at the bottom. It draws only what the core has committed.
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use egui::{RichText, Ui};
 use workbench_protocol::namespaces::execution::{GoalPhase, GoalView};
@@ -17,7 +18,7 @@ use super::features::execution::ExecutionBand;
 use super::features::{FeatureId, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
-use super::transcript::{self, Scope, byte_size};
+use super::transcript::{self, Scope, TranscriptView, byte_size};
 use super::{ClientAttachmentDraft, Draft};
 use crate::attachments::{AttachmentIo, Intake};
 use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, progress_band};
@@ -78,6 +79,9 @@ pub struct ConversationIo<'a> {
     pub attachment_drafts: &'a BTreeMap<String, Vec<ClientAttachmentDraft>>,
     pub sending: &'a BTreeSet<String>,
     pub loading_attachments: &'a BTreeMap<String, usize>,
+    /// What relative links in the transcripts resolve against: the selected
+    /// thread's working tree on this machine.
+    pub link_base: Option<&'a Path>,
 }
 
 impl ConversationIo<'_> {
@@ -167,6 +171,7 @@ pub fn run_tab(
     pane: &mut ConversationPane,
     cache: &Cache,
     connected: bool,
+    base: Option<&Path>,
     tab: Option<&RunTab>,
     effects: &mut Vec<Effect>,
 ) {
@@ -187,10 +192,13 @@ pub fn run_tab(
             transcript::transcript(
                 ui,
                 &mut pane.requested_bodies,
-                cache,
-                Scope::Run {
-                    thread: &tab.thread,
-                    run: &tab.run,
+                TranscriptView {
+                    cache,
+                    scope: Scope::Run {
+                        thread: &tab.thread,
+                        run: &tab.run,
+                    },
+                    base,
                 },
                 |ui| run_transcript_empty(ui, name),
                 |_, _| {},
@@ -422,8 +430,11 @@ fn thread_transcript(
     transcript::transcript(
         ui,
         &mut pane.requested_bodies,
-        io.cache,
-        Scope::Thread(thread),
+        TranscriptView {
+            cache: io.cache,
+            scope: Scope::Thread(thread),
+            base: io.link_base,
+        },
         |ui| {
             if !waiting && !older {
                 empty_state(

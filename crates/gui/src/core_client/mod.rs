@@ -609,6 +609,7 @@ impl CoreClientScreen {
             })
             .flatten();
         self.local.begin_frame(ui.ctx(), roots, projects);
+        let link_base = self.local.workspace().map(std::path::Path::to_path_buf);
         let frame = {
             let s = &mut *shared;
             let view = FeatureView {
@@ -629,6 +630,7 @@ impl CoreClientScreen {
                     attachment_drafts: &s.attachment_drafts,
                     sending: &s.sending,
                     loading_attachments: &s.loading_attachments,
+                    link_base: link_base.as_deref(),
                 },
                 selection: &selection,
                 effects: &mut effects,
@@ -666,6 +668,8 @@ impl CoreClientScreen {
                 effect,
             );
         }
+        // Closing a file tab or a reset layout drops its preview.
+        self.local.sweep_files(ui.ctx(), &self.dock);
         // Closing a tab, a reset layout or another thread drops its run's history.
         for run in self.run_tabs.sweep(&mut self.dock, self.selected.as_ref()) {
             shared.cache.forget_run(run.as_str());
@@ -712,6 +716,11 @@ fn apply_effect(
             shell::Effect::Open(tab @ (shell::CoreTab::Diff | shell::CoreTab::Terminal)) => {
                 shell::open_local(dock, tab);
             }
+            shell::Effect::Open(tab @ shell::CoreTab::File(_)) => shell::focus_beside(
+                dock,
+                tab,
+                shell::CoreTab::Feature(features::FeatureId::Execution),
+            ),
             shell::Effect::Open(tab) => shell::focus(dock, tab),
             // The frame's end reads the run's history once the tab is in the dock.
             shell::Effect::OpenRun(pane) => shell::focus_beside(

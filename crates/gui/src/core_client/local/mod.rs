@@ -1,8 +1,10 @@
 //! The panes that work on this machine's files and processes: the Diff of the selected
-//! thread's working tree and one shell per project, drawn with the embedded workbench's
-//! panes. The core client runs beside the core, so the directories the core reports
-//! are read here directly ([`context`]); nothing of this goes through the core.
+//! thread's working tree, one shell per project and the previews of linked files
+//! ([`files`]), drawn with the embedded workbench's panes. The core client runs beside
+//! the core, so the directories the core reports are read here directly ([`context`]);
+//! nothing of this goes through the core.
 pub mod context;
+pub mod files;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,10 +17,13 @@ pub use context::{LocalRoot, LocalRoots};
 
 use crate::diff::{AUTO_REFRESH_INTERVAL, DiffModel, DiffRequest, DiffSource, GitCliDiffSource};
 use crate::panes::diff::{diff_pane, selected_mode};
+use crate::panes::file_viewer::{self, FileLink, file_viewer_pane, resolve_file_link};
 use crate::panes::terminal::terminal_pane;
 use crate::pty::{TerminalSpawner, resolve_terminal_cwd};
 use crate::terminal::TerminalSessionsOf;
 use crate::theme::widgets::{empty_state, spinner};
+
+use super::shell::CoreTab;
 
 /// The Terminal's shells are keyed by project; `None` is the shell in the home directory.
 pub type LocalTerminalKey = Option<ProjectId>;
@@ -32,6 +37,7 @@ pub struct LocalPanes {
     pub(super) terminals: TerminalSessionsOf<LocalTerminalKey>,
     home: PathBuf,
     roots: LocalRoots,
+    pub(super) files: files::FileTabs,
 }
 
 impl Default for LocalPanes {
@@ -58,6 +64,7 @@ impl LocalPanes {
             terminals,
             home,
             roots: LocalRoots::default(),
+            files: files::FileTabs::default(),
         }
     }
 
@@ -143,6 +150,40 @@ impl LocalPanes {
         terminal_pane(ui, &mut self.terminals, &key, &cwd);
     }
 
+    /// The selected thread's working tree on this machine, which relative links in
+    /// the transcripts resolve against.
+    pub fn workspace(&self) -> Option<&Path> {
+        self.roots.workspace.ready()
+    }
+
+    pub fn file_tab(&mut self, ui: &mut egui::Ui, id: files::FileTabId) {
+        if let Some(tab) = self.files.get(id) {
+            file_viewer_pane(ui, &tab.path, self.roots.workspace.ready());
+        }
+    }
+
+    pub fn file_title(&self, id: files::FileTabId) -> Option<&str> {
+        self.files.get(id).map(|tab| tab.title.as_str())
+    }
+
+    pub fn file_base(&self, id: files::FileTabId) -> Option<&Path> {
+        self.files.get(id).and_then(|tab| tab.path.parent())
+    }
+
+    /// The tab of `link`'s file, which scrolls to the link's line when drawn.
+    pub fn open_file(&mut self, ctx: &egui::Context, link: FileLink) -> files::FileTabId {
+        file_viewer::request_line(ctx, &link);
+        self.files.open(link.path)
+    }
+
+    /// After the dock: a File tab the dock lost (closed, or a reset layout) is dropped
+    /// with its preview, so the file is read anew when opened again.
+    pub fn sweep_files(&mut self, ctx: &egui::Context, dock: &egui_dock::DockState<CoreTab>) {
+        for path in self.files.sweep(dock) {
+            file_viewer::forget_file(ctx, &path);
+        }
+    }
+
     /// Before egui reads the input: a focused terminal takes the keys, so no shortcut
     /// and no focus move steals one the shell needs. The core client has no keymap,
     /// so no key passes through.
@@ -155,6 +196,28 @@ impl LocalPanes {
             .retain(|event| !matches!(event, egui::Event::Paste(text) if text.is_empty()));
         self.terminals.capture_input(raw, |_, _| false);
     }
+}
+
+/// Takes the local-file links a tab opened since output command `start`, as the
+/// embedded workbench does, resolving relative ones against `base`. Without a base, a
+/// relative link is dropped too: the desktop would resolve it against this process's
+/// working directory.
+pub fn take_links(ctx: &egui::Context, start: usize, base: Option<&Path>) -> Vec<FileLink> {
+    let links = file_viewer::take_file_links(ctx, start, base);
+    if base.is_none() {
+        let any_base = Some(Path::new("/"));
+        ctx.output_mut(|output| {
+            let mut index = 0;
+            output.commands.retain(|command| {
+                let eligible = index >= start;
+                index += 1;
+                !(eligible
+                    && matches!(command, egui::OutputCommand::OpenUrl(url)
+                        if resolve_file_link(&url.url, any_base).is_some()))
+            });
+        });
+    }
+    links
 }
 
 fn loading(ui: &mut egui::Ui) {

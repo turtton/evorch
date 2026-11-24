@@ -2,6 +2,7 @@
 //! which shows the root runs only, and the run tabs, which show one run each. Like the
 //! embedded workbench, a subagent's messages appear only in its own transcript tab.
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use egui::{RichText, Ui};
 use workbench_protocol::{ids::*, views::*};
@@ -9,7 +10,7 @@ use workbench_protocol::{ids::*, views::*};
 use super::cache::Cache;
 use super::connection::Action;
 use super::shell::Effect;
-use crate::panes::markdown_render::render_markdown_with_base;
+use crate::panes::markdown_render::render_markdown_in_workspace;
 use crate::panes::transcript_widgets::{code_block, diff_block, user_bubble};
 use crate::theme::icons;
 use crate::theme::text::muted;
@@ -25,18 +26,26 @@ pub(super) enum Scope<'a> {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct TranscriptView<'a> {
+    pub cache: &'a Cache,
+    pub scope: Scope<'a>,
+    /// What relative links and images in the messages resolve against.
+    pub base: Option<&'a Path>,
+}
+
 /// Draws the messages of `scope` in a scroll area that follows the newest one, with
 /// "Load earlier messages" while older ones exist. `empty` is drawn when no message is
 /// shown, and `cards` after the messages.
 pub(super) fn transcript(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
-    cache: &Cache,
-    scope: Scope<'_>,
+    view: TranscriptView<'_>,
     empty: impl FnOnce(&mut Ui),
     cards: impl FnOnce(&mut Ui, &mut Vec<Effect>),
     effects: &mut Vec<Effect>,
 ) {
+    let TranscriptView { cache, scope, base } = view;
     let mut failed = None;
     let (salt, messages, older, load_earlier): (_, Vec<_>, _, _) = match scope {
         Scope::Thread(thread) => (
@@ -102,7 +111,7 @@ pub(super) fn transcript(
             for item in items(&messages) {
                 match item {
                     Item::Message(message) => {
-                        message_row(ui, requested_bodies, cache, message, effects);
+                        message_row(ui, requested_bodies, cache, base, message, effects);
                     }
                     Item::Tools(tools) => tool_group(ui, requested_bodies, cache, &tools, effects),
                 }
@@ -174,6 +183,7 @@ fn message_row(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
+    base: Option<&Path>,
     message: &CommittedMessage,
     effects: &mut Vec<Effect>,
 ) {
@@ -192,12 +202,11 @@ fn message_row(
                         if let Some(text) =
                             message_text(ui, requested_bodies, cache, message, effects)
                         {
-                            render_markdown_with_base(
+                            render_markdown_in_workspace(
                                 ui,
                                 text,
                                 &format!("msg-{}-{}", message.run, message.index.get()),
-                                None,
-                                None,
+                                base,
                             );
                         }
                     });
