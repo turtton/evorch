@@ -244,6 +244,18 @@ async fn committed_before_source_terminal_recovers_the_same_target_and_goal() {
             .unwrap();
         assert_eq!(receipt.state, HandoffState::Committed);
         assert_eq!(receipt.target_run_id, target.to_string());
+        db.handle()
+            .upsert_thread_goal_usage(
+                &goal.goal_id,
+                &event_bus::escalation_thread_id(&target.to_string()),
+                &target.to_string(),
+                &event_bus::ThreadGoalUsage {
+                    model_requests: 12,
+                    input_tokens: 333,
+                    output_tokens: 20,
+                },
+            )
+            .unwrap();
         // No second target or provider request on an idempotent replay.
         assert_eq!(
             runtime
@@ -295,7 +307,8 @@ async fn committed_before_source_terminal_recovers_the_same_target_and_goal() {
             }
         );
         assert!(restored.checks_paused);
-        assert_eq!(restored.usage.input_tokens, 111);
+        assert_eq!(restored.usage.input_tokens, 333);
+        assert_eq!(restored.usage.model_requests, 13);
         assert_eq!(restored.usage.output_tokens, 222);
         assert_eq!(restored.max_tokens, goal.max_tokens);
         assert_eq!(restored.original_request, goal.original_request);

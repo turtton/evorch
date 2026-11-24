@@ -432,6 +432,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("gc_state", Keep, "artifact collector state"),
     ("gc_unknown_meta", Keep, "artifact collector state"),
     ("thread_tombstones", Tombstone, "the fence"),
+    (
+        "thread_goal_usage_current",
+        Keep,
+        "goals move across thread/root boundaries; retain only goal_id and cumulative counters",
+    ),
     ("run_tombstones", Tombstone, "the fence"),
     ("task_tombstones", Tombstone, "the fence"),
 ];

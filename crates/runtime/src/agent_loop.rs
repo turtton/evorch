@@ -1358,15 +1358,22 @@ impl LoopState {
                 return;
             }
             self.publish_context(&visible_messages, estimated, window);
-            if let Some(runtime) = self.runtime()
-                && !runtime.goal_model_request(
+            if let Some(runtime) = self.runtime() {
+                match runtime.goal_model_request(
                     self.task.run_id,
                     self.task.config.purpose,
                     self.task.config.budget.max_tokens.bounded(),
-                )
-            {
-                self.finish_error("Goal cumulative budget exhausted".into());
-                return;
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.finish_error("Goal cumulative budget exhausted".into());
+                        return;
+                    }
+                    Err(error) => {
+                        self.finish_error(error);
+                        return;
+                    }
+                }
             }
             if let Err(error) = self.capture_benchmark(&invocation, &visible_messages).await {
                 self.finish_error(error.to_string());
@@ -1490,8 +1497,12 @@ impl LoopState {
                 session.set_last_usage(usage);
             }
             self.budget.usage(usage);
-            if let Some(runtime) = self.runtime() {
-                runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage);
+            if let Some(runtime) = self.runtime()
+                && let Err(error) =
+                    runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage)
+            {
+                self.finish_error(error);
+                return;
             }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}

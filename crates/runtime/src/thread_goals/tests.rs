@@ -8,6 +8,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
+mod usage_tests;
+
 #[derive(Clone)]
 enum Step {
     Create,
@@ -178,6 +180,14 @@ fn harness(
     root: Vec<Step>,
     reviewer: Vec<Step>,
 ) -> (AgentRuntime, Arc<Model>, event_bus::EventReceiver) {
+    harness_with_store(root, reviewer, true)
+}
+
+fn harness_with_store(
+    root: Vec<Step>,
+    reviewer: Vec<Step>,
+    durable: bool,
+) -> (AgentRuntime, Arc<Model>, event_bus::EventReceiver) {
     let dir = tempfile::tempdir().unwrap();
     let storage_config = storage::StorageConfig {
         db_path: dir.path().join("review.db"),
@@ -201,8 +211,12 @@ fn harness(
         bus.clone(),
         Arc::new(::tools::ToolExecutor::new(bus)),
         model.clone(),
-    )
-    .with_run_store(store);
+    );
+    let runtime = if durable {
+        runtime.with_run_store(store)
+    } else {
+        runtime
+    };
     model
         .runtime
         .set(Arc::downgrade(&runtime.shared))
@@ -507,7 +521,9 @@ async fn restore_keeps_pause_and_usage_without_spawning_and_stop_resume_does_not
     runtime
         .set_goal_checks_paused("thread", &goal.goal_id, true)
         .unwrap();
-    runtime.goal_model_request(root, crate::RunPurpose::General, None);
+    runtime
+        .goal_model_request(root, crate::RunPurpose::General, None)
+        .unwrap();
     let saved = runtime.thread_goal("thread").unwrap();
     let (restored, _, _) = harness(vec![], vec![]);
     restored.restore_thread_goal(saved.clone()).unwrap();
@@ -758,38 +774,50 @@ async fn token_budget_includes_review_and_cannot_reset_on_restore() {
     runtime
         .create_thread_goal("thread", root, "Research".into(), vec!["Evidence".into()])
         .unwrap();
-    assert!(runtime.goal_model_request(root, crate::RunPurpose::General, Some(20)));
-    runtime.goal_usage(
-        root,
-        crate::RunPurpose::General,
-        Usage {
-            input_tokens: 10,
-            output_tokens: 2,
-            ..Default::default()
-        },
+    assert!(
+        runtime
+            .goal_model_request(root, crate::RunPurpose::General, Some(20))
+            .unwrap()
     );
+    runtime
+        .goal_usage(
+            root,
+            crate::RunPurpose::General,
+            Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let reviewer = RunId::new(100);
     let purpose = crate::RunPurpose::ThreadGoalReview {
         root_run_id: root,
         epoch: 0,
     };
-    assert!(runtime.goal_model_request(reviewer, purpose, None));
-    runtime.goal_usage(
-        reviewer,
-        purpose,
-        Usage {
-            input_tokens: 8,
-            output_tokens: 2,
-            ..Default::default()
-        },
-    );
+    assert!(runtime.goal_model_request(reviewer, purpose, None).unwrap());
+    runtime
+        .goal_usage(
+            reviewer,
+            purpose,
+            Usage {
+                input_tokens: 8,
+                output_tokens: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let saved = runtime.thread_goal("thread").unwrap();
     assert_eq!(saved.phase, ThreadGoalPhase::Blocked);
     assert_eq!(saved.usage.input_tokens + saved.usage.output_tokens, 22);
     let (restored, _, _) = harness(vec![], vec![]);
     restored.restore_thread_goal(saved).unwrap();
     restored.bind_thread_root("thread", root).unwrap();
-    assert!(!restored.goal_model_request(root, crate::RunPurpose::General, None));
+    assert!(
+        !restored
+            .goal_model_request(root, crate::RunPurpose::General, None)
+            .unwrap()
+    );
     assert_eq!(restored.thread_goal("thread").unwrap().max_tokens, Some(20));
 }
 
@@ -838,7 +866,11 @@ async fn blocked_goal_requires_explicit_host_replacement_to_start_new_budget() {
     exhausted.max_tokens = Some(12);
     exhausted.usage.input_tokens = 12;
     runtime.restore_thread_goal(exhausted).unwrap();
-    assert!(!runtime.goal_model_request(root, crate::RunPurpose::General, None));
+    assert!(
+        !runtime
+            .goal_model_request(root, crate::RunPurpose::General, None)
+            .unwrap()
+    );
     let blocked = runtime.thread_goal("thread").unwrap();
     assert!(blocked.reason.as_ref().unwrap().contains("/goal"));
     assert!(
@@ -891,7 +923,11 @@ async fn trusted_root_handoff_preserves_goal_pause_request_and_cumulative_usage(
     runtime
         .set_goal_checks_paused("thread", &goal.goal_id, true)
         .unwrap();
-    assert!(runtime.goal_model_request(source, crate::RunPurpose::General, Some(100)));
+    assert!(
+        runtime
+            .goal_model_request(source, crate::RunPurpose::General, Some(100))
+            .unwrap()
+    );
     {
         let mut goals = runtime.goal_lock();
         let entry = goals.goals.get_mut("thread").unwrap();
@@ -1126,7 +1162,11 @@ async fn surviving_old_root_child_remains_accounted_and_fenced_after_handoff() {
     runtime.bind_thread_root("thread", source).unwrap();
     assert_eq!(runtime.goal_owner_for_run(source), Some(source));
     let usage = runtime.thread_goal(&thread).unwrap().usage.clone();
-    assert!(runtime.goal_model_request(source, crate::RunPurpose::General, None));
+    assert!(
+        runtime
+            .goal_model_request(source, crate::RunPurpose::General, None)
+            .unwrap()
+    );
     assert_eq!(
         runtime.thread_goal(&thread).unwrap().usage,
         usage,
@@ -1135,7 +1175,11 @@ async fn surviving_old_root_child_remains_accounted_and_fenced_after_handoff() {
     assert_eq!(runtime.goal_owner_for_run(child), Some(target));
     assert_eq!(runtime.active_goal_children(target), vec![child]);
     let before = runtime.thread_goal(&thread).unwrap().usage.model_requests;
-    assert!(runtime.goal_model_request(child, crate::RunPurpose::General, None));
+    assert!(
+        runtime
+            .goal_model_request(child, crate::RunPurpose::General, None)
+            .unwrap()
+    );
     assert_eq!(
         runtime.thread_goal(&thread).unwrap().usage.model_requests,
         before + 1

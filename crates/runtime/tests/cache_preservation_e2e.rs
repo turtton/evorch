@@ -3870,6 +3870,75 @@ async fn external_comment_warning_preserves_wire_prefix_across_following_turns()
 }
 
 #[tokio::test]
+async fn durable_goal_usage_display_checkpoint_preserves_wire_prefix_and_cache() {
+    let mut script: Vec<_> = (0..18)
+        .map(|index| {
+            ScriptedResponse::tool_call(
+                &format!("usage-{index}"),
+                MODEL,
+                0,
+                &format!("read-{index}"),
+                "read",
+                [json!({"index":index}).to_string()],
+            )
+        })
+        .collect();
+    script.push(text_response(
+        "Finished the paused goal's requested research",
+    ));
+    let mut harness = harness(script, 1_000_000);
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("usage-checkpoint.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let root = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("usage-cache", root)
+        .unwrap();
+    let goal = harness
+        .runtime
+        .create_thread_goal(
+            "usage-cache",
+            root,
+            "Research the implementation".into(),
+            vec!["Verified evidence".into()],
+        )
+        .unwrap();
+    harness
+        .runtime
+        .set_goal_checks_paused("usage-cache", &goal.goal_id, true)
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        root,
+        None,
+        Role::Worker,
+        "Research the implementation",
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, root, AgentRunPhase::Done).await;
+    let current = harness.runtime.thread_goal("usage-cache").unwrap();
+    assert_eq!(current.usage.model_requests, 19);
+    assert_eq!(
+        storage::Database::open_read_only(&config.db_path)
+            .unwrap()
+            .thread_goal_usage(&goal.goal_id)
+            .unwrap(),
+        Some(current.usage)
+    );
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {snapshot})
+        if snapshot.usage.model_requests == 16)));
+    // verify_trace derives cache reuse from the actual provider input and independently
+    // checks every wire prefix, including the turn after the display checkpoint.
+    verify_trace(&harness, root, &events, 0);
+}
+
+#[tokio::test]
 async fn proactive_goal_self_check_preserves_wire_prefix_and_cache() {
     let call = |id: &str, name: &str, input: Value| {
         ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
