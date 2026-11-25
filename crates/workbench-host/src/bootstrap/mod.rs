@@ -30,6 +30,7 @@ mod recovery_06a_tests;
 pub mod recovery_disposal;
 pub mod restart;
 pub mod retention;
+mod retention_workers;
 #[cfg(test)]
 mod scratch_archive_tests;
 pub mod services;
@@ -149,6 +150,10 @@ pub struct BootstrappedHost {
     planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
     auto_archive: Option<crate::thread_retention::AutoArchiveOwner>,
+    #[cfg(any(test, feature = "test-support"))]
+    manual_retention_fixture: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    fixture_retention: Option<retention_workers::RetentionStartup>,
     thread_index_owner: Option<thread_index::ThreadIndexOwner>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
@@ -289,6 +294,8 @@ impl BootstrappedHost {
         recovery: Option<&dyn core_startup::CoreStartupHook>,
         claimed: Option<planned::ClaimedBootstrap>,
     ) -> Result<Self, BootstrapError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let manual_retention_fixture = seams.is_some();
         let planned = claimed.is_some();
         let successor_epoch = claimed.as_ref().map(|c| c.successor_epoch());
         let spawn_ledger = sandbox::SpawnLedger::new();
@@ -732,6 +739,10 @@ impl BootstrappedHost {
             planned_exit: None,
             reclaim: None,
             auto_archive: None,
+            #[cfg(any(test, feature = "test-support"))]
+            manual_retention_fixture,
+            #[cfg(any(test, feature = "test-support"))]
+            fixture_retention: None,
             thread_index_owner: None,
             history_owner: None,
             executor,
@@ -886,24 +897,12 @@ impl BootstrappedHost {
         self.thread_index_owner = Some(thread_index::ThreadIndexOwner::start(
             deferred.writer.clone(),
         )?);
-        self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
-            runtime::thread_retention::ExecutorConfig::new(
-                deferred.writer.clone(),
-                deferred.storage.clone(),
-                Some(deferred.artifacts),
-            ),
-        )?);
-        // PR1 intentionally supplies no authority, even for a single running core.
-        self.auto_archive = Some(crate::thread_retention::AutoArchiveOwner::start(
-            Arc::downgrade(&self.host),
-            crate::thread_retention::AutoArchiveCoordinator::new(
-                deferred.storage.clone(),
-                deferred.options.ownership_root.clone(),
-                storage::thread_retention::AutoArchivePolicy {
-                    after_days: self.config.storage.thread_retention.auto_archive_after_days,
-                },
-            ),
-        )?);
+        self.start_retention_workers(retention_workers::RetentionStartup {
+            writer: deferred.writer.clone(),
+            storage: deferred.storage.clone(),
+            artifacts: deferred.artifacts,
+            ownership_root: deferred.options.ownership_root.clone(),
+        })?;
         host_services::start(
             &mut self.services,
             &deferred.options,

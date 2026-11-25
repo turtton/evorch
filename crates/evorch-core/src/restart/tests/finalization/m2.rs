@@ -359,10 +359,8 @@ async fn final_business_event_and_usage_are_durable_without_periodic_flush() {
     assert!(host.shutdown().await.is_err());
 }
 
-// These SQL/worker-ACK tests do not verify time. A paused Tokio clock can
-// auto-advance the product preparation deadline while the std retention worker
-// is still completing real I/O, cancelling preparation before the tested barrier.
-#[tokio::test]
+// The default fake-model fixture has no autonomous retention producers.
+#[tokio::test(start_paused = true)]
 async fn busy_writer_barrier_stays_failed_closed_after_the_snapshot_is_released() {
     let (_dir, mut host) = boot().await;
     let core = RestartCoordinator::new(&host);
@@ -494,6 +492,7 @@ async fn cleanup_reports_late_join_failure_and_still_joins_remaining_services() 
 #[tokio::test]
 async fn retention_producers_pause_before_sealing_and_join_before_storage_drains() {
     let (_dir, mut host) = boot().await;
+    host.enable_retention_producers_for_test().unwrap();
     let gates = host.restart_producers();
     let maintenance = &gates[gates.len() - 2..];
     assert!(maintenance.iter().all(|g| g.is_open()));
