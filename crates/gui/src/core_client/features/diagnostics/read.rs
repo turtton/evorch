@@ -150,19 +150,10 @@ fn cancel_text(reason: CancelReason) -> String {
     }
 }
 
-/// One line for what a read is doing, `None` once it holds data (or nothing was asked).
-pub(crate) fn phase_line(phase: &Phase) -> Option<&str> {
-    match phase {
-        Phase::Waiting => Some(LOADING),
-        Phase::Failed(text) => Some(text),
-        Phase::Idle | Phase::Ready => None,
-    }
-}
-
 /// What a read shows while it waits for the core.
 pub(crate) const LOADING: &str = "Loading…";
 
-/// [`phase_line`] drawn in the legacy panes' style: a muted line while waiting, and a
+/// What a read is doing, drawn in the legacy panes' style: a muted line while waiting, and a
 /// failure in the error colour.
 pub(crate) fn phase_label(ui: &mut egui::Ui, phase: &Phase) {
     match phase {
@@ -281,6 +272,6 @@ mod tests {
             ),
             None,
         );
-        assert!(phase_line(read.phase()).is_some());
+        assert!(matches!(read.phase(), Phase::Failed(_)));
     }
 }

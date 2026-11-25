@@ -60,5 +60,6 @@ pub mod thread_search;
 pub mod transcript_tool;
 pub mod transcript_widgets;
 pub mod usage;
+pub mod usage_widgets;
 
 pub mod subscription_provider;

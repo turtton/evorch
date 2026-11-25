@@ -11,8 +11,7 @@ use config::types::provider::{ModelSpeed, PriceSchedule};
 use recorder::pricing::{self, TokenUsage, UsagePricing};
 use storage::usage::{UsageDailyRow, UsageRequestRow, UsageStatus};
 
-#[path = "usage_stats/day.rs"]
-pub mod day;
+pub use super::local_day as day;
 pub use day::LocalDay;
 
 #[path = "usage_stats/series.rs"]
