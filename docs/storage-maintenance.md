@@ -548,7 +548,7 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - 長時間続く reader は、バックフィル中に WAL の増大を招く。
 - 常時稼働中の live retention（[io-performance.md](io-performance.md#イベントの永続化と保持)）は 1 tick あたりの削除量と時間を制限するため、既存の大きな滞留は本手順で一括処理する。
 
-## thread 自動 archive（PR1: 投影と保留中の実装）
+## thread 自動 archive（PR1: 正本判定と保留中の実装）
 
 ```toml
 [storage.thread_retention]
@@ -558,18 +558,35 @@ archived_delete_after_days = 7
 
 - それぞれ独立に 0 で新規の archive／削除確定を無効化する。明示した 30 などの値は維持する。確定済み削除の回収や確定済み archive の添付整理は、必要な authority があれば続く。
 - **削除の省略時既定値が 30 日から 7 日へ変わる。次回の core・旧 GUI の起動時排他フェーズでは、7〜30 日前の既存 archive も削除対象になり得る。** 既定値の変更を避ける場合は 30 を明示する。PR1 は削除判定・起動時確定経路を変えない。時刻のない旧 archive の扱いも従来どおり。
-- **PR1 の通常 core は、単一 core 運用でも authority 未配線のため自動 archive・添付整理・scratch hint を実行しない（AuthorityUnavailable）。PR2 で authority を配線して有効化する。** この保留時は sidebar／添付 lock、sidebar 読込み、family 展開・候補走査を一切行わず、backfill 進捗だけを観測する。迂回設定はない。
-- 活動は新規メッセージ受理・確定、実行開始・実再開・実行／ターン終了に限定する。閲覧、goal/lane/usage、索引再構築、復元再公開、backfill 処理時刻は活動ではない。family 全 member の実活動と legacy 上界の最大から 24 時間×日数を数え、境界以上で到達する。
-- 既存 run に活動証拠がない場合だけ、最初に処理した run_contexts.updated_at_ns を別の上界として一回記録する。上界もない既存 run は保留。移行後作成の適用済み run は活動なしとして thread 作成時刻を基準にする。
-- pin、実行・開始待ち・復元/wake/compaction 進行中、現在の未完了 goal（Complete 以外）、評価サンプル、未回答質問（子・継承先含む）、open attached/summary lane、未適用・関係不明は family 全体を保護する。通常のターン間待機は実行中と混同しない。
-- source trigger と投影は履歴索引から独立している。reclaim-lock を持つ既存 ReclaimWorker が reader で抽出し writer で CAS 適用する。5 秒周期、全 source 合計 500 検査行・復号読込み 2,097,152 B/tick。失敗・skip・競合も予算を消費する。ヘッダだけで活動が分かるイベントは payload を読まない。外部本文は解決しない。超過行は復号せず対象を保留し cursor を進める。 復号予算には既存 goal 投影の lineage JSON も含め、reader で長さを先に確認する。同一 tick 内の同じ lineage は復号済み値を再利用し、writer は revision と固定長ヘッダだけを検査する。
-- 読めない goal の帰属は、ヘッダ run が thread_runs で一意に結合されていればその run/family に限って保留する（通常の goal 移譲は同一 sidebar family 内という仮定）。未結合・複数結合で帰属不能なら全候補を保留し、global_failures と最大 8 件の event ID を本文なしで診断する。破損元の修復／削除と再走査まで保留は残る。PR1 に修復 CLI は追加しない。PR2 で帰属不明データの運用と別 family への移譲を再検討する。
-- 自動処理は専用スレッドで host mutex を try_lock できたときだけ動く。前景の handler、Busy 契約、手動 archive の attachment→sidebar lock と同期削除は維持する。最終再検査から rename までの残る admission 窓は許容し、後続操作には既存の archived family の扱いを適用する。新しい intent 保留や arbitration は置かない。
-- 1 tick は最大 1 family publish、remove_thread 1 呼出し（既存 4096 entry 有界削除）、scratch hint 1 member。sidebar の archived 状態が添付整理の唯一の durable intent で、cursor はメモリ上。restore は従来どおり残存添付の整理を先に完了する。symlink を辿らず root 外を消さない。失敗で archive 時刻を戻さない。
+- **PR1 の通常 core は、単一 core 運用でも authority 未配線のため自動 archive・添付整理・scratch hint を実行しない（`AuthorityUnavailable`）。PR2 で authority を配線して有効化する。** この保留時の tick は DB・sidebar・添付を開かず、host mutex も sidebar／添付 lock も取らない。迂回設定はない。
+- **判定は派生状態を持たない。** 1 tick は 1 family だけを、host mutex の `try_lock` と sidebar lock の同一区間で、正本（events・受理表・`run_contexts`・質問・評価サンプル・lane・`lane_handoffs`）から直接判定する。tick を跨いで持つのは巡回位置だけで、判定の途中結果・投影・backfill・trigger はない。v75 は索引 4 本だけを足す（表・trigger なし）。
+- 判定の手順は、sidebar 再読込、admission の gate stamp（全体・thread・run）採取、メモリ上の確認（実行中 run、メモリ上の goal）、stamp 採取後に始めた 1 つの read transaction での DB 判定、stamp の一致確認、保存・mirror・通知の順。stamp 採取から再確認までの間に前景の admission や event の publish が入ると publish しない。再確認後の admission は archive 済み family 上の通常操作として扱う。
+- 活動は、events の `run_id` ヘッダと受理表（`host_input_receipts`・`host_chat_submissions`）の `accepted_at_ns` で見る。種別は MessageCompleted／FinalResultPublished／MessagePart、TurnCompleted、Delivered（再送も数える）、Running への出入りを示す AgentRunStateChanged（この行だけ復号）。閲覧、sidebar 操作、goal/lane/usage、履歴再構築、handoff コピー（元の時刻を保つ）、復元時の再公開、質問取消、lane close は活動ではない。family の期限は全 member の最終活動の最大から 24 時間×日数（境界時刻以上で到達、overflow で早期処理しない）。
+- 空 thread（run もメッセージもない）は作成時刻から日数で対象になる。event・受理行が 1 件もなく会話（`run_contexts.message_count > 0`）だけがある run は、その保存時刻を遅延方向の上界として使う。会話もない run は遅延させない。
+- pin、実行・開始待ち・復元/wake/compaction 進行中、未完了 goal（Complete 以外）、評価サンプル、未回答質問（子・継承先含む）、open attached/summary lane、membership 投影の未適用は family 全体を保護する。通常のターン間待機は実行中と混同しない。`backfill_pending`（events ヘッダの backfill 未完）の間は全 family を保留する。
+- goal は run ごとの最新 snapshot を部分索引 `idx_events_goal_by_run` で 1 件ずつ読み、thread の最新を現在の goal とする。`lane_handoffs` に committed 以降で同じ goal_id の receipt（元 run 起点）があれば、goal は移譲済みで移譲元を保護しない（移譲先での完了・置換には依存しない）。未 commit の receipt では保護する。
+- 1 tick の予算は、family の thread＋run が R=1,024、run あたり末尾 P=16 行、tick あたり末尾 Q=512 行、goal 復号 K=128 件、読込み byte 2,097,152。events を読む各文は `INDEXED BY` で索引を固定する。超過・復号失敗・family 外の thread を名指す snapshot は保留（`FamilyRunBudget`／`ActivityProbeBudget`／`GoalDecodeBudget`／`GoalUndecodable`／`GoalOutsideFamily`）。
+- 自動処理は専用スレッドで host mutex を try_lock できたときだけ動く。前景の handler、Busy 契約、手動 archive の attachment→sidebar lock と同期削除は維持する。最終再検査から rename までの残る admission 窓は許容する。新しい intent 保留や arbitration は置かない。
+- 1 tick は最大 1 family の判定、1 publish、`remove_thread` 1 呼出し（既存 4096 entry 有界削除）、scratch hint 1 member。sidebar の archived 状態が添付整理の唯一の durable intent で、cursor はメモリ上。restore は従来どおり残存添付の整理を先に完了する。symlink を辿らず root 外を消さない。失敗で archive 時刻を戻さない。
 - scratch は手動と同じ既存 hint のみ。hint 再送は許容するが、プロセス内状態・lease の制約により古い thread などを回収できない場合がある。hint 発行は scratch 削除の durable 完了を意味しない。
-- backfill backlog・将来の期限・通常 tick は idle の busy 理由ではない。保守だけのために core を常駐させない（idle_grace_secs 既定 60 秒）。停止中は別 daemon が処理せず、次回稼働時に再開する。planned exit の準備時は既存 ProducerGate で retention producer も pause／drain し、取消時は再開する。停止時は新規 tick を止め、worker の writer ACK と join を bridge flush／storage barrier より前に確認する。
-- 診断は thread_retention の構造化ログと有界 RetentionReport。本文は記録せず、同じ理由を毎 tick 再出力しない。AttachmentCleanupPending は未完了と失敗をまとめた区分。
+- 期限処理は idle の busy 理由ではない。保守だけのために core を常駐させない（`idle_grace_secs` 既定 60 秒）。停止中は別 daemon が処理せず、次回稼働時に再開する。planned exit の準備時は既存 ProducerGate で auto-archive owner を pause／drain し、停止時は新規 tick を止めて storage barrier の前に join する。ReclaimWorker は変更しない。
+- 診断は `thread_retention` target の構造化ログと有界 `RetentionReport`。本文は記録せず、同じ理由を毎 tick 再出力しない。`AttachmentCleanupPending` は未完了と失敗をまとめた区分。
 
-### Sidebar 計測の採用条件
+### 既知の限界
 
-合意後の基準は、1,000 threads が p95（30 サンプル×3 回の中央値）50ms 以下・全観測最大 100ms 以下、2,000 threads は全観測最大 100ms 以下（p95 は記録のみ）、5,000 は参考のみ。heavy trial（624 run の member を含む）は p95 に入れず最大に入れる。最終 coordinator も同じ基準で計測する。実データは使用しない。PR2 着手時に実 sidebar 規模を確認して再評価する。
+遅延方向（手動 archive は可能）:
+
+- receipt のない移譲（v54 より前、テスト用の非 durable 経路）の移譲元は goal 保護のまま。
+- R を超える family は自動 archive されない。
+- 直近の日数内に活動でない event が P 行を超える run を持つ family は遅れる。
+- fork で複製された会話（event なし）は、復元時の保存で遅れる。
+
+誤 archive 方向（許容済みの範囲）:
+
+- 時計が archive 日数以上巻き戻った場合。
+- read transaction 開始後に gate を通らず commit された変更（authority 下では他プロセスの writer はいない）。
+- `run_id` ヘッダと食い違う payload だけの活動帰属変更（header を正本とする）。
+
+### 計測
+
+判定 SQL 一式は `cargo run --release -p storage --example retention_decision_measure -- <work-dir>` で測る（合成 fixture のみ、実データは使わない）。基準・予算は計測前に宣言し、結果は PR に記録する。Sidebar の lock 区間は、1,000 threads が p95 50ms 以下・全観測最大 100ms 以下、2,000 threads は全観測最大 100ms 以下（常識外のブロックがないことの確認）。PR2 の性能は同じ観点で記録・確認する。

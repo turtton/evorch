@@ -58,8 +58,6 @@ pub struct ExecutorConfig {
     pub files_retry_limit: u32,
     pub jobs_per_page: usize,
     pub meta_scans_per_cycle: usize,
-    /// Reversible planned-restart admission; never an idle-retention reason.
-    pub producer: crate::producer::ProducerGate,
 }
 
 impl ExecutorConfig {
@@ -78,7 +76,6 @@ impl ExecutorConfig {
             files_retry_limit: FILES_RETRY_LIMIT,
             jobs_per_page: JOBS_PER_PAGE,
             meta_scans_per_cycle: META_SCANS_PER_CYCLE,
-            producer: crate::producer::ProducerGate::default(),
         }
     }
 }
@@ -89,11 +86,7 @@ pub struct ExecutorReport {
     pub cycles: u64,
     /// This process holds the reclaim lease and works.
     pub holds_lease: bool,
-    pub maintenance_paused: bool,
-    pub waiting_for_reclaim_lease: bool,
     pub backfill_remaining: u64,
-    /// Independent activity projection, under this worker's reclaim lease.
-    pub activity: storage::thread_retention::activity::ActivityReport,
     pub rows_reclaimed: u64,
     pub jobs_db_pending: u64,
     /// Jobs only the exclusive startup phase can finish (reported, not worked on).
@@ -155,12 +148,12 @@ impl ReclaimWorker {
         Ok(self.reader.as_ref().expect("opened above"))
     }
 
-    fn ensure_lease(&mut self, report: &mut ExecutorReport, cycle: u64) {
+    fn ensure_lease(&mut self, report: &mut ExecutorReport) {
         if self.lease.is_some() {
             return;
         }
         let retry = u64::from(self.config.lease_retry_cycles.max(1));
-        if !cycle.is_multiple_of(retry) {
+        if !self.cycles.is_multiple_of(retry) {
             return;
         }
         match storage::reclaim_lease(&self.config.storage.db_path) {
@@ -173,20 +166,12 @@ impl ReclaimWorker {
     /// whose rows are gone. Does nothing (and writes nothing) without the lease.
     pub fn run_once(&mut self) -> ExecutorReport {
         let mut report = ExecutorReport::default();
-        let cycle = self.cycles;
+        self.ensure_lease(&mut report);
         self.cycles += 1;
         report.cycles = self.cycles;
         report.holds_lease = self.lease.is_some();
-        let Some(_permit) = self.config.producer.try_enter() else {
-            report.maintenance_paused = true;
-            return report;
-        };
-        self.ensure_lease(&mut report, cycle);
-        report.holds_lease = self.lease.is_some();
-        report.waiting_for_reclaim_lease = !report.holds_lease;
         if report.holds_lease {
             self.backfill(&mut report);
-            self.activity_backfill(&mut report);
             self.reclaim(&mut report);
             if self.config.artifacts.is_some() {
                 self.remove_files(&mut report);
@@ -200,18 +185,6 @@ impl ReclaimWorker {
             .cloned()
             .collect();
         report
-    }
-
-    fn activity_backfill(&mut self, report: &mut ExecutorReport) {
-        let handle = self.config.handle.clone();
-        let result = self
-            .reader()
-            .and_then(|reader| reader.activity_page().map_err(|e| e.to_string()))
-            .and_then(|page| handle.apply_activity_page(page).map_err(|e| e.to_string()));
-        match result {
-            Ok(progress) => report.activity = progress,
-            Err(error) => report.errors.push(format!("activity projection: {error}")),
-        }
     }
 
     fn backfill(&mut self, report: &mut ExecutorReport) {
@@ -378,7 +351,6 @@ struct Shared {
 /// storage it uses.
 pub struct ReclaimExecutor {
     shared: Arc<Shared>,
-    producer: crate::producer::ProducerGate,
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -395,19 +367,13 @@ impl ReclaimExecutor {
         });
         let (stop, stopped) = mpsc::channel::<()>();
         let interval = config.interval;
-        let producer = config.producer.clone();
         let mut worker = ReclaimWorker::new(config);
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("thread-retention-reclaim".into())
             .spawn(move || {
-                let mut lease_state=None;
                 loop {
                     let report = worker.run_once();
-                    if lease_state!=Some(report.holds_lease)||report.cycles.is_multiple_of(12){
-                       tracing::info!(target:"thread_retention",reason=if report.waiting_for_reclaim_lease{"WaitingForReclaimLease"}else{"BackfillProgress"},rows=report.activity.inspected_rows,decode_bytes=report.activity.decode_bytes,pending_sources=report.activity.pending_sources,legacy_fallback=report.activity.legacy_fallback,missing_activity_and_fallback=report.activity.missing_activity_and_fallback,"reclaim/activity progress");
-                       lease_state=Some(report.holds_lease);
-                    }
                     for error in &report.errors {
                         tracing::warn!(%error, "thread retention reclaim");
                     }
@@ -426,7 +392,6 @@ impl ReclaimExecutor {
             })?;
         Ok(Self {
             shared,
-            producer,
             stop,
             thread: Some(thread),
         })
@@ -467,12 +432,7 @@ impl ReclaimExecutor {
     }
 
     /// Planned M2 stage 2: signal now, join only after child reap.
-    pub fn producer_gate(&self) -> crate::producer::ProducerGate {
-        self.producer.clone()
-    }
-
     pub fn request_stop(&self) {
-        self.producer.close();
         let _ = self.stop.send(());
     }
 

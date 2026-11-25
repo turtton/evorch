@@ -14,17 +14,7 @@ use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
 const LATEST_SCHEMA: u32 = 75;
 
-const EXPECTED_TABLES: [&str; 145] = [
-    "retention_activity_control",
-    "retention_activity_cursors",
-    "retention_activity_sources",
-    "retention_activity_pending",
-    "retention_activity_runs",
-    "retention_activity_goals",
-    "retention_activity_bindings",
-    "retention_activity_deliveries",
-    "retention_activity_failures",
-    "retention_activity_thread_revisions",
+const EXPECTED_TABLES: [&str; 135] = [
     "history_control",
     "history_run_state",
     "history_event_cuts",
@@ -162,14 +152,11 @@ const EXPECTED_TABLES: [&str; 145] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 113] = [
-    "idx_retention_activity_failures_run",
+const EXPECTED_INDICES: [&str; 110] = [
     "idx_retention_questions_root_pending",
-    "retention_activity_candidates",
-    "retention_activity_deliveries_run",
-    "retention_activity_goals_thread",
-    "retention_activity_goals_event",
-    "retention_activity_pending_run",
+    "idx_events_goal_by_run",
+    "host_input_receipts_run_accepted",
+    "host_chat_submissions_run_accepted",
     "idx_history_discovery",
     "idx_history_merge",
     "cli_continuity_live",

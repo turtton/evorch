@@ -3,14 +3,15 @@ use crate::CommandHost;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak, mpsc};
-use storage::thread_retention::activity::ActivityReport;
+use storage::thread_retention::decision::DecisionStats;
 use storage::thread_retention::{AutoArchiveAuthority, AutoArchivePolicy};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetentionReport {
-    pub activity: ActivityReport,
     /// Per-tick counts, not global candidate totals. Reasons contain no message text.
     pub holds: BTreeMap<&'static str, usize>,
+    /// What the family decision of this tick read, if one ran.
+    pub decision: Option<DecisionStats>,
     pub inspected_runs: usize,
     pub published: usize,
     pub attachment_calls: usize,
@@ -28,46 +29,19 @@ impl RetentionReport {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Member {
-    pub id: workspace_state::ThreadId,
-    pub runs: Vec<String>,
-    pub created: i64,
-}
-#[derive(Clone, Debug)]
-pub(crate) struct RunProof {
-    pub run: String,
-    pub revision: storage::thread_retention::activity::ActivityRevision,
-    pub gate: runtime::thread_retention::gate::GateStamp,
-}
-#[derive(Clone, Debug)]
-pub(crate) struct Candidate {
-    pub key: workspace_state::ThreadId,
-    pub members: Vec<Member>,
-    pub archive_revision: u64,
-    pub pin_revision: u64,
-    pub member: usize,
-    pub run: usize,
-    pub db_after: i64,
-    pub binding_revision: i64,
-    pub seen: std::collections::HashSet<String>,
-    pub activity: i64,
-    pub proofs: Vec<RunProof>,
-    pub global_gate: runtime::thread_retention::gate::GateStamp,
-    pub thread_gates: BTreeMap<String, runtime::thread_retention::gate::GateStamp>,
-    pub thread_revisions: BTreeMap<String, storage::thread_retention::activity::ActivityRevision>,
-}
-/// At most one family publication, one remove_thread and one scratch member per tick.
+/// The only state kept between ticks is where the next scan starts: every verdict is
+/// taken from the canonical sources inside one tick. One family decision, one
+/// publication, one `remove_thread` and one scratch member at most per tick.
 pub struct AutoArchiveCoordinator {
     pub(crate) config: storage::StorageConfig,
     root: PathBuf,
     pub(crate) policy: AutoArchivePolicy,
     pub(crate) after_family: Option<String>,
     pub(crate) cleanup_after: Option<String>,
-    pub(crate) candidate: Option<Candidate>,
     stopped: bool,
     last_holds: BTreeMap<&'static str, usize>,
-    last_global_failures: (u64, Vec<i64>),
+    #[cfg(feature = "test-support")]
+    pub(crate) after_decision: Option<Box<dyn FnMut() + Send>>,
 }
 impl AutoArchiveCoordinator {
     pub fn new(config: storage::StorageConfig, root: PathBuf, policy: AutoArchivePolicy) -> Self {
@@ -77,15 +51,20 @@ impl AutoArchiveCoordinator {
             policy,
             after_family: None,
             cleanup_after: None,
-            candidate: None,
             stopped: false,
             last_holds: BTreeMap::new(),
-            last_global_failures: Default::default(),
+            #[cfg(feature = "test-support")]
+            after_decision: None,
         }
+    }
+    /// Runs between the family decision and the admission re-check (a test places an
+    /// admission exactly there).
+    #[cfg(feature = "test-support")]
+    pub fn on_decision(&mut self, hook: impl FnMut() + Send + 'static) {
+        self.after_decision = Some(Box::new(hook));
     }
     pub fn stop(&mut self) {
         self.stopped = true;
-        self.candidate = None;
     }
     pub fn tick(
         &mut self,
@@ -98,13 +77,10 @@ impl AutoArchiveCoordinator {
             report.hold("StopRequested");
             return report;
         }
-        // This branch precedes host/sidebar/attachment access or candidate expansion.
+        // Nothing but this report precedes the check: no database, host, sidebar or
+        // attachment access, so another process holding any of them is never disturbed.
         let Some(authority) = authority else {
             report.hold("AuthorityUnavailable");
-            match storage::Database::open(&self.config).and_then(|db| db.activity_report()) {
-                Ok(progress) => report.activity = progress,
-                Err(error) => report.failure(error),
-            }
             self.log(&report);
             return report;
         };
@@ -132,9 +108,6 @@ impl AutoArchiveCoordinator {
                 return report;
             }
         };
-        if let Ok(progress) = db.activity_report() {
-            report.activity = progress
-        }
         host.areas
             .workspace
             .auto_archive_tick(self, &db, now_ns, &mut report);
@@ -143,18 +116,9 @@ impl AutoArchiveCoordinator {
         report
     }
     fn log(&mut self, report: &RetentionReport) {
-        let global_failures = (
-            report.activity.global_failures,
-            report.activity.global_failure_event_ids.clone(),
-        );
-        if self.last_holds != report.holds
-            || self.last_global_failures != global_failures
-            || !report.failures.is_empty()
-            || report.published > 0
-        {
-            tracing::info!(target:"thread_retention",holds=?report.holds,published=report.published,inspected_runs=report.inspected_runs,backfill_pending=report.activity.backfill_pending,pending_sources=report.activity.pending_sources,global_failures=report.activity.global_failures,global_failure_event_ids=?report.activity.global_failure_event_ids,legacy_fallback=report.activity.legacy_fallback,missing_activity_and_fallback=report.activity.missing_activity_and_fallback,attachment_calls=report.attachment_calls,scratch_hints=report.scratch_hints,failures=report.failures.len(),"auto archive tick");
+        if self.last_holds != report.holds || !report.failures.is_empty() || report.published > 0 {
+            tracing::info!(target:"thread_retention",holds=?report.holds,published=report.published,inspected_runs=report.inspected_runs,decision=?report.decision,attachment_calls=report.attachment_calls,scratch_hints=report.scratch_hints,failures=report.failures.len(),"auto archive tick");
             self.last_holds = report.holds.clone();
-            self.last_global_failures = global_failures;
         }
     }
 }

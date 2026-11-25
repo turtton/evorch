@@ -122,11 +122,6 @@ struct Work {
 
 /// Run tables in deletion order: (table, predicate on `?1`). Ledger rows need a grant.
 const RUN_TABLES: &[(&str, &str)] = &[
-    ("retention_activity_failures", "run_id = ?1"),
-    ("retention_activity_sources", "run_id = ?1"),
-    ("retention_activity_pending", "run_id = ?1"),
-    ("retention_activity_runs", "run_id = ?1"),
-    ("retention_activity_deliveries", "run_id = ?1"),
     ("history_message_sources", "run_id = ?1"),
     ("history_pending_parts", "run_id = ?1"),
     ("history_messages", "run_id = ?1"),
@@ -480,7 +475,6 @@ fn run_tables(
         return provenance_entries(tx, family, cursor, &run);
     }
     if table.starts_with("history_")
-        || table.starts_with("retention_activity_")
         || matches!(
             table,
             "host_chat_submissions"
@@ -1152,27 +1146,6 @@ fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, St
 /// rows when the thread has no lane (any more). None of these tables is fenced against
 /// DELETE, so reclaim always progresses, and each step is bounded.
 fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
-    let activity: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='retention_activity_goals')",
-        [],
-        |r| r.get(0),
-    )?;
-    if activity {
-        // One primary-key row per thread; it is fenced by the tombstone, so it cannot return.
-        tx.execute(
-            "DELETE FROM retention_activity_thread_revisions WHERE thread_id=?1",
-            [thread],
-        )?;
-        for table in ["retention_activity_bindings", "retention_activity_goals"] {
-            let rows=tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE thread_id=?1 LIMIT ?2)"),params![thread,RECLAIM_ROWS])?;
-            if rows > 0 {
-                return Ok(Work {
-                    rows: rows as u64,
-                    ..Work::default()
-                });
-            }
-        }
-    }
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
     // Management receipts precede their FK owner and are reclaimed in bounded batches.
     let management: bool = tx.query_row(

@@ -448,33 +448,3 @@ fn without_an_artifact_store_the_files_are_never_marked_done() {
     assert_eq!((summary.jobs_db_done, summary.jobs_done), (1, 0));
     assert!(run.artifacts.load(&run.deleted.artifact_id).is_ok());
 }
-
-#[test]
-fn planned_maintenance_pause_is_reversible_and_close_precedes_writer_barrier() {
-    let f = running();
-    let config = f.config();
-    let gate = config.producer.clone();
-    let pause = gate.pause();
-    let mut worker = ReclaimWorker::new(config);
-    let before = f.world.database().activity_report().unwrap();
-    let blocked = worker.run_once();
-    assert!(blocked.maintenance_paused);
-    assert_eq!(blocked.rows_reclaimed, 0);
-    assert_eq!(before, f.world.database().activity_report().unwrap());
-    assert!(gate.resume(pause));
-    let admitted = worker.run_once();
-    assert!(!admitted.maintenance_paused);
-    assert_eq!(gate.active(), 0, "writer ACK completed within the permit");
-    gate.close();
-    let mut config = f.config();
-    config.producer = gate.clone();
-    let executor = ReclaimExecutor::spawn(config).unwrap();
-    assert!(executor.wait_for_cycles(1).maintenance_paused);
-    executor.try_shutdown().unwrap();
-    let joined = f.world.database().activity_report().unwrap();
-    f.storage.handle().barrier().unwrap();
-    assert!(worker.run_once().maintenance_paused);
-    assert_eq!(joined, f.world.database().activity_report().unwrap());
-    assert!(gate.is_closed());
-    assert_eq!(gate.active(), 0);
-}

@@ -1,13 +1,14 @@
-//! Shared archive transition plus bounded automatic wrappers; no arbitration layer.
+//! Shared archive transition plus bounded automatic wrappers. Automatic work runs under
+//! the host mutex, so it never races the foreground handlers of this process.
 use super::*;
-use crate::thread_retention::{
-    AutoArchiveCoordinator, Candidate, Member, RetentionReport, RunProof,
-};
-const INSPECTION_BUDGET: usize = 64;
+use crate::thread_retention::{AutoArchiveCoordinator, RetentionReport};
+use runtime::thread_retention::gate::GateStamp;
+use storage::thread_retention::decision::{DecisionBudget, FamilyMember, Verdict};
+
 fn members(
     sidebar: &workspace_state::SidebarState,
     key: &ThreadId,
-) -> Result<Vec<Member>, &'static str> {
+) -> Result<Vec<FamilyMember>, &'static str> {
     let states = sidebar.resolve_states();
     let mut out = Vec::new();
     for thread in &sidebar.threads {
@@ -22,19 +23,38 @@ fn members(
             }
             runs.sort();
             runs.dedup();
-            out.push(Member {
-                id: thread.id.clone(),
+            out.push(FamilyMember {
+                thread_id: thread.id.to_string(),
+                created_ns: created,
                 runs,
-                created,
             });
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     if out.is_empty() {
         return Err("FamilyUnresolved");
     }
     Ok(out)
 }
+
+/// Admission registrations of the family: global, each thread, each run.
+fn stamps(
+    runtime: &AgentRuntime,
+    family: &[FamilyMember],
+    runs: &[String],
+) -> Vec<(String, GateStamp)> {
+    let mut scopes = vec![String::new()];
+    scopes.extend(family.iter().map(|m| format!("t:{}", m.thread_id)));
+    scopes.extend(runs.iter().map(|r| format!("r:{r}")));
+    scopes
+        .into_iter()
+        .map(|scope| {
+            let stamp = runtime.retention_gate_stamp(&scope);
+            (scope, stamp)
+        })
+        .collect()
+}
+
 impl Service {
     /// The same numbered family mutation is used by manual and automatic archive.
     pub(super) fn archive_transition(
@@ -59,6 +79,10 @@ impl Service {
             access: false,
         })
     }
+    /// One tick, one family: the sidebar lock is held from the read to the save, the
+    /// verdict comes from the canonical sources, and the admission stamps taken before
+    /// the verdict are compared after it. An admission after the last comparison is an
+    /// ordinary operation on an archived family.
     fn automatic(
         &self,
         state: &mut AutoArchiveCoordinator,
@@ -67,233 +91,95 @@ impl Service {
         report: &mut RetentionReport,
     ) -> Result<(), String> {
         let runtime = self.runtime.as_ref().ok_or("runtime unavailable")?;
+        let Some(cutoff) = state.policy.cutoff(now_ns) else {
+            report.hold("AutoArchiveDisabled");
+            return Ok(());
+        };
         let deleted = self.deleted().map_err(|_| "tombstone read failed")?;
         let lock = self.store.lock().map_err(|_| "SidebarBusy")?;
         let mut document = self.store.read(&lock).map_err(|_| "sidebar read failed")?;
         document.prune_threads(&*deleted);
         let snapshot = self.repair_membership(&mut document.sidebar)?;
         let resolved = document.sidebar.resolve_states();
-        if state.candidate.is_none() && state.policy.after_days != 0 {
-            let mut keys: Vec<_> = resolved
-                .iter()
-                .filter_map(|(id, s)| {
-                    (!s.archived && s.family.as_ref().ok() == Some(id)).then_some(id.clone())
-                })
-                .collect();
-            keys.sort();
-            let chosen = keys.into_iter().find(|id| {
-                state
-                    .after_family
-                    .as_ref()
-                    .is_none_or(|after| id.to_string() > *after)
-            });
-            if let Some(key) = chosen {
-                let current = &resolved[&key];
-                if current.pinned {
-                    report.hold("Pinned");
-                    state.after_family = Some(key.to_string());
-                    return Ok(());
-                }
-                let family = members(&document.sidebar, &key).map_err(str::to_owned)?;
-                let activity = family.iter().map(|m| m.created).max().unwrap_or(i64::MIN);
-                state.candidate = Some(Candidate {
-                    key,
-                    members: family,
-                    archive_revision: current.archive_revision,
-                    pin_revision: current.pin_revision,
-                    member: 0,
-                    run: 0,
-                    db_after: 0,
-                    binding_revision: db
-                        .activity_binding_revision()
-                        .map_err(|_| "binding revision read failed")?,
-                    seen: Default::default(),
-                    activity,
-                    proofs: vec![],
-                    global_gate: runtime.retention_gate_stamp(""),
-                    thread_gates: Default::default(),
-                    thread_revisions: Default::default(),
-                });
-            } else {
-                state.after_family = None;
-            }
-        }
-        let Some(mut candidate) = state.candidate.take() else {
+        let mut keys: Vec<_> = resolved
+            .iter()
+            .filter_map(|(id, s)| {
+                (!s.archived && s.family.as_ref().ok() == Some(id)).then_some(id.clone())
+            })
+            .collect();
+        keys.sort();
+        let chosen = keys.into_iter().find(|id| {
+            state
+                .after_family
+                .as_ref()
+                .is_none_or(|after| id.to_string() > *after)
+        });
+        let Some(key) = chosen else {
+            state.after_family = None;
+            report.hold("ScanComplete");
             return Ok(());
         };
-        let current = resolved.get(&candidate.key).ok_or("FamilyUnresolved")?;
-        if current.archived {
-            report.hold("AlreadyApplied");
-            state.after_family = Some(candidate.key.to_string());
-            return Ok(());
-        }
-        if current.pinned {
+        state.after_family = Some(key.to_string());
+        if resolved[&key].pinned {
             report.hold("Pinned");
-            state.after_family = Some(candidate.key.to_string());
             return Ok(());
         }
-        if current.archive_revision != candidate.archive_revision
-            || current.pin_revision != candidate.pin_revision
-            || members(&document.sidebar, &candidate.key).map_err(str::to_owned)?
-                != candidate.members
+        let family = members(&document.sidebar, &key).map_err(str::to_owned)?;
+        let budget = DecisionBudget::default();
+        let runs = match db
+            .family_runs(&family, &budget)
+            .map_err(|_| "family runs read failed")?
         {
-            report.hold("StaleRevision");
-            state.after_family = Some(candidate.key.to_string());
+            Ok(runs) => runs,
+            Err(hold) => {
+                report.hold(hold.reason());
+                return Ok(());
+            }
+        };
+        report.inspected_runs = runs.len();
+        let before = stamps(runtime, &family, &runs);
+        if before.iter().any(|(_, s)| s.failed != 0) {
+            report.hold("EventPersistenceFailed");
             return Ok(());
         }
-        let mut work = 0;
-        while candidate.member < candidate.members.len() && work < INSPECTION_BUDGET {
-            let member = candidate.members[candidate.member].clone();
-            if candidate.run == 0 && candidate.db_after == 0 {
-                work += 1;
-                let stamp = runtime.retention_gate_stamp(&format!("t:{}", member.id));
-                if stamp.pending != 0 {
-                    report.hold("ForegroundPending");
-                    state.after_family = Some(candidate.key.to_string());
-                    return Ok(());
-                }
-                candidate.thread_gates.insert(member.id.to_string(), stamp);
-                candidate.thread_revisions.insert(
-                    member.id.to_string(),
-                    db.activity_thread_revision(&member.id.to_string())
-                        .map_err(|_| "decision revision read failed")?,
-                );
-                if let Some(hold) = db
-                    .activity_thread_hold(&member.id.to_string())
-                    .map_err(|_| "protection read failed")?
-                {
-                    report.hold(hold);
-                    state.after_family = Some(candidate.key.to_string());
-                    return Ok(());
-                }
-                if runtime
-                    .thread_goal(&member.id.to_string())
-                    .is_some_and(|g| g.phase != event_bus::ThreadGoalPhase::Complete)
-                {
-                    report.hold("UnfinishedGoal");
-                    state.after_family = Some(candidate.key.to_string());
-                    return Ok(());
-                }
-            }
-            while candidate.run < member.runs.len() && work < INSPECTION_BUDGET {
-                let run = &member.runs[candidate.run];
-                work += 1;
-                candidate.run += 1;
-                if let Some(hold) = Self::inspect_run(runtime, db, run, &mut candidate, report)? {
-                    report.hold(hold);
-                    state.after_family = Some(candidate.key.to_string());
-                    return Ok(());
-                }
-            }
-            if candidate.run < member.runs.len() || work == INSPECTION_BUDGET {
-                break;
-            }
-            let remaining = INSPECTION_BUDGET - work;
-            let rows = db
-                .activity_thread_run_page(&member.id.to_string(), candidate.db_after, remaining)
-                .map_err(|_| "member run page failed")?;
-            let complete = rows.len() < remaining;
-            for (position, run) in rows {
-                work += 1;
-                candidate.db_after = position;
-                if let Some(hold) = Self::inspect_run(runtime, db, &run, &mut candidate, report)? {
-                    report.hold(hold);
-                    state.after_family = Some(candidate.key.to_string());
-                    return Ok(());
-                }
-            }
-            if complete {
-                candidate.member += 1;
-                candidate.run = 0;
-                candidate.db_after = 0;
-            } else {
-                break;
-            }
-        }
-        if candidate.member < candidate.members.len() {
-            report.hold("FamilyInspectionPending");
-            state.candidate = Some(candidate);
+        if before.iter().any(|(_, s)| s.pending != 0) {
+            report.hold("ForegroundPending");
             return Ok(());
         }
-        state.after_family = Some(candidate.key.to_string());
-        if !state.policy.due(candidate.activity, now_ns) {
-            report.hold("NotDue");
-            return Ok(());
-        }
-        if db
-            .activity_binding_revision()
-            .map_err(|_| "binding revision read failed")?
-            != candidate.binding_revision
-        {
-            report.hold("StaleRevision");
-            return Ok(());
-        }
-        // Final canonical checks are under host + sidebar locks. No run-map lock
-        // spans these reads. Admissions after this check are ordinary archived work.
-        for member in &candidate.members {
-            if candidate.thread_revisions.get(&member.id.to_string())
-                != Some(
-                    &db.activity_thread_revision(&member.id.to_string())
-                        .map_err(|_| "decision revision read failed")?,
-                )
-            {
-                report.hold("StaleRevision");
-                return Ok(());
-            }
-            if let Some(hold) = db
-                .activity_thread_hold(&member.id.to_string())
-                .map_err(|_| "protection read failed")?
-            {
-                report.hold(hold);
-                return Ok(());
-            }
-            if runtime
-                .thread_goal(&member.id.to_string())
-                .is_some_and(|g| g.phase != event_bus::ThreadGoalPhase::Complete)
-            {
-                report.hold("UnfinishedGoal");
-                return Ok(());
-            }
-        }
-        for proof in &candidate.proofs {
-            let activity = db
-                .run_activity(&proof.run)
-                .map_err(|_| "activity read failed")?;
-            if !activity.ready || activity.revision != proof.revision {
-                report.hold("SourceRevisionBehind");
-                return Ok(());
-            }
-            if db
-                .activity_question_protected(&proof.run)
-                .map_err(|_| "question read failed")?
-            {
-                report.hold("UnansweredQuestion");
-                return Ok(());
-            }
-        }
-        // Memory-only live/gate inspection is last, after all I/O above.
-        for proof in &candidate.proofs {
-            let gate = runtime.retention_gate_stamp(&format!("r:{}", proof.run));
-            if gate != proof.gate || gate.pending != 0 {
-                report.hold("StaleRevision");
-                return Ok(());
-            }
-            if runtime.retention_run_protected(proof.run.parse().map_err(|_| "FamilyUnresolved")?) {
+        for run in &runs {
+            let parsed = run.parse().map_err(|_| "FamilyUnresolved")?;
+            if runtime.retention_run_protected(parsed) {
                 report.hold("LiveRun");
                 return Ok(());
             }
         }
-        if runtime.retention_gate_stamp("") != candidate.global_gate
-            || candidate.thread_gates.iter().any(|(thread, stamp)| {
-                runtime.retention_gate_stamp(&format!("t:{thread}")) != *stamp
-            })
-        {
+        if family.iter().any(|m| {
+            runtime
+                .thread_goal(&m.thread_id)
+                .is_some_and(|g| g.phase != event_bus::ThreadGoalPhase::Complete)
+        }) {
+            report.hold("UnfinishedGoal");
+            return Ok(());
+        }
+        let decision = db
+            .decide_family_archive(&family, cutoff, &budget)
+            .map_err(|_| "archive decision failed")?;
+        report.decision = Some(decision.stats);
+        if let Verdict::Hold(hold) = decision.verdict {
+            report.hold(hold.reason());
+            return Ok(());
+        }
+        #[cfg(feature = "test-support")]
+        if let Some(hook) = state.after_decision.as_mut() {
+            hook();
+        }
+        if stamps(runtime, &family, &runs) != before {
             report.hold("StaleRevision");
             return Ok(());
         }
         let done = Self::archive_transition(
             &mut document.sidebar,
-            &candidate.key,
+            &key,
             true,
             now_ns.div_euclid(1_000_000_000),
         )
@@ -306,54 +192,6 @@ impl Service {
         self.publish(&done);
         report.published = 1;
         Ok(())
-    }
-    fn inspect_run(
-        runtime: &AgentRuntime,
-        db: &storage::Database,
-        run: &str,
-        candidate: &mut Candidate,
-        report: &mut RetentionReport,
-    ) -> Result<Option<&'static str>, String> {
-        if !candidate.seen.insert(run.to_owned()) {
-            return Ok(None);
-        }
-        report.inspected_runs += 1;
-        let parsed = run.parse().map_err(|_| "FamilyUnresolved")?;
-        let gate = runtime.retention_gate_stamp(&format!("r:{run}"));
-        if gate.pending != 0 {
-            return Ok(Some("ForegroundPending"));
-        }
-        if runtime.retention_run_protected(parsed) {
-            return Ok(Some("LiveRun"));
-        }
-        if db
-            .activity_question_protected(run)
-            .map_err(|_| "question read failed")?
-        {
-            return Ok(Some("UnansweredQuestion"));
-        }
-        let activity = db.run_activity(run).map_err(|_| "activity read failed")?;
-        if !activity.ready {
-            return Ok(Some(if activity.failure.is_some() {
-                "SourceRevisionBehind"
-            } else {
-                "BackfillPending"
-            }));
-        }
-        if let Some(at) = activity
-            .last_actual_activity_at
-            .into_iter()
-            .chain(activity.legacy_activity_upper_bound)
-            .max()
-        {
-            candidate.activity = candidate.activity.max(at)
-        }
-        candidate.proofs.push(RunProof {
-            run: run.to_owned(),
-            revision: activity.revision,
-            gate,
-        });
-        Ok(None)
     }
     fn automatic_cleanup(
         &self,

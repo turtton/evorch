@@ -39,6 +39,17 @@ impl Default for AutoArchivePolicy {
     }
 }
 impl AutoArchivePolicy {
+    /// `now - age`: activity at or before it is old enough. `None` when automatic
+    /// archive is off or the age does not fit; an unrepresentable cutoff never lets a
+    /// family become due early.
+    #[must_use]
+    pub fn cutoff(self, now_ns: i64) -> Option<i64> {
+        if self.after_days == 0 {
+            return None;
+        }
+        let age = i64::from(self.after_days).checked_mul(super::NANOS_PER_DAY)?;
+        Some(now_ns.checked_sub(age).unwrap_or(i64::MIN))
+    }
     /// Inclusive 24-hour days. Unrepresentable deadlines never become due.
     #[must_use]
     pub fn due(self, last_ns: i64, now_ns: i64) -> bool {
@@ -130,5 +141,16 @@ mod tests {
             .due(0, i64::MAX)
         );
         assert!(!AutoArchivePolicy { after_days: 0 }.due(0, i64::MAX));
+        assert_eq!(p.cutoff(end), Some(0));
+        assert_eq!(p.cutoff(0), Some(-end));
+        assert_eq!(p.cutoff(i64::MIN + 1), Some(i64::MIN));
+        assert_eq!(
+            AutoArchivePolicy {
+                after_days: u32::MAX
+            }
+            .cutoff(0),
+            None
+        );
+        assert_eq!(AutoArchivePolicy { after_days: 0 }.cutoff(0), None);
     }
 }

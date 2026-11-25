@@ -8,7 +8,6 @@
 //! decides *when* to confirm: the caller supplies the sidebar-derived input and
 //! must hold the exclusive locks that prove no other evorch process runs.
 
-pub mod activity;
 mod authority;
 pub mod decision;
 #[cfg(feature = "test-support")]

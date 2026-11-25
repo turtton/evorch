@@ -234,67 +234,23 @@ async fn host_attachment_removal_failure_after_save_does_not_prevent_scratch_det
 }
 
 #[tokio::test]
-async fn test_seams_defer_retention_until_explicit_enable_and_backfill_still_progresses() {
+async fn test_seams_defer_retention_until_explicit_enable() {
     let mut w = world(&[]).await;
     assert!(w.boot.reclaim.is_none() && w.boot.auto_archive.is_none());
     assert!(w.boot.fixture_retention.is_some());
-    let config = w.boot.storage_config().clone();
-    let sql = rusqlite::Connection::open(&config.db_path).unwrap();
-    sql.execute_batch("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Message','MessageCompleted','fixture-activity',123,'{}')").unwrap();
     w.boot.enable_retention_producers_for_test().unwrap();
-    let report = w.boot.reclaim.as_ref().unwrap().wait_for_cycles(1);
-    assert!(report.holds_lease);
-    assert!(!report.activity.backfill_pending && report.activity.pending_sources == 0);
-    let reader = storage::Database::open(&config).unwrap();
-    assert_eq!(
-        reader
-            .run_activity("fixture-activity")
-            .unwrap()
-            .last_actual_activity_at,
-        Some(123)
-    );
-    assert!(w.boot.auto_archive.is_some() && w.boot.fixture_retention.is_none());
+    assert!(w.boot.reclaim.is_some() && w.boot.auto_archive.is_some());
+    assert!(w.boot.fixture_retention.is_none());
     w.boot.enable_retention_producers_for_test().unwrap();
     w.boot.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn retention_backlog_and_future_deadlines_do_not_keep_the_core_busy() {
+async fn the_auto_archive_owner_and_its_future_deadlines_do_not_keep_the_core_busy() {
     let mut w = world(&["future-deadline"]).await;
-    let config = w.boot.storage_config().clone();
-    // A directly driven worker holds the real reclaim lease. The owned worker
-    // cannot consume the backlog, independent of scheduling or wall-clock time.
-    let mut blocker = runtime::thread_retention::executor::ReclaimWorker::new(
-        runtime::thread_retention::ExecutorConfig::new(
-            w.boot.storage_writer().clone(),
-            config.clone(),
-            None,
-        ),
-    );
-    assert!(blocker.run_once().holds_lease);
-    let sql = rusqlite::Connection::open(&config.db_path).unwrap();
-    sql.execute_batch("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Message','MessageCompleted','backlog-activity',123,'{}')").unwrap();
     w.boot.enable_retention_producers_for_test().unwrap();
-    let report = w.boot.reclaim.as_ref().unwrap().wait_for_cycles(1);
-    assert!(report.waiting_for_reclaim_lease);
-    assert_eq!(
-        sql.query_row(
-            "SELECT count(*) FROM retention_activity_pending WHERE run_id='backlog-activity'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        1
-    );
-    assert!(
-        w.boot
-            .auto_archive
-            .as_ref()
-            .unwrap()
-            .producer_gate()
-            .is_open()
-    );
-    assert!(w.boot.reclaim.as_ref().unwrap().producer_gate().is_open());
+    let archive = w.boot.auto_archive.as_ref().unwrap();
+    assert!(archive.producer_gate().is_open());
     assert!(!w.boot.busy());
     w.boot.shutdown().await.unwrap();
 }

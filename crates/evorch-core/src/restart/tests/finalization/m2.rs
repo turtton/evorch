@@ -359,29 +359,10 @@ async fn final_business_event_and_usage_are_durable_without_periodic_flush() {
     assert!(host.shutdown().await.is_err());
 }
 
-// The default fake-model fixture has no autonomous retention producers.
 #[tokio::test(start_paused = true)]
 async fn busy_writer_barrier_stays_failed_closed_after_the_snapshot_is_released() {
     let (_dir, mut host) = boot().await;
     let core = RestartCoordinator::new(&host);
-    // Pin after sealing to isolate the final FULL barrier. An earlier reader
-    // can correctly fail the resume flush after maintenance already committed.
-    let id = core
-        .request_planned(BTreeMap::new())
-        .unwrap_or_else(|error| {
-            panic!(
-                "planned request {error:?}; coordinator {:?}; runtime {:?}",
-                core.snapshot(),
-                core.0.runtime.quiesce_state()
-            )
-        });
-    core.wait_sealed(id).await.unwrap_or_else(|error| {
-        panic!(
-            "seal {error:?}; coordinator {:?}; runtime {:?}",
-            core.snapshot(),
-            core.0.runtime.quiesce_state()
-        )
-    });
     let reader = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
     reader.execute_batch("BEGIN").unwrap();
     let _: i64 = reader
@@ -389,9 +370,7 @@ async fn busy_writer_barrier_stays_failed_closed_after_the_snapshot_is_released(
         .unwrap();
     // This read snapshot is held until the FULL checkpoint reports busy. There
     // is no timing race or delayed release: correctness depends on the SQL lock.
-    let tx = transaction(&host);
-    core.start_finalization_without_target(id, &mut host, tx)
-        .unwrap();
+    let id = start(&mut host, &core).await;
     assert!(core.wait_finalization(id).await.is_err());
     assert_eq!(core.snapshot().phase, RestartPhase::FailedClosed);
     assert_eq!(
@@ -490,53 +469,22 @@ async fn cleanup_reports_late_join_failure_and_still_joins_remaining_services() 
 // auto-advance the product preparation deadline while the std retention worker
 // is still completing real I/O, cancelling preparation before the tested barrier.
 #[tokio::test]
-async fn retention_producers_pause_before_sealing_and_join_before_storage_drains() {
+async fn auto_archive_owner_pauses_before_sealing_and_joins_before_storage_drains() {
     let (_dir, mut host) = boot().await;
     host.enable_retention_producers_for_test().unwrap();
     let gates = host.restart_producers();
-    let maintenance = &gates[gates.len() - 2..];
-    assert!(maintenance.iter().all(|g| g.is_open()));
+    let archive = gates.last().unwrap().clone();
+    assert!(archive.is_open());
     let core = RestartCoordinator::new(&host);
-    let id = core
-        .request_planned(BTreeMap::new())
-        .unwrap_or_else(|error| {
-            panic!(
-                "planned request {error:?}; coordinator {:?}; runtime {:?}",
-                core.snapshot(),
-                core.0.runtime.quiesce_state()
-            )
-        });
-    core.wait_sealed(id).await.unwrap_or_else(|error| {
-        panic!(
-            "seal {error:?}; coordinator {:?}; runtime {:?}",
-            core.snapshot(),
-            core.0.runtime.quiesce_state()
-        )
-    });
-    assert!(maintenance.iter().all(|g| !g.is_open() && g.active() == 0));
-    let db = rusqlite::Connection::open(&host.composition.storage.db_path).unwrap();
-    db.execute_batch("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Message','MessageCompleted','run-999',1,'{}')").unwrap();
-    let pending = || {
-        db.query_row(
-            "SELECT count(*) FROM retention_activity_pending WHERE run_id='run-999'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap()
-    };
-    assert_eq!(pending(), 1);
+    let id = core.request_planned(BTreeMap::new()).unwrap();
+    core.wait_sealed(id).await.unwrap();
+    assert!(!archive.is_open() && archive.active() == 0);
     let tx = transaction(&host);
     core.start_finalization_without_target(id, &mut host, tx)
         .unwrap();
     // No exec target is intentional. This failure is beyond StorageDrained.
     assert!(core.wait_finalization(id).await.is_err());
     assert!(core.0.state.lock().unwrap().completed_stage.unwrap() >= ExitStage::StorageDrained);
-    assert!(maintenance.iter().all(|g| g.is_closed() && g.active() == 0));
-    host.composition.storage_writer.barrier().unwrap();
-    assert_eq!(
-        pending(),
-        1,
-        "no retention commit after the storage barrier"
-    );
+    assert!(archive.is_closed() && archive.active() == 0);
     let _ = host.shutdown().await;
 }

@@ -142,17 +142,6 @@ fn insert_event(
 fn build(config: &StorageConfig) -> Result<Fixture> {
     drop(Database::open(config)?);
     let conn = Connection::open(&config.db_path)?;
-    // The measured schema is v75 without the projection of the abandoned design.
-    let triggers: Vec<String> = conn
-        .prepare(
-            "SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'retention_activity%' \
-             OR name LIKE 'retention_decision%' OR name LIKE 'fence_retention_activity%')",
-        )?
-        .query_map([], |r| r.get(0))?
-        .collect::<std::result::Result<_, _>>()?;
-    for name in triggers {
-        conn.execute_batch(&format!("DROP TRIGGER {name}"))?;
-    }
     conn.execute(
         "INSERT INTO sessions (id, status, created_at_ns, updated_at_ns) VALUES ('s','running',0,0)",
         [],
@@ -216,7 +205,7 @@ fn build(config: &StorageConfig) -> Result<Fixture> {
         let mut goal_n: i64 = 0;
         while i < total {
             let at = now - 120 * DAY_NS + i * span / total;
-            let day = ((at - (now - 120 * DAY_NS)) / DAY_NS) as i64;
+            let day = (at - (now - 120 * DAY_NS)) / DAY_NS;
             let is_goal = goal_n * total < GOAL_EVENTS * (i + 1);
             if is_goal {
                 let (root, thread) = &goal_roots[rng.below(goal_roots.len())];
@@ -333,11 +322,6 @@ fn build(config: &StorageConfig) -> Result<Fixture> {
     })
 }
 
-#[derive(Default)]
-struct Stat {
-    micros: Vec<f64>,
-}
-
 struct Counters {
     rows_q: usize,
     bytes: usize,
@@ -346,6 +330,9 @@ struct Counters {
     statements: usize,
     outcome: String,
 }
+
+// Same text as `migrations::backfill::backfill_pending`, run first by every decision.
+const BACKFILL_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM events WHERE subkind IS NULL) OR EXISTS(SELECT 1 FROM events WHERE run_id IS NULL AND subkind IN ('TaskProgressed', 'TaskCheckpoint', 'ThreadGoalUpdated'))";
 
 fn drain_json(
     conn: &Connection,
@@ -383,6 +370,14 @@ fn decide(conn: &Connection, threads: &[String], runs: &[String], cutoff: i64) -
     };
     let run_json = serde_json::to_string(runs)?;
     let thread_json = serde_json::to_string(threads)?;
+    drain_json(
+        conn,
+        sql::THREAD_RUNS,
+        params![thread_json, 1_024i64],
+        &mut c,
+    )?;
+    let _: bool = conn.query_row(BACKFILL_PENDING, [], |r| r.get(0))?;
+    c.statements += 1;
     let recent = drain_json(conn, sql::RECENT_RUNS, params![run_json, cutoff], &mut c)?;
     for run in &recent {
         let mut stmt = conn.prepare_cached(sql::RUN_TAIL)?;
@@ -509,7 +504,9 @@ fn drain_goal_ids(conn: &Connection, run_json: &str, c: &mut Counters) -> Result
 }
 
 fn plans(conn: &Connection) -> Result<()> {
-    let probes: [(&str, &str); 12] = [
+    let probes: [(&str, &str); 14] = [
+        ("THREAD_RUNS", sql::THREAD_RUNS),
+        ("BACKFILL_PENDING", BACKFILL_PENDING),
         ("RECENT_RUNS", sql::RECENT_RUNS),
         ("RUN_TAIL", sql::RUN_TAIL),
         ("GOAL_LATEST", sql::GOAL_LATEST),
@@ -660,14 +657,6 @@ fn main() -> Result<()> {
         "fixture: {events} events ({goals} goal rows), {THREADS} threads, family of {BIG_THREADS} threads/{BIG_RUNS} runs, sqlite {version}, db {} MiB, built in {:.0}s; disk: nvme (df), os cache warm, per-trial fresh connection (cold sqlite page cache)",
         std::fs::metadata(&path)?.len() >> 20,
         started.elapsed().as_secs_f64()
-    );
-    let t = Instant::now();
-    for ddl in sql::INDEX_DDL {
-        conn.execute_batch(ddl)?;
-    }
-    println!(
-        "v75 indexes created in {:.2}s (goal index + 2 receipt indexes)",
-        t.elapsed().as_secs_f64()
     );
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     plans(&conn)?;
