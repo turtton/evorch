@@ -6,13 +6,13 @@
 
 use std::time::{Duration, Instant};
 
-use egui_extras::{Column, TableBuilder};
 use workspace_ui::SidebarState;
 
 use crate::model::usage_stats::{
     BreakdownRow, CostCalculator, CostMode, UsageDataset, UsageDimension, UsageFilter, UsageLoader,
     UsageRange, UsageTotals, breakdown, filter_options,
 };
+use crate::panes::usage_widgets::{SortColumn, TableRow, UsageCells, breakdown_table};
 use crate::theme::text::{h3, muted};
 use recorder::pricing::UsagePricing;
 
@@ -65,84 +65,6 @@ const LIVE_REFRESH: Duration = Duration::from_secs(15);
 /// Refresh today's footer total this often.
 const FOOTER_REFRESH: Duration = Duration::from_secs(60);
 const PRICING_REFRESH: Duration = Duration::from_secs(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortColumn {
-    Requests,
-    Input,
-    CacheWrite,
-    CacheRead,
-    Output,
-    Total,
-    CacheHit,
-    Cost,
-}
-
-impl SortColumn {
-    fn format(self, totals: &UsageTotals) -> String {
-        match self {
-            Self::Requests => totals.requests.to_string(),
-            Self::Input => compact_tokens(totals.uncached_input()),
-            Self::CacheWrite => compact_tokens(totals.tokens.cache_write),
-            Self::CacheRead => compact_tokens(totals.tokens.cache_read),
-            Self::Output => compact_tokens(totals.tokens.output),
-            Self::Total => compact_tokens(totals.total_tokens()),
-            Self::CacheHit => totals
-                .cache_hit_rate()
-                .map_or_else(|| "—".into(), |rate| format!("{rate:.1}%")),
-            Self::Cost => format_cost(totals),
-        }
-    }
-
-    fn value(self, totals: &UsageTotals) -> f64 {
-        match self {
-            Self::Requests => totals.requests as f64,
-            Self::Input => totals.uncached_input() as f64,
-            Self::CacheWrite => totals.tokens.cache_write as f64,
-            Self::CacheRead => totals.tokens.cache_read as f64,
-            Self::Output => totals.tokens.output as f64,
-            Self::Total => totals.total_tokens() as f64,
-            Self::CacheHit => totals.cache_hit_rate().unwrap_or_default(),
-            Self::Cost => totals.cost,
-        }
-    }
-}
-
-// Cost and totals first: they stay visible when the tab is narrow.
-const COLUMNS: [(&str, SortColumn, &str); 8] = [
-    ("Cost", SortColumn::Cost, "Estimated cost in USD"),
-    ("Total", SortColumn::Total, "All input and output tokens"),
-    (
-        "Cache hit",
-        SortColumn::CacheHit,
-        "Cache read share of all input tokens",
-    ),
-    (
-        "Requests",
-        SortColumn::Requests,
-        "Provider attempts, including failures",
-    ),
-    (
-        "Input",
-        SortColumn::Input,
-        "Input tokens not served from or written to cache",
-    ),
-    (
-        "Cache write",
-        SortColumn::CacheWrite,
-        "Input tokens written to the prompt cache",
-    ),
-    (
-        "Cache read",
-        SortColumn::CacheRead,
-        "Input tokens served from the prompt cache",
-    ),
-    (
-        "Output",
-        SortColumn::Output,
-        "Output tokens, including reasoning",
-    ),
-];
 
 #[derive(Debug, Clone, PartialEq)]
 struct ViewKey {
@@ -629,110 +551,47 @@ impl UsagePane {
         let Some((rows, total)) = self.current_view() else {
             return;
         };
-        let mut order: Vec<&BreakdownRow> = rows.iter().collect();
-        if let Some((column, descending)) = sort {
-            order.sort_by(|left, right| {
-                let ordering = column
-                    .value(&left.totals)
-                    .total_cmp(&column.value(&right.totals));
-                if descending {
-                    ordering.reverse()
+        let rows: Vec<TableRow> = rows
+            .iter()
+            .map(|row| TableRow {
+                label: key_label(dimension, &row.key, sidebar),
+                cells: cells(&row.totals),
+                children: if show_models {
+                    row.models
+                        .iter()
+                        .map(|(model, totals)| (model.clone(), cells(totals)))
+                        .collect()
                 } else {
-                    ordering
-                }
-            });
-        }
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-        TableBuilder::new(ui)
-            .id_salt("usage-breakdown")
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
-            .column(Column::initial(150.0).at_least(110.0).clip(true))
-            .columns(Column::auto().at_least(56.0), COLUMNS.len())
-            .header(row_height, |mut header| {
-                header.col(|ui| {
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.strong(dimension.label());
-                    });
-                });
-                for (title, column, hint) in COLUMNS {
-                    header.col(|ui| {
-                        let marker = match sort {
-                            Some((sorted, true)) if sorted == column => " ▼",
-                            Some((sorted, false)) if sorted == column => " ▲",
-                            _ => "",
-                        };
-                        let clicked = ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!("{title}{marker}")).strong(),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text(hint)
-                            .clicked();
-                        if clicked {
-                            sort = match sort {
-                                Some((sorted, true)) if sorted == column => Some((column, false)),
-                                Some((sorted, false)) if sorted == column => None,
-                                _ => Some((column, true)),
-                            };
-                        }
-                    });
-                }
+                    Vec::new()
+                },
             })
-            .body(|mut body| {
-                for row in order {
-                    body.row(row_height, |mut table_row| {
-                        let label = key_label(dimension, &row.key, sidebar);
-                        totals_row(&mut table_row, &label, &row.totals, false);
-                    });
-                    if show_models {
-                        for (model, totals) in &row.models {
-                            body.row(row_height, |mut table_row| {
-                                totals_row(
-                                    &mut table_row,
-                                    &format!("    └ {model}"),
-                                    totals,
-                                    false,
-                                );
-                            });
-                        }
-                    }
-                }
-                body.row(row_height, |mut table_row| {
-                    totals_row(&mut table_row, "Total", &total, true);
-                });
-            });
+            .collect();
+        breakdown_table(
+            ui,
+            "usage-breakdown",
+            dimension.label(),
+            &rows,
+            &cells(&total),
+            &mut sort,
+            show_models,
+            true,
+        );
         self.sort = sort;
     }
 }
 
-fn totals_row(
-    row: &mut egui_extras::TableRow<'_, '_>,
-    label: &str,
-    totals: &UsageTotals,
-    strong: bool,
-) {
-    let text = |value: String| {
-        let text = egui::RichText::new(value);
-        if strong { text.strong() } else { text }
-    };
-    row.col(|ui| {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.label(text(label.to_owned())).on_hover_text(label);
-        });
-    });
-    for (_, column, _) in COLUMNS {
-        row.col(|ui| {
-            let response = ui.label(text(column.format(totals)));
-            if column == SortColumn::Cost && totals.unpriced {
-                response.on_hover_text(
-                    "Some requests have no known price or reported no usage; the cost is a lower bound.",
-                );
-            }
-        });
+fn cells(totals: &UsageTotals) -> UsageCells {
+    UsageCells {
+        requests: totals.requests,
+        failed: totals.failed,
+        input: totals.tokens.input,
+        output: totals.tokens.output,
+        cache_read: totals.tokens.cache_read,
+        cache_write: totals.tokens.cache_write,
+        reasoning: totals.reasoning,
+        cost: totals.cost,
+        lower_bound: totals.unpriced,
+        ttft_ms: totals.average_ttft_ms(),
     }
 }
 

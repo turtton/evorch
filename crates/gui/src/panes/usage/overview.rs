@@ -1,16 +1,18 @@
 //! Overview: stat tiles, daily token and cost bars, activity grid and distribution.
 
-use egui::{Ui, vec2};
-use egui_plot::{Bar, BarChart, Legend};
+use egui::Ui;
 use workspace_ui::SidebarState;
 
-use super::charts::{self, SERIES};
-use super::{compact_tokens, format_cost, key_label};
-use crate::model::telemetry::latency_label;
+use super::charts;
+use super::{cells, key_label};
 use crate::model::usage_stats::series::{self, Share};
 use crate::model::usage_stats::{
     CostCalculator, CostMode, LocalDay, UsageDataset, UsageDimension, UsageFilter, UsageRange,
     UsageTotals,
+};
+use crate::panes::usage_widgets::{
+    self, ShareRow, TILE_WIDTH, UsageCells, activity_grid, daily_cost_chart, daily_token_chart,
+    overview_tiles,
 };
 use crate::theme::text::muted;
 use recorder::pricing::UsagePricing;
@@ -25,13 +27,11 @@ pub(super) const DISTRIBUTION: [UsageDimension; 6] = [
     UsageDimension::Purpose,
 ];
 
-const TILE_WIDTH: f32 = 132.0;
-
 /// Precomputed series, rebuilt only when the data or controls change.
 pub(super) struct OverviewData {
     first: LocalDay,
-    days: Vec<(LocalDay, UsageTotals)>,
-    total: UsageTotals,
+    days: Vec<(LocalDay, UsageCells)>,
+    total: UsageCells,
     dimension: UsageDimension,
     shares: Vec<Share>,
     order: Vec<String>,
@@ -59,8 +59,11 @@ impl OverviewData {
         }
         Some(Self {
             first,
-            days,
-            total,
+            days: days
+                .iter()
+                .map(|(day, totals)| (*day, cells(totals)))
+                .collect(),
+            total: cells(&total),
             dimension,
             shares: series::top_shares(&dataset.facts, filter, dimension, &mut costs, 5),
             order: series::stable_order(&dataset.facts, dimension, &mut costs),
@@ -73,21 +76,21 @@ impl OverviewData {
         sidebar: &SidebarState,
         dimension: &mut UsageDimension,
     ) {
-        self.tiles(ui);
+        charts::tiles(ui, TILE_WIDTH, overview_tiles(&self.total, &self.days));
         charts::section(
             ui,
             "Daily tokens",
             "Input split by cache use, plus output; one bar per day",
         );
-        self.token_bars(ui);
+        daily_token_chart(ui, "usage-daily-tokens", self.first, &self.days);
         charts::section(ui, "Daily cost", "Estimated cost per day in USD");
-        self.cost_bars(ui);
+        daily_cost_chart(ui, "usage-daily-cost", self.first, &self.days);
         charts::section(
             ui,
             "Activity",
             "Total tokens per day; darker cells used less",
         );
-        self.activity(ui);
+        activity_grid(ui, "usage-activity", &self.days);
         charts::section(
             ui,
             "Distribution",
@@ -105,156 +108,6 @@ impl OverviewData {
         });
         share_list(ui, &self.shares, &self.order, self.dimension, sidebar);
     }
-
-    fn tiles(&self, ui: &mut Ui) {
-        let total = &self.total;
-        let daily = |metric: fn(&UsageTotals) -> f64| -> Vec<f64> {
-            self.days.iter().map(|(_, totals)| metric(totals)).collect()
-        };
-        let day_count = self.days.len().max(1) as f64;
-        let tiles: [(&str, String, String, Vec<f64>); 6] = [
-            (
-                "Cost",
-                format_cost(total),
-                format!("${:.2} / day", total.cost / day_count),
-                daily(|totals| totals.cost),
-            ),
-            (
-                "Tokens",
-                compact_tokens(total.total_tokens()),
-                format!(
-                    "in {} · out {}",
-                    compact_tokens(total.tokens.input),
-                    compact_tokens(total.tokens.output)
-                ),
-                daily(|totals| totals.total_tokens() as f64),
-            ),
-            (
-                "Requests",
-                total.requests.to_string(),
-                total
-                    .success_rate()
-                    .map_or_else(|| "—".into(), |rate| format!("{rate:.1}% succeeded")),
-                daily(|totals| totals.requests as f64),
-            ),
-            (
-                "Cache hit",
-                total
-                    .cache_hit_rate()
-                    .map_or_else(|| "—".into(), |rate| format!("{rate:.1}%")),
-                format!("{} read", compact_tokens(total.tokens.cache_read)),
-                daily(|totals| totals.cache_hit_rate().unwrap_or_default()),
-            ),
-            (
-                "Per 1M tokens",
-                total
-                    .cost_per_million()
-                    .map_or_else(|| "—".into(), |cost| format!("${cost:.2}")),
-                "blended cost".into(),
-                daily(|totals| totals.cost_per_million().unwrap_or_default()),
-            ),
-            (
-                "Avg TTFT",
-                total
-                    .average_ttft_ms()
-                    .map_or_else(|| "—".into(), |ttft| latency_label(ttft as f64)),
-                format!("{} reasoning", compact_tokens(total.reasoning)),
-                daily(|totals| totals.average_ttft_ms().unwrap_or_default() as f64),
-            ),
-        ];
-        charts::tiles(
-            ui,
-            TILE_WIDTH,
-            tiles
-                .into_iter()
-                .map(|(title, value, detail, values)| charts::Tile {
-                    title: title.to_owned(),
-                    value,
-                    detail,
-                    sparkline: Some(values),
-                })
-                .collect(),
-        );
-    }
-
-    fn token_bars(&self, ui: &mut Ui) {
-        let charts = charts::stacked_day_bars(&self.days, self.first, &charts::TOKEN_LAYERS);
-        charts::day_plot("usage-daily-tokens", self.first, 170.0)
-            .legend(Legend::default())
-            .y_axis_formatter(|mark, _| compact_tokens(mark.value.max(0.0) as u64))
-            .show(ui, |plot| {
-                for chart in charts {
-                    plot.bar_chart(chart);
-                }
-            });
-    }
-
-    fn cost_bars(&self, ui: &mut Ui) {
-        let first = self.first;
-        let bars = self
-            .days
-            .iter()
-            .enumerate()
-            .map(|(day, (_, totals))| Bar::new(day as f64, totals.cost).width(0.7))
-            .collect();
-        let chart = BarChart::new("Cost", bars)
-            .color(SERIES[0])
-            .element_formatter(Box::new(move |bar, _| {
-                format!(
-                    "{} · ${:.2}",
-                    first.add_days(bar.argument as i64),
-                    bar.value
-                )
-            }));
-        charts::day_plot("usage-daily-cost", self.first, 170.0)
-            .y_axis_formatter(|mark, _| format!("${:.2}", mark.value))
-            .show(ui, |plot| plot.bar_chart(chart));
-    }
-
-    fn activity(&self, ui: &mut Ui) {
-        let (Some((first, _)), Some((last, _))) = (self.days.first(), self.days.last()) else {
-            return;
-        };
-        let start = first.week_start();
-        let weeks = (last.days_since(start) / 7 + 1) as usize;
-        let mut values = vec![vec![0.0; weeks]; 7];
-        let mut labels = vec![vec![String::new(); weeks]; 7];
-        for (day, totals) in &self.days {
-            let offset = day.days_since(start);
-            let (week, weekday) = ((offset / 7) as usize, (offset % 7) as usize);
-            values[weekday][week] = totals.total_tokens() as f64;
-            labels[weekday][week] = format!(
-                "{day}: {} tokens · {}",
-                compact_tokens(totals.total_tokens()),
-                format_cost(totals)
-            );
-        }
-        let rows: Vec<String> = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let tooltip = |row: usize, column: usize| {
-            let text = &labels[row][column];
-            if text.is_empty() {
-                "Outside the period".into()
-            } else {
-                text.clone()
-            }
-        };
-        egui::ScrollArea::horizontal()
-            .id_salt("usage-activity")
-            .show(ui, |ui| {
-                charts::heat_grid(
-                    ui,
-                    "usage-activity-grid",
-                    &rows,
-                    &[],
-                    &values,
-                    &tooltip,
-                    vec2(14.0, 14.0),
-                );
-            });
-    }
 }
 
 /// A part-to-whole bar plus one row per slice, colored by stable entity order.
@@ -265,11 +118,7 @@ pub(super) fn share_list(
     dimension: UsageDimension,
     sidebar: &SidebarState,
 ) {
-    if shares.is_empty() {
-        ui.label(muted("No usage for these filters."));
-        return;
-    }
-    let labelled: Vec<_> = shares
+    let rows: Vec<ShareRow> = shares
         .iter()
         .map(|share| {
             let (label, color) = match &share.key {
@@ -279,41 +128,13 @@ pub(super) fn share_list(
                 ),
                 None => ("Other".to_owned(), charts::other_color()),
             };
-            (share, label, color)
+            ShareRow {
+                label,
+                color,
+                fraction: share.fraction,
+                cells: cells(&share.totals),
+            }
         })
         .collect();
-    charts::share_bar(
-        ui,
-        &labelled
-            .iter()
-            .map(|(share, label, color)| {
-                (
-                    share.fraction,
-                    *color,
-                    format!("{label}: {:.1}%", share.fraction * 100.0),
-                )
-            })
-            .collect::<Vec<_>>(),
-        14.0,
-    );
-    egui::Grid::new(("usage-shares", dimension.label()))
-        .striped(true)
-        .show(ui, |ui| {
-            for (share, label, color) in labelled {
-                ui.horizontal(|ui| charts::legend_item(ui, color, &label));
-                ui.label(format!("{:.1}%", share.fraction * 100.0));
-                ui.label(format_cost(&share.totals));
-                ui.label(format!(
-                    "{} tok",
-                    compact_tokens(share.totals.total_tokens())
-                ));
-                ui.label(
-                    share
-                        .totals
-                        .cache_hit_rate()
-                        .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.0}%")),
-                );
-                ui.end_row();
-            }
-        });
+    usage_widgets::share_list(ui, ("usage-shares", dimension.label()), &rows);
 }

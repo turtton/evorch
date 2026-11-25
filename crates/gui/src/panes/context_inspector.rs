@@ -11,8 +11,6 @@ use runtime::base_context::{BaseContextReport, RunContextView};
 
 use crate::model::commands::{CommandSink, ContextPreviewReceiver};
 use crate::model::context_inspector::{BudgetSegment, PreviewSpec, compact_tokens};
-use crate::theme::text::muted;
-use crate::theme::tokens::palette;
 
 #[path = "context_inspector/body.rs"]
 mod body;
@@ -250,49 +248,11 @@ impl ContextInspectorPane {
 
 /// Stacked budget bar over the whole window; the unfilled tail is free space.
 fn budget_bar(ui: &mut egui::Ui, segments: &[BudgetSegment], window: u64) {
-    let used: u64 = segments.iter().map(|segment| segment.tokens).sum();
-    let scale = window.max(used).max(1) as f32;
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, palette().BORDER);
-    let mut x = rect.left();
-    for (index, segment) in segments.iter().enumerate() {
-        let w = rect.width() * segment.tokens as f32 / scale;
-        let part = egui::Rect::from_min_max(
-            egui::pos2(x, rect.top()),
-            egui::pos2((x + w).min(rect.right()), rect.bottom()),
-        );
-        painter.rect_filled(part, 0.0, segment_color(index));
-        x += w;
-    }
-    response.on_hover_text(
-        segments
-            .iter()
-            .map(|segment| format!("{}: {}", segment.label, segment.tokens))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    ui.horizontal_wrapped(|ui| {
-        for (index, segment) in segments.iter().enumerate() {
-            ui.label(egui::RichText::new("■").color(segment_color(index)));
-            ui.label(muted(format!(
-                "{} {}",
-                segment.label,
-                compact_tokens(segment.tokens)
-            )));
-        }
-        ui.label(egui::RichText::new("■").color(palette().BORDER));
-        ui.label(muted(format!(
-            "Free {}",
-            compact_tokens(window.saturating_sub(used))
-        )));
-    });
-}
-
-fn segment_color(index: usize) -> egui::Color32 {
-    let series = crate::panes::usage::charts::SERIES;
-    series[index % series.len()]
+    let segments: Vec<(&str, u64)> = segments
+        .iter()
+        .map(|segment| (segment.label, segment.tokens))
+        .collect();
+    crate::panes::usage_widgets::budget_bar(ui, &segments, window);
 }
 
 /// `18.4K / 200K (9%)`, never a bare percentage.

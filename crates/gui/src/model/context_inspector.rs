@@ -214,17 +214,7 @@ fn block_text(block: &ContentBlock) -> Option<String> {
 /// messages are named but never shown, and their tokens stay in the budget.
 pub fn message_list_heading(rows: &[MessageRow]) -> (String, Option<String>) {
     let listed = rows.iter().filter(|row| row.listed).count();
-    let hidden = rows.len() - listed;
-    if hidden == 0 {
-        return (format!("Messages ({listed})"), None);
-    }
-    let noun = if hidden == 1 { "message" } else { "messages" };
-    (
-        format!("Messages ({listed} of {})", rows.len()),
-        Some(format!(
-            "{hidden} replay-only {noun} hidden · counted in the budget"
-        )),
-    )
+    crate::panes::usage_widgets::message_heading(listed, rows.len() - listed, rows.len())
 }
 
 /// Budget segments of a run's persisted history, by message role.

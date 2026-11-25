@@ -21,6 +21,7 @@ pub mod lane_close;
 pub mod lanes;
 pub mod latest_job;
 pub mod ledger;
+pub mod local_day;
 pub mod model_catalog;
 pub mod model_metadata;
 pub mod model_picker;

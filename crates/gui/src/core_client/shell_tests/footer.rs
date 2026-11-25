@@ -10,8 +10,11 @@ use crate::panes::theme_widgets::NO_SETTINGS_PATH;
 use crate::theme::style::{ThemePreset, style_for};
 use std::time::Duration;
 use workbench_protocol::{
+    ids::OperationId,
     namespaces::diagnostics::{
-        DiagnosticsQuery, DiagnosticsReply, ReadOutcome, UsageRange, UsageSummary, UsageTotals,
+        ContextMessage, ContextMessageRole, ContextSegment, DiagnosticsQuery, DiagnosticsReply,
+        GetRunContext, ReadOutcome, RunContext, RunContextOverview, UsageDay, UsageModel,
+        UsageRange, UsageSummary, UsageTotals,
     },
     operation::{OperationState, OperationView},
 };
@@ -61,12 +64,150 @@ fn today(operation: OperationView, cost_micro_usd: u64) -> FeatureReply {
     ))))
 }
 
-// Given: a connected window whose diagnostics tab is not open
-// When: the core answers today's usage
-// Then: the usage button shows the cost of today, and pressing it opens the Diagnostics tab
+fn ready(operation_id: OperationId) -> OperationView {
+    OperationView {
+        operation_id,
+        state: OperationState::Ready,
+        revision: Revision(1),
+        result: None,
+    }
+}
+
+fn diagnostics_asked(screen: &mut Screen) -> Vec<(u64, DiagnosticsQuery)> {
+    screen.harness.run_steps(2);
+    let mut asked = Vec::new();
+    while let Ok(action) = screen.actions.try_recv() {
+        if let Action::Feature(FeatureAction {
+            feature: FeatureId::Diagnostics,
+            tag,
+            request: FeatureRequest::Query(Query::Diagnostics(query)),
+        }) = action
+        {
+            asked.push((tag, query));
+        }
+    }
+    asked
+}
+
+fn last_week(operation: OperationView) -> FeatureReply {
+    let day = |day: &str, requests: u64, micro_usd: u64| UsageDay {
+        day: day.into(),
+        totals: UsageTotals {
+            requests,
+            input_tokens: 40_000 * requests,
+            output_tokens: 3_000 * requests,
+            cache_read_tokens: 25_000 * requests,
+            recorded_cost_micro_usd: micro_usd,
+            ..Default::default()
+        },
+    };
+    let days = vec![
+        day("2026-11-19", 4, 420_000),
+        day("2026-11-21", 9, 1_100_000),
+        day("2026-11-24", 6, 730_000),
+    ];
+    let mut totals = UsageTotals::default();
+    for listed in &days {
+        totals.requests += listed.totals.requests;
+        totals.input_tokens += listed.totals.input_tokens;
+        totals.output_tokens += listed.totals.output_tokens;
+        totals.cache_read_tokens += listed.totals.cache_read_tokens;
+        totals.recorded_cost_micro_usd += listed.totals.recorded_cost_micro_usd;
+    }
+    let models = vec![
+        UsageModel {
+            provider: "anthropic".into(),
+            model: "claude-opus".into(),
+            totals: UsageTotals {
+                recorded_cost_micro_usd: 1_800_000,
+                ..totals.clone()
+            },
+        },
+        UsageModel {
+            provider: "openai".into(),
+            model: "gpt".into(),
+            totals: UsageTotals {
+                requests: 3,
+                recorded_cost_micro_usd: 450_000,
+                ..Default::default()
+            },
+        },
+    ];
+    FeatureReply::Query(Ok(QueryReply::Diagnostics(DiagnosticsReply::Usage(
+        Box::new(ReadOutcome {
+            operation,
+            data: Some(UsageSummary {
+                range: UsageRange::Last7Days,
+                from_day: "2026-11-19".into(),
+                to_day: "2026-11-25".into(),
+                totals,
+                days,
+                days_omitted: 0,
+                models,
+                models_omitted: 0,
+            }),
+        }),
+    ))))
+}
+
+fn run_context(get: &GetRunContext) -> FeatureReply {
+    let message = |index: u32, role, summary: &str, tokens| ContextMessage {
+        index,
+        role,
+        summary: summary.into(),
+        tokens,
+        listed: true,
+    };
+    FeatureReply::Query(Ok(QueryReply::Diagnostics(DiagnosticsReply::Context(
+        Box::new(ReadOutcome {
+            operation: ready(get.operation_id.clone()),
+            data: Some(RunContext {
+                overview: RunContextOverview {
+                    run: get.run.clone(),
+                    role: "orchestrator".into(),
+                    category: None,
+                    phase: "after_tool_round".into(),
+                    selected_model: Some("claude-opus".into()),
+                    updated_at_ms: 0,
+                    tools: vec!["read_file".into(), "bash".into()],
+                    tools_omitted: 0,
+                    message_count: 2,
+                    compaction_checkpoints: 0,
+                    segments: vec![
+                        ContextSegment {
+                            label: "system".into(),
+                            tokens: 6_200,
+                        },
+                        ContextSegment {
+                            label: "user".into(),
+                            tokens: 340,
+                        },
+                    ],
+                },
+                messages: Page {
+                    items: vec![
+                        message(
+                            0,
+                            ContextMessageRole::System,
+                            "You are the orchestrator",
+                            6_200,
+                        ),
+                        message(1, ContextMessageRole::User, "Run the auth tests", 340),
+                    ],
+                    next_cursor: None,
+                    snapshot_revision: Revision(1),
+                },
+            }),
+        }),
+    ))))
+}
+
+// Given: a connected window whose usage tab is not open
+// When: the core answers today's usage, the button is pressed and the last 7 days are answered
+// Then: the button shows the cost of today, and the Usage tab shows the legacy overview and a run's context
 #[test]
-fn the_usage_button_shows_the_cost_of_today_and_opens_diagnostics() {
-    let mut screen = screen(egui::vec2(1280.0, 800.0));
+fn the_usage_button_shows_the_cost_of_today_and_opens_the_usage_tab() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
     let (tag, operation) = todays_summary(screen.settle());
     screen.harness.get_by_label("Usage");
 
@@ -78,7 +219,7 @@ fn the_usage_button_shows_the_cost_of_today_and_opens_diagnostics() {
     screen.harness.run_steps(2);
     assert!(screen.harness.query_by_label("Usage").is_none());
     screen.harness.get_by_label("$1.50 today").click();
-    screen.harness.run_steps(2);
+    let asked = diagnostics_asked(&mut screen);
     assert!(
         screen
             .harness
@@ -87,6 +228,58 @@ fn the_usage_button_shows_the_cost_of_today_and_opens_diagnostics() {
             .find_tab(&CoreTab::Feature(FeatureId::Diagnostics))
             .is_some()
     );
+    let (tag, get) = asked
+        .into_iter()
+        .find_map(|(tag, query)| match query {
+            DiagnosticsQuery::GetUsageSummary(get) if get.range == UsageRange::Last7Days => {
+                Some((tag, get))
+            }
+            _ => None,
+        })
+        .expect("the last 7 days were asked");
+    screen.shared.lock().unwrap().features.reply(
+        FeatureId::Diagnostics,
+        tag,
+        last_week(ready(get.operation_id)),
+    );
+    screen.harness.run_steps(2);
+    screen
+        .harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Usage tab");
+    screen.harness.get_by_label("Usage");
+    for label in [
+        "2026-11-19 to 2026-11-25",
+        "$2.25",
+        "Daily tokens",
+        "claude-opus",
+    ] {
+        screen.harness.get_by_label(label);
+    }
+    screen.capture("usage");
+
+    screen
+        .harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Context")
+        .click();
+    let (tag, get) = diagnostics_asked(&mut screen)
+        .into_iter()
+        .find_map(|(tag, query)| match query {
+            DiagnosticsQuery::GetRunContext(get) => Some((tag, get)),
+            _ => None,
+        })
+        .expect("the context of the thread's run was asked");
+    assert_eq!(get.run.as_str(), "run-1");
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .features
+        .reply(FeatureId::Diagnostics, tag, run_context(&get));
+    screen.harness.run_steps(2);
+    screen
+        .harness
+        .get_by_label("user · 340 · Run the auth tests");
+    screen.capture("usage-context");
 }
 
 // Given: a cost of today is shown / When: the connection is lost / Then: the button reads Usage again
