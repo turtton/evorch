@@ -657,7 +657,7 @@ impl StorageHandle {
 impl Database {
     /// Direct canonical protection reads, never owner/claim classification.
     pub fn activity_thread_hold(&self, thread: &str) -> Result<Option<&'static str>, StorageError> {
-        let unknown_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_activity_pending p JOIN events e ON p.source=0 AND p.source_id=e.id WHERE e.subkind IS NULL OR (e.kind='Orchestrator' AND e.subkind='ThreadGoalUpdated')) OR EXISTS(SELECT 1 FROM retention_activity_failures WHERE run_id='')",[],|r|r.get(0))?;
+        let unknown_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_activity_pending p JOIN events e ON p.source=0 AND p.source_id=e.id WHERE p.run_id='' OR e.subkind IS NULL OR (e.kind='Orchestrator' AND e.subkind='ThreadGoalUpdated')) OR EXISTS(SELECT 1 FROM retention_activity_failures WHERE run_id='')",[],|r|r.get(0))?;
         if unknown_goal {
             return Ok(Some("SourceRevisionBehind"));
         }

@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub(crate) mod admin_audit;
+mod admission;
 mod cleanup;
 mod conversation_plan;
 mod index;
@@ -1271,15 +1272,9 @@ impl StorageHandle {
         // repo::event::append_event でも再検査される。
         let event = crate::entity::redact_tool_event(event);
         SecretGuard::from_env().check_event_kind(&event.kind)?;
-        let (reply, result) = mpsc::channel();
-        self.0
-            .send(Command::AppendEvent(
-                session_id.map(String::from),
-                event.clone(),
-                reply,
-            ))
-            .map_err(|_| StorageError::WriterClosed)?;
-        let result = result.recv().map_err(|_| StorageError::WriterClosed)?;
+        let result = self.request(|reply| {
+            Command::AppendEvent(session_id.map(String::from), event.clone(), reply)
+        });
         if result.is_ok() {
             self.3.notify();
         }
@@ -1302,11 +1297,7 @@ impl StorageHandle {
     ///
     /// writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
     pub fn reconcile(&self) -> Result<ReconcileSummary, StorageError> {
-        let (reply, result) = mpsc::channel();
-        self.0
-            .send(Command::Reconcile(reply))
-            .map_err(|_| StorageError::WriterClosed)?;
-        result.recv().map_err(|_| StorageError::WriterClosed)?
+        self.request(Command::Reconcile)
     }
 
     /// usage ledger へリクエスト単位の行を保存します。既存の request ID は維持します。
@@ -1518,40 +1509,7 @@ impl StorageHandle {
         });
         let (reply, result) = mpsc::channel();
         let command = command(reply);
-        let admission = match &command {
-            Command::AppendHostInputAccepted(_, _, _, receipt, _) => {
-                Some(Some(format!("r:{}", receipt.run_id)))
-            }
-            Command::RecordHostChatSubmission(submission, _) => {
-                Some(Some(format!("r:{}", submission.run_id)))
-            }
-            // G3/G4: the destination of an uncommitted binding is not yet
-            // discoverable by a family reader. Register globally, without
-            // expanding that family or inspecting serialized context.
-            Command::UpsertRunContext(..)
-            | Command::UpsertRunContextWithEvidence(..)
-            | Command::UpsertRunContextWithReceipts(..)
-            | Command::AdvanceHandoff(..)
-            | Command::ConversationPlan(..)
-            | Command::SaveResumeIntent(..)
-            | Command::RetireResumeIntent(..)
-            | Command::StopUnregisteredResumeIntent(..)
-            | Command::Recovery(..)
-            | Command::CompareAndSwapRunContextRestoreState(..)
-            | Command::InvalidateRunContext(..)
-            | Command::RecordReviewEvidenceWithEdges(..)
-            | Command::RecordReviewLineageEdge(..)
-            | Command::TransitionHostInputs(..)
-            | Command::UpdateHostInputReceipts(..)
-            | Command::CreateUserQuestion(..)
-            | Command::BindUserQuestions(..)
-            | Command::AnswerUserQuestion(..)
-            | Command::AnswerUserQuestionWithEvidence(..)
-            | Command::SaveEvalSample(..)
-            | Command::DeleteEvalSample(..)
-            | Command::UpsertThreads(..) => Some(None),
-            _ => None,
-        };
+        let admission = admission::scope(&command);
         let mut retention_admission = admission.and_then(|scope| self.request_admission_for(scope));
         let outcome = self
             .0

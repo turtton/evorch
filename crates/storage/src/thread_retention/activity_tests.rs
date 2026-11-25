@@ -627,3 +627,20 @@ fn unreadable_goal_with_unique_header_binding_holds_only_its_run_family() {
         None
     );
 }
+
+#[test]
+fn unattributed_committed_message_holds_empty_families_before_and_after_projection() {
+    let f = Fixture::new();
+    f.drain();
+    f.reader.conn.execute_batch("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,wall_clock_ns,payload) VALUES(1,0,'Message','MessageCompleted',1,'{}')").unwrap();
+    assert_eq!(
+        f.reader.activity_thread_hold("unrelated-empty").unwrap(),
+        Some("SourceRevisionBehind")
+    );
+    f.drain();
+    assert_eq!(
+        f.reader.activity_thread_hold("unrelated-empty").unwrap(),
+        Some("SourceRevisionBehind")
+    );
+    assert_eq!(f.reader.activity_report().unwrap().global_failures, 1);
+}

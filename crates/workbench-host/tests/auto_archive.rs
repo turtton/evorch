@@ -18,6 +18,7 @@ struct World {
     config: StorageConfig,
     store: SidebarStore,
     rt: tokio::runtime::Runtime,
+    scratch_hints: Arc<Mutex<Vec<String>>>,
 }
 impl World {
     fn new(runs: usize) -> Self {
@@ -49,6 +50,7 @@ impl World {
             dir,
             config,
             store,
+            scratch_hints: Default::default(),
             rt: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -90,7 +92,11 @@ impl World {
             None,
             |_| false,
         )
-        .with_mirror(handle);
+        .with_mirror(handle)
+        .with_scratch_hint({
+            let seen = self.scratch_hints.clone();
+            Arc::new(move |id| seen.lock().unwrap().push(id.into()))
+        });
         Arc::new(Mutex::new(
             CommandHost::new(CommandService::new(runtime, self.rt.handle().clone())).with_areas(
                 Areas {
@@ -389,4 +395,127 @@ fn source_mutation_during_staged_inspection_invalidates_the_old_candidate() {
     assert_eq!(r.published, 0);
     assert!(!w.archived());
     assert_eq!(w.drive(&mut c, &host, &a, 15 * DAY).published, 1);
+}
+
+fn many_attachments(w: &World) -> (sandbox::attachments::AttachmentRoot, std::path::PathBuf) {
+    let root = sandbox::attachments::AttachmentRoot::at(w.dir.path().join("attachments"));
+    let files = root.files("thread").unwrap();
+    for i in 0..4098 {
+        std::fs::write(files.path().join(format!("{i}.bin")), b"fixture").unwrap();
+    }
+    (root, files.path().to_owned())
+}
+
+#[test]
+fn partial_attachment_cleanup_resumes_after_restart_with_archiving_disabled_and_does_not_follow_symlinks()
+ {
+    let w = World::new(1);
+    let (_root, files) = many_attachments(&w);
+    let outside = w.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, files.join("outside-link")).unwrap();
+    let leases = w.leases();
+    let authority = AutoArchiveAuthority::new(&leases);
+    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+    w.drain(&storage.handle());
+    let host = w.host(storage.handle());
+    let mut first = w.coordinator();
+    let applied = w.drive(&mut first, &host, &authority, 7 * DAY);
+    assert_eq!(applied.published, 1);
+    assert_eq!(applied.attachment_calls, 1);
+    assert!(applied.holds.contains_key("AttachmentCleanupPending"));
+    assert!(files.exists());
+    let remaining = std::fs::read_dir(&files).unwrap().count();
+    assert!((1..4098).contains(&remaining));
+    let before =
+        w.store.read_unlocked().unwrap().sidebar.resolve_states()[&ThreadId::new("thread")].clone();
+    let mut restarted = AutoArchiveCoordinator::new(
+        w.config.clone(),
+        w.dir.path().into(),
+        AutoArchivePolicy { after_days: 0 },
+    );
+    let resumed = restarted.tick(&host, Some(&authority), 8 * DAY);
+    assert_eq!(resumed.published, 0);
+    assert_eq!(resumed.attachment_calls, 1);
+    assert_eq!(resumed.scratch_hints, 1);
+    assert_eq!(*w.scratch_hints.lock().unwrap(), ["thread", "thread"]);
+    assert!(!files.exists());
+    assert!(outside.join("keep").is_file());
+    let after =
+        w.store.read_unlocked().unwrap().sidebar.resolve_states()[&ThreadId::new("thread")].clone();
+    assert_eq!(before.archive_revision, after.archive_revision);
+    assert_eq!(before.archived_at, after.archived_at);
+}
+
+#[test]
+fn manual_restore_finishes_old_cleanup_and_stale_cursor_keeps_new_active_attachments() {
+    use workbench_protocol::{
+        commands::CommandResult,
+        namespaces::{WorkspaceQuery, WorkspaceReply, workspace::*},
+        queries::PageRequest,
+    };
+    let w = World::new(1);
+    let (root, files) = many_attachments(&w);
+    let leases = w.leases();
+    let authority = AutoArchiveAuthority::new(&leases);
+    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+    w.drain(&storage.handle());
+    let host = w.host(storage.handle());
+    let mut c = w.coordinator();
+    assert_eq!(w.drive(&mut c, &host, &authority, 7 * DAY).published, 1);
+    assert!(files.exists());
+    {
+        // Exercise the real synchronous manual wrapper under the host mutex,
+        // including attachment-before-sidebar cleanup and mirror/notifications.
+        let foreground = host.lock().unwrap();
+        let area = WorkspaceArea::with_store(
+            w.store.clone(),
+            Some(foreground.service().runtime().clone()),
+            vec![],
+            None,
+            |_| false,
+        )
+        .with_mirror(storage.handle());
+        let WorkspaceReply::Families(page) = area
+            .query(&WorkspaceQuery::ListFamilies(PageRequest::default()))
+            .unwrap()
+        else {
+            panic!("families")
+        };
+        let family = &page.items[0];
+        let reply = area
+            .command(
+                WorkspaceCommand::SetFamilyArchived(SetFamilyArchived {
+                    thread: family.key.clone(),
+                    archived: false,
+                    expected_family: FamilyIdentity {
+                        key: family.key.clone(),
+                        membership_epoch: family.membership_epoch,
+                    },
+                    expected_revision: family.archive_revision,
+                }),
+                &workbench_host::provenance::local_desktop(),
+            )
+            .unwrap();
+        assert!(matches!(
+            *reply.result.unwrap(),
+            CommandResult::Workspace(WorkspaceResult::Applied(_))
+        ));
+    }
+    assert!(!files.exists());
+    let fresh = root.files("thread").unwrap().path().join("fresh");
+    std::fs::write(&fresh, b"new active attachment").unwrap();
+    // A legitimate new accepted message, not the restore itself, advances
+    // activity. All clocks are injected; Event::new's wall clock is not used.
+    rusqlite::Connection::open(&w.config.db_path).unwrap().execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload)VALUES(1,0,'Message','MessageCompleted','run-1',?1,'{}')",[8*DAY]).unwrap();
+    w.drain(&storage.handle());
+    let report = c.tick(&host, Some(&authority), 8 * DAY);
+    assert_eq!(report.published, 0);
+    assert_eq!(report.attachment_calls, 0);
+    assert!(fresh.is_file());
+    assert!(
+        !w.store.read_unlocked().unwrap().sidebar.resolve_states()[&ThreadId::new("thread")]
+            .archived
+    );
 }
