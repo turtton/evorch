@@ -45,6 +45,10 @@ pub struct RunActivity {
     pub revision: i64,
     pub failure: Option<String>,
 }
+// Source removal/header reclassification must not scan all current goals.
+const INVALIDATE_GOAL_SOURCE_SQL: &str =
+    "UPDATE retention_activity_goals SET uncertain=1 WHERE event_id=?1";
+
 #[derive(Debug)]
 enum Evidence {
     Activity(String, i64),
@@ -638,7 +642,7 @@ impl StorageHandle {
                         },
                         Evidence::Ignored=>{},
                         Evidence::Failed(reason,global)=>{tx.prepare_cached("INSERT INTO retention_activity_failures(source,source_id,run_id,reason) VALUES(?1,?2,?3,?4)")?.execute(params![i.source,i.id,if global {""}else{&i.scope},reason])?;},
-                        Evidence::None=>{if i.source==0 {tx.prepare_cached("UPDATE retention_activity_goals SET uncertain=1 WHERE event_id=?1")?.execute([i.id])?;}},
+                        Evidence::None=>{if i.source==0 {tx.prepare_cached(INVALIDATE_GOAL_SOURCE_SQL)?.execute([i.id])?;}},
                     }
                 }
                 if let Some(rev)=i.pending_revision {tx.prepare_cached("DELETE FROM retention_activity_pending WHERE source=?1 AND source_id=?2 AND revision=?3 AND run_id=?4")?.execute(params![i.source,i.id,rev,i.pending_scope])?;}

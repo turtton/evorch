@@ -161,12 +161,13 @@ const EXPECTED_TABLES: [&str; 144] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 112] = [
+const EXPECTED_INDICES: [&str; 113] = [
     "idx_retention_activity_failures_run",
     "idx_retention_questions_root_pending",
     "retention_activity_candidates",
     "retention_activity_deliveries_run",
     "retention_activity_goals_thread",
+    "retention_activity_goals_event",
     "retention_activity_pending_run",
     "idx_history_discovery",
     "idx_history_merge",

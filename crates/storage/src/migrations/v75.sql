@@ -44,6 +44,7 @@ CREATE TABLE retention_activity_runs(run_id TEXT PRIMARY KEY, actual_ns INTEGER,
 CREATE INDEX retention_activity_candidates ON retention_activity_runs(failure,actual_ns,run_id);
 CREATE TABLE retention_activity_goals(goal_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, root_run_id TEXT NOT NULL, related TEXT NOT NULL, complete INTEGER NOT NULL, event_id INTEGER NOT NULL, uncertain INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX retention_activity_goals_thread ON retention_activity_goals(thread_id);
+CREATE INDEX retention_activity_goals_event ON retention_activity_goals(event_id);
 CREATE TABLE retention_activity_bindings(thread_id TEXT PRIMARY KEY, goal_id TEXT, event_id INTEGER NOT NULL, uncertain INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE retention_activity_deliveries(message_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, accepted_at_ns INTEGER NOT NULL);
 CREATE INDEX retention_activity_deliveries_run ON retention_activity_deliveries(run_id);

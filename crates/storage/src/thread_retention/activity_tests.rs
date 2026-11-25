@@ -644,3 +644,63 @@ fn unattributed_committed_message_holds_empty_families_before_and_after_projecti
     );
     assert_eq!(f.reader.activity_report().unwrap().global_failures, 1);
 }
+
+#[test]
+fn deleted_goal_source_updates_only_its_projection_through_an_indexed_lookup() {
+    let f = Fixture::new();
+    let removed = f.insert(
+        snapshot(goal(
+            "one",
+            "thread-one",
+            "run-one",
+            ThreadGoalPhase::Complete,
+        )),
+        100,
+    );
+    f.insert(
+        snapshot(goal(
+            "two",
+            "thread-two",
+            "run-two",
+            ThreadGoalPhase::Complete,
+        )),
+        200,
+    );
+    f.drain();
+    let plan = f
+        .reader
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {INVALIDATE_GOAL_SOURCE_SQL}"))
+        .unwrap()
+        .query_map([removed], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.starts_with("SEARCH retention_activity_goals ")
+                && line.contains("retention_activity_goals_event")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter().all(|line| !line.starts_with("SCAN ")),
+        "{plan:?}"
+    );
+    f.reader
+        .conn
+        .execute("DELETE FROM events WHERE id=?1", [removed])
+        .unwrap();
+    f.drain();
+    let states = f
+        .reader
+        .conn
+        .prepare("SELECT goal_id,uncertain FROM retention_activity_goals ORDER BY goal_id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(states, vec![("one".into(), true), ("two".into(), false)]);
+}
