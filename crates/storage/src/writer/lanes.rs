@@ -34,6 +34,17 @@ impl StorageHandle {
         writes: bool,
         work: impl FnOnce(&Connection) -> Result<T, StorageError> + Send + 'static,
     ) -> Result<T, StorageError> {
+        let mut admission = writes.then(|| self.request_admission()).flatten();
+        let outcome = self.activity_job(writes, work);
+        Self::retain_failed_admission(&mut admission, &outcome);
+        outcome
+    }
+    /// Projection-only work: no foreground intent. Its own source revision/CAS is the guard.
+    pub(crate) fn activity_job<T: Send + 'static>(
+        &self,
+        writes: bool,
+        work: impl FnOnce(&Connection) -> Result<T, StorageError> + Send + 'static,
+    ) -> Result<T, StorageError> {
         let (reply, result) = mpsc::channel();
         let job: LaneJob = Box::new(move |conn, suspended| {
             let outcome = if writes && suspended {

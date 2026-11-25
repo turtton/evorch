@@ -19,6 +19,7 @@ use crate::event::{Event, FaultEvent};
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
     next_subscriber_id: AtomicU64,
+    persistence: std::sync::Arc<crate::PersistenceNotifications>,
     fences: std::sync::Arc<crate::fencing::MutationFences>,
     shared: std::sync::Mutex<
         std::collections::HashMap<
@@ -41,6 +42,7 @@ impl EventBus {
         Self {
             tx,
             next_subscriber_id: AtomicU64::new(0),
+            persistence: std::sync::Arc::default(),
             fences: std::sync::Arc::default(),
             shared: std::sync::Mutex::default(),
         }
@@ -90,7 +92,14 @@ impl EventBus {
             );
             return 0;
         };
+        self.persistence
+            .notify(&event, crate::PersistenceStage::Published);
         self.tx.send(event).unwrap_or(0)
+    }
+
+    /// Internal ACK seam; does not keep the bus or subscriber alive.
+    pub fn persistence_notifications(&self) -> std::sync::Arc<crate::PersistenceNotifications> {
+        self.persistence.clone()
     }
 
     pub fn register_mutation_fence(&self, run: String, check: crate::MutationCheck) -> bool {

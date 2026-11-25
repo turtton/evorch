@@ -18,6 +18,7 @@
 //!
 //! Handlers run under the host's mutex and never wait: a held lock is answered
 //! with [`WorkspaceRejection::Busy`] at once.
+mod retention;
 use super::AreaHandles;
 use crate::areas::ProjectionSource;
 use crate::bootstrap::BootstrapError;
@@ -868,19 +869,7 @@ impl Service {
                 let id = Self::family_member(document, &c.thread, deleted)?;
                 let current = Self::check_family(&document.sidebar, &id, &c.expected_family)?;
                 check_expected(c.expected_revision, Revision(current.archive_revision))?;
-                let changed = document
-                    .sidebar
-                    .set_family_archived(&id, c.archived, now_seconds())
-                    .map_err(thread_rejection)?;
-                let revision = document
-                    .sidebar
-                    .resolve_states()
-                    .get(&id)
-                    .map_or(0, |s| s.archive_revision);
-                Ok(Done {
-                    applied: applied(Revision(revision), changed),
-                    access: false,
-                })
+                Self::archive_transition(&mut document.sidebar, &id, c.archived, now_seconds())
             }
             WorkspaceCommand::SetFamilyPinned(c) => {
                 let id = Self::family_member(document, &c.thread, deleted)?;

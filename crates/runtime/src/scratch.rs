@@ -181,6 +181,13 @@ impl ThreadScratch {
         Ok(scratch)
     }
 
+    /// Isolated attachment root for a synthetic exclusive-writer fixture.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn with_fixture_attachments(mut self, root: sandbox::attachments::AttachmentRoot) -> Self {
+        self.attachments = root;
+        self
+    }
+
     /// A private parent removed when this value drops, for runtimes without ownership.
     ///
     /// # Errors

@@ -19,7 +19,7 @@ pub const MIN_THREAD_INDEX_MAX_BYTES: u64 = 1024 * 1024;
 pub const MAX_THREAD_INDEX_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// アーカイブ済みスレッドを削除するまでの日数の既定値。
-pub const DEFAULT_ARCHIVED_DELETE_AFTER_DAYS: u32 = 30;
+pub const DEFAULT_ARCHIVED_DELETE_AFTER_DAYS: u32 = 7;
 
 /// ストレージ層の利用者設定。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -38,7 +38,9 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThreadRetentionConfig {
-    /// アーカイブしてから削除するまでの日数。既定 30、0 で新規の削除確定を無効化する。
+    /// 最終活動から自動アーカイブするまでの日数。既定7、0で新規処理を無効化する。
+    pub auto_archive_after_days: u32,
+    /// アーカイブしてから削除するまでの日数。既定 7、0 で新規の削除確定を無効化する。
     /// 時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる
     /// （pin・評価サンプル・実行中の family は除外）。
     pub archived_delete_after_days: u32,
@@ -47,6 +49,7 @@ pub struct ThreadRetentionConfig {
 impl Default for ThreadRetentionConfig {
     fn default() -> Self {
         Self {
+            auto_archive_after_days: 7,
             archived_delete_after_days: DEFAULT_ARCHIVED_DELETE_AFTER_DAYS,
         }
     }
@@ -120,13 +123,25 @@ mod tests {
     // Given: 一部のキーだけを指定した TOML / When: パースする
     // Then: 省略したキーは既定値で補完される
     #[test]
-    fn thread_retention_defaults_to_thirty_days_and_zero_disables() {
+    fn thread_retention_defaults_to_seven_days_and_zero_disables_independently() {
         assert_eq!(
             StorageConfig::default()
                 .thread_retention
                 .archived_delete_after_days,
-            30
+            7
         );
+        assert_eq!(
+            StorageConfig::default()
+                .thread_retention
+                .auto_archive_after_days,
+            7
+        );
+        let disabled: StorageConfig = toml::from_str(
+            "[thread_retention]\nauto_archive_after_days=0\narchived_delete_after_days=30\n",
+        )
+        .unwrap();
+        assert_eq!(disabled.thread_retention.auto_archive_after_days, 0);
+        assert_eq!(disabled.thread_retention.archived_delete_after_days, 30);
         let config: StorageConfig =
             toml::from_str("[thread_retention]\narchived_delete_after_days = 0\n").expect("TOML");
         assert_eq!(config.thread_retention.archived_delete_after_days, 0);

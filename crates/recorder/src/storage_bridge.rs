@@ -332,6 +332,9 @@ async fn run_subscribed(
         bridge.policy,
         bridge.storage.max_event_bytes(),
     );
+    let persistence = bus_lifetime
+        .upgrade()
+        .map(|bus| bus.persistence_notifications());
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     // A single blocking worker keeps SQLite off the async runtime. Queue permits
     // remain held until persistence completes, including during cancellation.
@@ -344,6 +347,16 @@ async fn run_subscribed(
                         tracing::trace!(target: "restart_drain", phase = "persist_begin", monotonic_ns = queued.event.meta.monotonic.as_nanos() as u64);
                         let monotonic_ns = queued.event.meta.monotonic.as_nanos() as u64;
                         let result = bridge.handle_event(&queued.event);
+                        if let Some(observer) = &persistence {
+                            observer.notify(
+                                &queued.event,
+                                if result.is_ok() {
+                                    event_bus::PersistenceStage::Committed
+                                } else {
+                                    event_bus::PersistenceStage::Failed
+                                },
+                            );
+                        }
                         drop(queued);
                         tracing::trace!(target: "restart_drain", phase = "persist_end", monotonic_ns, pending = bridge.monitor.snapshot().pending_events);
                         result

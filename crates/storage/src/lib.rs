@@ -139,8 +139,8 @@ pub use repo::user_questions::AnswerMode;
 pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
 pub use writer::{
-    Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
-    ThreadIndexJobStatus, WalWaitStatus,
+    MutationAdmission, Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS,
+    ThreadIndexCounters, ThreadIndexJobStatus, WalWaitStatus,
 };
 
 /// A pause point in the conversation plan write, for tests of a stop around the commit.

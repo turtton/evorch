@@ -86,7 +86,10 @@ pub struct ExecutorReport {
     pub cycles: u64,
     /// This process holds the reclaim lease and works.
     pub holds_lease: bool,
+    pub waiting_for_reclaim_lease: bool,
     pub backfill_remaining: u64,
+    /// Independent activity projection, under this worker's reclaim lease.
+    pub activity: storage::thread_retention::activity::ActivityReport,
     pub rows_reclaimed: u64,
     pub jobs_db_pending: u64,
     /// Jobs only the exclusive startup phase can finish (reported, not worked on).
@@ -170,8 +173,10 @@ impl ReclaimWorker {
         self.cycles += 1;
         report.cycles = self.cycles;
         report.holds_lease = self.lease.is_some();
+        report.waiting_for_reclaim_lease = !report.holds_lease;
         if report.holds_lease {
             self.backfill(&mut report);
+            self.activity_backfill(&mut report);
             self.reclaim(&mut report);
             if self.config.artifacts.is_some() {
                 self.remove_files(&mut report);
@@ -185,6 +190,18 @@ impl ReclaimWorker {
             .cloned()
             .collect();
         report
+    }
+
+    fn activity_backfill(&mut self, report: &mut ExecutorReport) {
+        let handle = self.config.handle.clone();
+        let result = self
+            .reader()
+            .and_then(|reader| reader.activity_page().map_err(|e| e.to_string()))
+            .and_then(|page| handle.apply_activity_page(page).map_err(|e| e.to_string()));
+        match result {
+            Ok(progress) => report.activity = progress,
+            Err(error) => report.errors.push(format!("activity projection: {error}")),
+        }
     }
 
     fn backfill(&mut self, report: &mut ExecutorReport) {
@@ -372,8 +389,13 @@ impl ReclaimExecutor {
         let thread = std::thread::Builder::new()
             .name("thread-retention-reclaim".into())
             .spawn(move || {
+                let mut lease_state=None;
                 loop {
                     let report = worker.run_once();
+                    if lease_state!=Some(report.holds_lease)||report.cycles.is_multiple_of(12){
+                       tracing::info!(target:"thread_retention",reason=if report.waiting_for_reclaim_lease{"WaitingForReclaimLease"}else{"BackfillProgress"},rows=report.activity.inspected_rows,decode_bytes=report.activity.decode_bytes,pending_sources=report.activity.pending_sources,legacy_fallback=report.activity.legacy_fallback,missing_activity_and_fallback=report.activity.missing_activity_and_fallback,"reclaim/activity progress");
+                       lease_state=Some(report.holds_lease);
+                    }
                     for error in &report.errors {
                         tracing::warn!(%error, "thread retention reclaim");
                     }

@@ -13,6 +13,7 @@
 
 pub mod binding;
 pub mod executor;
+pub mod gate;
 pub mod guard;
 pub mod startup;
 

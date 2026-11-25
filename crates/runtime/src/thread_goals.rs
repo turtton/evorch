@@ -83,6 +83,7 @@ impl AgentRuntime {
 
     /// Register trusted host thread ownership before starting the reserved root.
     pub fn bind_thread_root(&self, thread_id: &str, run_id: RunId) -> Result<(), String> {
+        let _retention_admission = self.retention_admission();
         let plan_gate = self.shared.plan_authority.get(thread_id);
         let _plan_authority = plan_gate
             .lock()
@@ -179,6 +180,7 @@ impl AgentRuntime {
         objective: String,
         criteria: Vec<String>,
     ) -> Result<ThreadGoalSnapshot, String> {
+        let _retention_admission = self.retention_admission();
         self.create_goal_inner(thread_id, run_id, objective, criteria, true)
     }
 
@@ -189,6 +191,7 @@ impl AgentRuntime {
         objective: String,
         criteria: Vec<String>,
     ) -> Result<ThreadGoalSnapshot, String> {
+        let _retention_admission = self.retention_admission();
         self.create_goal_inner(thread_id, run_id, objective, criteria, false)
     }
 
@@ -348,6 +351,7 @@ impl AgentRuntime {
 
     /// Rehydrate event-sourced state without starting work or granting new authority.
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
+        let _retention_admission = self.retention_admission();
         let usage_read_failed = self.restore_goal_usage(&mut snapshot);
         let plan_gate = self.shared.plan_authority.get(&snapshot.thread_id);
         let _plan_authority = plan_gate
@@ -449,6 +453,7 @@ impl AgentRuntime {
         goal_id: &str,
         enabled: bool,
     ) -> Result<(), String> {
+        let _retention_admission = self.retention_admission();
         let reviewer = {
             let mut goals = self.goal_lock();
             let entry = matching(&mut goals, thread_id, goal_id)?;
@@ -477,6 +482,7 @@ impl AgentRuntime {
         goal_id: &str,
         paused: bool,
     ) -> Result<(), String> {
+        let _retention_admission = self.retention_admission();
         let reviewer = {
             let mut goals = self.goal_lock();
             let entry = matching(&mut goals, thread_id, goal_id)?;
@@ -585,6 +591,7 @@ impl AgentRuntime {
         source_owner: Option<&crate::ownership::OwnerPermit>,
         before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
     ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        let _retention_admission = self.retention_admission();
         self.handoff_thread_goal_prepared(source, target, source_owner, None, before_transfer)
     }
 
@@ -596,6 +603,7 @@ impl AgentRuntime {
         incarnation: Option<&str>,
         before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
     ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        let _retention_admission = self.retention_admission();
         // Authority before Q; never wait for a plan gate while holding Q/runs.
         // Sorted two-thread acquisition also permits opposite handoffs without ABBA.
         let expected_source = self.goal_thread(source);
@@ -819,6 +827,7 @@ impl AgentRuntime {
     }
 
     pub(crate) fn restore_committed_handoff(&self, target: RunId) -> Result<(), String> {
+        let _retention_admission = self.retention_admission();
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
         };

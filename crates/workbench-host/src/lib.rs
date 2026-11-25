@@ -34,6 +34,7 @@ pub mod queries;
 pub mod receipts;
 pub mod scratch_archive;
 pub mod subscriptions;
+pub mod thread_retention;
 
 pub use ingress::CommandHost;
 /// The Q1 leaf, built and registered by the composition root.

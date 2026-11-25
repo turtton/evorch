@@ -318,3 +318,160 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
         }
     }
 }
+
+// G1..G6 runtime entries. G1 completion also registers before event publication and
+// keeps pending through recorder ACK (gate behavior tests). G7 storage lane writes,
+// G8/G9 host-mutex + attachment/sidebar lock, G10 owner shutdown are inventoried
+// separately at their owning crates; LIVE_ONLY is deliberately not reused here.
+#[test]
+fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() {
+    let registered: BTreeMap<&str, &str> = BTreeMap::from([
+        ("runtime.rs::delegate_background", "G1"),
+        ("runtime.rs::delegate_background_as_child", "G1"),
+        ("runtime.rs::reserve_child_run_id", "G1"),
+        ("runtime.rs::reserve_handoff_admission", "G1"),
+        ("runtime.rs::spawn_escalated_root", "G1"),
+        ("runtime.rs::spawn_lane_root", "G1"),
+        ("runtime.rs::spawn_prepared_handoff", "G1"),
+        ("runtime.rs::spawn_reserved", "G1"),
+        ("runtime.rs::spawn_reserved_child", "G1"),
+        ("runtime.rs::deliver_follow_ups_next_turn", "G2"),
+        ("runtime.rs::deliver_notice", "G2"),
+        ("runtime.rs::record_host_chat_submission", "G2"),
+        ("runtime.rs::send_agent_message", "G2"),
+        ("runtime.rs::send_internal_message", "G2"),
+        ("runtime.rs::send_message", "G2"),
+        ("runtime.rs::send_user_input", "G2"),
+        ("lane_delivery.rs::resume_lane_deliveries", "G2"),
+        ("lane_instructions.rs::send_lane_instruction", "G2"),
+        ("runtime.rs::compact", "G3"),
+        ("runtime/chat_restore.rs::continue_goal", "G3"),
+        ("runtime/chat_restore.rs::delegate_chat", "G3"),
+        ("runtime/chat_restore.rs::delegate_chat_seeded", "G3"),
+        ("runtime/chat_restore.rs::resume_chat", "G3"),
+        ("runtime/chat_restore.rs::resume_chat_observed", "G3"),
+        ("runtime/chat_restore.rs::wake_chat", "G3"),
+        (
+            "runtime/restart_handoff.rs::persist_restart_tool_snapshot",
+            "G3",
+        ),
+        ("runtime/saved_compaction.rs::compact_saved_chat", "G3"),
+        ("thread_goals.rs::bind_thread_root", "G4"),
+        (
+            "thread_read_dirs.rs::set_thread_read_only_directories",
+            "G4",
+        ),
+        ("thread_goals.rs::create_agent_thread_goal", "G5"),
+        ("thread_goals.rs::create_thread_goal", "G5"),
+        ("thread_goals.rs::handoff_thread_goal", "G5"),
+        ("thread_goals.rs::handoff_thread_goal_prepared", "G5"),
+        ("thread_goals.rs::restore_committed_handoff", "G5"),
+        ("thread_goals.rs::restore_thread_goal", "G5"),
+        ("thread_goals.rs::set_goal_checks_paused", "G5"),
+        ("thread_goals.rs::set_goal_review", "G5"),
+        ("runtime/questions.rs::answer_subagent_question", "G6"),
+        ("runtime/questions.rs::answer_user_question", "G6"),
+        (
+            "runtime/questions.rs::answer_user_question_if_pending",
+            "G6",
+        ),
+        (
+            "runtime/questions.rs::answer_user_question_if_pending_from_host",
+            "G6",
+        ),
+        ("runtime/questions.rs::inherit_user_questions", "G6"),
+        ("runtime/questions.rs::request_user_question", "G6"),
+        ("runtime/questions.rs::request_user_question_outcome", "G6"),
+    ]);
+    let exempt = BTreeMap::from([
+        (
+            "ownership/host.rs::start",
+            "owner registry permit only; run admission is separately registered",
+        ),
+        (
+            "ownership/host.rs::attach",
+            "owner registry lease only; not run admission",
+        ),
+        (
+            "ownership/host.rs::claim",
+            "owner registry adoption only; runtime restore admission is registered",
+        ),
+        (
+            "ownership/host.rs::owned_permit",
+            "delegates to owner registry attach; not execution",
+        ),
+        (
+            "ownership/registry.rs::start",
+            "registry implementation, not archive eligibility or run admission",
+        ),
+        (
+            "ownership/registry.rs::attach",
+            "registry implementation, not archive eligibility or run admission",
+        ),
+        (
+            "team.rs::claim",
+            "session task queue, not durable thread/run input",
+        ),
+        (
+            "pull_requests/service.rs::inherit",
+            "pull-request context inheritance only, not sidebar membership, activity or retention protection",
+        ),
+        (
+            "pull_requests/service.rs::inherit_now",
+            "pull-request context inheritance only, not sidebar membership, activity or retention protection",
+        ),
+        (
+            "team_context.rs::persistent",
+            "constructs a session-local view, not durable mutation",
+        ),
+        (
+            "attachments.rs::attachment_read_directories",
+            "read-only metadata; uploads are G9 host guarded",
+        ),
+        (
+            "restore/diagnostics.rs::restore_diagnostics",
+            "read-only diagnostics",
+        ),
+    ]);
+    let all = sources();
+    for key in table().keys() {
+        assert!(
+            registered.contains_key(key) || exempt.contains_key(key),
+            "classify automatic-archive entry independently: {key}"
+        );
+    }
+    for (key, category) in &registered {
+        let (path, name) = key.split_once("::").unwrap();
+        let text = definition(&all, path, name).unwrap_or_else(|| panic!("{key} removed"));
+        assert!(
+            text.contains("retention_admission()") || text.contains("retention_run_admission("),
+            "{category} {key} must register before work"
+        );
+    }
+    let verbs=Regex::new(r"^(restore|resume|wake|continue|bind|create|answer|compact|delegate|handoff|send|deliver|inherit|set_goal|set_thread|persist|spawn|reserve|record_host|start|claim|owned|attach|install|register)").unwrap();
+    let identity=Regex::new(r"thread_id|thread:|ThreadGoalSnapshot|RunId|run_id|run:|child:|parent:|recipient|ThreadOwner|\bid: &str").unwrap();
+    let entry =
+        Regex::new(r"\n[ \t]*pub\s+(?:async\s+)?fn\s+([a-z_0-9]+)\s*(?:<[^>]*>)?\(").unwrap();
+    for (path, text) in &all {
+        for cap in entry.captures_iter(text) {
+            let m = cap.get(0).unwrap();
+            let name = &cap[1];
+            let mut depth = 1;
+            let mut end = m.end();
+            for (offset, c) in text[m.end()..].char_indices() {
+                depth += i32::from(c == '(') - i32::from(c == ')');
+                if depth == 0 {
+                    end = m.end() + offset;
+                    break;
+                }
+            }
+            if verbs.is_match(name) && identity.is_match(&text[m.end()..end]) {
+                let key = format!("{path}::{name}");
+                assert!(
+                    registered.contains_key(key.as_str()) || exempt.contains_key(key.as_str()),
+                    "new automatic-archive entry must be classified: {key}"
+                );
+            }
+        }
+    }
+}

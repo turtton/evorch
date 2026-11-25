@@ -140,6 +140,7 @@ impl WeakAgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) retention_gate: Arc<crate::thread_retention::gate::RetentionGate>,
     pub(crate) quiesce: crate::quiesce::Coordinator,
     pub(crate) dispatch_tails: Arc<crate::quiesce::dispatch::DispatchTails>,
     pub(crate) stop_boundary: OnceLock<Arc<dyn crate::quiesce::StopBoundary>>,
@@ -821,6 +822,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                retention_gate: crate::thread_retention::gate::RetentionGate::install(&bus),
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
                 plan_authority: crate::conversation_plan::AuthorityGates::default(),
                 pull_requests: OnceLock::new(),
@@ -971,6 +973,10 @@ impl AgentRuntime {
         if let Some(latest) = store.latest_run_id {
             self.shared.run_ids.observe(latest);
         }
+        let gate = self.shared.retention_gate.clone();
+        store
+            .handle
+            .install_request_admission(Arc::new(move |scope| Box::new(gate.enter_scope(scope))));
         let _ = self.shared.run_store.set(store);
         self
     }
@@ -1232,6 +1238,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                retention_gate: crate::thread_retention::gate::RetentionGate::install(&bus),
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
                 plan_authority: crate::conversation_plan::AuthorityGates::default(),
                 pull_requests: OnceLock::new(),
@@ -1365,6 +1372,7 @@ impl AgentRuntime {
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
     pub fn delegate_background(&self, role: Role, prompt: String, config: RunConfig) -> RunId {
+        let _retention_admission = self.retention_admission();
         self.spawn_run(None, role, prompt, config)
     }
 
@@ -1396,6 +1404,7 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(parent);
         crate::policy::authorize_child_role(Some(parent), role)?;
         let run_id = self.reserve_child_run_id(parent)?;
         self.spawn_reserved_child(parent, run_id, role, prompt, config)
@@ -1411,6 +1420,7 @@ impl AgentRuntime {
     /// # Errors
     /// 親 run が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn reserve_child_run_id(&self, parent: RunId) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(parent);
         {
             let runs = lock_runs(&self.shared.runs);
             if !runs.contains_key(&parent) {
@@ -1443,6 +1453,7 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> RunId {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.spawn_run_with_handoff(
             run_id,
             parent,
@@ -1469,6 +1480,7 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         crate::policy::authorize_child_role(Some(parent), role)?;
         Ok(self.spawn_reserved(run_id, Some(parent), role, prompt, config))
     }
@@ -2461,6 +2473,7 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> Result<(), String> {
+        let _retention_admission = self.retention_run_admission(run_id);
         let _dispatch = self
             .dispatch_registration_guard()
             .map_err(|e| e.to_string())?;
@@ -2490,6 +2503,7 @@ impl AgentRuntime {
         source: RunId,
         target: RunId,
     ) -> Arc<ExecutionControl> {
+        let _retention_admission = self.retention_run_admission(target);
         #[cfg(test)]
         {
             let execution = lock_runs(&self.shared.runs)
@@ -2533,6 +2547,7 @@ impl AgentRuntime {
         target: RunId,
         ownership: Option<crate::ownership::OwnerPermit>,
     ) -> Result<(), String> {
+        let _retention_admission = self.retention_run_admission(target);
         if self.inspect_agent(target).is_ok() {
             return Ok(());
         }
@@ -2609,6 +2624,7 @@ impl AgentRuntime {
         continuity: crate::continuity::Continuity,
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
+        let _retention_admission = self.retention_admission();
         let publication = cancellation::ExecutionControl::new(false).publication();
         let target =
             self.prepare_handoff_to_lane(&memo, source_config, continuity, &publication)?;
@@ -2631,6 +2647,7 @@ impl AgentRuntime {
 
     /// 対話待機中の run へユーザーメッセージを送る。
     pub fn send_message(&self, run_id: RunId, text: String) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.send_user_input(run_id, text, None)
     }
 
@@ -2646,6 +2663,7 @@ impl AgentRuntime {
         text: String,
         submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.send_inbox_message(run_id, HostPrompt::plain(text), true, None, submission_id)
     }
 
@@ -2654,6 +2672,7 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.send_inbox_message(run_id, HostPrompt::plain(text), false, None, None)
     }
 
@@ -2666,6 +2685,7 @@ impl AgentRuntime {
     /// [`RuntimeError::UnknownRun`] for an unregistered run, otherwise the
     /// last delivery error, [`RuntimeError::RunTerminated`] when none was tried.
     pub fn deliver_notice(&self, run_id: RunId, text: &str) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         let candidates = {
             let runs = lock_runs(&self.shared.runs);
             if !runs.contains_key(&run_id) {
@@ -2990,6 +3010,7 @@ impl AgentRuntime {
         &self,
         submission: &storage::HostChatSubmission,
     ) -> Result<bool, storage::StorageError> {
+        let _retention_admission = self.retention_admission();
         match self.shared.run_store.get() {
             Some(store) => store.handle.record_host_chat_submission(submission),
             None => Ok(false),
@@ -3168,6 +3189,7 @@ impl AgentRuntime {
     /// Deliver queued follow-ups before the next model request, without cancelling
     /// an in-flight response or tool. This does not send a new message.
     pub fn deliver_follow_ups_next_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.validate_run_mutation(run_id)?;
         let entry = self.entry(run_id)?;
         if entry.inbox_tx.is_closed() {
@@ -3693,6 +3715,7 @@ impl AgentRuntime {
 
     /// run の次のターン境界で手動コンテキスト圧縮を要求する。
     pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.ensure_no_saved_compaction(run_id)?;
         self.validate_run_mutation(run_id)?;
         let entry = self.entry(run_id)?;
@@ -3849,6 +3872,7 @@ impl AgentRuntime {
         content: impl Into<String>,
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(recipient);
         let _dispatch = self.dispatch_registration_guard()?;
         self.validate_run_mutation(sender)?;
         let live = lock_runs(&self.shared.runs)

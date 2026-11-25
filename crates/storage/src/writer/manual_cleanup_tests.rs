@@ -24,6 +24,7 @@ fn start(conn: Connection, config: StorageConfig) -> Storage {
         config.hard_limits.max_event_bytes,
         Arc::new(config.clone()),
         Default::default(),
+        Default::default(),
     );
     let writer =
         std::thread::spawn(move || run_writer(conn, rx, config, false, false, false, false));

@@ -33,9 +33,9 @@
 | 旧形式 DB の変換（停止中のみ） | `evorch maintenance convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]` | [convert-bodies](#convert-bodies-による変換) |
 | `auto_vacuum` の一回限りの切替（停止中のみ） | `evorch maintenance vacuum [--apply] [--backup <new-path>]` | [auto_vacuum](#auto_vacuum-の一回限りの移行) |
 | events の縮小（停止中のみ） | `evorch maintenance compact-events …` | [オフライン縮小](#オフライン縮小preview--必須バックアップ--apply) |
-| アーカイブ済みスレッドの期限削除 | 設定 `[storage.thread_retention] archived_delete_after_days`（既定 30、0 で新規の確定を無効化） | [runtime](#スレッドの期限削除runtime起動フェーズ束縛回収)、[GUI](#スレッドの期限削除gui起動表示採番) |
+| アーカイブ済みスレッドの期限削除 | 設定 `[storage.thread_retention] archived_delete_after_days`（既定 7、0 で新規の確定を無効化） | [runtime](#スレッドの期限削除runtime起動フェーズ束縛回収)、[GUI](#スレッドの期限削除gui起動表示採番) |
 
-期限削除に専用のコマンドはない。設定の既定値は 30 日で、GUI を起動すると、起動の排他フェーズ（他の evorch プロセスが動いていない起動だけ）が期限の来たアーカイブ済み family を確定し、以後は背景の回収が DB の行を少しずつ消す。`archived_delete_after_days = 0` にすると新規の確定は行われない（回収や巨大行の保守は続く）。時刻を持たない古いアーカイブは日数に関係なく直ちに対象になり、pin・評価サンプル・実行中の family は除外される。確定した削除は取り消せない。GUI での起動手順・表示（アーカイブ一覧のホバーに "Deletes in N days" など）・通知は[GUI の節](#スレッドの期限削除gui起動表示採番)を参照。
+期限削除に専用のコマンドはない。設定の既定値は 7 日で、GUI を起動すると、起動の排他フェーズ（他の evorch プロセスが動いていない起動だけ）が期限の来たアーカイブ済み family を確定し、以後は背景の回収が DB の行を少しずつ消す。`archived_delete_after_days = 0` にすると新規の確定は行われない（回収や巨大行の保守は続く）。時刻を持たない古いアーカイブは日数に関係なく直ちに対象になり、pin・評価サンプル・実行中の family は除外される。確定した削除は取り消せない。GUI での起動手順・表示（アーカイブ一覧のホバーに "Deletes in N days" など）・通知は[GUI の節](#スレッドの期限削除gui起動表示採番)を参照。
 
 ## convert-bodies による変換
 
@@ -346,7 +346,7 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
 
 `crates/runtime/src/thread_retention/` が、上の storage 基盤を「いつ確定し、誰が回収するか」へつなぐ。
 GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にある。設定は
-`[storage.thread_retention] archived_delete_after_days`（既定 30、0 で新規の確定を行わない。
+`[storage.thread_retention] archived_delete_after_days`（既定 7、0 で新規の確定を行わない。
 時刻のない legacy アーカイブは日数に関係なく即 due で、pin・評価サンプル・実行中の family は除外）。
 
 - **ロックは 2 本。** DB のリース（`<db>.maintenance-lock`）と ownership root のリース
@@ -547,3 +547,28 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - `--delta-mode delete` は reasoning 表示と未完了の本文を失う。バックアップからしか戻せない。
 - 長時間続く reader は、バックフィル中に WAL の増大を招く。
 - 常時稼働中の live retention（[io-performance.md](io-performance.md#イベントの永続化と保持)）は 1 tick あたりの削除量と時間を制限するため、既存の大きな滞留は本手順で一括処理する。
+
+## thread 自動 archive（PR1: 投影と保留中の実装）
+
+```toml
+[storage.thread_retention]
+auto_archive_after_days = 7
+archived_delete_after_days = 7
+```
+
+- それぞれ独立に 0 で新規の archive／削除確定を無効化する。明示した 30 などの値は維持する。確定済み削除の回収や確定済み archive の添付整理は、必要な authority があれば続く。
+- **削除の省略時既定値が 30 日から 7 日へ変わる。次回の core・旧 GUI の起動時排他フェーズでは、7〜30 日前の既存 archive も削除対象になり得る。** 既定値の変更を避ける場合は 30 を明示する。PR1 は削除判定・起動時確定経路を変えない。時刻のない旧 archive の扱いも従来どおり。
+- **PR1 の通常 core は、単一 core 運用でも authority 未配線のため自動 archive・添付整理・scratch hint を実行しない（AuthorityUnavailable）。PR2 で authority を配線して有効化する。** この保留時は sidebar／添付 lock、sidebar 読込み、family 展開・候補走査を一切行わず、backfill 進捗だけを観測する。迂回設定はない。
+- 活動は新規メッセージ受理・確定、実行開始・実再開・実行／ターン終了に限定する。閲覧、goal/lane/usage、索引再構築、復元再公開、backfill 処理時刻は活動ではない。family 全 member の実活動と legacy 上界の最大から 24 時間×日数を数え、境界以上で到達する。
+- 既存 run に活動証拠がない場合だけ、最初に処理した run_contexts.updated_at_ns を別の上界として一回記録する。上界もない既存 run は保留。移行後作成の適用済み run は活動なしとして thread 作成時刻を基準にする。
+- pin、実行・開始待ち・復元/wake/compaction 進行中、現在の未完了 goal（Complete 以外）、評価サンプル、未回答質問（子・継承先含む）、open attached/summary lane、未適用・関係不明は family 全体を保護する。通常のターン間待機は実行中と混同しない。
+- source trigger と投影は履歴索引から独立している。reclaim-lock を持つ既存 ReclaimWorker が reader で抽出し writer で CAS 適用する。5 秒周期、全 source 合計 500 検査行・復号読込み 2,097,152 B/tick。失敗・skip・競合も予算を消費する。ヘッダだけで活動が分かるイベントは payload を読まない。外部本文は解決しない。超過行は復号せず対象を保留し cursor を進める。
+- 自動処理は専用スレッドで host mutex を try_lock できたときだけ動く。前景の handler、Busy 契約、手動 archive の attachment→sidebar lock と同期削除は維持する。最終再検査から rename までの残る admission 窓は許容し、後続操作には既存の archived family の扱いを適用する。新しい intent 保留や arbitration は置かない。
+- 1 tick は最大 1 family publish、remove_thread 1 呼出し（既存 4096 entry 有界削除）、scratch hint 1 member。sidebar の archived 状態が添付整理の唯一の durable intent で、cursor はメモリ上。restore は従来どおり残存添付の整理を先に完了する。symlink を辿らず root 外を消さない。失敗で archive 時刻を戻さない。
+- scratch は手動と同じ既存 hint のみ。hint 再送は許容するが、プロセス内状態・lease の制約により古い thread などを回収できない場合がある。hint 発行は scratch 削除の durable 完了を意味しない。
+- backfill backlog・将来の期限・通常 tick は idle の busy 理由ではない。保守だけのために core を常駐させない（idle_grace_secs 既定 60 秒）。停止中は別 daemon が処理せず、次回稼働時に再開する。停止時は新規 tick を止め、worker の writer ACK と join を bridge flush／storage barrier より前に確認する。
+- 診断は thread_retention の構造化ログと有界 RetentionReport。本文は記録せず、同じ理由を毎 tick 再出力しない。AttachmentCleanupPending は未完了と失敗をまとめた区分。
+
+### Sidebar 計測の採用条件
+
+合意後の基準は、1,000 threads が p95（30 サンプル×3 回の中央値）50ms 以下・全観測最大 100ms 以下、2,000 threads は全観測最大 100ms 以下（p95 は記録のみ）、5,000 は参考のみ。heavy trial（624 run の member を含む）は p95 に入れず最大に入れる。最終 coordinator も同じ基準で計測する。実データは使用しない。PR2 着手時に実 sidebar 規模を確認して再評価する。

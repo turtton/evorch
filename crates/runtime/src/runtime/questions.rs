@@ -115,6 +115,7 @@ impl AgentRuntime {
         options: Vec<String>,
         blocking: bool,
     ) -> Result<UserQuestion, String> {
+        let _retention_admission = self.retention_run_admission(run);
         match self.request_user_question_outcome(run, title, options, blocking)? {
             storage::lane_delivery::LaneQuestionCreated::Created(question) => Ok(*question),
             storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(diagnostic) => {
@@ -136,6 +137,7 @@ impl AgentRuntime {
         options: Vec<String>,
         blocking: bool,
     ) -> Result<storage::lane_delivery::LaneQuestionCreated, String> {
+        let _retention_admission = self.retention_run_admission(run);
         self.request_question_with_binding(
             run,
             title,
@@ -323,6 +325,7 @@ impl AgentRuntime {
         id: &str,
         answer: &str,
     ) -> Result<UserQuestion, String> {
+        let _retention_admission = self.retention_run_admission(caller);
         let (child, question) = self.persist_subagent_answer(caller, id, answer)?;
         self.resume_answered_child(caller, child, &question)
             .await
@@ -411,6 +414,7 @@ impl AgentRuntime {
     /// Host-facing answer API. A live run must still have current mutation authority.
     /// Offline answers are persisted for explicit conversation resumption, never replaying tools.
     pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<UserQuestion, String> {
+        let _retention_admission = self.retention_admission();
         self.answer_question(
             id,
             answer,
@@ -435,6 +439,7 @@ impl AgentRuntime {
         id: &str,
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
+        let _retention_admission = self.retention_admission();
         self.answer_user_question_if_pending_from_host(id, answer, None)
             .map_err(|error| error.to_string())
     }
@@ -452,6 +457,7 @@ impl AgentRuntime {
         answer: &str,
         caller: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<AnswerOutcome, AnswerQuestionError> {
+        let _retention_admission = self.retention_admission();
         self.answer_question_with_mode(
             id,
             answer,
@@ -744,6 +750,7 @@ impl AgentRuntime {
         target: RunId,
         messages: &[providers::Message],
     ) -> Result<(), String> {
+        let _retention_admission = self.retention_run_admission(target);
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
         };

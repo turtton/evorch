@@ -1297,7 +1297,7 @@ fn schedule_reports_due_dates_and_protections() {
         .unwrap();
 
     assert_eq!(statuses[0].1, RetentionStatus::DueNextStartup);
-    assert_eq!(statuses[1].1, RetentionStatus::DueIn { days: 29 });
+    assert_eq!(statuses[1].1, RetentionStatus::DueIn { days: 6 });
     assert_eq!(
         statuses[2].1,
         RetentionStatus::DueNextStartup,
@@ -1654,10 +1654,17 @@ fn oversized_rows_wait_for_the_exclusive_step_which_deletes_at_least_one() {
     let storage = Storage::open(config(&f.path)).unwrap();
 
     // When: the bounded steps run.
-    let progress = storage
-        .handle()
-        .reclaim_step(ReclaimBudget::default())
-        .unwrap();
+    // Additional retention projections may take another bounded step. Wait for
+    // the semantic DB-pending transition rather than fixing the table order.
+    let progress = loop {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        if progress.jobs_db_pending == 0 {
+            break progress;
+        }
+    };
     storage.close();
 
     // Then: the small row is gone, the large one is registered, the job waits.

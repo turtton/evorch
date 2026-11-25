@@ -247,7 +247,8 @@
           "max_bytes": 536870912
         },
         "thread_retention": {
-          "archived_delete_after_days": 30
+          "archived_delete_after_days": 7,
+          "auto_archive_after_days": 7
         }
       }
     },
@@ -1908,7 +1909,8 @@
           "description": "アーカイブ済みスレッドの期限削除（`[storage.thread_retention]`）。",
           "$ref": "#/$defs/ThreadRetentionConfig",
           "default": {
-            "archived_delete_after_days": 30
+            "archived_delete_after_days": 7,
+            "auto_archive_after_days": 7
           }
         }
       },
@@ -1970,10 +1972,17 @@
       "type": "object",
       "properties": {
         "archived_delete_after_days": {
-          "description": "アーカイブしてから削除するまでの日数。既定 30、0 で新規の削除確定を無効化する。\n時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる\n（pin・評価サンプル・実行中の family は除外）。",
+          "description": "アーカイブしてから削除するまでの日数。既定 7、0 で新規の削除確定を無効化する。\n時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる\n（pin・評価サンプル・実行中の family は除外）。",
           "type": "integer",
           "format": "uint32",
-          "default": 30,
+          "default": 7,
+          "minimum": 0
+        },
+        "auto_archive_after_days": {
+          "description": "最終活動から自動アーカイブするまでの日数。既定7、0で新規処理を無効化する。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 7,
           "minimum": 0
         }
       },

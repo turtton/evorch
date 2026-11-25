@@ -8,6 +8,12 @@
 //! decides *when* to confirm: the caller supplies the sidebar-derived input and
 //! must hold the exclusive locks that prove no other evorch process runs.
 
+pub mod activity;
+mod authority;
+#[cfg(feature = "test-support")]
+pub use authority::ExclusiveFixtureStorage;
+pub use authority::{AutoArchiveAuthority, AutoArchivePolicy};
+
 use std::collections::{BTreeMap, HashSet};
 
 use event_bus::{EventKind, OrchestratorEvent};
@@ -55,7 +61,7 @@ pub struct ThreadRetentionPolicy {
 impl Default for ThreadRetentionPolicy {
     fn default() -> Self {
         Self {
-            archived_delete_after_days: 30,
+            archived_delete_after_days: 7,
             legacy: LegacyArchivedPolicy::Immediate,
         }
     }

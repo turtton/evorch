@@ -148,6 +148,7 @@ pub struct BootstrappedHost {
     bridge: Option<OwnedStorageBridge>,
     planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
+    auto_archive: Option<crate::thread_retention::AutoArchiveOwner>,
     thread_index_owner: Option<thread_index::ThreadIndexOwner>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
@@ -730,6 +731,7 @@ impl BootstrappedHost {
             bridge: Some(bridge),
             planned_exit: None,
             reclaim: None,
+            auto_archive: None,
             thread_index_owner: None,
             history_owner: None,
             executor,
@@ -891,6 +893,17 @@ impl BootstrappedHost {
                 Some(deferred.artifacts),
             ),
         )?);
+        // PR1 intentionally supplies no authority, even for a single running core.
+        self.auto_archive = Some(crate::thread_retention::AutoArchiveOwner::start(
+            Arc::downgrade(&self.host),
+            crate::thread_retention::AutoArchiveCoordinator::new(
+                deferred.storage.clone(),
+                deferred.options.ownership_root.clone(),
+                storage::thread_retention::AutoArchivePolicy {
+                    after_days: self.config.storage.thread_retention.auto_archive_after_days,
+                },
+            ),
+        )?);
         host_services::start(
             &mut self.services,
             &deferred.options,
@@ -977,6 +990,9 @@ impl BootstrappedHost {
             history.stop();
         }
         let mut failure = None;
+        if let Some(owner) = &self.auto_archive {
+            owner.request_stop();
+        }
         // Area tasks stop producing before the runtime drains; they are joined
         // below, with the other host-owned tasks.
         for producer in self.restart_producers() {
@@ -1015,6 +1031,15 @@ impl BootstrappedHost {
         // area task failing is reported but does not keep the owner.
         let drained = failure.is_none();
         lane_pr::remember(&mut failure, self.area_tasks.shutdown().await);
+        if let Some(mut owner) = self.auto_archive.take() {
+            lane_pr::remember(
+                &mut failure,
+                tokio::task::spawn_blocking(move || owner.shutdown())
+                    .await
+                    .map_err(|_| "auto archive join panicked".to_owned())
+                    .and_then(|r| r),
+            );
+        }
         if let Some(reclaim) = self.reclaim.take() {
             lane_pr::remember(&mut failure, reclaim.try_shutdown());
         }

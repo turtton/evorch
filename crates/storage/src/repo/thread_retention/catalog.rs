@@ -34,6 +34,51 @@ use Treatment::{
 /// `(table, treatment, why)`. FTS shadow tables and `sqlite_*` are excluded by the test.
 pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
+        "retention_activity_control",
+        Keep,
+        "migration boundary and source clock; no run payload",
+    ),
+    (
+        "retention_activity_cursors",
+        Keep,
+        "initial bounded source discovery positions",
+    ),
+    (
+        "retention_activity_failures",
+        ReclaimRun,
+        "source-specific decode failures",
+    ),
+    (
+        "retention_activity_sources",
+        ReclaimRun,
+        "durable source revisions",
+    ),
+    (
+        "retention_activity_pending",
+        ReclaimRun,
+        "unapplied source references",
+    ),
+    (
+        "retention_activity_runs",
+        ReclaimRun,
+        "activity and one-time legacy upper bound",
+    ),
+    (
+        "retention_activity_deliveries",
+        ReclaimRun,
+        "deduplicated message delivery evidence",
+    ),
+    (
+        "retention_activity_goals",
+        ReclaimThread,
+        "latest goal identity and lineage",
+    ),
+    (
+        "retention_activity_bindings",
+        ReclaimThread,
+        "current goal and cleared binding position",
+    ),
+    (
         "restart_transactions",
         Keep,
         "durable restart and permanent invalidation evidence",
