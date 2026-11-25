@@ -1374,19 +1374,25 @@ impl Service {
 
     fn upserts(document: &SidebarDocument) -> Vec<storage::threads::ThreadUpsert> {
         let states = document.sidebar.resolve_states();
+        let mut project_roots: BTreeMap<_, Option<String>> = BTreeMap::new();
         document
             .sidebar
             .threads
             .iter()
             .filter_map(|t| {
                 let state = states.get(&t.id).filter(|s| s.is_resolved())?;
-                let root = document
-                    .sidebar
-                    .projects
-                    .iter()
-                    .find(|p| p.id == t.project_id)
-                    .and_then(|p| p.repo_root.canonicalize().ok())
-                    .map(|p| path_text(&p));
+                let root = project_roots
+                    .entry(t.project_id.clone())
+                    .or_insert_with(|| {
+                        document
+                            .sidebar
+                            .projects
+                            .iter()
+                            .find(|p| p.id == t.project_id)
+                            .and_then(|p| p.repo_root.canonicalize().ok())
+                            .map(|p| path_text(&p))
+                    })
+                    .clone();
                 Some(storage::threads::ThreadUpsert {
                     thread_id: t.id.to_string(),
                     project_id: Some(t.project_id.to_string()),
