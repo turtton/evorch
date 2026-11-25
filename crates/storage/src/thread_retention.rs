@@ -10,6 +10,7 @@
 
 pub mod activity;
 mod authority;
+pub mod decision;
 #[cfg(feature = "test-support")]
 pub use authority::ExclusiveFixtureStorage;
 pub use authority::{AutoArchiveAuthority, AutoArchivePolicy};
