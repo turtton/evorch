@@ -255,6 +255,47 @@ fn receipt_status_and_goal_updates_are_not_activity() {
     assert_eq!(state.last_actual_activity_at, Some(10));
     assert!(f.reader.activity_goal_protected("thread").unwrap());
 }
+
+#[test]
+fn handoff_copy_is_dirty_across_reopen_and_preserves_historical_acceptance() {
+    let mut f = Fixture::new();
+    f.reader.conn.execute("INSERT INTO review_evidence(id,root_run_id,target_run_id,kind,text,created_at_ns) VALUES('evidence','source','source','human_input','historical input',10)",[]).unwrap();
+    f.reader.conn.execute("INSERT INTO host_input_receipts(prompt_id,run_id,root_run_id,text,status,accepted_at_ns,status_at_ns,evidence_id) VALUES('prompt','source','source','historical input','delivered',10,1000,'evidence')",[]).unwrap();
+    f.drain();
+
+    assert!(
+        f.storage
+            .handle()
+            .copy_handoff_evidence(vec!["source".into()], "successor".into())
+            .unwrap()
+    );
+    assert!(!f.reader.run_activity("successor").unwrap().ready);
+    f.reader = Database::open(&f.config).unwrap();
+    assert!(!f.reader.run_activity("successor").unwrap().ready);
+    assert!(f.reader.activity_report().unwrap().pending_sources > 0);
+    f.drain();
+    let copied = f.reader.run_activity("successor").unwrap();
+    assert!(copied.ready);
+    assert_eq!(copied.last_actual_activity_at, Some(10));
+    assert_eq!(copied.legacy_activity_upper_bound, None);
+
+    // Retrying authentic evidence copying does not manufacture another acceptance.
+    assert!(
+        f.storage
+            .handle()
+            .copy_handoff_evidence(vec!["source".into()], "successor".into())
+            .unwrap()
+    );
+    assert_eq!(f.reader.activity_report().unwrap().pending_sources, 0);
+    assert_eq!(
+        f.reader
+            .run_activity("successor")
+            .unwrap()
+            .last_actual_activity_at,
+        Some(10)
+    );
+}
+
 #[test]
 fn migration_boundary_captures_legacy_fallback_once_and_new_empty_runs_are_ready() {
     let f = Fixture::new();
