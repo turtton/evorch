@@ -19,6 +19,12 @@ use crate::core_client::restart::{
     panel::{Confirming, PanelRequest, RestartPanel},
     text,
 };
+use crate::theme::icons;
+use crate::theme::text::{medium, muted};
+use crate::theme::tokens::palette;
+use crate::theme::widgets::{
+    accessible, compact_row, ghost, primary_button, reason_label, surface_frame,
+};
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
@@ -208,45 +214,49 @@ impl Feature for RestartFeature {
         if self.panel.restart_in_flight() {
             ui.ctx().request_repaint_after(POLL);
         }
+        let warn = palette().WARNING_FG;
         if let Some(error) = &self.read_error {
-            ui.colored_label(ui.visuals().warn_fg_color, error);
+            reason_label(ui, warn, error);
         }
         let phase = self.panel.status().map(|s| s.status.phase);
         match self.panel.status() {
             Some(status) => {
-                ui.label(format!(
-                    "状態：{}（リビジョン {}）",
+                ui.label(medium(format!(
+                    "Status: {} (revision {})",
                     text::phase(status.status.phase),
                     status.status.revision
-                ));
+                )));
                 for run in approval_blocked_runs(&status.status) {
-                    ui.colored_label(ui.visuals().warn_fg_color, text::approval_blocker(run));
+                    reason_label(ui, warn, text::approval_blocker(run));
                 }
                 if let Some(reason) = status.status.cancel_reason {
-                    ui.colored_label(ui.visuals().warn_fg_color, text::cancel_reason(reason));
+                    reason_label(ui, warn, text::cancel_reason(reason));
                 }
                 if status.audit.denial_persistence_failures.get() > 0 {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        "警告：拒否の監査記録を保存できなかったものがあります",
+                    reason_label(
+                        ui,
+                        warn,
+                        "Warning: some denial audit records could not be stored",
                     );
                 }
             }
             None => {
-                ui.label("状態を読み込んでいます。");
+                ui.label(muted("Loading the restart status…"));
             }
         }
         let mut blocker_choice = None;
         if let Some(blockers) = self.panel.blockers()
             && !blockers.blockers.is_empty()
         {
-            ui.label("再起動を待たせているシェル：");
+            ui.label(muted("Shells holding up the restart:"));
             for (index, blocker) in blockers.blockers.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("run {}", blocker.run));
-                    if ui.small_button("このシェルを中断…").clicked() {
-                        blocker_choice = Some(index);
-                    }
+                ui.push_id(index, |ui| {
+                    compact_row(ui, false, |ui| {
+                        ui.label(muted(format!("run {}", blocker.run)));
+                        if ui.add(ghost("Interrupt this shell…")).clicked() {
+                            blocker_choice = Some(index);
+                        }
+                    });
                 });
             }
         }
@@ -254,24 +264,21 @@ impl Feature for RestartFeature {
             && let Err(error) = self.panel.begin_interrupt(&BlockerSelector::Index(index))
         {
             self.panel
-                .push_notice(format!("{error}。何も送っていません"));
+                .push_notice(format!("{error}. Nothing was sent."));
         }
         match self.panel.confirming().cloned() {
             Some(Confirming::Restart(binding)) => {
-                ui.separator();
-                ui.label(format!(
-                    "コアを再起動します（対象 {}、コア世代 {}）。実行中の作業は安全点で止まり、新しいコアで続きます。",
+                let question = format!(
+                    "Restart the core (target {}, core epoch {}). Running work stops at a safe point and continues in the new core.",
                     binding.target_id.as_str(),
                     binding.expected_core_epoch.get()
-                ));
-                self.confirm_buttons(ui, ctx, "再起動する");
+                );
+                self.confirmation(ui, ctx, &question, "Restart now");
             }
             Some(Confirming::Interrupt { run, .. }) => {
-                ui.separator();
-                ui.label(format!(
-                    "run {run} のシェルを中断します。実行中のコマンドは止まります。"
-                ));
-                self.confirm_buttons(ui, ctx, "中断する");
+                let question =
+                    format!("Interrupt the shell of run {run}. The running command stops.");
+                self.confirmation(ui, ctx, &question, "Interrupt");
             }
             None => {
                 ui.horizontal(|ui| {
@@ -279,19 +286,22 @@ impl Feature for RestartFeature {
                         && phase.is_none_or(|p| {
                             p == workbench_protocol::namespaces::lifecycle::RestartPhase::Running
                         });
-                    if ui
-                        .add_enabled(
-                            idle && self.panel.targets().is_some(),
-                            egui::Button::new("コアを再起動…"),
-                        )
-                        .clicked()
+                    let restart = ui.add_enabled(
+                        idle && self.panel.targets().is_some(),
+                        egui::Button::new(icons::with_icon(
+                            icons::ARROW_CLOCKWISE,
+                            "Restart core…",
+                        )),
+                    );
+                    accessible(&restart, "Restart core…");
+                    if restart.clicked()
                         && let Err(error) = self.panel.begin_restart(admin_id("restart"))
                     {
                         self.panel
-                            .push_notice(format!("{error}。何も送っていません"));
+                            .push_notice(format!("{error}. Nothing was sent."));
                     }
                     if phase.is_some_and(cancellable)
-                        && ui.button("再起動を取り消す").clicked()
+                        && ui.add(ghost("Cancel restart")).clicked()
                         && let Some(request) = self.panel.cancel(admin_id("cancel"))
                     {
                         self.send(ctx, request);
@@ -300,33 +310,45 @@ impl Feature for RestartFeature {
             }
         }
         for notice in self.panel.notices() {
-            ui.label(notice);
+            ui.label(muted(notice));
         }
-        if !self.panel.notices().is_empty() && ui.small_button("通知を消す").clicked() {
+        if !self.panel.notices().is_empty() && ui.add(ghost("Clear notices")).clicked() {
             self.panel.clear_notices();
         }
         if let Some(count) = self.panel.undisposed()
             && count > 0
         {
-            ui.label(format!(
-                "未処分のグラフ {count} 件：`evorch core graphs list` で確認してください。"
-            ));
+            ui.label(muted(format!(
+                "{count} undisposed graph(s): check them with `evorch core graphs list`."
+            )));
         }
     }
 }
 
 impl RestartFeature {
-    fn confirm_buttons(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, label: &str) {
-        ui.horizontal(|ui| {
-            if ui.button(label).clicked()
-                && let Some(request) = self.panel.accept(admin_id("interrupt"))
-            {
-                self.send(ctx, request);
-                self.refresh_due = true;
-            }
-            if ui.button("やめる").clicked() {
-                self.panel.dismiss_confirmation();
-            }
+    fn confirmation(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &mut FeatureContext<'_>,
+        question: &str,
+        label: &str,
+    ) {
+        surface_frame(palette().SURFACE_RAISED).show(ui, |ui| {
+            ui.label(question);
+            ui.horizontal(|ui| {
+                if primary_button(ui, label).clicked()
+                    && let Some(request) = self.panel.accept(admin_id("interrupt"))
+                {
+                    self.send(ctx, request);
+                    self.refresh_due = true;
+                }
+                if ui.add(ghost("Cancel")).clicked() {
+                    self.panel.dismiss_confirmation();
+                }
+            });
         });
     }
 }
+
+#[cfg(test)]
+mod tests;

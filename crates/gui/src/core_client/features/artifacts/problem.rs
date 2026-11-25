@@ -63,23 +63,25 @@ impl Problem {
 
     pub(super) fn line(&self) -> String {
         match self {
-            Self::Busy(_) => {
-                "コアがビジーです。しばらくしてから「再試行」を押してください。".to_owned()
-            }
-            Self::Denied => "この接続では成果物の内容を読む権限がありません。".to_owned(),
+            Self::Busy(_) => "The core is busy. Press Retry in a moment.".to_owned(),
+            Self::Denied => "This connection is not allowed to read artifact content.".to_owned(),
             Self::Gone => {
-                "成果物は削除されたか、参照が指すものではなくなりました（一覧を再読み込みしてください）。"
+                "The artifact was deleted or the reference no longer points to it. Reload the list."
                     .to_owned()
             }
             Self::DigestMismatch => {
-                "受け取った内容が参照のダイジェストと一致しません。内容は表示しません。".to_owned()
+                "The received content does not match the reference's digest, so it is not shown."
+                    .to_owned()
             }
-            Self::TooLarge(why) => format!("大きすぎて表示できません: {why}"),
-            Self::Unsupported(kind) => format!("この種類（{kind}）は表示できません。"),
+            Self::TooLarge(why) => format!("Preview unavailable: too large ({why})"),
+            Self::Unsupported(kind) => {
+                format!("Preview unavailable: unsupported media type ({kind})")
+            }
             Self::Disconnected => {
-                "接続が切れたため読み込みを中止しました。再接続後に開き直してください。".to_owned()
+                "Loading stopped because the connection was lost. Open it again after reconnecting."
+                    .to_owned()
             }
-            Self::Other(message) => format!("読み込めませんでした: {message}"),
+            Self::Other(message) => format!("Could not load: {message}"),
         }
     }
 }

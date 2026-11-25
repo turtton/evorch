@@ -215,7 +215,7 @@ impl RestartPanel {
         if stale {
             self.confirming = None;
             self.notices.push(
-                "確認中の対象が変わったため、確認を取り消しました。内容を確認してからもう一度操作してください".into(),
+                "The target being confirmed changed, so the confirmation was dropped. Check it again before trying again.".into(),
             );
         }
     }

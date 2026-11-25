@@ -17,8 +17,11 @@ use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, Feat
 use crate::mcp_settings::{
     DraftTransport, DraftValue, DraftValueKind, McpServerDraft, SecretTarget,
 };
+use crate::theme::text::muted;
+use crate::theme::tokens::palette;
+use crate::theme::widgets::{badge, spinner};
 use config::mcp::{MCP_ROLE_KEYS, McpServerEntry, McpSource};
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use workbench_host::areas::mcp::{config_definition, describe, wire_definition};
 use workbench_protocol::{
@@ -28,12 +31,12 @@ use workbench_protocol::{
     handshake::Capability,
     ids::ProjectId,
     namespaces::mcp::{
-        CancelOperation, ConfirmApproval, DeleteSecret, McpApprovalPreview, McpCommand,
-        McpErrorCode, McpEvent, McpMutation, McpOperationId, McpOperationKind, McpOperationState,
-        McpOperationView, McpOrigin, McpOutcome, McpQuery, McpReply, McpResult, McpRevision,
-        McpScope, McpSecretState, McpSecretValue, McpServerStatus, McpServerView, McpSettings,
-        PreviewApproval, Refresh, RevokeApproval, SaveOverride, SaveSecret, SetEnabled,
-        TestConnection,
+        CancelOperation, ConfirmApproval, DeleteSecret, McpApprovalPreview, McpApprovalWarning,
+        McpCommand, McpErrorCode, McpEvent, McpField, McpMutation, McpOperationId,
+        McpOperationKind, McpOperationState, McpOperationView, McpOrigin, McpOutcome, McpQuery,
+        McpReply, McpResult, McpRevision, McpScope, McpSecretState, McpSecretValue, McpServerState,
+        McpServerStatus, McpServerView, McpSettings, PreviewApproval, Refresh, RevokeApproval,
+        SaveOverride, SaveSecret, SetEnabled, TestConnection,
     },
     queries::{Query, QueryReply},
 };
@@ -264,7 +267,151 @@ pub fn error_text(code: McpErrorCode) -> String {
             "The result is not known: the keychain entry or the settings may have been changed. The list is reloaded; check it before trying again.".into()
         }
         McpErrorCode::SecretMissing => "The keychain entry has no stored value yet.".into(),
-        other => format!("Failed: {other:?}"),
+        McpErrorCode::Timeout => "The server did not answer in time.".into(),
+        McpErrorCode::Transport => {
+            "The server could not be reached or stopped unexpectedly.".into()
+        }
+        McpErrorCode::HttpStatus { status } => format!("The server answered with HTTP {status}."),
+        McpErrorCode::Protocol => "The server's response was not valid MCP.".into(),
+        McpErrorCode::ServerRejected => "The server rejected the request.".into(),
+        McpErrorCode::ToolRejected => "The tool reported an error.".into(),
+        McpErrorCode::Configuration => "The server definition is invalid.".into(),
+        McpErrorCode::ApprovalRevoked => {
+            "Approval was revoked; calls to this server are refused.".into()
+        }
+        McpErrorCode::RoleNotAllowed => {
+            "This server is not shared with this role; calls to it are refused.".into()
+        }
+        McpErrorCode::MissingEnvironment { field } => format!(
+            "An environment variable used in {} is not set in evorch's environment.",
+            field_label(field)
+        ),
+        McpErrorCode::ProcessLimitReached => {
+            "Too many local MCP servers are running for this project; it was not started.".into()
+        }
+        McpErrorCode::PreparationLimitReached => {
+            "Too many MCP connections are being prepared for this project; this server is unavailable for this run.".into()
+        }
+        McpErrorCode::Unavailable => "The server is unavailable.".into(),
+        McpErrorCode::Cancelled => "Cancelled.".into(),
+        McpErrorCode::InputRequired => {
+            "The server asked for interactive input, which evorch does not support.".into()
+        }
+        McpErrorCode::LimitExceeded => "The server's response exceeded a size limit.".into(),
+        McpErrorCode::DefinitionChanged => {
+            "The server's tool definitions changed since this conversation started.".into()
+        }
+        McpErrorCode::UnknownProject => "The core does not know this project.".into(),
+    }
+}
+
+fn field_label(field: McpField) -> &'static str {
+    match field {
+        McpField::Command => "command",
+        McpField::Args => "arguments",
+        McpField::Cwd => "working directory",
+        McpField::Env => "environment",
+        McpField::Url => "URL",
+        McpField::Headers => "headers",
+        McpField::Token => "token",
+    }
+}
+
+fn status_badge(status: McpServerStatus) -> (&'static str, Color32) {
+    match status {
+        McpServerStatus::Disabled => ("off", palette().TEXT_MUTED),
+        McpServerStatus::Invalid => ("invalid", palette().ERROR_FG),
+        McpServerStatus::NeedsApproval => ("needs approval", palette().WARNING),
+        McpServerStatus::SecretUnavailable => ("secret unavailable", palette().WARNING),
+        McpServerStatus::Connecting => ("connecting", palette().INFO),
+        McpServerStatus::Ready => ("ready", palette().SUCCESS),
+        McpServerStatus::Unavailable => ("unavailable", palette().ERROR_FG),
+        McpServerStatus::ProcessLimitReached => ("process limit", palette().WARNING),
+    }
+}
+
+fn status_reason(state: &McpServerState) -> Option<McpErrorCode> {
+    match (state.reason, state.status) {
+        (Some(reason), _) => Some(reason),
+        (None, McpServerStatus::NeedsApproval) => Some(McpErrorCode::NeedsApproval),
+        (None, McpServerStatus::ProcessLimitReached) => Some(McpErrorCode::ProcessLimitReached),
+        (None, McpServerStatus::SecretUnavailable) => Some(McpErrorCode::SecretUnavailable),
+        (None, McpServerStatus::Invalid) => Some(McpErrorCode::Configuration),
+        (None, _) => None,
+    }
+}
+
+/// `error_text` describes a failed operation; a server's state is not one, so
+/// the codes whose operation wording would claim a write or a reload differ.
+fn state_reason_text(code: McpErrorCode) -> String {
+    match code {
+        McpErrorCode::SecretUnavailable => "The OS keychain is not available. Nothing was read or stored, and evorch does not fall back to a file.".into(),
+        McpErrorCode::SecretLocked => "The OS keychain is locked. Unlock it and try again.".into(),
+        McpErrorCode::SecretDenied => {
+            "Access to the OS keychain was denied or cancelled. Nothing was stored.".into()
+        }
+        McpErrorCode::SecretMissing => {
+            "The keychain entry has no stored value yet. Edit the server to set it.".into()
+        }
+        McpErrorCode::ConfigConflict => {
+            "The MCP configuration changed on disk. Reload and try again.".into()
+        }
+        McpErrorCode::StalePreview => "The MCP configuration changed after this preview, so nothing was approved. Review the current settings again.".into(),
+        McpErrorCode::OutcomeUnknown => {
+            "The connection ended before the result arrived; it is not retried.".into()
+        }
+        other => error_text(other),
+    }
+}
+
+fn operation_text(kind: McpOperationKind) -> &'static str {
+    match kind {
+        McpOperationKind::Refresh => "Reloading…",
+        McpOperationKind::SaveOverride => "Saving…",
+        McpOperationKind::SetEnabled => "Updating…",
+        McpOperationKind::PreviewApproval => "Reading what approving would allow…",
+        McpOperationKind::ConfirmApproval => "Approving…",
+        McpOperationKind::RevokeApproval => "Revoking approval…",
+        McpOperationKind::TestConnection => "Testing the connection…",
+        McpOperationKind::SaveSecret => "Storing the secret…",
+        McpOperationKind::DeleteSecret => "Deleting the secret…",
+    }
+}
+
+fn delete_partial_text(name: &str, reason: McpErrorCode) -> String {
+    let cause = match reason {
+        McpErrorCode::SecretUnavailable => "the OS keychain is not available",
+        McpErrorCode::SecretLocked => "the OS keychain is locked",
+        McpErrorCode::SecretDenied => "access to the OS keychain was denied or cancelled",
+        McpErrorCode::ConfigConflict => "the MCP configuration changed on disk meanwhile",
+        _ => "the OS keychain reported an error",
+    };
+    format!(
+        "The references of {name} are removed, but the keychain entry was not deleted because {cause}. Its value may still be stored in the OS keychain."
+    )
+}
+
+fn warning_text(warning: McpApprovalWarning, preview: &McpApprovalPreview) -> (String, Color32) {
+    match warning {
+        McpApprovalWarning::HostProcessOutsideSandbox => (
+            "This starts a program on this computer outside the sandbox. It can run any command with your user permissions.".into(),
+            palette().WARNING_FG,
+        ),
+        McpApprovalWarning::PrivateDestination => (
+            "This is an address on this computer or the local network. evorch connects only to the addresses listed above; a new address needs approval again.".into(),
+            palette().WARNING_FG,
+        ),
+        McpApprovalWarning::PlaintextHttp => (
+            "http:// is not encrypted: requests, headers and any secrets are sent in plain text on the network.".into(),
+            palette().ERROR_FG,
+        ),
+        McpApprovalWarning::SendsSecretReferences => (
+            format!(
+                "These secrets are sent to this server with every request: {}.",
+                preview.summary.secret_references.join(", ")
+            ),
+            palette().WARNING_FG,
+        ),
     }
 }
 
@@ -831,10 +978,40 @@ fn secret_state_label(state: McpSecretState) -> &'static str {
     }
 }
 
-fn status_label(view: &McpServerView) -> String {
-    match view.state.reason {
-        Some(reason) => format!("{:?} ({reason:?})", view.state.status),
-        None => format!("{:?}", view.state.status),
+fn row_note(ui: &mut Ui, note: &RowNote) {
+    match note {
+        RowNote::Working(kind) => {
+            ui.horizontal(|ui| {
+                spinner(ui);
+                ui.label(muted(operation_text(*kind)));
+            });
+        }
+        RowNote::Approved => {
+            ui.colored_label(
+                palette().SUCCESS,
+                "Approved. It is used from the next new run.",
+            );
+        }
+        RowNote::Revoked => {
+            ui.colored_label(palette().WARNING_FG, "Approval revoked.");
+        }
+        RowNote::Tested(status) => {
+            let (label, color) = status_badge(*status);
+            ui.colored_label(color, format!("Connection test: {label}."));
+        }
+        // Row failures come only from a connection test or a revoke, which
+        // never store a secret, so the write-claiming operation wording is wrong.
+        RowNote::Failed(error) => {
+            ui.colored_label(palette().ERROR_FG, state_reason_text(*error));
+        }
+        RowNote::Cancelled => {
+            ui.label("Cancelled.");
+        }
+        RowNote::Unknown => {
+            ui.label(
+                "The result is not known (the core no longer holds it). Check the state before trying again.",
+            );
+        }
     }
 }
 
@@ -845,9 +1022,7 @@ impl McpFeature {
                 Notice::Saved => "Saved. Changes apply from the next new run.".to_owned(),
                 Notice::SecretStored => "The secret is stored in the OS keychain.".to_owned(),
                 Notice::SecretDeleted(name) => format!("The secret of {name} was deleted."),
-                Notice::SecretDeletePartial { name, reason } => format!(
-                    "The references of {name} are removed, but deleting the keychain entry failed ({reason:?}): its value may still be stored."
-                ),
+                Notice::SecretDeletePartial { name, reason } => delete_partial_text(name, *reason),
                 Notice::Conflict => error_text(McpErrorCode::ConfigConflict),
                 Notice::Failed(message) => message.clone(),
                 Notice::Unknown => {
@@ -914,8 +1089,19 @@ impl McpFeature {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&id).strong());
-                ui.label(status_label(server));
+                let (label, color) = status_badge(server.state.status);
+                badge(ui, label, color, palette().SURFACE);
             });
+            let note_cause = match &note {
+                Some(RowNote::Failed(code)) => Some(*code),
+                Some(RowNote::Cancelled) => Some(McpErrorCode::Cancelled),
+                _ => None,
+            };
+            if let Some(reason) = status_reason(&server.state)
+                && note_cause != Some(reason)
+            {
+                ui.label(muted(state_reason_text(reason)));
+            }
             for (name, state) in &server.secret_states {
                 ui.label(format!(
                     "Keychain entry {name}: {}",
@@ -923,17 +1109,7 @@ impl McpFeature {
                 ));
             }
             if let Some(note) = &note {
-                ui.label(match note {
-                    RowNote::Working(kind) => format!("Working: {kind:?}"),
-                    RowNote::Approved => "Approved. It is used from the next new run.".into(),
-                    RowNote::Revoked => "Approval revoked.".into(),
-                    RowNote::Tested(status) => format!("Test result: {status:?}"),
-                    RowNote::Failed(error) => error_text(*error),
-                    RowNote::Cancelled => "Cancelled.".into(),
-                    RowNote::Unknown => {
-                        "The result is not known (the core no longer holds it). Check the state before trying again.".into()
-                    }
-                });
+                row_note(ui, note);
             }
             ui.horizontal_wrapped(|ui| {
                 if actions.edit && ui.button("Edit").clicked() {
@@ -1090,8 +1266,15 @@ impl McpFeature {
                 if let Some(executable) = &preview.summary.executable {
                     ui.label(format!("Runs: {executable}"));
                 }
+                if !preview.approved_ips.is_empty() {
+                    ui.label(format!(
+                        "Allowed addresses: {}",
+                        preview.approved_ips.join(", ")
+                    ));
+                }
                 for warning in &preview.warnings {
-                    ui.colored_label(ui.visuals().warn_fg_color, format!("{warning:?}"));
+                    let (text, color) = warning_text(*warning, preview);
+                    ui.colored_label(color, text);
                 }
                 if !preview.summary.secret_references.is_empty() {
                     ui.label(format!(
@@ -2190,5 +2373,314 @@ mod tests {
         );
         assert_eq!(feature.operations.get(&id), Some(&running));
         assert!(!feature.pending.contains_key(&1));
+    }
+
+    const ALL_STATUSES: [McpServerStatus; 8] = [
+        McpServerStatus::Disabled,
+        McpServerStatus::Invalid,
+        McpServerStatus::NeedsApproval,
+        McpServerStatus::SecretUnavailable,
+        McpServerStatus::Connecting,
+        McpServerStatus::Ready,
+        McpServerStatus::Unavailable,
+        McpServerStatus::ProcessLimitReached,
+    ];
+
+    #[test]
+    fn server_states_read_as_the_legacy_badges() {
+        let labels: Vec<_> = ALL_STATUSES.iter().map(|s| status_badge(*s).0).collect();
+        assert_eq!(
+            labels,
+            [
+                "off",
+                "invalid",
+                "needs approval",
+                "secret unavailable",
+                "connecting",
+                "ready",
+                "unavailable",
+                "process limit",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_failure_is_shown_as_a_type_name() {
+        let fields = [
+            McpField::Command,
+            McpField::Args,
+            McpField::Cwd,
+            McpField::Env,
+            McpField::Url,
+            McpField::Headers,
+            McpField::Token,
+        ];
+        let mut codes = vec![
+            McpErrorCode::Timeout,
+            McpErrorCode::Transport,
+            McpErrorCode::HttpStatus { status: 502 },
+            McpErrorCode::Protocol,
+            McpErrorCode::ServerRejected,
+            McpErrorCode::ToolRejected,
+            McpErrorCode::Configuration,
+            McpErrorCode::ConfigConflict,
+            McpErrorCode::NeedsApproval,
+            McpErrorCode::ApprovalRevoked,
+            McpErrorCode::RoleNotAllowed,
+            McpErrorCode::StalePreview,
+            McpErrorCode::SecretUnavailable,
+            McpErrorCode::SecretLocked,
+            McpErrorCode::SecretDenied,
+            McpErrorCode::SecretMissing,
+            McpErrorCode::ProcessLimitReached,
+            McpErrorCode::PreparationLimitReached,
+            McpErrorCode::Unavailable,
+            McpErrorCode::Cancelled,
+            McpErrorCode::OutcomeUnknown,
+            McpErrorCode::InputRequired,
+            McpErrorCode::LimitExceeded,
+            McpErrorCode::DefinitionChanged,
+            McpErrorCode::UnknownProject,
+        ];
+        codes.extend(
+            fields
+                .iter()
+                .map(|field| McpErrorCode::MissingEnvironment { field: *field }),
+        );
+        for code in codes {
+            let text = error_text(code);
+            let name = format!("{code:?}");
+            let name = name.split([' ', '{']).next().unwrap();
+            assert!(
+                !text.contains(name) || name.chars().filter(char::is_ascii_uppercase).count() < 2,
+                "{text}"
+            );
+            assert!(!text.contains('{') && !text.contains("::"), "{text}");
+        }
+        assert_eq!(
+            error_text(McpErrorCode::HttpStatus { status: 502 }),
+            "The server answered with HTTP 502."
+        );
+        assert!(
+            error_text(McpErrorCode::MissingEnvironment {
+                field: McpField::Cwd
+            })
+            .contains("working directory")
+        );
+    }
+
+    #[test]
+    fn a_revoked_server_row_shows_its_badge_reason_and_test_result_in_words() {
+        use egui_kittest::kittest::Queryable;
+        let mut feature = McpFeature::default();
+        let mut settings = settings_of("p", revision('a'));
+        settings.servers.push(McpServerView {
+            server_id: "fixture".into(),
+            origin: McpOrigin::ProjectToml,
+            imported_exists: false,
+            tombstone: false,
+            definition: None,
+            diagnostics: vec![],
+            state: McpServerState {
+                status: McpServerStatus::NeedsApproval,
+                reason: Some(McpErrorCode::ApprovalRevoked),
+            },
+            secret_references: vec![],
+            secret_states: BTreeMap::new(),
+        });
+        feature.projects.entry("p".into()).or_default().settings = Some(settings);
+        feature.notes.insert(
+            ("p".to_owned(), "fixture".to_owned()),
+            RowNote::Tested(McpServerStatus::Ready),
+        );
+        let mut window = window(feature);
+        window.run_steps(2);
+        assert!(window.query_by_label("fixture").is_some());
+        assert!(window.query_by_label("needs approval").is_some());
+        assert!(
+            window
+                .query_by_label("Approval was revoked; calls to this server are refused.")
+                .is_some()
+        );
+        assert!(window.query_by_label("Connection test: ready.").is_some());
+        assert!(window.query_by_label_contains("NeedsApproval").is_none());
+        assert!(window.query_by_label_contains("ApprovalRevoked").is_none());
+    }
+
+    #[test]
+    fn a_failed_operation_whose_reason_is_the_server_state_is_shown_once() {
+        use egui_kittest::kittest::Queryable;
+        let mut feature = McpFeature::default();
+        let mut settings = settings_of("p", revision('a'));
+        settings.servers.push(McpServerView {
+            server_id: "fixture".into(),
+            origin: McpOrigin::ProjectToml,
+            imported_exists: false,
+            tombstone: false,
+            definition: None,
+            diagnostics: vec![],
+            state: McpServerState {
+                status: McpServerStatus::NeedsApproval,
+                reason: Some(McpErrorCode::NeedsApproval),
+            },
+            secret_references: vec![],
+            secret_states: BTreeMap::new(),
+        });
+        feature.projects.entry("p".into()).or_default().settings = Some(settings);
+        feature.notes.insert(
+            ("p".to_owned(), "fixture".to_owned()),
+            RowNote::Failed(McpErrorCode::NeedsApproval),
+        );
+        let mut window = window(feature);
+        window.run_steps(2);
+        let text = error_text(McpErrorCode::NeedsApproval);
+        assert_eq!(window.query_all_by_label(&text).count(), 1);
+    }
+
+    #[test]
+    fn a_cancelled_or_keychain_failed_test_shows_its_cause_once() {
+        use egui_kittest::kittest::Queryable;
+        for (reason, note, text) in [
+            (McpErrorCode::Cancelled, RowNote::Cancelled, "Cancelled."),
+            (
+                McpErrorCode::SecretLocked,
+                RowNote::Failed(McpErrorCode::SecretLocked),
+                "The OS keychain is locked. Unlock it and try again.",
+            ),
+        ] {
+            let mut feature = McpFeature::default();
+            let mut settings = settings_of("p", revision('a'));
+            settings.servers.push(McpServerView {
+                server_id: "fixture".into(),
+                origin: McpOrigin::ProjectToml,
+                imported_exists: false,
+                tombstone: false,
+                definition: None,
+                diagnostics: vec![],
+                state: McpServerState {
+                    status: McpServerStatus::Unavailable,
+                    reason: Some(reason),
+                },
+                secret_references: vec![],
+                secret_states: BTreeMap::new(),
+            });
+            feature.projects.entry("p".into()).or_default().settings = Some(settings);
+            feature
+                .notes
+                .insert(("p".to_owned(), "fixture".to_owned()), note);
+            let mut window = window(feature);
+            window.run_steps(2);
+            assert_eq!(window.query_all_by_label(text).count(), 1, "{text}");
+            assert_eq!(
+                window
+                    .query_all_by_label_contains("keychain is locked")
+                    .count(),
+                usize::from(reason == McpErrorCode::SecretLocked)
+            );
+            assert!(
+                window
+                    .query_by_label_contains("may not have been stored")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_state_reason_never_claims_a_failed_write_or_a_reload() {
+        for (status, reason) in [
+            (McpServerStatus::SecretUnavailable, None),
+            (
+                McpServerStatus::SecretUnavailable,
+                Some(McpErrorCode::SecretLocked),
+            ),
+            (
+                McpServerStatus::SecretUnavailable,
+                Some(McpErrorCode::SecretDenied),
+            ),
+            (
+                McpServerStatus::Unavailable,
+                Some(McpErrorCode::OutcomeUnknown),
+            ),
+            (
+                McpServerStatus::Unavailable,
+                Some(McpErrorCode::ConfigConflict),
+            ),
+        ] {
+            let text = status_reason(&McpServerState { status, reason })
+                .map(state_reason_text)
+                .unwrap();
+            assert!(!text.contains("may not have been stored"), "{text}");
+            assert!(!text.contains("is reloaded"), "{text}");
+        }
+        assert_eq!(
+            status_reason(&McpServerState {
+                status: McpServerStatus::SecretUnavailable,
+                reason: None,
+            })
+            .map(state_reason_text)
+            .unwrap(),
+            "The OS keychain is not available. Nothing was read or stored, and evorch does not fall back to a file."
+        );
+    }
+
+    #[test]
+    fn a_private_destination_review_lists_the_addresses_its_warning_refers_to() {
+        use egui_kittest::kittest::Queryable;
+        use workbench_protocol::namespaces::mcp::{
+            McpApprovalSummary, McpDestination, McpFingerprint, McpPreviewId,
+        };
+        let mut feature = McpFeature::default();
+        let mut settings = settings_of("p", revision('a'));
+        settings.servers.push(McpServerView {
+            server_id: "fixture".into(),
+            origin: McpOrigin::ProjectToml,
+            imported_exists: false,
+            tombstone: false,
+            definition: None,
+            diagnostics: vec![],
+            state: McpServerState {
+                status: McpServerStatus::NeedsApproval,
+                reason: None,
+            },
+            secret_references: vec![],
+            secret_states: BTreeMap::new(),
+        });
+        feature.projects.entry("p".into()).or_default().settings = Some(settings);
+        feature.review = Some((
+            "fixture".into(),
+            Review::Ready(Box::new(McpApprovalPreview {
+                preview_id: McpPreviewId::from_bytes(&[1; 16]),
+                scope: McpScope {
+                    project: project(),
+                    server_id: "fixture".into(),
+                },
+                source_revision: revision('a'),
+                fingerprint: McpFingerprint::from_bytes(&[2; 32]),
+                warnings: vec![McpApprovalWarning::PrivateDestination],
+                previous_fingerprint: None,
+                previous_summary: None,
+                summary: McpApprovalSummary {
+                    destination: Some(McpDestination {
+                        scheme: "http".into(),
+                        host: "localhost".into(),
+                        port: 8080,
+                    }),
+                    ..Default::default()
+                },
+                approved_ips: vec!["127.0.0.1".into(), "::1".into()],
+            })),
+        ));
+        let mut window = window(feature);
+        window.run_steps(2);
+        assert!(
+            window
+                .query_by_label("Allowed addresses: 127.0.0.1, ::1")
+                .is_some()
+        );
+        assert!(
+            window
+                .query_by_label_contains("connects only to the addresses listed above")
+                .is_some()
+        );
     }
 }

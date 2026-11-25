@@ -58,11 +58,11 @@ const MAX_UNSUBSCRIBES: usize = 8;
 const MAX_VERIFY: usize = MAX_STOPPED_IMAGES + 1;
 
 const NOTE_STOPPED: &str = "The page was closed.";
-const NOTE_UNAVAILABLE: &str = "このrunのブラウザは観測できません";
-const NOTE_REVOKED: &str = "この実行は失効したため観測を終了しました";
-const NOTE_CAPACITY: &str = "同時に観測できる数の上限です。しばらくしてから更新してください";
-const NOTE_ENDED: &str = "配信が終了しました";
-const NOTE_UNEXPECTED: &str = "予期しない応答を受け取りました";
+const NOTE_UNAVAILABLE: &str = "This run's browser cannot be observed";
+const NOTE_REVOKED: &str = "Observation ended because the run was revoked";
+const NOTE_CAPACITY: &str = "Too many pages are being observed at once. Refresh in a moment.";
+const NOTE_ENDED: &str = "The stream ended";
+const NOTE_UNEXPECTED: &str = "Unexpected reply from the core";
 
 fn state_note(state: ObservationState) -> &'static str {
     match state {
@@ -487,7 +487,7 @@ impl ObservationFeature {
             },
             FeatureReply::Command(Err(e)) | FeatureReply::Query(Err(e)) => {
                 Err(if e.outcome_unknown {
-                    format!("{}（結果が分かりません。再送しません）", e.message)
+                    format!("{} (outcome unknown; not sent again)", e.message)
                 } else {
                     e.message
                 })

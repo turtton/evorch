@@ -156,7 +156,7 @@ fn u24(bytes: &[u8]) -> u32 {
 fn within_limits((width, height): (u32, u32)) -> Result<(), ImageProblem> {
     if width > MAX_SIDE || height > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
         return Err(ImageProblem::TooLarge(format!(
-            "{width}×{height} ピクセル（上限 {MAX_SIDE} 辺・{MAX_PIXELS} ピクセル）"
+            "{width}×{height} pixels (limit {MAX_SIDE} px per side, {MAX_PIXELS} pixels)"
         )));
     }
     Ok(())
@@ -227,7 +227,7 @@ pub(super) fn decode_within(
         || decoder.total_bytes() > MAX_DECODED_BYTES
     {
         return Err(ImageProblem::TooLarge(format!(
-            "{width}×{height} ピクセル（上限 {MAX_SIDE} 辺・{MAX_PIXELS} ピクセル）"
+            "{width}×{height} pixels (limit {MAX_SIDE} px per side, {MAX_PIXELS} pixels)"
         )));
     }
     let rgba = image::DynamicImage::from_decoder(decoder)

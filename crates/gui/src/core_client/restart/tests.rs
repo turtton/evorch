@@ -120,7 +120,7 @@ fn a_changed_target_or_epoch_drops_the_dialog_instead_of_running_it() {
             panel
                 .notices()
                 .iter()
-                .any(|n| n.contains("確認を取り消しました"))
+                .any(|n| n.contains("confirmation was dropped"))
         );
     }
 }
@@ -179,7 +179,7 @@ fn after_a_restart_only_reads_are_asked_never_a_command() {
         Instant::now(),
     );
     assert!(panel.reconcile_queries().is_empty());
-    assert!(panel.notices().iter().any(|n| n.contains("監査記録")));
+    assert!(panel.notices().iter().any(|n| n.contains("audit record")));
 }
 
 #[test]
@@ -226,8 +226,8 @@ fn a_conflict_reads_as_a_changed_target_and_the_banner_shows_stage_and_deadline(
         "changed",
         RetryAdvice::Never,
     )));
-    assert!(panel.notices()[0].contains("競合"));
-    assert!(panel.notices()[0].contains("何も変更していません"));
+    assert!(panel.notices()[0].contains("Conflict"));
+    assert!(panel.notices()[0].contains("Nothing was changed"));
 
     let view = ReconnectView {
         stage: Stage::RestartingToReady,
@@ -310,7 +310,7 @@ fn a_refused_restart_asks_once_which_graphs_are_undisposed_and_says_what_to_do()
         panel
             .notices()
             .iter()
-            .any(|n| n.contains("2 件") && n.contains("evorch core graphs list")),
+            .any(|n| n.contains("2 graph(s)") && n.contains("evorch core graphs list")),
         "{:?}",
         panel.notices()
     );
@@ -325,7 +325,12 @@ fn a_lost_reply_is_shown_as_unknown_and_not_as_a_failure_to_retry() {
         RetryAdvice::Never,
     ));
     panel.on_request_failure(true, &unknown, true);
-    assert!(panel.notices().iter().any(|n| n.contains("結果が不明")));
+    assert!(
+        panel
+            .notices()
+            .iter()
+            .any(|n| n.contains("outcome is unknown"))
+    );
     assert!(panel.take_undisposed_query().is_none());
 }
 
@@ -351,4 +356,74 @@ fn a_refused_restart_can_be_asked_again_and_a_lost_reply_cannot() {
     // A lost reply keeps the request until it is read back.
     assert!(panel.restart_in_flight());
     assert!(panel.has_uncertain());
+}
+
+fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}'))
+}
+
+#[test]
+fn every_restart_sentence_is_english() {
+    use super::text;
+    use workbench_protocol::namespaces::lifecycle::RestartCancelReason;
+    let mut lines: Vec<String> = [
+        RestartPhase::Running,
+        RestartPhase::Requested,
+        RestartPhase::PreparingDrains,
+        RestartPhase::WaitingSafePoint,
+        RestartPhase::Sealing,
+        RestartPhase::Sealed,
+        RestartPhase::Capturing,
+        RestartPhase::Finalizing,
+        RestartPhase::Cancelling,
+        RestartPhase::FailedClosed,
+        RestartPhase::ShuttingDown,
+    ]
+    .into_iter()
+    .map(|phase| text::phase(phase).to_owned())
+    .collect();
+    for (code, retry) in [
+        (ErrorCode::Conflict, RetryAdvice::Never),
+        (ErrorCode::Busy, RetryAdvice::UserActionRequired),
+        (ErrorCode::Busy, RetryAdvice::Never),
+        (ErrorCode::UnsupportedCapability, RetryAdvice::Never),
+        (ErrorCode::PermissionDenied, RetryAdvice::Never),
+        (ErrorCode::Internal, RetryAdvice::Never),
+    ] {
+        lines.push(text::failure(&ClientError::Server(WorkbenchError::new(
+            code, "held", retry,
+        ))));
+    }
+    for state in [
+        AdminOperationState::Pending,
+        AdminOperationState::Started,
+        AdminOperationState::Completed,
+        AdminOperationState::Unknown,
+    ] {
+        for outcome in [
+            AdminOutcome::Pending,
+            AdminOutcome::Succeeded,
+            AdminOutcome::Failed,
+            AdminOutcome::Cancelled,
+            AdminOutcome::Conflict,
+            AdminOutcome::Unknown,
+        ] {
+            lines.extend(text::receipt(&AdminReceipt {
+                operation_id: id("op-1"),
+                state,
+                outcome,
+                audit_warning: true,
+            }));
+        }
+    }
+    lines.push(text::approval_blocker(&RunId::new("run-a").unwrap()));
+    lines.push(text::cancel_reason(RestartCancelReason::ApprovalPending {
+        pending: 2,
+    }));
+    lines.push(text::undisposed(2));
+    lines.push(text::outcome_unknown());
+    for line in &lines {
+        assert!(!has_cjk(line), "{line}");
+    }
 }

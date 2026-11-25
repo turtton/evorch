@@ -1,4 +1,4 @@
-//! What a person is told. Surfaces differ in wording (the desktop is Japanese)
+//! What a person is told. Surfaces differ in wording
 //! but not in what they distinguish, so the distinctions live here: which
 //! failure is a stale target, whether the audit trail is in trouble, where the
 //! reconnect stands and by when it must succeed.

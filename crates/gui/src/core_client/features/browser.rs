@@ -299,7 +299,7 @@ impl BrowserFeature {
             }
             if self.previews.len() >= MAX_PREVIEWS {
                 self.notice = Some(format!(
-                    "プレビューは同時に {MAX_PREVIEWS} 件までです。閉じてから開き直してください"
+                    "Up to {MAX_PREVIEWS} previews can be open at once. Close one, then open this again."
                 ));
                 continue;
             }
@@ -803,16 +803,16 @@ impl BrowserFeature {
                     (Purpose::CloseTab(_), Err(failure)) if Self::is_gone(&failure) => {
                         self.remove_preview(pid, ctx)
                     }
-                    (Purpose::Unsubscribe(_), _) => {}
+                    (Purpose::Unsubscribe(_), _) | (Purpose::Input(_), Ok(_)) => {}
                     (_, Ok(_)) => {
                         self.previews[idx].status =
-                            Some("予期しない応答を受け取りました".to_owned());
+                            Some("Unexpected reply from the core".to_owned());
                     }
                     (purpose, Err(failure)) => {
                         if Self::is_gone(&failure) {
                             self.lose(
                                 idx,
-                                format!("プレビューは閉じられました（{}）", failure.describe()),
+                                format!("The preview was closed ({})", failure.describe()),
                                 ctx,
                             );
                         } else {
@@ -822,15 +822,15 @@ impl BrowserFeature {
                                 self.previews[idx].resize_failed = Some(*viewport);
                             }
                             let what = match purpose {
-                                Purpose::Input(_) => "入力",
-                                Purpose::Resize(..) => "サイズ変更",
-                                Purpose::Streaming(..) => "ストリーミング",
-                                Purpose::Notices(_) => "通知の取得",
-                                Purpose::Inspect(..) => "検査",
-                                _ => "操作",
+                                Purpose::Input(_) => "Input",
+                                Purpose::Resize(..) => "Resize",
+                                Purpose::Streaming(..) => "Streaming",
+                                Purpose::Notices(_) => "Reading notices",
+                                Purpose::Inspect(..) => "Inspection",
+                                _ => "Operation",
                             };
                             self.previews[idx].status =
-                                Some(format!("{what}に失敗しました: {}", failure.describe()));
+                                Some(format!("{what} failed: {}", failure.describe()));
                         }
                     }
                 }
@@ -852,12 +852,12 @@ impl BrowserFeature {
             other => {
                 let why = match other {
                     Err(failure) => failure.describe(),
-                    Ok(_) => "予期しない応答を受け取りました".to_owned(),
+                    Ok(_) => "Unexpected reply from the core".to_owned(),
                 };
                 self.session = SessionState::Failed;
                 for p in &mut self.previews {
                     if p.phase == Phase::Waiting {
-                        p.phase = Phase::Lost(format!("セッションを作成できません: {why}"));
+                        p.phase = Phase::Lost(format!("Could not create a session: {why}"));
                     }
                 }
             }
@@ -882,7 +882,7 @@ impl BrowserFeature {
             other => {
                 let why = match other {
                     Err(failure) => failure.describe(),
-                    Ok(_) => "予期しない応答を受け取りました".to_owned(),
+                    Ok(_) => "Unexpected reply from the core".to_owned(),
                 };
                 if rec.for_missing {
                     self.abandon_recovery(&why);
@@ -905,7 +905,7 @@ impl BrowserFeature {
         for p in &mut self.previews {
             if p.phase == Phase::Suspended {
                 p.phase = Phase::Lost(format!(
-                    "セッションを再開できません（{why}）。もう一度開いてください"
+                    "Could not resume the session ({why}). Open it again."
                 ));
             }
         }
@@ -946,11 +946,13 @@ impl BrowserFeature {
                     rec.probe_due = true;
                 }
             }
-            Ok(_) => self.lose(idx, "予期しない応答を受け取りました".to_owned(), ctx),
+            Ok(_) => self.lose(idx, "Unexpected reply from the core".to_owned(), ctx),
             Err(Failure::Unknown) => {
                 self.previews[idx].phase = Phase::OpenUnknown;
-                self.previews[idx].status =
-                    Some("開いたかどうか分かりません（再送しません）。一覧で確認します".to_owned());
+                self.previews[idx].status = Some(
+                    "Not known whether it opened (not sent again). Checking the tab list."
+                        .to_owned(),
+                );
                 self.probe = if ready { Probe::Need } else { self.probe };
                 if let SessionState::Recovering(rec) = &mut self.session {
                     rec.probe_due = true;
@@ -958,7 +960,7 @@ impl BrowserFeature {
             }
             Err(failure) => self.lose(
                 idx,
-                format!("プレビューを開けません: {}", failure.describe()),
+                format!("Could not open the preview: {}", failure.describe()),
                 ctx,
             ),
         }
@@ -1005,13 +1007,13 @@ impl BrowserFeature {
             }
             Ok(_) => {
                 self.previews[idx].stream =
-                    Stream::Blocked("予期しない応答を受け取りました".to_owned())
+                    Stream::Blocked("Unexpected reply from the core".to_owned())
             }
             Err(failure) => {
                 if Self::is_gone(&failure) {
                     self.lose(
                         idx,
-                        format!("プレビューは閉じられました（{}）", failure.describe()),
+                        format!("The preview was closed ({})", failure.describe()),
                         ctx,
                     );
                 } else {
@@ -1077,7 +1079,7 @@ impl BrowserFeature {
             ) => {
                 if byte_len > MAX_CAPTURE_BLOB_BYTES {
                     self.previews[idx].capture =
-                        Capture::Failed(format!("キャプチャが大きすぎます（{byte_len} バイト）"));
+                        Capture::Failed(format!("The capture is too large ({byte_len} bytes)"));
                     return;
                 }
                 let tag = self.data_tag(pid, DataKind::Capture);
@@ -1094,20 +1096,18 @@ impl BrowserFeature {
                 if Self::is_gone(&failure) {
                     self.lose(
                         idx,
-                        format!("プレビューは閉じられました（{}）", failure.describe()),
+                        format!("The preview was closed ({})", failure.describe()),
                         ctx,
                     );
                 } else {
                     self.previews[idx].capture_picture.clear();
-                    self.previews[idx].capture = Capture::Failed(format!(
-                        "キャプチャに失敗しました: {}",
-                        failure.describe()
-                    ));
+                    self.previews[idx].capture =
+                        Capture::Failed(format!("Capture failed: {}", failure.describe()));
                 }
             }
             _ => {
                 self.previews[idx].capture =
-                    Capture::Failed("予期しない応答を受け取りました".to_owned())
+                    Capture::Failed("Unexpected reply from the core".to_owned())
             }
         }
     }
@@ -1141,7 +1141,7 @@ impl BrowserFeature {
                         }
                         None => {
                             p.phase = Phase::Lost(
-                                "開けたか確認できませんでした。もう一度開いてください".to_owned(),
+                                "Could not confirm that it opened. Open it again.".to_owned(),
                             )
                         }
                     }
@@ -1157,7 +1157,7 @@ impl BrowserFeature {
                         None => {
                             p.forget_connection();
                             p.phase = Phase::Lost(
-                                "タブは閉じられました（helper の再起動など）。もう一度開いてください"
+                                "The tab was closed (for example, the helper restarted). Open it again."
                                     .to_owned(),
                             );
                         }
@@ -1197,7 +1197,7 @@ impl BrowserFeature {
         for p in &mut self.previews {
             if p.phase == Phase::Suspended {
                 p.phase = Phase::Lost(
-                    "セッションの猶予が切れたか core が再起動しました。もう一度開いてください"
+                    "The session's grace period ran out or the core restarted. Open it again."
                         .to_owned(),
                 );
             }
@@ -1267,12 +1267,12 @@ impl BrowserFeature {
                         match DecodeJob::start(blob.bytes, egui_ctx.clone(), &self.decoders) {
                             Some(job) => Capture::Decoding(job),
                             None => Capture::Failed(
-                                "画像の展開が混み合っています。少し待ってからもう一度試してください"
+                                "Too many images are being decoded. Wait a moment and try again."
                                     .to_owned(),
                             ),
                         }
                     }
-                    _ => Capture::Failed("キャプチャの形式が不正です".to_owned()),
+                    _ => Capture::Failed("The capture is not in a supported format".to_owned()),
                 };
             }
             let p = &mut self.previews[idx];
@@ -1336,7 +1336,7 @@ impl BrowserFeature {
                 }
                 p.attempts = p.attempts.saturating_add(1);
                 if p.attempts >= MAX_STREAM_ATTEMPTS {
-                    p.stream = Stream::Blocked("ストリームが繰り返し終了しました".to_owned());
+                    p.stream = Stream::Blocked("The stream ended repeatedly".to_owned());
                 } else {
                     p.cooldown = Some(now + backoff(p.attempts));
                 }
@@ -1367,7 +1367,7 @@ impl BrowserFeature {
             (DataKind::Capture, DataNotice::Failed(error)) => {
                 self.data_tags.remove(&tag);
                 self.previews[idx].capture =
-                    Capture::Failed(format!("キャプチャを受け取れません: {}", error.message));
+                    Capture::Failed(format!("Could not receive the capture: {}", error.message));
             }
             (DataKind::Capture, DataNotice::Cancelled) => {
                 self.data_tags.remove(&tag);
@@ -1466,7 +1466,7 @@ impl Feature for BrowserFeature {
                     tabs, ..
                 }))) => Ok(tabs),
                 FeatureReply::Query(Ok(_)) | FeatureReply::Command(Ok(_)) => {
-                    Err(FeatureError::new("予期しない応答を受け取りました"))
+                    Err(FeatureError::new("Unexpected reply from the core"))
                 }
                 FeatureReply::Query(Err(e)) | FeatureReply::Command(Err(e)) => Err(e),
             });

@@ -12,7 +12,10 @@ use std::{
 };
 
 use egui::{Event, Key, Modifiers, PointerButton, Rect, pos2, vec2};
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use serde_json::{Value, json};
 use workbench_client::renderer::Frame;
 use workbench_protocol::{
@@ -1430,6 +1433,11 @@ fn input_leaves_one_at_a_time_in_the_order_it_was_made() {
         rig.cdp_methods(),
         ["mousePressed", "mouseMoved", "mouseReleased"]
     );
+    assert_eq!(
+        rig.preview(0).status,
+        None,
+        "delivered input is not a problem"
+    );
 }
 
 #[test]
@@ -1688,7 +1696,7 @@ fn a_failed_resize_has_an_explicit_retry_that_sends_the_same_size_again() {
     rig.advance(Duration::from_secs(5));
     rig.pump();
     assert_eq!(rig.core.count("resize"), 1, "not sent again by itself");
-    rig.harness.get_by_label("サイズ変更を再試行").click();
+    rig.harness.get_by_label("Retry resize").click();
     rig.harness.run_steps(2);
     rig.advance(Duration::from_millis(200));
     rig.pump();
@@ -2405,4 +2413,68 @@ fn going_back_to_a_size_that_failed_sends_the_resize_again() {
     rig.harness.set_size(vec2(500.0, 480.0));
     rig.pump();
     assert_eq!(rig.core.count("resize"), 3, "A is a new wish");
+}
+
+fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}'))
+}
+
+fn assert_english(rig: &Rig) {
+    for node in rig.harness.root().children_recursive() {
+        let node = node.accesskit_node();
+        for text in [node.label(), node.value()].into_iter().flatten() {
+            let text = text.to_string();
+            assert!(!has_cjk(&text), "{text}");
+        }
+    }
+}
+
+#[test]
+fn the_preview_reads_in_english() {
+    let mut rig = Rig::new();
+    rig.harness.run_steps(2);
+    assert!(
+        rig.harness
+            .query_by_label_contains("No preview is open")
+            .is_some()
+    );
+
+    rig.open(1);
+    let id = rig.preview(0).id;
+    let title = rig.preview(0).title.clone();
+    rig.core
+        .script("resize", Script::Refuse(busy(RetryAdvice::Never)));
+    rig.harness.set_size(vec2(600.0, 480.0));
+    rig.pump();
+    rig.request(UiRequest::Do(id, Action::Notices));
+    rig.request(UiRequest::Do(id, Action::Inspect(InspectKind::Layout)));
+    rig.harness.run_steps(2);
+    for label in [
+        "Capture",
+        "Notices",
+        "Inspect",
+        "Retry resize",
+        "Page notices",
+        "No notices",
+        "Inspection: Layout",
+    ] {
+        assert!(rig.harness.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(
+        rig.harness
+            .query_by_label_contains("Resize failed")
+            .is_some()
+    );
+    assert_english(&rig);
+
+    rig.harness.get_by_label(&format!("Close {title}")).click();
+    rig.harness.run_steps(2);
+    rig.pump();
+    assert!(rig.harness.state().feature.previews.is_empty());
+    assert!(
+        rig.harness
+            .query_by_label_contains("No preview is open")
+            .is_some()
+    );
 }

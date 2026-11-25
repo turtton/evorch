@@ -109,22 +109,20 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
         shows_exact(&window, "page.html"),
         "the click on the artifact row was not taken"
     );
-    window.until(|w| shows_exact(w, "プレビューを開く")).await;
+    window.until(|w| shows_exact(w, "Open preview")).await;
     window.until(|w| shows(w, "<canvas")).await;
 
     // Its preview: the browser section opens by itself and frames reach the texture.
-    click_exact(&mut window, "プレビューを開く");
+    click_exact(&mut window, "Open preview");
     window.until(|w| frames_taken(w) > 0).await;
-    window
-        .until(|w| !shows(w, "アーティファクトのプレビューを開くと"))
-        .await;
+    window.until(|w| !shows(w, "No preview is open")).await;
     let stats = window.shared.lock().unwrap().features.data_stats();
     assert!(stats.frames_received >= stats.frames_taken && stats.bytes_held < 40 << 20);
 
     // Its inspection result.
-    click_exact(&mut window, "検査");
+    click_exact(&mut window, "Inspect");
     click_exact(&mut window, "DOM");
-    window.until(|w| shows(w, "検査: DOM")).await;
+    window.until(|w| shows(w, "Inspection: DOM")).await;
     assert_eq!(
         env.run_tabs(),
         0,
