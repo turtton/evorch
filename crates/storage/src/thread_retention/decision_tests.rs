@@ -461,6 +461,28 @@ fn a_goal_handed_to_another_family_no_longer_protects_its_source() {
 }
 
 #[test]
+fn receipts_of_one_source_run_beyond_the_goal_budget_hold() {
+    let f = Fixture::new();
+    let family = one();
+    f.event(goal("g1", "t1", "r1", ThreadGoalPhase::Working), 10);
+    for i in 0..3 {
+        f.sql(
+            "INSERT INTO lane_handoffs(source_run_id,source_incarnation,target_run_id,lane_id,request_json,state,goal_json) VALUES('r1',?1,?2,?2,'{}','committed','{\"goal_id\":\"other\"}')",
+            params![format!("i{i}"), format!("target{i}")],
+        );
+    }
+    let tight = DecisionBudget {
+        goal_decodes: 2,
+        ..DecisionBudget::default()
+    };
+    assert_eq!(
+        f.decide_with(&family, &tight).verdict,
+        held(Hold::GoalDecodeBudget)
+    );
+    assert_eq!(f.decide(&family), held(Hold::UnfinishedGoal));
+}
+
+#[test]
 fn a_snapshot_naming_a_thread_outside_the_family_or_unreadable_holds() {
     let f = Fixture::new();
     let family = one();

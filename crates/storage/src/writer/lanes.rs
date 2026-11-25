@@ -39,7 +39,8 @@ impl StorageHandle {
         Self::retain_failed_admission(&mut admission, &outcome);
         outcome
     }
-    /// Projection-only work: no foreground intent. Its own source revision/CAS is the guard.
+    /// A lane job without a foreground admission: the caller registers one, or the work is
+    /// not a foreground intent (the gate stamps are not moved by it).
     pub(crate) fn activity_job<T: Send + 'static>(
         &self,
         writes: bool,

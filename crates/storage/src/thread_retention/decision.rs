@@ -46,7 +46,7 @@ pub mod sql {
         AND NOT EXISTS(SELECT 1 FROM host_chat_submissions s INDEXED BY host_chat_submissions_run_accepted WHERE s.run_id = j.value)";
     pub const HANDOFF_SHAPE: &str = "SELECT rowid, octet_length(goal_json) FROM lane_handoffs \
         WHERE source_run_id = ?1 AND goal_json IS NOT NULL \
-        AND state IN ('committed', 'started', 'recoverable_start_failure')";
+        AND state IN ('committed', 'started', 'recoverable_start_failure') LIMIT ?2";
     pub const HANDOFF_BODY: &str = "SELECT goal_json FROM lane_handoffs WHERE rowid = ?1";
     pub const QUESTIONS: &str = "SELECT j.value FROM json_each(?1) j WHERE \
         EXISTS(SELECT 1 FROM user_questions q INDEXED BY user_questions_run WHERE q.run_id = j.value AND q.answered = 0) \
@@ -402,11 +402,19 @@ impl Reader<'_> {
         self.stats.statements += 1;
         let receipts: Vec<(i64, i64)> = {
             let mut stmt = self.conn.prepare_cached(sql::HANDOFF_SHAPE).or_else(fail)?;
+            // One row more than the goal budget proves the receipts exceed it.
+            let limit =
+                i64::try_from(self.budget.goal_decodes.saturating_add(1)).unwrap_or(i64::MAX);
             let rows = stmt
-                .query_map([&goal.root_run_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .query_map(params![&goal.root_run_id, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .or_else(fail)?;
             rows.collect::<Result<Vec<_>, _>>().or_else(fail)?
         };
+        if receipts.len() > self.budget.goal_decodes {
+            return hold(Hold::GoalDecodeBudget);
+        }
         for (rowid, bytes) in receipts {
             self.charge(bytes, Hold::GoalDecodeBudget)?;
             self.stats.statements += 1;

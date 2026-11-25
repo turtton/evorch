@@ -565,7 +565,7 @@ archived_delete_after_days = 7
 - 空 thread（run もメッセージもない）は作成時刻から日数で対象になる。event・受理行が 1 件もなく会話（`run_contexts.message_count > 0`）だけがある run は、その保存時刻を遅延方向の上界として使う。会話もない run は遅延させない。
 - pin、実行・開始待ち・復元/wake/compaction 進行中、未完了 goal（Complete 以外）、評価サンプル、未回答質問（子・継承先含む）、open attached/summary lane、membership 投影の未適用は family 全体を保護する。通常のターン間待機は実行中と混同しない。`backfill_pending`（events ヘッダの backfill 未完）の間は全 family を保留する。
 - goal は run ごとの最新 snapshot を部分索引 `idx_events_goal_by_run` で 1 件ずつ読み、thread の最新を現在の goal とする。`lane_handoffs` に committed 以降で同じ goal_id の receipt（元 run 起点）があれば、goal は移譲済みで移譲元を保護しない（移譲先での完了・置換には依存しない）。未 commit の receipt では保護する。
-- 1 tick の予算は、family の thread＋run が R=1,024、run あたり末尾 P=16 行、tick あたり末尾 Q=512 行、goal 復号 K=128 件、読込み byte 2,097,152。events を読む各文は `INDEXED BY` で索引を固定する。超過・復号失敗・family 外の thread を名指す snapshot は保留（`FamilyRunBudget`／`ActivityProbeBudget`／`GoalDecodeBudget`／`GoalUndecodable`／`GoalOutsideFamily`）。
+- 1 tick の予算は、family の thread＋run が R=1,024、run あたり末尾 P=16 行、tick あたり末尾 Q=512 行、goal 復号 K=128 件、読込み byte 2,097,152。events を探索する各文は `INDEXED BY` で索引を固定する（例外は、選んだ行の本文・shape を主キー（id／rowid）で 1 件読む文だけ）。超過・復号失敗・family 外の thread を名指す snapshot は保留（`FamilyRunBudget`／`ActivityProbeBudget`／`GoalDecodeBudget`／`GoalUndecodable`／`GoalOutsideFamily`）。
 - 自動処理は専用スレッドで host mutex を try_lock できたときだけ動く。前景の handler、Busy 契約、手動 archive の attachment→sidebar lock と同期削除は維持する。最終再検査から rename までの残る admission 窓は許容する。新しい intent 保留や arbitration は置かない。
 - 1 tick は最大 1 family の判定、1 publish、`remove_thread` 1 呼出し（既存 4096 entry 有界削除）、scratch hint 1 member。sidebar の archived 状態が添付整理の唯一の durable intent で、cursor はメモリ上。restore は従来どおり残存添付の整理を先に完了する。symlink を辿らず root 外を消さない。失敗で archive 時刻を戻さない。
 - scratch は手動と同じ既存 hint のみ。hint 再送は許容するが、プロセス内状態・lease の制約により古い thread などを回収できない場合がある。hint 発行は scratch 削除の durable 完了を意味しない。
@@ -580,12 +580,14 @@ archived_delete_after_days = 7
 - R を超える family は自動 archive されない。
 - 直近の日数内に活動でない event が P 行を超える run を持つ family は遅れる。
 - fork で複製された会話（event なし）は、復元時の保存で遅れる。
+- 1 つの移譲元 run に goal の `lane_handoffs` receipt が K 件を超えて積まれている場合は保留（`GoalDecodeBudget`）。
 
 誤 archive 方向（許容済みの範囲）:
 
 - 時計が archive 日数以上巻き戻った場合。
 - read transaction 開始後に gate を通らず commit された変更（authority 下では他プロセスの writer はいない）。
 - `run_id` ヘッダと食い違う payload だけの活動帰属変更（header を正本とする）。
+- 同一 run 内で header の `wall_clock_ns` を ID 順と逆転させる帯域外 rewrite（古い ID の時刻だけを新しくするなど）。判定は run の最大 ID から末尾を読んで打ち切るため、直近の活動を見落とす。本番の events 書込み経路（追記、delta 圧縮、payload の rewrite、backfill）は `wall_clock_ns` を書き換えず、delta 圧縮も先頭行の id と時刻を保つため、この逆転を作らない。
 
 ### 計測
 
