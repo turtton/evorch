@@ -2,6 +2,7 @@
 DROP TRIGGER IF EXISTS retention_activity_events_insert;
 DROP TRIGGER IF EXISTS retention_activity_events_delete;
 DROP TRIGGER IF EXISTS retention_activity_events_update;
+DROP TRIGGER IF EXISTS retention_activity_events_payload_update;
 DROP TRIGGER IF EXISTS retention_activity_host_input_receipts_insert;
 DROP TRIGGER IF EXISTS retention_activity_host_input_receipts_delete;
 DROP TRIGGER IF EXISTS retention_activity_host_input_receipts_update;

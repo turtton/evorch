@@ -136,6 +136,10 @@ fn unrelated_events_have_zero_projection_writes() {
         .unwrap();
     f.reader
         .conn
+        .execute("UPDATE events SET payload='rewritten' WHERE id=?1", [id])
+        .unwrap();
+    f.reader
+        .conn
         .execute("DELETE FROM events WHERE id=?1", [id])
         .unwrap();
     for table in [
@@ -162,6 +166,177 @@ fn unrelated_events_have_zero_projection_writes() {
         0
     );
 }
+#[test]
+fn payload_rewrites_from_another_connection_stay_dirty_across_reopen() {
+    let state = |from, to| {
+        EventKind::from(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run".into(),
+            from,
+            to,
+            reason: None,
+            waiting: None,
+        })
+    };
+    let delivery = |id: &str| {
+        EventKind::from(event_bus::AgentMessageEvent::Delivered {
+            message: event_bus::AgentMessage {
+                message_id: id.into(),
+                sender_run_id: "sender".into(),
+                recipient_run_id: "run".into(),
+                kind: event_bus::AgentMessageKind::Reply,
+                content: "reply".into(),
+                reply_to: None,
+            },
+            disposition: event_bus::DeliveryDisposition::Steering,
+        })
+    };
+    for (case, before, after, legacy) in [
+        (
+            "goal",
+            snapshot(goal("goal", "thread", "run", ThreadGoalPhase::Complete)),
+            snapshot(goal("goal", "thread", "run", ThreadGoalPhase::Working)),
+            false,
+        ),
+        (
+            "lifecycle",
+            state(AgentRunPhase::Waiting, AgentRunPhase::Waiting),
+            state(AgentRunPhase::Waiting, AgentRunPhase::Running),
+            false,
+        ),
+        (
+            "delivery",
+            delivery("old-message"),
+            delivery("new-message"),
+            false,
+        ),
+        (
+            "legacy-null",
+            MessageEvent::MessageDelta {
+                run_id: Some("run".into()),
+                delta: "delta".into(),
+            }
+            .into(),
+            message("run"),
+            true,
+        ),
+    ] {
+        let mut f = Fixture::new();
+        let id = f.insert(before, 100);
+        if legacy {
+            f.reader
+                .conn
+                .execute("UPDATE events SET subkind=NULL WHERE id=?1", [id])
+                .unwrap();
+        }
+        f.drain();
+        let applied = f.reader.run_activity("run").unwrap();
+        assert!(applied.ready, "{case}");
+        let stale = f.reader.activity_page().unwrap();
+        let other = rusqlite::Connection::open(&f.config.db_path).unwrap();
+        other
+            .execute("UPDATE events SET payload=payload WHERE id=?1", [id])
+            .unwrap();
+        assert_eq!(
+            f.reader.run_activity("run").unwrap().revision,
+            applied.revision,
+            "unchanged {case}"
+        );
+        other
+            .execute(
+                "UPDATE events SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&after).unwrap(), id],
+            )
+            .unwrap();
+        drop(other);
+        assert!(!f.reader.run_activity("run").unwrap().ready, "{case}");
+        f.storage.close();
+        f.storage = Storage::open(f.config.clone()).unwrap();
+        f.reader = Database::open(&f.config).unwrap();
+        let dirty = f.reader.run_activity("run").unwrap();
+        assert!(!dirty.ready, "reopened {case}");
+        assert!(dirty.revision > applied.revision, "{case}");
+        assert!(
+            f.reader.activity_report().unwrap().pending_sources > 0,
+            "{case}"
+        );
+        assert!(
+            f.storage
+                .handle()
+                .apply_activity_page(stale)
+                .unwrap()
+                .cas_rejected,
+            "{case}"
+        );
+        f.drain();
+        assert!(
+            f.reader.run_activity("run").unwrap().ready,
+            "reapplied {case}"
+        );
+        match case {
+            "goal" => assert!(f.reader.activity_goal_protected("thread").unwrap()),
+            "delivery" => {
+                let count: i64 = f.reader.conn.query_row("SELECT count(*) FROM retention_activity_deliveries WHERE message_id='new-message' AND run_id='run'", [], |r| r.get(0)).unwrap();
+                assert_eq!(count, 1);
+            }
+            _ => assert_eq!(
+                f.reader
+                    .run_activity("run")
+                    .unwrap()
+                    .last_actual_activity_at,
+                Some(100),
+                "{case}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn payload_only_rewrites_of_header_activity_do_not_dirty_projection() {
+    let f = Fixture::new();
+    for (kind, subkind) in [
+        ("Message", "MessageCompleted"),
+        ("Message", "FinalResultPublished"),
+        ("Message", "MessagePart"),
+        ("Lifecycle", "TurnCompleted"),
+    ] {
+        f.reader.conn.execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,?1,?2,'run',100,'{}')", params![kind, subkind]).unwrap();
+    }
+    f.drain();
+    let applied = f.reader.run_activity("run").unwrap();
+    let revision: i64 = f
+        .reader
+        .conn
+        .query_row(
+            "SELECT revision FROM retention_activity_control WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let other = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    assert_eq!(
+        other
+            .execute(r#"UPDATE events SET payload='{"rewritten":true}'"#, [])
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        f.reader
+            .conn
+            .query_row(
+                "SELECT revision FROM retention_activity_control WHERE id=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        revision
+    );
+    let unchanged = f.reader.run_activity("run").unwrap();
+    assert!(unchanged.ready);
+    assert_eq!(unchanged.revision, applied.revision);
+    assert_eq!(unchanged.last_actual_activity_at, Some(100));
+    assert_eq!(f.reader.activity_report().unwrap().pending_sources, 0);
+}
+
 #[test]
 fn row_budget_counts_all_rows_and_activity_headers_never_decode_bodies() {
     let f = Fixture::new();
