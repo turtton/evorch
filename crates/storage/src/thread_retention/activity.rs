@@ -116,46 +116,46 @@ fn prepare_goal(
     let state = goals.get_mut(&g.goal_id).expect("goal state was inserted");
     let prior = state.header.clone();
     let mut apply = prior.as_ref().is_none_or(|old| old.position <= pos);
-    if let Some(old) = &prior {
-        if apply && old.thread != g.thread_id && !g.related_root_run_ids.contains(&old.root) {
-            if state.invalid {
-                return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
-            }
-            if state.related.is_none() {
-                let remaining = ACTIVITY_DECODE_BYTES_PER_TICK - report.decode_bytes;
-                if state.related_bytes > remaining {
-                    if !at_head
-                        && source_bytes.saturating_add(state.related_bytes)
-                            <= ACTIVITY_DECODE_BYTES_PER_TICK
-                    {
-                        return Ok(GoalPreparation::Deferred);
-                    }
-                    report.oversized += 1;
-                    return Ok(GoalPreparation::Failed(
-                        "goal lineage decode budget exceeded",
-                    ));
+    if let Some(old) = &prior
+        && apply
+        && old.thread != g.thread_id
+        && !g.related_root_run_ids.contains(&old.root)
+    {
+        if state.invalid {
+            return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
+        }
+        if state.related.is_none() {
+            let remaining = ACTIVITY_DECODE_BYTES_PER_TICK - report.decode_bytes;
+            if state.related_bytes > remaining {
+                if !at_head
+                    && source_bytes.saturating_add(state.related_bytes)
+                        <= ACTIVITY_DECODE_BYTES_PER_TICK
+                {
+                    return Ok(GoalPreparation::Deferred);
                 }
-                report.decode_bytes += state.related_bytes;
-                let related: String = c
-                    .prepare_cached(
-                        "SELECT related FROM retention_activity_goals WHERE goal_id=?1",
-                    )?
-                    .query_row([&g.goal_id], |r| r.get(0))?;
-                match serde_json::from_str(&related) {
-                    Ok(roots) => state.related = Some(roots),
-                    Err(_) => {
-                        state.invalid = true;
-                        return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
-                    }
+                report.oversized += 1;
+                return Ok(GoalPreparation::Failed(
+                    "goal lineage decode budget exceeded",
+                ));
+            }
+            report.decode_bytes += state.related_bytes;
+            let related: String = c
+                .prepare_cached("SELECT related FROM retention_activity_goals WHERE goal_id=?1")?
+                .query_row([&g.goal_id], |r| r.get(0))?;
+            match serde_json::from_str(&related) {
+                Ok(roots) => state.related = Some(roots),
+                Err(_) => {
+                    state.invalid = true;
+                    return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
                 }
             }
-            if state
-                .related
-                .as_ref()
-                .is_some_and(|roots| roots.contains(&g.root_run_id))
-            {
-                apply = false;
-            }
+        }
+        if state
+            .related
+            .as_ref()
+            .is_some_and(|roots| roots.contains(&g.root_run_id))
+        {
+            apply = false;
         }
     }
     if apply {
@@ -595,10 +595,10 @@ fn goal(
     if !decision.apply {
         return Ok(true);
     }
-    if let Some(old) = prior {
-        if old.thread != g.thread_id {
-            c.prepare_cached("UPDATE retention_activity_bindings SET goal_id=NULL,event_id=?3,uncertain=0 WHERE thread_id=?1 AND goal_id=?2 AND event_id<=?3")?.execute(params![old.thread,g.goal_id,pos])?;
-        }
+    if let Some(old) = prior
+        && old.thread != g.thread_id
+    {
+        c.prepare_cached("UPDATE retention_activity_bindings SET goal_id=NULL,event_id=?3,uncertain=0 WHERE thread_id=?1 AND goal_id=?2 AND event_id<=?3")?.execute(params![old.thread,g.goal_id,pos])?;
     }
     c.prepare_cached("INSERT INTO retention_activity_goals(goal_id,thread_id,root_run_id,related,complete,event_id) SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?2) AND NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=?3) ON CONFLICT(goal_id) DO UPDATE SET thread_id=excluded.thread_id,root_run_id=excluded.root_run_id,related=excluded.related,complete=excluded.complete,event_id=excluded.event_id,uncertain=0 WHERE retention_activity_goals.event_id<=excluded.event_id")?.execute(params![g.goal_id,g.thread_id,g.root_run_id,related,g.phase==ThreadGoalPhase::Complete,pos])?;
     c.prepare_cached("INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?1) ON CONFLICT(thread_id) DO UPDATE SET goal_id=excluded.goal_id,event_id=excluded.event_id,uncertain=0 WHERE retention_activity_bindings.event_id<=excluded.event_id")?.execute(params![g.thread_id,g.goal_id,pos])?;
