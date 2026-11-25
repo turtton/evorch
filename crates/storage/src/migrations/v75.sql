@@ -67,18 +67,19 @@ INSERT INTO retention_activity_pending(source,source_id,run_id) SELECT 0,NEW.id,
 END;
 -- Header-only activity deliberately ignores payload rewrites. Decoded sources,
 -- including legacy NULL subkinds, must remain dirty after an out-of-hook rewrite.
--- Header changes are already covered above; do not enqueue the same edit twice.
+-- Decode must establish attribution even if metadata changed in the same edit.
 CREATE TRIGGER retention_activity_events_payload_update AFTER UPDATE OF payload ON events
 WHEN (NEW.subkind IS NULL
  OR (NEW.kind='Lifecycle' AND NEW.subkind='AgentRunStateChanged')
  OR (NEW.kind='Orchestrator' AND NEW.subkind='ThreadGoalUpdated')
  OR (NEW.kind='AgentMessage' AND NEW.subkind='Delivered'))
-AND OLD.kind IS NEW.kind AND OLD.subkind IS NEW.subkind
-AND OLD.run_id IS NEW.run_id AND OLD.wall_clock_ns IS NEW.wall_clock_ns
 AND OLD.payload IS NOT NEW.payload BEGIN
 UPDATE retention_activity_control SET revision=revision+1 WHERE id=1;
 INSERT INTO retention_activity_sources(run_id,revision) SELECT coalesce(NEW.run_id,''),1 WHERE NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id) ON CONFLICT(run_id) DO UPDATE SET revision=revision+1;
 INSERT INTO retention_activity_pending(source,source_id,run_id) SELECT 0,NEW.id,coalesce(NEW.run_id,'') WHERE NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id) ON CONFLICT(source,source_id,run_id) DO UPDATE SET revision=revision+1;
+-- The rewritten payload may belong to another family despite an unchanged header.
+INSERT INTO retention_activity_sources(run_id,revision) SELECT '',1 WHERE coalesce(NEW.run_id,'')<>'' AND NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id) ON CONFLICT(run_id) DO UPDATE SET revision=revision+1;
+INSERT INTO retention_activity_pending(source,source_id,run_id) SELECT 0,NEW.id,'' WHERE coalesce(NEW.run_id,'')<>'' AND NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=NEW.run_id) ON CONFLICT(source,source_id,run_id) DO UPDATE SET revision=revision+1;
 END;
 CREATE TRIGGER retention_activity_host_input_receipts_insert AFTER INSERT ON host_input_receipts BEGIN
 UPDATE retention_activity_control SET revision=revision+1 WHERE id=1;

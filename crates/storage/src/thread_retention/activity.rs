@@ -630,8 +630,11 @@ impl StorageHandle {
                     match i.evidence {
                         Evidence::Activity(run,at)=>{tx.prepare_cached("UPDATE retention_activity_runs SET actual_ns=max(coalesce(actual_ns,?2),?2) WHERE run_id=?1")?.execute(params![run,at])?;},
                         Evidence::Delivery(id,run,at)=>{
-                            let inserted=tx.prepare_cached("INSERT OR IGNORE INTO retention_activity_deliveries VALUES(?1,?2,?3)")?.execute(params![id,run,at])?;
-                            if inserted>0{tx.prepare_cached("UPDATE retention_activity_runs SET actual_ns=max(coalesce(actual_ns,?2),?2) WHERE run_id=?1")?.execute(params![run,at])?;}
+                            // A rewrite can correct the recipient, but neither that correction
+                            // nor a resend changes this message's original acceptance time.
+                            let accepted=tx.prepare_cached("INSERT INTO retention_activity_deliveries VALUES(?1,?2,?3) ON CONFLICT(message_id) DO UPDATE SET run_id=excluded.run_id WHERE retention_activity_deliveries.run_id<>excluded.run_id RETURNING accepted_at_ns")?
+                                .query_row(params![id,run,at],|r|r.get::<_,i64>(0)).optional()?;
+                            if let Some(accepted)=accepted{tx.prepare_cached("UPDATE retention_activity_runs SET actual_ns=max(coalesce(actual_ns,?2),?2) WHERE run_id=?1")?.execute(params![run,accepted])?;}
                         },
                         Evidence::Goal(g,pos,related,decision)=>{
                             if !goal(&tx,&g,pos,&related,&decision)? { report.cas_rejected=true; return Ok(report); }

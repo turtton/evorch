@@ -52,6 +52,30 @@ fn message(run: &str) -> EventKind {
     }
     .into()
 }
+fn state(run: &str, from: AgentRunPhase, to: AgentRunPhase) -> EventKind {
+    LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from,
+        to,
+        reason: None,
+        waiting: None,
+    }
+    .into()
+}
+fn delivery(id: &str, recipient: &str) -> EventKind {
+    event_bus::AgentMessageEvent::Delivered {
+        message: event_bus::AgentMessage {
+            message_id: id.into(),
+            sender_run_id: "sender".into(),
+            recipient_run_id: recipient.into(),
+            kind: event_bus::AgentMessageKind::Reply,
+            content: "reply".into(),
+            reply_to: None,
+        },
+        disposition: event_bus::DeliveryDisposition::Steering,
+    }
+    .into()
+}
 fn goal(id: &str, thread: &str, root: &str, phase: ThreadGoalPhase) -> ThreadGoalSnapshot {
     ThreadGoalSnapshot {
         goal_id: id.into(),
@@ -168,28 +192,6 @@ fn unrelated_events_have_zero_projection_writes() {
 }
 #[test]
 fn payload_rewrites_from_another_connection_stay_dirty_across_reopen() {
-    let state = |from, to| {
-        EventKind::from(LifecycleEvent::AgentRunStateChanged {
-            run_id: "run".into(),
-            from,
-            to,
-            reason: None,
-            waiting: None,
-        })
-    };
-    let delivery = |id: &str| {
-        EventKind::from(event_bus::AgentMessageEvent::Delivered {
-            message: event_bus::AgentMessage {
-                message_id: id.into(),
-                sender_run_id: "sender".into(),
-                recipient_run_id: "run".into(),
-                kind: event_bus::AgentMessageKind::Reply,
-                content: "reply".into(),
-                reply_to: None,
-            },
-            disposition: event_bus::DeliveryDisposition::Steering,
-        })
-    };
     for (case, before, after, legacy) in [
         (
             "goal",
@@ -199,14 +201,14 @@ fn payload_rewrites_from_another_connection_stay_dirty_across_reopen() {
         ),
         (
             "lifecycle",
-            state(AgentRunPhase::Waiting, AgentRunPhase::Waiting),
-            state(AgentRunPhase::Waiting, AgentRunPhase::Running),
+            state("run", AgentRunPhase::Waiting, AgentRunPhase::Waiting),
+            state("run", AgentRunPhase::Waiting, AgentRunPhase::Running),
             false,
         ),
         (
             "delivery",
-            delivery("old-message"),
-            delivery("new-message"),
+            delivery("old-message", "run"),
+            delivery("new-message", "run"),
             false,
         ),
         (
@@ -288,6 +290,132 @@ fn payload_rewrites_from_another_connection_stay_dirty_across_reopen() {
             ),
         }
     }
+}
+
+fn assert_payload_reattribution_holds_destination(
+    before: EventKind,
+    after: EventKind,
+    rewritten_clock: Option<i64>,
+    expected_activity: i64,
+) -> Fixture {
+    let mut f = Fixture::new();
+    f.reader.conn.execute_batch("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('run','family-a','run',0),('other','family-b','other',0)").unwrap();
+    f.insert(message("other"), 100);
+    let id = f.insert(before, 200);
+    f.drain();
+    assert!(f.reader.run_activity("other").unwrap().ready);
+    let stale = f.reader.activity_page().unwrap();
+    let other = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    let payload = serde_json::to_string(&after).unwrap();
+    if let Some(clock) = rewritten_clock {
+        other
+            .execute(
+                "UPDATE events SET payload=?1,wall_clock_ns=?3 WHERE id=?2",
+                params![payload, id, clock],
+            )
+            .unwrap();
+    } else {
+        other
+            .execute(
+                "UPDATE events SET payload=?1 WHERE id=?2",
+                params![payload, id],
+            )
+            .unwrap();
+    }
+    drop(other);
+    assert_eq!(
+        f.reader
+            .conn
+            .query_row("SELECT run_id FROM events WHERE id=?1", [id], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "run",
+        "the payload changed attribution without changing the header run_id"
+    );
+    assert!(
+        !f.reader.run_activity("other").unwrap().ready,
+        "the destination family must wait for attribution discovery"
+    );
+    f.storage.close();
+    f.storage = Storage::open(f.config.clone()).unwrap();
+    f.reader = Database::open(&f.config).unwrap();
+    let destination = f.reader.run_activity("other").unwrap();
+    assert!(!destination.ready);
+    assert_eq!(destination.last_actual_activity_at, Some(100));
+    assert!(
+        f.reader
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM retention_activity_pending WHERE run_id='')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert!(
+        f.storage
+            .handle()
+            .apply_activity_page(stale)
+            .unwrap()
+            .cas_rejected
+    );
+    f.drain();
+    let destination = f.reader.run_activity("other").unwrap();
+    assert!(destination.ready);
+    assert_eq!(destination.last_actual_activity_at, Some(expected_activity));
+    assert_eq!(f.reader.activity_report().unwrap().pending_sources, 0);
+    f
+}
+
+#[test]
+fn lifecycle_payload_reattribution_holds_the_destination_family_across_reopen() {
+    assert_payload_reattribution_holds_destination(
+        state("run", AgentRunPhase::Waiting, AgentRunPhase::Running),
+        state("other", AgentRunPhase::Waiting, AgentRunPhase::Running),
+        None,
+        200,
+    );
+}
+
+#[test]
+fn lifecycle_payload_reattribution_with_a_header_edit_keeps_global_protection() {
+    assert_payload_reattribution_holds_destination(
+        state("run", AgentRunPhase::Waiting, AgentRunPhase::Running),
+        state("other", AgentRunPhase::Waiting, AgentRunPhase::Running),
+        Some(300),
+        300,
+    );
+}
+
+#[test]
+fn delivered_payload_reattribution_holds_the_destination_family_across_reopen() {
+    let f = assert_payload_reattribution_holds_destination(
+        delivery("message", "run"),
+        delivery("message", "other"),
+        None,
+        200,
+    );
+    assert_eq!(
+        f.reader
+            .conn
+            .query_row(
+                "SELECT run_id,accepted_at_ns FROM retention_activity_deliveries WHERE message_id='message'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+        ("other".into(), 200)
+    );
+    f.insert(delivery("message", "other"), 300);
+    f.drain();
+    assert_eq!(
+        f.reader
+            .run_activity("other")
+            .unwrap()
+            .last_actual_activity_at,
+        Some(200),
+        "resending the same message to its corrected recipient is not new activity"
+    );
 }
 
 #[test]
