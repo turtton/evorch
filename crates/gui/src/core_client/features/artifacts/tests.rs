@@ -352,8 +352,8 @@ fn the_next_page_continues_from_the_cursor_and_stops_where_the_core_does() {
         .feature
         .reply(tag, list(first, Some("cursor-1")));
     harness.run_steps(2);
-    assert!(harness.query_by_label("さらに読み込む").is_some());
-    harness.get_by_label("さらに読み込む").click();
+    assert!(harness.query_by_label("Load more artifacts").is_some());
+    harness.get_by_label("Load more artifacts").click();
     let sent = frames(&mut harness);
     let (tag, query) = only_query(&sent);
     assert!(
@@ -368,7 +368,7 @@ fn the_next_page_continues_from_the_cursor_and_stops_where_the_core_does() {
     harness.state_mut().feature.reply(tag, list(second, None));
     harness.run_steps(2);
     assert_eq!(harness.state().feature.items.len(), 3);
-    assert!(harness.query_by_label("さらに読み込む").is_none());
+    assert!(harness.query_by_label("Load more artifacts").is_none());
 }
 
 #[test]
@@ -841,7 +841,7 @@ fn html_is_shown_as_source_and_its_preview_is_a_reference_for_the_browser_featur
     let sent = frames(&mut harness);
     assert!(sent.queries.is_empty() && sent.started.is_empty() && sent.previews.is_empty());
     assert_eq!(harness.state().text().line(0).0, source);
-    harness.get_by_label("プレビューを開く").click();
+    harness.get_by_label("Open preview").click();
     let sent = frames(&mut harness);
     assert_eq!(sent.previews, [page]);
     assert!(sent.queries.is_empty() && sent.started.is_empty());
@@ -851,7 +851,7 @@ fn html_is_shown_as_source_and_its_preview_is_a_reference_for_the_browser_featur
     let sent = open_row_after_click(&mut harness, &meta(&note, "note.txt", "text/plain", 5));
     assert!(sent.previews.is_empty());
     harness.run_steps(2);
-    assert!(harness.query_by_label("プレビューを開く").is_none());
+    assert!(harness.query_by_label("Open preview").is_none());
 }
 
 /// The `Get` of a row that was just clicked, answered.
@@ -1690,4 +1690,104 @@ fn a_decode_held_back_blocks_the_next_one_until_its_thread_ends_whatever_is_done
     assert!(matches!(rig.body(), Body::Image(ImageView::Decoding)));
     let image = job.wait().expect("decodes");
     assert_eq!(image.size, [4, 3], "the picture shown is the new one");
+}
+
+fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{3000}'..='\u{30ff}' | '\u{3400}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}'))
+}
+
+fn assert_english(harness: &Harness<'static, Rig>) {
+    for node in harness.root().children_recursive() {
+        let node = node.accesskit_node();
+        for text in [node.label(), node.value()].into_iter().flatten() {
+            let text = text.to_string();
+            assert!(!has_cjk(&text), "{text}");
+        }
+    }
+}
+
+#[test]
+fn the_panel_reads_in_english() {
+    let page = reference("t1", 1);
+    let note = reference("t1", 2);
+    let mut harness = harness(Rig::new("t1"));
+    let sent = frames(&mut harness);
+    let (tag, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        tag,
+        list(
+            vec![
+                meta(&page, "page.html", "text/html", 40),
+                meta(&note, "note.txt", "text/plain", 5),
+            ],
+            Some("c1"),
+        ),
+    );
+    harness.run_steps(2);
+    assert!(harness.query_by_label_contains("Artifacts (2)").is_some());
+    assert!(harness.query_by_label("Load more artifacts").is_some());
+    assert!(
+        harness
+            .query_by_label("page.html  (text/html, 40 B)")
+            .is_some()
+    );
+    assert_english(&harness);
+
+    let sent = open_row(
+        &mut harness,
+        "page.html",
+        &meta(&page, "page.html", "text/html", 40),
+    );
+    let (read, _) = only_query(&sent);
+    harness
+        .state_mut()
+        .feature
+        .reply(read, content(&page, 0, "<p>hello</p>", true));
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Open preview").is_some());
+    assert!(
+        harness
+            .query_by_label("Showing the HTML source; it is not run here.")
+            .is_some()
+    );
+    assert_english(&harness);
+
+    let sent = open_row(
+        &mut harness,
+        "note.txt",
+        &meta(&note, "note.txt", "text/plain", 5),
+    );
+    let (read, _) = only_query(&sent);
+    harness.state_mut().feature.reply(
+        read,
+        err(FeatureError::new("busy").with_code(ErrorCode::Busy)),
+    );
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label("The core is busy. Press Retry in a moment.")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Retry").is_some());
+    assert_english(&harness);
+
+    let Err(image::ImageProblem::TooLarge(why)) =
+        image::decode(&png(image::MAX_SIDE + 1, 1), MediaType::Png)
+    else {
+        panic!("an image over the side limit is too large");
+    };
+    let problems = [
+        Problem::Busy(None),
+        Problem::Denied,
+        Problem::Gone,
+        Problem::DigestMismatch,
+        Problem::TooLarge(why),
+        Problem::Unsupported("application/zip".to_owned()),
+        Problem::Disconnected,
+        Problem::Other("held".to_owned()),
+    ];
+    for problem in &problems {
+        assert!(!has_cjk(&problem.line()), "{}", problem.line());
+    }
 }

@@ -65,8 +65,8 @@ impl InspectKind {
     pub const ALL: [Self; 3] = [Self::Layout, Self::Accessibility, Self::Document];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Layout => "レイアウト",
-            Self::Accessibility => "アクセシビリティ",
+            Self::Layout => "Layout",
+            Self::Accessibility => "Accessibility",
             Self::Document => "DOM",
         }
     }

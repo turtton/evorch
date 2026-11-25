@@ -2423,6 +2423,7 @@ mod settings;
 mod lanes;
 
 mod composer;
+mod english_panes;
 mod many_subagents;
 mod pull_requests;
 mod read_panes;

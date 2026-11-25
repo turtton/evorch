@@ -978,11 +978,11 @@ async fn operations(rig: &mut Rig, close: bool) -> Value {
     }
     // Close the preview, and open the same artifact again. A closed tab's allocation
     // stays in the core's budget until the helper generation ends, so a soak closes rarely.
-    rig.click(0, "×");
+    rig.click(0, &format!("Close {}", artifact.artifact_id));
     rig.until(|r| {
         r.wins[0]
             .harness
-            .query_by_label_contains("アーティファクトのプレビューを開くと")
+            .query_by_label_contains("No preview is open")
             .is_some()
     })
     .await;
@@ -1082,7 +1082,7 @@ fn operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl() {
                 resizes += 1;
                 let refused = rig.wins[0]
                     .harness
-                    .query_by_label_contains("サイズ変更に失敗しました")
+                    .query_by_label_contains("Resize failed")
                     .is_some();
                 if refused || resizes >= 400 {
                     break refused;
@@ -1098,18 +1098,15 @@ fn operation_budget_is_exhausted_by_resizes_and_recovers_after_the_ttl() {
                 let text = format!("{n:?}");
                 if let Some(at) = text.find("value: \"") {
                     let value: String = text[at + 8..].chars().take_while(|c| *c != '"').collect();
-                    if value.contains("失敗") || value.contains("Busy") {
+                    if value.contains("failed") || value.contains("Busy") {
                         status.push(value);
                     }
                 }
             }
             rig.run(Duration::from_secs(62)).await;
-            let retry_button = rig.wins[0]
-                .harness
-                .query_by_label("サイズ変更を再試行")
-                .is_some();
+            let retry_button = rig.wins[0].harness.query_by_label("Retry resize").is_some();
             if retry_button {
-                rig.click(0, "サイズ変更を再試行");
+                rig.click(0, "Retry resize");
             }
             let seen = rig.log.lock().unwrap().uploads_len();
             let size = rig.log.lock().unwrap().uploads.last().unwrap().size;

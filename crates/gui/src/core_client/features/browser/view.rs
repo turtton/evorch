@@ -9,6 +9,13 @@ use egui::{
 };
 use workbench_protocol::namespaces::browser::RendererViewport;
 
+use crate::theme::icons;
+use crate::theme::text::{medium, muted};
+use crate::theme::tokens::palette;
+use crate::theme::widgets::{
+    accessible, ghost, ghost_icon_button, icon_button, readable_selection, reason_label,
+};
+
 use super::{
     BrowserFeature, MIN_VIEWPORT, UiRequest,
     frame::{MAX_HEIGHT, MAX_WIDTH},
@@ -27,15 +34,18 @@ impl BrowserFeature {
             p.visible = false;
         }
         if let Some(notice) = &self.notice {
-            ui.colored_label(ui.visuals().warn_fg_color, notice);
+            reason_label(ui, palette().WARNING_FG, notice);
         }
         if self.previews.is_empty() {
-            ui.weak("アーティファクトのプレビューを開くと、ここに表示されます。");
+            ui.label(muted(
+                "No preview is open. A preview appears here when you open one from Artifacts.",
+            ));
             return;
         }
         let mut chosen = None;
         let mut closes = Vec::new();
         ui.horizontal_wrapped(|ui| {
+            readable_selection(ui);
             for p in &self.previews {
                 if ui
                     .selectable_label(self.selected == Some(p.id), &p.title)
@@ -43,7 +53,7 @@ impl BrowserFeature {
                 {
                     chosen = Some(p.id);
                 }
-                if ui.small_button("×").on_hover_text("閉じる").clicked() {
+                if icon_button(ui, icons::X, &format!("Close {}", p.title)).clicked() {
                     closes.push(UiRequest::Close(p.id));
                 }
             }
@@ -65,56 +75,63 @@ impl BrowserFeature {
 
 fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mut Vec<UiRequest>) {
     let id = p.id;
-    let warn = ui.visuals().warn_fg_color;
+    let warn = palette().WARNING_FG;
     ui.horizontal_wrapped(|ui| match &p.phase {
         Phase::Waiting => {
-            ui.weak("セッションを準備しています…");
+            ui.label(muted("Preparing the session…"));
         }
         Phase::Opening(_) if unknown => {
-            ui.colored_label(
+            reason_label(
+                ui,
                 warn,
-                "開けたか分かりません（再送しません）。結果を待っています…",
+                "Not known whether it opened (not sent again). Waiting for the result…",
             );
         }
         Phase::Opening(_) => {
-            ui.weak("開いています…");
+            ui.label(muted("Opening…"));
         }
         Phase::OpenUnknown => {
-            ui.colored_label(warn, "開けたか分かりません。一覧で確認しています…");
+            reason_label(
+                ui,
+                warn,
+                "Not known whether it opened. Checking the tab list…",
+            );
         }
         Phase::Suspended => {
-            ui.weak("再接続しています…");
+            ui.label(muted("Reconnecting…"));
         }
         Phase::Lost(why) => {
-            ui.colored_label(warn, why);
-            if ui.button("もう一度開く").clicked() {
+            reason_label(ui, warn, why);
+            if ui.add(ghost("Open again")).clicked() {
                 requests.push(UiRequest::Reopen(id));
             }
         }
         Phase::Open => {
             match &p.stream {
                 Stream::Blocked(why) => {
-                    ui.colored_label(warn, format!("ストリームを開始できません: {why}"));
-                    if ui.button("再試行").clicked() {
+                    reason_label(ui, warn, format!("Could not start the stream: {why}"));
+                    if ui.add(ghost("Retry")).clicked() {
                         requests.push(UiRequest::Retry(id));
                     }
                 }
                 Stream::Subscribing(_) | Stream::Binding { .. } => {
-                    ui.weak("接続しています…");
+                    ui.label(muted("Connecting…"));
                 }
                 Stream::Off | Stream::Live { .. } => {}
             }
             let capturing = matches!(p.capture, Capture::Receiving(_) | Capture::Decoding(_));
-            if ui
-                .add_enabled(!capturing, egui::Button::new("キャプチャ"))
-                .clicked()
-            {
+            let capture = ui.add_enabled(
+                !capturing,
+                ghost(icons::with_icon(icons::CAMERA, "Capture")),
+            );
+            accessible(&capture, "Capture");
+            if capture.clicked() {
                 requests.push(UiRequest::Do(id, Action::Capture));
             }
-            if ui.button("通知").clicked() {
+            if ghost_icon_button(ui, icons::BELL, "Notices").clicked() {
                 requests.push(UiRequest::Do(id, Action::Notices));
             }
-            ui.menu_button("検査", |ui| {
+            ui.menu_button("Inspect", |ui| {
                 for kind in InspectKind::ALL {
                     if ui.button(kind.label()).clicked() {
                         requests.push(UiRequest::Do(id, Action::Inspect(kind)));
@@ -158,16 +175,16 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
         }
         None => {
             let text = if p.is_open() {
-                "フレームを待っています…"
+                "Waiting for the first frame…"
             } else {
-                "プレビューは表示できません"
+                "The preview cannot be shown"
             };
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
                 text,
                 FontId::proportional(14.0),
-                Color32::GRAY,
+                palette().TEXT_MUTED,
             );
         }
     }
@@ -177,20 +194,26 @@ fn draw_preview(ui: &mut egui::Ui, p: &mut Preview, unknown: bool, requests: &mu
     }
 
     if let Some(status) = &p.status {
-        ui.colored_label(warn, status);
+        reason_label(ui, warn, status);
     }
     // A resize that failed or ended unknown is not sent again by itself for the same
     // size; this is the explicit way to try it again.
     if p.resize_failed.is_some()
         && ui
-            .button("サイズ変更を再試行")
-            .on_hover_text("同じサイズでもう一度送ります")
+            .add(ghost("Retry resize"))
+            .on_hover_text("Sends the same size again")
             .clicked()
     {
         requests.push(UiRequest::Retry(id));
     }
-    if p.input.dropped() > 0 {
-        ui.weak(format!("{} 件の入力を省きました", p.input.dropped()));
+    match p.input.dropped() {
+        0 => {}
+        1 => {
+            ui.label(muted("1 input was dropped"));
+        }
+        n => {
+            ui.label(muted(format!("{n} inputs were dropped")));
+        }
     }
     draw_results(ui, p);
 }
@@ -246,18 +269,18 @@ fn forward_input(ui: &mut egui::Ui, p: &mut Preview, rect: Rect, response: &egui
 fn draw_results(ui: &mut egui::Ui, p: &Preview) {
     match &p.capture {
         Capture::Receiving(_) => {
-            ui.weak("キャプチャを受け取っています…");
+            ui.label(muted("Receiving the capture…"));
         }
         Capture::Decoding(_) => {
-            ui.weak("キャプチャを展開しています…");
+            ui.label(muted("Decoding the capture…"));
         }
         Capture::Failed(why) => {
-            ui.colored_label(ui.visuals().warn_fg_color, why);
+            reason_label(ui, palette().WARNING_FG, why);
         }
         Capture::Idle => {}
     }
     if let Some(texture) = p.capture_picture.texture() {
-        egui::CollapsingHeader::new("キャプチャ")
+        egui::CollapsingHeader::new(medium("Captured image"))
             .id_salt(("capture", p.id))
             .default_open(true)
             .show(ui, |ui| {
@@ -270,26 +293,26 @@ fn draw_results(ui: &mut egui::Ui, p: &Preview) {
             });
     }
     if let Some(notices) = &p.notices {
-        egui::CollapsingHeader::new("通知")
+        egui::CollapsingHeader::new(medium("Page notices"))
             .id_salt(("notices", p.id))
             .default_open(true)
             .show(ui, |ui| {
                 if notices.blocked.is_empty() && notices.dialogs.is_empty() {
-                    ui.weak("通知はありません");
+                    ui.label(muted("No notices"));
                 }
                 for line in &notices.blocked {
-                    ui.label(format!("ブロック: {line}"));
+                    ui.label(format!("Blocked: {line}"));
                 }
                 for line in &notices.dialogs {
-                    ui.label(format!("ダイアログ: {line}"));
+                    ui.label(format!("Dialog: {line}"));
                 }
                 if notices.truncated {
-                    ui.weak("…（一部を省きました）");
+                    ui.label(muted("… (some were left out)"));
                 }
             });
     }
     if let Some(inspection) = &p.inspection {
-        egui::CollapsingHeader::new(format!("検査: {}", inspection.label))
+        egui::CollapsingHeader::new(medium(format!("Inspection: {}", inspection.label)))
             .id_salt(("inspection", p.id))
             .default_open(true)
             .show(ui, |ui| {
@@ -300,7 +323,7 @@ fn draw_results(ui: &mut egui::Ui, p: &Preview) {
                         ui.monospace(&inspection.text);
                     });
                 if inspection.truncated {
-                    ui.weak("…（結果を途中で切りました）");
+                    ui.label(muted("… (the result was cut off)"));
                 }
             });
     }

@@ -121,7 +121,7 @@ async fn until(window: &mut Window, _waiting_for: &str, shown: impl Fn(&Window) 
 }
 
 fn shows(window: &Window, text: &str) -> bool {
-    window.query_by_label_contains(text).is_some()
+    window.query_all_by_label_contains(text).next().is_some()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -327,7 +327,7 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
     // Test: the core starts the mock server and the handshake succeeds.
     click(&mut window, "Test connection");
     until(&mut window, "the test result is shown", |w| {
-        shows(w, "Test result: Ready")
+        shows(w, "Connection test: ready")
     })
     .await;
     assert_eq!(started.load(Ordering::SeqCst), 1, "one server process ran");
@@ -340,9 +340,14 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
     .await;
     click(&mut window, "Test connection");
     until(&mut window, "the refused test is shown", |w| {
-        shows(w, "not approved") || shows(w, "ApprovalRevoked")
+        !shows(w, "Testing the connection") && shows(w, "not approved")
     })
     .await;
+    assert_eq!(
+        window.query_all_by_label_contains("not approved").count(),
+        1,
+        "the refusal is shown once"
+    );
     assert_eq!(
         started.load(Ordering::SeqCst),
         1,

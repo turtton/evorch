@@ -36,6 +36,13 @@ use super::layout::paged_list;
 use super::{
     Availability, Feature, FeatureContext, FeatureError, FeatureId, FeatureReply, Visibility,
 };
+use crate::theme::icons;
+use crate::theme::text::{medium, muted};
+use crate::theme::tokens::palette;
+use crate::theme::widgets::{
+    accessible, compact_row, ghost, ghost_icon_button, icon_button, reason_label, soft_frame,
+    spinner,
+};
 use problem::Problem;
 use text::TextBody;
 use workbench_protocol::{
@@ -236,7 +243,7 @@ impl ArtifactsFeature {
                 });
                 ListState::Ready
             }
-            Ok(_) => ListState::Failed(Problem::Other("想定外の応答です".to_owned())),
+            Ok(_) => ListState::Failed(Problem::Other("Unexpected reply from the core".to_owned())),
         });
     }
 
@@ -256,7 +263,7 @@ impl ArtifactsFeature {
                     body
                 }
             }
-            Ok(_) => Body::Failed(Problem::Other("想定外の応答です".to_owned())),
+            Ok(_) => Body::Failed(Problem::Other("Unexpected reply from the core".to_owned())),
         };
     }
 
@@ -282,13 +289,15 @@ impl ArtifactsFeature {
                 }
                 if let Err(error) = view.body.append(offset, &text, eof) {
                     let why = match error {
-                        text::AppendError::Gap => "読み取り位置が一致しません",
-                        text::AppendError::NoProgress => "読み取りが進みません",
+                        text::AppendError::Gap => "The read position does not match",
+                        text::AppendError::NoProgress => "The read is not progressing",
                     };
                     view.problem = Some(Problem::Other(why.to_owned()));
                 }
             }
-            Ok(_) => view.problem = Some(Problem::Other("想定外の応答です".to_owned())),
+            Ok(_) => {
+                view.problem = Some(Problem::Other("Unexpected reply from the core".to_owned()))
+            }
         }
     }
 
@@ -324,7 +333,7 @@ impl ArtifactsFeature {
                 open.body = Body::Failed(match failure {
                     image::ImageProblem::TooLarge(why) => Problem::TooLarge(why),
                     image::ImageProblem::Decode(why) => {
-                        Problem::Other(format!("画像を復号できません: {why}"))
+                        Problem::Other(format!("the image could not be decoded ({why})"))
                     }
                 });
             }
@@ -443,21 +452,19 @@ impl ArtifactsFeature {
     fn draw_list(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         let mut reload = false;
         ui.horizontal(|ui| {
-            ui.label(format!("成果物（{} 件）", self.items.len()));
-            reload = ui.button("再読み込み").clicked();
+            ui.label(medium(icons::with_icon(
+                icons::IMAGES,
+                format!("Artifacts ({})", self.items.len()),
+            )));
+            reload = icon_button(ui, icons::ARROW_CLOCKWISE, "Reload artifacts").clicked();
         });
         match &self.list {
-            Some(ListState::Loading) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("読み込み中…");
-                });
-            }
+            Some(ListState::Loading) => loading(ui, "Loading…"),
             Some(ListState::Failed(problem)) => {
-                ui.colored_label(ui.visuals().error_fg_color, problem.line());
+                reason_label(ui, palette().ERROR_FG, problem.line());
             }
             Some(ListState::Ready) if self.items.is_empty() => {
-                ui.weak("このスレッドの成果物はありません。");
+                ui.label(muted("This thread has no artifacts."));
             }
             _ => {}
         }
@@ -470,19 +477,37 @@ impl ArtifactsFeature {
             self.next
                 .as_deref()
                 .filter(|_| can_page)
-                .map(|_| "さらに読み込む"),
+                .map(|_| "Load more artifacts"),
             |ui| {
                 for item in &self.items {
                     let selected = open_id.as_deref() == Some(item.reference.artifact_id.as_str());
-                    let row = format!("{}  ({}, {} B)", item.title, item.media_type, item.byte_len);
-                    if ui.selectable_label(selected, row).clicked() {
-                        chosen = Some(item.clone());
-                    }
+                    ui.push_id(item.reference.artifact_id.as_str(), |ui| {
+                        compact_row(ui, selected, |ui| {
+                            let title =
+                                medium(icons::with_icon(media_icon(&item.media_type), &item.title));
+                            let response = ui.add(egui::Button::new(title).frame(false));
+                            accessible(
+                                &response,
+                                &format!(
+                                    "{}  ({}, {} B)",
+                                    item.title, item.media_type, item.byte_len
+                                ),
+                            );
+                            ui.label(muted(format!(
+                                "{} · {}",
+                                item.media_type,
+                                size_text(item.byte_len)
+                            )));
+                            if response.clicked() {
+                                chosen = Some(item.clone());
+                            }
+                        });
+                    });
                 }
             },
         );
         if self.items.len() >= MAX_LISTED && self.next.is_none() && can_page {
-            ui.weak(format!("先頭 {MAX_LISTED} 件までを表示しています。"));
+            ui.label(muted(format!("Showing the first {MAX_LISTED} artifacts.")));
         }
         if reload {
             self.request_list(ctx, false);
@@ -496,87 +521,12 @@ impl ArtifactsFeature {
 
     fn draw_open(&mut self, ui: &mut egui::Ui) -> Option<Click> {
         let Some(open) = self.open.as_mut() else {
-            ui.weak("成果物を選ぶと内容を表示します。");
+            ui.label(muted("Select an artifact to show its content."));
             return None;
         };
-        let title = open
-            .meta
-            .as_ref()
-            .map_or(open.title.as_str(), |m| m.title.as_str());
-        ui.strong(title);
-        let mut click = None;
-        let error_color = ui.visuals().error_fg_color;
-        let html = open
-            .meta
-            .as_ref()
-            .is_some_and(|m| m.media_type == "text/html");
-        match &open.body {
-            Body::Waiting => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("確認中…");
-                });
-            }
-            Body::Failed(problem) => {
-                ui.colored_label(error_color, problem.line());
-                if problem.can_retry() && ui.button("再試行").clicked() {
-                    click = Some(Click::Retry);
-                }
-            }
-            Body::Text(view) => {
-                if html {
-                    ui.horizontal(|ui| {
-                        ui.label("HTML のソースを表示しています（ここでは実行しません）。");
-                        if ui.button("プレビューを開く").clicked() {
-                            click = Some(Click::Preview);
-                        }
-                    });
-                }
-                draw_text(ui, &view.body);
-                if view.read_tag.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("読み込み中…");
-                    });
-                }
-                if view.body.capped() {
-                    ui.weak(format!(
-                        "先頭 {} KiB までを表示しています。",
-                        text::MAX_TEXT_BYTES / 1024
-                    ));
-                }
-                if let Some(problem) = &view.problem {
-                    ui.colored_label(error_color, problem.line());
-                    if problem.can_retry() && ui.button("再試行").clicked() {
-                        click = Some(Click::Retry);
-                    }
-                }
-            }
-            Body::Image(ImageView::Shown { texture, size }) => {
-                let source = egui::load::SizedTexture::new(
-                    texture.id(),
-                    egui::vec2(size[0] as f32, size[1] as f32),
-                );
-                ui.add(
-                    egui::Image::new(source)
-                        .max_size(egui::vec2(ui.available_width(), IMAGE_VIEW_HEIGHT))
-                        .maintain_aspect_ratio(true),
-                );
-            }
-            Body::Image(ImageView::Decoding) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("画像を復号中…");
-                });
-            }
-            Body::Image(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("画像を受信中…");
-                });
-            }
-        }
-        click
+        soft_frame(palette().SURFACE)
+            .show(ui, |ui| draw_body(ui, open))
+            .inner
     }
 
     fn apply(&mut self, ctx: &mut FeatureContext<'_>, click: Click) {
@@ -605,6 +555,94 @@ impl ArtifactsFeature {
     }
 }
 
+fn draw_body(ui: &mut egui::Ui, open: &Open) -> Option<Click> {
+    let title = open
+        .meta
+        .as_ref()
+        .map_or(open.title.as_str(), |m| m.title.as_str());
+    ui.label(medium(title).color(palette().TEXT));
+    let mut click = None;
+    let error_color = palette().ERROR_FG;
+    let html = open
+        .meta
+        .as_ref()
+        .is_some_and(|m| m.media_type == "text/html");
+    match &open.body {
+        Body::Waiting => loading(ui, "Checking…"),
+        Body::Failed(problem) => {
+            reason_label(ui, error_color, problem.line());
+            if problem.can_retry() && ui.add(ghost("Retry")).clicked() {
+                click = Some(Click::Retry);
+            }
+        }
+        Body::Text(view) => {
+            if html {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(muted("Showing the HTML source; it is not run here."));
+                    if ghost_icon_button(ui, icons::ARROW_SQUARE_OUT, "Open preview").clicked() {
+                        click = Some(Click::Preview);
+                    }
+                });
+            }
+            draw_text(ui, &view.body);
+            if view.read_tag.is_some() {
+                loading(ui, "Loading…");
+            }
+            if view.body.capped() {
+                ui.label(muted(format!(
+                    "Showing the first {} KiB.",
+                    text::MAX_TEXT_BYTES / 1024
+                )));
+            }
+            if let Some(problem) = &view.problem {
+                reason_label(ui, error_color, problem.line());
+                if problem.can_retry() && ui.add(ghost("Retry")).clicked() {
+                    click = Some(Click::Retry);
+                }
+            }
+        }
+        Body::Image(ImageView::Shown { texture, size }) => {
+            let source = egui::load::SizedTexture::new(
+                texture.id(),
+                egui::vec2(size[0] as f32, size[1] as f32),
+            );
+            ui.add(
+                egui::Image::new(source)
+                    .max_size(egui::vec2(ui.available_width(), IMAGE_VIEW_HEIGHT))
+                    .maintain_aspect_ratio(true),
+            );
+        }
+        Body::Image(ImageView::Decoding) => loading(ui, "Decoding the image…"),
+        Body::Image(_) => loading(ui, "Loading preview…"),
+    }
+    click
+}
+
+fn loading(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal(|ui| {
+        spinner(ui);
+        ui.label(muted(text));
+    });
+}
+
+fn media_icon(media_type: &str) -> &'static str {
+    match media_type {
+        "text/html" => icons::FILE_HTML,
+        "text/plain" => icons::FILE_TEXT,
+        _ => icons::IMAGE,
+    }
+}
+
+fn size_text(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * KIB;
+    match bytes {
+        b if b >= MIB => format!("{:.1} MiB", b as f64 / MIB as f64),
+        b if b >= KIB => format!("{:.1} KiB", b as f64 / KIB as f64),
+        b => format!("{b} B"),
+    }
+}
+
 /// The body an artifact of this kind gets once the core confirmed its metadata.
 fn body_for(meta: &ArtifactMetadata) -> Body {
     match meta.media_type.as_str() {
@@ -616,7 +654,7 @@ fn body_for(meta: &ArtifactMetadata) -> Body {
         other => match MediaType::from_mime(other) {
             Some(_) if meta.byte_len == 0 || meta.byte_len > MAX_IMAGE_BLOB_BYTES => {
                 Body::Failed(Problem::TooLarge(format!(
-                    "{} バイト（上限 {} MiB）",
+                    "{} bytes (limit {} MiB)",
                     meta.byte_len,
                     MAX_IMAGE_BLOB_BYTES / (1024 * 1024)
                 )))
@@ -635,7 +673,7 @@ fn accept_blob(
     meta: Option<&ArtifactMetadata>,
 ) -> Result<(Vec<u8>, MediaType), Problem> {
     let DataPayload::Blob(blob) = payload else {
-        return Err(Problem::Other("想定外のデータです".to_owned()));
+        return Err(Problem::Other("Unexpected data from the core".to_owned()));
     };
     let digest =
         BlobStart::artifact_digest(&reference.digest).map_err(|_| Problem::DigestMismatch)?;
@@ -759,7 +797,9 @@ impl Feature for ArtifactsFeature {
         self.enter_scope(ctx);
         self.flush(ctx);
         if self.scope.is_none() {
-            ui.weak("プロジェクトとスレッドを選ぶと、その成果物を表示します。");
+            ui.label(muted(
+                "Select a project and a thread to show their artifacts.",
+            ));
             return;
         }
         if self.list.is_none() {

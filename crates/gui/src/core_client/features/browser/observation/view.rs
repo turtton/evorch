@@ -5,6 +5,10 @@ use workbench_protocol::namespaces::browser::observation::{
 };
 
 use super::{ObservationFeature, Runs, Shown, pixels::one_line};
+use crate::theme::icons;
+use crate::theme::text::{medium, muted};
+use crate::theme::tokens::palette;
+use crate::theme::widgets::{icon_button, reason_label};
 
 /// The newest activity lines laid over the picture, as the previous pane did.
 const OVERLAY_LINES: usize = 6;
@@ -63,20 +67,20 @@ impl ObservationFeature {
 
     pub(super) fn draw(&self, ui: &mut egui::Ui) -> Option<Click> {
         let mut click = None;
-        ui.strong("Agent browser");
+        ui.label(medium("Agent browser"));
         let selected = self.target.as_ref().map(|t| &t.run);
         match &self.runs {
             Runs::Unknown | Runs::Loading => {
-                ui.weak("Looking for agent pages...");
+                ui.label(muted("Looking for agent pages..."));
             }
             Runs::Failed(message) => {
-                ui.colored_label(ui.visuals().error_fg_color, one_line(message));
+                reason_label(ui, palette().ERROR_FG, one_line(message));
             }
             Runs::Loaded(scopes) => {
                 if scopes.is_empty() && self.stopped.is_empty() {
-                    ui.weak(
+                    ui.label(muted(
                         "No agent page is open in this conversation. A page appears here when an agent uses the browser tools.",
-                    );
+                    ));
                 }
                 ui.horizontal_wrapped(|ui| {
                     for scope in scopes {
@@ -90,7 +94,7 @@ impl ObservationFeature {
                 });
             }
         }
-        if ui.small_button("Refresh agent pages").clicked() {
+        if icon_button(ui, icons::ARROW_CLOCKWISE, "Refresh agent pages").clicked() {
             click = Some(Click::Reload);
         }
         let current = self.current();
@@ -99,7 +103,7 @@ impl ObservationFeature {
                 .as_ref()
                 .is_none_or(|c| c.note != Some(hold.message.as_str()))
         {
-            ui.colored_label(ui.visuals().error_fg_color, one_line(&hold.message));
+            reason_label(ui, palette().ERROR_FG, one_line(&hold.message));
         }
         if let Some(current) = current {
             self.draw_current(ui, &current);
@@ -122,7 +126,11 @@ impl ObservationFeature {
             name
         };
         let on = selected == Some(&scope.run);
-        if ui.selectable_label(on, text).clicked() && !on {
+        let tab = ui.scope(|ui| {
+            crate::theme::widgets::readable_selection(ui);
+            ui.selectable_label(on, text)
+        });
+        if tab.inner.clicked() && !on {
             *click = Some(Click::View(ObservationTarget {
                 project: scope.project.clone(),
                 thread: scope.thread.clone(),
@@ -137,11 +145,11 @@ impl ObservationFeature {
         let active = shown_tab.or_else(|| snapshot.and_then(|s| s.active_tab.as_ref()));
         if let Some(snapshot) = snapshot {
             if let Some(tab) = snapshot.tabs.iter().find(|t| Some(&t.id) == active) {
-                ui.weak(format!(
+                ui.label(muted(format!(
                     "Showing the active tab {} ({})",
                     one_line(&tab.title),
                     one_line(&tab.url)
-                ));
+                )));
             }
             if snapshot.tabs.len() > 1 {
                 for tab in &snapshot.tabs {
@@ -161,7 +169,7 @@ impl ObservationFeature {
             }
         }
         if let Some(note) = current.note {
-            ui.weak(one_line(note));
+            ui.label(muted(one_line(note)));
         }
         let activity = snapshot.map_or(&[][..], |s| s.activity.as_slice());
         let recent = &activity[activity.len().saturating_sub(OVERLAY_LINES)..];
@@ -178,7 +186,7 @@ impl ObservationFeature {
             }
             None => {
                 if current.live {
-                    ui.weak("Waiting for the first frame of this page...");
+                    ui.label(muted("Waiting for the first frame of this page..."));
                 }
                 activity_lines(ui, recent);
             }
