@@ -1158,6 +1158,11 @@ fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageErr
         |r| r.get(0),
     )?;
     if activity {
+        // One primary-key row per thread; it is fenced by the tombstone, so it cannot return.
+        tx.execute(
+            "DELETE FROM retention_activity_thread_revisions WHERE thread_id=?1",
+            [thread],
+        )?;
         for table in ["retention_activity_bindings", "retention_activity_goals"] {
             let rows=tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE thread_id=?1 LIMIT ?2)"),params![thread,RECLAIM_ROWS])?;
             if rows > 0 {

@@ -37,12 +37,27 @@ pub struct ActivityReport {
     /// At most eight source event ids; no message or goal bodies.
     pub global_failure_event_ids: Vec<i64>,
 }
+/// Equality token for archive decisions, not an applied-source watermark.
+///
+/// Source clocks alone cannot invalidate an already inspected destination when a
+/// payload is reattributed from another run. Projection triggers advance scoped
+/// decision clocks in the same transaction. Keep clocks separate: adding them
+/// could overflow or alias after a counter row is reclaimed/rebuilt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActivityRevision {
+    pub source: i64,
+    pub projection: i64,
+    pub thread: i64,
+    pub bindings: i64,
+    pub global: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunActivity {
     pub last_actual_activity_at: Option<i64>,
     pub legacy_activity_upper_bound: Option<i64>,
     pub ready: bool,
-    pub revision: i64,
+    pub revision: ActivityRevision,
     pub failure: Option<String>,
 }
 // Source removal/header reclassification must not scan all current goals.
@@ -538,9 +553,15 @@ impl Database {
     }
     /// Canonical source/applied comparison, never inferred from the newest event ID.
     pub fn run_activity(&self, run: &str) -> Result<RunActivity, StorageError> {
-        let row=self.conn.prepare_cached("SELECT r.actual_ns,r.legacy_upper_ns,r.applied,coalesce(s.revision,0),r.failure,r.legacy FROM retention_activity_runs r LEFT JOIN retention_activity_sources s ON s.run_id=r.run_id WHERE r.run_id=?1")?.query_row([run],|r|Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?))).optional()?;
-        let Some((actual, fallback, applied, revision, failure, legacy)) = row else {
-            return Ok(RunActivity::default());
+        let (actual, fallback, applied, source, failure, legacy, projection, thread, bindings, global) = self.conn.prepare_cached(
+            "SELECT r.actual_ns,r.legacy_upper_ns,r.applied,coalesce(s.revision,0),r.failure,coalesce(r.legacy,0),coalesce(s.decision_revision,0),coalesce(t.revision,0),c.binding_revision,c.decision_revision FROM retention_activity_control c LEFT JOIN retention_activity_runs r ON r.run_id=?1 LEFT JOIN retention_activity_sources s ON s.run_id=?1 LEFT JOIN thread_runs b ON b.run_id=?1 LEFT JOIN retention_activity_thread_revisions t ON t.thread_id=b.thread_id WHERE c.id=1"
+        )?.query_row([run], |r| Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,i64>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,i64>(9)?)))?;
+        let revision = ActivityRevision {
+            source,
+            projection,
+            thread,
+            bindings,
+            global,
         };
         let backfill: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM retention_activity_cursors WHERE complete=0)",
@@ -558,12 +579,16 @@ impl Database {
             legacy_activity_upper_bound: fallback,
             ready: !backfill
                 && !pending
-                && applied == revision
+                && applied == Some(source)
                 && failure.is_none()
                 && (!legacy || actual.is_some() || fallback.is_some()),
             revision,
             failure,
         })
+    }
+    /// Also covers empty threads, whose current goal/protection has no run proof.
+    pub fn activity_thread_revision(&self, thread: &str) -> Result<ActivityRevision, StorageError> {
+        Ok(self.conn.prepare_cached("SELECT coalesce(t.revision,0),c.binding_revision,c.decision_revision FROM retention_activity_control c LEFT JOIN retention_activity_thread_revisions t ON t.thread_id=?1 WHERE c.id=1")?.query_row([thread], |r| Ok(ActivityRevision { thread:r.get(0)?, bindings:r.get(1)?, global:r.get(2)?, ..Default::default() }))?)
     }
     pub fn activity_report(&self) -> Result<ActivityReport, StorageError> {
         let mut r = ActivityReport::default();

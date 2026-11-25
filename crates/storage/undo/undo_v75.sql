@@ -1,3 +1,36 @@
+-- Decision epochs must be detached before projection/control tables.
+DROP TRIGGER IF EXISTS fence_retention_activity_thread_revisions_insert;
+DROP TRIGGER IF EXISTS fence_retention_activity_thread_revisions_update;
+DROP TRIGGER IF EXISTS retention_decision_runs_insert;
+DROP TRIGGER IF EXISTS retention_decision_runs_update;
+DROP TRIGGER IF EXISTS retention_decision_runs_delete;
+DROP TRIGGER IF EXISTS retention_decision_goals_insert;
+DROP TRIGGER IF EXISTS retention_decision_goals_update;
+DROP TRIGGER IF EXISTS retention_decision_goals_delete;
+DROP TRIGGER IF EXISTS retention_decision_bindings_insert;
+DROP TRIGGER IF EXISTS retention_decision_bindings_update;
+DROP TRIGGER IF EXISTS retention_decision_bindings_delete;
+DROP TRIGGER IF EXISTS retention_decision_deliveries_insert;
+DROP TRIGGER IF EXISTS retention_decision_deliveries_update;
+DROP TRIGGER IF EXISTS retention_decision_deliveries_delete;
+DROP TRIGGER IF EXISTS retention_decision_failures_insert;
+DROP TRIGGER IF EXISTS retention_decision_failures_update;
+DROP TRIGGER IF EXISTS retention_decision_failures_delete;
+DROP TRIGGER IF EXISTS retention_decision_pending_insert;
+DROP TRIGGER IF EXISTS retention_decision_pending_update;
+DROP TRIGGER IF EXISTS retention_decision_pending_delete;
+DROP TRIGGER IF EXISTS retention_decision_cursors_insert;
+DROP TRIGGER IF EXISTS retention_decision_cursors_update;
+DROP TRIGGER IF EXISTS retention_decision_cursors_delete;
+DROP TRIGGER IF EXISTS retention_decision_sources_insert;
+DROP TRIGGER IF EXISTS retention_decision_sources_update;
+DROP TRIGGER IF EXISTS retention_decision_sources_delete;
+DROP TRIGGER IF EXISTS retention_decision_threads_delete;
+DROP TRIGGER IF EXISTS retention_decision_threads_update;
+DROP TRIGGER IF EXISTS retention_decision_thread_runs_insert;
+DROP TRIGGER IF EXISTS retention_decision_thread_runs_update;
+DROP TRIGGER IF EXISTS retention_decision_thread_runs_delete;
+DROP TABLE IF EXISTS retention_activity_thread_revisions;
 -- Test-only restoration of older synthetic databases.
 DROP TRIGGER IF EXISTS retention_activity_events_insert;
 DROP TRIGGER IF EXISTS retention_activity_events_delete;

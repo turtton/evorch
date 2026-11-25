@@ -13,6 +13,92 @@ use workbench_host::{
 };
 use workspace_state::{ProjectId, SidebarDocument, SidebarStore, ThreadId, ThreadRecord};
 const DAY: i64 = 86_400_000_000_000;
+fn reassigned_activity(recipient: &str, delivered: bool) -> event_bus::EventKind {
+    if delivered {
+        event_bus::AgentMessageEvent::Delivered {
+            message: event_bus::AgentMessage {
+                message_id: "reassigned".into(),
+                sender_run_id: "sender".into(),
+                recipient_run_id: recipient.into(),
+                kind: event_bus::AgentMessageKind::Reply,
+                content: "reply".into(),
+                reply_to: None,
+            },
+            disposition: event_bus::DeliveryDisposition::Steering,
+        }
+        .into()
+    } else {
+        event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: recipient.into(),
+            from: event_bus::AgentRunPhase::Waiting,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+            waiting: None,
+        }
+        .into()
+    }
+}
+
+fn assert_reassigned_payload_invalidates_inspected_destination(delivered: bool) {
+    let w = World::new(624);
+    let sql = rusqlite::Connection::open(&w.config.db_path).unwrap();
+    sql.execute("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('run-outside','z-outside','run-outside',0)", []).unwrap();
+    let event = reassigned_activity("run-outside", delivered);
+    sql.execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,?1,?2,'run-outside',?3,?4)",rusqlite::params![if delivered {"AgentMessage"}else{"Lifecycle"},event.subkind_name(),8*DAY,serde_json::to_string(&event).unwrap()]).unwrap();
+    let id = sql.last_insert_rowid();
+    let lock = w.store.lock().unwrap();
+    let mut doc = w.store.read(&lock).unwrap();
+    let mut outside = ThreadRecord::new(
+        ThreadId::new("z-outside"),
+        ProjectId::new("project"),
+        "outside",
+    );
+    outside.created_at = 0;
+    outside.updated_at = 0;
+    outside.root_run_id = Some("run-outside".into());
+    doc.sidebar.threads.push(outside);
+    doc.sidebar.refresh_derived();
+    w.store.write(&lock, &doc).unwrap();
+    drop(lock);
+    let leases = w.leases();
+    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+    w.drain(&storage.handle());
+    let db = Database::open(&w.config).unwrap();
+    let before = db.run_activity("run-2").unwrap();
+    let host = w.host(storage.handle());
+    let authority = AutoArchiveAuthority::new(&leases);
+    let mut coordinator = w.coordinator();
+    let first = coordinator.tick(&host, Some(&authority), 8 * DAY);
+    assert_eq!(first.holds.get("FamilyInspectionPending"), Some(&1));
+    assert!(first.inspected_runs >= 2 && first.inspected_runs < 624);
+    sql.execute(
+        "UPDATE events SET payload=?1 WHERE id=?2",
+        rusqlite::params![
+            serde_json::to_string(&reassigned_activity("run-2", delivered)).unwrap(),
+            id
+        ],
+    )
+    .unwrap();
+    w.drain(&storage.handle());
+    let after = db.run_activity("run-2").unwrap();
+    assert_eq!(after.last_actual_activity_at, Some(8 * DAY));
+    assert!(after.ready);
+    let report = w.drive(&mut coordinator, &host, &authority, 8 * DAY);
+    assert_eq!(report.published, 0, "{report:?}");
+    assert!(!w.archived());
+    assert_ne!(before.revision, after.revision);
+}
+
+#[test]
+fn lifecycle_reattribution_invalidates_a_destination_already_inspected_for_archive() {
+    assert_reassigned_payload_invalidates_inspected_destination(false);
+}
+
+#[test]
+fn delivered_reattribution_invalidates_a_destination_already_inspected_for_archive() {
+    assert_reassigned_payload_invalidates_inspected_destination(true);
+}
+
 struct World {
     dir: tempfile::TempDir,
     config: StorageConfig,

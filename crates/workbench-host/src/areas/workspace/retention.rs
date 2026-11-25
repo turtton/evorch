@@ -112,6 +112,7 @@ impl Service {
                     proofs: vec![],
                     global_gate: runtime.retention_gate_stamp(""),
                     thread_gates: Default::default(),
+                    thread_revisions: Default::default(),
                 });
             } else {
                 state.after_family = None;
@@ -152,6 +153,11 @@ impl Service {
                     return Ok(());
                 }
                 candidate.thread_gates.insert(member.id.to_string(), stamp);
+                candidate.thread_revisions.insert(
+                    member.id.to_string(),
+                    db.activity_thread_revision(&member.id.to_string())
+                        .map_err(|_| "decision revision read failed")?,
+                );
                 if let Some(hold) = db
                     .activity_thread_hold(&member.id.to_string())
                     .map_err(|_| "protection read failed")?
@@ -225,6 +231,15 @@ impl Service {
         // Final canonical checks are under host + sidebar locks. No run-map lock
         // spans these reads. Admissions after this check are ordinary archived work.
         for member in &candidate.members {
+            if candidate.thread_revisions.get(&member.id.to_string())
+                != Some(
+                    &db.activity_thread_revision(&member.id.to_string())
+                        .map_err(|_| "decision revision read failed")?,
+                )
+            {
+                report.hold("StaleRevision");
+                return Ok(());
+            }
             if let Some(hold) = db
                 .activity_thread_hold(&member.id.to_string())
                 .map_err(|_| "protection read failed")?

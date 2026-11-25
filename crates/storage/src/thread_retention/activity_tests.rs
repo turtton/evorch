@@ -256,7 +256,7 @@ fn payload_rewrites_from_another_connection_stay_dirty_across_reopen() {
         f.reader = Database::open(&f.config).unwrap();
         let dirty = f.reader.run_activity("run").unwrap();
         assert!(!dirty.ready, "reopened {case}");
-        assert!(dirty.revision > applied.revision, "{case}");
+        assert!(dirty.revision.source > applied.revision.source, "{case}");
         assert!(
             f.reader.activity_report().unwrap().pending_sources > 0,
             "{case}"
@@ -304,6 +304,10 @@ fn assert_payload_reattribution_holds_destination(
     let id = f.insert(before, 200);
     f.drain();
     assert!(f.reader.run_activity("other").unwrap().ready);
+    let inspected = (
+        f.reader.run_activity("other").unwrap().revision,
+        f.reader.activity_thread_revision("family-b").unwrap(),
+    );
     let stale = f.reader.activity_page().unwrap();
     let other = rusqlite::Connection::open(&f.config.db_path).unwrap();
     let payload = serde_json::to_string(&after).unwrap();
@@ -364,6 +368,14 @@ fn assert_payload_reattribution_holds_destination(
     assert!(destination.ready);
     assert_eq!(destination.last_actual_activity_at, Some(expected_activity));
     assert_eq!(f.reader.activity_report().unwrap().pending_sources, 0);
+    assert_ne!(
+        inspected,
+        (
+            destination.revision,
+            f.reader.activity_thread_revision("family-b").unwrap()
+        ),
+        "applying the moved activity must retire proofs taken before it"
+    );
     f
 }
 
@@ -1047,4 +1059,200 @@ fn deleted_goal_source_updates_only_its_projection_through_an_indexed_lookup() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(states, vec![("one".into(), true), ("two".into(), false)]);
+}
+
+/// Every write to a projection value used by archive decisions must move the decision
+/// token of each affected run and thread (old and new attribution) in the same
+/// transaction. Rows are written with raw SQL so out-of-hook writers are included.
+#[test]
+fn every_projection_write_moves_the_decision_token_of_each_affected_scope() {
+    const ALL: &[&str] = &["run:r-a", "run:r-b", "thread:T1", "thread:T2", "thread:T3"];
+    // (name, sql, changed scopes, scopes that must stay untouched)
+    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "run_update",
+            "UPDATE retention_activity_runs SET actual_ns=999 WHERE run_id='r-a'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "run_delete",
+            "DELETE FROM retention_activity_runs WHERE run_id='r-b'",
+            &["run:r-b", "thread:T2"],
+            &["run:r-a", "thread:T1", "thread:T3"],
+        ),
+        (
+            "goal_phase",
+            "UPDATE retention_activity_goals SET complete=1 WHERE goal_id='G1'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "goal_transfer_thread",
+            "UPDATE retention_activity_goals SET thread_id='T2' WHERE goal_id='G1'",
+            &["run:r-a", "run:r-b", "thread:T1", "thread:T2"],
+            &["thread:T3"],
+        ),
+        (
+            "goal_root_change",
+            "UPDATE retention_activity_goals SET root_run_id='r-b' WHERE goal_id='G1'",
+            &["run:r-a", "run:r-b", "thread:T1"],
+            &["thread:T3"],
+        ),
+        (
+            "goal_insert",
+            "INSERT INTO retention_activity_goals(goal_id,thread_id,root_run_id,related,complete,event_id) VALUES('G2','T3','r-b','[\"r-a\"]',0,2)",
+            &["run:r-a", "run:r-b", "thread:T3"],
+            &[],
+        ),
+        (
+            "goal_delete",
+            "DELETE FROM retention_activity_goals WHERE goal_id='G1'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "binding_clear",
+            "UPDATE retention_activity_bindings SET goal_id=NULL WHERE thread_id='T1'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "binding_move",
+            "UPDATE retention_activity_bindings SET thread_id='T3' WHERE thread_id='T1'",
+            &["run:r-a", "thread:T1", "thread:T3"],
+            &["run:r-b", "thread:T2"],
+        ),
+        (
+            "binding_insert",
+            "INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id) VALUES('T3','G1',2)",
+            &["run:r-a", "thread:T1", "thread:T3"],
+            &["run:r-b", "thread:T2"],
+        ),
+        (
+            "binding_delete",
+            "DELETE FROM retention_activity_bindings WHERE thread_id='T1'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "delivery_recipient",
+            "UPDATE retention_activity_deliveries SET run_id='r-b' WHERE message_id='m1'",
+            &["run:r-a", "run:r-b", "thread:T1", "thread:T2"],
+            &["thread:T3"],
+        ),
+        (
+            "delivery_insert",
+            "INSERT INTO retention_activity_deliveries VALUES('m2','r-b',5)",
+            &["run:r-b", "thread:T2"],
+            &["run:r-a", "thread:T1", "thread:T3"],
+        ),
+        (
+            "delivery_delete",
+            "DELETE FROM retention_activity_deliveries WHERE message_id='m1'",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "failure_insert",
+            "INSERT INTO retention_activity_failures VALUES(9,2,'r-b','x')",
+            &["run:r-b", "thread:T2"],
+            &["run:r-a", "thread:T1", "thread:T3"],
+        ),
+        (
+            "failure_move",
+            "UPDATE retention_activity_failures SET run_id='r-b' WHERE source=9 AND source_id=1",
+            &["run:r-a", "run:r-b", "thread:T1", "thread:T2"],
+            &["thread:T3"],
+        ),
+        (
+            "failure_delete",
+            "DELETE FROM retention_activity_failures WHERE source=9 AND source_id=1",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "pending_insert",
+            "INSERT INTO retention_activity_pending(source,source_id,run_id) VALUES(0,99,'r-b')",
+            &["run:r-b", "thread:T2"],
+            &["run:r-a", "thread:T1", "thread:T3"],
+        ),
+        (
+            "pending_move",
+            "UPDATE retention_activity_pending SET run_id='r-b' WHERE source=0 AND source_id=98",
+            &["run:r-a", "run:r-b", "thread:T1", "thread:T2"],
+            &["thread:T3"],
+        ),
+        (
+            "pending_delete",
+            "DELETE FROM retention_activity_pending WHERE source=0 AND source_id=98",
+            &["run:r-a", "thread:T1"],
+            &["run:r-b", "thread:T2", "thread:T3"],
+        ),
+        (
+            "unknown_run_failure",
+            "INSERT INTO retention_activity_failures VALUES(9,3,'','x')",
+            ALL,
+            &[],
+        ),
+        (
+            "unknown_run_pending",
+            "INSERT INTO retention_activity_pending(source,source_id,run_id) VALUES(0,97,'')",
+            ALL,
+            &[],
+        ),
+        (
+            "cursor_advanced",
+            "UPDATE retention_activity_cursors SET after_id=5 WHERE stream=0",
+            ALL,
+            &[],
+        ),
+        (
+            "binding_added_to_thread",
+            "INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('r-n','T3','r-n',0)",
+            &["thread:T3"],
+            &[],
+        ),
+        (
+            "binding_moved_between_threads",
+            "UPDATE thread_runs SET thread_id='T3' WHERE run_id='r-b'",
+            &["thread:T2", "thread:T3"],
+            &[],
+        ),
+        (
+            "binding_removed",
+            "DELETE FROM thread_runs WHERE run_id='r-b'",
+            &["thread:T2"],
+            &[],
+        ),
+    ];
+    let token = |f: &Fixture, scope: &str| -> String {
+        let (kind, id) = scope.split_once(':').unwrap();
+        match kind {
+            "run" => format!("{:?}", f.reader.run_activity(id).unwrap().revision),
+            _ => format!("{:?}", f.reader.activity_thread_revision(id).unwrap()),
+        }
+    };
+    for (name, sql, changed, same) in cases {
+        let f = Fixture::new();
+        f.reader.conn.execute_batch("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('r-a','T1','r-a',0),('r-b','T2','r-b',0)").unwrap();
+        f.reader.conn.execute_batch("INSERT INTO retention_activity_goals(goal_id,thread_id,root_run_id,related,complete,event_id) VALUES('G1','T1','r-a','[]',0,1);
+            INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id) VALUES('T1','G1',1);
+            INSERT INTO retention_activity_deliveries VALUES('m1','r-a',10);
+            INSERT INTO retention_activity_failures VALUES(9,1,'r-a','x');
+            INSERT INTO retention_activity_pending(source,source_id,run_id) VALUES(0,98,'r-a')").unwrap();
+        f.reader.conn.execute_batch("INSERT OR IGNORE INTO retention_activity_runs(run_id,actual_ns,captured) VALUES('r-a',1,1),('r-b',1,1)").unwrap();
+        // Pending rows are intentionally left in place for the pending cases.
+        let before: Vec<String> = ALL.iter().map(|s| token(&f, s)).collect();
+        f.reader.conn.execute_batch(sql).unwrap();
+        let after: Vec<String> = ALL.iter().map(|s| token(&f, s)).collect();
+        for (i, scope) in ALL.iter().enumerate() {
+            if changed.contains(scope) {
+                assert_ne!(before[i], after[i], "{name}: {scope} must be invalidated");
+            }
+            if same.contains(scope) {
+                assert_eq!(before[i], after[i], "{name}: {scope} must stay valid");
+            }
+        }
+    }
 }

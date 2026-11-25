@@ -14,7 +14,7 @@ use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
 const LATEST_SCHEMA: u32 = 75;
 
-const EXPECTED_TABLES: [&str; 144] = [
+const EXPECTED_TABLES: [&str; 145] = [
     "retention_activity_control",
     "retention_activity_cursors",
     "retention_activity_sources",
@@ -24,6 +24,7 @@ const EXPECTED_TABLES: [&str; 144] = [
     "retention_activity_bindings",
     "retention_activity_deliveries",
     "retention_activity_failures",
+    "retention_activity_thread_revisions",
     "history_control",
     "history_run_state",
     "history_event_cuts",

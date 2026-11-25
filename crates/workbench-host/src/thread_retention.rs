@@ -37,7 +37,7 @@ pub(crate) struct Member {
 #[derive(Clone, Debug)]
 pub(crate) struct RunProof {
     pub run: String,
-    pub revision: i64,
+    pub revision: storage::thread_retention::activity::ActivityRevision,
     pub gate: runtime::thread_retention::gate::GateStamp,
 }
 #[derive(Clone, Debug)]
@@ -55,6 +55,7 @@ pub(crate) struct Candidate {
     pub proofs: Vec<RunProof>,
     pub global_gate: runtime::thread_retention::gate::GateStamp,
     pub thread_gates: BTreeMap<String, runtime::thread_retention::gate::GateStamp>,
+    pub thread_revisions: BTreeMap<String, storage::thread_retention::activity::ActivityRevision>,
 }
 /// At most one family publication, one remove_thread and one scratch member per tick.
 pub struct AutoArchiveCoordinator {

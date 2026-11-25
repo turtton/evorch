@@ -74,6 +74,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "latest goal identity and lineage",
     ),
     (
+        "retention_activity_thread_revisions",
+        ReclaimThread,
+        "decision epochs invalidate staged empty-thread and family proofs",
+    ),
+    (
         "retention_activity_bindings",
         ReclaimThread,
         "current goal and cleared binding position",
