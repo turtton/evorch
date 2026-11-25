@@ -465,7 +465,10 @@ fn decide(conn: &Connection, threads: &[String], runs: &[String], cutoff: i64) -
     // Handoff receipt per candidate goal root (the family roots with a goal).
     for run in runs.iter().take(BIG_THREADS) {
         let mut stmt = conn.prepare_cached(sql::HANDOFF_SHAPE)?;
-        let _ = stmt.query_map([run], |r| r.get::<_, i64>(0))?.count();
+        let limit = i64::try_from(K + 1).unwrap();
+        let _ = stmt
+            .query_map(rusqlite::params![run, limit], |r| r.get::<_, i64>(0))?
+            .count();
         c.statements += 1;
     }
     for text in [sql::QUESTIONS, sql::EVAL_SAMPLES] {
