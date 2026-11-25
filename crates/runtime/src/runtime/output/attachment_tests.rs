@@ -81,6 +81,39 @@ async fn cleanup(runtime: &AgentRuntime) {
     }
 }
 #[tokio::test]
+async fn retention_protection_distinguishes_live_phases_turn_boundaries_and_compaction() {
+    let (runtime, _, child) = fixture();
+    // No await until cleanup: the current-thread executor cannot race these
+    // registered live snapshots with model execution or a phase publication.
+    for (phase, idle_turn, compacting, protected) in [
+        (AgentRunPhase::Pending, false, false, true),
+        (AgentRunPhase::Running, false, false, true),
+        (AgentRunPhase::Waiting, false, false, true),
+        (AgentRunPhase::Waiting, true, false, false),
+        (AgentRunPhase::Waiting, true, true, true),
+        (AgentRunPhase::Done, false, false, false),
+        (AgentRunPhase::Done, false, true, true),
+    ] {
+        set(&runtime, child, phase, idle_turn, None);
+        lock_runs(&runtime.shared.runs)
+            .get(&child)
+            .unwrap()
+            .compaction_busy
+            .store(compacting, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            runtime.retention_run_protected(child),
+            protected,
+            "{phase:?}, idle_turn={idle_turn}, compacting={compacting}"
+        );
+    }
+    lock_runs(&runtime.shared.runs)
+        .get(&child)
+        .unwrap()
+        .compaction_busy
+        .store(false, std::sync::atomic::Ordering::Release);
+    cleanup(&runtime).await;
+}
+#[tokio::test]
 async fn relation_denials_are_indistinguishable_and_never_restore() {
     let (runtime, root, child) = fixture();
     let sibling = runtime

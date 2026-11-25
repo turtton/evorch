@@ -237,8 +237,8 @@ fn owner_remnants_block_only_inside_the_grace_period() {
     let cases = [
         // (active, expires_at_ms, confirmed)
         (false, NOW_MS, true),
-        (true, NOW_MS - 29 * DAY_MS, false),
-        (true, NOW_MS - 31 * DAY_MS, true),
+        (true, NOW_MS - 6 * DAY_MS, false),
+        (true, NOW_MS - 8 * DAY_MS, true),
         (true, NOW_MS + DAY_MS, false),
     ];
     for (active, expires_at, confirmed) in cases {
@@ -395,7 +395,7 @@ fn schedule_reports_what_the_host_shows() {
         .iter_mut()
         .find(|thread| thread.thread_id == "NEW")
         .unwrap();
-    new.archived_at_s = Some(NOW_NS / 1_000_000_000 - 10 * 86_400);
+    new.archived_at_s = Some(NOW_NS / 1_000_000_000 - 86_400);
     let database = world.database();
     let registry = world.registry();
     let status = |binding: &BindingStatus,
@@ -410,7 +410,7 @@ fn schedule_reports_what_the_host_shows() {
     let normal = policy();
     let shown = status(&BindingStatus::Bound, &normal);
     assert_eq!(shown["OLD"], RetentionStatus::DueNextStartup);
-    assert_eq!(shown["NEW"], RetentionStatus::DueIn { days: 20 });
+    assert_eq!(shown["NEW"], RetentionStatus::DueIn { days: 6 });
     assert!(matches!(
         shown["HELD"],
         RetentionStatus::Blocked(BlockReason::Owner(_))

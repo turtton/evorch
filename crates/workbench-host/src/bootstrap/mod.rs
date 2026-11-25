@@ -30,6 +30,7 @@ mod recovery_06a_tests;
 pub mod recovery_disposal;
 pub mod restart;
 pub mod retention;
+mod retention_workers;
 #[cfg(test)]
 mod scratch_archive_tests;
 pub mod services;
@@ -148,6 +149,11 @@ pub struct BootstrappedHost {
     bridge: Option<OwnedStorageBridge>,
     planned_exit: Option<Arc<tokio::sync::Mutex<planned_exit::PlannedExit>>>,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
+    auto_archive: Option<crate::thread_retention::AutoArchiveOwner>,
+    #[cfg(any(test, feature = "test-support"))]
+    manual_retention_fixture: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    fixture_retention: Option<retention_workers::RetentionStartup>,
     thread_index_owner: Option<thread_index::ThreadIndexOwner>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
@@ -288,6 +294,8 @@ impl BootstrappedHost {
         recovery: Option<&dyn core_startup::CoreStartupHook>,
         claimed: Option<planned::ClaimedBootstrap>,
     ) -> Result<Self, BootstrapError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let manual_retention_fixture = seams.is_some();
         let planned = claimed.is_some();
         let successor_epoch = claimed.as_ref().map(|c| c.successor_epoch());
         let spawn_ledger = sandbox::SpawnLedger::new();
@@ -730,6 +738,11 @@ impl BootstrappedHost {
             bridge: Some(bridge),
             planned_exit: None,
             reclaim: None,
+            auto_archive: None,
+            #[cfg(any(test, feature = "test-support"))]
+            manual_retention_fixture,
+            #[cfg(any(test, feature = "test-support"))]
+            fixture_retention: None,
             thread_index_owner: None,
             history_owner: None,
             executor,
@@ -884,13 +897,12 @@ impl BootstrappedHost {
         self.thread_index_owner = Some(thread_index::ThreadIndexOwner::start(
             deferred.writer.clone(),
         )?);
-        self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
-            runtime::thread_retention::ExecutorConfig::new(
-                deferred.writer.clone(),
-                deferred.storage.clone(),
-                Some(deferred.artifacts),
-            ),
-        )?);
+        self.start_retention_workers(retention_workers::RetentionStartup {
+            writer: deferred.writer.clone(),
+            storage: deferred.storage.clone(),
+            artifacts: deferred.artifacts,
+            ownership_root: deferred.options.ownership_root.clone(),
+        })?;
         host_services::start(
             &mut self.services,
             &deferred.options,
@@ -946,6 +958,9 @@ impl BootstrappedHost {
         if let Some(pr) = self.runtime.pull_requests() {
             gates.push(pr.producer_gate());
         }
+        if let Some(archive) = &self.auto_archive {
+            gates.push(archive.producer_gate());
+        }
         gates
     }
 
@@ -977,6 +992,9 @@ impl BootstrappedHost {
             history.stop();
         }
         let mut failure = None;
+        if let Some(owner) = &self.auto_archive {
+            owner.request_stop();
+        }
         // Area tasks stop producing before the runtime drains; they are joined
         // below, with the other host-owned tasks.
         for producer in self.restart_producers() {
@@ -1015,6 +1033,15 @@ impl BootstrappedHost {
         // area task failing is reported but does not keep the owner.
         let drained = failure.is_none();
         lane_pr::remember(&mut failure, self.area_tasks.shutdown().await);
+        if let Some(mut owner) = self.auto_archive.take() {
+            lane_pr::remember(
+                &mut failure,
+                tokio::task::spawn_blocking(move || owner.shutdown())
+                    .await
+                    .map_err(|_| "auto archive join panicked".to_owned())
+                    .and_then(|r| r),
+            );
+        }
         if let Some(reclaim) = self.reclaim.take() {
             lane_pr::remember(&mut failure, reclaim.try_shutdown());
         }

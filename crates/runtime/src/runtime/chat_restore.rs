@@ -63,6 +63,7 @@ impl AgentRuntime {
     /// Other live runs are unchanged. Images and goal creation belong to a new
     /// human submission through `continue_goal`, not to this scheduling operation.
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         self.require_manual_resume_open()?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.deny_deleted_run(&run_id.to_string())
@@ -82,6 +83,7 @@ impl AgentRuntime {
         authority: RunConfig,
         observation: ChatResumeObservation,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         let _manual = self
             .shared
             .quiesce
@@ -143,6 +145,7 @@ impl AgentRuntime {
     /// the messages held for it. Like [`Self::resume_chat`] it reuses saved
     /// history under current authority, but it is not user input.
     pub fn wake_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         let _dispatch = self.dispatch_registration_guard()?;
         self.resume(run_id, ChatContinuation::Wake, authority)
     }
@@ -167,6 +170,7 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run_id);
         let _manual = self
             .shared
             .quiesce
@@ -786,6 +790,7 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_admission();
         self.delegate_chat_seeded(thread_id, role, prompt, config, None)
     }
 
@@ -803,6 +808,7 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        let _retention_admission = self.retention_admission();
         let _external = self.external_admission_guard()?;
         let _dispatch = self.dispatch_registration_guard()?;
         let deleted = |deleted| RuntimeError::RunRestoreFailed {

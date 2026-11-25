@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub(crate) mod admin_audit;
+mod admission;
 mod cleanup;
 mod conversation_plan;
 mod index;
@@ -312,7 +313,13 @@ impl Storage {
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
         Ok(Self(
-            StorageHandle(tx, max_event_bytes, reader_config, Default::default()),
+            StorageHandle(
+                tx,
+                max_event_bytes,
+                reader_config,
+                Default::default(),
+                Default::default(),
+            ),
             Some(writer),
         ))
     }
@@ -346,7 +353,21 @@ pub struct StorageHandle(
     u64,
     Arc<StorageConfig>,
     Arc<CommitObservers>,
+    Arc<RequestAdmissions>,
 );
+
+/// A memory-only registration kept until the synchronous writer ACK.
+pub trait MutationAdmission: Send {
+    fn persistence_failed(&mut self);
+}
+type AdmissionFactory = dyn Fn(Option<String>) -> Box<dyn MutationAdmission> + Send + Sync;
+#[derive(Default)]
+struct RequestAdmissions(std::sync::OnceLock<Arc<AdmissionFactory>>);
+impl std::fmt::Debug for RequestAdmissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestAdmissions").finish_non_exhaustive()
+    }
+}
 
 #[derive(Default)]
 struct CommitObservers(std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>);
@@ -433,6 +454,27 @@ impl StorageHandle {
     /// Retain the callback to stay subscribed; dropping it unregisters lazily.
     pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
         self.3.0.lock().unwrap().push(Arc::downgrade(observer));
+    }
+
+    /// Core-local memory-only registration retained through the synchronous writer ACK.
+    /// The callback must not perform I/O, wait, or acquire another lock.
+    pub fn install_request_admission(
+        &self,
+        factory: Arc<dyn Fn(Option<String>) -> Box<dyn MutationAdmission> + Send + Sync>,
+    ) -> bool {
+        self.4.0.set(factory).is_ok()
+    }
+    pub(crate) fn request_admission(&self) -> Option<Box<dyn MutationAdmission>> {
+        self.request_admission_for(None)
+    }
+
+    /// Validate a scoped capability against this writer, not a caller-supplied DB path.
+    pub fn validate_auto_archive_authority(
+        &self,
+        authority: &crate::thread_retention::AutoArchiveAuthority<'_>,
+        root: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        authority.validate(&self.2.db_path, root)
     }
 
     /// Serialized payload limit, retained in memory without contacting the writer.
@@ -755,8 +797,24 @@ impl StorageHandle {
     ) -> Result<T, crate::thread_index::SnapshotApiError> {
         let closed = || crate::thread_index::SnapshotApiError::Storage(StorageError::WriterClosed);
         let (reply, result) = mpsc::channel();
-        self.0.send(command(reply)).map_err(|_| closed())?;
-        result.recv().map_err(|_| closed())?
+        // G3: snapshot/compaction/adoption work remains registered until its ACK.
+        let mut admission = self.request_admission();
+        let outcome = self
+            .0
+            .send(command(reply))
+            .map_err(|_| closed())
+            .and_then(|()| result.recv().map_err(|_| closed()))
+            .and_then(|r| r);
+        if let Err(crate::thread_index::SnapshotApiError::Storage(error)) = &outcome
+            && matches!(
+                error,
+                StorageError::Sqlite(_) | StorageError::Io(_) | StorageError::WriterClosed
+            )
+            && let Some(guard) = admission.as_mut()
+        {
+            guard.persistence_failed();
+        }
+        outcome
     }
 
     /// Persist an idempotent evidence batch without truncating or redacting user text.
@@ -1214,15 +1272,9 @@ impl StorageHandle {
         // repo::event::append_event でも再検査される。
         let event = crate::entity::redact_tool_event(event);
         SecretGuard::from_env().check_event_kind(&event.kind)?;
-        let (reply, result) = mpsc::channel();
-        self.0
-            .send(Command::AppendEvent(
-                session_id.map(String::from),
-                event.clone(),
-                reply,
-            ))
-            .map_err(|_| StorageError::WriterClosed)?;
-        let result = result.recv().map_err(|_| StorageError::WriterClosed)?;
+        let result = self.request(|reply| {
+            Command::AppendEvent(session_id.map(String::from), event.clone(), reply)
+        });
         if result.is_ok() {
             self.3.notify();
         }
@@ -1245,11 +1297,7 @@ impl StorageHandle {
     ///
     /// writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
     pub fn reconcile(&self) -> Result<ReconcileSummary, StorageError> {
-        let (reply, result) = mpsc::channel();
-        self.0
-            .send(Command::Reconcile(reply))
-            .map_err(|_| StorageError::WriterClosed)?;
-        result.recv().map_err(|_| StorageError::WriterClosed)?
+        self.request(Command::Reconcile)
     }
 
     /// usage ledger へリクエスト単位の行を保存します。既存の request ID は維持します。
@@ -1447,6 +1495,10 @@ impl StorageHandle {
         self.request(Command::Checkpoint)
     }
 
+    fn request_admission_for(&self, scope: Option<String>) -> Option<Box<dyn MutationAdmission>> {
+        self.4.0.get().map(|f| f(scope))
+    }
+
     fn request<T>(&self, command: impl FnOnce(ReplyTx<T>) -> Command) -> Result<T, StorageError> {
         #[cfg(any(test, feature = "test-support"))]
         REQUESTS_FORBIDDEN.with(|flag| {
@@ -1456,10 +1508,17 @@ impl StorageHandle {
             );
         });
         let (reply, result) = mpsc::channel();
-        self.0
-            .send(command(reply))
-            .map_err(|_| StorageError::WriterClosed)?;
-        result.recv().map_err(|_| StorageError::WriterClosed)?
+        let command = command(reply);
+        let admission = admission::scope(&command);
+        let mut retention_admission = admission.and_then(|scope| self.request_admission_for(scope));
+        let outcome = self
+            .0
+            .send(command)
+            .map_err(|_| StorageError::WriterClosed)
+            .and_then(|()| result.recv().map_err(|_| StorageError::WriterClosed))
+            .and_then(|r| r);
+        Self::retain_failed_admission(&mut retention_admission, &outcome);
+        outcome
     }
 
     fn index_request<T>(
@@ -1796,5 +1855,20 @@ impl StorageHandle {
         change: crate::handoffs::HandoffTransition,
     ) -> Result<crate::handoffs::HandoffReceipt, StorageError> {
         self.request(|reply| Command::AdvanceHandoff(change, reply))
+    }
+}
+
+impl StorageHandle {
+    pub(crate) fn retain_failed_admission<T>(
+        admission: &mut Option<Box<dyn MutationAdmission>>,
+        result: &Result<T, StorageError>,
+    ) {
+        if matches!(
+            result,
+            Err(StorageError::Sqlite(_) | StorageError::Io(_) | StorageError::WriterClosed)
+        ) && let Some(guard) = admission
+        {
+            guard.persistence_failed();
+        }
     }
 }

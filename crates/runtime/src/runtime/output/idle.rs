@@ -38,3 +38,26 @@ fn between_turns(entry: &RunEntry) -> bool {
         // public Running from releasing this guard during the observation.
         && !entry.user_inbox.adopting()
 }
+
+impl AgentRuntime {
+    /// Exact live protection for one member; no owner/claim lookup and no I/O.
+    pub fn retention_run_protected(&self, run: RunId) -> bool {
+        {
+            let runs = lock_runs(&self.shared.runs);
+            if let Some(entry) = runs.get(&run) {
+                return entry.compaction_busy.load(Ordering::Acquire)
+                    || match *entry.phase_rx.borrow() {
+                        AgentRunPhase::Pending | AgentRunPhase::Running => true,
+                        AgentRunPhase::Waiting => !between_turns(entry),
+                        _ => false,
+                    };
+            }
+        }
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&run)
+            .is_some_and(|a| !a.cancelled && a.result.borrow().is_none())
+    }
+}

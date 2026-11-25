@@ -32,6 +32,7 @@ pub enum ExitStage {
 struct Workers {
     services: services::BackgroundServices,
     reclaim: Option<runtime::thread_retention::ReclaimExecutor>,
+    auto_archive: Option<crate::thread_retention::AutoArchiveOwner>,
     index_owner: Option<thread_index::ThreadIndexOwner>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -119,6 +120,7 @@ impl BootstrappedHost {
             workers: Some(Workers {
                 services: std::mem::take(&mut self.services),
                 reclaim: self.reclaim.take(),
+                auto_archive: self.auto_archive.take(),
                 index_owner: self.thread_index_owner.take(),
                 tasks,
             }),
@@ -229,6 +231,9 @@ impl PlannedExit {
                 }
                 if let Some(workers) = self.workers.as_mut() {
                     workers.services.request_planned_stop();
+                    if let Some(owner) = &workers.auto_archive {
+                        owner.request_stop();
+                    }
                     if let Some(reclaim) = &workers.reclaim {
                         reclaim.request_stop();
                     }
@@ -289,6 +294,15 @@ impl PlannedExit {
                             area.shutdown().await.map_err(|e| e.to_string()),
                         );
                         remember(&mut failure, runtime.join_learning_for_planned_exit().await);
+                        if let Some(mut owner) = workers.auto_archive.take() {
+                            remember(
+                                &mut failure,
+                                tokio::task::spawn_blocking(move || owner.shutdown())
+                                    .await
+                                    .map_err(|_| "auto archive join panicked".to_owned())
+                                    .and_then(|r| r),
+                            );
+                        }
                         if let Some(reclaim) = workers.reclaim.take() {
                             remember(
                                 &mut failure,

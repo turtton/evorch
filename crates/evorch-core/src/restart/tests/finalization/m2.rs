@@ -464,3 +464,27 @@ async fn cleanup_reports_late_join_failure_and_still_joins_remaining_services() 
         Some(ExitStage::ChildrenReaped)
     );
 }
+
+// These SQL/worker-ACK tests do not verify time. A paused Tokio clock can
+// auto-advance the product preparation deadline while the std retention worker
+// is still completing real I/O, cancelling preparation before the tested barrier.
+#[tokio::test]
+async fn auto_archive_owner_pauses_before_sealing_and_joins_before_storage_drains() {
+    let (_dir, mut host) = boot().await;
+    host.enable_retention_producers_for_test().unwrap();
+    let gates = host.restart_producers();
+    let archive = gates.last().unwrap().clone();
+    assert!(archive.is_open());
+    let core = RestartCoordinator::new(&host);
+    let id = core.request_planned(BTreeMap::new()).unwrap();
+    core.wait_sealed(id).await.unwrap();
+    assert!(!archive.is_open() && archive.active() == 0);
+    let tx = transaction(&host);
+    core.start_finalization_without_target(id, &mut host, tx)
+        .unwrap();
+    // No exec target is intentional. This failure is beyond StorageDrained.
+    assert!(core.wait_finalization(id).await.is_err());
+    assert!(core.0.state.lock().unwrap().completed_stage.unwrap() >= ExitStage::StorageDrained);
+    assert!(archive.is_closed() && archive.active() == 0);
+    let _ = host.shutdown().await;
+}

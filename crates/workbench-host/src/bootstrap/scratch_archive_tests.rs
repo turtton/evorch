@@ -232,3 +232,25 @@ async fn host_attachment_removal_failure_after_save_does_not_prevent_scratch_det
         "saved archive is collectible despite attachment failure"
     );
 }
+
+#[tokio::test]
+async fn test_seams_defer_retention_until_explicit_enable() {
+    let mut w = world(&[]).await;
+    assert!(w.boot.reclaim.is_none() && w.boot.auto_archive.is_none());
+    assert!(w.boot.fixture_retention.is_some());
+    w.boot.enable_retention_producers_for_test().unwrap();
+    assert!(w.boot.reclaim.is_some() && w.boot.auto_archive.is_some());
+    assert!(w.boot.fixture_retention.is_none());
+    w.boot.enable_retention_producers_for_test().unwrap();
+    w.boot.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_auto_archive_owner_and_its_future_deadlines_do_not_keep_the_core_busy() {
+    let mut w = world(&["future-deadline"]).await;
+    w.boot.enable_retention_producers_for_test().unwrap();
+    let archive = w.boot.auto_archive.as_ref().unwrap();
+    assert!(archive.producer_gate().is_open());
+    assert!(!w.boot.busy());
+    w.boot.shutdown().await.unwrap();
+}

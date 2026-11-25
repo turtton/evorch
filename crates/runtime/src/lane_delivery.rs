@@ -1335,6 +1335,7 @@ impl AgentRuntime {
         run: RunId,
         ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), crate::RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run);
         let deleted = |reason| crate::RuntimeError::RunRestoreFailed {
             run_id: run.to_string(),
             reason: crate::RunRestoreFailure::ThreadDeleted(reason),

@@ -328,11 +328,10 @@ pub(crate) fn get_by_thread(
     thread_id: &str,
 ) -> Result<Option<LaneRecord>, StorageError> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM lanes WHERE thread_id = ?1 AND {LIVE}"),
-            [thread_id],
-            from_row,
-        )
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM lanes WHERE thread_id = ?1 AND {LIVE}"
+        ))?
+        .query_row([thread_id], from_row)
         .optional()?)
 }
 

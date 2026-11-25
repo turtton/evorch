@@ -629,6 +629,7 @@ impl AgentRuntime {
         catalog: &[providers::ToolSpec],
         permissions_fingerprint: &str,
     ) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run);
         self.deny_deleted_run(&run.to_string()).map_err(error)?;
         self.validate_capture_session(session)?;
         let id = session.restart_id.as_str();

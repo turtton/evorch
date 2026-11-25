@@ -246,11 +246,8 @@ pub(crate) fn upsert_in(
 /// The stored `archived` flag; a thread with no row counts as not archived.
 fn archived_flag(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
     Ok(conn
-        .query_row(
-            "SELECT archived FROM threads WHERE thread_id = ?1",
-            [thread_id],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT archived FROM threads WHERE thread_id = ?1")?
+        .query_row([thread_id], |row| row.get(0))
         .optional()?
         .unwrap_or(false))
 }
@@ -266,11 +263,9 @@ fn tombstoned_identity(
 ) -> Result<Option<StorageError>, StorageError> {
     let thread_ids = [Some(&thread.thread_id), thread.parent_thread_id.as_ref()];
     for thread_id in thread_ids.into_iter().flatten() {
-        let hit: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
-            [thread_id],
-            |row| row.get(0),
-        )?;
+        let hit: bool = conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)")?
+            .query_row([thread_id], |row| row.get(0))?;
         if hit {
             return Ok(Some(StorageError::Tombstoned {
                 run_id: None,
@@ -283,11 +278,9 @@ fn tombstoned_identity(
         (true, thread.escalation_source_run_id.as_ref()),
     ] {
         let Some(run_id) = run_id else { continue };
-        let hit: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
-            [run_id],
-            |row| row.get(0),
-        )?;
+        let hit: bool = conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)")?
+            .query_row([run_id], |row| row.get(0))?;
         // A mirror may explicitly repeat an existing lane's historical source.
         // Root/owner/parent fences above remain strict; a new source is never adopted.
         if hit && provenance && conn.query_row(
@@ -308,11 +301,10 @@ fn tombstoned_identity(
 
 pub(crate) fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRow>, StorageError> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM threads WHERE thread_id = ?1 AND {THREAD_LIVE}"),
-            [thread_id],
-            thread_from_row,
-        )
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM threads WHERE thread_id = ?1 AND {THREAD_LIVE}"
+        ))?
+        .query_row([thread_id], thread_from_row)
         .optional()?)
 }
 

@@ -177,6 +177,22 @@ pub fn shared_with_wait(
 }
 
 impl ExclusiveLeases {
+    pub(crate) fn validate_archive_identity(
+        &self,
+        db: &Path,
+        root: &Path,
+    ) -> Result<(), StorageError> {
+        same_lease(&self.db, &lease_path(db)?)?;
+        same_lease(&self.root, &root.join(".ownership-lock"))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn archive_writer_lease(&self) -> Result<File, StorageError> {
+        self.db
+            .try_clone()
+            .map_err(|error| StorageError::Io(error.to_string()))
+    }
+
     /// Give up exclusivity and hold both locks shared for the rest of the process.
     ///
     /// A flock conversion is not atomic: the exclusive lock is removed first, so

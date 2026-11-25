@@ -3,6 +3,8 @@
 pub mod artifact;
 pub use artifact::{ArtifactPresentation, PresentedArtifact};
 pub mod bus;
+mod persistence;
+pub use persistence::{PersistenceNotifications, PersistenceObserver, PersistenceStage};
 mod message_parts;
 pub use message_parts::MessagePartAssembler;
 mod fencing;

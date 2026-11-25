@@ -43,6 +43,7 @@ impl AgentRuntime {
         run: RunId,
         mut authority: RunConfig,
     ) -> Result<(), RuntimeError> {
+        let _retention_admission = self.retention_run_admission(run);
         let fail = |reason: String| RuntimeError::SavedCompactionFailed {
             run_id: run.to_string(),
             reason,

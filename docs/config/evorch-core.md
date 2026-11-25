@@ -134,3 +134,11 @@ live 設定/sidebar reload、GUI trust/allowed-directory 設定の統合は後�
 P7a は shared maintenance leases と tombstone fence、確定済み削除の reclaim を
 組み立てるが、GUI sidebar の archive 判定・移行や新規 retention 削除確定はしない。
 durable lane の自動復旧と安全点再起動・自動再開も後続であり、GUI を置き換えない。
+
+## スレッド保守と idle
+
+[storage.thread_retention] の auto_archive_after_days と archived_delete_after_days はそれぞれ既定 7 日、独立した 0 で新規処理を停止する。削除の既定 30→7 日化により、次回の起動時排他フェーズで 7〜30 日前の既存 archive が削除対象になり得る。30 の明示設定は維持される。
+
+PR1 は通常 core（単一 core でも）へ auto-archive authority を渡さず、`AuthorityUnavailable` で自動 archive・添付整理・scratch hint を保留する（この間は DB・sidebar・添付を開かず lock も取らない）。PR2 で配線される。判定は派生状態を持たず、1 tick・1 family を正本から直接読む。詳細は [ストレージ保守](../storage-maintenance.md#thread-自動-archivepr1-正本判定と保留中の実装)。
+
+保守 backlog・将来の期限は busy() に加えない。保守だけのために idle 終了を抑止せず、停止中の別 daemon もない。次回稼働で再開する。shutdown／planned exit は retention producer を止め、実行中の有界処理の ACK と worker join の後に bridge flush／storage barrier を行う。barrier 後の retention commit は許さない。
