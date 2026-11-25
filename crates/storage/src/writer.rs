@@ -796,8 +796,24 @@ impl StorageHandle {
     ) -> Result<T, crate::thread_index::SnapshotApiError> {
         let closed = || crate::thread_index::SnapshotApiError::Storage(StorageError::WriterClosed);
         let (reply, result) = mpsc::channel();
-        self.0.send(command(reply)).map_err(|_| closed())?;
-        result.recv().map_err(|_| closed())?
+        // G3: snapshot/compaction/adoption work remains registered until its ACK.
+        let mut admission = self.request_admission();
+        let outcome = self
+            .0
+            .send(command(reply))
+            .map_err(|_| closed())
+            .and_then(|()| result.recv().map_err(|_| closed()))
+            .and_then(|r| r);
+        if let Err(crate::thread_index::SnapshotApiError::Storage(error)) = &outcome
+            && matches!(
+                error,
+                StorageError::Sqlite(_) | StorageError::Io(_) | StorageError::WriterClosed
+            )
+            && let Some(guard) = admission.as_mut()
+        {
+            guard.persistence_failed();
+        }
+        outcome
     }
 
     /// Persist an idempotent evidence batch without truncating or redacting user text.
@@ -1503,18 +1519,31 @@ impl StorageHandle {
         let (reply, result) = mpsc::channel();
         let command = command(reply);
         let admission = match &command {
-            Command::UpsertRunContext(record, ..)
-            | Command::UpsertRunContextWithEvidence(record, ..)
-            | Command::UpsertRunContextWithReceipts(record, ..) => {
-                Some(Some(format!("r:{}", record.run_id)))
-            }
             Command::AppendHostInputAccepted(_, _, _, receipt, _) => {
                 Some(Some(format!("r:{}", receipt.run_id)))
             }
             Command::RecordHostChatSubmission(submission, _) => {
                 Some(Some(format!("r:{}", submission.run_id)))
             }
-            Command::CreateUserQuestion(..)
+            // G3/G4: the destination of an uncommitted binding is not yet
+            // discoverable by a family reader. Register globally, without
+            // expanding that family or inspecting serialized context.
+            Command::UpsertRunContext(..)
+            | Command::UpsertRunContextWithEvidence(..)
+            | Command::UpsertRunContextWithReceipts(..)
+            | Command::AdvanceHandoff(..)
+            | Command::ConversationPlan(..)
+            | Command::SaveResumeIntent(..)
+            | Command::RetireResumeIntent(..)
+            | Command::StopUnregisteredResumeIntent(..)
+            | Command::Recovery(..)
+            | Command::CompareAndSwapRunContextRestoreState(..)
+            | Command::InvalidateRunContext(..)
+            | Command::RecordReviewEvidenceWithEdges(..)
+            | Command::RecordReviewLineageEdge(..)
+            | Command::TransitionHostInputs(..)
+            | Command::UpdateHostInputReceipts(..)
+            | Command::CreateUserQuestion(..)
             | Command::BindUserQuestions(..)
             | Command::AnswerUserQuestion(..)
             | Command::AnswerUserQuestionWithEvidence(..)

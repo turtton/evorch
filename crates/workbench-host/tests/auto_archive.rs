@@ -49,7 +49,10 @@ impl World {
             dir,
             config,
             store,
-            rt: tokio::runtime::Runtime::new().unwrap(),
+            rt: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
         }
     }
     fn leases(&self) -> ExclusiveLeases {
@@ -132,9 +135,9 @@ impl World {
 #[test]
 fn no_authority_does_not_touch_host_sidebar_or_attachment_locks() {
     let w = World::new(1);
-    let leases = w.leases();
-    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
-    w.drain(&storage.handle());
+    // The ordinary shared writer must continue backfill while another process
+    // could own both filesystem locks. No exclusive authority is constructed.
+    let storage = storage::Storage::open(w.config.clone()).unwrap();
     let host = w.host(storage.handle());
     let mut c = w.coordinator();
     let before = std::fs::read(w.store.path()).unwrap();
@@ -145,6 +148,25 @@ fn no_authority_does_not_touch_host_sidebar_or_attachment_locks() {
     let foreground = host.lock().unwrap();
     let r = c.tick(&host, None, 8 * DAY);
     assert_eq!(r.holds.get("AuthorityUnavailable"), Some(&1));
+    assert!(r.activity.pending_sources > 0);
+    let mut worker = runtime::thread_retention::executor::ReclaimWorker::new(
+        runtime::thread_retention::ExecutorConfig::new(storage.handle(), w.config.clone(), None),
+    );
+    for _ in 0..100 {
+        let step = worker.run_once();
+        assert!(step.errors.is_empty(), "{:?}", step.errors);
+        if Database::open(&w.config)
+            .unwrap()
+            .run_activity("run-1")
+            .unwrap()
+            .ready
+        {
+            break;
+        }
+    }
+    let after = c.tick(&host, None, 8 * DAY);
+    assert_eq!(after.holds.get("AuthorityUnavailable"), Some(&1));
+    assert_eq!(after.activity.pending_sources, 0);
     assert_eq!(r.published, 0);
     assert_eq!(r.attachment_calls, 0);
     assert_eq!(r.scratch_hints, 0);
@@ -218,4 +240,153 @@ fn held_foreground_mutex_defers_background_without_changing_foreground_contract(
     assert!(!w.archived());
     drop(foreground);
     assert_eq!(w.drive(&mut c, &host, &a, 8 * DAY).published, 1);
+}
+
+// One protected descendant blocks the whole family, not just its own record.
+#[test]
+fn canonical_descendant_protections_hold_the_family() {
+    for (case, reason) in [
+        ("pin", "Pinned"),
+        ("goal", "UnfinishedGoal"),
+        ("unreadable-transferred-goal", "SourceRevisionBehind"),
+        ("sample", "EvaluationSample"),
+        ("question", "UnansweredQuestion"),
+        ("inherited", "UnansweredQuestion"),
+        ("attached", "OpenManagedLane"),
+        ("summary", "OpenManagedLane"),
+    ] {
+        let w = World::new(1);
+        let lock = w.store.lock().unwrap();
+        let mut doc = w.store.read(&lock).unwrap();
+        let mut child =
+            ThreadRecord::new(ThreadId::new("child"), ProjectId::new("project"), "child");
+        child.created_at = 0;
+        child.updated_at = 0;
+        child.parent_thread_id = Some(ThreadId::new("thread"));
+        child.root_run_id = Some("run-2".into());
+        doc.sidebar.threads.push(child);
+        doc.sidebar.refresh_derived();
+        if case == "pin" {
+            doc.sidebar
+                .set_family_pinned(&ThreadId::new("child"), true)
+                .unwrap();
+        }
+        w.store.write(&lock, &doc).unwrap();
+        drop(lock);
+        let leases = w.leases();
+        let storage =
+            ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+        let sql = rusqlite::Connection::open(&w.config.db_path).unwrap();
+        sql.execute("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('run-2','child','run-2',0)",[]).unwrap();
+        sql.execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Message','MessageCompleted','run-2',0,'{}')",[]).unwrap();
+        w.drain(&storage.handle());
+        match case {
+            "unreadable-transferred-goal" => {
+                // The unreadable snapshot names the child, while its header root
+                // remains uniquely bound to the parent. Both are one family.
+                let snapshot = event_bus::ThreadGoalSnapshot {
+                    goal_id: "transferred".into(),
+                    thread_id: "child".into(),
+                    root_run_id: "run-1".into(),
+                    related_root_run_ids: vec![],
+                    objective: "x".repeat(2_097_153),
+                    criteria: vec![],
+                    checks: vec![],
+                    phase: event_bus::ThreadGoalPhase::Working,
+                    review_enabled: false,
+                    checks_paused: false,
+                    work_stopped: false,
+                    epoch: 0,
+                    review_round: 0,
+                    findings: vec![],
+                    reason: None,
+                    usage: Default::default(),
+                    max_review_rounds: 1,
+                    max_tokens: None,
+                    original_request: "request".into(),
+                };
+                let event =
+                    event_bus::EventKind::from(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+                        snapshot,
+                    });
+                sql.execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Orchestrator','ThreadGoalUpdated','run-1',0,?1)", [serde_json::to_string(&event).unwrap()]).unwrap();
+                w.drain(&storage.handle());
+                assert_eq!(
+                    Database::open(&w.config)
+                        .unwrap()
+                        .activity_report()
+                        .unwrap()
+                        .global_failures,
+                    0
+                );
+            }
+            "goal" => {
+                sql.execute_batch("INSERT INTO retention_activity_goals(goal_id,thread_id,root_run_id,related,complete,event_id) VALUES('goal','child','run-2','[]',0,1); INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id) VALUES('child','goal',1);").unwrap();
+            }
+            "sample" => {
+                sql.execute_batch("INSERT INTO thread_start_states(thread_id,root_run_id,project_root,repo_prefix,head_commit,diff,captured_at_ns,replayable) VALUES('child','run-2','/fixture','','fixture',X'',0,1); INSERT INTO eval_samples(thread_id,problem,focus_roles,created_at_ns,updated_at_ns) VALUES('child','problem','[]',0,0);").unwrap();
+            }
+            "question" => {
+                sql.execute("INSERT INTO user_questions(id,run_id,root_run_id,root_name,payload) VALUES('q','run-3','run-2','root','{}')",[]).unwrap();
+            }
+            "inherited" => {
+                sql.execute_batch("INSERT INTO user_questions(id,run_id,root_run_id,root_name,payload) VALUES('q','run-4','outside','root','{}'); INSERT INTO user_question_links(question_id,run_id) VALUES('q','run-2');").unwrap();
+            }
+            "attached" | "summary" => {
+                let brief=serde_json::json!({"objective":"objective","inputs":[],"deliverables":[],"acceptance_criteria":[],"constraints":[],"report_policy":case}).to_string();
+                sql.execute("INSERT INTO lanes(lane_id,thread_id,origin_thread_id,origin_run_id,creation_key,request_hash,scope,lead_thread_id,policy,management_revision,brief_json,brief_revision,start_seed,root_run_id,generation,created_at_ns,updated_at_ns,last_activity_at_ns) VALUES('lane','child','thread','run-1','creation','hash','lane','thread',?1,1,?2,1,'{}','run-2',1,0,0,0)",rusqlite::params![case,brief]).unwrap();
+            }
+            _ => {}
+        }
+        let host = w.host(storage.handle());
+        let mut c = w.coordinator();
+        let r = w.drive(&mut c, &host, &AutoArchiveAuthority::new(&leases), 8 * DAY);
+        assert_eq!(r.published, 0, "{case}");
+        assert!(r.holds.contains_key(reason), "{case}: {:?}", r.holds);
+        assert!(!w.archived(), "{case}");
+    }
+}
+#[test]
+fn capability_cannot_authorize_another_mirror_writer() {
+    let w = World::new(1);
+    let other = World::new(1);
+    let leases = w.leases();
+    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+    w.drain(&storage.handle());
+    let wrong = storage::Storage::open(other.config.clone()).unwrap();
+    let host = w.host(wrong.handle());
+    let before = std::fs::read(w.store.path()).unwrap();
+    let report = w
+        .coordinator()
+        .tick(&host, Some(&AutoArchiveAuthority::new(&leases)), 8 * DAY);
+    assert_eq!(report.published, 0);
+    assert_eq!(report.attachment_calls, 0);
+    assert!(
+        report.holds.contains_key("AuthorityUnavailable"),
+        "{report:?}"
+    );
+    assert_eq!(std::fs::read(w.store.path()).unwrap(), before);
+}
+#[test]
+fn source_mutation_during_staged_inspection_invalidates_the_old_candidate() {
+    let w = World::new(624);
+    let leases = w.leases();
+    let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
+    w.drain(&storage.handle());
+    let host = w.host(storage.handle());
+    let a = AutoArchiveAuthority::new(&leases);
+    let mut c = w.coordinator();
+    let first = c.tick(&host, Some(&a), 8 * DAY);
+    assert!(first.holds.contains_key("FamilyInspectionPending"));
+    let sql = rusqlite::Connection::open(&w.config.db_path).unwrap();
+    sql.execute(
+        "UPDATE events SET wall_clock_ns=?1 WHERE run_id='run-624'",
+        [8 * DAY],
+    )
+    .unwrap();
+    w.drain(&storage.handle());
+    let r = w.drive(&mut c, &host, &a, 8 * DAY);
+    assert_eq!(r.published, 0);
+    assert!(!w.archived());
+    assert_eq!(w.drive(&mut c, &host, &a, 15 * DAY).published, 1);
 }

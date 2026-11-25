@@ -66,6 +66,7 @@ pub struct AutoArchiveCoordinator {
     pub(crate) candidate: Option<Candidate>,
     stopped: bool,
     last_holds: BTreeMap<&'static str, usize>,
+    last_global_failures: (u64, Vec<i64>),
 }
 impl AutoArchiveCoordinator {
     pub fn new(config: storage::StorageConfig, root: PathBuf, policy: AutoArchivePolicy) -> Self {
@@ -78,6 +79,7 @@ impl AutoArchiveCoordinator {
             candidate: None,
             stopped: false,
             last_holds: BTreeMap::new(),
+            last_global_failures: Default::default(),
         }
     }
     pub fn stop(&mut self) {
@@ -140,14 +142,24 @@ impl AutoArchiveCoordinator {
         report
     }
     fn log(&mut self, report: &RetentionReport) {
-        if self.last_holds != report.holds || !report.failures.is_empty() || report.published > 0 {
-            tracing::info!(target:"thread_retention",holds=?report.holds,published=report.published,inspected_runs=report.inspected_runs,backfill_pending=report.activity.backfill_pending,pending_sources=report.activity.pending_sources,legacy_fallback=report.activity.legacy_fallback,missing_activity_and_fallback=report.activity.missing_activity_and_fallback,attachment_calls=report.attachment_calls,scratch_hints=report.scratch_hints,failures=report.failures.len(),"auto archive tick");
+        let global_failures = (
+            report.activity.global_failures,
+            report.activity.global_failure_event_ids.clone(),
+        );
+        if self.last_holds != report.holds
+            || self.last_global_failures != global_failures
+            || !report.failures.is_empty()
+            || report.published > 0
+        {
+            tracing::info!(target:"thread_retention",holds=?report.holds,published=report.published,inspected_runs=report.inspected_runs,backfill_pending=report.activity.backfill_pending,pending_sources=report.activity.pending_sources,global_failures=report.activity.global_failures,global_failure_event_ids=?report.activity.global_failure_event_ids,legacy_fallback=report.activity.legacy_fallback,missing_activity_and_fallback=report.activity.missing_activity_and_fallback,attachment_calls=report.attachment_calls,scratch_hints=report.scratch_hints,failures=report.failures.len(),"auto archive tick");
             self.last_holds = report.holds.clone();
+            self.last_global_failures = global_failures;
         }
     }
 }
 /// Dedicated blocking owner. No leases or authority can be installed through it in PR1.
 pub struct AutoArchiveOwner {
+    producer: runtime::producer::ProducerGate,
     stop: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -157,6 +169,8 @@ impl AutoArchiveOwner {
         mut coordinator: AutoArchiveCoordinator,
     ) -> std::io::Result<Self> {
         let (stop, receive) = mpsc::channel();
+        let producer = runtime::producer::ProducerGate::default();
+        let admission = producer.clone();
         let worker = std::thread::Builder::new()
             .name("auto-archive".into())
             .spawn(move || {
@@ -165,6 +179,9 @@ impl AutoArchiveOwner {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
+                    let Some(_permit) = admission.try_enter() else {
+                        continue;
+                    };
                     let Some(host) = host.upgrade() else { break };
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -177,11 +194,16 @@ impl AutoArchiveOwner {
                 coordinator.stop();
             })?;
         Ok(Self {
+            producer,
             stop,
             worker: Some(worker),
         })
     }
+    pub fn producer_gate(&self) -> runtime::producer::ProducerGate {
+        self.producer.clone()
+    }
     pub fn request_stop(&self) {
+        self.producer.close();
         let _ = self.stop.send(());
     }
     pub fn shutdown(&mut self) -> Result<(), String> {

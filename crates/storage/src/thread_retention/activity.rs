@@ -8,7 +8,7 @@ use event_bus::{
     ThreadGoalSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::io::Read;
+use std::{collections::BTreeMap, io::Read};
 
 pub const ACTIVITY_ROWS_PER_TICK: usize = 500;
 pub const ACTIVITY_DECODE_BYTES_PER_TICK: usize = 2_097_152;
@@ -32,6 +32,10 @@ pub struct ActivityReport {
     pub pending_sources: u64,
     pub legacy_fallback: u64,
     pub missing_activity_and_fallback: u64,
+    /// All durable failures without a unique run/thread attribution.
+    pub global_failures: u64,
+    /// At most eight source event ids; no message or goal bodies.
+    pub global_failure_event_ids: Vec<i64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunActivity {
@@ -44,11 +48,131 @@ pub struct RunActivity {
 #[derive(Debug)]
 enum Evidence {
     Activity(String, i64),
-    Goal(Box<ThreadGoalSnapshot>, i64, String),
+    Goal(Box<ThreadGoalSnapshot>, i64, String, GoalDecision),
+    GoalRejected(Box<ThreadGoalSnapshot>, i64, String),
+    Ignored,
     Delivery(String, String, i64),
     None,
-    Failed(String),
+    Failed(String, bool),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GoalHeader {
+    thread: String,
+    root: String,
+    position: i64,
+}
+#[derive(Debug)]
+struct GoalDecision {
+    prior: Option<GoalHeader>,
+    apply: bool,
+}
+struct CachedGoal {
+    header: Option<GoalHeader>,
+    related_bytes: usize,
+    related: Option<Vec<String>>,
+    invalid: bool,
+}
+enum GoalPreparation {
+    Ready(GoalDecision),
+    Deferred,
+    Failed(&'static str),
+}
+// Simulate this page's reducer in its reader snapshot. Prior projection JSON is
+// charged before it is selected; repeated snapshots reuse already-decoded lineage.
+fn prepare_goal(
+    c: &Connection,
+    g: &ThreadGoalSnapshot,
+    pos: i64,
+    source_bytes: usize,
+    at_head: bool,
+    report: &mut ActivityReport,
+    goals: &mut BTreeMap<String, CachedGoal>,
+) -> Result<GoalPreparation, StorageError> {
+    if !goals.contains_key(&g.goal_id) {
+        let old: Option<(String, String, i64, usize)> = c.prepare_cached(
+            "SELECT thread_id,root_run_id,event_id,octet_length(related) FROM retention_activity_goals WHERE goal_id=?1"
+        )?.query_row([&g.goal_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let (header, related_bytes) = old.map_or((None, 0), |(thread, root, position, n)| {
+            (
+                Some(GoalHeader {
+                    thread,
+                    root,
+                    position,
+                }),
+                n,
+            )
+        });
+        goals.insert(
+            g.goal_id.clone(),
+            CachedGoal {
+                header,
+                related_bytes,
+                related: None,
+                invalid: false,
+            },
+        );
+    }
+    let state = goals.get_mut(&g.goal_id).expect("goal state was inserted");
+    let prior = state.header.clone();
+    let mut apply = prior.as_ref().is_none_or(|old| old.position <= pos);
+    if let Some(old) = &prior {
+        if apply && old.thread != g.thread_id && !g.related_root_run_ids.contains(&old.root) {
+            if state.invalid {
+                return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
+            }
+            if state.related.is_none() {
+                let remaining = ACTIVITY_DECODE_BYTES_PER_TICK - report.decode_bytes;
+                if state.related_bytes > remaining {
+                    if !at_head
+                        && source_bytes.saturating_add(state.related_bytes)
+                            <= ACTIVITY_DECODE_BYTES_PER_TICK
+                    {
+                        return Ok(GoalPreparation::Deferred);
+                    }
+                    report.oversized += 1;
+                    return Ok(GoalPreparation::Failed(
+                        "goal lineage decode budget exceeded",
+                    ));
+                }
+                report.decode_bytes += state.related_bytes;
+                let related: String = c
+                    .prepare_cached(
+                        "SELECT related FROM retention_activity_goals WHERE goal_id=?1",
+                    )?
+                    .query_row([&g.goal_id], |r| r.get(0))?;
+                match serde_json::from_str(&related) {
+                    Ok(roots) => state.related = Some(roots),
+                    Err(_) => {
+                        state.invalid = true;
+                        return Ok(GoalPreparation::Failed("invalid prior goal lineage"));
+                    }
+                }
+            }
+            if state
+                .related
+                .as_ref()
+                .is_some_and(|roots| roots.contains(&g.root_run_id))
+            {
+                apply = false;
+            }
+        }
+    }
+    if apply {
+        *state = CachedGoal {
+            header: Some(GoalHeader {
+                thread: g.thread_id.clone(),
+                root: g.root_run_id.clone(),
+                position: pos,
+            }),
+            related_bytes: 0,
+            related: Some(g.related_root_run_ids.clone()),
+            invalid: false,
+        };
+    }
+    Ok(GoalPreparation::Ready(GoalDecision { prior, apply }))
+}
+
 #[derive(Debug)]
 struct Item {
     source: i64,
@@ -86,18 +210,50 @@ fn scope_info(c: &Connection, run: &str) -> Result<(Option<i64>, bool), StorageE
     ))
 }
 // Metadata first: never SELECT a page of payloads before checking the byte budget.
+// A malformed goal has no readable snapshot thread id. A uniquely bound header
+// root protects that family; otherwise its destination is unknown globally.
+// Goal transfers are assumed to stay within a sidebar family (see PR2 notes).
+fn failed_event(
+    c: &Connection,
+    kind: &str,
+    sub: Option<&str>,
+    run: Option<&str>,
+    reason: &str,
+) -> Result<Option<Evidence>, StorageError> {
+    let possible_goal = kind == "Orchestrator" && matches!(sub, None | Some("ThreadGoalUpdated"));
+    let globally_unknown = if possible_goal {
+        match run {
+            Some(run) => c.prepare_cached("SELECT count(*) FROM (SELECT DISTINCT thread_id FROM thread_runs WHERE run_id=?1 LIMIT 2)")?.query_row([run], |r| r.get::<_, usize>(0))? != 1,
+            None => true,
+        }
+    } else {
+        false
+    };
+    Ok(Some(Evidence::Failed(reason.into(), globally_unknown)))
+}
+
 fn event(
     c: &Connection,
     id: i64,
     remaining: usize,
     at_head: bool,
     report: &mut ActivityReport,
+    goals: &mut BTreeMap<String, CachedGoal>,
 ) -> Result<Option<Evidence>, StorageError> {
+    let source_start = report.decode_bytes;
     type EventHeader = (String, Option<String>, Option<String>, i64, String, usize);
     let row:Option<EventHeader>=c.prepare_cached("SELECT kind,subkind,run_id,wall_clock_ns,typeof(payload),octet_length(payload) FROM events WHERE id=?1")?.query_row([id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
     let Some((kind, sub, run, at, ty, stored)) = row else {
         return Ok(Some(Evidence::None));
     };
+    if let Some(run) = &run {
+        let deleted: bool = c
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=?1)")?
+            .query_row([run], |r| r.get(0))?;
+        if deleted {
+            return Ok(Some(Evidence::Ignored));
+        }
+    }
     if matches!(
         (kind.as_str(), sub.as_deref()),
         (
@@ -106,7 +262,7 @@ fn event(
         ) | ("Lifecycle", Some("TurnCompleted"))
     ) {
         return Ok(Some(run.map_or(
-            Evidence::Failed("missing run attribution".into()),
+            Evidence::Failed("missing run attribution".into(), false),
             |r| Evidence::Activity(r, at),
         )));
     }
@@ -136,7 +292,13 @@ fn event(
             return Ok(None);
         }
         report.oversized += 1;
-        return Ok(Some(Evidence::Failed("decode budget exceeded".into())));
+        return failed_event(
+            c,
+            &kind,
+            sub.as_deref(),
+            run.as_deref(),
+            "decode budget exceeded",
+        );
     }
     report.decode_bytes += bytes - prefix_bytes;
     let mut stmt = c.prepare_cached("SELECT payload FROM events WHERE id=?1")?;
@@ -147,26 +309,44 @@ fn event(
         rusqlite::types::ValueRef::Blob(v) => {
             let mut data = Vec::with_capacity(plain.min(4096));
             let Ok(decoder) = zstd::stream::read::Decoder::new(v) else {
-                return Ok(Some(Evidence::Failed("invalid compressed source".into())));
+                return failed_event(
+                    c,
+                    &kind,
+                    sub.as_deref(),
+                    run.as_deref(),
+                    "invalid compressed source",
+                );
             };
             if decoder
                 .take(plain as u64 + 1)
                 .read_to_end(&mut data)
                 .is_err()
             {
-                return Ok(Some(Evidence::Failed("invalid compressed source".into())));
+                return failed_event(
+                    c,
+                    &kind,
+                    sub.as_deref(),
+                    run.as_deref(),
+                    "invalid compressed source",
+                );
             }
             if data.len() != plain {
-                return Ok(Some(Evidence::Failed("invalid compressed source".into())));
+                return failed_event(
+                    c,
+                    &kind,
+                    sub.as_deref(),
+                    run.as_deref(),
+                    "invalid compressed source",
+                );
             }
             data
         }
-        _ => return Ok(Some(Evidence::Failed("invalid source".into()))),
+        _ => return failed_event(c, &kind, sub.as_deref(), run.as_deref(), "invalid source"),
     };
     // Token-form bodies need not be resolved: only lifecycle, identity and goal metadata
     // are used. Message activity is header-only. No content_blobs reads occur here.
     let Ok(value) = serde_json::from_slice::<EventKind>(&decoded) else {
-        return Ok(Some(Evidence::Failed("invalid source".into())));
+        return failed_event(c, &kind, sub.as_deref(), run.as_deref(), "invalid source");
     };
     Ok(Some(match value {
         EventKind::Message(
@@ -185,7 +365,31 @@ fn event(
         EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
             let related =
                 serde_json::to_string(&snapshot.related_root_run_ids).map_err(|_| invalid())?;
-            Evidence::Goal(Box::new(snapshot), id, related)
+            let deleted: bool = c.prepare_cached("SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?1) OR EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=?2)")?
+                .query_row(params![snapshot.thread_id,snapshot.root_run_id], |r|r.get(0))?;
+            if deleted {
+                return Ok(Some(Evidence::Ignored));
+            }
+            let decision = match prepare_goal(
+                c,
+                &snapshot,
+                id,
+                report.decode_bytes - source_start,
+                at_head,
+                report,
+                goals,
+            )? {
+                GoalPreparation::Ready(decision) => decision,
+                GoalPreparation::Deferred => return Ok(None),
+                GoalPreparation::Failed(reason) => {
+                    return Ok(Some(Evidence::GoalRejected(
+                        Box::new(snapshot),
+                        id,
+                        reason.into(),
+                    )));
+                }
+            };
+            Evidence::Goal(Box::new(snapshot), id, related, decision)
         }
         EventKind::AgentMessage(event_bus::AgentMessageEvent::Delivered { message, .. }) => {
             Evidence::Delivery(message.message_id, message.recipient_run_id, at)
@@ -203,13 +407,14 @@ fn item(
     scope: String,
     rev: Option<i64>,
     report: &mut ActivityReport,
+    goals: &mut BTreeMap<String, CachedGoal>,
 ) -> Result<Option<Item>, StorageError> {
     let at_head = report.inspected_rows == 0;
     report.inspected_rows += 1;
     let evidence = match source {
         0 => {
             let remaining = ACTIVITY_DECODE_BYTES_PER_TICK - report.decode_bytes;
-            let Some(e) = event(c, id, remaining, at_head, report)? else {
+            let Some(e) = event(c, id, remaining, at_head, report, goals)? else {
                 return Ok(None);
             };
             e
@@ -232,7 +437,7 @@ fn item(
     let pending_scope = scope.clone();
     let scope = match &evidence {
         Evidence::Activity(run, _) | Evidence::Delivery(_, run, _) => run.clone(),
-        Evidence::Goal(g, _, _) => g.root_run_id.clone(),
+        Evidence::Goal(g, _, _, _) | Evidence::GoalRejected(g, _, _) => g.root_run_id.clone(),
         _ => scope,
     };
     let (fallback, legacy) = scope_info(c, &scope)?;
@@ -262,6 +467,7 @@ impl Database {
             cursors: vec![],
             report: ActivityReport::default(),
         };
+        let mut goals = BTreeMap::new();
         let initial_work:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM retention_activity_cursors WHERE complete=0 AND after_id<high_water)",[],|r|r.get(0))?;
         let queue_limit = if initial_work {
             250
@@ -270,7 +476,16 @@ impl Database {
         };
         let queued=tx.prepare("SELECT source,source_id,run_id,revision FROM retention_activity_pending ORDER BY source,source_id,run_id LIMIT ?1")?.query_map([queue_limit],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))?.collect::<Result<Vec<_>,_>>()?;
         for (source, id, scope, rev) in queued {
-            let Some(i) = item(&tx, source, id, scope, Some(rev), &mut page.report)? else {
+            let Some(i) = item(
+                &tx,
+                source,
+                id,
+                scope,
+                Some(rev),
+                &mut page.report,
+                &mut goals,
+            )?
+            else {
                 break;
             };
             page.items.push(i);
@@ -300,7 +515,8 @@ impl Database {
                     complete = true;
                     break;
                 };
-                let Some(i) = item(&tx, source, id, scope, None, &mut page.report)? else {
+                let Some(i) = item(&tx, source, id, scope, None, &mut page.report, &mut goals)?
+                else {
                     break;
                 };
                 after = id;
@@ -359,25 +575,34 @@ fn goal(
     g: &ThreadGoalSnapshot,
     pos: i64,
     related: &str,
-) -> Result<(), StorageError> {
-    let prior:Option<(String,String,i64,String)>=c.prepare_cached("SELECT thread_id,root_run_id,event_id,related FROM retention_activity_goals WHERE goal_id=?1")?.query_row([&g.goal_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    if let Some((thread, root, oldpos, oldrelated)) = &prior {
-        if *oldpos > pos {
-            return Ok(());
-        }
-        let contains = serde_json::from_str::<Vec<String>>(oldrelated)
-            .unwrap_or_default()
-            .contains(&g.root_run_id);
-        if thread != &g.thread_id && contains && !g.related_root_run_ids.contains(root) {
-            return Ok(());
-        }
-        if thread != &g.thread_id {
-            c.prepare_cached("UPDATE retention_activity_bindings SET goal_id=NULL,event_id=?3,uncertain=0 WHERE thread_id=?1 AND goal_id=?2 AND event_id<=?3")?.execute(params![thread,g.goal_id,pos])?;
+    decision: &GoalDecision,
+) -> Result<bool, StorageError> {
+    let prior = c
+        .prepare_cached(
+            "SELECT thread_id,root_run_id,event_id FROM retention_activity_goals WHERE goal_id=?1",
+        )?
+        .query_row([&g.goal_id], |r| {
+            Ok(GoalHeader {
+                thread: r.get(0)?,
+                root: r.get(1)?,
+                position: r.get(2)?,
+            })
+        })
+        .optional()?;
+    if prior != decision.prior {
+        return Ok(false);
+    }
+    if !decision.apply {
+        return Ok(true);
+    }
+    if let Some(old) = prior {
+        if old.thread != g.thread_id {
+            c.prepare_cached("UPDATE retention_activity_bindings SET goal_id=NULL,event_id=?3,uncertain=0 WHERE thread_id=?1 AND goal_id=?2 AND event_id<=?3")?.execute(params![old.thread,g.goal_id,pos])?;
         }
     }
     c.prepare_cached("INSERT INTO retention_activity_goals(goal_id,thread_id,root_run_id,related,complete,event_id) SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?2) AND NOT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=?3) ON CONFLICT(goal_id) DO UPDATE SET thread_id=excluded.thread_id,root_run_id=excluded.root_run_id,related=excluded.related,complete=excluded.complete,event_id=excluded.event_id,uncertain=0 WHERE retention_activity_goals.event_id<=excluded.event_id")?.execute(params![g.goal_id,g.thread_id,g.root_run_id,related,g.phase==ThreadGoalPhase::Complete,pos])?;
     c.prepare_cached("INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?1) ON CONFLICT(thread_id) DO UPDATE SET goal_id=excluded.goal_id,event_id=excluded.event_id,uncertain=0 WHERE retention_activity_bindings.event_id<=excluded.event_id")?.execute(params![g.thread_id,g.goal_id,pos])?;
-    Ok(())
+    Ok(true)
 }
 impl StorageHandle {
     pub fn apply_activity_page(&self, page: ActivityPage) -> Result<ActivityReport, StorageError> {
@@ -404,8 +629,15 @@ impl StorageHandle {
                             let inserted=tx.prepare_cached("INSERT OR IGNORE INTO retention_activity_deliveries VALUES(?1,?2,?3)")?.execute(params![id,run,at])?;
                             if inserted>0{tx.prepare_cached("UPDATE retention_activity_runs SET actual_ns=max(coalesce(actual_ns,?2),?2) WHERE run_id=?1")?.execute(params![run,at])?;}
                         },
-                        Evidence::Goal(g,pos,related)=>goal(&tx,&g,pos,&related)?,
-                        Evidence::Failed(reason)=>{tx.prepare_cached("INSERT INTO retention_activity_failures(source,source_id,run_id,reason) VALUES(?1,?2,?3,?4)")?.execute(params![i.source,i.id,i.scope,reason])?;},
+                        Evidence::Goal(g,pos,related,decision)=>{
+                            if !goal(&tx,&g,pos,&related,&decision)? { report.cas_rejected=true; return Ok(report); }
+                        },
+                        Evidence::GoalRejected(g,pos,reason)=>{
+                            tx.prepare_cached("INSERT INTO retention_activity_failures(source,source_id,run_id,reason) VALUES(?1,?2,?3,?4)")?.execute(params![i.source,i.id,i.scope,reason])?;
+                            tx.prepare_cached("INSERT INTO retention_activity_bindings(thread_id,goal_id,event_id,uncertain) SELECT ?1,NULL,?2,1 WHERE NOT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?1) ON CONFLICT(thread_id) DO UPDATE SET uncertain=1,event_id=excluded.event_id WHERE retention_activity_bindings.event_id<=excluded.event_id")?.execute(params![g.thread_id,pos])?;
+                        },
+                        Evidence::Ignored=>{},
+                        Evidence::Failed(reason,global)=>{tx.prepare_cached("INSERT INTO retention_activity_failures(source,source_id,run_id,reason) VALUES(?1,?2,?3,?4)")?.execute(params![i.source,i.id,if global {""}else{&i.scope},reason])?;},
                         Evidence::None=>{if i.source==0 {tx.prepare_cached("UPDATE retention_activity_goals SET uncertain=1 WHERE event_id=?1")?.execute([i.id])?;}},
                     }
                 }
@@ -425,7 +657,7 @@ impl StorageHandle {
 impl Database {
     /// Direct canonical protection reads, never owner/claim classification.
     pub fn activity_thread_hold(&self, thread: &str) -> Result<Option<&'static str>, StorageError> {
-        let unknown_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_activity_pending p JOIN events e ON p.source=0 AND p.source_id=e.id WHERE e.subkind IS NULL OR (e.kind='Orchestrator' AND e.subkind='ThreadGoalUpdated'))",[],|r|r.get(0))?;
+        let unknown_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_activity_pending p JOIN events e ON p.source=0 AND p.source_id=e.id WHERE e.subkind IS NULL OR (e.kind='Orchestrator' AND e.subkind='ThreadGoalUpdated')) OR EXISTS(SELECT 1 FROM retention_activity_failures WHERE run_id='')",[],|r|r.get(0))?;
         if unknown_goal {
             return Ok(Some("SourceRevisionBehind"));
         }
@@ -475,6 +707,12 @@ impl Database {
 }
 
 fn progress(c: &Connection, r: &mut ActivityReport) -> Result<(), StorageError> {
+    r.global_failures = c.query_row(
+        "SELECT count(*) FROM retention_activity_failures WHERE run_id=''",
+        [],
+        |r| r.get(0),
+    )?;
+    r.global_failure_event_ids = c.prepare_cached("SELECT source_id FROM retention_activity_failures WHERE run_id='' AND source=0 ORDER BY source_id LIMIT 8")?.query_map([], |r|r.get(0))?.collect::<Result<Vec<_>,_>>()?;
     r.pending_sources =
         c.query_row("SELECT count(*) FROM retention_activity_pending", [], |r| {
             r.get(0)

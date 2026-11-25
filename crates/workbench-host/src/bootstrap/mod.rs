@@ -959,6 +959,12 @@ impl BootstrappedHost {
         if let Some(pr) = self.runtime.pull_requests() {
             gates.push(pr.producer_gate());
         }
+        if let Some(reclaim) = &self.reclaim {
+            gates.push(reclaim.producer_gate());
+        }
+        if let Some(archive) = &self.auto_archive {
+            gates.push(archive.producer_gate());
+        }
         gates
     }
 

@@ -189,6 +189,9 @@ fn exact_decode_boundary_deferral_and_oversized_rows_are_bounded() {
     assert_eq!(report.decode_bytes, ACTIVITY_DECODE_BYTES_PER_TICK);
     assert!(f.reader.activity_goal_protected("thread").unwrap());
     payload.push(' ');
+    // The oversized row has a known family; the global unknown-root contract
+    // is tested separately below. Other known families must still progress.
+    f.reader.conn.execute("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('oversized','other-thread','oversized',0)", []).unwrap();
     f.reader.conn.execute("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) VALUES(1,0,'Orchestrator','ThreadGoalUpdated','oversized',1,?1)",[&payload]).unwrap();
     let report = f.tick();
     assert_eq!(report.oversized, 1);
@@ -218,7 +221,14 @@ fn goal_transfer_complete_and_replacement_never_resurrect_an_old_binding() {
     f.drain();
     assert!(!f.reader.activity_goal_protected("A").unwrap());
     assert!(!f.reader.activity_goal_protected("B").unwrap());
-    super::goal(&f.reader.conn, &g1, 1, "[]").unwrap();
+    let mut cache = std::collections::BTreeMap::new();
+    let mut report = ActivityReport::default();
+    let GoalPreparation::Ready(decision) =
+        prepare_goal(&f.reader.conn, &g1, 1, 0, true, &mut report, &mut cache).unwrap()
+    else {
+        panic!("small goal fits");
+    };
+    assert!(super::goal(&f.reader.conn, &g1, 1, "[]", &decision).unwrap());
     assert!(!f.reader.activity_goal_protected("A").unwrap());
     let mut stale = g2;
     stale.thread_id = "A".into();
@@ -430,4 +440,190 @@ fn initial_high_water_finishes_while_new_events_continue_to_arrive() {
     );
     f.drain();
     assert!(f.reader.run_activity("new").unwrap().ready);
+}
+
+#[test]
+fn prior_goal_lineage_is_budgeted_at_the_exact_boundary_and_scopes_oversize_failure() {
+    for excess in [0, 1] {
+        let f = Fixture::new();
+        f.drain();
+        f.insert(
+            snapshot(goal("g", "a", "old", ThreadGoalPhase::Complete)),
+            1,
+        );
+        f.drain();
+        let event = snapshot(goal("g", "b", "new", ThreadGoalPhase::Working));
+        let source_bytes = serde_json::to_vec(&event).unwrap().len();
+        let prefix = serde_json::to_string(&vec!["new"]).unwrap();
+        let lineage_bytes = ACTIVITY_DECODE_BYTES_PER_TICK - source_bytes + excess;
+        let related = prefix.clone() + &" ".repeat(lineage_bytes - prefix.len());
+        f.reader
+            .conn
+            .execute(
+                "UPDATE retention_activity_goals SET related=?1 WHERE goal_id='g'",
+                [related],
+            )
+            .unwrap();
+        f.insert(event, 2);
+        f.insert(message("healthy"), 3);
+        let report = f.tick();
+        assert_eq!(report.oversized, excess);
+        assert!(!report.cas_rejected);
+        assert_eq!(
+            report.decode_bytes,
+            if excess == 0 {
+                ACTIVITY_DECODE_BYTES_PER_TICK
+            } else {
+                source_bytes
+            }
+        );
+        assert_eq!(f.reader.activity_goal_protected("b").unwrap(), excess != 0);
+        assert_eq!(f.reader.run_activity("new").unwrap().ready, excess == 0);
+        // The bad goal does not consume another candidate's progress or create
+        // global uncertainty. Header-only message activity costs no decode bytes.
+        let healthy = f.reader.run_activity("healthy").unwrap();
+        assert!(healthy.ready);
+        assert_eq!(healthy.last_actual_activity_at, Some(3));
+        let thread: String = f
+            .reader
+            .conn
+            .query_row(
+                "SELECT thread_id FROM retention_activity_goals WHERE goal_id='g'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread, "a");
+    }
+}
+
+#[test]
+fn repeated_goal_snapshots_reuse_reader_lineage_and_defer_before_another_payload() {
+    let f = Fixture::new();
+    f.drain();
+    f.insert(
+        snapshot(goal("g", "a", "old", ThreadGoalPhase::Complete)),
+        1,
+    );
+    f.drain();
+    let prefix = serde_json::to_string(&vec!["new"]).unwrap();
+    let lineage_bytes = ACTIVITY_DECODE_BYTES_PER_TICK / 2;
+    f.reader
+        .conn
+        .execute(
+            "UPDATE retention_activity_goals SET related=?1 WHERE goal_id='g'",
+            [prefix.clone() + &" ".repeat(lineage_bytes - prefix.len())],
+        )
+        .unwrap();
+    let mut g = goal("g", "b", "new", ThreadGoalPhase::Working);
+    g.objective = "x".repeat(2_000);
+    let event = snapshot(g);
+    let source_bytes = serde_json::to_vec(&event).unwrap().len();
+    for _ in 0..ACTIVITY_ROWS_PER_TICK {
+        f.insert(event.clone(), 2);
+    }
+    let report = f.tick();
+    assert_eq!(report.oversized, 0);
+    assert!(report.inspected_rows > 1 && report.inspected_rows < ACTIVITY_ROWS_PER_TICK);
+    assert_eq!(
+        report.decode_bytes,
+        lineage_bytes + (report.inspected_rows - 1) * source_bytes
+    );
+    assert!(report.pending_sources > 0);
+    f.drain();
+    assert!(!f.reader.activity_goal_protected("b").unwrap());
+}
+
+#[test]
+fn another_projection_commit_rejects_a_stale_reader_goal_decision() {
+    let f = Fixture::new();
+    f.drain();
+    f.insert(snapshot(goal("g", "a", "old", ThreadGoalPhase::Working)), 1);
+    f.drain();
+    let mut transferred = goal("g", "b", "new", ThreadGoalPhase::Complete);
+    transferred.related_root_run_ids = vec!["old".into()];
+    f.insert(snapshot(transferred), 2);
+    let first = f.reader.activity_page().unwrap();
+    let stale = f.reader.activity_page().unwrap();
+    assert!(
+        !f.storage
+            .handle()
+            .apply_activity_page(first)
+            .unwrap()
+            .cas_rejected
+    );
+    assert!(
+        f.storage
+            .handle()
+            .apply_activity_page(stale)
+            .unwrap()
+            .cas_rejected
+    );
+    assert!(!f.reader.activity_goal_protected("a").unwrap());
+    assert!(!f.reader.activity_goal_protected("b").unwrap());
+    let current: String = f
+        .reader
+        .conn
+        .query_row(
+            "SELECT thread_id FROM retention_activity_goals WHERE goal_id='g'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(current, "b");
+}
+
+#[test]
+fn unreadable_goal_with_unknown_root_holds_globally_and_reports_bounded_ids_until_removed() {
+    let f = Fixture::new();
+    f.insert(
+        snapshot(goal(
+            "g",
+            "old-thread",
+            "old-root",
+            ThreadGoalPhase::Complete,
+        )),
+        1,
+    );
+    f.insert(message("old-root"), 1);
+    f.drain();
+    let mut g = goal("g", "old-thread", "unbound-root", ThreadGoalPhase::Working);
+    g.objective = "x".repeat(ACTIVITY_DECODE_BYTES_PER_TICK + 1);
+    let id = f.insert(snapshot(g), 2);
+    f.drain();
+    let report = f.reader.activity_report().unwrap();
+    assert_eq!(report.global_failures, 1);
+    assert_eq!(report.global_failure_event_ids, [id]);
+    assert_eq!(
+        f.reader.activity_thread_hold("old-thread").unwrap(),
+        Some("SourceRevisionBehind")
+    );
+    assert!(!f.reader.run_activity("old-root").unwrap().ready);
+    f.reader
+        .conn
+        .execute("DELETE FROM events WHERE id=?1", [id])
+        .unwrap();
+    f.drain();
+    assert_eq!(f.reader.activity_report().unwrap().global_failures, 0);
+    assert_eq!(f.reader.activity_thread_hold("old-thread").unwrap(), None);
+    assert!(f.reader.run_activity("old-root").unwrap().ready);
+}
+
+#[test]
+fn unreadable_goal_with_unique_header_binding_holds_only_its_run_family() {
+    let f = Fixture::new();
+    f.reader.conn.execute("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES('bound-root','source-thread','bound-root',0)", []).unwrap();
+    f.insert(message("bound-root"), 1);
+    f.insert(message("unrelated-root"), 1);
+    let mut g = goal("g", "child-thread", "bound-root", ThreadGoalPhase::Working);
+    g.objective = "x".repeat(ACTIVITY_DECODE_BYTES_PER_TICK + 1);
+    f.insert(snapshot(g), 2);
+    f.drain();
+    assert_eq!(f.reader.activity_report().unwrap().global_failures, 0);
+    assert!(!f.reader.run_activity("bound-root").unwrap().ready);
+    assert!(f.reader.run_activity("unrelated-root").unwrap().ready);
+    assert_eq!(
+        f.reader.activity_thread_hold("unrelated-thread").unwrap(),
+        None
+    );
 }

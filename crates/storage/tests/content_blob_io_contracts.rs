@@ -150,7 +150,12 @@ const C_GC: u64 = 24;
 // The history-only v39 -> latest probe measured 456/721 frames for 10/100,000 rows
 // (434/681 at v72), with 218,982 VM steps at both sizes. Reserve the 40 fixed
 // schema frames at 100,000 rows; collection and VM scaling budgets are unchanged.
-const MIGRATION_FRAMES: u64 = 24
+// v75 adds activity/goal schema, bounded cursor seeds and source/fence triggers.
+// The full probe measured 495/791 frames and exactly 221,082 VM steps at both
+// 10 and 100,000 thread_runs rows (70 fixed frames above v74 at the large size).
+// Add that measured fixed cost; retain collection and VM-step scaling budgets.
+const MIGRATION_FRAMES: u64 = 70
+    + 24
     + 280
     + 40
     + 32
@@ -410,6 +415,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v75.sql"),
                     include_str!("../undo/undo_v74.sql"),
                     include_str!("../undo/undo_v73.sql"),
                     include_str!("../undo/undo_v72.sql"),

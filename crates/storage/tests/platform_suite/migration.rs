@@ -12,9 +12,18 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 74;
+const LATEST_SCHEMA: u32 = 75;
 
-const EXPECTED_TABLES: [&str; 135] = [
+const EXPECTED_TABLES: [&str; 144] = [
+    "retention_activity_control",
+    "retention_activity_cursors",
+    "retention_activity_sources",
+    "retention_activity_pending",
+    "retention_activity_runs",
+    "retention_activity_goals",
+    "retention_activity_bindings",
+    "retention_activity_deliveries",
+    "retention_activity_failures",
     "history_control",
     "history_run_state",
     "history_event_cuts",
@@ -152,7 +161,13 @@ const EXPECTED_TABLES: [&str; 135] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 106] = [
+const EXPECTED_INDICES: [&str; 112] = [
+    "idx_retention_activity_failures_run",
+    "idx_retention_questions_root_pending",
+    "retention_activity_candidates",
+    "retention_activity_deliveries_run",
+    "retention_activity_goals_thread",
+    "retention_activity_pending_run",
     "idx_history_discovery",
     "idx_history_merge",
     "cli_continuity_live",
@@ -1348,6 +1363,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v75.sql"),
                 include_str!("../../undo/undo_v74.sql"),
                 include_str!("../../undo/undo_v73.sql"),
                 include_str!("../../undo/undo_v72.sql"),

@@ -562,11 +562,12 @@ archived_delete_after_days = 7
 - 活動は新規メッセージ受理・確定、実行開始・実再開・実行／ターン終了に限定する。閲覧、goal/lane/usage、索引再構築、復元再公開、backfill 処理時刻は活動ではない。family 全 member の実活動と legacy 上界の最大から 24 時間×日数を数え、境界以上で到達する。
 - 既存 run に活動証拠がない場合だけ、最初に処理した run_contexts.updated_at_ns を別の上界として一回記録する。上界もない既存 run は保留。移行後作成の適用済み run は活動なしとして thread 作成時刻を基準にする。
 - pin、実行・開始待ち・復元/wake/compaction 進行中、現在の未完了 goal（Complete 以外）、評価サンプル、未回答質問（子・継承先含む）、open attached/summary lane、未適用・関係不明は family 全体を保護する。通常のターン間待機は実行中と混同しない。
-- source trigger と投影は履歴索引から独立している。reclaim-lock を持つ既存 ReclaimWorker が reader で抽出し writer で CAS 適用する。5 秒周期、全 source 合計 500 検査行・復号読込み 2,097,152 B/tick。失敗・skip・競合も予算を消費する。ヘッダだけで活動が分かるイベントは payload を読まない。外部本文は解決しない。超過行は復号せず対象を保留し cursor を進める。
+- source trigger と投影は履歴索引から独立している。reclaim-lock を持つ既存 ReclaimWorker が reader で抽出し writer で CAS 適用する。5 秒周期、全 source 合計 500 検査行・復号読込み 2,097,152 B/tick。失敗・skip・競合も予算を消費する。ヘッダだけで活動が分かるイベントは payload を読まない。外部本文は解決しない。超過行は復号せず対象を保留し cursor を進める。 復号予算には既存 goal 投影の lineage JSON も含め、reader で長さを先に確認する。同一 tick 内の同じ lineage は復号済み値を再利用し、writer は revision と固定長ヘッダだけを検査する。
+- 読めない goal の帰属は、ヘッダ run が thread_runs で一意に結合されていればその run/family に限って保留する（通常の goal 移譲は同一 sidebar family 内という仮定）。未結合・複数結合で帰属不能なら全候補を保留し、global_failures と最大 8 件の event ID を本文なしで診断する。破損元の修復／削除と再走査まで保留は残る。PR1 に修復 CLI は追加しない。PR2 で帰属不明データの運用と別 family への移譲を再検討する。
 - 自動処理は専用スレッドで host mutex を try_lock できたときだけ動く。前景の handler、Busy 契約、手動 archive の attachment→sidebar lock と同期削除は維持する。最終再検査から rename までの残る admission 窓は許容し、後続操作には既存の archived family の扱いを適用する。新しい intent 保留や arbitration は置かない。
 - 1 tick は最大 1 family publish、remove_thread 1 呼出し（既存 4096 entry 有界削除）、scratch hint 1 member。sidebar の archived 状態が添付整理の唯一の durable intent で、cursor はメモリ上。restore は従来どおり残存添付の整理を先に完了する。symlink を辿らず root 外を消さない。失敗で archive 時刻を戻さない。
 - scratch は手動と同じ既存 hint のみ。hint 再送は許容するが、プロセス内状態・lease の制約により古い thread などを回収できない場合がある。hint 発行は scratch 削除の durable 完了を意味しない。
-- backfill backlog・将来の期限・通常 tick は idle の busy 理由ではない。保守だけのために core を常駐させない（idle_grace_secs 既定 60 秒）。停止中は別 daemon が処理せず、次回稼働時に再開する。停止時は新規 tick を止め、worker の writer ACK と join を bridge flush／storage barrier より前に確認する。
+- backfill backlog・将来の期限・通常 tick は idle の busy 理由ではない。保守だけのために core を常駐させない（idle_grace_secs 既定 60 秒）。停止中は別 daemon が処理せず、次回稼働時に再開する。planned exit の準備時は既存 ProducerGate で retention producer も pause／drain し、取消時は再開する。停止時は新規 tick を止め、worker の writer ACK と join を bridge flush／storage barrier より前に確認する。
 - 診断は thread_retention の構造化ログと有界 RetentionReport。本文は記録せず、同じ理由を毎 tick 再出力しない。AttachmentCleanupPending は未完了と失敗をまとめた区分。
 
 ### Sidebar 計測の採用条件
