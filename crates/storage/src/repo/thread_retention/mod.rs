@@ -16,6 +16,7 @@ mod candidates;
 pub(crate) mod catalog;
 mod closure;
 mod confirm;
+pub(crate) mod online;
 pub(crate) mod reclaim;
 
 pub(crate) use candidates::schedule;

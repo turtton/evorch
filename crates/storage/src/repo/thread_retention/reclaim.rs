@@ -1382,40 +1382,54 @@ fn count(conn: &Connection, source: &str) -> Result<u64, StorageError> {
     )?)
 }
 
-/// Runs up to `budget.max_transactions` reclaim transactions over the pending
-/// jobs in family order. Reads only when nothing is pending.
-pub(crate) fn reclaim_step(
-    conn: &Connection,
-    budget: ReclaimBudget,
-) -> Result<ReclaimProgress, StorageError> {
-    reclaim_step_in(conn, budget, Layout::Current)
-}
-
-/// [`reclaim_step`] for a database in either run layout.
+/// Bounded reclaim for the exclusive startup wrapper, in either run layout.
 pub(crate) fn reclaim_step_in(
     conn: &Connection,
     budget: ReclaimBudget,
     layout: Layout,
 ) -> Result<ReclaimProgress, StorageError> {
+    reclaim_step_rotating_in(conn, budget, layout, None).map(|(progress, _)| progress)
+}
+
+/// An in-memory cursor for the live writer: even an errored family advances it.
+/// The exclusive startup wrapper retains its original from-start behavior.
+pub(crate) fn reclaim_step_rotating(
+    conn: &Connection,
+    budget: ReclaimBudget,
+    after: Option<&str>,
+) -> Result<(ReclaimProgress, Option<String>), StorageError> {
+    reclaim_step_rotating_in(conn, budget, Layout::Current, after)
+}
+fn reclaim_step_rotating_in(
+    conn: &Connection,
+    budget: ReclaimBudget,
+    layout: Layout,
+    after: Option<&str>,
+) -> Result<(ReclaimProgress, Option<String>), StorageError> {
     let mut progress = ReclaimProgress::default();
-    let families: Vec<String> = {
-        // Every job takes at least one transaction, so the budget bounds the list.
+    let page = |after: &str| -> Result<Vec<String>, StorageError> {
         let mut statement = conn.prepare_cached(
             "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_runnable \
-             WHERE state = 'db_pending' AND waiting_exclusive = 0 \
-             ORDER BY family_key LIMIT ?1",
+             WHERE state = 'db_pending' AND waiting_exclusive = 0 AND family_key > ?1 \
+             ORDER BY family_key LIMIT ?2",
         )?;
-        statement
-            .query_map([i64::from(budget.max_transactions)], |row| {
-                row.get::<_, String>(0)
+        Ok(statement
+            .query_map(params![after, i64::from(budget.max_transactions)], |row| {
+                row.get(0)
             })?
-            .collect::<Result<_, _>>()?
+            .collect::<Result<_, _>>()?)
     };
+    let mut families = page(after.unwrap_or(""))?;
+    if families.is_empty() && after.is_some() {
+        families = page("")?;
+    }
+    let mut cursor = None;
     'jobs: for family in &families {
         loop {
             if progress.transactions >= budget.max_transactions {
                 break 'jobs;
             }
+            cursor = Some(family.clone());
             let (work, finished) = match step_job(conn, family, layout) {
                 Ok(result) => result,
                 Err(error) => {
@@ -1448,7 +1462,7 @@ pub(crate) fn reclaim_step_in(
         "FROM reclaim_jobs WHERE state IN ('db_done', 'files_pending', 'done', 'files_failed')",
     )?;
     progress.oversized_pending = count(conn, "FROM reclaim_oversized")?;
-    Ok(progress)
+    Ok((progress, cursor))
 }
 
 /// Deletes oversized rows smallest first, one bounded transaction each, until

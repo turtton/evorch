@@ -80,6 +80,7 @@ pub(super) fn scope(command: &Command) -> Option<Option<String>> {
         | Command::ReclaimMarkFiles(..)
         | Command::RecordArtifactRef(..)
         | Command::RemoveArtifactRefs(..)
+        | Command::ConfirmRetentionOnline(..)
         | Command::EnsureRetentionBinding(..)
         | Command::RetentionBackfillStep(..)
         | Command::DiagnosticCleanupStatus(..)

@@ -208,7 +208,9 @@ impl ReclaimWorker {
     }
 
     fn reclaim(&mut self, report: &mut ExecutorReport) {
-        match self.config.handle.reclaim_step(ReclaimBudget::default()) {
+        match self.config.handle.reclaim_step(ReclaimBudget {
+            max_transactions: 1,
+        }) {
             Ok(step) => {
                 report.rows_reclaimed = step.rows;
                 report.jobs_db_pending = step.jobs_db_pending;

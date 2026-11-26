@@ -218,6 +218,13 @@ enum Command {
     RecordArtifactRef(crate::artifact_refs::ArtifactRef, ReplyTx),
     RemoveArtifactRefs(Vec<String>, ReplyTx<usize>),
     RetentionBackfillStep(usize, ReplyTx<crate::BackfillProgress>),
+    ConfirmRetentionOnline(
+        Arc<crate::WriterLeases>,
+        crate::thread_retention::online::OnlineRequest,
+        crate::thread_retention::online::OnlineBudget,
+        Arc<dyn crate::thread_retention::online::CommitFence>,
+        ReplyTx<crate::thread_retention::online::OnlineOutcome>,
+    ),
     EnsureRetentionBinding(
         Arc<crate::WriterLeases>,
         crate::thread_retention::BindingInput,
@@ -476,7 +483,7 @@ impl StorageHandle {
     }
 
     /// Core-local memory-only registration retained through the synchronous writer ACK.
-    /// The callback must not perform I/O, wait, or acquire another lock.
+    /// The callback must not perform I/O or acquire non-admission locks.
     pub fn install_request_admission(
         &self,
         factory: Arc<dyn Fn(Option<String>) -> Box<dyn MutationAdmission> + Send + Sync>,
@@ -488,6 +495,18 @@ impl StorageHandle {
     }
 
     /// Validate a scoped capability against this writer, not a caller-supplied DB path.
+    pub fn confirm_retention_online(
+        &self,
+        authority: &crate::thread_retention::AutoArchiveAuthority<'_>,
+        request: crate::thread_retention::online::OnlineRequest,
+        budget: crate::thread_retention::online::OnlineBudget,
+        fence: Arc<dyn crate::thread_retention::online::CommitFence>,
+    ) -> Result<crate::thread_retention::online::OnlineOutcome, StorageError> {
+        let leases = authority.owned_leases();
+        self.request(|reply| Command::ConfirmRetentionOnline(leases, request, budget, fence, reply))
+    }
+
+    /// Establish the DB half after the ownership-root binding is durable.
     pub fn ensure_retention_binding(
         &self,
         authority: &crate::thread_retention::AutoArchiveAuthority<'_>,

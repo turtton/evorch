@@ -53,6 +53,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     // are identical. The full-chain probe separately covers root-page relocation.
     sql.execute_batch(&format!("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x < {rows}-1) INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) SELECT printf('run-%07d',x),'t','run-0000000',0 FROM n; WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x < {rows}-1) INSERT INTO resume_intents(run_id,incarnation,payload) SELECT printf('run-%07d',x),'old','{{}}' FROM n;")).unwrap();
     sql.execute_batch(concat!(
+        include_str!("../undo/undo_v77.sql"),
         include_str!("../undo/undo_v76.sql"),
         include_str!("../undo/undo_v75.sql"),
         include_str!("../undo/undo_v74.sql"),

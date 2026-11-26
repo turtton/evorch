@@ -12,7 +12,7 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 76;
+const LATEST_SCHEMA: u32 = 77;
 
 const EXPECTED_TABLES: [&str; 136] = [
     "history_control",
@@ -153,7 +153,12 @@ const EXPECTED_TABLES: [&str; 136] = [
     "conversation_plan_history",
 ];
 
-const EXPECTED_INDICES: [&str; 110] = [
+const EXPECTED_INDICES: [&str; 115] = [
+    "pr_auto_fix_destination",
+    "lane_recovery_destination",
+    "lane_recovery_saved_root",
+    "lane_management_projection_pending",
+    "recovery_claim_members_run",
     "idx_retention_questions_root_pending",
     "idx_events_goal_by_run",
     "host_input_receipts_run_accepted",
@@ -1353,6 +1358,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v77.sql"),
                 include_str!("../../undo/undo_v76.sql"),
                 include_str!("../../undo/undo_v75.sql"),
                 include_str!("../../undo/undo_v74.sql"),

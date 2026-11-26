@@ -446,21 +446,32 @@ impl Database {
         budget: &DecisionBudget,
     ) -> Result<Decision, StorageError> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut reader = Reader {
-            conn: &tx,
-            budget,
-            stats: DecisionStats::default(),
-        };
-        let verdict = match reader.run(family, cutoff_ns) {
-            Ok(()) => Verdict::Due,
-            Err(Ok(h)) => Verdict::Hold(h),
-            Err(Err(e)) => return Err(e),
-        };
-        Ok(Decision {
-            verdict,
-            stats: reader.stats,
-        })
+        decide_on_connection(&tx, family, cutoff_ns, budget)
     }
+}
+
+/// The canonical plan-C decision, also used inside the online writer's IMMEDIATE
+/// transaction. This function neither starts nor commits a transaction.
+pub(crate) fn decide_on_connection(
+    conn: &Connection,
+    family: &[FamilyMember],
+    cutoff_ns: i64,
+    budget: &DecisionBudget,
+) -> Result<Decision, StorageError> {
+    let mut reader = Reader {
+        conn,
+        budget,
+        stats: DecisionStats::default(),
+    };
+    let verdict = match reader.run(family, cutoff_ns) {
+        Ok(()) => Verdict::Due,
+        Err(Ok(h)) => Verdict::Hold(h),
+        Err(Err(e)) => return Err(e),
+    };
+    Ok(Decision {
+        verdict,
+        stats: reader.stats,
+    })
 }
 
 fn json<T: serde::Serialize + ?Sized>(value: &T) -> Hit<String> {
