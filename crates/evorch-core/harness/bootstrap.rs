@@ -248,6 +248,7 @@ mod linux {
                         "status":"ready", "pid":std::process::id(), "epoch":2,
                         "services":host.services.names().collect::<Vec<_>>(),
                         "agents":host.runtime.list_agents().len(),
+                        "retention_inactive":host.tick_retention_for_test(123_000_000).is_err(),
                         "probe":host.planned_probe_stats().map(|s| serde_json::json!({"registered":s.registered,"reaped":s.reaped,"unconfirmed":s.unconfirmed})),
                         "timings_ms":measurements.0.iter()
                             .map(|(s,d)|(format!("{s:?}"),d.as_secs_f64()*1000.))
@@ -258,10 +259,12 @@ mod linux {
                     // production hook only after the parent has audited Ready.
                     host.activate_after_ready(&evorch_core::recovery_service::CoreGraphRecovery)
                         .await?;
+                    let retention = host.tick_retention_for_test(123_000_000)?;
                     say(serde_json::json!({
                         "status":"activated",
                         "services":host.services.names().collect::<Vec<_>>(),
                         "admin_read":host.admin.reader().read(|| Ok(123u64)).await.unwrap(),
+                        "retention_holds":retention.holds,
                     }));
                     host.shutdown().await?;
                     drop(listener);

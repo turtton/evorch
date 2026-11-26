@@ -960,18 +960,9 @@ async fn lane_operations_on_the_screen_reach_the_ledger_and_survive_a_thread_swi
     waiting(&world.boot.runtime, lane.root_run_id).await;
     // The workspace puts both threads in the lead's project; the ledger requires that before a
     // detached lane can be attached to its lead again.
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
+    let side = world.boot.storage_writer().clone();
     let project_root = world._dir.path().canonicalize().unwrap();
-    side.handle()
+    side.clone()
         .upsert_threads_host(&[LEAD, lane.thread_id.as_str()].map(|thread| {
             storage::threads::ThreadUpsert {
                 thread_id: thread.to_owned(),
@@ -1343,18 +1334,9 @@ async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_t
 
     // The lane reports again, as its run does: the ledger lifts the close and the core
     // announces the report.
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
+    let side = world.boot.storage_writer().clone();
     let appended = side
-        .handle()
+        .clone()
         .append_lane_report_with_delivery(
             lane.lane_id.clone(),
             seen.management_revision.0,
@@ -1395,17 +1377,8 @@ async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_rep
     let world = start().await;
     // The team board is the lead thread's persisted one, written through the real board (a
     // claim included) the way a coordinator saves it; the core reads it as a restarted one would.
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
-    side.handle()
+    let side = world.boot.storage_writer().clone();
+    side.clone()
         .upsert_threads_host(&[storage::threads::ThreadUpsert {
             thread_id: LEAD.to_owned(),
             project_id: Some(world.project.as_str().to_owned()),
@@ -1422,7 +1395,7 @@ async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_rep
         }])
         .unwrap();
     let board = runtime::team::TeamBoard::durable(
-        side.handle(),
+        side.clone(),
         format!("{}:{LEAD}", world.project.as_str()),
     );
     for (id, path) in [
@@ -1522,18 +1495,9 @@ async fn a_detached_lane_past_the_first_page_is_shown_and_reattached_from_the_sc
         waiting(&world.boot.runtime, lane.root_run_id).await;
         lanes.push(lane);
     }
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
+    let side = world.boot.storage_writer().clone();
     let project_root = world._dir.path().canonicalize().unwrap();
-    side.handle()
+    side.clone()
         .upsert_threads_host(
             &std::iter::once(LEAD.to_owned())
                 .chain(lanes.iter().map(|lane| lane.thread_id.clone()))
@@ -1789,17 +1753,8 @@ async fn a_run_history_past_the_first_page_is_paged_and_drilled_into_with_the_po
 async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view() {
     let world = start().await;
     let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
-    side.handle()
+    let side = world.boot.storage_writer().clone();
+    side.clone()
         .upsert_threads_host(&[storage::threads::ThreadUpsert {
             thread_id: LEAD.to_owned(),
             project_id: Some(world.project.as_str().to_owned()),
@@ -1816,7 +1771,7 @@ async fn a_task_past_the_first_page_is_paged_and_opened_with_its_detail_in_view(
         }])
         .unwrap();
     let board = runtime::team::TeamBoard::durable(
-        side.handle(),
+        side.clone(),
         format!("{}:{LEAD}", world.project.as_str()),
     );
     let id = |n: usize| format!("task-{n:03}");
@@ -1863,17 +1818,8 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
     let world = start().await;
     let count = workbench_protocol::limits::DEFAULT_PAGE_SIZE as usize + 1;
     // The ledger is written first: the runs below keep the database busy.
-    let side = storage::Storage::open(storage::StorageConfig {
-        db_path: world
-            ._dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("evorch-events.db"),
-        ..Default::default()
-    })
-    .unwrap();
-    side.handle()
+    let side = world.boot.storage_writer().clone();
+    side.clone()
         .upsert_threads_host(&[storage::threads::ThreadUpsert {
             thread_id: LEAD.to_owned(),
             project_id: Some(world.project.as_str().to_owned()),
@@ -1890,7 +1836,7 @@ async fn the_conversation_controls_stay_in_view_beside_a_screenful_of_features()
         }])
         .unwrap();
     let board = runtime::team::TeamBoard::durable(
-        side.handle(),
+        side.clone(),
         format!("{}:{LEAD}", world.project.as_str()),
     );
     for n in 0..count {

@@ -7,6 +7,7 @@ pub(crate) mod offline;
 pub(crate) mod retention;
 pub(crate) mod retention_events;
 mod vacuum;
+pub mod writer_leases;
 
 pub use compact::{CompactOptions, CompactSummary, DeltaMode, backfill_events, compact_events};
 #[cfg(any(test, feature = "unchecked-open"))]

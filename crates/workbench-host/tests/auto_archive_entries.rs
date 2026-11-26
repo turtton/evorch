@@ -48,7 +48,7 @@ fn workspace_attachment_and_shutdown_entries_have_canonical_lock_or_admission_ro
         (
             "areas/workspace.rs",
             "command declare_saved project_entries query register_thread retention_entries sidebar_threads with_mirror with_scratch_hint with_store",
-            "G4/G8 delegated/exempt: core entries run under CommandHost mutex and reload canonical membership/pin/archive under sidebar lock. Automatic work holds the same host mutex via try_lock. Constructors/queries introduce no execution admission.",
+            "G4/G8 delegated/exempt: core entries run under CommandHost mutex and reload canonical membership/pin/archive under sidebar lock. Archive publication holds the same host mutex via try_lock; binding establishment and writer ACK run outside it. This exemption is for reversible archive only, not PR2b deletion. Constructors/queries introduce no execution admission.",
         ),
         (
             "attachments.rs",
@@ -63,7 +63,7 @@ fn workspace_attachment_and_shutdown_entries_have_canonical_lock_or_admission_ro
         (
             "bootstrap/mod.rs",
             "activate_after_ready area_work_notify graph_collector open open_claimed_for_core open_for_core open_for_core_with_test_seams open_with_mcp_test_seams open_with_service_observer open_with_service_seams open_with_test_seams planned_probe_stats probe_after_ready quiesce_for_restart restart_preparing_services restart_producers shutdown storage_config storage_writer",
-            "G10 delegated: production owners receive no authority; restart_producers pauses/drains retention and shutdown joins before storage barrier. Constructors, probes and test seams cannot grant authority.",
+            "G10 delegated: production owners borrow dedicated DB/root writer authority; restart_producers pauses/drains retention and shutdown joins before storage barrier. Probes/test seams cannot forge authority; missing root stays disabled until restart.",
         ),
         (
             "bootstrap/planned_exit.rs",

@@ -120,6 +120,7 @@ pub use maintenance::offline::{
     ExclusiveLeases, RecoveryStartupComplete, SharedLeases, improvement_lease, reclaim_lease,
     shared_with_wait, try_exclusive,
 };
+pub use maintenance::writer_leases::{DbWriterLease, WRITER_LEASE_WAIT, WriterLeases};
 pub use migrations::backfill::{
     BackfillProgress, DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
 };

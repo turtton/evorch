@@ -334,6 +334,7 @@ async fn what_a_user_granted_is_declared_again_after_the_core_restarts() {
         vec![extra.canonicalize().unwrap()]
     );
     w.core.shutdown().await.unwrap();
+    drop(w.core);
 
     let mut again = open(&w.root, w.dir.sockets()).await;
     assert_eq!(

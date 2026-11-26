@@ -384,6 +384,7 @@ async fn check_success(scenario: &str) {
     assert_eq!(ready["pid"], old["pid"]);
     assert_eq!(ready["services"], serde_json::json!([]));
     assert_eq!(ready["agents"], 0);
+    assert_eq!(ready["retention_inactive"], true);
     assert_eq!(
         f.database()
             .restart_transaction("restart")
@@ -405,6 +406,13 @@ async fn check_success(scenario: &str) {
         );
     }
     assert_eq!(activated["admin_read"], 123);
+    assert!(
+        !activated["retention_holds"]
+            .as_object()
+            .unwrap()
+            .contains_key("AuthorityUnavailable"),
+        "the activated successor must retain both writer leases"
+    );
     assert!(f.child.wait().unwrap().success());
 }
 

@@ -424,13 +424,16 @@ fn gui_factory(
     core: &BootstrappedHost,
     model: Arc<Model>,
 ) -> (
-    storage::Storage,
+    storage::StorageHandle,
     AgentRuntime,
     Arc<OwnerHost>,
     services::BackgroundServices,
 ) {
     let db = components::storage_config(&core.config, dir.path().join("evorch-events.db"));
-    learning_factory(dir, &core.config, model, db)
+    let writer = core.storage_writer().clone();
+    let (runtime, owner, services) =
+        learning_factory_with_writer(dir, &core.config, model, db, writer.clone());
+    (writer, runtime, owner, services)
 }
 
 fn learning_factory(
@@ -444,9 +447,22 @@ fn learning_factory(
     Arc<OwnerHost>,
     services::BackgroundServices,
 ) {
+    let store = storage::Storage::open(db.clone()).unwrap();
+    let (runtime, owner, services) =
+        learning_factory_with_writer(dir, config, model, db, store.handle());
+    (store, runtime, owner, services)
+}
+
+// Resident logical runtimes use the core's existing writer, never a second DB writer.
+fn learning_factory_with_writer(
+    dir: &test_socket_dir::SplitDir,
+    config: &config::Config,
+    model: Arc<Model>,
+    db: storage::StorageConfig,
+    writer: storage::StorageHandle,
+) -> (AgentRuntime, Arc<OwnerHost>, services::BackgroundServices) {
     // Construct precisely the factory the legacy GUI calls, on a second runtime.
     let bus = Arc::new(EventBus::new(64));
-    let store = storage::Storage::open(db.clone()).unwrap();
     let gui_owner =
         Arc::new(OwnerHost::open(dir.sockets(), config.ownership.clone(), bus.clone()).unwrap());
     let gui = learning::configure(
@@ -457,7 +473,7 @@ fn learning_factory(
         ),
         config,
         db.clone(),
-        store.handle(),
+        writer,
         dir.path(),
     );
     let mut services = services::BackgroundServices::default();
@@ -479,7 +495,7 @@ fn learning_factory(
         evaluation,
     )
     .unwrap();
-    (store, gui, gui_owner, services)
+    (gui, gui_owner, services)
 }
 
 #[tokio::test]
@@ -559,9 +575,17 @@ async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exi
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
-    let mut first = open(&dir, model.clone()).await;
-    let (_store, remaining, _owner, mut services) = gui_factory(&dir, &first, model);
-    first.shutdown().await.unwrap();
+    let mut config = config::Config::default();
+    config.self_improvement.enabled = true;
+    let db = components::storage_config(&config, root.join("evorch-events.db"));
+    // Collector election is independent of DB writer ownership. Exercise its
+    // handover between logical hosts while the one real writer remains alive.
+    let (store, first, first_owner, mut first_services) =
+        learning_factory(&dir, &config, model.clone(), db.clone());
+    let (remaining, _owner, mut services) =
+        learning_factory_with_writer(&dir, &config, model, db, store.handle());
+    first_services.shutdown().await.unwrap();
+    drop((first_services, first, first_owner));
     runtime::self_improvement::spool_fault(
         &root.join("self-improvement/drafts/crash-spool"),
         "StorageWriterHalted",

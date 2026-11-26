@@ -62,7 +62,6 @@ impl runtime::SandboxFactory for Direct {
 
 struct Fixture {
     dir: test_socket_dir::SplitDir,
-    storage: Storage,
     source: Arc<FakePullRequestSource>,
 }
 
@@ -79,9 +78,9 @@ impl Fixture {
             ..Default::default()
         })
         .unwrap();
+        storage.close();
         Self {
             dir,
-            storage,
             source: Arc::new(FakePullRequestSource::new()),
         }
     }
@@ -472,13 +471,17 @@ async fn a_fetch_cut_off_by_the_core_stopping_is_never_committed() {
     core.shutdown().await.unwrap();
     // The answer arrives only after the core drained. It has nowhere to go.
     gate.release_ok(fetched(7));
-    let snapshot = f.storage.handle().pull_request_snapshot(&key(7)).unwrap();
+    let snapshot = storage::Database::open_for_inspection(&f.dir.path().join("evorch-events.db"))
+        .unwrap()
+        .pull_request_snapshot(&key(7))
+        .unwrap();
     assert!(
         snapshot.is_none_or(|snapshot| snapshot.facts.is_none()),
         "the stale fetch must not be stored"
     );
 
     // After a restart the link is still there and the facts are still unknown.
+    drop(core);
     let mut again = f.core().await;
     let view = read(&again);
     assert!(view.link.is_some(), "the link is durable");
@@ -576,9 +579,8 @@ async fn the_limit_stop_is_announced_once_for_every_client_together() {
         assert!(view.limit_reached && !view.enabled);
         assert_eq!(view.used, view.limit);
     }
-    let told = f
-        .storage
-        .handle()
+    let told = core
+        .storage_writer()
         .pr_auto_fix_limit_events(key(7), None)
         .unwrap();
     assert!(
@@ -788,11 +790,15 @@ async fn a_planned_restart_waits_for_accepted_commands_and_never_adopts_a_cut_of
     gate.arrived().await;
     core.shutdown().await.unwrap();
     gate.release_ok(fetched(7));
-    let snapshot = f.storage.handle().pull_request_snapshot(&key(7)).unwrap();
+    let snapshot = storage::Database::open_for_inspection(&f.dir.path().join("evorch-events.db"))
+        .unwrap()
+        .pull_request_snapshot(&key(7))
+        .unwrap();
     assert!(
         snapshot.is_none_or(|snapshot| snapshot.facts.is_none()),
         "a result that arrives after the seal is not adopted"
     );
+    drop(core);
     let mut again = f.core().await;
     assert!(read(&again).link.is_some(), "the link is durable");
     assert!(

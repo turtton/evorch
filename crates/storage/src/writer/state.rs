@@ -895,6 +895,27 @@ pub(super) fn run_writer_with_index(
                     &artifact_ids,
                 ));
             }
+            Ok(Command::EnsureRetentionBinding(leases, binding, now, reply)) => {
+                let result = (|| {
+                    leases.validate_archive_identity(
+                        &state.config.db_path,
+                        std::path::Path::new(&binding.ownership_root),
+                    )?;
+                    let tx = state.conn.unchecked_transaction()?;
+                    if let Some(row) = crate::repo::thread_retention::binding(&tx)?
+                        && (row.ownership_root != binding.ownership_root
+                            || row.sidebar_path != binding.sidebar_path)
+                    {
+                        return Err(StorageError::Serialization(
+                            "retention binding mismatch".into(),
+                        ));
+                    }
+                    tx.execute("INSERT OR IGNORE INTO retention_binding(id, ownership_root, sidebar_path, bound_at_ns) VALUES(1, ?1, ?2, ?3)", rusqlite::params![binding.ownership_root, binding.sidebar_path, now])?;
+                    tx.commit()?;
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
             Ok(Command::RetentionBackfillStep(rows, reply)) => {
                 let result = crate::migrations::backfill::backfill_step(&state.conn, rows);
                 state.accounting = event::EventAccounting::default();

@@ -246,6 +246,10 @@ impl Service {
     }
 }
 impl WorkspaceArea {
+    pub(crate) fn auto_archive_binding(&self) -> Option<(storage::StorageHandle, PathBuf)> {
+        let service = self.inner.as_ref()?;
+        Some((service.mirror.clone()?, service.store.path().to_path_buf()))
+    }
     pub(crate) fn accepts_auto_archive_authority(
         &self,
         authority: &storage::thread_retention::AutoArchiveAuthority<'_>,
@@ -266,6 +270,7 @@ impl WorkspaceArea {
         db: &storage::Database,
         now_ns: i64,
         report: &mut RetentionReport,
+        cleanup_bound: bool,
     ) {
         let Some(service) = &self.inner else {
             report.hold("WorkspaceUnavailable");
@@ -277,6 +282,10 @@ impl WorkspaceArea {
                 "FamilyUnresolved" => report.hold("FamilyUnresolved"),
                 _ => report.failure(error),
             }
+        }
+        if !cleanup_bound {
+            report.hold("BindingMismatch");
+            return;
         }
         if let Err(error) = service.automatic_cleanup(state, report) {
             match error.as_str() {

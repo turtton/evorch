@@ -36,6 +36,7 @@ pub struct OwnerHost {
     scratch: Arc<ThreadScratch>,
     /// Threads retention deleted; set once after the startup phase.
     tombstones: OnceLock<TombstoneGuard>,
+    writer_leases: OnceLock<Arc<storage::WriterLeases>>,
     worker: Mutex<Option<WorkerControl>>,
     archive: super::scratch_archive::ArchiveService,
 }
@@ -71,6 +72,9 @@ impl OwnerHost {
         bus: Arc<EventBus>,
     ) -> Result<Self, RegistryError> {
         Self::open_mode(root, settings, bus, false)
+    }
+    pub fn retain_writer_leases(&self, leases: Arc<storage::WriterLeases>) {
+        let _ = self.writer_leases.set(leases);
     }
     pub fn enable_normal_shutdown(&self) {
         self.release_on_drop.store(true, Ordering::SeqCst);
@@ -142,6 +146,7 @@ impl OwnerHost {
             release_on_drop: AtomicBool::new(ordinary),
             scratch,
             tombstones: OnceLock::new(),
+            writer_leases: OnceLock::new(),
             worker: Mutex::new(Some(WorkerControl {
                 stop,
                 join: Some(worker),

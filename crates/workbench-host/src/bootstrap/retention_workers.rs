@@ -26,12 +26,12 @@ impl BootstrappedHost {
     fn spawn_retention_workers(&mut self, startup: RetentionStartup) -> Result<(), BootstrapError> {
         self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
             runtime::thread_retention::ExecutorConfig::new(
-                startup.writer,
+                startup.writer.clone(),
                 startup.storage.clone(),
                 Some(startup.artifacts),
             ),
         )?);
-        // PR1 never installs authority, including this explicit fixture opt-in.
+        // Root contention disables only automatic archive/root cleanup, not DB reclaim.
         self.auto_archive = Some(crate::thread_retention::AutoArchiveOwner::start(
             Arc::downgrade(&self.host),
             crate::thread_retention::AutoArchiveCoordinator::new(
@@ -41,8 +41,24 @@ impl BootstrappedHost {
                     after_days: self.config.storage.thread_retention.auto_archive_after_days,
                 },
             ),
+            self.writer_leases.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            self.manual_retention_fixture,
         )?);
         Ok(())
+    }
+
+    /// Explicit clock/tick for bootstrap fixtures; unavailable before activation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tick_retention_for_test(
+        &self,
+        now_ns: i64,
+    ) -> Result<crate::thread_retention::RetentionReport, BootstrapError> {
+        self.auto_archive
+            .as_ref()
+            .ok_or("retention producer not activated")?
+            .tick_for_test(now_ns)
+            .map_err(Into::into)
     }
 
     /// Start the real retention producers in a fake-model composition fixture.

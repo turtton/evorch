@@ -218,6 +218,12 @@ enum Command {
     RecordArtifactRef(crate::artifact_refs::ArtifactRef, ReplyTx),
     RemoveArtifactRefs(Vec<String>, ReplyTx<usize>),
     RetentionBackfillStep(usize, ReplyTx<crate::BackfillProgress>),
+    EnsureRetentionBinding(
+        Arc<crate::WriterLeases>,
+        crate::thread_retention::BindingInput,
+        i64,
+        ReplyTx,
+    ),
     DiagnosticCleanupStatus(DiagnosticCleanupScope, ReplyTx<cleanup::CleanupStatus>),
     CleanupDiagnosticBatch(
         DiagnosticCleanupScope,
@@ -273,13 +279,26 @@ impl Storage {
     /// Like [`Self::open`], for a caller that already holds the database lease
     /// shared (see [`crate::SharedLeases::db_lease`]). The writer thread keeps
     /// `db_lease` until it exits; the lock outlives it while another handle on the
-    /// same lease is alive. The caller must have locked it: this does not check.
+    /// same lease is alive. This also takes the direct writer lease shared; cores
+    /// must reuse their typed exclusive lease through `open_with_writer_lease`.
     pub fn open_with_lease(
         config: StorageConfig,
         db_lease: std::fs::File,
     ) -> Result<Self, StorageError> {
-        let lease = db_lease;
+        let writer = crate::DbWriterLease::shared(&config.db_path)?;
+        Self::open_with_writer_lease(config, db_lease, writer)
+    }
+
+    /// Reuse the core's already-held DB writer lease; never relock through another FD.
+    pub fn open_with_writer_lease(
+        config: StorageConfig,
+        db_lease: std::fs::File,
+        writer_lease: crate::DbWriterLease,
+    ) -> Result<Self, StorageError> {
+        writer_lease.validate(&config.db_path)?;
         let database = Database::open(&config)?;
+        writer_lease.bind_identity(&config.db_path)?;
+        let lease = (db_lease, writer_lease);
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;
         log_size_state(initial_size, &config.hard_limits, writes_suspended);
@@ -469,6 +488,16 @@ impl StorageHandle {
     }
 
     /// Validate a scoped capability against this writer, not a caller-supplied DB path.
+    pub fn ensure_retention_binding(
+        &self,
+        authority: &crate::thread_retention::AutoArchiveAuthority<'_>,
+        binding: crate::thread_retention::BindingInput,
+        now_ns: i64,
+    ) -> Result<(), StorageError> {
+        let leases = authority.owned_leases();
+        self.request(|reply| Command::EnsureRetentionBinding(leases, binding, now_ns, reply))
+    }
+
     pub fn validate_auto_archive_authority(
         &self,
         authority: &crate::thread_retention::AutoArchiveAuthority<'_>,

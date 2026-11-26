@@ -526,7 +526,10 @@ async fn reconnect_is_for_a_later_explicit_call_and_does_not_replay_unknown_outc
     assert_reaped_on_linux(pid);
 }
 
-async fn legacy_host(core: &Core, legacy_model: Arc<Model>) -> BootstrappedHost {
+async fn legacy_host(
+    core: &Core,
+    legacy_model: Arc<Model>,
+) -> Result<BootstrappedHost, workbench_host::bootstrap::BootstrapError> {
     BootstrappedHost::open_with_mcp_test_seams(
         options(&core.dir),
         TestSeams {
@@ -541,7 +544,6 @@ async fn legacy_host(core: &Core, legacy_model: Arc<Model>) -> BootstrappedHost 
         ),
     )
     .await
-    .unwrap()
 }
 
 #[tokio::test]
@@ -551,17 +553,17 @@ async fn parallel_legacy_host_cannot_connect_or_execute_the_core_owned_thread() 
     let run = core.send("thread", "first");
     let (mut peer, _) = core.peer(run).await;
     core.called(&mut peer, run).await;
-    // The legacy GUI uses the same CommandService/OwnerHost boundary. Its MCP
-    // service is inert until admission; a shared DB does not confer ownership.
+    // A legacy embedded writer is refused before it can connect or run MCP.
     let legacy_model = Arc::new(Model::default());
     legacy_model.call("must-not-run");
-    let mut legacy = legacy_host(&core, legacy_model.clone()).await;
-    assert!(send(&legacy, "thread", "legacy").is_err());
-    assert!(legacy.runtime.list_agents().is_empty());
+    let error = legacy_host(&core, legacy_model.clone())
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("DB writer lease unavailable"));
     assert!(legacy_model.inputs.lock().unwrap().is_empty());
     peer.get_mut().write_all(b"continue\n").await.unwrap();
     core.waiting(run).await;
-    legacy.shutdown().await.unwrap();
     core.boot.shutdown().await.unwrap();
 }
 
@@ -577,8 +579,32 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_host() {
     let old = core.boot.owner.owned_permit("thread").unwrap();
     let inputs = core.model.inputs.lock().unwrap().len();
     let model = Arc::new(Model::default());
-    let mut legacy = legacy_host(&core, model.clone()).await;
-    let _next = core.boot.owner.handoff(&old, &legacy.owner).unwrap();
+    // Handoff between logical runtimes shares the core's single writer.
+    let bus = Arc::new(event_bus::EventBus::new(4096));
+    let owner =
+        runtime::ownership::OwnerHost::open(core.dir.sockets(), Default::default(), bus.clone())
+            .unwrap();
+    let mcp = runtime::mcp::McpHostServices::at_config_dir(
+        runtime::mcp::McpCredentialBackend::Available(Arc::new(
+            sandbox::FileCredentialStore::open(core.dir.path().join("secrets")).unwrap(),
+        )),
+        core.dir.path().to_path_buf(),
+    );
+    let successor_runtime = runtime::AgentRuntime::with_sandbox_factory(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        model.clone(),
+        Arc::new(Unisolated),
+    )
+    .with_run_store(
+        runtime::RunStore::open(
+            core.boot.storage_config(),
+            core.boot.storage_writer().clone(),
+        )
+        .unwrap(),
+    )
+    .with_mcp_service(mcp.runs.clone());
+    let next = core.boot.owner.handoff(&old, &owner).unwrap();
     // No async yield since handoff: the previous socket is still alive, but
     // the exact mutation fence used before tool calls already rejects it.
     #[cfg(target_os = "linux")]
@@ -609,14 +635,30 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_host() {
     }
     assert_reaped_on_linux(old_pid);
     assert_eq!(core.model.inputs.lock().unwrap().len(), inputs);
-    let mut events = legacy.runtime.event_bus().subscribe();
+    let mut events = successor_runtime.event_bus().subscribe();
     model.call("new-owner");
-    let successor = send(&legacy, "thread", "successor").unwrap();
+    let successor = successor_runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            "Inspect MCP evidence".into(),
+            runtime::RunConfig {
+                project_root: Some(core.dir.path().canonicalize().unwrap()),
+                ownership: Some(next),
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let (mut next_peer, pid) = accept_peer(&core.listener, &mut events, successor).await;
     await_call(&mut next_peer, &mut events, successor).await;
     next_peer.get_mut().write_all(b"continue\n").await.unwrap();
     through(&mut events, successor, AgentRunPhase::Waiting).await;
-    legacy.shutdown().await.unwrap();
+    successor_runtime.request_quiesce();
+    successor_runtime.wait_quiesced().await.unwrap();
+    mcp.shutdown().await.unwrap();
+    owner.quiesce().unwrap();
     core.boot.shutdown().await.unwrap();
     assert_reaped_on_linux(pid);
 }

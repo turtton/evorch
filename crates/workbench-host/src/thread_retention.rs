@@ -1,4 +1,4 @@
-//! Auto-archive owner and reports. PR1 deliberately never supplies production authority.
+//! Core-owned automatic archive, authorized by dedicated DB/root writer leases.
 use crate::CommandHost;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -89,7 +89,8 @@ impl AutoArchiveCoordinator {
             report.failure(error);
             return report;
         }
-        let Ok(host) = host.try_lock() else {
+        let host_arc = host;
+        let Ok(host) = host_arc.try_lock() else {
             report.hold("ForegroundPending");
             return report;
         };
@@ -101,6 +102,9 @@ impl AutoArchiveCoordinator {
             report.hold("AuthorityUnavailable");
             return report;
         }
+        let binding = host.areas.workspace.auto_archive_binding();
+        drop(host);
+        // Connection setup, filesystem durability and the writer ACK are outside the host mutex.
         let db = match storage::Database::open(&self.config) {
             Ok(db) => db,
             Err(error) => {
@@ -108,9 +112,44 @@ impl AutoArchiveCoordinator {
                 return report;
             }
         };
+        let cleanup_bound = binding.is_some_and(|(writer, sidebar)| {
+            match runtime::thread_retention::binding::ensure_binding(
+                &db,
+                &writer,
+                authority,
+                runtime::thread_retention::binding::BindingPaths {
+                    ownership_root: &self.root,
+                    sidebar_path: &sidebar,
+                },
+                &self.config.db_path,
+                now_ns,
+            ) {
+                Ok(runtime::thread_retention::binding::BindingStatus::Bound) => true,
+                Ok(status) => {
+                    report.failure(format!("root cleanup disabled: {status:?}"));
+                    false
+                }
+                Err(error) => {
+                    report.failure(error);
+                    false
+                }
+            }
+        });
+        let Ok(host) = host_arc.try_lock() else {
+            report.hold("ForegroundPending");
+            return report;
+        };
+        if !host
+            .areas
+            .workspace
+            .accepts_auto_archive_authority(authority, &self.root)
+        {
+            report.hold("AuthorityUnavailable");
+            return report;
+        }
         host.areas
             .workspace
-            .auto_archive_tick(self, &db, now_ns, &mut report);
+            .auto_archive_tick(self, &db, now_ns, &mut report, cleanup_bound);
         drop(host);
         self.log(&report);
         report
@@ -122,16 +161,23 @@ impl AutoArchiveCoordinator {
         }
     }
 }
-/// Dedicated blocking owner. No leases or authority can be installed through it in PR1.
+/// Dedicated blocking owner; retains the exact startup writer leases until joined.
+enum OwnerCommand {
+    Stop,
+    #[cfg(any(test, feature = "test-support"))]
+    Tick(i64, mpsc::Sender<RetentionReport>),
+}
 pub struct AutoArchiveOwner {
     producer: runtime::producer::ProducerGate,
-    stop: mpsc::Sender<()>,
+    stop: mpsc::Sender<OwnerCommand>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl AutoArchiveOwner {
     pub fn start(
         host: Weak<Mutex<CommandHost>>,
         mut coordinator: AutoArchiveCoordinator,
+        leases: Arc<storage::WriterLeases>,
+        #[cfg(any(test, feature = "test-support"))] manual_fixture: bool,
     ) -> std::io::Result<Self> {
         let (stop, receive) = mpsc::channel();
         let producer = runtime::producer::ProducerGate::default();
@@ -139,21 +185,45 @@ impl AutoArchiveOwner {
         let worker = std::thread::Builder::new()
             .name("auto-archive".into())
             .spawn(move || {
+                #[cfg(not(any(test, feature = "test-support")))]
+                let manual_fixture = false;
                 loop {
-                    match receive.recv_timeout(std::time::Duration::from_secs(5)) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
+                    let message = if manual_fixture {
+                        receive
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    } else {
+                        receive.recv_timeout(std::time::Duration::from_secs(5))
+                    };
+                    let now = match message {
+                        Ok(OwnerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        #[cfg(any(test, feature = "test-support"))]
+                        Ok(OwnerCommand::Tick(now, reply)) => {
+                            let report = if let (Some(_permit), Some(host)) =
+                                (admission.try_enter(), host.upgrade())
+                            {
+                                coordinator.tick(&host, leases.authority().as_ref(), now)
+                            } else {
+                                let mut report = RetentionReport::default();
+                                report.hold("ProducerPaused");
+                                report
+                            };
+                            let _ = reply.send(report);
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .and_then(|d| i64::try_from(d.as_nanos()).ok()),
+                    };
                     let Some(_permit) = admission.try_enter() else {
                         continue;
                     };
-                    let Some(host) = host.upgrade() else { break };
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .and_then(|d| i64::try_from(d.as_nanos()).ok());
+                    let Some(host) = host.upgrade() else {
+                        break;
+                    };
                     if let Some(now) = now {
-                        coordinator.tick(&host, None, now);
+                        coordinator.tick(&host, leases.authority().as_ref(), now);
                     }
                 }
                 coordinator.stop();
@@ -164,12 +234,20 @@ impl AutoArchiveOwner {
             worker: Some(worker),
         })
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tick_for_test(&self, now_ns: i64) -> Result<RetentionReport, String> {
+        let (reply, receive) = mpsc::channel();
+        self.stop
+            .send(OwnerCommand::Tick(now_ns, reply))
+            .map_err(|_| "archive worker stopped")?;
+        receive.recv().map_err(|_| "archive tick reply lost".into())
+    }
     pub fn producer_gate(&self) -> runtime::producer::ProducerGate {
         self.producer.clone()
     }
     pub fn request_stop(&self) {
         self.producer.close();
-        let _ = self.stop.send(());
+        let _ = self.stop.send(OwnerCommand::Stop);
     }
     pub fn shutdown(&mut self) -> Result<(), String> {
         self.request_stop();

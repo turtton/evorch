@@ -157,6 +157,7 @@ pub struct BootstrappedHost {
     thread_index_owner: Option<thread_index::ThreadIndexOwner>,
     executor: Arc<tools::ToolExecutor>,
     _leases: storage::SharedLeases,
+    writer_leases: Arc<storage::WriterLeases>,
 }
 
 /// Actual construction output, exposed only to composition contract tests.
@@ -301,64 +302,91 @@ impl BootstrappedHost {
         let spawn_ledger = sandbox::SpawnLedger::new();
         let adapters =
             adapters.unwrap_or_else(|| lane_pr::PullRequestAdapters::owned(spawn_ledger.clone()));
-        let (config, bus, storage_config, storage, leases, seed, claimed_owner, planned_collector) =
-            if let Some(claimed) = claimed {
-                let planned::PlannedStorage {
-                    config,
-                    bus,
-                    storage_config,
-                    storage,
-                    leases,
-                    seed,
-                    collector,
-                    ..
-                } = claimed.storage;
-                (
-                    config,
-                    bus,
-                    storage_config,
-                    storage,
-                    leases,
-                    Some(seed),
-                    Some(claimed.owner),
-                    Some(collector),
-                )
-            } else {
-                let config = config::Config::load_strict(&config::LoadOptions {
-                    user_config_dir: Some(options.config_dir.clone()),
-                    project_dir: Some(options.project_root.clone()),
-                    read_env: false,
-                    ..Default::default()
-                })?;
-                let bus = Arc::new(EventBus::new(4096));
-                let db_path = options.config_dir.join("evorch-events.db");
-                // The core confirms the deletion of expired archived threads (see
-                // `retention`): exclusive leases for the phase, then shared for its life.
-                let plan = retention::RetentionPlan {
-                    db_path: db_path.clone(),
-                    ownership_root: options.ownership_root.clone(),
-                    sidebar_path: options.config_dir.join("sidebar.json"),
-                    artifacts_dir: Some(options.config_dir.join("artifacts")),
-                    policy: runtime::thread_retention::policy_from_config(&config.storage),
-                };
-                let leases = tokio::task::spawn_blocking(move || {
-                    retention::acquire_leases(&plan, Duration::from_secs(30))
-                })
-                .await??;
-                let storage_config = components::storage_config(&config, db_path);
-                let storage =
-                    storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
-                (
-                    config,
-                    bus,
-                    storage_config,
-                    storage,
-                    leases,
-                    None,
-                    None,
-                    None,
-                )
+        let (
+            config,
+            bus,
+            storage_config,
+            storage,
+            leases,
+            writer_leases,
+            seed,
+            claimed_owner,
+            planned_collector,
+        ) = if let Some(claimed) = claimed {
+            let planned::PlannedStorage {
+                config,
+                bus,
+                storage_config,
+                storage,
+                leases,
+                writer_leases,
+                seed,
+                collector,
+                ..
+            } = claimed.storage;
+            (
+                config,
+                bus,
+                storage_config,
+                storage,
+                leases,
+                writer_leases,
+                Some(seed),
+                Some(claimed.owner),
+                Some(collector),
+            )
+        } else {
+            let config = config::Config::load_strict(&config::LoadOptions {
+                user_config_dir: Some(options.config_dir.clone()),
+                project_dir: Some(options.project_root.clone()),
+                read_env: false,
+                ..Default::default()
+            })?;
+            let bus = Arc::new(EventBus::new(4096));
+            let db_path = options.config_dir.join("evorch-events.db");
+            // The core confirms the deletion of expired archived threads (see
+            // `retention`): exclusive leases for the phase, then shared for its life.
+            let plan = retention::RetentionPlan {
+                db_path: db_path.clone(),
+                ownership_root: options.ownership_root.clone(),
+                sidebar_path: options.config_dir.join("sidebar.json"),
+                artifacts_dir: Some(options.config_dir.join("artifacts")),
+                policy: runtime::thread_retention::policy_from_config(&config.storage),
             };
+            let (writer_leases, leases) = tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                let writer = Arc::new(storage::WriterLeases::acquire(
+                    &plan.db_path,
+                    &plan.ownership_root,
+                    storage::WRITER_LEASE_WAIT,
+                )?);
+                let remaining = storage::WRITER_LEASE_WAIT.saturating_sub(started.elapsed());
+                let maintenance = if writer.has_root_writer() {
+                    retention::acquire_leases(&plan, remaining)?
+                } else {
+                    storage::shared_with_wait(&plan.db_path, &plan.ownership_root, remaining)?
+                };
+                Ok::<_, BootstrapError>((writer, maintenance))
+            })
+            .await??;
+            let storage_config = components::storage_config(&config, db_path);
+            let storage = storage::Storage::open_with_writer_lease(
+                storage_config.clone(),
+                leases.db_lease()?,
+                writer_leases.db_lease(),
+            )?;
+            (
+                config,
+                bus,
+                storage_config,
+                storage,
+                leases,
+                writer_leases,
+                None,
+                None,
+                None,
+            )
+        };
         let handle = storage.handle();
         // This reload must stay AFTER acquire_leases (including any exclusive
         // maintenance/downgrade), regardless of which PR adds that phase first.
@@ -714,6 +742,7 @@ impl BootstrappedHost {
             storage_writer: handle.clone(),
             model: routed_identity.unwrap_or(composed.model_identity),
         };
+        owner.retain_writer_leases(writer_leases.clone());
         let mut bootstrap = Self {
             host,
             runtime,
@@ -747,6 +776,7 @@ impl BootstrappedHost {
             history_owner: None,
             executor,
             _leases: leases,
+            writer_leases,
         };
         if !planned {
             let live_core_epoch = bootstrap
