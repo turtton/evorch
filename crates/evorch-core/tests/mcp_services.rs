@@ -655,8 +655,15 @@ async fn idle_handoff_fences_old_calls_and_drains_the_previous_host() {
     await_call(&mut next_peer, &mut events, successor).await;
     next_peer.get_mut().write_all(b"continue\n").await.unwrap();
     through(&mut events, successor, AgentRunPhase::Waiting).await;
-    successor_runtime.request_quiesce();
-    successor_runtime.wait_quiesced().await.unwrap();
+    // This logical MCP fixture has no provider-wire checkpoint adapter. Stop
+    // the idle run normally rather than requesting a durable restart capture.
+    successor_runtime
+        .stop(successor, runtime::StopScope::SelfOnly)
+        .unwrap();
+    assert_eq!(
+        successor_runtime.wait(successor).await.unwrap(),
+        AgentRunPhase::Stopped
+    );
     mcp.shutdown().await.unwrap();
     owner.quiesce().unwrap();
     core.boot.shutdown().await.unwrap();
