@@ -3270,7 +3270,11 @@ impl AgentRuntime {
     /// Stop an eligible retention member only at an idle chat boundary. The owner
     /// first passes common read-only deletion checks for the whole closure. This
     /// uses the existing lifecycle boundary/token/durable intent path, outside host locks.
-    pub fn stop_retention_idle(&self, run: RunId) -> Result<(), RuntimeError> {
+    pub fn stop_retention_idle(
+        &self,
+        run: RunId,
+        before: &[(String, crate::thread_retention::gate::GateStamp)],
+    ) -> Result<(), RuntimeError> {
         self.deny_deleted_run(&run.to_string())?;
         let (inbox, incarnation) = {
             let entry = self.entry(run)?;
@@ -3281,6 +3285,12 @@ impl AgentRuntime {
         };
         // Input-first is visible in queues; stop-first seals before a receipt.
         inbox.serialize_trusted_send(|| {
+            let _admission = self
+                .shared
+                .retention_gate
+                .try_enter_unchanged(before, format!("r:{run}"))
+                .ok_or(RuntimeError::RestartBusy)?;
+            self.deny_deleted_run(&run.to_string())?;
             let delivery = crate::quiesce::StopDelivery::new(self, run, StopScope::SelfOnly)
                 .expecting_incarnation(incarnation)
                 .between_turns_only();
@@ -3411,10 +3421,7 @@ impl AgentRuntime {
             let pending = admissions
                 .get(&run_id)
                 .is_some_and(|a| !a.cancelled && a.result.borrow().is_none());
-            let stamp = self.retention_gate_stamp(&format!("r:{run_id}"));
             if pending
-                || stamp.pending != 0
-                || stamp.failed != 0
                 || runs
                     .get(&run_id)
                     .is_none_or(|e| !output::idle::between_turns(e))

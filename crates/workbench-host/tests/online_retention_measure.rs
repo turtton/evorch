@@ -44,7 +44,10 @@ fn measure<T>(label: &str, work: impl FnOnce() -> T) -> T {
 #[ignore = "manual synthetic benchmark, not a timing correctness test"]
 fn online_retention_writer_budget_measurement() {
     let budget = OnlineBudget::default();
-    println!("initial candidate budget {budget:?}; warm page cache; debug build");
+    println!(
+        "initial candidate budget {budget:?}; warm page cache; optimized={}",
+        !cfg!(debug_assertions)
+    );
     let trials = std::env::var("RETENTION_TRIALS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -116,6 +119,7 @@ fn online_retention_writer_budget_measurement() {
                     sidebar_path: sidebar.to_str().unwrap().into(),
                 };
                 let request = OnlineRequest {
+                    db_identity: db.retention_identity().unwrap(),
                     seed: "candidate".into(),
                     expected,
                     binding: binding.clone(),

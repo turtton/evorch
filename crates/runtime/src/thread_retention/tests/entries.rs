@@ -335,7 +335,7 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
 
 // G1..G6 runtime entries. G1 completion also registers before event publication and
 // keeps pending through recorder ACK (gate behavior tests). G7 storage lane writes,
-// G8/G9 host-mutex + attachment/sidebar lock, G10 owner shutdown are inventoried
+// G8/G9 pre-save admission through mirror ACK, G10 owner shutdown are inventoried
 // separately at their owning crates; LIVE_ONLY is deliberately not reused here.
 #[test]
 fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() {
@@ -457,6 +457,11 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
     for (key, category) in &registered {
         let (path, name) = key.split_once("::").unwrap();
         let text = definition(&all, path, name).unwrap_or_else(|| panic!("{key} removed"));
+        let text = if text.contains("deny_deleted_spawn(") {
+            definition(&all, "runtime.rs", "deny_deleted_spawn").expect("spawn admission helper")
+        } else {
+            text
+        };
         assert!(
             text.contains("retention_admission()") || text.contains("retention_run_admission("),
             "{category} {key} must register before work"
@@ -486,6 +491,113 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
                     "new automatic-archive entry must be classified: {key}"
                 );
             }
+        }
+    }
+}
+
+// Creation/reactivation primitives are separately closed, including private cached
+// admission and internal wake/resume routes. A new caller of a primitive fails
+// classification, even when it is not a public identity entry. Behaviour is also
+// exercised against retained terminal entries in the real bootstrap tests.
+#[test]
+fn internal_activation_routes_are_closed_and_reach_the_mutable_guard() {
+    let sources = sources();
+    let markers = [
+        ".register_run(",
+        ".build_run_candidate(",
+        ".try_spawn_run_preadmitted(",
+        ".try_spawn_run_with_handoff(",
+        ".admit_run(",
+        ".start_seeded_chat(",
+        ".continue_chat_fenced(",
+        ".commit_chat_resume(",
+    ];
+    let methods = Regex::new(
+        r"\n[ \t]*(?:pub(?:\([a-z:]+\))?\s+)?(?:async\s+)?fn\s+([a-z_0-9]+)\s*(?:<[^>]*>)?\(",
+    )
+    .unwrap();
+    let mut actual = std::collections::BTreeSet::new();
+    for (file, text) in &sources {
+        if ![
+            "runtime.rs",
+            "runtime/admission.rs",
+            "runtime/chat_restore.rs",
+        ]
+        .contains(&file.as_str())
+        {
+            continue;
+        }
+        for capture in methods.captures_iter(text) {
+            let name = &capture[1];
+            let content = body(text, capture.get(0).unwrap().start() + 1);
+            if name == "build_run_candidate"
+                || markers.iter().any(|marker| content.contains(marker))
+            {
+                actual.insert(format!("{file}::{name}"));
+            }
+        }
+    }
+    let routes = [
+        (
+            "runtime.rs::register_run",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime.rs::spawn_run_with_handoff",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::try_spawn_run_with_handoff",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::try_spawn_run_preadmitted",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::build_run_candidate",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime.rs::registration_installs_seed_without_reading_a_closed_store",
+            None,
+        ), // Unit fixture, no live retention producer.
+        (
+            "runtime/admission.rs::register_without_admission",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime/admission.rs::admit_run",
+            Some(("runtime/admission.rs", "admit_run")),
+        ),
+        (
+            "runtime/chat_restore.rs::resume_chat_fenced",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::continue_chat",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::continue_chat_fenced",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::delegate_chat_seeded",
+            Some(("runtime/chat_restore.rs", "delegate_chat_seeded")),
+        ),
+    ];
+    assert_eq!(
+        actual,
+        routes.iter().map(|(key, _)| (*key).to_string()).collect(),
+        "classify every new internal activation caller"
+    );
+    for (key, route) in routes {
+        if let Some((file, name)) = route {
+            assert!(
+                mentions_guard(definition(&sources, file, name).unwrap()),
+                "{key} must reach the mutable guard"
+            );
         }
     }
 }

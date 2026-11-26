@@ -484,7 +484,7 @@ pub fn startup_notice(
     }
     if !retried_over_budget.is_empty() {
         skipped.push(format!(
-            "{} families retry at next startup",
+            "{} families exceed online cleanup budget",
             retried_over_budget.len()
         ));
     }

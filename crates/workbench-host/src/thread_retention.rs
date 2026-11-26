@@ -171,6 +171,7 @@ impl AutoArchiveCoordinator {
             report.hold("ForegroundPending");
             return report;
         };
+        let locked = std::time::Instant::now();
         if !host
             .areas
             .workspace
@@ -183,6 +184,9 @@ impl AutoArchiveCoordinator {
             .workspace
             .auto_archive_tick(self, &db, now_ns, &mut report, cleanup_bound);
         drop(host);
+        report.host_lock_ns = report
+            .host_lock_ns
+            .max(u64::try_from(locked.elapsed().as_nanos()).unwrap_or(u64::MAX));
         self.log(&report);
         report
     }

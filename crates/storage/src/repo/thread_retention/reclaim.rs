@@ -1407,21 +1407,25 @@ fn reclaim_step_rotating_in(
     after: Option<&str>,
 ) -> Result<(ReclaimProgress, Option<String>), StorageError> {
     let mut progress = ReclaimProgress::default();
-    let page = |after: &str| -> Result<Vec<String>, StorageError> {
-        let mut statement = conn.prepare_cached(
+    let page = |after: Option<&str>| -> Result<Vec<String>, StorageError> {
+        // Empty is a valid SQL text key: the initial/wrapped page includes it.
+        // Both branches keep the keyed range and LIMIT (no optional-OR scan).
+        let comparison = if after.is_some() { ">" } else { ">=" };
+        let mut statement = conn.prepare_cached(&format!(
             "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_runnable \
-             WHERE state = 'db_pending' AND waiting_exclusive = 0 AND family_key > ?1 \
-             ORDER BY family_key LIMIT ?2",
-        )?;
+             WHERE state = 'db_pending' AND waiting_exclusive = 0 AND family_key {comparison} ?1 \
+             ORDER BY family_key LIMIT ?2"
+        ))?;
         Ok(statement
-            .query_map(params![after, i64::from(budget.max_transactions)], |row| {
-                row.get(0)
-            })?
+            .query_map(
+                params![after.unwrap_or(""), i64::from(budget.max_transactions)],
+                |row| row.get(0),
+            )?
             .collect::<Result<_, _>>()?)
     };
-    let mut families = page(after.unwrap_or(""))?;
+    let mut families = page(after)?;
     if families.is_empty() && after.is_some() {
-        families = page("")?;
+        families = page(None)?;
     }
     let mut cursor = None;
     'jobs: for family in &families {

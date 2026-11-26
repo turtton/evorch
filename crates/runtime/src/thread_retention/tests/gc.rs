@@ -1059,7 +1059,8 @@ fn a_blob_shared_by_two_deleted_threads_goes_with_the_last_of_them() {
     };
 
     // T1 is deleted; T2 and S live on.
-    assert_eq!(ran(&startup(&["T1"], &["T2", "S"])).confirmed.len(), 1);
+    assert_eq!(world.confirm_archived(&["T1"], &["T2", "S"]), 1);
+    assert!(ran(&startup(&["T1"], &["T2", "S"])).confirmed.is_empty());
     reclaim();
     let after_first = startup(&["T1"], &["T2", "S"]);
     let gc = ran(&after_first).gc.expect("stage 7 ran");
@@ -1067,7 +1068,8 @@ fn a_blob_shared_by_two_deleted_threads_goes_with_the_last_of_them() {
     assert!(blob.is_file(), "T2 still needs the shared blob");
 
     // T2 is deleted as well.
-    assert_eq!(ran(&startup(&["T1", "T2"], &["S"])).confirmed.len(), 1);
+    assert_eq!(world.confirm_archived(&["T1", "T2"], &["S"]), 1);
+    assert!(ran(&startup(&["T1", "T2"], &["S"])).confirmed.is_empty());
     reclaim();
     let after_second = startup(&["T1", "T2"], &["S"]);
     let gc = ran(&after_second).gc.expect("stage 7 ran");

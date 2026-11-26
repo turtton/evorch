@@ -28,6 +28,8 @@ pub struct OnlineClosure {
 }
 #[derive(Debug, Clone)]
 pub struct OnlineRequest {
+    /// Root-pair identity observed by preflight; compared inside the IMMEDIATE transaction.
+    pub db_identity: String,
     pub seed: String,
     pub expected: OnlineClosure,
     pub input: RetentionInput,

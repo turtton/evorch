@@ -17,7 +17,7 @@ struct State {
     events: HashMap<EventKey, usize>,
     global: GateStamp,
     sealed: Option<HashSet<String>>,
-    #[cfg(test)]
+    // A released commit cannot be overtaken by another seal before waiters admit.
     waiters: usize,
 }
 #[derive(Hash, PartialEq, Eq)]
@@ -88,16 +88,11 @@ impl RetentionGate {
     fn enter(self: &Arc<Self>, scope: Option<String>) -> Admission {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while blocked(&s, scope.as_deref()) {
+            s.waiters += 1;
             #[cfg(test)]
-            {
-                s.waiters += 1;
-                self.blocked.notify_all();
-            }
+            self.blocked.notify_all();
             s = self.released.wait(s).unwrap_or_else(|e| e.into_inner());
-            #[cfg(test)]
-            {
-                s.waiters -= 1;
-            }
+            s.waiters -= 1;
         }
         let stamp = match &scope {
             Some(k) => s.scopes.entry(k.clone()).or_default(),
@@ -125,16 +120,11 @@ impl RetentionGate {
     fn enter_event(self: &Arc<Self>, scopes: Vec<String>) -> Option<Vec<Admission>> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         while scopes.iter().any(|scope| blocked(&s, Some(scope))) {
+            s.waiters += 1;
             #[cfg(test)]
-            {
-                s.waiters += 1;
-                self.blocked.notify_all();
-            }
+            self.blocked.notify_all();
             s = self.released.wait(s).unwrap_or_else(|e| e.into_inner());
-            #[cfg(test)]
-            {
-                s.waiters -= 1;
-            }
+            s.waiters -= 1;
         }
         if let Some(guard) = self.guard.get() {
             for scope in &scopes {
@@ -169,6 +159,7 @@ impl RetentionGate {
         let guard = self.guard.get()?.clone();
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.sealed.is_some()
+            || s.waiters != 0
             || before.is_empty()
             || before.iter().any(|(scope, stamp)| {
                 stamp.pending != 0 || stamp.failed != 0 || *stamp != stamp_for(&s, scope)
@@ -181,6 +172,34 @@ impl RetentionGate {
             gate: self.clone(),
             guard,
             started: std::time::Instant::now(),
+        })
+    }
+    /// The idle Stop linearization point: compare the whole preflight snapshot
+    /// and register its run mutation under one leaf mutex. No SQL or run-map lock.
+    pub(crate) fn try_enter_unchanged(
+        self: &Arc<Self>,
+        before: &[(String, GateStamp)],
+        scope: String,
+    ) -> Option<Admission> {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.sealed.is_some()
+            || s.waiters != 0
+            || before.is_empty()
+            || !before.iter().any(|(key, _)| key == &scope)
+            || before
+                .iter()
+                .any(|(key, old)| old.pending != 0 || old.failed != 0 || *old != stamp_for(&s, key))
+        {
+            return None;
+        }
+        let stamp = s.scopes.entry(scope.clone()).or_default();
+        stamp.revision = stamp.revision.wrapping_add(1);
+        stamp.pending += 1;
+        drop(s);
+        Some(Admission {
+            gate: self.clone(),
+            scope: Some(scope),
+            retain: false,
         })
     }
     pub(crate) fn enter_scope(self: &Arc<Self>, scope: Option<String>) -> Admission {
@@ -471,6 +490,26 @@ mod seal_tests {
         assert_eq!(waiter.join().unwrap(), (Ok(42), true));
         assert_eq!(gate.stamp("r:run-1").pending, 0);
     }
+    #[test]
+    fn a_released_commit_cannot_overtake_a_waiting_global_request() {
+        let bus = Arc::new(EventBus::new(8));
+        let (gate, _) = ready(&bus);
+        let seal = gate.try_seal(&before(&gate)).unwrap();
+        let (done, release) = std::sync::mpsc::channel();
+        let g = gate.clone();
+        let waiter = std::thread::spawn(move || {
+            let _request = g.enter_storage();
+            release.recv().unwrap();
+        });
+        gate.wait_blocked(1);
+        drop(seal);
+        // In either scheduling order the first request is still waiting or
+        // admitted/pending, so a second commit cannot extend its wait.
+        assert!(gate.try_seal(&before(&gate)).is_none());
+        done.send(()).unwrap();
+        waiter.join().unwrap();
+        assert!(gate.try_seal(&before(&gate)).is_some());
+    }
     #[tokio::test]
     async fn rollback_releases_live_bus_publish_without_dropping_and_ack_drains() {
         let bus = Arc::new(EventBus::new(8));
@@ -524,5 +563,34 @@ mod seal_tests {
         assert!(result.is_err());
         assert!(guard.check_run("run-1").is_ok());
         let _next = gate.try_seal(&before(&gate)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod stop_admission_tests {
+    use super::*;
+    fn snapshot(gate: &RetentionGate) -> Vec<(String, GateStamp)> {
+        ["", "t:thread", "r:run"]
+            .into_iter()
+            .map(|s| (s.into(), gate.stamp(s)))
+            .collect()
+    }
+    #[test]
+    fn completed_pin_invalidates_stop_preflight_and_pending_input_is_preserved() {
+        let gate = Arc::new(RetentionGate::default());
+        let before = snapshot(&gate);
+        drop(gate.enter_scope(Some("t:thread".into())));
+        assert!(gate.try_enter_unchanged(&before, "r:run".into()).is_none());
+        let before = snapshot(&gate);
+        let input = gate.enter_scope(Some("r:run".into()));
+        assert!(gate.try_enter_unchanged(&before, "r:run".into()).is_none());
+        assert_eq!(gate.stamp("r:run").pending, 1);
+        drop(input);
+        let stop = gate
+            .try_enter_unchanged(&snapshot(&gate), "r:run".into())
+            .unwrap();
+        assert_eq!(gate.stamp("r:run").pending, 1);
+        drop(stop);
+        assert_eq!(gate.stamp("r:run").pending, 0);
     }
 }

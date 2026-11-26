@@ -40,6 +40,7 @@ fn fixture() -> (Database, OnlineRequest) {
       INSERT INTO thread_runs VALUES('ra','a','ra',0);
       INSERT INTO run_contexts(run_id,role,name,config_json,checkpoints_json,terminal_phase,restorable,updated_at_ns) VALUES('ra','worker','w','{}','[]','done',1,0);").unwrap();
     let request = OnlineRequest {
+        db_identity: db.retention_identity().unwrap(),
         seed: "a".into(),
         expected: OnlineClosure {
             threads: vec!["a".into()],
@@ -302,4 +303,31 @@ fn failed_reclaim_family_does_not_starve_the_next_live_writer_page() {
     assert!(advanced.last_error.is_none());
     assert_eq!(advanced.transactions, 1);
     assert_eq!(next.as_deref(), Some("b"));
+}
+
+#[test]
+fn changed_database_identity_is_rejected_inside_confirmation() {
+    let (db, req) = fixture();
+    db.conn
+        .execute("UPDATE retention_identity SET db_id='other' WHERE id=1", [])
+        .unwrap();
+    assert_hold(
+        &db,
+        &req,
+        OnlineBudget::default(),
+        "DatabaseIdentityMismatch",
+    );
+}
+
+#[test]
+fn initial_reclaim_page_includes_an_empty_sql_family_key() {
+    let db = Database::open_in_memory().unwrap();
+    db.conn.execute("INSERT INTO reclaim_jobs(family_key,state,cursor_json,created_at_ns,updated_at_ns) VALUES('','db_pending','{}',0,0)", []).unwrap();
+    let (_, cursor) = crate::repo::thread_retention::reclaim::reclaim_step_rotating(
+        &db.conn,
+        crate::thread_retention::ReclaimBudget::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(cursor.as_deref(), Some(""));
 }

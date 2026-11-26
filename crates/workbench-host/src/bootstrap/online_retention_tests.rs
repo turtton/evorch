@@ -48,7 +48,90 @@ impl runtime::SandboxFactory for FixtureSandbox {
     }
 }
 
-async fn lifecycle(interactive: bool) {
+#[derive(Debug, Default)]
+struct Measurements {
+    host_ns: u64,
+    seal_ns: u64,
+    stop_ns: u64,
+    writer_ns: u64,
+    foreground_baseline_ns: u64,
+    foreground_concurrent_ns: u64,
+    foreground_extra_ns: u64,
+    holds: usize,
+}
+impl Measurements {
+    fn observe(&mut self, r: &crate::thread_retention::RetentionReport) {
+        self.host_ns = self.host_ns.max(r.host_lock_ns);
+        self.seal_ns = self.seal_ns.max(r.seal_ns);
+        self.stop_ns = self.stop_ns.max(r.idle_stop_ns);
+        self.writer_ns = self.writer_ns.max(r.writer_roundtrip_ns);
+        self.holds += r.holds.values().sum::<usize>();
+    }
+    fn query(host: &Arc<std::sync::Mutex<crate::CommandHost>>) {
+        use workbench_protocol::{
+            ids::SessionId,
+            namespaces::workspace::WorkspaceQuery,
+            queries::{PageRequest, Query},
+        };
+        host.lock()
+            .unwrap()
+            .handle_query(
+                &SessionId::new("retention-measure").unwrap(),
+                &Query::Workspace(WorkspaceQuery::ListProjects(PageRequest::default())),
+                &crate::provenance::local_desktop(),
+            )
+            .unwrap();
+    }
+    fn tick(
+        &mut self,
+        core: &BootstrappedHost,
+        now: i64,
+        measure: bool,
+    ) -> crate::thread_retention::RetentionReport {
+        if !measure {
+            return core.tick_retention_for_test(now).unwrap();
+        }
+        let host = core.host.clone();
+        let ns = |start: std::time::Instant| {
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        };
+        let start = std::time::Instant::now();
+        Self::query(&host);
+        let baseline_ns = ns(start);
+        self.foreground_baseline_ns = self.foreground_baseline_ns.max(baseline_ns);
+        // A bounded pair of real requests, not an unbounded load generator. The
+        // barrier only starts them together; there is no artificial seal delay.
+        let ready = std::sync::Barrier::new(2);
+        let (mut report, foreground_ns) = std::thread::scope(|scope| {
+            let query = scope.spawn(|| {
+                ready.wait();
+                let start = std::time::Instant::now();
+                Self::query(&host);
+                ns(start)
+            });
+            ready.wait();
+            let report = core.tick_retention_for_test(now).unwrap();
+            (report, query.join().unwrap())
+        });
+        self.foreground_concurrent_ns = self.foreground_concurrent_ns.max(foreground_ns);
+        self.foreground_extra_ns = self
+            .foreground_extra_ns
+            .max(foreground_ns.saturating_sub(baseline_ns));
+        self.observe(&report);
+        if report.holds.contains_key("ForegroundPending") {
+            // Record the contention, then allow a bounded uncontended tick to
+            // progress. Performance runs must not depend on which thread wins.
+            let next = core.tick_retention_for_test(now).unwrap();
+            self.observe(&next);
+            report.confirmed += next.confirmed;
+            report.stopped_runs += next.stopped_runs;
+        }
+        report
+    }
+}
+
+async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) -> Measurements {
+    let mut measurements = Measurements::default();
     let root = test_socket_dir::SplitDir::new();
     let config = root.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
@@ -63,6 +146,15 @@ async fn lifecycle(interactive: bool) {
         ProjectId::new("project"),
         "online family",
     ));
+    for i in 0..unrelated {
+        let other = ThreadId::new(&format!("zz-unrelated-{i:04}"));
+        doc.sidebar.threads.push(ThreadRecord::new(
+            other.clone(),
+            ProjectId::new("project"),
+            "unrelated",
+        ));
+        doc.sidebar.set_family_pinned(&other, true).unwrap();
+    }
     doc.sidebar.refresh_derived();
     store.write(&store.lock().unwrap(), &doc).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -87,7 +179,7 @@ async fn lifecycle(interactive: bool) {
         .delegate_chat(
             "online-family",
             Role::Worker,
-            "hello".into(),
+            "hello ".repeat(4_096),
             RunConfig {
                 interactive,
                 keep_alive: interactive,
@@ -114,6 +206,33 @@ async fn lifecycle(interactive: bool) {
     }
     core.bridge.as_mut().unwrap().flush().unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    if interactive && unrelated == 0 {
+        // Input is accepted first, without yielding to its consumer. A completed
+        // admission still invalidates Stop's preflight, and its turn runs normally.
+        let before = [String::new(), "t:online-family".into(), format!("r:{run}")]
+            .into_iter()
+            .map(|scope| {
+                let stamp = core.runtime.retention_gate_stamp(&scope);
+                (scope, stamp)
+            })
+            .collect::<Vec<_>>();
+        core.runtime
+            .send_user_input(run, "accepted first".into(), None)
+            .unwrap();
+        assert!(matches!(
+            core.runtime.stop_retention_idle(run, &before),
+            Err(runtime::RuntimeError::RestartBusy)
+        ));
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == &run.to_string())
+            {
+                break;
+            }
+        }
+        core.bridge.as_mut().unwrap().flush().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
     // Canonical sidebar root, under the same mutation gate as workspace commands.
     {
         let _admission = core.runtime.retention_workspace_admission();
@@ -142,7 +261,7 @@ async fn lifecycle(interactive: bool) {
         .unwrap();
     let archive_now = latest.checked_add(8 * DAY_NS).unwrap();
     for _ in 0..12 {
-        core.tick_retention_for_test(archive_now).unwrap();
+        measurements.tick(&core, archive_now, unrelated > 0);
         if store.read_unlocked().unwrap().sidebar.resolve_states()[&id].archived {
             break;
         }
@@ -162,15 +281,54 @@ async fn lifecycle(interactive: bool) {
             ) * DAY_NS,
         )
         .unwrap();
+    // An attachment left behind by a failed archive cleanup. Register before
+    // publishing the fixture file, just like the production attachment writer.
+    let attachments = core.runtime.attachment_root().unwrap();
+    let files = attachments.files("online-family").unwrap();
+    {
+        let _admission = core.runtime.retention_workspace_admission();
+        std::fs::write(
+            files.path().join("left-after-archive.txt"),
+            b"retained attachment",
+        )
+        .unwrap();
+    }
+    let pages_before: i64 = read
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
     let mut stopped = 0;
     let mut confirmed = 0;
     for _ in 0..12 {
-        let report = core.tick_retention_for_test(due).unwrap();
+        let report = measurements.tick(&core, due, unrelated > 0);
         stopped += report.stopped_runs;
         confirmed += report.confirmed;
         if report.stopped_runs > 0 {
             core.runtime.wait_retention_task(run).await.unwrap();
             core.bridge.as_mut().unwrap().flush().unwrap();
+            if pin_after_stop {
+                assert_eq!(confirmed, 0, "Stop is not a deletion commit");
+                let _admission = core.runtime.retention_workspace_admission();
+                let mut sidebar = store.read_unlocked().unwrap();
+                sidebar.sidebar.set_family_pinned(&id, true).unwrap();
+                store.write(&store.lock().unwrap(), &sidebar).unwrap();
+                drop(_admission);
+                let calls_after_stop = calls.load(Ordering::SeqCst);
+                for _ in 0..4 {
+                    assert_eq!(measurements.tick(&core, due, false).confirmed, 0);
+                }
+                assert!(!db.tombstones().unwrap().threads.contains("online-family"));
+                assert_eq!(
+                    core.runtime.inspect_agent(run).unwrap().phase,
+                    AgentRunPhase::Stopped
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    calls_after_stop,
+                    "a failed confirmation never auto-resumes"
+                );
+                core.shutdown().await.unwrap();
+                return measurements;
+            }
         }
         if confirmed > 0 {
             break;
@@ -218,6 +376,12 @@ async fn lifecycle(interactive: bool) {
             .is_err()
     );
     assert!(core.runtime.resume_chat(run, RunConfig::default()).is_err());
+    assert!(core.runtime.wake_chat(run, RunConfig::default()).is_err());
+    assert!(
+        core.runtime
+            .continue_goal(run, "late".into(), RunConfig::default())
+            .is_err()
+    );
     assert!(
         core.runtime
             .delegate_chat(
@@ -251,6 +415,13 @@ async fn lifecycle(interactive: bool) {
         }
     }
     assert!(reclaimed > 0);
+    for _ in 0..2 {
+        measurements.tick(&core, due, unrelated > 0);
+    }
+    assert!(
+        !files.path().exists(),
+        "tombstone-keyed attachment recovery survives sidebar removal"
+    );
     let remaining: i64 = read
         .query_row(
             "SELECT COUNT(*) FROM events WHERE run_id = ?1",
@@ -260,14 +431,40 @@ async fn lifecycle(interactive: bool) {
         .unwrap();
     assert_eq!(remaining, 0);
     core.storage_writer().checkpoint_now().unwrap();
+    let pages_after: i64 = read
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        pages_after < pages_before,
+        "existing budgeted vacuum reclaims pages: {pages_before} -> {pages_after}"
+    );
     core.shutdown().await.unwrap();
+    measurements
 }
 
 #[tokio::test]
 async fn online_retention_bootstrap_terminal_family() {
-    lifecycle(false).await;
+    lifecycle(false, 0, false).await;
 }
 #[tokio::test]
 async fn online_retention_bootstrap_idle_waiting_family() {
-    lifecycle(true).await;
+    lifecycle(true, 0, false).await;
+}
+
+#[tokio::test]
+async fn online_retention_pin_after_idle_stop_never_auto_resumes() {
+    lifecycle(true, 0, true).await;
+}
+
+/// Synthetic, warm-cache workbench-host measurement; deliberately no wall-clock
+/// assertions. Run serially with --ignored --nocapture; never touches real XDG.
+#[tokio::test]
+#[ignore = "manual host/fence/foreground performance measurement"]
+async fn online_retention_host_measurement() {
+    for threads in [1_000, 2_000] {
+        for repetition in 0..6 {
+            let m = lifecycle(true, threads - 1, false).await;
+            eprintln!("retention_host threads={threads} repetition={repetition} {m:?}");
+        }
+    }
 }

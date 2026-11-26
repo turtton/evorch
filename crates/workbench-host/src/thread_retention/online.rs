@@ -223,7 +223,15 @@ impl AutoArchiveCoordinator {
             ownership_root: snapshot.input.ownership_root.clone(),
             sidebar_path: snapshot.input.sidebar_path.clone(),
         };
+        let db_identity = match db.retention_identity() {
+            Ok(id) => id,
+            Err(e) => {
+                report.failure(e);
+                return;
+            }
+        };
         let request = OnlineRequest {
+            db_identity,
             seed: seed.clone(),
             expected: closure,
             input: snapshot.input,
@@ -249,7 +257,7 @@ impl AutoArchiveCoordinator {
         if !idle.is_empty() {
             let start = Instant::now();
             for run in idle.into_iter().take(1) {
-                match snapshot.runtime.stop_retention_idle(run) {
+                match snapshot.runtime.stop_retention_idle(run, &snapshot.before) {
                     Ok(()) => report.stopped_runs += 1,
                     Err(e) => {
                         report.failure(e);

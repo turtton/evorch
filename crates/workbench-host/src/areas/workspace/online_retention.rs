@@ -44,7 +44,14 @@ impl WorkspaceArea {
             .read(&lock)
             .map_err(|_| "SidebarUnavailable")?;
         let old_count = document.sidebar.threads.len();
-        document.prune_threads(&|id| guard.check_thread(id).is_err());
+        if document
+            .sidebar
+            .threads
+            .iter()
+            .any(|t| guard.check_thread(&t.id.to_string()).is_err())
+        {
+            document.prune_threads(&|id| guard.check_thread(id).is_err());
+        }
         if old_count != document.sidebar.threads.len() {
             service
                 .store

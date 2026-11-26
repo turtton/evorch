@@ -1,46 +1,22 @@
-//! The exclusive startup phase.
+//! Exclusive startup recovery, not a deletion-permission fallback.
 //!
-//! The caller holds [`storage::ExclusiveLeases`]: no other evorch process has the
-//! database open or shares the ownership root. This is the only place a deletion
-//! is confirmed, and the only place state outside the database (owner rows, scratch
-//! directories) is removed.
-//!
-//! Order matters. Stages 0-3 prepare (backfill, closure search) and end with one
-//! confirming commit per family; nothing outside the database changes before it.
-//! Stages 4-7 reclaim what is confirmed; a failure or crash there never undoes a
-//! deletion, and the next start repeats the stage.
-//!
-//! | stage | work |
-//! |---|---|
-//! | 0 | identity, binding check |
-//! | 1 | event backfill (bounded) |
-//! | 2 | closure search (bounded) |
-//! | 3 | owner classification, root binding, finalize per family |
-//! | 4 | owner rows of deleted threads, scratch directories |
-//! | 5 | oversized rows |
-//! | 6 | incremental vacuum |
-//! | 7 | artifact blob collection (mark and sweep) |
-//!
-//! Stages 1, 4, 5 and 6 do not depend on the retention period: with
-//! `archived_delete_after_days = 0` nothing new is confirmed but what earlier starts
-//! confirmed (and every oversized row registered by any change) is still reclaimed.
-//! Stages 5 and 6 touch only the database, so they also run when the binding does
-//! not match; owner rows and scratch directories never do. Stage 7 needs the binding
-//! too (it deletes files), and the artifacts directory; it does not depend on the
-//! retention period either, since earlier starts' deletions leave the blobs behind.
+//! The caller holds ExclusiveLeases. Only the active core confirms new deletions
+//! through the common bounded online engine. Legacy embedded startup does not.
+//! Startup keeps bounded backfill, committed-tombstone owner/scratch recovery,
+//! oversized-row reclamation, the existing incremental vacuum and artifact GC.
+//! Recovery failure never undoes a committed deletion.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use storage::thread_retention::{
-    BindingInput, BlockReason, ConfirmedFamily, ExploreBudget, FamilyState, FinalizeBudget,
-    FinalizeOutcome, OversizedProgress, RetentionInput, SidebarThread, ThreadRetentionPolicy,
-    TombstoneSet,
+    BlockReason, ConfirmedFamily, FamilyState, OversizedProgress, RetentionInput, SidebarThread,
+    ThreadRetentionPolicy, TombstoneSet,
 };
 use storage::{BackfillProgress, Database, ExclusiveLeases, StorageConfig};
 
 use super::binding::{BindingPaths, BindingStatus, canonical_string};
-use super::{RetentionError, check_binding, owner_blocks, write_root_binding};
+use super::{RetentionError, check_binding};
 use crate::artifacts::{GcBudget, GcReport};
 use crate::ownership::Registry;
 use crate::scratch::ThreadScratch;
@@ -318,7 +294,7 @@ pub fn run_exclusive_phase(
 pub fn run_exclusive_phase_with_progress(
     _leases: &ExclusiveLeases,
     paths: &StartupPaths,
-    policy: &ThreadRetentionPolicy,
+    _policy: &ThreadRetentionPolicy,
     input: &RetentionInput,
     budget: &StartupBudget,
     now_ns: i64,
@@ -384,9 +360,8 @@ pub fn run_exclusive_phase_with_progress(
             elapsed: started.elapsed(),
         });
     }
-    let enabled = policy.archived_delete_after_days > 0;
-
-    // Stage 1.
+    // New confirmations belong exclusively to the active core's bounded engine.
+    // Startup (including legacy embedded) only backfills and reclaims committed jobs.
     notify(StartupProgress::StageStarted(Stage::Backfill));
     let mut ran = Ran {
         backfill: database
@@ -394,40 +369,6 @@ pub fn run_exclusive_phase_with_progress(
         ..Ran::default()
     };
     notify(StartupProgress::StageFinished(Stage::Backfill));
-    let backfilled =
-        ran.backfill.remaining_unconverted == 0 && ran.backfill.remaining_unattributed == 0;
-
-    if enabled && backfilled {
-        // Stage 2.
-        notify(StartupProgress::StageStarted(Stage::Explore));
-        ran.families = database.retention_explore(
-            input,
-            policy,
-            ExploreBudget {
-                max_edges: budget.explore_edges,
-            },
-        )?;
-        notify(StartupProgress::StageFinished(Stage::Explore));
-        // Stage 3. Once a family is confirmed, a later failure is reported, not raised.
-        notify(StartupProgress::StageStarted(Stage::Finalize));
-        let outcome = confirm_families(
-            &database,
-            paths,
-            policy,
-            input,
-            budget,
-            now_ns,
-            &status,
-            &mut ran,
-            &mut notify,
-        );
-        match outcome {
-            Ok(()) => {}
-            Err(error) if ran.confirmed.is_empty() => return Err(error),
-            Err(error) => ran.errors.push(format!("finalize: {error}")),
-        }
-        notify(StartupProgress::StageFinished(Stage::Finalize));
-    }
 
     // Stages 4-7: reclaim what is confirmed. A failure here is reported, not raised.
     let tombstones = read_tombstones(&database, &mut ran)?;
@@ -541,152 +482,6 @@ fn open_registry(ownership_root: &Path) -> Result<Option<Registry>, RetentionErr
         Ok(_) => Ok(Some(Registry::open_existing(&path)?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(RetentionError::Io(error)),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn confirm_families(
-    database: &Database,
-    paths: &StartupPaths,
-    policy: &ThreadRetentionPolicy,
-    input: &RetentionInput,
-    budget: &StartupBudget,
-    now_ns: i64,
-    status: &BindingStatus,
-    ran: &mut Ran,
-    notify: &mut impl FnMut(StartupProgress),
-) -> Result<(), RetentionError> {
-    let mut explored = Vec::new();
-    for (key, state) in &ran.families {
-        match state {
-            FamilyState::Explored { threads, .. } => explored.push((key.clone(), threads.clone())),
-            FamilyState::Blocked(reason) => ran.blocked.push((key.clone(), reason.clone())),
-            FamilyState::Exploring { .. } => {}
-        }
-    }
-    if explored.is_empty() {
-        return Ok(());
-    }
-    // Owner rows. Unreadable means nothing is known about who holds what.
-    let all_threads = explored
-        .iter()
-        .flat_map(|(_, threads)| threads.iter().cloned())
-        .collect::<Vec<_>>();
-    let verdicts = open_registry(&paths.ownership_root)
-        .map_err(|error| error.to_string())
-        .and_then(|registry| match registry {
-            Some(registry) => registry
-                .classify_for_retention(&all_threads)
-                .map_err(|error| error.to_string()),
-            None => Ok(std::collections::BTreeMap::new()),
-        });
-    let verdicts = match verdicts {
-        Ok(verdicts) => verdicts,
-        Err(error) => {
-            for (key, _) in &explored {
-                ran.blocked.push((
-                    key.clone(),
-                    BlockReason::Owner(format!("owner registry unreadable: {error}")),
-                ));
-            }
-            ran.owner_registry_error = Some(error);
-            return Ok(());
-        }
-    };
-    let now_ms = u64::try_from(now_ns / 1_000_000)
-        .map_err(|_| RetentionError::Input("now_ns is negative".into()))?;
-    let blocks = owner_blocks(&verdicts, now_ms, policy.archived_delete_after_days);
-    let binding = BindingInput {
-        ownership_root: input.ownership_root.clone(),
-        sidebar_path: input.sidebar_path.clone(),
-    };
-    let mut root_bound = matches!(status, BindingStatus::Bound);
-    for (key, threads) in explored {
-        let Some(first) = database.retention_finalize_budget(&key)? else {
-            continue;
-        };
-        let family_blocks: std::collections::BTreeMap<String, String> = blocks
-            .iter()
-            .filter(|(thread, _)| threads.contains(thread))
-            .map(|(thread, reason)| (thread.clone(), reason.clone()))
-            .collect();
-        // An owner holds a member: no confirmation can follow, so do not even bind the root.
-        if let Some(reason) = family_blocks.values().next() {
-            ran.blocked.push((key, BlockReason::Owner(reason.clone())));
-            continue;
-        }
-        // The root side of the binding is on disk before the first confirmation
-        // can commit; a failure here confirms nothing.
-        if !root_bound {
-            let db_id = database.retention_identity()?;
-            write_root_binding(&paths.ownership_root, &db_id, &paths.db_path, now_ns)?;
-            root_bound = true;
-            notify(StartupProgress::RootBound);
-        }
-        // Attachments should already be absent after archive. Retry a failed archive
-        // cleanup before confirming retention, never report deletion while they remain.
-        let scratch = ThreadScratch::for_ownership_root(&paths.ownership_root)?;
-        let attachment_root = scratch.attachment_root();
-        let _attachments = if attachment_root.path().try_exists()? {
-            let guard =
-                crate::attachments::AttachmentArchive::lock(attachment_root, threads.clone())?;
-            guard.remove()?;
-            Some(guard)
-        } else {
-            None
-        };
-        let settled = finalize_with_doubling(first, budget.finalize_rounds, |attempt| {
-            database.retention_finalize(&key, input, policy, &family_blocks, &binding, attempt)
-        })?;
-        match settled {
-            Settled::Confirmed(family) => {
-                notify(StartupProgress::FamilyConfirmed {
-                    family_key: family.family_key.clone(),
-                });
-                ran.confirmed.push(family);
-            }
-            Settled::OverBudget => ran.retried_over_budget.push(key),
-            Settled::Stale => ran.stale.push(key),
-            Settled::Blocked(reason) => ran.blocked.push((key, reason)),
-            Settled::Disabled => {}
-        }
-    }
-    Ok(())
-}
-
-/// How one family's finalize attempts ended.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Settled {
-    Confirmed(ConfirmedFamily),
-    /// Every round exceeded its budget; the family stays unconfirmed until the next start.
-    OverBudget,
-    Stale,
-    Blocked(BlockReason),
-    Disabled,
-}
-
-/// Try `finalize` with `first`, doubling the budget after each `OverBudget`, at most
-/// `rounds` times (at least once). The family is never split: a family that does not
-/// fit in the last round waits for the next start.
-pub(crate) fn finalize_with_doubling(
-    first: FinalizeBudget,
-    rounds: u32,
-    mut finalize: impl FnMut(FinalizeBudget) -> Result<FinalizeOutcome, storage::StorageError>,
-) -> Result<Settled, storage::StorageError> {
-    let mut attempt = first;
-    let mut tried = 0;
-    loop {
-        tried += 1;
-        match finalize(attempt)? {
-            FinalizeOutcome::Confirmed(family) => return Ok(Settled::Confirmed(family)),
-            FinalizeOutcome::OverBudget { .. } if tried >= rounds.max(1) => {
-                return Ok(Settled::OverBudget);
-            }
-            FinalizeOutcome::OverBudget { .. } => attempt = attempt.doubled(),
-            FinalizeOutcome::Stale { .. } => return Ok(Settled::Stale),
-            FinalizeOutcome::Blocked(reason) => return Ok(Settled::Blocked(reason)),
-            FinalizeOutcome::Disabled => return Ok(Settled::Disabled),
-        }
     }
 }
 

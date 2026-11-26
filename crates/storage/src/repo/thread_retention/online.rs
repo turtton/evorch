@@ -7,7 +7,7 @@ use crate::thread_retention::{
     online::{CommitFence, OnlineBudget, OnlineClosure, OnlineOutcome, OnlineRequest},
 };
 use crate::{Database, StorageError};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[cfg(test)]
@@ -211,12 +211,23 @@ fn check(
     budget: OnlineBudget,
 ) -> Check<(OnlineClosure, Vec<String>)> {
     let OnlineRequest {
+        db_identity,
         seed,
         expected,
         input,
         policy,
         binding,
     } = request;
+    let actual_db_id: Option<String> = conn
+        .query_row(
+            "SELECT db_id FROM retention_identity WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual_db_id.as_deref() != Some(db_identity.as_str()) {
+        return held("DatabaseIdentityMismatch");
+    }
     if policy.archived_delete_after_days == 0 {
         return held("DeletionDisabled");
     }
