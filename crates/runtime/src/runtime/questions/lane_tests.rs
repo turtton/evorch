@@ -309,7 +309,7 @@ async fn lead_questions_are_independent_paginated_and_answers_are_untrusted() {
             .code,
         "already_answered"
     );
-    let tag = answered.answer_message();
+    let tag = answered.answer_message().unwrap();
     assert!(tag.starts_with("[lane-answer "));
     let history = vec![message(providers::Role::User, &tag)];
     assert!(AgentRuntime::answer_is_in_history(&history, &answered));
@@ -595,7 +595,7 @@ async fn lane_lead_answer_is_injected_once_across_explicit_restore() {
         .unwrap();
     f.waiting(lane.root_run_id).await;
     let last = f.model.requests.lock().unwrap().last().unwrap().clone();
-    let answer_text = answered.answer_message();
+    let answer_text = answered.answer_message().unwrap();
     assert_eq!(
         last.iter()
             .filter(|m| m.role == providers::Role::User)

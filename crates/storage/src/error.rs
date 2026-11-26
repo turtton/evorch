@@ -180,6 +180,9 @@ pub enum StorageError {
     /// The question was already answered by someone else. Only reported to a caller that
     /// asked to be the first to answer ([`crate::AnswerMode::FirstOnly`]).
     QuestionAlreadyAnswered,
+    /// The question was cancelled by offline maintenance. It is terminal, was never
+    /// answered, and can no longer be answered, forwarded or rerouted.
+    QuestionCancelled,
     /// The run or thread was deleted by a confirmed retention (tombstoned), so
     /// nothing may be recorded for it any more. Not retryable.
     Tombstoned {
@@ -321,6 +324,7 @@ impl fmt::Display for StorageError {
                 "assistant reference is missing or already consumed"
             ),
             Self::QuestionAlreadyAnswered => write!(formatter, "question already answered"),
+            Self::QuestionCancelled => write!(formatter, "question cancelled"),
             Self::Tombstoned { run_id, thread_id } => write!(
                 formatter,
                 "run {} / thread {} was deleted by retention",
@@ -496,6 +500,7 @@ impl std::error::Error for StorageError {
             | Self::AssistantReferenceConflict
             | Self::AssistantReferenceUnavailable
             | Self::QuestionAlreadyAnswered
+            | Self::QuestionCancelled
             | Self::Tombstoned { .. }
             | Self::LessonFavorite { .. }
             | Self::BodyUnresolved { .. }

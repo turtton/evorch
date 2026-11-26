@@ -124,6 +124,7 @@ fn question(n: u32, q: u32) -> UserQuestion {
         responder: None,
         routing_revision: 0,
         management_revision: None,
+        cancelled: false,
     }
 }
 fn report(status: LaneStatus) -> LaneReportInput {
@@ -648,6 +649,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v76.sql"),
         include_str!("../undo/undo_v75.sql"),
         include_str!("../undo/undo_v74.sql"),
         include_str!("../undo/undo_v73.sql"),

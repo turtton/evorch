@@ -27,7 +27,7 @@ impl LoopState {
         }
         if questions
             .iter()
-            .any(|question| question.blocking && question.answer.is_none())
+            .any(|question| question.blocking && question.is_pending())
         {
             return Ok(UserQuestionReadiness::Waiting);
         }
@@ -69,7 +69,11 @@ impl LoopState {
         let questions = runtime.user_answers(self.task.run_id)?;
         let mut received = false;
         for question in questions {
-            if question.answer.is_none() || self.answered_questions.contains(&question.id) {
+            // Only a stored answer is delivered; a cancelled question has none.
+            let Some(message) = question.answer_message() else {
+                continue;
+            };
+            if self.answered_questions.contains(&question.id) {
                 continue;
             }
             // A restored run rebuilds its in-memory set from the persisted user
@@ -80,7 +84,7 @@ impl LoopState {
                 // The message tag carries who answered, so a parent agent's answer
                 // cannot pass for the user's.
                 self.begin_internal_input();
-                self.context.push_user(&question.answer_message());
+                self.context.push_user(&message);
                 match &question.answer_origin {
                     Some(event_bus::AnswerOrigin::ParentAgent { answered_by_run_id }) => {
                         self.observe_parent_input(answered_by_run_id);
@@ -130,11 +134,12 @@ mod tests {
             blocking: true,
             answer: Some("A".into()),
             answer_origin: None,
+            cancelled: false,
         };
         let mut message = providers::Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
-                text: question.answer_message(),
+                text: question.answer_message().unwrap(),
             }],
         };
         assert!(!answer_in_history(&[message.clone()], &question));

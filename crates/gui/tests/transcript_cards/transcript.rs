@@ -245,6 +245,7 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
         blocking: true,
         answer: None,
         answer_origin: None,
+        cancelled: false,
     };
     let asked = Event::new(ToolEvent::UserQuestionUpdated {
         question: question.clone(),
@@ -457,6 +458,7 @@ fn answer_notice_names_who_answered() {
                 blocking: true,
                 answer: Some("Use A".into()),
                 answer_origin: origin,
+                cancelled: false,
             },
         }));
         registry.run("root").unwrap().entries().to_vec()
@@ -546,6 +548,7 @@ fn child_question_answer_names_who_answered_in_thread_and_child_run() {
                 blocking: true,
                 answer: None,
                 answer_origin: None,
+                cancelled: false,
             };
             registry.apply(&Event::new(ToolEvent::UserQuestionUpdated {
                 question: question.clone(),

@@ -540,7 +540,7 @@ fn new_question_runs(
             .wait_questions(*run)
             .into_iter()
             .filter(|q| {
-                q.answer.is_none() && !reported.contains(&q.id) && !runtime.question_reported(&q.id)
+                q.is_pending() && !reported.contains(&q.id) && !runtime.question_reported(&q.id)
             })
             .map(|q| q.id)
             .collect();
@@ -621,8 +621,8 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Sn
                 ready_turns.insert(run.to_string());
             }
             let questions = runtime.wait_questions(*run);
-            value["needs_user_input"] = Value::Bool(!terminal(&value) && questions.iter().any(|q| q.blocking && q.answer.is_none()));
-            value["has_pending_question"] = Value::Bool(questions.iter().any(|q| q.answer.is_none()));
+            value["needs_user_input"] = Value::Bool(!terminal(&value) && questions.iter().any(|q| q.blocking && q.is_pending()));
+            value["has_pending_question"] = Value::Bool(questions.iter().any(|q| q.is_pending()));
             for (field, limit) in [("output", OUTPUT_BYTES), ("reason", REASON_BYTES)] {
                 let truncated = value[field].as_str().is_some_and(|text| text.len() > limit);
                 if truncated {

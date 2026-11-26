@@ -98,6 +98,7 @@ impl Fixture {
             responder: None,
             routing_revision: 0,
             management_revision: None,
+            cancelled: false,
         };
         crate::repo::lane_delivery::create_question(
             self.c(),

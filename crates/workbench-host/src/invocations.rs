@@ -534,7 +534,7 @@ impl InvocationRegistry {
         self.runtime.user_answers(run).is_ok_and(|questions| {
             questions
                 .iter()
-                .any(|question| question.blocking && question.answer.is_none())
+                .any(|question| question.blocking && question.is_pending())
         })
     }
 

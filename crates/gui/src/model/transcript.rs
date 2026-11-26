@@ -465,6 +465,7 @@ impl TranscriptModel {
                         Some(event_bus::AnswerOrigin::ParentAgent{..})=>format!("Answer from parent agent: {answer}"),
                         _=>format!("Answer: {answer}"),
                     },
+                    None if question.cancelled=>format!("Question cancelled without an answer: {}",question.title),
                     None=>format!("Question: {}",question.title),
                 }});
             }

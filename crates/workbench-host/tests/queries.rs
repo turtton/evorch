@@ -695,6 +695,7 @@ fn legacy_questions_discard_stale_routing_payload_and_preserve_unknown_answer_or
         responder: Some(event_bus::lane::QuestionResponder::User),
         routing_revision: 7,
         management_revision: Some(3),
+        cancelled: false,
     };
     f.store.handle().create_user_question(&q).unwrap();
     let mut sub = f.subscribe();
@@ -838,6 +839,7 @@ fn lane_questions_use_durable_requester_and_user_or_lead_routing() {
             responder: None,
             routing_revision: 0,
             management_revision: None,
+            cancelled: false,
         };
         f.store
             .handle()
@@ -2603,6 +2605,7 @@ fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
         responder: Some(event_bus::lane::QuestionResponder::User),
         routing_revision: 0,
         management_revision: None,
+        cancelled: false,
     };
     f.store.handle().create_user_question(&q).unwrap();
     let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());

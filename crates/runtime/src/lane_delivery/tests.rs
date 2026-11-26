@@ -8,6 +8,7 @@ tokio::task_local! {
     pub(super) static AFTER_RECEIPT_BARRIER: Arc<tokio::sync::Barrier>;
     pub(super) static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 }
+mod cancelled_questions;
 mod harness;
 pub(super) mod integration;
 mod lease;
@@ -335,6 +336,7 @@ impl Fixture {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         self.storage
             .handle()

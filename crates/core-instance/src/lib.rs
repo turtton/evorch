@@ -455,6 +455,99 @@ impl Drop for Instance {
     }
 }
 
+/// Exclusion of a core over one config directory, for offline maintenance that must be
+/// sure no core runs or starts. It holds the launch and the lifetime lock of the directory
+/// (in the order a starting core takes them) until it is dropped; a core that tries to
+/// start meanwhile is refused as already running.
+///
+/// It does not discover a core by endpoint or process: the locks are the proof. Lock files
+/// are never unlinked or replaced.
+#[derive(Debug)]
+pub struct MaintenanceGuard {
+    config: PathBuf,
+    _launch: Option<File>,
+    _lifetime: Option<File>,
+}
+
+/// The config directory as it exists: never created, and as private as a core demands.
+fn existing_config(config: &Path) -> io::Result<PathBuf> {
+    let config = fs::canonicalize(config)?;
+    let m = fs::metadata(&config)?;
+    if !m.is_dir() || m.uid() != rustix::process::geteuid().as_raw() || m.mode() & 0o022 != 0 {
+        return Err(unsafe_path());
+    }
+    Ok(config)
+}
+
+fn probe_shared(path: &Path) -> Result<Option<File>, InstanceError> {
+    let f = match OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC).bits() as i32)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    regular(&f, path)?;
+    flock(&f, FlockOperation::NonBlockingLockShared).map_err(|e| {
+        if e == rustix::io::Errno::WOULDBLOCK {
+            InstanceError::AlreadyRunning
+        } else {
+            InstanceError::Io(e.into())
+        }
+    })?;
+    Ok(Some(f))
+}
+
+impl MaintenanceGuard {
+    /// For a preview: creates and changes nothing. Existing lock files are opened
+    /// read-only and locked shared without waiting; a missing lock file means no core ever
+    /// used the directory, which is not an error here (the database lease still decides).
+    ///
+    /// # Errors
+    /// [`InstanceError::AlreadyRunning`] while a core holds a lock; I/O errors for a
+    /// missing or unsafe directory, a symlinked or foreign lock file.
+    pub fn inspect(config: &Path) -> Result<Self, InstanceError> {
+        let config = existing_config(config)?;
+        let identity = ConfigIdentity {
+            identity: String::new(),
+            config: config.clone(),
+        };
+        let launch = probe_shared(&identity.launch_path())?;
+        let lifetime = probe_shared(&identity.lifetime_path())?;
+        Ok(Self {
+            config,
+            _launch: launch,
+            _lifetime: lifetime,
+        })
+    }
+
+    /// For an apply: both locks exclusively without waiting, creating a lock file that does
+    /// not exist yet (owner only). The directory itself must already exist.
+    ///
+    /// # Errors
+    /// As [`Self::inspect`].
+    pub fn acquire(config: &Path) -> Result<Self, InstanceError> {
+        let config = existing_config(config)?;
+        let identity = ConfigIdentity {
+            identity: String::new(),
+            config: config.clone(),
+        };
+        let launch = lock(&identity.launch_path())?;
+        let lifetime = lock(&identity.lifetime_path())?;
+        Ok(Self {
+            config,
+            _launch: Some(launch),
+            _lifetime: Some(lifetime),
+        })
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +570,53 @@ mod tests {
             bind_private_socket(&path).is_err(),
             "an existing path is never replaced"
         );
+    }
+
+    #[test]
+    fn inspect_changes_nothing_and_a_missing_lock_means_no_core() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let guard = MaintenanceGuard::inspect(dir.path()).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        drop(guard);
+        assert!(MaintenanceGuard::inspect(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn a_running_or_starting_core_is_refused_by_both_modes_and_blocks_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = ConfigIdentity::new(dir.path()).unwrap();
+        let launch = LaunchGuard::acquire(&config).unwrap();
+        assert!(matches!(
+            MaintenanceGuard::inspect(dir.path()),
+            Err(InstanceError::AlreadyRunning)
+        ));
+        assert!(matches!(
+            MaintenanceGuard::acquire(dir.path()),
+            Err(InstanceError::AlreadyRunning)
+        ));
+        drop(launch);
+        let held = MaintenanceGuard::acquire(dir.path()).unwrap();
+        assert!(matches!(
+            LaunchGuard::acquire(&config),
+            Err(InstanceError::AlreadyRunning)
+        ));
+        let lifetime_probe = MaintenanceGuard::inspect(dir.path());
+        assert!(matches!(lifetime_probe, Err(InstanceError::AlreadyRunning)));
+        drop(held);
+        MaintenanceGuard::inspect(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_lock_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, b"").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(".evorch-core.lock")).unwrap();
+        assert!(MaintenanceGuard::inspect(dir.path()).is_err());
+        assert!(MaintenanceGuard::acquire(dir.path()).is_err());
     }
 }

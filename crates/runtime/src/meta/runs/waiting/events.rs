@@ -130,7 +130,7 @@ pub(super) fn poll_with(
                     |n| !n.observed(),
                 ))
     });
-    let pending_question = own_questions.iter().any(|q| q.answer.is_none());
+    let pending_question = own_questions.iter().any(|q| q.is_pending());
     let managed_lanes = !runtime.wait_lanes(caller).is_empty();
     let shell_source = jobs.iter().any(|j| {
         j.state != tools::ShellJobState::Terminal

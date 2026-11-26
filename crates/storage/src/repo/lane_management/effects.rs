@@ -9,7 +9,7 @@ pub(super) fn questions(
     old: &LaneRecord,
     new: &LaneRecord,
 ) -> Result<(), StorageError> {
-    let mut s=c.prepare("SELECT r.payload,q.payload FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND q.answered=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)")?;
+    let mut s=c.prepare("SELECT r.payload,q.payload FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND q.answered=0 AND q.cancelled=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)")?;
     let rows = s
         .query_map([&old.lane_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

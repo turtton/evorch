@@ -49,11 +49,11 @@ pub mod sql {
         AND state IN ('committed', 'started', 'recoverable_start_failure') LIMIT ?2";
     pub const HANDOFF_BODY: &str = "SELECT goal_json FROM lane_handoffs WHERE rowid = ?1";
     pub const QUESTIONS: &str = "SELECT j.value FROM json_each(?1) j WHERE \
-        EXISTS(SELECT 1 FROM user_questions q INDEXED BY user_questions_run WHERE q.run_id = j.value AND q.answered = 0) \
+        EXISTS(SELECT 1 FROM user_questions q INDEXED BY user_questions_run WHERE q.run_id = j.value AND q.answered = 0 AND q.cancelled = 0) \
         OR EXISTS(SELECT 1 FROM user_questions q INDEXED BY idx_retention_questions_root_pending \
-                  WHERE q.root_run_id = j.value AND q.answered = 0) \
+                  WHERE q.root_run_id = j.value AND q.answered = 0 AND q.cancelled = 0) \
         OR EXISTS(SELECT 1 FROM user_question_links l INDEXED BY user_question_links_run \
-                  JOIN user_questions q ON q.id = l.question_id WHERE l.run_id = j.value AND q.answered = 0)";
+                  JOIN user_questions q ON q.id = l.question_id WHERE l.run_id = j.value AND q.answered = 0 AND q.cancelled = 0)";
     pub const EVAL_SAMPLES: &str = "SELECT j.value FROM json_each(?1) j \
         WHERE EXISTS(SELECT 1 FROM eval_samples s WHERE s.thread_id = j.value)";
     pub const LANES: &str = "SELECT l.thread_id, l.policy, \

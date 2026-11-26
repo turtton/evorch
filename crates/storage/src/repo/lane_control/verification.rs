@@ -403,6 +403,19 @@ fn review_snapshot(
     })
 }
 pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseResult, StorageError> {
+    let tx = tx(conn)?;
+    let result = close_lane_in(&tx, r)?;
+    tx.commit()?;
+    Ok(result)
+}
+/// The close itself, inside a transaction the caller owns and commits. Everything a
+/// close records (the close row, `current_close_id`, the Closed notification) is
+/// written here, so a caller that batches several closes keeps them atomic without a
+/// second copy of the transition.
+pub(crate) fn close_lane_in(
+    tx: &Connection,
+    r: CloseLane,
+) -> Result<LaneCloseResult, StorageError> {
     let note = r.note.trim();
     if note.is_empty() || note.len() > LANE_CLOSE_NOTE_MAX_BYTES {
         return Err(err(LaneOperationError::InvalidInput));
@@ -414,7 +427,6 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
     if !valid_shape || r.ready_seq == Some(0) {
         return Err(err(LaneOperationError::InvalidInput));
     }
-    let tx = tx(conn)?;
     let (lead, closed_by) = match &r.closer {
         LaneCloser::Lead {
             thread_id,
@@ -440,18 +452,18 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
             )
         }
     };
-    let l = managed(&tx, &r.lane_id, r.expected_management_revision, lead)?;
+    let l = managed(tx, &r.lane_id, r.expected_management_revision, lead)?;
     if let LaneCloser::Lead {
         thread_id,
         root_run_id,
     } = &r.closer
-        && !is_lead_root(&tx, thread_id, root_run_id)?
+        && !is_lead_root(tx, thread_id, root_run_id)?
     {
         return Err(err(LaneOperationError::NotCurrentLead));
     }
     // The report the close is about. A lead may only close the latest Ready that was
     // reported for the current brief; a human may also end a lane that has none.
-    let report = latest_report(&tx, &l)?;
+    let report = latest_report(tx, &l)?;
     let ready = match (r.ready_seq, report) {
         (Some(seq), Some(report)) => {
             if report.report_seq != seq
@@ -478,7 +490,7 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
     }
     let review = r
         .verification_id
-        .map(|id| review_snapshot(&tx, &l.lane_id, id, ready.as_ref(), l.brief_revision))
+        .map(|id| review_snapshot(tx, &l.lane_id, id, ready.as_ref(), l.brief_revision))
         .transpose()?;
     let current: Option<String> = tx.query_row(
         "SELECT current_close_id FROM lanes WHERE lane_id=?1",
@@ -525,7 +537,7 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
         artifact_revision: ready.as_ref().and_then(|x| x.artifact_revision.clone()),
         note: note.to_owned(),
         review,
-        pr_context: Some(pr_context(&tx, &l.thread_id)?),
+        pr_context: Some(pr_context(tx, &l.thread_id)?),
         closed_by: Some(closed_by),
         at_ns: r.at_ns,
         outcome: LaneCloseOutcome::Closed,
@@ -550,7 +562,7 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
         .clone()
         .ok_or_else(|| err(LaneOperationError::NotAttached))?;
     crate::repo::lane_delivery::enqueue(
-        &tx,
+        tx,
         LaneNotification {
             notification_id: String::new(),
             lane_id: l.lane_id,
@@ -564,17 +576,16 @@ pub(crate) fn close_lane(conn: &Connection, r: CloseLane) -> Result<LaneCloseRes
             created_at_ns: r.at_ns,
         },
     )?;
-    tx.commit()?;
     Ok(result)
 }
 /// Questions raised by the lane's own runs (its root and every run under it) that nobody has
-/// answered. Unlike the attention list this does not wait for a question to be forwarded to
+/// answered and nobody cancelled. Unlike the attention list this does not wait for a question to be forwarded to
 /// the lead: a person ending the lane needs to know about every one of them. A question whose
 /// run was deleted is not counted, which is the ledger's only form of cancellation. Each
 /// question is one row, so it is counted once however it is routed.
 fn open_question_count(conn: &Connection, lane: &LaneRecord) -> Result<u64, StorageError> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM user_questions q WHERE q.answered=0 \
+        "SELECT COUNT(*) FROM user_questions q WHERE q.answered=0 AND q.cancelled=0 \
          AND (q.root_run_id=?2 \
               OR q.run_id IN (SELECT run_id FROM thread_runs WHERE thread_id=?1) \
               OR q.root_run_id IN (SELECT root_run_id FROM thread_runs WHERE thread_id=?1)) \

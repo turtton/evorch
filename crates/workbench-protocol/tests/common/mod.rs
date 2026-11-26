@@ -397,6 +397,7 @@ pub fn question(target: QuestionTarget) -> QuestionView {
             text: "yes".into(),
             answered_by: Some(human()),
         }),
+        cancelled: false,
         revision: Revision(5),
         raised_by: agent(),
     }

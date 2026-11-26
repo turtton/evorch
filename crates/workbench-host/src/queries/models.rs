@@ -248,7 +248,7 @@ pub(crate) fn collect(
             .values()
             .filter(|q| {
                 q.requester.thread == thread.summary.id
-                    && q.answer.is_none()
+                    && q.is_pending()
                     && q.target == QuestionTarget::User
             })
             .count() as u32;
@@ -347,6 +347,7 @@ fn question_view(
         title: text(&q.title, 1024),
         options: q.options.iter().take(32).map(|o| text(o, 1024)).collect(),
         answer,
+        cancelled: q.cancelled,
         revision: Revision(q.routing_revision),
         raised_by,
     }))

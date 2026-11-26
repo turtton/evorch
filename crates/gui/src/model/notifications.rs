@@ -83,7 +83,7 @@ impl NotificationsModel {
     ) {
         let (kind, run_id, summary) = match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
-                if question.answer.is_none() && question.run_id == question.root_run_id =>
+                if question.is_pending() && question.run_id == question.root_run_id =>
             {
                 // Durable chat identity survives a missing run-start event. Other roots
                 // can still be resolved through their run id when the button is clicked.
@@ -382,6 +382,7 @@ mod tests {
                 blocking: true,
                 answer: None,
                 answer_origin: None,
+                cancelled: false,
             };
             let mut model = NotificationsModel::default();
             // When: the pending question arrives.
@@ -421,6 +422,7 @@ mod tests {
                 blocking: true,
                 answer,
                 answer_origin: None,
+                cancelled: false,
             };
             let mut model = NotificationsModel::default();
             model.apply_event(

@@ -1,6 +1,7 @@
 //! Explicit offline repair and conservative, replay-equivalent live retention.
 
 pub(crate) mod archive_purge;
+mod cleanup_archive_blockers;
 mod compact;
 mod convert_bodies;
 pub(crate) mod offline;
@@ -9,6 +10,10 @@ pub(crate) mod retention_events;
 mod vacuum;
 pub mod writer_leases;
 
+pub use cleanup_archive_blockers::{
+    CleanupApplyOptions, CleanupApplySummary, CleanupPlan, CleanupPreviewOptions, Manifest,
+    PLAN_VERSION, SidebarBindings, apply_archive_blocker_cleanup, preview_archive_blocker_cleanup,
+};
 pub use compact::{CompactOptions, CompactSummary, DeltaMode, backfill_events, compact_events};
 #[cfg(any(test, feature = "unchecked-open"))]
 pub use convert_bodies::testing::{

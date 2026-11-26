@@ -99,6 +99,7 @@ fn question(id: &str, run: &str, root: &str, answer: Option<&str>) -> Event {
             blocking: true,
             answer: answer.map(str::to_owned),
             answer_origin: None,
+            cancelled: false,
         },
     })
 }

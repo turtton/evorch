@@ -62,6 +62,7 @@ fn source_reclaim_keeps_live_recipient_question_and_answer_then_last_recipient_c
             responder: None,
             routing_revision: 0,
             management_revision: None,
+            cancelled: false,
         };
         h.create_user_question(&q).unwrap();
         h.bind_user_questions("source-run", "target-run", std::slice::from_ref(&q.id))

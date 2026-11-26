@@ -53,10 +53,10 @@ pub use event::{
     CompactionMode, CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent,
     DiagnosticSeverity, EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta,
     FallbackAxis, FaultEvent, HumanChannel, LedgerEvent, LifecycleEvent, MessageEvent,
-    ProviderEvent, ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES, RequestPurpose,
-    RoutingSource, RunActivity, SCHEMA_VERSION, ServiceTier, SkillDiagnosticKind, ToolEvent,
-    UsageEvent, UserQuestion, WaitingCause, WaitingDelegate, WaitingMode, WaitingRelation,
-    WaitingRun, WindowSource,
+    ProviderEvent, ProviderFailureKind, QuestionStatus, REQUEST_FAILED_DETAIL_MAX_BYTES,
+    RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION, ServiceTier, SkillDiagnosticKind,
+    ToolEvent, UsageEvent, UserQuestion, WaitingCause, WaitingDelegate, WaitingMode,
+    WaitingRelation, WaitingRun, WindowSource,
 };
 pub use orchestrator::OrchestratorEvent;
 pub use otel::{

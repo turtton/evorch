@@ -586,6 +586,15 @@ fn protections_are_read_from_their_own_tables() {
         assert_eq!(f.decide(&family), held(Hold::UnansweredQuestion), "{case}");
         f.sql("UPDATE user_questions SET answered=1", []);
         assert_eq!(f.decide(&family), due(), "{case} answered");
+        f.sql("UPDATE user_questions SET answered=0", []);
+        assert_eq!(
+            f.decide(&family),
+            held(Hold::UnansweredQuestion),
+            "{case} reopened"
+        );
+        // A cancelled question is terminal and no longer protects the family.
+        f.sql("UPDATE user_questions SET cancelled=1, payload=json_set(payload,'$.cancelled',json('true'))", []);
+        assert_eq!(f.decide(&family), due(), "{case} cancelled");
     }
     let lane = |policy: &str, closed: bool, revision: i64, projected: i64| {
         f.sql("DELETE FROM lane_closes", []);

@@ -19,6 +19,12 @@ impl TranscriptModel {
                     format!("Answer{by} sent to subagent {name}: {answer}")
                 }
                 (Some(answer), None) => format!("Answer{by} sent to a subagent: {answer}"),
+                (None, _) if question.cancelled => {
+                    format!(
+                        "Subagent question cancelled without an answer: {}",
+                        question.title
+                    )
+                }
                 (None, Some(name)) => format!(
                     "Subagent question from {name} reached orchestrator: {}",
                     question.title

@@ -162,7 +162,8 @@ for its persistence, approval-provenance, cache, and evaluation contracts.
   workbench-wide limit. A run's answer history is not capped: reading, answer
   injection and continuation keep working past 32 lifetime questions, and the
   `user_answers` and `subagent_questions` tools list every unanswered question
-  plus the 32 most recent answered ones. Storage or
+  plus the 32 most recent answered or cancelled ones. A cancelled question
+  (offline cleanup only; no answer, never delivered as one) is terminal and does not block finish. Storage or
   secret-guard failures are surfaced. No answer grants tool permission.
 - The GUI shows questions in their owning conversation. A storage acknowledgement
   clears an answered card even if an old run's event fence rejects its event.

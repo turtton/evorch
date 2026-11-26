@@ -85,7 +85,7 @@ fn items(
     Ok(result)
 }
 /// The pending questions routed to a lane for its current management.
-const PENDING_QUESTIONS: &str = "FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND r.management_revision=?2 AND q.answered=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
+const PENDING_QUESTIONS: &str = "FROM lane_question_routes r JOIN user_questions q ON q.id=r.question_id WHERE r.lane_id=?1 AND r.management_revision=?2 AND q.answered=0 AND q.cancelled=0 AND r.requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND r.requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
 
 /// How many pending questions [`lane_items`] would list for the lane, counted without
 /// reading any of them.

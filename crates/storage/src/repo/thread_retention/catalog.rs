@@ -285,6 +285,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("lane_closes", ReclaimThread, "immutable lane close history"),
     (
+        "archive_blocker_cleanup_receipts",
+        Keep,
+        "one-time offline cleanup completion evidence: hashes and counts only, no thread body",
+    ),
+    (
         "lane_forward_receipts",
         ReclaimThread,
         "atomic question forward receipts",

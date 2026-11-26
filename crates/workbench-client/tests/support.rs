@@ -290,6 +290,7 @@ pub fn answered_question(answer: String) -> QuestionView {
                 ClientId::new("client-2").unwrap(),
             )),
         }),
+        cancelled: false,
         revision: Revision(2),
         raised_by: Provenance::agent(run),
     }

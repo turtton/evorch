@@ -519,6 +519,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 blocking: true,
                 answer: None,
                 answer_origin: None,
+                cancelled: false,
             },
         })]);
     }
@@ -545,6 +546,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 blocking: true,
                 answer: Some("Use the existing API".into()),
                 answer_origin: None,
+                cancelled: false,
             },
         })]);
     gui.run();
@@ -568,6 +570,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 blocking: true,
                 answer: None,
                 answer_origin: None,
+                cancelled: false,
             },
         })]);
     gui.run();

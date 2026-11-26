@@ -316,7 +316,7 @@ pub(super) fn ask_user(name: &str) -> ToolSpec {
 pub(super) fn user_answers(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Return the questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance: every unanswered question and the 32 most recent answered ones, oldest first. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
+        "Return the questions created by this run or explicitly inherited from its resumed conversation, with pending/answered/cancelled state and original requester provenance: every pending question and the 32 most recent answered or cancelled ones, oldest first. A cancelled question has cancelled:true and no answer; it was closed without an answer and will never be answered. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
         json!({}),
         &[],
         true,
@@ -326,7 +326,7 @@ pub(super) fn user_answers(name: &str) -> ToolSpec {
 pub(super) fn subagent_questions(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Read questions from one direct child run, including pending state and original requester: every unanswered question and the 32 most recent answered ones, oldest first. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
+        "Read questions from one direct child run, including pending state and original requester: every pending question and the 32 most recent answered or cancelled ones, oldest first. A cancelled question has cancelled:true and no answer. Use after wait reports attention for that child. Listed questions count as reported, so a later wait does not return for them. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
         json!({"run_id":run_id()}),
         &["run_id"],
         true,

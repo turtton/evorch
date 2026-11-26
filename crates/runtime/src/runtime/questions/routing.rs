@@ -178,6 +178,7 @@ pub(super) fn question_error(error: storage::StorageError) -> LaneError {
     let code = match &error {
         StorageError::LaneOperation(reason) => reason.as_str(),
         StorageError::QuestionAlreadyAnswered => "already_answered",
+        StorageError::QuestionCancelled => "question_cancelled",
         StorageError::StaleRevision {
             kind: "routing", ..
         } => "stale_routing",

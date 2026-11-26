@@ -1484,6 +1484,7 @@ async fn lane_restore_admission_failure_has_one_failed_report_not_one_per_execut
                 responder: None,
                 routing_revision: 0,
                 management_revision: None,
+                cancelled: false,
             };
             let created = f
                 .storage

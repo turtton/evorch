@@ -116,20 +116,20 @@ pub(super) fn user_answers(
     }
 }
 
-/// Most recent answered questions listed beside every unanswered one. Older
-/// answers were already injected into the run (or, for a child's questions,
+/// Most recent terminal (answered or cancelled) questions listed beside every pending
+/// one. Older answers were already injected into the run (or, for a child's questions,
 /// given by the reader itself); runtime logic reads the complete history, only
 /// the model-facing listings of `user_answers` and `subagent_questions` are
 /// bounded.
-const ANSWERED_LISTING_LIMIT: usize = 32;
+const TERMINAL_LISTING_LIMIT: usize = 32;
 
 fn listing_window(questions: Vec<event_bus::UserQuestion>) -> Vec<event_bus::UserQuestion> {
-    let answered = questions.iter().filter(|q| q.answer.is_some()).count();
-    let mut skip = answered.saturating_sub(ANSWERED_LISTING_LIMIT);
+    let terminal = questions.iter().filter(|q| q.is_terminal()).count();
+    let mut skip = terminal.saturating_sub(TERMINAL_LISTING_LIMIT);
     questions
         .into_iter()
         .filter(|question| {
-            if question.answer.is_some() && skip > 0 {
+            if question.is_terminal() && skip > 0 {
                 skip -= 1;
                 return false;
             }

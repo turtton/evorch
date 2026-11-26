@@ -825,7 +825,7 @@ impl Projection {
                         .values()
                         .filter(|v| {
                             q.thread.as_ref().is_none_or(|t| *t == v.requester.thread)
-                                && (!q.pending_only || v.answer.is_none())
+                                && (!q.pending_only || v.is_pending())
                         })
                         .cloned()
                         .collect(),
@@ -1322,7 +1322,7 @@ fn snapshot_items(models: &Models, scope: &SubscriptionScope) -> Vec<SnapshotIte
             .questions
             .values()
             .filter(|q| {
-                q.answer.is_none()
+                q.is_pending()
                     && matches_scope(
                         models,
                         scope,

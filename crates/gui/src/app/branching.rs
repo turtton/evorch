@@ -26,7 +26,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let thread_id = thread.id.to_string();
         if self.user_questions.values().any(|question| {
-            question.answer.is_none()
+            question.is_pending()
                 && super::questions::belongs_to_thread(question, &thread_id, &thread.run_ids)
         }) {
             return Some("Cannot rewind with unanswered questions");
