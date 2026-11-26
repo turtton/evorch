@@ -193,7 +193,8 @@ impl World {
         let run = self.runtime.reserve_run_id();
         self.runtime.bind_thread_root(THREAD, run).unwrap();
         self.runtime
-            .spawn_reserved(run, None, Role::Worker, prompt, Self::config());
+            .spawn_reserved(run, None, Role::Worker, prompt, Self::config())
+            .unwrap();
         run
     }
 

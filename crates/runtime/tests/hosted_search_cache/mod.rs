@@ -87,13 +87,15 @@ async fn failed_goal_usage_commit_drains_and_records_the_entire_hosted_search_wa
             }
         }
     });
-    runtime.spawn_reserved(
-        root,
-        None,
-        Role::WebResearcher,
-        "Research two independent sources",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::WebResearcher,
+            "Research two independent sources",
+            RunConfig::default(),
+        )
+        .unwrap();
     assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Error);
     assert_eq!(
         writes.load(Ordering::SeqCst),

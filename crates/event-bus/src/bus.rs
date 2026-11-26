@@ -12,6 +12,9 @@ use tokio::sync::broadcast;
 
 use crate::event::{Event, FaultEvent};
 
+/// A memory-only pre-publication permit. None explicitly fences a deleted target.
+pub type PublishAdmission = std::sync::Arc<dyn Fn(&Event) -> Option<Box<dyn Send>> + Send + Sync>;
+
 /// ブロードキャスト型イベントバス。
 ///
 /// `Arc<EventBus>` として共有することを想定しており、`Clone` 実装は意図的に
@@ -20,6 +23,7 @@ pub struct EventBus {
     tx: broadcast::Sender<Event>,
     next_subscriber_id: AtomicU64,
     persistence: std::sync::Arc<crate::PersistenceNotifications>,
+    publish_admission: std::sync::OnceLock<PublishAdmission>,
     fences: std::sync::Arc<crate::fencing::MutationFences>,
     shared: std::sync::Mutex<
         std::collections::HashMap<
@@ -43,6 +47,7 @@ impl EventBus {
             tx,
             next_subscriber_id: AtomicU64::new(0),
             persistence: std::sync::Arc::default(),
+            publish_admission: std::sync::OnceLock::new(),
             fences: std::sync::Arc::default(),
             shared: std::sync::Mutex::default(),
         }
@@ -80,7 +85,22 @@ impl EventBus {
     ///
     /// 受信者がゼロの場合は [`broadcast::SendError`] となるが、これを受信者数
     /// 0 として扱い panic しない。
+    /// Installed once by the core. The callback may wait for one memory-only seal,
+    /// never under the bus service lock or an ownership mutation guard.
+    pub fn install_publish_admission(&self, hook: PublishAdmission) -> bool {
+        self.publish_admission.set(hook).is_ok()
+    }
+
     pub fn emit(&self, event: Event) -> usize {
+        let _admission = if let Some(hook) = self.publish_admission.get() {
+            let Some(permit) = hook(&event) else {
+                tracing::debug!(target: "thread_retention", "event fenced: deleted target");
+                return 0;
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let Some(_guards) = self.fences.acquire(&event) else {
             // Report through tracing only: emitting a diagnostic event here
             // would reacquire the guard that just failed for this run.

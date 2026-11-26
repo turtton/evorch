@@ -88,7 +88,7 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id, checkpoint);
-        Ok(self.spawn_reserved(run_id, None, role, prompt, config))
+        self.spawn_reserved(run_id, None, role, prompt, config)
     }
 
     pub(crate) fn validate_benchmark_capture(

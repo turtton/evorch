@@ -103,13 +103,15 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
     let root = runtime.list_agents()[0].run_id;
     let children = rt.block_on(async {
         [Role::Worker, Role::Reviewer].map(|role| {
-            runtime.spawn_reserved(
-                runtime.reserve_run_id(),
-                Some(root),
-                role,
-                "child",
-                RunConfig::default(),
-            )
+            runtime
+                .spawn_reserved(
+                    runtime.reserve_run_id(),
+                    Some(root),
+                    role,
+                    "child",
+                    RunConfig::default(),
+                )
+                .unwrap()
         })
     });
     let runs = [root, children[0], children[1]].map(|id| id.to_string());

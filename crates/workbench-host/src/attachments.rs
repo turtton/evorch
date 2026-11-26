@@ -101,6 +101,7 @@ pub struct AttachmentWriter {
 }
 impl AttachmentWriter {
     pub fn upload(self, draft: NativeAttachment) -> Result<AttachmentRef, WorkbenchError> {
+        let _admission = self.authorizer.runtime.retention_workspace_admission();
         let mut service = AttachmentService::new(self.root);
         let result = service.upload_bytes_checked(
             (self.project, self.thread),

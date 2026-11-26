@@ -674,17 +674,21 @@ document.getElementById("info").addEventListener("mouseover", () => {
             agents.set_artifact_pages(pages);
             let run = agents.reserve_run_id();
             agents.bind_thread_root("thread", run).unwrap();
-            agents.spawn_reserved(
-                run,
-                None,
-                runtime::Role::Worker,
-                "Check the counter mock",
-                runtime::RunConfig {
-                    conversation: true,
-                    category: Some(config::agent_categories::CategoryId::Conversation.to_string()),
-                    ..Default::default()
-                },
-            );
+            agents
+                .spawn_reserved(
+                    run,
+                    None,
+                    runtime::Role::Worker,
+                    "Check the counter mock",
+                    runtime::RunConfig {
+                        conversation: true,
+                        category: Some(
+                            config::agent_categories::CategoryId::Conversation.to_string(),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
             let phase = agents.wait(run).await.unwrap();
             wake.send(GuiEvent::Finished(phase)).unwrap();
         });

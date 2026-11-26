@@ -194,7 +194,7 @@ impl LearningQueue {
                 name: Some("lesson".into()), category: Some(CategoryId::Lesson.to_string()),
                 purpose: RunPurpose::LessonExtract { source_run_id }, learning_internal: true,
                 model_preference: Some(quick), ..RunConfig::default()
-            });
+            }).map(|_| ()).map_err(|e| e.to_string())
         }).await.map_err(LearningError::Stage)? { self.runtime.clear_learning_run(extractor); return Err(LearningError::Interrupted) }
         drop(producer);
         let outcome = self
@@ -263,7 +263,7 @@ impl LearningQueue {
                     name: Some("learning-evidence-review".into()), category: Some(CategoryId::LessonReview.to_string()),
                     purpose: RunPurpose::LessonReview { source_run_id, extraction_run_id: extractor },
                     learning_internal: true, ..RunConfig::default()
-                });
+                }).map(|_| ()).map_err(|e| e.to_string())
             }).await.map_err(LearningError::Stage)? { return Err(LearningError::Interrupted) }
             drop(producer);
             let result = self

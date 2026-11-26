@@ -576,6 +576,11 @@ impl AgentRuntime {
             if admitted.is_ok() {
                 runtime.execution_hook(cancellation::HookPoint::AdmissionReady, &execution);
             }
+            // A cached/provider result is not permission to resurrect a committed deletion.
+            let _retention = match runtime.deny_deleted_spawn(run_id, parent, &config) {
+                Ok(permits) => permits,
+                Err(error) => { admitted = Err(error); Vec::new() }
+            };
             // Registration and generation replacement share I -> A. Never
             // acquire a publication gate under these global locks.
             let intents = runtime
@@ -918,13 +923,15 @@ mod tests {
         let root = runtime.reserve_run_id();
         runtime.reserve_admission(root, None, None);
         runtime.stop(root, StopScope::SelfOnly).unwrap();
-        runtime.spawn_reserved(
-            root,
-            None,
-            Role::Orchestrator,
-            "pending handoff",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                root,
+                None,
+                Role::Orchestrator,
+                "pending handoff",
+                RunConfig::default(),
+            )
+            .unwrap();
         assert!(matches!(
             runtime.wait(root).await,
             Err(RuntimeError::RunTerminated { .. })

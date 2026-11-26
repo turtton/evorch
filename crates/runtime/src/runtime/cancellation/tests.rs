@@ -49,7 +49,9 @@ fn fixture() -> (AgentRuntime, storage::Storage, tempfile::TempDir) {
 
 pub(super) async fn terminal(runtime: &AgentRuntime, parent: Option<RunId>, role: Role) -> RunId {
     let run = runtime.reserve_run_id();
-    runtime.spawn_reserved(run, parent, role, "material", RunConfig::default());
+    runtime
+        .spawn_reserved(run, parent, role, "material", RunConfig::default())
+        .unwrap();
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
     run
 }
@@ -204,16 +206,18 @@ async fn lane_admission_drain_preserves_stop_after_registration() {
     runtime.reserve_admission(run, None, None);
     let execution = runtime.execution_snapshot(run).unwrap();
     let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
-    runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "lane",
-        RunConfig {
-            lane_scope: Some(event_bus::LaneScope::Lane),
-            ..Default::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "lane",
+            RunConfig {
+                lane_scope: Some(event_bus::LaneScope::Lane),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     reached.recv().unwrap();
     assert!(runtime.inspect_agent(run).is_ok());
     let mut drain = Box::pin(runtime.drain_lane_admissions());
@@ -242,7 +246,9 @@ async fn ac15_cancel_after_registration_notifies_same_execution() {
     let execution = runtime.execution_snapshot(run).unwrap();
     let token = execution.publication();
     let (reached, release) = pause(&runtime, HookPoint::AdmissionRegistered, &execution);
-    runtime.spawn_reserved(run, None, Role::Worker, "pending", RunConfig::default());
+    runtime
+        .spawn_reserved(run, None, Role::Worker, "pending", RunConfig::default())
+        .unwrap();
     reached.recv().unwrap();
     {
         let admissions = runtime.shared.admissions.lock().unwrap();
@@ -359,13 +365,15 @@ async fn ac15_inherited_cancel_preserves_spawn_results_and_fences_publication_be
         runtime.reserve_admission(root, None, None);
         runtime.cancel_subtree(root).unwrap();
         let child = runtime.reserve_run_id();
-        runtime.spawn_reserved(
-            child,
-            Some(root),
-            Role::Worker,
-            "must not run",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                child,
+                Some(root),
+                Role::Worker,
+                "must not run",
+                RunConfig::default(),
+            )
+            .unwrap();
         let execution = runtime.execution_snapshot(child).unwrap();
         assert!(execution.cancelled());
         assert_eq!(*execution.cancel_tx.borrow(), RunInterrupt::Cancel);

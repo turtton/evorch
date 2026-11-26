@@ -1,4 +1,5 @@
 //! Core-owned automatic archive, authorized by dedicated DB/root writer leases.
+mod online;
 use crate::CommandHost;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,6 +18,12 @@ pub struct RetentionReport {
     pub attachment_calls: usize,
     pub scratch_hints: usize,
     pub failures: Vec<String>,
+    pub confirmed: usize,
+    pub stopped_runs: usize,
+    pub host_lock_ns: u64,
+    pub idle_stop_ns: u64,
+    pub writer_roundtrip_ns: u64,
+    pub seal_ns: u64,
 }
 impl RetentionReport {
     pub(crate) fn hold(&mut self, reason: &'static str) {
@@ -40,6 +47,13 @@ pub struct AutoArchiveCoordinator {
     pub(crate) cleanup_after: Option<String>,
     stopped: bool,
     last_holds: BTreeMap<&'static str, usize>,
+    online_policy: Option<storage::thread_retention::ThreadRetentionPolicy>,
+    delete_turn: bool,
+    delete_after: Option<String>,
+    delete_started: bool,
+    deleted_attachment_after: Option<String>,
+    permanent_holds: BTreeMap<String, &'static str>,
+    send_slot: Arc<Mutex<()>>,
     #[cfg(feature = "test-support")]
     pub(crate) after_decision: Option<Box<dyn FnMut() + Send>>,
 }
@@ -53,6 +67,13 @@ impl AutoArchiveCoordinator {
             cleanup_after: None,
             stopped: false,
             last_holds: BTreeMap::new(),
+            online_policy: None,
+            delete_turn: false,
+            delete_after: None,
+            delete_started: false,
+            deleted_attachment_after: None,
+            permanent_holds: BTreeMap::new(),
+            send_slot: Arc::new(Mutex::new(())),
             #[cfg(feature = "test-support")]
             after_decision: None,
         }
@@ -89,6 +110,8 @@ impl AutoArchiveCoordinator {
             report.failure(error);
             return report;
         }
+        let slot = self.send_slot.clone();
+        let _send_permit = slot.lock().unwrap_or_else(|e| e.into_inner());
         let host_arc = host;
         let Ok(host) = host_arc.try_lock() else {
             report.hold("ForegroundPending");
@@ -112,14 +135,14 @@ impl AutoArchiveCoordinator {
                 return report;
             }
         };
-        let cleanup_bound = binding.is_some_and(|(writer, sidebar)| {
+        let cleanup_bound = binding.as_ref().is_some_and(|(writer, sidebar)| {
             match runtime::thread_retention::binding::ensure_binding(
                 &db,
-                &writer,
+                writer,
                 authority,
                 runtime::thread_retention::binding::BindingPaths {
                     ownership_root: &self.root,
-                    sidebar_path: &sidebar,
+                    sidebar_path: sidebar,
                 },
                 &self.config.db_path,
                 now_ns,
@@ -135,6 +158,15 @@ impl AutoArchiveCoordinator {
                 }
             }
         });
+        if self.online_policy.is_some() {
+            let deleting = self.delete_turn;
+            self.delete_turn = !self.delete_turn;
+            if deleting {
+                self.online_tick(host_arc, authority, &db, now_ns, cleanup_bound, &mut report);
+                self.log(&report);
+                return report;
+            }
+        }
         let Ok(host) = host_arc.try_lock() else {
             report.hold("ForegroundPending");
             return report;

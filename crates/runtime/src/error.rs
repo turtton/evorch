@@ -33,6 +33,8 @@ pub enum RuntimeError {
     RestartObservationChanged,
     #[error("cannot withdraw follow-up: {0}")]
     FollowUpWithdrawal(#[from] crate::runtime::FollowUpWithdrawalError),
+    #[error(transparent)]
+    ThreadDeleted(#[from] crate::thread_retention::ThreadDeleted),
     #[error("review evidence for {run_id} is unavailable: {reason}")]
     ReviewEvidence { run_id: String, reason: String },
     #[error("実行 {run_id} の復元に失敗しました: {reason}")]

@@ -55,13 +55,15 @@ async fn send_to_memory_absent_run_restores_after_runtime_restart() {
     let model = model();
     let (runtime, _) = runtime_with(Arc::clone(&model));
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    runtime.spawn_reserved(
-        parent,
-        None,
-        Role::Orchestrator,
-        "parent",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            parent,
+            None,
+            Role::Orchestrator,
+            "parent",
+            RunConfig::default(),
+        )
+        .unwrap();
     terminal(&runtime, parent).await;
     // When: the new runtime receives a send for its absent child.
     runtime
@@ -220,24 +222,28 @@ async fn restored_run_id_never_collides_with_future_runs() {
         first.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     terminal(&first, parent).await;
     let child = RunId::new(100);
-    first.spawn_reserved(
-        child,
-        Some(parent),
-        Role::Worker,
-        "child",
-        RunConfig::default(),
-    );
+    first
+        .spawn_reserved(
+            child,
+            Some(parent),
+            Role::Worker,
+            "child",
+            RunConfig::default(),
+        )
+        .unwrap();
     terminal(&first, child).await;
     drop(first);
     let (runtime, _) = runtime_with(model());
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    runtime.spawn_reserved(
-        parent,
-        None,
-        Role::Orchestrator,
-        "parent",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            parent,
+            None,
+            Role::Orchestrator,
+            "parent",
+            RunConfig::default(),
+        )
+        .unwrap();
     terminal(&runtime, parent).await;
     // When: the stored high ID is restored.
     runtime
@@ -275,13 +281,15 @@ async fn legacy_oracle_snapshot_restores_as_advisor_after_restart() {
         .unwrap();
         let (runtime, _) = runtime_with(model());
         let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-        runtime.spawn_reserved(
-            parent,
-            None,
-            Role::Orchestrator,
-            "parent",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                parent,
+                None,
+                Role::Orchestrator,
+                "parent",
+                RunConfig::default(),
+            )
+            .unwrap();
         terminal(&runtime, parent).await;
         runtime
             .send_agent_message(

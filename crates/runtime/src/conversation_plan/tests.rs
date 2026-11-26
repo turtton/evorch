@@ -290,16 +290,19 @@ async fn superseded_root_child_foreign_thread_and_reused_execution_are_refused()
     f.runtime.bind_thread_root("thread", old).unwrap();
     let wrong = Arc::new(crate::mailbox::RunMailbox::new());
     assert!(tools::read(&f.runtime, &f.caller(old, &wrong), json!({"view":"tree"})).is_err());
-    let child = f.runtime.spawn_reserved(
-        f.runtime.reserve_run_id(),
-        Some(old),
-        Role::Worker,
-        "child",
-        RunConfig {
-            conversation: true,
-            ..Default::default()
-        },
-    );
+    let child = f
+        .runtime
+        .spawn_reserved(
+            f.runtime.reserve_run_id(),
+            Some(old),
+            Role::Worker,
+            "child",
+            RunConfig {
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     f.model.entered.notified().await;
     assert!(
         tools::read(

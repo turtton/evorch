@@ -67,13 +67,15 @@ async fn every_child_entry_refuses_an_orchestrator_and_registers_nothing() {
 
     // And: the infallible entry cannot start one either; its admission fails instead.
     let bypass = runtime.reserve_run_id();
-    runtime.spawn_reserved(
-        bypass,
-        Some(root),
-        Role::Orchestrator,
-        "c",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            bypass,
+            Some(root),
+            Role::Orchestrator,
+            "c",
+            RunConfig::default(),
+        )
+        .unwrap();
     let error = runtime.wait(bypass).await.expect_err("admission fails");
     assert!(is_denied(&error, root), "{error:?}");
     assert!(runtime.list_agents().iter().all(|run| run.run_id != bypass));

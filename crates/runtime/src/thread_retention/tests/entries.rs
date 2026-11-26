@@ -6,9 +6,8 @@
 //! itself or delegate to a function that does; the behaviour is tested in
 //! `thread_retention::tests::guard` and `chat_restore::tests::thread_deleted`.
 //!
-//! Internal (`pub(crate)` / `pub(super)`) functions are not listed: they are reachable
-//! only through these entries, from a live run, or from storage, whose readers hide
-//! tombstoned rows.
+//! A terminal entry may remain in memory after deletion: liveness and restore
+//! assumptions are not exemptions from the mutable tombstone guard.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,10 +24,7 @@ enum Guard {
 
 use Guard::{Exempt, Guarded};
 
-const LIVE_ONLY: &str = "acts on a live run of this process; a deleted run is never live";
 const READ_ONLY: &str = "reads storage, whose readers hide tombstoned rows; changes nothing";
-const RESTORE_PATH: &str =
-    "a run that is not live is restored through restore_queued_and_deliver, which is guarded";
 
 fn table() -> BTreeMap<&'static str, Guard> {
     BTreeMap::from([
@@ -68,9 +64,7 @@ fn table() -> BTreeMap<&'static str, Guard> {
         ),
         (
             "lane_instructions.rs::send_lane_instruction",
-            Exempt(
-                "the caller must be a live root run (a deleted run is never live); the ledger write is fenced for tombstoned lane threads",
-            ),
+            Guarded { via: &[] },
         ),
         ("thread_goals.rs::restore_thread_goal", Guarded { via: &[] }),
         (
@@ -144,25 +138,45 @@ fn table() -> BTreeMap<&'static str, Guard> {
                 via: &["answer_question_with_mode", "handoff_answer_recipients"],
             },
         ),
-        ("runtime.rs::send_agent_message", Exempt(RESTORE_PATH)),
-        ("runtime.rs::send_message", Exempt(RESTORE_PATH)),
-        ("runtime.rs::send_user_input", Exempt(RESTORE_PATH)),
-        ("runtime.rs::deliver_notice", Exempt(LIVE_ONLY)),
+        ("runtime.rs::send_agent_message", Guarded { via: &[] }),
+        (
+            "runtime.rs::send_message",
+            Guarded {
+                via: &[
+                    "send_user_input",
+                    "send_inbox_message",
+                    "validate_run_mutation",
+                ],
+            },
+        ),
+        (
+            "runtime.rs::send_user_input",
+            Guarded {
+                via: &["send_inbox_message", "validate_run_mutation"],
+            },
+        ),
+        ("runtime.rs::deliver_notice", Guarded { via: &[] }),
         (
             "runtime.rs::deliver_follow_ups_next_turn",
-            Exempt(LIVE_ONLY),
+            Guarded {
+                via: &["validate_run_mutation"],
+            },
         ),
-        ("runtime.rs::compact", Exempt(LIVE_ONLY)),
+        (
+            "runtime.rs::compact",
+            Guarded {
+                via: &["validate_run_mutation"],
+            },
+        ),
         (
             "runtime.rs::delegate_background_as_child",
-            Exempt(LIVE_ONLY),
+            Guarded {
+                via: &["reserve_child_run_id"],
+            },
         ),
-        ("runtime.rs::reserve_child_run_id", Exempt(LIVE_ONLY)),
-        (
-            "runtime.rs::spawn_reserved",
-            Exempt("a run ID reserved by this process's counter, not an identity from outside"),
-        ),
-        ("runtime.rs::spawn_reserved_child", Exempt(LIVE_ONLY)),
+        ("runtime.rs::reserve_child_run_id", Guarded { via: &[] }),
+        ("runtime.rs::spawn_reserved", Guarded { via: &[] }),
+        ("runtime.rs::spawn_reserved_child", Guarded { via: &[] }),
         (
             "restore/diagnostics.rs::restore_diagnostics",
             Exempt(READ_ONLY),
