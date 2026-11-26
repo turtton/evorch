@@ -84,6 +84,60 @@ fn episodes(f: &Fixture) -> Vec<LaneStallEpisode> {
         .collect()
 }
 #[tokio::test(start_paused = true)]
+async fn a_closed_lane_is_never_nudged_or_reopened_by_the_monitor() {
+    use storage::lane_control::{CloseLane, LaneCloser};
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "closed").await;
+    let (_owner, host) = owned(&f, &lane);
+    let base = host.now_ns();
+    let context = f
+        .storage
+        .handle()
+        .lane_close_context(lane.lane_id.clone())
+        .unwrap();
+    f.storage
+        .handle()
+        .close_lane(CloseLane {
+            closer: LaneCloser::Human {
+                surface: "maintenance_cli".into(),
+                client_id: None,
+            },
+            kind: event_bus::lane::LaneCloseKind::Discarded,
+            lane_id: lane.lane_id.clone(),
+            ready_seq: None,
+            expected_management_revision: context.management_revision,
+            expected_request_revision: context.request_revision,
+            note: "cleanup".into(),
+            verification_id: None,
+            at_ns: base,
+        })
+        .unwrap();
+    for minutes in [0, 30, 60, 90] {
+        host.now.store(base + minutes * MINUTE, Ordering::SeqCst);
+        f.runtime.monitor_lanes().unwrap();
+        assert!(
+            episodes(&f).is_empty(),
+            "{minutes} min: no stall episode for a closed lane"
+        );
+        assert_eq!(
+            f.runtime
+                .drive_lane_deliveries(&lane.thread_id)
+                .await
+                .unwrap(),
+            LaneDeliveryOutcome::Empty
+        );
+    }
+    assert!(
+        f.storage
+            .handle()
+            .current_lane_close(lane.lane_id.clone())
+            .unwrap()
+            .is_some(),
+        "the monitor left the close in place"
+    );
+}
+#[tokio::test(start_paused = true)]
 async fn no_report_and_work_stalled_boundaries_and_live_nudge_share_one_slot() {
     let mut f = Fixture::new();
     let (lead, _) = f.lead().await;
@@ -1484,6 +1538,7 @@ async fn lane_restore_admission_failure_has_one_failed_report_not_one_per_execut
                 responder: None,
                 routing_revision: 0,
                 management_revision: None,
+                cancelled: false,
             };
             let created = f
                 .storage

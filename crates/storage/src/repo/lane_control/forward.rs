@@ -33,6 +33,11 @@ pub(crate) fn forward(
         r.expected_lane_generation,
         r.expected_management_revision,
     ))?;
+    // Terminality is checked before the receipt: a retry of an old operation must not
+    // be read as success for a question that has since been cancelled.
+    if crate::repo::user_questions::get(&tx, &r.question_id)?.is_some_and(|q| q.cancelled) {
+        return Err(StorageError::QuestionCancelled);
+    }
     let old:Option<(String,String)>=tx.query_row("SELECT request_json,result_json FROM lane_forward_receipts WHERE caller_root=?1 AND operation_id=?2",params![r.caller_root,r.operation_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     if let Some((previous, result)) = old {
         if previous != request {
@@ -84,7 +89,7 @@ pub(crate) fn forward(
     }
     tx.execute("INSERT INTO lane_question_routes(question_id,lane_id,requester_run_id,requester_root_run_id,requester_thread_id,responder_thread_id,management_revision,routing_revision,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,1,?8)",params![q.id,l.lane_id,q.run_id,q.root_run_id,l.thread_id,lead,l.management_revision,bounded(&route,4096)?])?;
     tx.execute(
-        "UPDATE user_questions SET payload=?2 WHERE id=?1 AND answered=0",
+        "UPDATE user_questions SET payload=?2 WHERE id=?1 AND answered=0 AND cancelled=0",
         params![q.id, json(&q)?],
     )?;
     crate::repo::lane_delivery::enqueue(

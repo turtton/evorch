@@ -89,9 +89,10 @@ export function questionCard(ctx, question, { showThread = false } = {}) {
 
   const setBusy = (value) => {
     busy = value;
-    for (const button of options.querySelectorAll("button")) button.disabled = value || Boolean(q.answer);
-    input.disabled = value || Boolean(q.answer);
-    send.disabled = value || Boolean(q.answer) || input.value.trim() === "";
+    const closed = Boolean(q.answer) || Boolean(q.cancelled);
+    for (const button of options.querySelectorAll("button")) button.disabled = value || closed;
+    input.disabled = value || closed;
+    send.disabled = value || closed || input.value.trim() === "";
   };
 
   async function answer(text, { confirmFirst = false } = {}) {
@@ -166,6 +167,8 @@ export function questionCard(ctx, question, { showThread = false } = {}) {
     if (q.answer) {
       const by = q.answer.answered_by ? `（${label(SURFACE, q.answer.answered_by.surface)}）` : "";
       status.textContent = `回答済み${by}: ${q.answer.text}`;
+    } else if (q.cancelled) {
+      status.textContent = "取消済み（回答なしで閉じられました）";
     }
     setBusy(busy);
   }
@@ -177,7 +180,8 @@ export function questionCard(ctx, question, { showThread = false } = {}) {
       next.revision === q.revision &&
       next.management_revision === q.management_revision &&
       next.routing_revision === q.routing_revision &&
-      Boolean(next.answer) === Boolean(q.answer);
+      Boolean(next.answer) === Boolean(q.answer) &&
+      Boolean(next.cancelled) === Boolean(q.cancelled);
     q = next;
     if (!same) render();
   };

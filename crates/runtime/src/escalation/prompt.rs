@@ -28,10 +28,7 @@ pub(crate) fn render_escalation_prompt(
         memo.workspace_state, memo.escalation_reason, memo.suggested_next
     );
     prompt.push_str("\n## Inherited unanswered questions\n既存の質問 ID と元 requester provenance を維持してください。同内容を新 ID で再 ask せず、ユーザーには継承先 thread の既存質問への回答を案内してください。必須回答は到着後に観測するまで finish できません。ユーザーと合意した制約・完了条件、採用/却下した案と理由、未確認事項を引き継ぎ、メモにない内容は合意済みと推測しないでください。\n");
-    for question in questions
-        .iter()
-        .filter(|question| question.answer.is_none())
-    {
+    for question in questions.iter().filter(|question| question.is_pending()) {
         let _ = writeln!(
             prompt,
             "- ID: {} | requester: {} | root: {} ({}) | blocking: {}\n  Question: {}\n  Options: {:?}",
@@ -44,7 +41,7 @@ pub(crate) fn render_escalation_prompt(
             question.options
         );
     }
-    if questions.iter().all(|question| question.answer.is_some()) {
+    if questions.iter().all(|question| !question.is_pending()) {
         prompt.push_str("- (none)\n");
     }
     prompt
@@ -97,6 +94,7 @@ mod tests {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         let answered = event_bus::UserQuestion {
             responder: None,

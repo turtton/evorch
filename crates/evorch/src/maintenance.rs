@@ -3,8 +3,10 @@
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use storage::maintenance::{
-    CompactOptions, ConvertBodiesOptions, DeltaMode, StripOptions, VacuumOptions, compact_events,
-    convert_bodies, preview_task_progress_retention, strip_task_progress_cursor, vacuum_database,
+    CleanupApplyOptions, CleanupPreviewOptions, CompactOptions, ConvertBodiesOptions, DeltaMode,
+    StripOptions, VacuumOptions, apply_archive_blocker_cleanup, compact_events, convert_bodies,
+    preview_archive_blocker_cleanup, preview_task_progress_retention, strip_task_progress_cursor,
+    vacuum_database,
 };
 
 pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
@@ -15,6 +17,15 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
+  cleanup-archive-blockers [--config-dir <dir>] [--db <path>]
+  cleanup-archive-blockers [--config-dir <dir>] [--db <path>] --apply --plan <preview.json> --backup <path>
+cleanup-archive-blockers: one-time offline cleanup of what keeps threads from being archived. Every pending
+  question becomes cancelled (no answer, no approval) and every open attached/summary lane is closed as
+  discarded; nothing is stopped. The default is a read-only preview whose JSON output is the plan: save it
+  (umask 077; the stdout is the plan) and read it. --apply needs that plan and a backup path, and refuses a
+  database that changed since the preview. A custom --db needs --config-dir (its launch/lifetime locks and
+  sidebar.json are used). Stop evorch completely first; a non-empty WAL is always refused (start evorch once,
+  exit cleanly, preview again).
 convert-bodies: one-time conversion of a database of version 33 to 43 to the current format: the conversations in
   run_contexts.messages_json (version 33 to 39; migrations 34 to 39 are applied first, after the backup) become
   run_messages and content_blobs, each provenance map becomes run_message_provenance rows, the two old columns are
@@ -54,6 +65,16 @@ pub struct MaintenanceArgs {
     pub compact: Option<CompactOptions>,
     pub vacuum: Option<VacuumOptions>,
     pub convert_bodies: Option<ConvertBodiesOptions>,
+    pub cleanup: Option<CleanupArgs>,
+}
+
+/// `cleanup-archive-blockers`: preview unless `apply`, which needs `plan` and `backup`.
+#[derive(Debug, Clone, Default)]
+pub struct CleanupArgs {
+    pub config_dir: Option<PathBuf>,
+    pub apply: bool,
+    pub plan: Option<PathBuf>,
+    pub backup: Option<PathBuf>,
 }
 
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs, String> {
@@ -63,7 +84,11 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     }
     let command = argv.next().ok_or(USAGE)?;
     let retention_preview = match command.as_str() {
-        "strip-task-progress-cursor" | "compact-events" | "vacuum" | "convert-bodies" => false,
+        "strip-task-progress-cursor"
+        | "compact-events"
+        | "vacuum"
+        | "convert-bodies"
+        | "cleanup-archive-blockers" => false,
         "preview-task-progress-retention" => true,
         _ => return Err(USAGE.into()),
     };
@@ -74,6 +99,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         compact: (command == "compact-events").then(CompactOptions::default),
         vacuum: (command == "vacuum").then(VacuumOptions::default),
         convert_bodies: (command == "convert-bodies").then(ConvertBodiesOptions::default),
+        cleanup: (command == "cleanup-archive-blockers").then(CleanupArgs::default),
     };
     let mut seen = std::collections::BTreeSet::new();
     while let Some(arg) = argv.next() {
@@ -82,6 +108,16 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         }
         match arg.as_str() {
             "--db" => args.db = Some(argv.next().ok_or(USAGE)?.into()),
+            "--config-dir" if args.cleanup.is_some() => {
+                args.cleanup.as_mut().unwrap().config_dir = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--apply" if args.cleanup.is_some() => args.cleanup.as_mut().unwrap().apply = true,
+            "--plan" if args.cleanup.is_some() => {
+                args.cleanup.as_mut().unwrap().plan = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--backup" if args.cleanup.is_some() => {
+                args.cleanup.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
+            }
             "--apply" if args.compact.is_some() => args.compact.as_mut().unwrap().apply = true,
             "--backup" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
@@ -153,10 +189,90 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     if args.strip.no_backup && args.strip.backup.is_some() {
         return Err(USAGE.into());
     }
+    if let Some(cleanup) = &args.cleanup {
+        // A database outside the default place has its own config directory (its core
+        // locks and sidebar); the default one is never assumed for it.
+        let applying = cleanup.apply && cleanup.plan.is_some() && cleanup.backup.is_some();
+        let preview_only = !cleanup.apply && cleanup.plan.is_none() && cleanup.backup.is_none();
+        if (args.db.is_some() && cleanup.config_dir.is_none()) || !(applying || preview_only) {
+            return Err(USAGE.into());
+        }
+    }
     Ok(args)
 }
 
+/// The configuration directory and database the cleanup works on.
+fn cleanup_paths(
+    db: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let config_dir = match config_dir {
+        Some(dir) => dir,
+        None => {
+            config::user_config_dir().ok_or("cannot resolve config directory; pass --config-dir")?
+        }
+    };
+    let db = db.unwrap_or_else(|| config_dir.join("evorch-events.db"));
+    Ok((config_dir, db))
+}
+
+fn run_cleanup(db: Option<PathBuf>, cleanup: CleanupArgs) -> Result<Value, String> {
+    let (config_dir, db) = cleanup_paths(db, cleanup.config_dir)?;
+    let sidebar = config_dir.join("sidebar.json");
+    let refused = |error: core_instance::InstanceError| {
+        match error {
+        core_instance::InstanceError::AlreadyRunning => {
+            "an evorch core is running or starting for this config directory; stop it completely first".to_owned()
+        }
+        other => format!("config directory lock check failed: {other}"),
+    }
+    };
+    if cleanup.apply {
+        let plan = cleanup.plan.ok_or(USAGE)?;
+        let backup = cleanup.backup.ok_or(USAGE)?;
+        let _guard = core_instance::MaintenanceGuard::acquire(&config_dir).map_err(refused)?;
+        // The same directory a core uses for its owner registry and root writer lease.
+        let ownership_root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
+            .ok_or("cannot resolve the ownership state directory")?
+            .join("evorch")
+            .join("threads");
+        eprintln!(
+            "Applying the saved plan: cancels pending questions and discards open lanes in one transaction after a verified backup. Keep the backup secure: it holds the original data."
+        );
+        let summary = apply_archive_blocker_cleanup(&CleanupApplyOptions {
+            db,
+            config_dir,
+            ownership_root,
+            sidebar,
+            plan,
+            backup,
+        })
+        .map_err(|error| error.to_string())?;
+        eprintln!("{}", summary.message);
+        return Ok(json!(summary));
+    }
+    let _guard = core_instance::MaintenanceGuard::inspect(&config_dir).map_err(refused)?;
+    let plan = preview_archive_blocker_cleanup(&CleanupPreviewOptions {
+        db,
+        config_dir,
+        sidebar,
+    })
+    .map_err(|error| error.to_string())?;
+    eprintln!(
+        "Preview only: nothing was changed. Save this output as the plan and read it before applying; it is not permission to apply."
+    );
+    if !plan.apply_allowed {
+        eprintln!("This plan cannot be applied: it lists items that cannot be processed.");
+    }
+    Ok(json!(plan))
+}
+
 pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
+    if let Some(cleanup) = args.cleanup {
+        return run_cleanup(args.db, cleanup);
+    }
     let path = match args.db {
         Some(path) => path,
         None => config::user_config_dir()

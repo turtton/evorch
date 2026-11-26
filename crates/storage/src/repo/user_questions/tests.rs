@@ -20,6 +20,7 @@ fn ask(conn: &Connection, id: &str, run: &str, root: &str) {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         },
     )
     .unwrap();

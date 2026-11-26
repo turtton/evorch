@@ -155,6 +155,56 @@ fn vacuum_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
 }
 
 #[test]
+fn cleanup_archive_blockers_previews_by_default_and_apply_needs_plan_and_backup() {
+    let cleanup = parse(&["maintenance", "cleanup-archive-blockers"])
+        .unwrap()
+        .cleanup
+        .unwrap();
+    assert!(!cleanup.apply && cleanup.plan.is_none() && cleanup.backup.is_none());
+    let args = parse(&[
+        "maintenance",
+        "cleanup-archive-blockers",
+        "--config-dir",
+        "/c",
+        "--db",
+        "/c/x.db",
+        "--apply",
+        "--plan",
+        "p.json",
+        "--backup",
+        "b.db",
+    ])
+    .unwrap();
+    let cleanup = args.cleanup.unwrap();
+    assert!(cleanup.apply);
+    assert_eq!(cleanup.plan, Some("p.json".into()));
+    assert_eq!(cleanup.backup, Some("b.db".into()));
+    assert_eq!(cleanup.config_dir, Some("/c".into()));
+    for args in [
+        // apply needs both the plan and the backup
+        vec!["--apply"],
+        vec!["--apply", "--plan", "p.json"],
+        vec!["--apply", "--backup", "b.db"],
+        // a plan or backup without apply is never a preview
+        vec!["--plan", "p.json"],
+        vec!["--backup", "b.db"],
+        // a custom database needs its own config directory
+        vec!["--db", "/c/x.db"],
+        // no escape hatches, no duplicates
+        vec!["--existing-backup", "b.db"],
+        vec!["--force"],
+        vec!["--no-backup"],
+        vec!["--apply", "--apply", "--plan", "p", "--backup", "b"],
+        vec!["--config-dir", "/a", "--config-dir", "/b"],
+    ] {
+        let full = [vec!["maintenance", "cleanup-archive-blockers"], args].concat();
+        assert!(parse(&full).is_err(), "{full:?}");
+    }
+    assert!(parse(&["maintenance", "vacuum", "--plan", "p.json"]).is_err());
+    assert!(parse(&["maintenance", "vacuum", "--config-dir", "/c"]).is_err());
+}
+
+#[test]
 fn convert_bodies_is_a_preview_until_apply_and_takes_only_apply_backup_and_event_batch_rows() {
     let options = parse(&["maintenance", "convert-bodies"])
         .unwrap()

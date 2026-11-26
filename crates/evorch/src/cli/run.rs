@@ -399,7 +399,7 @@ async fn pending(
         .into_iter()
         .filter(|q| {
             q.blocking
-                && q.answer.is_none()
+                && q.is_pending()
                 && q.target == QuestionTarget::User
                 && &q.requester.root_run == owned
         })

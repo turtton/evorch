@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 mod output_attachment_schema;
 mod plan_schema;
+mod question_listing_schema;
 mod wait_liveness;
 mod wait_schema;
 
@@ -20,6 +21,8 @@ enum SchemaCase {
     PlanRetry,
     OutputAttachments,
     OutputAttachmentsUnchanged,
+    QuestionListing,
+    QuestionListingUnchanged,
 }
 
 pub(super) fn settings(h: &Harness) -> Config {
@@ -227,6 +230,7 @@ async fn recover_case(
     let wait_schema = matches!(schema_case, SchemaCase::Wait);
     let wait_liveness = matches!(schema_case, SchemaCase::WaitLiveness);
     let output_attachments = matches!(schema_case, SchemaCase::OutputAttachments);
+    let question_listing = matches!(schema_case, SchemaCase::QuestionListing);
     let plan_schema = matches!(
         schema_case,
         SchemaCase::Plan | SchemaCase::PlanUnchanged | SchemaCase::PlanRetry
@@ -235,6 +239,7 @@ async fn recover_case(
     let schema_change = wait_liveness
         || wait_schema
         || output_attachments
+        || question_listing
         || matches!(schema_case, SchemaCase::Plan | SchemaCase::PlanRetry);
     let mut script = if tools_case {
         vec![
@@ -258,6 +263,9 @@ async fn recover_case(
     }
     if output_attachments {
         script.insert(0, output_attachment_schema::legacy_call());
+    }
+    if question_listing {
+        script.insert(0, question_listing_schema::legacy_call());
     }
     if wait_schema {
         // The successor rejects this retired call, but its historical name, input,
@@ -308,6 +316,7 @@ async fn recover_case(
         Arc::new(wait_schema::PredecessorCatalog {
             plan: plan_schema,
             output_attachments,
+            question_listing,
             wait_liveness,
             ..Default::default()
         })
@@ -523,7 +532,7 @@ async fn recover_case(
         }
         let evidence = comparison.unwrap();
         assert_eq!(evidence.boundary, changed_tool || schema_change);
-        if wait_schema || wait_liveness {
+        if wait_schema || wait_liveness || question_listing {
             wait_schema::assert_evidence(&evidence);
         }
         if plan_schema && schema_change {
@@ -572,7 +581,7 @@ async fn recover_case(
                 .restart_tools_evidence("routed-wire", &run.to_string(), incarnation)
                 .unwrap()
                 .unwrap();
-            if wait_schema || wait_liveness {
+            if wait_schema || wait_liveness || question_listing {
                 wait_schema::assert_evidence(&saved);
             }
             if plan_schema {
@@ -829,6 +838,20 @@ async fn recover_case(
     }
     if wait_liveness {
         wait_liveness::assert_transition(
+            h.wire,
+            &requests,
+            after_index,
+            &old_input.request.tools,
+            &predecessor
+                .as_ref()
+                .unwrap()
+                .successor_tools
+                .lock()
+                .unwrap(),
+        );
+    }
+    if question_listing {
+        question_listing_schema::assert_transition(
             h.wire,
             &requests,
             after_index,

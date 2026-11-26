@@ -185,10 +185,82 @@ impl WriterLeases {
     }
 }
 
+/// Offline maintenance that changes data proves no writer exists: the DB writer lease and then
+/// the root writer lease, both exclusive and never waited for (DB first, as in
+/// [`WriterLeases::acquire`]). A running core, a legacy embedded writer or another core sharing
+/// the ownership root makes it fail. A missing root directory is created (as a core does) so the
+/// root lease is always really held; a root that cannot be created or locked is refused.
+/// Held until dropped; the lock files are never unlinked.
+#[derive(Debug)]
+pub struct ExclusiveWriterProof {
+    _db: File,
+    _root: File,
+}
+
+/// # Errors
+/// Either writer lease is held by another process, or a lock file is not the one at its path.
+pub fn exclusive_writer_proof(
+    db: &Path,
+    root: &Path,
+) -> Result<ExclusiveWriterProof, StorageError> {
+    let db_path = sibling_path(db, ".writer-lock")?;
+    let lock = open(&db_path)?;
+    lock.try_lock().map_err(|error| {
+        invalid(format!(
+            "a DB writer (a core or a legacy embedded writer) is running; stop it completely first: {error}"
+        ))
+    })?;
+    same_lease(&lock, &db_path)?;
+    fs::create_dir_all(root).map_err(io)?;
+    if !root.is_dir() {
+        return Err(invalid("the ownership root is not a directory"));
+    }
+    let path = root.join(".ownership-writer-lock");
+    let file = open(&path)?;
+    file.try_lock().map_err(|error| {
+        invalid(format!(
+            "another core holds the root writer lease of this ownership root; stop it completely first: {error}"
+        ))
+    })?;
+    same_lease(&file, &path)?;
+    let root = file;
+    Ok(ExclusiveWriterProof {
+        _db: lock,
+        _root: root,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Database, Storage, StorageConfig};
+    #[test]
+    fn maintenance_proof_really_holds_the_root_lease_even_for_a_missing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path(), "events.db");
+        drop(Storage::open(config.clone()).unwrap());
+        drop(Storage::open(self::config(dir.path(), "other.db")).unwrap());
+        let root = dir.path().join("not-yet").join("threads");
+        let proof = exclusive_writer_proof(&config.db_path, &root).unwrap();
+        // A core of another database that shares the root cannot take root authority now.
+        let other =
+            WriterLeases::acquire(&dir.path().join("other.db"), &root, Duration::ZERO).unwrap();
+        assert!(!other.has_root_writer());
+        drop(other);
+        // The database lease is held as well.
+        assert!(WriterLeases::acquire(&config.db_path, &root, Duration::ZERO).is_err());
+        drop(proof);
+        assert!(
+            WriterLeases::acquire(&dir.path().join("other.db"), &root, Duration::ZERO)
+                .unwrap()
+                .has_root_writer()
+        );
+        // A root that is not a directory is refused.
+        let file = dir.path().join("a-file");
+        fs::write(&file, b"x").unwrap();
+        assert!(exclusive_writer_proof(&config.db_path, &file).is_err());
+        assert!(exclusive_writer_proof(&config.db_path, &file.join("sub")).is_err());
+    }
     fn config(dir: &Path, name: &str) -> StorageConfig {
         StorageConfig {
             db_path: dir.join(name),

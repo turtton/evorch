@@ -1103,6 +1103,12 @@ pub struct UserQuestion {
     /// the origin was recorded (their source is unknown, not assumed to be a user).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_origin: Option<AnswerOrigin>,
+    /// The question was closed by offline maintenance without an answer. A
+    /// cancellation is not an answer and not an approval: `answer` and
+    /// `answer_origin` stay `None`. Absent in everything stored earlier, which
+    /// reads as "no cancellation recorded".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     /// Routing projection, not continuation inheritance. Missing means legacy routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub responder: Option<crate::lane::QuestionResponder>,
@@ -1110,6 +1116,31 @@ pub struct UserQuestion {
     pub routing_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub management_revision: Option<u64>,
+}
+
+/// Where a question stands. `Cancelled` is terminal like `Answered`, but nobody
+/// answered it: it never counts as an answer, an approval or review evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionStatus {
+    Pending,
+    Answered,
+    Cancelled,
+}
+
+impl QuestionStatus {
+    /// Answered or cancelled: nothing more can be done with the question.
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Answered => "answered",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// The source of a question's answer. Only `Host` is a person's answer; a
@@ -1139,13 +1170,45 @@ pub enum HumanChannel {
 }
 
 impl UserQuestion {
+    /// Pending, answered or cancelled. Storage never holds an answer and a
+    /// cancellation together; an answer wins in this projection regardless.
+    pub fn status(&self) -> QuestionStatus {
+        if self.answer.is_some() {
+            QuestionStatus::Answered
+        } else if self.cancelled {
+            QuestionStatus::Cancelled
+        } else {
+            QuestionStatus::Pending
+        }
+    }
+
+    /// Neither answered nor cancelled: the one state that blocks, waits and counts
+    /// against the quota.
+    pub fn is_pending(&self) -> bool {
+        self.status() == QuestionStatus::Pending
+    }
+
+    /// An answer was supplied (never true for a cancelled question).
+    pub fn is_answered(&self) -> bool {
+        self.status() == QuestionStatus::Answered
+    }
+
+    /// Answered or cancelled.
+    pub fn is_terminal(&self) -> bool {
+        self.status().is_terminal()
+    }
+
     /// The user-role message that delivers the stored answer to a recipient run.
     ///
     /// Injection and the history check that stops re-injection after a restore
     /// both use this, so they cannot drift apart. Agent origins have distinct
     /// tags; host and legacy (unknown-origin) answers keep the
     /// original `user-answer` form so histories saved earlier still match.
-    pub fn answer_message(&self) -> String {
+    ///
+    /// Only an answered question has such a message; a pending or cancelled one
+    /// yields `None`, so a cancellation can never be injected as an answer.
+    pub fn answer_message(&self) -> Option<String> {
+        let answer = self.answer.as_deref().filter(|_| !self.cancelled)?;
         let tag = match &self.answer_origin {
             Some(AnswerOrigin::ParentAgent { answered_by_run_id }) => {
                 format!("parent-answer id={} from={answered_by_run_id}", self.id)
@@ -1155,11 +1218,10 @@ impl UserQuestion {
             }
             Some(AnswerOrigin::Host { .. }) | None => format!("user-answer id={}", self.id),
         };
-        format!(
-            "[{tag}]\nQuestion: {}\nAnswer: {}",
-            self.title,
-            self.answer.as_deref().unwrap_or_default()
-        )
+        Some(format!(
+            "[{tag}]\nQuestion: {}\nAnswer: {answer}",
+            self.title
+        ))
     }
 
     /// Legacy child questions stay private unless explicitly routed to the user.
@@ -1983,6 +2045,7 @@ mod tests {
             blocking: true,
             answer: Some("Use A".into()),
             answer_origin: origin,
+            cancelled: false,
         }
     }
 
@@ -1991,11 +2054,13 @@ mod tests {
         let host = answered_question(Some(AnswerOrigin::Host {
             channel: Default::default(),
         }))
-        .answer_message();
+        .answer_message()
+        .unwrap();
         let parent = answered_question(Some(AnswerOrigin::ParentAgent {
             answered_by_run_id: "run-parent".into(),
         }))
-        .answer_message();
+        .answer_message()
+        .unwrap();
         assert_eq!(
             host,
             "[user-answer id=question-1]\nQuestion: Which API?\nAnswer: Use A"

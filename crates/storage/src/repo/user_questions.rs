@@ -19,6 +19,7 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
             .any(|s| s.trim().is_empty() || s.len() > 256)
         || question.answer.is_some()
         || question.answer_origin.is_some()
+        || question.cancelled
     {
         return Err(invalid(
             "invalid question: title 1..2048 bytes, at most 3 options of 1..256 bytes",
@@ -47,7 +48,7 @@ pub(super) fn requester_question_count(
     run_id: &str,
 ) -> Result<u64, StorageError> {
     Ok(conn.query_row(
-        "SELECT count(*) FROM user_questions q WHERE q.answered=0 \
+        "SELECT count(*) FROM user_questions q WHERE q.answered=0 AND q.cancelled=0 \
          AND (q.run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)) \
          AND ((q.run_id NOT IN (SELECT run_id FROM run_tombstones) AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones)) \
               OR EXISTS (SELECT 1 FROM user_question_links l2 WHERE l2.question_id=q.id AND l2.run_id != q.run_id AND l2.run_id NOT IN (SELECT run_id FROM run_tombstones)))",
@@ -100,6 +101,11 @@ fn answer_checked(
     origin: &AnswerOrigin,
     mode: AnswerMode,
 ) -> Result<(), StorageError> {
+    // A cancelled question is terminal and nobody answered it. Say so before any
+    // routing or answer comparison, so no retry can read it as an answer.
+    if get(conn, id)?.is_some_and(|stored| stored.cancelled) {
+        return Err(StorageError::QuestionCancelled);
+    }
     // Canonical routing, not a cached projection or inherited recipient link.
     let canonical: Option<String> = conn
         .query_row(
@@ -193,10 +199,13 @@ fn answer_checked(
     // Plan A's fence is on the answer itself, not each recipient. Never persist
     // evidence for a losing answer, even if the caller read a stale pending row.
     let updated = conn.execute(
-        "UPDATE user_questions SET payload=?2,answered=1 WHERE id=?1 AND answered=0",
+        "UPDATE user_questions SET payload=?2,answered=1 WHERE id=?1 AND answered=0 AND cancelled=0",
         params![id, payload],
     )?;
     if updated != 1 {
+        if get(conn, id)?.is_some_and(|stored| stored.cancelled) {
+            return Err(StorageError::QuestionCancelled);
+        }
         if mode == AnswerMode::FirstOnly {
             return Err(StorageError::QuestionAlreadyAnswered);
         }
@@ -257,11 +266,14 @@ pub fn bind(
     // questions are bounded: the same quota creation and attention count.
     let source_questions = for_run(conn, source)?
         .into_iter()
-        .map(|question| (question.id, question.answer.is_some()))
+        .map(|question| {
+            let pending = question.is_pending();
+            (question.id, pending)
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let mut unanswered = for_run(conn, target)?
         .into_iter()
-        .filter(|question| question.answer.is_none())
+        .filter(UserQuestion::is_pending)
         .map(|question| question.id)
         .collect::<std::collections::HashSet<_>>();
     for id in ids {
@@ -271,10 +283,10 @@ pub fn bind(
                     "question inheritance source does not own every question",
                 ));
             }
-            Some(false) => {
+            Some(true) => {
                 unanswered.insert(id.clone());
             }
-            Some(true) => {}
+            Some(false) => {}
         }
     }
     if unanswered.len() > crate::lane_delivery::QuestionCapacity::Requester.limit() as usize {
@@ -304,7 +316,7 @@ pub fn recipients(conn: &Connection, id: &str) -> Result<Vec<String>, StorageErr
 pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
     list(
         conn,
-        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC",
+        "SELECT payload FROM user_questions WHERE answered=0 AND cancelled=0 AND ?1='' AND ((run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)) OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=user_questions.id AND l.run_id != user_questions.run_id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))) ORDER BY rowid DESC",
         "",
     )
 }
@@ -318,6 +330,9 @@ fn list(conn: &Connection, sql: &str, arg: &str) -> Result<Vec<UserQuestion>, St
 fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageError> {
     let mut question: UserQuestion =
         serde_json::from_str(payload).map_err(|e| invalid(&e.to_string()))?;
+    if question.cancelled && (question.answer.is_some() || question.answer_origin.is_some()) {
+        return Err(invalid("a cancelled question carries an answer"));
+    }
     if let Some(route) = crate::repo::lane_delivery::routing(conn, &question.id)? {
         question.responder = Some(route.responder);
         question.routing_revision = route.routing_revision;

@@ -27,6 +27,7 @@ fn question(id: u64) -> UserQuestion {
         blocking: true,
         answer: None,
         answer_origin: None,
+        cancelled: false,
     }
 }
 

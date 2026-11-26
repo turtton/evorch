@@ -216,7 +216,7 @@ pub fn rows<'a>(board: &'a AttentionBoard, threads: &[ThreadRecord]) -> Vec<Atte
                     ..
                 } if lane_record.is_some() => {
                     board.question(question.as_str()).filter(|question| {
-                        question.answer.is_none()
+                        question.is_pending()
                             && matches!(question.responder, Some(QuestionResponder::User))
                     })
                 }
@@ -424,6 +424,7 @@ mod tests {
             blocking: false,
             answer: answer.map(str::to_owned),
             answer_origin: None,
+            cancelled: false,
         };
         let board_with = |stored: Option<UserQuestion>| {
             let mut board = AttentionBoard::default();

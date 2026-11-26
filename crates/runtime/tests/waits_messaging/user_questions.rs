@@ -788,6 +788,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         storage.handle().create_user_question(&question).unwrap();
         let path = dir.path().join("owners.db");
@@ -1181,4 +1182,111 @@ async fn subagent_questions_lists_every_unanswered_and_a_bounded_answered_window
     assert_eq!(listed[31].title, format!("Answered {}", ANSWERED - 1));
     assert_eq!(listed[32].id, pending.id);
     assert!(listed[32].answer.is_none());
+}
+
+#[tokio::test]
+async fn offline_cancelled_question_neither_blocks_finish_nor_is_injected_as_an_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir(&config_dir).unwrap();
+    let config = StorageConfig {
+        db_path: config_dir.join("evorch-events.db"),
+        ..Default::default()
+    };
+    let (old, question_id) = {
+        let storage = Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(EventBus::new(256));
+        let mut events = bus.subscribe();
+        let model = Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "ask",
+                "ask_user",
+                serde_json::json!({"title":"Required decision"}),
+            )),
+            Ok(text_response("waiting", FinishReason::Stop)),
+        ]));
+        let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+            .with_sequential_run_ids()
+            .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let old = runtime
+            .delegate_chat("thread", Role::Worker, "work".into(), RunConfig::default())
+            .unwrap();
+        question_waiting(&mut events, old).await;
+        let question = runtime.user_answers(old).unwrap().remove(0);
+        assert!(question.blocking && question.is_pending());
+        runtime.cancel(old).unwrap();
+        runtime.wait(old).await.unwrap();
+        drop(runtime);
+        storage.close();
+        (old, question.id)
+    };
+
+    // The offline cleanup runs with nothing open, as the operator would run it.
+    std::fs::write(config_dir.join("sidebar.json"), r#"{"threads":[]}"#).unwrap();
+    let preview = storage::maintenance::preview_archive_blocker_cleanup(
+        &storage::maintenance::CleanupPreviewOptions {
+            db: config.db_path.clone(),
+            config_dir: config_dir.clone(),
+            sidebar: config_dir.join("sidebar.json"),
+        },
+    )
+    .unwrap();
+    assert!(preview.apply_allowed);
+    assert_eq!(preview.counts.questions_to_cancel, 1);
+    let plan = dir.path().join("plan.json");
+    std::fs::write(&plan, serde_json::to_vec(&preview).unwrap()).unwrap();
+    let summary = storage::maintenance::apply_archive_blocker_cleanup(
+        &storage::maintenance::CleanupApplyOptions {
+            db: config.db_path.clone(),
+            config_dir: config_dir.clone(),
+            ownership_root: dir.path().join("threads"),
+            sidebar: config_dir.join("sidebar.json"),
+            plan,
+            backup: dir.path().join("backup.db"),
+        },
+    )
+    .unwrap();
+    assert_eq!(summary.status, "applied");
+
+    // A restart restores the thread: the cancelled question is carried but never
+    // blocks the finish, is never delivered as an answer, and cannot be answered.
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "done without any answer",
+        FinishReason::Stop,
+    ))]));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_sequential_run_ids()
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let stored = runtime.user_question(&question_id).unwrap().unwrap();
+    assert!(stored.cancelled && stored.answer.is_none() && stored.answer_origin.is_none());
+    assert_eq!(stored.run_id, old.to_string());
+    let resumed = runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            "continue".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+    assert!(!runtime.has_active_question_recipient(&question_id).unwrap());
+    let sent = serde_json::to_string(&model.observed().await).unwrap();
+    assert!(
+        !sent.contains("[user-answer id="),
+        "a cancelled question was injected as an answer"
+    );
+    let listed = runtime.user_answers(resumed).unwrap();
+    assert!(listed.iter().all(|q| q.cancelled && q.answer.is_none()));
+    let refused = runtime.answer_user_question(&question_id, "late");
+    assert!(refused.unwrap_err().contains("cancel"));
+    assert!(
+        runtime
+            .user_question(&question_id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .is_none()
+    );
 }

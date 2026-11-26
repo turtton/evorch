@@ -345,6 +345,9 @@ pub(crate) fn mutate_question(
     )?;
     let mut question = crate::repo::user_questions::get(&tx, &request.question_id)?
         .ok_or_else(|| conflict("unknown_question"))?;
+    if question.cancelled {
+        return Err(StorageError::QuestionCancelled);
+    }
     if old_id.as_deref() == Some(&request.operation_id) {
         if old_operation.as_deref() != Some(&operation) {
             return Err(conflict("operation_id_reused"));
@@ -455,7 +458,7 @@ pub(crate) fn questions(
             after_question_id: String::new(),
         },
     };
-    let mut statement=conn.prepare("SELECT r.question_id FROM lane_question_routes r JOIN lanes l ON l.lane_id=r.lane_id JOIN user_questions q ON q.id=r.question_id WHERE r.responder_thread_id=?1 AND l.lead_thread_id=?1 AND r.management_revision=l.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND q.answered=0 AND r.question_id>?2 AND r.rowid<=?3 ORDER BY r.question_id LIMIT 21")?;
+    let mut statement=conn.prepare("SELECT r.question_id FROM lane_question_routes r JOIN lanes l ON l.lane_id=r.lane_id JOIN user_questions q ON q.id=r.question_id WHERE r.responder_thread_id=?1 AND l.lead_thread_id=?1 AND r.management_revision=l.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND q.answered=0 AND q.cancelled=0 AND r.question_id>?2 AND r.rowid<=?3 ORDER BY r.question_id LIMIT 21")?;
     let ids = statement
         .query_map(
             params![lead, cursor.after_question_id, cursor.snapshot_max_rowid],

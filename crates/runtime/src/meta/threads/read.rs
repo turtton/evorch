@@ -291,7 +291,7 @@ fn overview(
                         "id": question.id,
                         "run_id": question.run_id,
                         "title": clip_chars(&scope.redact(&question.title), 200),
-                        "status": if question.answer.is_some() { "answered" } else { "pending" },
+                        "status": question.status().as_str(),
                         "answer": question.answer.as_deref().map(|answer| clip_chars(&scope.redact(answer), 200)),
                         "answer_origin": question.answer_origin,
                     }))

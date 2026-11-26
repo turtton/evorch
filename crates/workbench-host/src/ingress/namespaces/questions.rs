@@ -23,7 +23,7 @@ impl CommandHost {
             question_revision,
         }) = command;
         if let Ok(Some(question)) = self.service.runtime().user_question(question_id.as_str())
-            && question.answer.is_none()
+            && question.is_pending()
             && question.routing_revision != question_revision.get()
         {
             return Err(reject_error(

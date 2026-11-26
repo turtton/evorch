@@ -142,6 +142,7 @@ async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
         blocking: false,
         answer: None,
         answer_origin: None,
+        cancelled: false,
     };
     fixture
         .storage

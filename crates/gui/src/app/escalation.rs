@@ -54,7 +54,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .user_questions
                 .values()
                 .filter(|question| {
-                    question.answer.is_none()
+                    question.is_pending()
                         && question.is_user_visible()
                         && question
                             .recipient_run_ids

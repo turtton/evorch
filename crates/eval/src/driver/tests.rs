@@ -535,6 +535,7 @@ fn user_visible_questions_are_tracked_until_answered() {
         blocking: true,
         answer: None,
         answer_origin: None,
+        cancelled: false,
     };
     let answered = UserQuestion {
         answer: Some("a".into()),
@@ -677,6 +678,7 @@ fn root_question(id: &str, answer: Option<&str>) -> UserQuestion {
         blocking: true,
         answer: answer.map(Into::into),
         answer_origin: None,
+        cancelled: false,
     }
 }
 

@@ -580,7 +580,7 @@ fn open_questions<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a QuestionVi
         .questions
         .values()
         .filter(|q| {
-            q.answer.is_none() && q.target == QuestionTarget::User && &q.requester.thread == thread
+            q.is_pending() && q.target == QuestionTarget::User && &q.requester.thread == thread
         })
         .collect()
 }
@@ -590,7 +590,7 @@ fn lead_routed_count(cache: &Cache, thread: &ThreadId) -> usize {
         .questions
         .values()
         .filter(|q| {
-            q.answer.is_none()
+            q.is_pending()
                 && matches!(&q.target, QuestionTarget::Lead { lead_thread, .. } if lead_thread == thread)
         })
         .count()

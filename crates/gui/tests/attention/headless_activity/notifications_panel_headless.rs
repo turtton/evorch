@@ -62,6 +62,7 @@ fn pending_question_button_emits_thread_action_with_run_fallback() {
                     blocking: true,
                     answer: None,
                     answer_origin: None,
+                    cancelled: false,
                 },
             }),
             |_| None,
@@ -131,6 +132,7 @@ fn question_notification_opens_owning_thread_and_conversation() {
                 blocking: true,
                 answer: None,
                 answer_origin: None,
+                cancelled: false,
             },
         })]);
         state.open_agent_pane("other-run");

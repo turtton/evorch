@@ -8,7 +8,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub(super) fn fold_user_question(&mut self, event: &Event) {
         if let EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) = &event.kind {
-            if question.answer.is_some() {
+            // Answered or cancelled: no longer something the person can act on.
+            if !question.is_pending() {
                 self.user_questions.remove(&question.id);
                 self.question_drafts.remove(&question.id);
             } else {
@@ -29,7 +30,7 @@ pub(super) fn lead_routed_count<'a>(
     questions
         .into_iter()
         .filter(|question| {
-            question.answer.is_none()
+            question.is_pending()
                 && matches!(
                     &question.responder,
                     Some(event_bus::lane::QuestionResponder::Lead { thread_id })
@@ -119,6 +120,7 @@ mod tests {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         }
     }
 
@@ -138,6 +140,7 @@ mod tests {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         assert!(belongs_to_thread(&question, "one", &[]));
         assert!(!belongs_to_thread(&question, "two", &[]));

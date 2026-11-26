@@ -68,7 +68,7 @@ pub fn recorded(
             }
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
                 if question.is_user_visible()
-                    && question.answer.is_none()
+                    && question.is_pending()
                     && chat_runs.contains(&question.root_run_id)
                     && asked.insert(question.id.clone()) =>
             {

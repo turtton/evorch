@@ -219,7 +219,7 @@ pub fn project_tree<'a>(
     let questions: HashSet<&str> = cache
         .questions
         .values()
-        .filter(|q| q.answer.is_none() && q.target == QuestionTarget::User)
+        .filter(|q| q.is_pending() && q.target == QuestionTarget::User)
         .map(|q| q.requester.thread.as_str())
         .collect();
     let approvals: HashSet<&str> = cache

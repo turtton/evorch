@@ -100,6 +100,7 @@ fn question_event(responder: Option<QuestionResponder>) -> Event {
             blocking: false,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         },
     })
 }

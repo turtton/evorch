@@ -178,6 +178,10 @@ pub struct QuestionView {
     pub options: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<QuestionAnswer>,
+    /// Closed without an answer (offline maintenance). Terminal and never combined with
+    /// `answer`: it is not an answer, an approval or a pending request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     /// The revision `AnswerUserQuestion` must quote.
     pub revision: Revision,
     /// Who raised the question: an agent run.
@@ -185,6 +189,11 @@ pub struct QuestionView {
 }
 
 impl QuestionView {
+    /// Neither answered nor cancelled.
+    pub fn is_pending(&self) -> bool {
+        self.answer.is_none() && !self.cancelled
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
         // Agent-authored text: bounded, not restricted to a character set.
         check_bytes("title", &self.title, MAX_TITLE_BYTES, true)?;
@@ -195,6 +204,12 @@ impl QuestionView {
         self.raised_by.validate()?;
         if let Some(answer) = &self.answer {
             answer.validate()?;
+            if self.cancelled {
+                return Err(ValidationError::Inconsistent {
+                    field: "cancelled",
+                    reason: "a cancelled question has no answer",
+                });
+            }
         }
         Ok(())
     }

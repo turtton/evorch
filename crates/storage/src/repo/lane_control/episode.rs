@@ -187,6 +187,13 @@ pub(crate) fn check_nudge(
             )
             || e.notification_id.as_deref() != Some(&notice.notification_id)
             || progress_anchor(conn, &e.lane_id)? != e.progress_anchor
+            // A nudge is input that reopens a lane; a lane closed since it was requested
+            // must not be reopened by it.
+            || conn.query_row(
+                "SELECT current_close_id IS NOT NULL FROM lanes WHERE lane_id=?1",
+                [&e.lane_id],
+                |row| row.get::<_, bool>(0),
+            )?
         {
             return Err(err(LaneOperationError::StaleEpisode));
         }

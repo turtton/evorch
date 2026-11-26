@@ -88,7 +88,7 @@ impl NotificationLog {
                 .map(|summary| summary.project.clone())
         };
         for question in cache.questions.values() {
-            if question.answer.is_none()
+            if question.is_pending()
                 && question.target == QuestionTarget::User
                 && self.questions.insert(question.id.to_string())
             {

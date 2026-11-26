@@ -137,7 +137,7 @@ impl AgentRuntime {
     }
 
     fn queue_question_for_parent(&self, parent: RunId, child: RunId, question: &UserQuestion) {
-        if question.answer.is_some() || question.responder.is_some() {
+        if question.is_terminal() || question.responder.is_some() {
             return;
         }
         let runs = lock_runs(&self.shared.runs);

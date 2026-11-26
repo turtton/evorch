@@ -33,6 +33,7 @@
 | 旧形式 DB の変換（停止中のみ） | `evorch maintenance convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]` | [convert-bodies](#convert-bodies-による変換) |
 | `auto_vacuum` の一回限りの切替（停止中のみ） | `evorch maintenance vacuum [--apply] [--backup <new-path>]` | [auto_vacuum](#auto_vacuum-の一回限りの移行) |
 | events の縮小（停止中のみ） | `evorch maintenance compact-events …` | [オフライン縮小](#オフライン縮小preview--必須バックアップ--apply) |
+| archive を妨げる未回答質問と open lane の一回限りの整理（停止中のみ） | `evorch maintenance cleanup-archive-blockers [--config-dir <dir>] [--db <path>]`（preview）／`… --apply --plan <preview.json> --backup <path>` | [archive を妨げるものの整理](#archive-を妨げるものの整理cleanup-archive-blockers) |
 | アーカイブ済みスレッドの期限削除 | 設定 `[storage.thread_retention] archived_delete_after_days`（既定 7、0 で新規の確定を無効化） | [runtime](#スレッドの期限削除runtime起動フェーズ束縛回収)、[GUI](#スレッドの期限削除gui起動表示採番) |
 
 期限削除に専用のコマンドはない。設定の既定値は 7 日で、GUI を起動すると、起動の排他フェーズ（他の evorch プロセスが動いていない起動だけ）が期限の来たアーカイブ済み family を確定し、以後は背景の回収が DB の行を少しずつ消す。`archived_delete_after_days = 0` にすると新規の確定は行われない（回収や巨大行の保守は続く）。時刻を持たない古いアーカイブは日数に関係なく直ちに対象になり、pin・評価サンプル・実行中の family は除外される。確定した削除は取り消せない。GUI での起動手順・表示（アーカイブ一覧のホバーに "Deletes in N days" など）・通知は[GUI の節](#スレッドの期限削除gui起動表示採番)を参照。
@@ -547,6 +548,56 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - `--delta-mode delete` は reasoning 表示と未完了の本文を失う。バックアップからしか戻せない。
 - 長時間続く reader は、バックフィル中に WAL の増大を招く。
 - 常時稼働中の live retention（[io-performance.md](io-performance.md#イベントの永続化と保持)）は 1 tick あたりの削除量と時間を制限するため、既存の大きな滞留は本手順で一括処理する。
+
+## archive を妨げるものの整理（`cleanup-archive-blockers`）
+
+自動 archive は未回答の質問と、閉じられていない managed lane（attached／summary）があるスレッドを保留する。
+溜まった既存分を**一度だけ**片付けるオフライン専用コマンド。新しいオンライン API・writer コマンドは追加しない。
+
+- 質問は新しい終端状態 **cancelled** になる。回答・回答元・承認・review evidence は作られず、回答済みでもない（`user_answers` / `subagent_questions` には `cancelled: true` で出る）。同じ transaction で、その質問の pending な lane Question 通知を obsolete にする（lead を起こさない）。
+- lane は既存の close 遷移で **discarded** になる（closer は `maintenance_cli`）。run の停止・workspace・報告状態は変えない。後日 lane が再 open されたら通常どおり open 扱いに戻り、古い plan では再度 close されない。
+- detached lane と既に有効な close がある lane は対象外。
+- 取消・close は他の保護（pin・goal・最近の活動など）を解除しない。保護が外れたスレッドは自動 archive され、既定ではその **7 日後に自動削除**され得る。
+
+### 手順
+
+1. evorch（GUI・core・CLI）を完全に停止する。GUI を閉じただけで止まったと判断しない。
+2. 新しい evorch で一度起動して正常終了し、schema を最新にし WAL を空にする（旧 schema・非空 WAL は preview・apply とも拒否される。このコマンドは migration も WAL 回復もしない。WAL・lock ファイルを手で消さない）。
+3. preview（読み取り専用。DB・WAL・SHM・lease・config・lock・`sidebar.json` を作成も変更もしない）の JSON を保存して読む。
+
+```sh
+CONFIG="$HOME/.config/evorch"
+umask 077
+evorch maintenance cleanup-archive-blockers --config-dir "$CONFIG" > /safe/place/cleanup-preview.json
+```
+
+   確認する項目: 対象の質問・lane の全件、除外と理由、処理不能（`unprocessable`）、`apply_allowed`、新しい Closed 通知の宛先 lead 数、3 つの hash（`source_image_sha256`・`target_manifest_sha256`・`plan_hash`）。`config-dir` 以外の DB を指す `--db` には対応する `--config-dir`（その core lock と `sidebar.json`）が必須。
+4. **preview は apply の許可ではない。** 内容を確認し、了承してから同じ plan と新しい backup 先で apply する。
+
+```sh
+evorch maintenance cleanup-archive-blockers --config-dir "$CONFIG" --apply \
+  --plan /safe/place/cleanup-preview.json --backup /safe/place/evorch-before-cleanup.db
+```
+
+`--backup` に指定したパスにまだファイルが無ければ、検証済みの新しい backup を作る。あれば、同じ plan の image と byte 一致する場合だけ再利用し、上書きしない。backup は元データを含むので保管に注意する（DB 本体のみで、sidebar・artifact は含まない）。
+
+### 排他・安全の契約
+
+- apply は config の launch／lifetime lock、DB の保守 lease、SQLite の排他接続を終了まで保持する。core が動作中・起動中なら拒否される。preview は lock ファイルが無ければ「core 未使用」として DB の lease に委ね、他の異常は拒否する。
+- 未適用の apply は「WAL が空」「main DB の SHA-256 が plan と一致」「再列挙した対象が plan の manifest と一致」のすべてが必要。**preview と apply の間に core を一度でも起動したら、再 preview が必要。**
+- 質問が requester・root・全継承先の run がすべて削除済みで、かつ DB（`thread_runs`）にも sidebar の `run_ids`／`root_run_id` にも生きた thread の束縛が無い場合だけ「残骸」として除外される。判定できない項目（`sidebar.json` が読めない・形式不明、削除済み thread に宛てた pending 通知など）は処理不能で、1 件でもあれば apply 全体を拒否する。
+- 全変更は backup の検証後に単一 transaction で行い、完了 receipt（hash と件数だけ）を保存する。終了時に `wal_checkpoint(TRUNCATE)` を行う。
+
+### 再実行・中断
+
+- commit 前の中断は全体が rollback される。同じ plan で再実行できる（検証済み backup は再利用される）。
+- 完了済みの plan を再実行すると `already_applied` を返し、何も変更しない。
+- commit 後に checkpoint が終わらなかった場合は、通常の起動 → 正常終了 → **同じ plan で apply を再実行**して `already_applied` を確認する。
+- 上記以外（receipt なしで DB が変わっている等）は無変更で拒否される。再 preview から始める。
+
+### writer lease（PR2a）
+
+apply は config の launch／lifetime lock と DB 保守 lease に加え、core の **DB writer 専用 lease（`<db>.writer-lock`）と root writer 専用 lease（`<ownership root>/.ownership-writer-lock`）を DB → root の順で排他取得**してから WAL を確認する。待機はせず、core・legacy embedded writer・同じ ownership root を共有する別 DB の core のいずれかが動いていれば無変更で拒否する。ownership root は core と同じ `$XDG_STATE_HOME/evorch/threads`（未設定なら `~/.local/state/evorch/threads`）。ディレクトリが無ければ作成して root lease を実際に取得し、apply の終了まで保持する（作成も取得もできなければ拒否する）。preview は lease を取らず、lock ファイルも作らない。
 
 ## thread 自動 archive（PR2a: core の writer authority）
 

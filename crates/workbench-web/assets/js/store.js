@@ -236,7 +236,7 @@ export function createStore() {
     /** Questions waiting for the user (lead-routed ones are the lead's). */
     pendingQuestions(threadId) {
       return [...state.questions.values()].filter(
-        (q) => !q.answer && !isLeadRouted(q) && (!threadId || q.requester.thread === threadId),
+        (q) => !q.answer && !q.cancelled && !isLeadRouted(q) && (!threadId || q.requester.thread === threadId),
       );
     },
 
@@ -245,6 +245,7 @@ export function createStore() {
       return [...state.questions.values()].filter(
         (q) =>
           !q.answer &&
+          !q.cancelled &&
           isLeadRouted(q) &&
           (!leadThreadId || q.target.payload?.lead_thread === leadThreadId),
       );

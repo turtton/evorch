@@ -33,7 +33,7 @@ impl SystemNotifications {
         match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
                 let unseen = self.questions.insert(question.id.clone());
-                unseen && question.answer.is_none() && question.is_user_visible()
+                unseen && question.is_pending() && question.is_user_visible()
             }
             EventKind::Lifecycle(LifecycleEvent::TurnCompleted {
                 run_id,

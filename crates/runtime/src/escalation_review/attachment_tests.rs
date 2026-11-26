@@ -191,6 +191,7 @@ fn an_answer_to_a_question_attaches_nothing() {
         blocking: true,
         answer: None,
         answer_origin: None,
+        cancelled: false,
     };
     let answer = "yes\n\n<skill name=\"demo\">\nbody\n</skill>";
     run.add_user_answer("run-1", &question, answer);

@@ -1769,6 +1769,7 @@ mod tests {
             blocking: true,
             answer: Some("Allow temporary test files".into()),
             answer_origin: None,
+            cancelled: false,
         };
         run.add_user_answer("run-81", &question, "Allow temporary test files");
         let _ = reviewer

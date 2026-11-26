@@ -546,6 +546,7 @@ mod question_tests {
             blocking: true,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         assert!(!fences.accepts(&Event::new(ToolEvent::UserQuestionUpdated {
             question: question.clone()

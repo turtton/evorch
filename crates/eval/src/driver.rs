@@ -174,7 +174,8 @@ impl Observed {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
                 if question.is_user_visible() && self.is_root(&question.root_run_id) =>
             {
-                if question.answer.is_some() {
+                // Answered or cancelled: either way there is nothing left to answer.
+                if question.is_terminal() {
                     self.mark_answered(&question.id);
                 } else if !self.answered.contains(&question.id)
                     && !self.pending.iter().any(|pending| pending.id == question.id)
@@ -357,7 +358,7 @@ impl Desk for AgentRuntime {
         self.user_question(id)
             .ok()
             .flatten()
-            .is_some_and(|question| question.answer.is_some())
+            .is_some_and(|question| question.is_terminal())
     }
 
     fn answer(&self, id: &str, text: &str) -> Result<AnswerOutcome, String> {

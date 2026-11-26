@@ -343,7 +343,19 @@ impl AgentRuntime {
                                 .any(|p| !p.nudge_episode_ids.is_empty())
                         })
                     });
-            let classification = if unpresented_nudge_error {
+            // A closed lane is a management decision (for example the offline cleanup's
+            // discard): no stall is observed and no nudge is requested for it, so the monitor
+            // can never reopen it. A later input, report or brief change clears the close and
+            // monitoring resumes. An unreadable close is treated as not closed.
+            let closed = store
+                .handle
+                .current_lane_close(lane.lane_id.clone())
+                .ok()
+                .flatten()
+                .is_some();
+            let classification = if closed {
+                None
+            } else if unpresented_nudge_error {
                 Some(Class::RestoreUnavailable)
             } else if question {
                 Some(Class::WaitingQuestion)

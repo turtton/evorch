@@ -1157,7 +1157,7 @@ async fn accepted_answer_receipt_orders() {
             .unwrap();
         let messages: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
         assert!(AgentRuntime::answer_is_in_history(&messages, &accepted));
-        assert_eq!(messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b, ContentBlock::Text { text } if text == &accepted.answer_message())).count(), 1);
+        assert_eq!(messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b, ContentBlock::Text { text } if Some(text) == accepted.answer_message().as_ref())).count(), 1);
         shutdown(&f, &[lead, lane.root_run_id]).await;
     }
 }

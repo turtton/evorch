@@ -393,6 +393,7 @@ mod tests {
             blocking: false,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         }
     }
 

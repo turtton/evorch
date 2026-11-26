@@ -27,6 +27,13 @@ impl CommandService {
                 }];
             }
         };
+        if question.cancelled {
+            return vec![HostEvent::CommandRejected {
+                kind: RejectKind::Conflict,
+                reason: "Question was cancelled without an answer and can no longer be answered"
+                    .into(),
+            }];
+        }
         let chat_role = [Role::Worker, Role::Orchestrator]
             .into_iter()
             .find(|role| question.root_name == format!("chat:{}:{thread_id}", role.name()));
@@ -72,6 +79,7 @@ impl CommandService {
                 return vec![HostEvent::CommandRejected {
                     kind: match &error {
                         runtime::AnswerQuestionError::Ownership(_) => RejectKind::Fenced,
+                        runtime::AnswerQuestionError::Cancelled => RejectKind::Conflict,
                         runtime::AnswerQuestionError::Failed(_) => RejectKind::Failed,
                     },
                     reason: error.to_string(),
@@ -99,7 +107,17 @@ impl CommandService {
         if active {
             return vec![saved];
         }
-        let text = question.answer_message();
+        let Some(text) = question.answer_message() else {
+            return vec![
+                saved,
+                HostEvent::CommandRejected {
+                    kind: RejectKind::Failed,
+                    reason:
+                        "Answer saved, but the stored question has no answer text to resume with"
+                            .into(),
+                },
+            ];
+        };
         let mut events = self.submit_authorized(
             HostCommand::SendChat(ChatInput {
                 submission_id: String::new(),

@@ -39,6 +39,9 @@ pub enum AnswerOutcome {
 pub enum AnswerQuestionError {
     #[error(transparent)]
     Ownership(#[from] crate::ownership::RegistryError),
+    /// The question was cancelled by offline maintenance: terminal, never answered.
+    #[error("question cancelled: it was closed without an answer and can no longer be answered")]
+    Cancelled,
     #[error("{0}")]
     Failed(String),
 }
@@ -88,7 +91,7 @@ impl AgentRuntime {
                     if let Ok(questions) = self.user_answers(run_id) {
                         let pending: Vec<UserQuestion> = questions
                             .into_iter()
-                            .filter(|question| question.blocking && question.answer.is_none())
+                            .filter(|question| question.blocking && question.is_pending())
                             .collect();
                         if !pending.is_empty() {
                             return Ok(RunWait::BlockedOnUser(pending));
@@ -194,6 +197,7 @@ impl AgentRuntime {
             blocking,
             answer: None,
             answer_origin: None,
+            cancelled: false,
         };
         let permit = self
             .entry(run)
@@ -499,6 +503,11 @@ impl AgentRuntime {
                 channel: Default::default(),
             };
         let question = self.user_question(id)?.ok_or("unknown question")?;
+        if question.cancelled {
+            // Before any evidence, routing or idempotent-retry handling: a cancelled
+            // question is not an answered one, whatever was sent earlier.
+            return Err(AnswerQuestionError::Cancelled);
+        }
         let store = self
             .shared
             .run_store
@@ -585,6 +594,9 @@ impl AgentRuntime {
                 .answer_user_question_with_mode(id, answer, &origin, mode);
             if matches!(checked, Err(StorageError::QuestionAlreadyAnswered)) {
                 return Ok(AnswerOutcome::AlreadyAnswered);
+            }
+            if matches!(checked, Err(StorageError::QuestionCancelled)) {
+                return Err(AnswerQuestionError::Cancelled);
             }
             checked.map_err(|e| e.to_string())?;
         }
@@ -761,6 +773,8 @@ impl AgentRuntime {
         let ids = questions
             .iter()
             .filter(|question| {
+                // Pending and cancelled questions are carried as they are; an answer
+                // already in the history is not handed on again.
                 question.answer.is_none() || !Self::answer_is_in_history(messages, question)
             })
             .map(|question| question.id.clone())
@@ -778,7 +792,9 @@ impl AgentRuntime {
         messages: &[providers::Message],
         question: &UserQuestion,
     ) -> bool {
-        let text = question.answer_message();
+        let Some(text) = question.answer_message() else {
+            return false;
+        };
         messages.iter().any(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text {text:existing} if existing == &text)))
     }
 
@@ -805,7 +821,7 @@ impl AgentRuntime {
             if self
                 .user_answers(child)?
                 .iter()
-                .any(|question| question.blocking && question.answer.is_none())
+                .any(|question| question.blocking && question.is_pending())
             {
                 pending.push(child);
             }
@@ -834,11 +850,11 @@ impl AgentRuntime {
     }
     pub(crate) fn has_pending_user_questions(&self, run: RunId) -> bool {
         self.user_answers(run)
-            .is_ok_and(|questions| questions.iter().any(|q| q.blocking && q.answer.is_none()))
+            .is_ok_and(|questions| questions.iter().any(|q| q.blocking && q.is_pending()))
     }
     pub(crate) fn has_unanswered_questions(&self, run: RunId) -> bool {
         self.user_answers(run)
-            .is_ok_and(|questions| questions.iter().any(|q| q.answer.is_none()))
+            .is_ok_and(|questions| questions.iter().any(UserQuestion::is_pending))
     }
 }
 
