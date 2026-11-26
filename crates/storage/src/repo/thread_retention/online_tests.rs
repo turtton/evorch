@@ -243,6 +243,7 @@ fn trigger_targets_and_protection_sources_have_keyed_query_plans() {
         ("recovery_claim_members", "run_id"),
         ("restart_expected_members", "run_id"),
         ("recovery_members", "run_id"),
+        ("threads", "escalation_source_run_id"),
     ] {
         let sql = format!("EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE {key}=?1 LIMIT 4097");
         let plan = db
@@ -415,4 +416,66 @@ fn committed_manifest_links_sidebar_families_but_superseded_manifest_does_not() 
         assert!(tombstones.contains_run("ra"));
         assert_eq!(tombstones.contains_run("rb"), !superseded);
     }
+}
+
+#[test]
+fn excluded_escalation_lane_rows_are_metered_before_closure_filters() {
+    fn populated(count: usize) -> (Database, OnlineRequest) {
+        let (db, request) = fixture();
+        db.conn.execute_batch(&format!("
+            BEGIN;
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{count})
+            INSERT INTO threads(thread_id,escalation_source_run_id,created_at_ns,updated_at_ns,source)
+            SELECT printf('excluded-%05d',i),'ra',0,0,'host' FROM n;
+            INSERT INTO lanes(lane_id,thread_id,origin_thread_id,origin_run_id,creation_key,
+                request_hash,scope,policy,management_revision,management_projection_revision,
+                brief_json,brief_revision,start_seed,root_run_id,generation,created_at_ns,
+                updated_at_ns,last_activity_at_ns)
+            SELECT thread_id,thread_id,'a','ra',thread_id,'hash','lane','detached',1,1,
+                '{{}}',1,'{{}}',thread_id,1,0,0,0 FROM threads WHERE escalation_source_run_id='ra';
+            COMMIT;")).unwrap();
+        (db, request)
+    }
+    let budget = OnlineBudget::default();
+    let (small, _) = populated(100);
+    // These are deliberately excluded neighbors, not an oversized closure.
+    assert_eq!(
+        small.retention_online_closure("a", budget).unwrap(),
+        OnlineOutcome::Ready(OnlineClosure {
+            threads: vec!["a".into()],
+            runs: vec!["ra".into()]
+        })
+    );
+    let mut measurements = Vec::new();
+    for count in [budget.side_effect_rows * 2, budget.side_effect_rows * 20] {
+        let (db, request) = populated(count);
+        let steps = Arc::new(AtomicUsize::new(0));
+        let observed = steps.clone();
+        db.conn
+            .progress_handler(
+                1,
+                Some(move || {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            db.retention_online_closure("a", budget).unwrap(),
+            OnlineOutcome::Hold("SideEffectRowBudget")
+        );
+        db.conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        measurements.push(steps.load(Ordering::Relaxed));
+        assert_eq!(
+            db.retention_online_prepare(&request, budget).unwrap(),
+            OnlineOutcome::Hold("SideEffectRowBudget")
+        );
+        assert_hold(&db, &request, budget, "SideEffectRowBudget");
+    }
+    // Count SQLite work, not elapsed time. Ten times as many raw rows must not
+    // turn into ten times as much work once the same fixed budget is exhausted.
+    assert!(
+        measurements[1] <= measurements[0] + 256,
+        "VM steps: {measurements:?}"
+    );
 }

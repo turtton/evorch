@@ -113,6 +113,7 @@ fn closure(conn: &Connection, seed: &str, budget: OnlineBudget) -> Check<OnlineC
                 ("usage_requests", "run_id"),
                 ("usage_requests", "parent_run_id"),
                 ("threads", "root_run_id"),
+                ("threads", "escalation_source_run_id"),
             ] {
                 support.probe(table, key, &id)?;
             }
