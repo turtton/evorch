@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::super::executor::{ExecutorConfig, FILES_RETRY_LIMIT, ReclaimExecutor, ReclaimWorker};
-use super::{World, policy, ran};
+use super::World;
 use crate::artifacts::{ArtifactRecord, ArtifactStore, CaptureRequest};
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR-test-image";
@@ -71,8 +71,7 @@ fn running_configured(threads: &[&str], record_refs: bool) -> Running {
     for thread in threads {
         world.archived_thread(thread, &format!("r-{thread}"));
     }
-    let report = world.phase(&policy(), &world.input(threads, &["S"]));
-    assert_eq!(ran(&report).confirmed.len(), threads.len());
+    assert_eq!(world.confirm_archived(threads, &["S"]), threads.len());
     let workspace = world.dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("mock.png"), PNG).unwrap();

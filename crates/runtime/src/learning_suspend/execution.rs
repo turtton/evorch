@@ -39,12 +39,17 @@ impl LearningExecution {
         queue: &LearningJobQueue,
         run: RunId,
         review: bool,
-        spawn: impl FnOnce() + Send + 'static,
+        spawn: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) -> Result<bool, String> {
         let (entry, queue) = (self.clone(), queue.clone());
-        tokio::task::spawn_blocking(move || entry.spawn(&queue, run, review, spawn))
-            .await
-            .map_err(|_| "learning spawn task failed")?
+        tokio::task::spawn_blocking(move || {
+            let mut spawned = Ok(());
+            let started = entry.spawn(&queue, run, review, || spawned = spawn())?;
+            spawned?;
+            Ok(started)
+        })
+        .await
+        .map_err(|_| "learning spawn task failed")?
     }
 
     pub(crate) fn start(

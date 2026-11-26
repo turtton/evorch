@@ -1421,6 +1421,7 @@ impl AgentRuntime {
     /// 親 run が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn reserve_child_run_id(&self, parent: RunId) -> Result<RunId, RuntimeError> {
         let _retention_admission = self.retention_run_admission(parent);
+        self.deny_deleted_run(&parent.to_string())?;
         {
             let runs = lock_runs(&self.shared.runs);
             if !runs.contains_key(&parent) {
@@ -1452,9 +1453,9 @@ impl AgentRuntime {
         role: Role,
         prompt: impl Into<String>,
         config: RunConfig,
-    ) -> RunId {
-        let _retention_admission = self.retention_run_admission(run_id);
-        self.spawn_run_with_handoff(
+    ) -> Result<RunId, RuntimeError> {
+        let _retention = self.deny_deleted_spawn(run_id, parent, &config)?;
+        Ok(self.spawn_run_with_handoff(
             run_id,
             parent,
             role,
@@ -1462,7 +1463,7 @@ impl AgentRuntime {
             config,
             RunContinuation::Fresh,
             None,
-        )
+        ))
     }
 
     /// [`AgentRuntime::reserve_child_run_id`] で事前採番した ID を使って
@@ -1482,7 +1483,9 @@ impl AgentRuntime {
     ) -> Result<RunId, RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
         crate::policy::authorize_child_role(Some(parent), role)?;
-        Ok(self.spawn_reserved(run_id, Some(parent), role, prompt, config))
+        self.deny_deleted_run(&parent.to_string())?;
+        self.deny_deleted_run(&run_id.to_string())?;
+        self.spawn_reserved(run_id, Some(parent), role, prompt, config)
     }
 
     fn spawn_run(
@@ -1502,6 +1505,42 @@ impl AgentRuntime {
             RunContinuation::Fresh,
             None,
         )
+    }
+
+    /// Every registration path, including cached/provider admission, fences before effects.
+    fn deny_deleted_spawn(
+        &self,
+        run: RunId,
+        parent: Option<RunId>,
+        config: &RunConfig,
+    ) -> Result<Vec<Box<dyn storage::MutationAdmission>>, RuntimeError> {
+        let mut permits: Vec<Box<dyn storage::MutationAdmission>> =
+            vec![Box::new(self.retention_run_admission(run))];
+        if let Some(parent) = parent {
+            permits.push(Box::new(self.retention_run_admission(parent)));
+        }
+        let thread = config.name.as_deref().and_then(|n| {
+            n.strip_prefix("chat:")?
+                .split_once(':')
+                .map(|(_, thread)| thread)
+        });
+        if let Some(thread) = thread {
+            permits.push(Box::new(self.retention_thread_admission(thread)));
+        }
+        if let Some(owner) = &config.ownership {
+            permits.push(Box::new(self.retention_thread_admission(&owner.thread_id)));
+        }
+        self.deny_deleted_run(&run.to_string())?;
+        if let Some(parent) = parent {
+            self.deny_deleted_run(&parent.to_string())?;
+        }
+        if let Some(thread) = thread {
+            self.deny_deleted_thread(thread)?;
+        }
+        if let Some(owner) = &config.ownership {
+            self.deny_deleted_thread(&owner.thread_id)?;
+        }
+        Ok(permits)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1601,10 +1640,11 @@ impl AgentRuntime {
         review_seed: Option<ReviewSeed>,
         preadmitted: Option<Arc<ExecutionControl>>,
     ) -> Result<RunAdmission, RuntimeError> {
+        let _retention = self.deny_deleted_spawn(run_id, parent, &config)?;
         let _dispatch = self.dispatch_registration_guard().inspect_err(|error| {
             self.fail_admission(run_id, parent, &config, error.clone());
         })?;
-        // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
+        // Every spawn path ends here: an infallible entry point (`delegate_background`)
         // still cannot start a child Orchestrator. Its admission fails instead.
         if let Err(error) = crate::policy::authorize_child_role(parent, role) {
             let reason = error.to_string();
@@ -1868,6 +1908,7 @@ impl AgentRuntime {
         intents: &HashMap<RunId, cancellation::SpawnIntent>,
         inherit_parent: bool,
     ) -> Option<PreparedRunCandidate> {
+        let _retention = self.deny_deleted_spawn(run_id, parent, &config).ok()?;
         // I and A are held by the registration caller. Observing cancellation
         // is nonblocking: only G may change this flag, monotonically.
         if intents.get(&run_id).is_none_or(|intent| {
@@ -2686,6 +2727,7 @@ impl AgentRuntime {
     /// last delivery error, [`RuntimeError::RunTerminated`] when none was tried.
     pub fn deliver_notice(&self, run_id: RunId, text: &str) -> Result<RunId, RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
+        self.deny_deleted_run(&run_id.to_string())?;
         let candidates = {
             let runs = lock_runs(&self.shared.runs);
             if !runs.contains_key(&run_id) {
@@ -2766,6 +2808,10 @@ impl AgentRuntime {
         // observation to avoid a run-map -> status / send -> run-map lock cycle.
         // Nothing in this closure re-enters the trusted-send serializer.
         let send = || {
+            // Internal notices use the same retention/input serializer, but a
+            // host-input seal alone does not close their still-live channel.
+            // Retention Stop also sets the incarnation interrupt under this lock.
+            self.validate_run_mutation(run_id)?;
             // A sealed incarnation has drained its inbox for good: refuse before
             // reserving, persisting or creating a goal.
             if trusted_user && (inbox.sealed() || inbox.status().pending >= INBOX_CAPACITY) {
@@ -2868,7 +2914,7 @@ impl AgentRuntime {
             inbox.pause_point(user_inbox::SendPausePoint::BeforeLock);
             inbox.serialize_trusted_send(send)?;
         } else {
-            send()?;
+            inbox.serialize_trusted_send(send)?;
         }
         Ok(())
     }
@@ -3190,15 +3236,17 @@ impl AgentRuntime {
     /// an in-flight response or tool. This does not send a new message.
     pub fn deliver_follow_ups_next_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
-        self.validate_run_mutation(run_id)?;
-        let entry = self.entry(run_id)?;
-        if entry.inbox_tx.is_closed() {
-            return Err(RuntimeError::RunTerminated {
-                run_id: run_id.to_string(),
-            });
-        }
-        entry.user_inbox.request_next_turn();
-        Ok(())
+        let inbox = self.entry(run_id)?.user_inbox.clone();
+        inbox.serialize_trusted_send(|| {
+            self.validate_run_mutation(run_id)?;
+            if inbox.sealed() || self.entry(run_id)?.inbox_tx.is_closed() {
+                return Err(RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                });
+            }
+            inbox.request_next_turn();
+            Ok(())
+        })
     }
 
     /// run を停止する。停止後は復元により再開できる。
@@ -3215,6 +3263,41 @@ impl AgentRuntime {
         } else {
             delivery.deliver()
         }
+    }
+
+    /// Stop an eligible retention member only at an idle chat boundary. The owner
+    /// first passes common read-only deletion checks for the whole closure. This
+    /// uses the existing lifecycle boundary/token/durable intent path, outside host locks.
+    pub fn stop_retention_idle(
+        &self,
+        run: RunId,
+        before: &[(String, crate::thread_retention::gate::GateStamp)],
+    ) -> Result<(), RuntimeError> {
+        self.deny_deleted_run(&run.to_string())?;
+        let (inbox, incarnation) = {
+            let entry = self.entry(run)?;
+            (
+                entry.user_inbox.clone(),
+                entry.execution.publication().incarnation(),
+            )
+        };
+        // Input-first is visible in queues; stop-first seals before a receipt.
+        inbox.serialize_trusted_send(|| {
+            let _admission = self
+                .shared
+                .retention_gate
+                .try_enter_unchanged(before, format!("r:{run}"))
+                .ok_or(RuntimeError::RestartBusy)?;
+            self.deny_deleted_run(&run.to_string())?;
+            let delivery = crate::quiesce::StopDelivery::new(self, run, StopScope::SelfOnly)
+                .expecting_incarnation(incarnation)
+                .between_turns_only();
+            if let Some(boundary) = self.shared.stop_boundary.get() {
+                boundary.stop(delivery)
+            } else {
+                delivery.deliver()
+            }
+        })
     }
 
     /// The incarnation of the execution `run` has now. A resume of the same run
@@ -3255,6 +3338,7 @@ impl AgentRuntime {
         run_id: RunId,
         scope: StopScope,
         expected: Option<&str>,
+        between_turns_only: bool,
     ) -> Result<(), RuntimeError> {
         // Collect before taking admissions: spawning locks intents before admissions.
         let mut targets = match scope {
@@ -3272,17 +3356,28 @@ impl AgentRuntime {
             .iter()
             .zip(&gates)
             .map(|(_target, gate)| {
+                if between_turns_only {
+                    // Retention already holds the input serializer. Continue
+                    // takes this gate before that serializer, so never wait
+                    // here: an in-flight Continue makes this candidate busy.
+                    return match gate.try_lock() {
+                        Ok(guard) => Ok(guard),
+                        Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+                        Err(std::sync::TryLockError::WouldBlock) => Err(RuntimeError::RestartBusy),
+                    };
+                }
                 #[cfg(test)]
                 {
-                    self.lock_stop_test_gate(*_target, gate)
+                    Ok(self.lock_stop_test_gate(*_target, gate))
                 }
                 #[cfg(not(test))]
                 {
-                    gate.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    Ok(gate
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner))
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
         // Under the restore gates a resume of this run cannot interleave.
         if let Some(expected) = expected
             && self.execution_snapshot(run_id)?.publication().incarnation() != expected
@@ -3321,14 +3416,32 @@ impl AgentRuntime {
             }
             self.fence_paused_stop(*id, old, crate::quiesce::StopReason::OperatorStopped)?;
         }
-        self.goal_work_stopped(run_id);
+        if !between_turns_only {
+            self.goal_work_stopped(run_id);
+        }
         let mut admissions = self
             .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Keep the same admissions -> runs fence as cancel and registration.
-        let runs = lock_runs(&self.shared.runs);
+        let mut runs = lock_runs(&self.shared.runs);
+        if between_turns_only {
+            let pending = admissions
+                .get(&run_id)
+                .is_some_and(|a| !a.cancelled && a.result.borrow().is_none());
+            if pending
+                || runs
+                    .get(&run_id)
+                    .is_none_or(|e| !output::idle::between_turns(e))
+            {
+                return Err(RuntimeError::RestartBusy);
+            }
+            let entry = runs.get_mut(&run_id).expect("checked idle run");
+            // Stop is not a new child completion and must never wake the parent.
+            entry.completion_relayed = true;
+            entry.user_inbox.seal_serialized();
+        }
         if !runs.contains_key(&run_id)
             && !paused.contains_key(&run_id)
             && !admissions
@@ -3754,6 +3867,7 @@ impl AgentRuntime {
         let runs = lock_runs(&self.shared.runs);
         let mut summaries: Vec<AgentSummary> = runs
             .iter()
+            .filter(|(id, _)| self.deny_deleted_run(&id.to_string()).is_ok())
             .map(|(run_id, entry)| AgentSummary {
                 run_id: *run_id,
                 parent_run_id: entry.parent,
@@ -3770,6 +3884,7 @@ impl AgentRuntime {
 
     /// run の位相・会話履歴件数・workspace 情報を返す。
     pub fn inspect_agent(&self, run_id: RunId) -> Result<AgentInspection, RuntimeError> {
+        self.deny_deleted_run(&run_id.to_string())?;
         let runs = lock_runs(&self.shared.runs);
         let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
         let workspace = self
@@ -3790,13 +3905,25 @@ impl AgentRuntime {
     }
 
     pub(crate) fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let permit = self.entry(run_id)?.config.ownership.clone();
+        self.deny_deleted_run(&run_id.to_string())?;
+        let (permit, stopped) = {
+            let entry = self.entry(run_id)?;
+            (
+                entry.config.ownership.clone(),
+                matches!(*entry.execution.cancel_tx.borrow(), RunInterrupt::Stop),
+            )
+        };
         if let Some(permit) = permit {
             permit
                 .validate_generation()
                 .map_err(|_| RuntimeError::StaleOwnership {
                     run_id: run_id.to_string(),
                 })?;
+        }
+        if stopped {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
         }
         Ok(())
     }
@@ -3844,6 +3971,7 @@ impl AgentRuntime {
     }
 
     fn entry(&self, run_id: RunId) -> Result<RunEntryView<'_>, RuntimeError> {
+        self.deny_deleted_run(&run_id.to_string())?;
         let runs = lock_runs(&self.shared.runs);
         if !runs.contains_key(&run_id) {
             return Err(unknown_run(run_id));
@@ -3873,6 +4001,9 @@ impl AgentRuntime {
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
         let _retention_admission = self.retention_run_admission(recipient);
+        let _sender_admission = self.retention_run_admission(sender);
+        self.deny_deleted_run(&recipient.to_string())?;
+        self.deny_deleted_run(&sender.to_string())?;
         let _dispatch = self.dispatch_registration_guard()?;
         self.validate_run_mutation(sender)?;
         let live = lock_runs(&self.shared.runs)
@@ -4703,13 +4834,15 @@ mod review_provenance_tests {
         let runtime = AgentRuntime::new(bus, executor, Arc::new(HangingModel))
             .with_run_store(crate::RunStore::open(&config, storage.handle()).expect("run store"));
         let root = runtime.reserve_run_id();
-        runtime.spawn_reserved(
-            root,
-            None,
-            Role::Orchestrator,
-            "Investigate the sandbox failure",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                root,
+                None,
+                Role::Orchestrator,
+                "Investigate the sandbox failure",
+                RunConfig::default(),
+            )
+            .unwrap();
         let worker = runtime.reserve_run_id();
         runtime
             .spawn_reserved_child(
@@ -4931,13 +5064,15 @@ mod stop_cancel_tests {
     }
 
     fn spawn(runtime: &AgentRuntime, parent: Option<RunId>) -> RunId {
-        runtime.spawn_reserved(
-            runtime.reserve_run_id(),
-            parent,
-            Role::Worker,
-            "held",
-            RunConfig::default(),
-        )
+        runtime
+            .spawn_reserved(
+                runtime.reserve_run_id(),
+                parent,
+                Role::Worker,
+                "held",
+                RunConfig::default(),
+            )
+            .unwrap()
     }
 
     #[tokio::test]

@@ -451,7 +451,7 @@ impl LiveRun {
                 let mut phase = runtime.event_bus().subscribe();
                 runtime.spawn_reserved(run, None, runtime::Role::Worker, "live sharing", runtime::RunConfig {
                     interactive: true, keep_alive: true, project_root: Some(project), ..Default::default()
-                });
+                }).unwrap();
                 if waiting {
                     loop {
                         let event = phase.recv().await.unwrap();

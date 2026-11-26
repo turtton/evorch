@@ -282,13 +282,15 @@ mod tests {
         }
 
         fn spawn(&self, parent: Option<RunId>) -> RunId {
-            self.runtime.spawn_reserved(
-                self.runtime.reserve_run_id(),
-                parent,
-                Role::Worker,
-                "child",
-                RunConfig::default(),
-            )
+            self.runtime
+                .spawn_reserved(
+                    self.runtime.reserve_run_id(),
+                    parent,
+                    Role::Worker,
+                    "child",
+                    RunConfig::default(),
+                )
+                .unwrap()
         }
 
         fn validate(&self) -> Result<(), RuntimeError> {
@@ -383,13 +385,16 @@ mod tests {
                 .model
                 .admission_pending
                 .store(true, Ordering::Relaxed);
-            fixture.runtime.spawn_reserved(
-                fixture.root,
-                None,
-                Role::Orchestrator,
-                "root",
-                RunConfig::default(),
-            );
+            fixture
+                .runtime
+                .spawn_reserved(
+                    fixture.root,
+                    None,
+                    Role::Orchestrator,
+                    "root",
+                    RunConfig::default(),
+                )
+                .unwrap();
             assert!(
                 fixture
                     .runtime
@@ -560,17 +565,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        let child = fixture.runtime.spawn_reserved(
-            fixture.runtime.reserve_run_id(),
-            Some(root),
-            Role::Worker,
-            "child",
-            RunConfig {
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
-        );
+        let child = fixture
+            .runtime
+            .spawn_reserved(
+                fixture.runtime.reserve_run_id(),
+                Some(root),
+                Role::Worker,
+                "child",
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         for run in [root, child] {
             let mut phase = fixture.runtime.entry(run).unwrap().phase_rx.clone();
             tokio::time::timeout(std::time::Duration::from_secs(2), async {

@@ -72,10 +72,17 @@ pub fn run_phase(
     };
     let now = now_nanos();
     let input = startup_input(&paths, sidebar_threads(&document.sidebar), now)?;
+    // Readiness never explores or confirms new deletion candidates. Only the
+    // activation-time online engine may do that; the exclusive startup path
+    // retains oversized rows, artifact GC and old owner/scratch cleanup.
+    let cleanup_only = ThreadRetentionPolicy {
+        archived_delete_after_days: 0,
+        ..plan.policy
+    };
     Ok(run_exclusive_phase(
         leases,
         &paths,
-        &plan.policy,
+        &cleanup_only,
         &input,
         &StartupBudget::default(),
         now,

@@ -21,6 +21,8 @@ pub mod learning;
 #[cfg(test)]
 mod learning_tests;
 pub mod models;
+#[cfg(test)]
+mod online_retention_tests;
 pub mod planned;
 pub mod planned_exit;
 mod project_models;

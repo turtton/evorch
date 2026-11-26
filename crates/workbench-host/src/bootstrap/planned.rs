@@ -135,9 +135,12 @@ impl PlannedStorage {
             self.bus.clone(),
         )?);
         owner.retain_writer_leases(self.writer_leases.clone());
-        let tombstones = storage::Database::open(&self.storage_config)?.tombstones()?;
+        let guard = self
+            .runtime()
+            .tombstone_guard()
+            .ok_or("startup tombstone guard missing")?;
         owner
-            .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
+            .set_tombstone_guard(guard)
             .map_err(|_| "owner guard already set")?;
         let report =
             self.runtime()

@@ -526,17 +526,19 @@ impl Harness {
         self.script(run, steps);
         self.runtime.bind_thread_root(thread, run).unwrap();
         let category = (role == Role::Worker).then(|| CategoryId::Conversation.to_string());
-        self.runtime.spawn_reserved(
-            run,
-            None,
-            role,
-            "Discuss the UI",
-            RunConfig {
-                conversation: true,
-                category,
-                ..Default::default()
-            },
-        )
+        self.runtime
+            .spawn_reserved(
+                run,
+                None,
+                role,
+                "Discuss the UI",
+                RunConfig {
+                    conversation: true,
+                    category,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
     }
 
     fn visual_child(&self, parent: RunId, steps: Vec<Step>) -> RunId {
@@ -782,16 +784,18 @@ async fn orchestrator_cannot_capture_and_missing_store_fails_closed() {
         .lock()
         .unwrap()
         .insert(run.to_string(), vec![render("mock.png", "No store")].into());
-    runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Draw",
-        RunConfig {
-            category: Some(CategoryId::Visual.to_string()),
-            ..Default::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Draw",
+            RunConfig {
+                category: Some(CategoryId::Visual.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
     let result = &model.results.lock().unwrap()[&run.to_string()][0];
     assert!(

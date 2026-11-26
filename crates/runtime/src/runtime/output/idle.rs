@@ -1,6 +1,7 @@
 //! Read-only classification of a live interactive boundary. A Waiting phase
 //! alone also covers tool, child, lane, question and escalation waits.
 use super::super::{AgentRunPhase, AgentRuntime, RunEntry, RunId, lock_runs};
+use crate::{RuntimeError, runtime::unknown_run};
 use std::sync::atomic::Ordering;
 
 impl AgentRuntime {
@@ -24,11 +25,12 @@ impl AgentRuntime {
     }
 }
 
-fn between_turns(entry: &RunEntry) -> bool {
+pub(in crate::runtime) fn between_turns(entry: &RunEntry) -> bool {
     let input = entry.user_inbox.status();
     *entry.phase_rx.borrow() == AgentRunPhase::Waiting
         && entry.idle_turn.is_some()
         && !entry.compaction_busy.load(Ordering::Acquire)
+        && !entry.user_inbox.sealed()
         && input.pending == 0
         && !input.next_turn_requested
         && entry.inbox_tx.capacity() == entry.inbox_tx.max_capacity()
@@ -42,22 +44,67 @@ fn between_turns(entry: &RunEntry) -> bool {
 impl AgentRuntime {
     /// Exact live protection for one member; no owner/claim lookup and no I/O.
     pub fn retention_run_protected(&self, run: RunId) -> bool {
-        {
-            let runs = lock_runs(&self.shared.runs);
-            if let Some(entry) = runs.get(&run) {
-                return entry.compaction_busy.load(Ordering::Acquire)
-                    || match *entry.phase_rx.borrow() {
-                        AgentRunPhase::Pending | AgentRunPhase::Running => true,
-                        AgentRunPhase::Waiting => !between_turns(entry),
-                        _ => false,
-                    };
-            }
-        }
-        self.shared
+        let pending = self
+            .shared
             .admissions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&run)
-            .is_some_and(|a| !a.cancelled && a.result.borrow().is_none())
+            .is_some_and(|a| !a.cancelled && a.result.borrow().is_none());
+        if pending {
+            return true;
+        }
+        let runs = lock_runs(&self.shared.runs);
+        runs.get(&run).is_some_and(|entry| {
+            entry.compaction_busy.load(Ordering::Acquire)
+                || match *entry.phase_rx.borrow() {
+                    AgentRunPhase::Pending | AgentRunPhase::Running => true,
+                    AgentRunPhase::Waiting => !between_turns(entry),
+                    _ => false,
+                }
+        })
+    }
+}
+
+impl AgentRuntime {
+    /// Deletion requires proof that the entire task exited. No-join entries hold.
+    pub fn retention_delete_protected(&self, run: RunId) -> bool {
+        let pending = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&run)
+            .is_some_and(|a| !a.cancelled && a.result.borrow().is_none());
+        if pending {
+            return true;
+        }
+        let runs = lock_runs(&self.shared.runs);
+        runs.get(&run).is_some_and(|entry| {
+            !matches!(
+                *entry.phase_rx.borrow(),
+                AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+            ) || entry.compaction_busy.load(Ordering::Acquire)
+                || entry._join.as_ref().is_none_or(|join| !join.is_finished())
+                || entry.user_inbox.status().pending != 0
+                || entry.mailbox.has_interrupting_message()
+        })
+    }
+    /// Await the actual task tail without holding the run map across suspension.
+    pub async fn wait_retention_task(&self, run: RunId) -> Result<(), RuntimeError> {
+        futures_util::future::poll_fn(|cx| {
+            let mut runs = lock_runs(&self.shared.runs);
+            let Some(entry) = runs.get_mut(&run) else {
+                return std::task::Poll::Ready(Ok(()));
+            };
+            let Some(join) = entry._join.as_mut() else {
+                return std::task::Poll::Ready(Err(unknown_run(run)));
+            };
+            if join.is_finished() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            std::future::Future::poll(std::pin::Pin::new(join), cx).map(|_| Ok(()))
+        })
+        .await
     }
 }

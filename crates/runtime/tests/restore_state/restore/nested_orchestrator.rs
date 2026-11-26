@@ -43,13 +43,15 @@ async fn saved_child_orchestrator_is_refused_and_its_snapshot_kept() {
     let (runtime, bus) = runtime_with(model());
     let mut events = bus.subscribe();
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    runtime.spawn_reserved(
-        parent,
-        None,
-        Role::Orchestrator,
-        "parent",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            parent,
+            None,
+            Role::Orchestrator,
+            "parent",
+            RunConfig::default(),
+        )
+        .unwrap();
     terminal(&runtime, parent).await;
 
     // When: the live root parent messages the saved child.

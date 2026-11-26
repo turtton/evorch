@@ -245,7 +245,8 @@ async fn provider_admission_is_durable_once_and_quiesce_waits_for_its_actual_res
     assert_eq!(
         fixture
             .runtime
-            .spawn_reserved(run, None, Role::Worker, "duplicate", RunConfig::default()),
+            .spawn_reserved(run, None, Role::Worker, "duplicate", RunConfig::default())
+            .unwrap(),
         run
     );
     fixture.runtime.request_quiesce();
@@ -454,7 +455,8 @@ async fn cancel_before_registration_is_durably_cancelled_with_admission(admissio
     fixture.runtime.cancel(run).unwrap();
     fixture
         .runtime
-        .spawn_reserved(run, None, Role::Worker, "never start", RunConfig::default());
+        .spawn_reserved(run, None, Role::Worker, "never start", RunConfig::default())
+        .unwrap();
     assert!(fixture.runtime.wait(run).await.is_err());
     assert_eq!(fixture.intent(run).stop_reason, Some(StopReason::Cancelled));
     assert!(!fixture.intent(run).active);

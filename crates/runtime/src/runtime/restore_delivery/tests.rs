@@ -154,13 +154,15 @@ async fn cold_restore_distinguishes_a_root_parent_from_a_durable_subagent_parent
         let runtime = make_runtime(model.clone());
         // A live descendant may contact its durable parent without restoring the ancestors first.
         let sender = runtime.reserve_run_id();
-        runtime.spawn_reserved(
-            sender,
-            Some(recipient),
-            Role::Worker,
-            "sender",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                sender,
+                Some(recipient),
+                Role::Worker,
+                "sender",
+                RunConfig::default(),
+            )
+            .unwrap();
         runtime.wait(sender).await.unwrap();
         runtime
             .send_agent_message(sender, recipient, AgentMessageKind::Send, "resume", None)

@@ -665,7 +665,9 @@ async fn released_claim_never_rolls_back_revision_or_blocks_manual_registration_
     let run = saved(&f).await;
     let runtime = new_process(&f);
     let paused = prepare(&f, &runtime);
-    runtime.spawn_reserved(run, None, Role::Worker, "not allowed", RunConfig::default());
+    runtime
+        .spawn_reserved(run, None, Role::Worker, "not allowed", RunConfig::default())
+        .unwrap();
     assert!(runtime.list_agents().is_empty());
     let revision = paused.claim().members[0].reserved_revision;
     assert!(runtime.release_prepared_component(&paused, "").is_err());

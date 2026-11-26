@@ -255,7 +255,9 @@ fn saving_runtime() -> (AgentRuntime, crate::RunId) {
         std::sync::Arc::new(IdleModel),
     );
     let run = runtime.reserve_run_id();
-    runtime.spawn_reserved(run, None, Role::Worker, "idle", RunConfig::default());
+    runtime
+        .spawn_reserved(run, None, Role::Worker, "idle", RunConfig::default())
+        .unwrap();
     (runtime, run)
 }
 
@@ -463,7 +465,9 @@ async fn ac15_publication_gate_does_not_hold_global_spawn_or_cancel_locks() {
         .commit(|| {
             // A different run can spawn and cancel while this run publishes.
             let other = runtime.reserve_run_id();
-            runtime.spawn_reserved(other, None, Role::Worker, "idle", RunConfig::default());
+            runtime
+                .spawn_reserved(other, None, Role::Worker, "idle", RunConfig::default())
+                .unwrap();
             runtime.cancel(other).unwrap();
             runtime.cancel_subtree(other).unwrap();
             Ok(())
@@ -496,7 +500,9 @@ async fn ac15_blocked_publication_does_not_block_unrelated_spawn_or_cancel() {
         });
         started_rx.recv().unwrap();
         let other = runtime.reserve_run_id();
-        runtime.spawn_reserved(other, None, Role::Worker, "unrelated", RunConfig::default());
+        runtime
+            .spawn_reserved(other, None, Role::Worker, "unrelated", RunConfig::default())
+            .unwrap();
         runtime.cancel(other).unwrap();
         runtime.cancel_subtree(other).unwrap();
         release_tx.send(()).unwrap();

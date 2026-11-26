@@ -165,7 +165,9 @@ async fn assert_recovery_cache(human_after_c3: bool) {
     let runtime = process(&config, &storage, model.clone());
     let mut events = runtime.shared.bus.subscribe();
     let root = runtime.reserve_run_id();
-    runtime.spawn_reserved(root, None, Role::Orchestrator, "work", RunConfig::default());
+    runtime
+        .spawn_reserved(root, None, Role::Orchestrator, "work", RunConfig::default())
+        .unwrap();
     let child = runtime
         .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
         .unwrap();

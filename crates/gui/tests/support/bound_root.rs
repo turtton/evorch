@@ -18,6 +18,8 @@ pub fn start(
         &submission.project_id,
         &root.to_string(),
     );
-    runtime.spawn_reserved(root, None, role, render_entry_prompt(&submission), config);
+    runtime
+        .spawn_reserved(root, None, role, render_entry_prompt(&submission), config)
+        .unwrap();
     root
 }

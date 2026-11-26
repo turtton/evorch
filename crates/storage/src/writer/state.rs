@@ -32,6 +32,7 @@ struct WriterState {
     next_checkpoint_at: Instant,
     diagnostic_cursor: Option<event::diagnostic::Cursor>,
     reclaim_wal_pending: bool,
+    reclaim_after: Option<String>,
     index: super::index::IndexJob,
     task_progress_cursor: crate::maintenance::retention::Cursor,
     event_retention_cursor: crate::maintenance::retention_events::Cursor,
@@ -160,6 +161,7 @@ pub(super) fn run_writer_with_index(
         temp_warned,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
+        reclaim_after: None,
         index,
         task_progress_cursor: Default::default(),
         event_retention_cursor: Default::default(),
@@ -866,7 +868,17 @@ pub(super) fn run_writer_with_index(
                         "retention reclaim suspended by storage limit".into(),
                     ))
                 } else {
-                    crate::repo::thread_retention::reclaim::reclaim_step(&state.conn, budget)
+                    crate::repo::thread_retention::reclaim::reclaim_step_rotating(
+                        &state.conn,
+                        budget,
+                        state.reclaim_after.as_deref(),
+                    )
+                    .map(|(progress, cursor)| {
+                        if cursor.is_some() {
+                            state.reclaim_after = cursor;
+                        }
+                        progress
+                    })
                 };
                 // Deleted rows invalidate the cached event totals.
                 state.accounting = event::EventAccounting::default();
@@ -894,6 +906,26 @@ pub(super) fn run_writer_with_index(
                     &state.conn,
                     &artifact_ids,
                 ));
+            }
+            Ok(Command::ConfirmRetentionOnline(leases, request, budget, fence, reply)) => {
+                let result = (|| {
+                    leases.validate_archive_identity(
+                        &state.config.db_path,
+                        std::path::Path::new(&request.binding.ownership_root),
+                    )?;
+                    if state.writes_suspended {
+                        return Err(StorageError::Serialization(
+                            "retention confirmation suspended by storage limit".into(),
+                        ));
+                    }
+                    crate::repo::thread_retention::online::confirm(
+                        &state.conn,
+                        &request,
+                        budget,
+                        fence.as_ref(),
+                    )
+                })();
+                let _ = reply.send(result);
             }
             Ok(Command::EnsureRetentionBinding(leases, binding, now, reply)) => {
                 let result = (|| {
@@ -1531,6 +1563,7 @@ mod tests {
             suspend_logged: false,
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
+            reclaim_after: None,
             index: crate::writer::index::IndexJob::inert(),
             task_progress_cursor: Default::default(),
             event_retention_cursor: Default::default(),

@@ -128,47 +128,15 @@ pub(crate) fn finalize(
 
     let task_list = family_tasks(&tx, &run_list)?;
     let estimate_bytes = estimate(&tx, &run_list)?;
-    for thread in &thread_list {
-        tx.execute(
-            "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) VALUES (?1, ?2, ?3)",
-            params![thread, family_key, input.now_ns],
-        )?;
-    }
-    for run in &run_list {
-        let thread: Option<String> = tx
-            .query_row(
-                "SELECT thread_id FROM thread_runs WHERE run_id = ?1",
-                [run],
-                |row| row.get(0),
-            )
-            .optional()?;
-        tx.execute(
-            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, ?2, ?3)",
-            params![run, thread.as_deref().unwrap_or(family_key), family_key],
-        )?;
-    }
-    for task in &task_list {
-        tx.execute(
-            "INSERT INTO task_tombstones(task_id, family_key) VALUES (?1, ?2)",
-            params![task, family_key],
-        )?;
-    }
-    tx.execute(
-        "INSERT INTO reclaim_jobs(family_key, state, cursor_json, created_at_ns, updated_at_ns, \
-         estimate_bytes) VALUES (?1, 'db_pending', '{}', ?2, ?2, ?3)",
-        params![
-            family_key,
-            input.now_ns,
-            i64::try_from(estimate_bytes).unwrap_or(i64::MAX)
-        ],
+    write_tombstones(
+        &tx,
+        family_key,
+        &thread_list,
+        &run_list,
+        &task_list,
+        input.now_ns,
+        estimate_bytes,
     )?;
-    for thread in &thread_list {
-        tx.execute("DELETE FROM thread_runs WHERE thread_id = ?1", [thread])?;
-        tx.execute("DELETE FROM threads WHERE thread_id = ?1", [thread])?;
-    }
-    for run in &run_list {
-        tx.execute("DELETE FROM thread_runs WHERE run_id = ?1", [run])?;
-    }
     tx.execute(
         "DELETE FROM retention_staging_state WHERE family_key = ?1",
         [family_key],
@@ -220,4 +188,60 @@ fn estimate(conn: &Connection, runs: &[String]) -> Result<u64, StorageError> {
             .saturating_add(messages.query_row([run], |row| row.get::<_, u64>(0))?);
     }
     Ok(total)
+}
+
+/// Shared irreversible writes. Callers have already checked the complete closure
+/// and protections in this same transaction. Online callers bound every trigger
+/// target before calling; no history-size estimate is performed here.
+pub(super) fn write_tombstones(
+    tx: &Transaction<'_>,
+    family_key: &str,
+    thread_list: &[String],
+    run_list: &[String],
+    task_list: &[String],
+    now_ns: i64,
+    estimate_bytes: u64,
+) -> Result<(), StorageError> {
+    for thread in thread_list {
+        tx.execute(
+            "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) VALUES (?1, ?2, ?3)",
+            params![thread, family_key, now_ns],
+        )?;
+    }
+    for run in run_list {
+        let thread: Option<String> = tx
+            .query_row(
+                "SELECT thread_id FROM thread_runs WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, ?2, ?3)",
+            params![run, thread.as_deref().unwrap_or(family_key), family_key],
+        )?;
+    }
+    for task in task_list {
+        tx.execute(
+            "INSERT INTO task_tombstones(task_id, family_key) VALUES (?1, ?2)",
+            params![task, family_key],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO reclaim_jobs(family_key, state, cursor_json, created_at_ns, updated_at_ns, \
+         estimate_bytes) VALUES (?1, 'db_pending', '{}', ?2, ?2, ?3)",
+        params![
+            family_key,
+            now_ns,
+            i64::try_from(estimate_bytes).unwrap_or(i64::MAX)
+        ],
+    )?;
+    for thread in thread_list {
+        tx.execute("DELETE FROM thread_runs WHERE thread_id = ?1", [thread])?;
+        tx.execute("DELETE FROM threads WHERE thread_id = ?1", [thread])?;
+    }
+    for run in run_list {
+        tx.execute("DELETE FROM thread_runs WHERE run_id = ?1", [run])?;
+    }
+    Ok(())
 }

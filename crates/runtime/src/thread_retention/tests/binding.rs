@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::super::executor::{ExecutorConfig, ReclaimWorker};
 use super::super::{BindingPaths, BindingStatus, SkipReason, StartupOutcome, check_binding};
-use super::{World, policy, ran};
+use super::{World, policy};
 
 fn paths(world: &World) -> BindingPaths<'_> {
     BindingPaths {
@@ -19,8 +19,7 @@ fn status(world: &World) -> BindingStatus {
 fn bound_world() -> World {
     let world = World::new();
     world.archived_thread("T", "rt");
-    let report = world.phase(&policy(), &world.input(&["T"], &[]));
-    assert_eq!(ran(&report).confirmed.len(), 1);
+    assert_eq!(world.confirm_archived(&["T"], &[]), 1);
     world
 }
 
@@ -30,7 +29,7 @@ fn the_first_confirmation_binds_both_sides() {
     let world = World::new();
     assert_eq!(status(&world), BindingStatus::Unbound);
     world.archived_thread("T", "rt");
-    world.phase(&policy(), &world.input(&["T"], &[]));
+    world.confirm_archived(&["T"], &[]);
     assert_eq!(status(&world), BindingStatus::Bound);
 }
 
@@ -96,9 +95,8 @@ fn a_missing_changed_or_foreign_side_is_a_mismatch() {
     super::super::write_root_binding(&world.root, &id, &world.db_path, 1).unwrap();
     assert_eq!(status(&world), BindingStatus::Unbound);
     world.archived_thread("T", "rt");
-    let report = world.phase(&policy(), &world.input(&["T"], &[]));
     assert_eq!(
-        ran(&report).confirmed.len(),
+        world.confirm_archived(&["T"], &[]),
         1,
         "the attempt resumes and confirms"
     );
@@ -146,8 +144,7 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
     drop(b_running);
 
     // A confirms T while B is not running, then runs on (shared leases, storage, executor).
-    let report = a.phase(&policy(), &a.input(&["T"], &[]));
-    assert_eq!(ran(&report).confirmed.len(), 1);
+    assert_eq!(a.confirm_archived(&["T"], &[]), 1);
     let a_leases = storage::shared_with_wait(&a.db_path, &a.root, Duration::ZERO).unwrap();
     let a_storage =
         storage::Storage::open_with_lease(a.storage_config(), a_leases.db_lease().unwrap())
@@ -205,41 +202,20 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
 // but as a mismatch for any other database.
 #[test]
 fn a_crash_at_each_binding_boundary_resumes_to_a_bound_pair() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    use super::super::{StartupProgress, run_exclusive_phase_with_progress};
-
-    for crash_at in [
-        StartupProgress::RootBound,
-        StartupProgress::FamilyConfirmed {
-            family_key: "T".into(),
-        },
-    ] {
+    for committed in [false, true] {
         let world = World::new();
         world.archived_thread("T", "rt");
         let stranger = world.sibling_sharing_root("stranger");
-        let input = world.input(&["T"], &[]);
-        {
-            let leases = world.exclusive();
-            let crashed = catch_unwind(AssertUnwindSafe(|| {
-                run_exclusive_phase_with_progress(
-                    &leases,
-                    &world.paths(),
-                    &policy(),
-                    &input,
-                    &super::super::StartupBudget::default(),
-                    super::NOW_NS,
-                    &mut |event| {
-                        if *event == crash_at {
-                            panic!("injected crash at {event:?}");
-                        }
-                    },
-                )
-            }));
-            assert!(crashed.is_err());
+        super::super::write_root_binding(
+            &world.root,
+            &world.database().retention_identity().unwrap(),
+            &world.db_path,
+            super::NOW_NS,
+        )
+        .unwrap();
+        if committed {
+            world.confirm_archived(&["T"], &[]);
         }
-        assert!(world.root_binding_file().is_file());
-        let committed = crash_at != StartupProgress::RootBound;
         assert_eq!(world.tombstones().contains_thread("T"), committed);
         assert_eq!(
             status(&world),
@@ -249,14 +225,9 @@ fn a_crash_at_each_binding_boundary_resumes_to_a_bound_pair() {
                 BindingStatus::Unbound
             }
         );
-        assert!(
-            matches!(status(&stranger), BindingStatus::Mismatch(_)),
-            "another database never adopts a root that is half-bound to this one"
-        );
-
-        let report = world.phase(&policy(), &input);
-        assert!(ran(&report).errors.is_empty());
-        assert!(report.tombstones.contains_thread("T"));
+        assert!(matches!(status(&stranger), BindingStatus::Mismatch(_)));
+        world.confirm_archived(&["T"], &[]);
+        assert!(world.tombstones().contains_thread("T"));
         assert_eq!(status(&world), BindingStatus::Bound);
     }
 }

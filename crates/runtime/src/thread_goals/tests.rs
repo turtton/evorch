@@ -250,18 +250,20 @@ async fn phase(events: &mut event_bus::EventReceiver, run: RunId, wanted: AgentR
 fn start(runtime: &AgentRuntime, role: Role, keep_alive: bool) -> RunId {
     let root = runtime.reserve_run_id();
     runtime.bind_thread_root("thread", root).unwrap();
-    runtime.spawn_reserved(
-        root,
-        None,
-        role,
-        "Compare the requested options",
-        RunConfig {
-            conversation: true,
-            interactive: keep_alive,
-            keep_alive,
-            ..Default::default()
-        },
-    )
+    runtime
+        .spawn_reserved(
+            root,
+            None,
+            role,
+            "Compare the requested options",
+            RunConfig {
+                conversation: true,
+                interactive: keep_alive,
+                keep_alive,
+                ..Default::default()
+            },
+        )
+        .unwrap()
 }
 
 #[tokio::test]
@@ -1273,18 +1275,20 @@ async fn real_escalation_keeps_paused_chat_alive_and_fences_root_and_reviewer() 
     runtime
         .set_goal_checks_paused("thread", &goal.goal_id, true)
         .unwrap();
-    runtime.spawn_reserved(
-        source,
-        None,
-        Role::Worker,
-        "Compare options",
-        RunConfig {
-            interactive: true,
-            keep_alive: true,
-            ownership: Some(permit),
-            ..Default::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            source,
+            None,
+            Role::Worker,
+            "Compare options",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ownership: Some(permit),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let target = loop {
         if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::EscalationRequested {
             new_run_id,

@@ -153,7 +153,8 @@ async fn goal_lineage_snapshot_is_frozen_before_first_inspection() {
         .seed_learning_snapshot(extraction, root, snapshot);
     fixture
         .runtime
-        .spawn_reserved(extraction, None, Role::Worker, "extract", config.clone());
+        .spawn_reserved(extraction, None, Role::Worker, "extract", config.clone())
+        .unwrap();
     fixture.runtime.wait(extraction).await.unwrap();
     assert!(fixture.runtime.learning_candidates(extraction).is_err());
     assert!(

@@ -303,17 +303,19 @@ context_window_tokens = 1000000
     let run = runtime.reserve_run_id();
     assert_eq!(run.to_string(), record.root_run_id);
     runtime.bind_thread_root("cache-artifact", run).unwrap();
-    runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Inspect the artifact",
-        RunConfig {
-            conversation: true,
-            category: Some(config::agent_categories::CategoryId::Conversation.to_string()),
-            ..Default::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Inspect the artifact",
+            RunConfig {
+                conversation: true,
+                category: Some(config::agent_categories::CategoryId::Conversation.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut initialization_count = 0;
     let mut usage = vec![];
     loop {

@@ -24,13 +24,17 @@ impl BootstrappedHost {
     }
 
     fn spawn_retention_workers(&mut self, startup: RetentionStartup) -> Result<(), BootstrapError> {
-        self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(
-            runtime::thread_retention::ExecutorConfig::new(
-                startup.writer.clone(),
-                startup.storage.clone(),
-                Some(startup.artifacts),
-            ),
-        )?);
+        let send_slot = Arc::new(std::sync::Mutex::new(()));
+        let mut reclaim = runtime::thread_retention::ExecutorConfig::new(
+            startup.writer.clone(),
+            startup.storage.clone(),
+            Some(startup.artifacts),
+        );
+        reclaim.send_slot = send_slot.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            reclaim.manual = self.manual_retention_fixture;
+        }
         // Root contention disables only automatic archive/root cleanup, not DB reclaim.
         self.auto_archive = Some(crate::thread_retention::AutoArchiveOwner::start(
             Arc::downgrade(&self.host),
@@ -40,11 +44,25 @@ impl BootstrappedHost {
                 storage::thread_retention::AutoArchivePolicy {
                     after_days: self.config.storage.thread_retention.auto_archive_after_days,
                 },
-            ),
+            )
+            .with_send_slot(send_slot)
+            .with_delete_policy(storage::thread_retention::ThreadRetentionPolicy {
+                archived_delete_after_days: self
+                    .config
+                    .storage
+                    .thread_retention
+                    .archived_delete_after_days,
+                ..Default::default()
+            }),
             self.writer_leases.clone(),
             #[cfg(any(test, feature = "test-support"))]
             self.manual_retention_fixture,
         )?);
+        reclaim.producer_gate = self
+            .auto_archive
+            .as_ref()
+            .map(|owner| owner.producer_gate());
+        self.reclaim = Some(runtime::thread_retention::ReclaimExecutor::spawn(reclaim)?);
         Ok(())
     }
 
@@ -58,6 +76,17 @@ impl BootstrappedHost {
             .as_ref()
             .ok_or("retention producer not activated")?
             .tick_for_test(now_ns)
+            .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tick_reclaim_for_test(
+        &self,
+    ) -> Result<runtime::thread_retention::ExecutorReport, BootstrapError> {
+        self.reclaim
+            .as_ref()
+            .ok_or("reclaim producer not activated")?
+            .tick_for_test()
             .map_err(Into::into)
     }
 

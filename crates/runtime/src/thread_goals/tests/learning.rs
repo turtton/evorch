@@ -367,13 +367,15 @@ async fn independently_reviewed_completion_also_starts_learning() {
     runtime
         .set_goal_review("thread", &goal.goal_id, true)
         .unwrap();
-    runtime.spawn_reserved(
-        root,
-        None,
-        Role::Worker,
-        "Research options",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Worker,
+            "Research options",
+            RunConfig::default(),
+        )
+        .unwrap();
     runtime.wait(root).await.unwrap();
     runtime.wait_learning(root).await.unwrap().unwrap();
     assert_eq!(
@@ -430,16 +432,18 @@ async fn learning_internal_goal_completion_does_not_trigger_learning() {
             vec!["Verified".into()],
         )
         .unwrap();
-    runtime.spawn_reserved(
-        root,
-        None,
-        Role::Worker,
-        "Internal work",
-        RunConfig {
-            learning_internal: true,
-            ..Default::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Worker,
+            "Internal work",
+            RunConfig {
+                learning_internal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
     assert_eq!(
         runtime.thread_goal("thread").unwrap().phase,

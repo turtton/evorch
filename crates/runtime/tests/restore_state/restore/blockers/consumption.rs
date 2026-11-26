@@ -18,13 +18,15 @@ async fn consumed_snapshot_requires_repersist_before_second_restore() {
         .unwrap();
     let (second, _) = runtime_with(model());
     let second = second.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    second.spawn_reserved(
-        parent,
-        None,
-        Role::Orchestrator,
-        "parent",
-        RunConfig::default(),
-    );
+    second
+        .spawn_reserved(
+            parent,
+            None,
+            Role::Orchestrator,
+            "parent",
+            RunConfig::default(),
+        )
+        .unwrap();
     // When: a memory-absent runtime requests the consumed snapshot before yielding execution.
     let result = second.send_agent_message(parent, child, AgentMessageKind::Send, "replay", None);
     // Then: it refuses the consumed snapshot rather than replaying the old context.

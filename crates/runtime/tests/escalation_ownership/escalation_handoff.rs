@@ -387,7 +387,9 @@ async fn escalation_publishes_child_and_goal_before_admission_and_can_stop_while
         runtime
             .set_goal_checks_paused("source-thread", &goal.goal_id, true)
             .unwrap();
-        runtime.spawn_reserved(source, None, Role::Worker, "request", RunConfig::default());
+        runtime
+            .spawn_reserved(source, None, Role::Worker, "request", RunConfig::default())
+            .unwrap();
         let (target, before) = events_through_escalation(&mut events, source).await;
         model.entered.notified().await;
         let child = event_bus::escalation_thread_id(&target.to_string());
@@ -688,21 +690,23 @@ async fn failed_or_stopped_admission_can_continue_the_same_child_with_current_au
         runtime
             .set_goal_checks_paused("source-thread", &goal.goal_id, true)
             .unwrap();
-        runtime.spawn_reserved(
-            source,
-            None,
-            Role::Worker,
-            "request",
-            RunConfig {
-                ownership: Some(OwnerPermit {
-                    registry_path: registry_path.clone(),
-                    thread_id: "source-thread".into(),
-                    lease,
-                    run_id: None,
-                }),
-                ..Default::default()
-            },
-        );
+        runtime
+            .spawn_reserved(
+                source,
+                None,
+                Role::Worker,
+                "request",
+                RunConfig {
+                    ownership: Some(OwnerPermit {
+                        registry_path: registry_path.clone(),
+                        thread_id: "source-thread".into(),
+                        lease,
+                        run_id: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let (target, _) = events_through_escalation(&mut events, source).await;
         model.entered.notified().await;
         let child = event_bus::escalation_thread_id(&target.to_string());

@@ -518,6 +518,7 @@ impl CommandHost {
         command: Command,
         provenance: Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        let _retention_admission = self.service.runtime().retention_workspace_admission();
         if matches!(&command, Command::Lifecycle(_)) {
             return Err(crate::queries::error(
                 workbench_protocol::errors::ErrorCode::PermissionDenied,

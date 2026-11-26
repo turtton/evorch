@@ -38,6 +38,8 @@ impl AgentRuntime {
         request: LaneInstructionRequest,
     ) -> Result<LaneInstructionOutcome, LaneError> {
         let _retention_admission = self.retention_run_admission(caller);
+        self.deny_deleted_run(&caller.to_string())
+            .map_err(|e| LaneError::new("thread_deleted", e.to_string()))?;
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;

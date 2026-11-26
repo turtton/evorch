@@ -58,6 +58,12 @@ pub struct ExecutorConfig {
     pub files_retry_limit: u32,
     pub jobs_per_page: usize,
     pub meta_scans_per_cycle: usize,
+    /// Shared with online confirmation: at most one background writer request.
+    pub send_slot: Arc<Mutex<()>>,
+    /// Paused/drained together with online confirmation during planned capture.
+    pub producer_gate: Option<crate::producer::ProducerGate>,
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub manual: bool,
 }
 
 impl ExecutorConfig {
@@ -76,6 +82,10 @@ impl ExecutorConfig {
             files_retry_limit: FILES_RETRY_LIMIT,
             jobs_per_page: JOBS_PER_PAGE,
             meta_scans_per_cycle: META_SCANS_PER_CYCLE,
+            send_slot: Arc::new(Mutex::new(())),
+            producer_gate: None,
+            #[cfg(any(test, feature = "recovery-test-support"))]
+            manual: false,
         }
     }
 }
@@ -166,6 +176,18 @@ impl ReclaimWorker {
     /// whose rows are gone. Does nothing (and writes nothing) without the lease.
     pub fn run_once(&mut self) -> ExecutorReport {
         let mut report = ExecutorReport::default();
+        let producer = self.config.producer_gate.clone();
+        let _permit = if let Some(gate) = producer {
+            let Some(permit) = gate.try_enter() else {
+                self.cycles += 1;
+                report.cycles = self.cycles;
+                report.holds_lease = self.lease.is_some();
+                return report;
+            };
+            Some(permit)
+        } else {
+            None
+        };
         self.ensure_lease(&mut report);
         self.cycles += 1;
         report.cycles = self.cycles;
@@ -191,6 +213,8 @@ impl ReclaimWorker {
         if self.backfill_done {
             return;
         }
+        let slot = self.config.send_slot.clone();
+        let _permit = slot.lock().unwrap_or_else(|e| e.into_inner());
         match self
             .config
             .handle
@@ -208,7 +232,11 @@ impl ReclaimWorker {
     }
 
     fn reclaim(&mut self, report: &mut ExecutorReport) {
-        match self.config.handle.reclaim_step(ReclaimBudget::default()) {
+        let slot = self.config.send_slot.clone();
+        let _permit = slot.lock().unwrap_or_else(|e| e.into_inner());
+        match self.config.handle.reclaim_step(ReclaimBudget {
+            max_transactions: 1,
+        }) {
             Ok(step) => {
                 report.rows_reclaimed = step.rows;
                 report.jobs_db_pending = step.jobs_db_pending;
@@ -292,7 +320,11 @@ impl ReclaimWorker {
         // family: a row left behind is dropped by the next start's orphan check, and
         // until then it only keeps a blob.
         if !removal.removed.is_empty()
-            && let Err(error) = self.config.handle.remove_artifact_refs(&removal.removed)
+            && let Err(error) = {
+                let slot = self.config.send_slot.clone();
+                let _permit = slot.lock().unwrap_or_else(|e| e.into_inner());
+                self.config.handle.remove_artifact_refs(&removal.removed)
+            }
         {
             report.errors.push(format!(
                 "artifact references of {}: {error}",
@@ -330,6 +362,8 @@ impl ReclaimWorker {
     }
 
     fn mark(&self, family: &str, outcome: FilesOutcome, report: &mut ExecutorReport) -> bool {
+        let slot = self.config.send_slot.clone();
+        let _permit = slot.lock().unwrap_or_else(|e| e.into_inner());
         match self.config.handle.reclaim_mark_files(family, outcome) {
             Ok(changed) => changed,
             Err(error) => {
@@ -349,9 +383,15 @@ struct Shared {
 
 /// The reclaim thread. [`Self::shutdown`] joins it: call it before dropping the
 /// storage it uses.
+enum ReclaimCommand {
+    Stop,
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    Tick(mpsc::SyncSender<ExecutorReport>),
+}
+
 pub struct ReclaimExecutor {
     shared: Arc<Shared>,
-    stop: mpsc::Sender<()>,
+    stop: mpsc::Sender<ReclaimCommand>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -365,25 +405,39 @@ impl ReclaimExecutor {
             report: Mutex::new(ExecutorReport::default()),
             changed: Condvar::new(),
         });
-        let (stop, stopped) = mpsc::channel::<()>();
+        let (stop, stopped) = mpsc::channel::<ReclaimCommand>();
+        #[cfg(any(test, feature = "recovery-test-support"))]
+        let manual = config.manual;
+        #[cfg(not(any(test, feature = "recovery-test-support")))]
+        let manual = false;
         let interval = config.interval;
         let mut worker = ReclaimWorker::new(config);
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("thread-retention-reclaim".into())
             .spawn(move || {
-                loop {
+                let mut cycle = || {
                     let report = worker.run_once();
                     for error in &report.errors {
                         tracing::warn!(%error, "thread retention reclaim");
                     }
-                    publish(&thread_shared, report, false);
-                    // The only event is shutdown; a timeout starts the next cycle.
-                    if !matches!(
-                        stopped.recv_timeout(interval),
-                        Err(RecvTimeoutError::Timeout)
-                    ) {
-                        break;
+                    publish(&thread_shared, report.clone(), false);
+                    report
+                };
+                if !manual {
+                    cycle();
+                }
+                loop {
+                    match stopped.recv_timeout(interval) {
+                        Ok(ReclaimCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+                        #[cfg(any(test, feature = "recovery-test-support"))]
+                        Ok(ReclaimCommand::Tick(reply)) => {
+                            let _ = reply.send(cycle());
+                        }
+                        Err(RecvTimeoutError::Timeout) if !manual => {
+                            cycle();
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
                     }
                 }
                 let mut last = lock(&thread_shared.report).clone();
@@ -395,6 +449,16 @@ impl ReclaimExecutor {
             stop,
             thread: Some(thread),
         })
+    }
+
+    /// Explicit acknowledged cycle; only available to composition fixtures.
+    #[cfg(any(test, feature = "recovery-test-support"))]
+    pub fn tick_for_test(&self) -> Result<ExecutorReport, String> {
+        let (reply, done) = mpsc::sync_channel(0);
+        self.stop
+            .send(ReclaimCommand::Tick(reply))
+            .map_err(|_| "reclaim stopped")?;
+        done.recv().map_err(|_| "reclaim reply lost".into())
     }
 
     /// The latest cycle's report.
@@ -433,7 +497,7 @@ impl ReclaimExecutor {
 
     /// Planned M2 stage 2: signal now, join only after child reap.
     pub fn request_stop(&self) {
-        let _ = self.stop.send(());
+        let _ = self.stop.send(ReclaimCommand::Stop);
     }
 
     fn join(&mut self) -> std::io::Result<()> {

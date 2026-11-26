@@ -248,6 +248,11 @@ impl UserInbox {
         self.sealed.store(true, Ordering::Release);
     }
 
+    /// The retention stop holds serialize_trusted_send and has checked all queues.
+    pub(crate) fn seal_serialized(&self) {
+        self.sealed.store(true, Ordering::Release);
+    }
+
     /// Checked by host sends while they hold the trusted-send lock.
     pub(crate) fn sealed(&self) -> bool {
         self.sealed.load(Ordering::Acquire)

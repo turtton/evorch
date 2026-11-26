@@ -3913,13 +3913,16 @@ async fn durable_goal_usage_display_checkpoint_preserves_wire_prefix_and_cache()
         .runtime
         .set_goal_checks_paused("usage-cache", &goal.goal_id, true)
         .unwrap();
-    harness.runtime.spawn_reserved(
-        root,
-        None,
-        Role::Worker,
-        "Research the implementation",
-        RunConfig::default(),
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Worker,
+            "Research the implementation",
+            RunConfig::default(),
+        )
+        .unwrap();
     let events = through_phase(&mut harness.receiver, root, AgentRunPhase::Done).await;
     let current = harness.runtime.thread_goal("usage-cache").unwrap();
     assert_eq!(current.usage.model_requests, 19);
@@ -4196,13 +4199,16 @@ async fn goal_review_repair_preserves_original_roots_wire_prefix_and_cumulative_
         .runtime
         .set_goal_review("review-cache", &goal.goal_id, true)
         .unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Research options",
-        RunConfig::default(),
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Research options",
+            RunConfig::default(),
+        )
+        .unwrap();
     let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
     let goal = harness.runtime.thread_goal("review-cache").unwrap();
     assert_eq!(goal.phase, event_bus::ThreadGoalPhase::Complete);
@@ -4286,18 +4292,21 @@ async fn paused_goal_restore_and_idle_checks_resume_preserve_the_wire_cache() {
         .runtime
         .set_goal_checks_paused("restored-goal", &goal.goal_id, true)
         .unwrap();
-    harness.runtime.spawn_reserved(
-        root,
-        None,
-        Role::Worker,
-        "Research options",
-        RunConfig {
-            interactive: true,
-            keep_alive: true,
-            name: Some("chat:worker:restored-goal".into()),
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Worker,
+            "Research options",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                name: Some("chat:worker:restored-goal".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await;
     harness
         .runtime
@@ -4426,17 +4435,20 @@ async fn learning_wire_case(retry: bool) {
             vec!["Verified report".into()],
         )
         .unwrap();
-    harness.runtime.spawn_reserved(
-        root,
-        None,
-        Role::Worker,
-        "Research options",
-        RunConfig {
-            interactive: true,
-            keep_alive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Worker,
+            "Research options",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await;
     assert_eq!(
         harness.runtime.thread_goal("learning-cache").unwrap().phase,
@@ -4641,16 +4653,19 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
     }
     let run = harness.runtime.reserve_run_id();
     harness.runtime.bind_thread_root("thread", run).unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Start work",
-        RunConfig {
-            interactive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Start work",
+            RunConfig {
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
         .runtime
@@ -4810,17 +4825,20 @@ async fn archive_reclaim_resume_appends_one_notice_and_preserves_wire_prefix() {
 
     let run = harness.runtime.reserve_run_id();
     harness.runtime.bind_thread_root("thread", run).unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Start work",
-        RunConfig {
-            interactive: true,
-            keep_alive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Start work",
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     std::fs::write(dir.join("saved"), "scratch").unwrap();
 
@@ -5166,16 +5184,19 @@ async fn saved_image_history_survives_repeated_restore_with_identical_wire_prefi
         .runtime
         .bind_thread_root("legacy-image", run)
         .unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        prompt.clone(),
-        RunConfig {
-            interactive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            prompt.clone(),
+            RunConfig {
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
         .runtime
@@ -5315,16 +5336,19 @@ async fn allowed_restore_preserves_wire_prefix(changed: bool) {
         .set_project_allowed_directories(root.clone(), vec![first.clone()]);
     let run = harness.runtime.reserve_run_id();
     harness.runtime.bind_thread_root("thread", run).unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        prompt,
-        RunConfig {
-            interactive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            prompt,
+            RunConfig {
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
         .runtime
@@ -5630,16 +5654,19 @@ async fn thread_read_dirs_restore_preserves_wire_prefix(changed: bool) {
         .set_thread_read_only_directories("thread", vec![drafts.clone(), shared.clone()]);
     let run = harness.runtime.reserve_run_id();
     harness.runtime.bind_thread_root("thread", run).unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Start work",
-        RunConfig {
-            interactive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Start work",
+            RunConfig {
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
         .runtime
@@ -6115,16 +6142,19 @@ async fn restored_runs_keep_allowed_instructions_without_appending_them_again() 
         .set_project_allowed_directories(root, vec![shared.clone()]);
     let run = harness.runtime.reserve_run_id();
     harness.runtime.bind_thread_root("thread", run).unwrap();
-    harness.runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "Start work",
-        RunConfig {
-            interactive: true,
-            ..Default::default()
-        },
-    );
+    harness
+        .runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "Start work",
+            RunConfig {
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
         .runtime

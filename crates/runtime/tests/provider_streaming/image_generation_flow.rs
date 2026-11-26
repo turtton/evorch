@@ -259,16 +259,18 @@ async fn ac12_ac14_root_worker_and_visual_worker_generate_embed_and_present() {
         let worker = if root_worker {
             parent
         } else {
-            runtime.spawn_reserved(
-                parent,
-                None,
-                Role::Orchestrator,
-                "coordinate",
-                RunConfig {
-                    conversation: true,
-                    ..Default::default()
-                },
-            );
+            runtime
+                .spawn_reserved(
+                    parent,
+                    None,
+                    Role::Orchestrator,
+                    "coordinate",
+                    RunConfig {
+                        conversation: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
             let worker = runtime.reserve_run_id();
             runtime
                 .spawn_reserved_child(
@@ -285,17 +287,19 @@ async fn ac12_ac14_root_worker_and_visual_worker_generate_embed_and_present() {
             worker
         };
         if root_worker {
-            runtime.spawn_reserved(
-                parent,
-                None,
-                Role::Worker,
-                "mock",
-                RunConfig {
-                    conversation: true,
-                    category: Some("conversation".into()),
-                    ..Default::default()
-                },
-            );
+            runtime
+                .spawn_reserved(
+                    parent,
+                    None,
+                    Role::Worker,
+                    "mock",
+                    RunConfig {
+                        conversation: true,
+                        category: Some("conversation".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
         }
         assert_eq!(runtime.wait(worker).await.unwrap(), AgentRunPhase::Done);
         let observed = model.observed.lock().unwrap().clone();
@@ -490,25 +494,29 @@ async fn ac6_dispatch_denies_orchestrator_and_child_conversation_worker() {
         let parent = runtime.reserve_run_id();
         let run = runtime.reserve_run_id();
         if role == Role::Worker {
-            runtime.spawn_reserved(
-                parent,
-                None,
-                Role::Orchestrator,
-                "parent",
-                RunConfig::default(),
-            );
+            runtime
+                .spawn_reserved(
+                    parent,
+                    None,
+                    Role::Orchestrator,
+                    "parent",
+                    RunConfig::default(),
+                )
+                .unwrap();
         }
-        runtime.spawn_reserved(
-            run,
-            (role == Role::Worker).then_some(parent),
-            role,
-            "attempt",
-            RunConfig {
-                conversation: true,
-                category: Some("conversation".into()),
-                ..Default::default()
-            },
-        );
+        runtime
+            .spawn_reserved(
+                run,
+                (role == Role::Worker).then_some(parent),
+                role,
+                "attempt",
+                RunConfig {
+                    conversation: true,
+                    category: Some("conversation".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
         assert!(server.received_requests().await.unwrap().is_empty());
         assert!(!workspace.path().join("hero.png").exists());

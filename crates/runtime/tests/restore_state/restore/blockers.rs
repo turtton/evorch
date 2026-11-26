@@ -115,13 +115,15 @@ async fn consumed_snapshot_stays_unrestorable_when_no_new_checkpoint_can_be_save
             let (restarted, _) = runtime_with(model());
             let restarted =
                 restarted.with_run_store(RunStore::open(&config, reopened.handle()).unwrap());
-            restarted.spawn_reserved(
-                parent,
-                None,
-                Role::Orchestrator,
-                "parent",
-                RunConfig::default(),
-            );
+            restarted
+                .spawn_reserved(
+                    parent,
+                    None,
+                    Role::Orchestrator,
+                    "parent",
+                    RunConfig::default(),
+                )
+                .unwrap();
             terminal(&restarted, parent).await;
             assert_eq!(
                 restarted.send_agent_message(parent, child, AgentMessageKind::Send, "next", None),
@@ -160,22 +162,26 @@ async fn absent_recipient_authorizes_before_reading_corrupt_payload() {
         .unwrap();
         let (runtime, _) = runtime_with(model());
         let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-        runtime.spawn_reserved(
-            parent,
-            None,
-            Role::Orchestrator,
-            "parent",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                parent,
+                None,
+                Role::Orchestrator,
+                "parent",
+                RunConfig::default(),
+            )
+            .unwrap();
         terminal(&runtime, parent).await;
         let unrelated = RunId::new(99);
-        runtime.spawn_reserved(
-            unrelated,
-            None,
-            Role::Worker,
-            "unrelated",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved(
+                unrelated,
+                None,
+                Role::Worker,
+                "unrelated",
+                RunConfig::default(),
+            )
+            .unwrap();
         terminal(&runtime, unrelated).await;
         // When: both identities request the same corrupt recipient.
         let denied =

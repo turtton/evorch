@@ -18,11 +18,13 @@
 //!
 //! Handlers run under the host's mutex and never wait: a held lock is answered
 //! with [`WorkspaceRejection::Busy`] at once.
+mod online_retention;
 mod retention;
 use super::AreaHandles;
 use crate::areas::ProjectionSource;
 use crate::bootstrap::BootstrapError;
 use crate::queries::{Pager, revision};
+pub(crate) use online_retention::OnlineSnapshot;
 use runtime::AgentRuntime;
 use runtime::ownership::Registry;
 use runtime::thread_retention::{
@@ -284,6 +286,11 @@ impl WorkspaceArea {
     /// # Errors
     /// The sidebar could not be locked, read or written.
     pub fn register_thread(&self, new: &NewThread<'_>) -> Result<(), WorkbenchError> {
+        let _admission = self
+            .inner
+            .as_ref()
+            .and_then(|s| s.runtime.as_ref())
+            .map(|r| r.retention_workspace_admission());
         let Some(service) = self.inner.as_ref() else {
             return Ok(());
         };
@@ -328,6 +335,11 @@ impl WorkspaceArea {
     /// directory that no longer exists stays declared in the sidebar and is
     /// not made a live permission (the runtime skips it).
     pub fn declare_saved(&self) -> Result<(), WorkbenchError> {
+        let _admission = self
+            .inner
+            .as_ref()
+            .and_then(|s| s.runtime.as_ref())
+            .map(|r| r.retention_workspace_admission());
         let service = self.inner.as_ref().ok_or_else(unwired)?;
         let document = service.read()?;
         service.declare(&document);
@@ -339,6 +351,11 @@ impl WorkspaceArea {
         command: WorkspaceCommand,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        let _admission = self
+            .inner
+            .as_ref()
+            .and_then(|s| s.runtime.as_ref())
+            .map(|r| r.retention_workspace_admission());
         let service = self.inner.as_ref().ok_or_else(unwired)?;
         let result = match service.run(&command, provenance) {
             Ok(done) => {
@@ -354,6 +371,11 @@ impl WorkspaceArea {
         &self,
         query: &workbench_protocol::namespaces::WorkspaceQuery,
     ) -> Result<WorkspaceReply, WorkbenchError> {
+        let _admission = self
+            .inner
+            .as_ref()
+            .and_then(|s| s.runtime.as_ref())
+            .map(|r| r.retention_workspace_admission());
         use workbench_protocol::namespaces::WorkspaceQuery as Q;
         let service = self.inner.as_ref().ok_or_else(unwired)?;
         let document = service.read()?;

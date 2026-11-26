@@ -458,7 +458,7 @@ pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
         RetentionStatus::NotArchived | RetentionStatus::Disabled => return None,
         RetentionStatus::DueIn { days: 1 } => "Deletes in 1 day".to_owned(),
         RetentionStatus::DueIn { days } => format!("Deletes in {days} days"),
-        RetentionStatus::DueNextStartup => "Deletes at next startup".to_owned(),
+        RetentionStatus::DueNextStartup => "Waiting for online cleanup".to_owned(),
         RetentionStatus::Blocked(BlockReason::Owner(owner))
             if owner == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
         {
@@ -499,7 +499,7 @@ fn block_reason_text(reason: &BlockReason) -> String {
         }
         BlockReason::Owner(owner) => owner_hold_text(owner),
         BlockReason::Exploring => "still preparing".to_owned(),
-        BlockReason::OverBudget => "retried at next startup".to_owned(),
+        BlockReason::OverBudget => "exceeds online cleanup budget".to_owned(),
     }
 }
 
@@ -1294,7 +1294,7 @@ mod tests {
         );
         assert_eq!(
             text(RetentionStatus::DueNextStartup).as_deref(),
-            Some("Deletes at next startup")
+            Some("Waiting for online cleanup")
         );
         for (reason, expected) in [
             (BlockReason::Pinned, "Deletion on hold (pinned)"),
@@ -1321,7 +1321,7 @@ mod tests {
             (BlockReason::Exploring, "Deletion on hold (still preparing)"),
             (
                 BlockReason::OverBudget,
-                "Deletion on hold (retried at next startup)",
+                "Deletion on hold (exceeds online cleanup budget)",
             ),
             (
                 BlockReason::Owner(runtime::thread_retention::BINDING_MISMATCH_BLOCK.into()),

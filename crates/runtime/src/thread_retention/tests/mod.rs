@@ -145,6 +145,80 @@ impl World {
             .expect("no other holder in tests")
     }
 
+    /// Seed committed jobs through the real bounded writer engine, with real
+    /// DB/root writer leases. No live runtime producers exist in these fixtures.
+    /// Recovery tests must not rely on startup granting new deletion permission.
+    pub fn confirm_archived(&self, archived: &[&str], active: &[&str]) -> usize {
+        use storage::thread_retention::{BindingInput, ExclusiveFixtureStorage, online::*};
+        struct Fence;
+        struct Seal;
+        impl CommitFence for Fence {
+            fn try_seal(&self) -> Option<Box<dyn SealedCommit>> {
+                Some(Box::new(Seal))
+            }
+        }
+        impl SealedCommit for Seal {
+            fn publish(&mut self, _: &storage::thread_retention::ConfirmedFamily) {}
+        }
+        let db = self.database();
+        db.retention_backfill_startup(1000, 10000).unwrap();
+        let leases =
+            storage::WriterLeases::acquire(&self.db_path, &self.root, std::time::Duration::ZERO)
+                .unwrap();
+        let writer =
+            ExclusiveFixtureStorage::open(self.storage_config(), &self.root, &leases).unwrap();
+        let authority = leases.authority().unwrap();
+        let paths = super::BindingPaths {
+            ownership_root: &self.root,
+            sidebar_path: &self.sidebar,
+        };
+        assert_eq!(
+            super::binding::ensure_binding(
+                &db,
+                &writer.handle(),
+                &authority,
+                paths,
+                &self.db_path,
+                NOW_NS
+            )
+            .unwrap(),
+            super::BindingStatus::Bound
+        );
+        let input = self.input(archived, active);
+        let budget = OnlineBudget::default();
+        let mut count = 0;
+        for seed in archived {
+            if db.tombstones().unwrap().contains_thread(seed) {
+                continue;
+            }
+            let OnlineOutcome::Ready(expected) = db.retention_online_closure(seed, budget).unwrap()
+            else {
+                panic!("fixture closure held");
+            };
+            let request = OnlineRequest {
+                db_identity: db.retention_identity().unwrap(),
+                seed: (*seed).into(),
+                expected,
+                input: input.clone(),
+                policy: policy(),
+                binding: BindingInput {
+                    ownership_root: input.ownership_root.clone(),
+                    sidebar_path: input.sidebar_path.clone(),
+                },
+            };
+            let outcome = writer
+                .handle()
+                .confirm_retention_online(&authority, request, budget, std::sync::Arc::new(Fence))
+                .unwrap();
+            assert!(
+                matches!(outcome, OnlineOutcome::Confirmed(_)),
+                "{outcome:?}"
+            );
+            count += 1;
+        }
+        count
+    }
+
     /// One whole phase: take the exclusive locks, run, release.
     pub fn phase(&self, policy: &ThreadRetentionPolicy, input: &RetentionInput) -> StartupReport {
         self.phase_with(policy, input, &StartupBudget::default())
@@ -227,44 +301,25 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
     match &report.outcome {
         super::StartupOutcome::Ran {
             confirmed,
-            blocked,
             owners_removed,
             scratch,
-            owner_registry_error,
             errors,
-            families,
-            backfill,
-            stale,
             gc,
             ..
         } => RanView {
-            confirmed: confirmed
-                .iter()
-                .map(|family| family.family_key.as_str())
-                .collect(),
-            blocked,
+            confirmed: confirmed.iter().map(|f| f.family_key.as_str()).collect(),
             owners_removed: *owners_removed,
             scratch,
-            owner_registry_error: owner_registry_error.as_deref(),
             errors,
-            families,
-            remaining_backfill: backfill.remaining_unconverted + backfill.remaining_unattributed,
-            stale,
             gc: gc.as_ref(),
         },
         other => panic!("phase was skipped: {other:?}"),
     }
 }
-
 pub(super) struct RanView<'a> {
     pub confirmed: Vec<&'a str>,
-    pub blocked: &'a [(String, storage::thread_retention::BlockReason)],
     pub owners_removed: usize,
     pub scratch: &'a super::startup::ScratchReport,
-    pub owner_registry_error: Option<&'a str>,
     pub errors: &'a [String],
-    pub families: &'a [(String, storage::thread_retention::FamilyState)],
-    pub remaining_backfill: u64,
-    pub stale: &'a [String],
     pub gc: Option<&'a crate::artifacts::GcReport>,
 }

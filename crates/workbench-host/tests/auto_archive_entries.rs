@@ -48,17 +48,17 @@ fn workspace_attachment_and_shutdown_entries_have_canonical_lock_or_admission_ro
         (
             "areas/workspace.rs",
             "command declare_saved project_entries query register_thread retention_entries sidebar_threads with_mirror with_scratch_hint with_store",
-            "G4/G8 delegated/exempt: core entries run under CommandHost mutex and reload canonical membership/pin/archive under sidebar lock. Archive publication holds the same host mutex via try_lock; binding establishment and writer ACK run outside it. This exemption is for reversible archive only, not PR2b deletion. Constructors/queries introduce no execution admission.",
+            "G4/G8: command, register_thread, declare_saved and query register global admission before sidebar save and hold through synchronous mirror writer ACK. Online deletion snapshots canonical sidebar and gate stamps under try_lock, then releases host before preflight, Stop and writer confirmation. Constructors/read-only projections introduce no execution admission.",
         ),
         (
             "attachments.rs",
             "append append_base64 append_base64_checked append_checked begin begin_checked check commit_locked discard discard finish finish_checked immutable_metadata message_with_paths new recover_dead_uploads references root upload upload_bytes upload_bytes_checked",
-            "G9 delegated/exempt: core upload/update admission is serialized by CommandHost mutex; attachment -> sidebar locks revalidate archive. Legacy GUI upload is excluded by exclusive authority. Staging/read-only metadata is not activity.",
+            "G9: AttachmentWriter::upload registers global admission before staging/file publication and holds through commit; outer core command admission also covers attachment update and sidebar mirror ACK. Attachment/sidebar revalidation remains; exclusive writer authority excludes legacy GUI. Read-only metadata and constructors introduce no work.",
         ),
         (
             "ingress.rs",
             "admin answer_provenance attachment_writer command_receipt connections full_approval_input handle_command handle_query handle_request install_agent_observation_for_test management_enabled new new_with_epoch projection receipts reconcile_attachments reject_error renderer_data_plane renderer_owner renderer_reconnect_grace renderer_reconnect_grace request_provenance reserve_new_chat_thread running_invocations service service_mut status_probe submission_provenance submit_local submit_local_authorized submit_local_chat_with_permit with_admin with_areas with_projects with_receipts",
-            "G2/G4/G8/G9 delegated: synchronous CommandHost dispatch holds host mutex; conversation inputs go to guarded runtime/storage admissions, sidebar and attachments use canonical lock/re-read. Observation/provenance/queries admit no work.",
+            "G2/G4/G8/G9: handle_command registers global admission before dispatch, held through side effects/ACK. Conversation inputs additionally enter runtime/run admission and serialized inbox acceptance; workspace and attachment writers admit before publishing. Host mutex alone is not an online deletion exemption. Read-only provenance/observation changes no work.",
         ),
         (
             "bootstrap/mod.rs",

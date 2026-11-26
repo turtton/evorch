@@ -329,7 +329,9 @@ async fn recording_rejects_thread_bound_runs_and_initial_goals_before_model_requ
                     vec!["criterion".into()],
                 )
                 .unwrap();
-            runtime.spawn_reserved(run, None, Role::Worker, "task", RunConfig::default())
+            runtime
+                .spawn_reserved(run, None, Role::Worker, "task", RunConfig::default())
+                .unwrap()
         };
         assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
         assert_eq!(calls.load(Ordering::SeqCst), 0);

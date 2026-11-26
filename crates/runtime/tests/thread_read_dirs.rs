@@ -106,7 +106,9 @@ impl Dirs {
 fn start_in(runtime: &AgentRuntime, thread: &str, role: Role, prompt: &str) -> RunId {
     let run = runtime.reserve_run_id();
     runtime.bind_thread_root(thread, run).unwrap();
-    runtime.spawn_reserved(run, None, role, prompt, RunConfig::default());
+    runtime
+        .spawn_reserved(run, None, role, prompt, RunConfig::default())
+        .unwrap();
     run
 }
 
@@ -119,16 +121,18 @@ fn start_in_project(
 ) -> RunId {
     let run = runtime.reserve_run_id();
     runtime.bind_thread_root(thread, run).unwrap();
-    runtime.spawn_reserved(
-        run,
-        None,
-        role,
-        prompt,
-        RunConfig {
-            project_root: Some(project_root.to_owned()),
-            ..RunConfig::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            run,
+            None,
+            role,
+            prompt,
+            RunConfig {
+                project_root: Some(project_root.to_owned()),
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
     run
 }
 

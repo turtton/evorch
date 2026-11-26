@@ -6,9 +6,8 @@
 //! itself or delegate to a function that does; the behaviour is tested in
 //! `thread_retention::tests::guard` and `chat_restore::tests::thread_deleted`.
 //!
-//! Internal (`pub(crate)` / `pub(super)`) functions are not listed: they are reachable
-//! only through these entries, from a live run, or from storage, whose readers hide
-//! tombstoned rows.
+//! A terminal entry may remain in memory after deletion: liveness and restore
+//! assumptions are not exemptions from the mutable tombstone guard.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,10 +24,7 @@ enum Guard {
 
 use Guard::{Exempt, Guarded};
 
-const LIVE_ONLY: &str = "acts on a live run of this process; a deleted run is never live";
 const READ_ONLY: &str = "reads storage, whose readers hide tombstoned rows; changes nothing";
-const RESTORE_PATH: &str =
-    "a run that is not live is restored through restore_queued_and_deliver, which is guarded";
 
 fn table() -> BTreeMap<&'static str, Guard> {
     BTreeMap::from([
@@ -68,9 +64,7 @@ fn table() -> BTreeMap<&'static str, Guard> {
         ),
         (
             "lane_instructions.rs::send_lane_instruction",
-            Exempt(
-                "the caller must be a live root run (a deleted run is never live); the ledger write is fenced for tombstoned lane threads",
-            ),
+            Guarded { via: &[] },
         ),
         ("thread_goals.rs::restore_thread_goal", Guarded { via: &[] }),
         (
@@ -144,25 +138,45 @@ fn table() -> BTreeMap<&'static str, Guard> {
                 via: &["answer_question_with_mode", "handoff_answer_recipients"],
             },
         ),
-        ("runtime.rs::send_agent_message", Exempt(RESTORE_PATH)),
-        ("runtime.rs::send_message", Exempt(RESTORE_PATH)),
-        ("runtime.rs::send_user_input", Exempt(RESTORE_PATH)),
-        ("runtime.rs::deliver_notice", Exempt(LIVE_ONLY)),
+        ("runtime.rs::send_agent_message", Guarded { via: &[] }),
+        (
+            "runtime.rs::send_message",
+            Guarded {
+                via: &[
+                    "send_user_input",
+                    "send_inbox_message",
+                    "validate_run_mutation",
+                ],
+            },
+        ),
+        (
+            "runtime.rs::send_user_input",
+            Guarded {
+                via: &["send_inbox_message", "validate_run_mutation"],
+            },
+        ),
+        ("runtime.rs::deliver_notice", Guarded { via: &[] }),
         (
             "runtime.rs::deliver_follow_ups_next_turn",
-            Exempt(LIVE_ONLY),
+            Guarded {
+                via: &["validate_run_mutation"],
+            },
         ),
-        ("runtime.rs::compact", Exempt(LIVE_ONLY)),
+        (
+            "runtime.rs::compact",
+            Guarded {
+                via: &["validate_run_mutation"],
+            },
+        ),
         (
             "runtime.rs::delegate_background_as_child",
-            Exempt(LIVE_ONLY),
+            Guarded {
+                via: &["reserve_child_run_id"],
+            },
         ),
-        ("runtime.rs::reserve_child_run_id", Exempt(LIVE_ONLY)),
-        (
-            "runtime.rs::spawn_reserved",
-            Exempt("a run ID reserved by this process's counter, not an identity from outside"),
-        ),
-        ("runtime.rs::spawn_reserved_child", Exempt(LIVE_ONLY)),
+        ("runtime.rs::reserve_child_run_id", Guarded { via: &[] }),
+        ("runtime.rs::spawn_reserved", Guarded { via: &[] }),
+        ("runtime.rs::spawn_reserved_child", Guarded { via: &[] }),
         (
             "restore/diagnostics.rs::restore_diagnostics",
             Exempt(READ_ONLY),
@@ -321,7 +335,7 @@ fn every_public_identity_entry_is_guarded_or_exempt_with_a_reason() {
 
 // G1..G6 runtime entries. G1 completion also registers before event publication and
 // keeps pending through recorder ACK (gate behavior tests). G7 storage lane writes,
-// G8/G9 host-mutex + attachment/sidebar lock, G10 owner shutdown are inventoried
+// G8/G9 pre-save admission through mirror ACK, G10 owner shutdown are inventoried
 // separately at their owning crates; LIVE_ONLY is deliberately not reused here.
 #[test]
 fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() {
@@ -443,6 +457,11 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
     for (key, category) in &registered {
         let (path, name) = key.split_once("::").unwrap();
         let text = definition(&all, path, name).unwrap_or_else(|| panic!("{key} removed"));
+        let text = if text.contains("deny_deleted_spawn(") {
+            definition(&all, "runtime.rs", "deny_deleted_spawn").expect("spawn admission helper")
+        } else {
+            text
+        };
         assert!(
             text.contains("retention_admission()") || text.contains("retention_run_admission("),
             "{category} {key} must register before work"
@@ -472,6 +491,113 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
                     "new automatic-archive entry must be classified: {key}"
                 );
             }
+        }
+    }
+}
+
+// Creation/reactivation primitives are separately closed, including private cached
+// admission and internal wake/resume routes. A new caller of a primitive fails
+// classification, even when it is not a public identity entry. Behaviour is also
+// exercised against retained terminal entries in the real bootstrap tests.
+#[test]
+fn internal_activation_routes_are_closed_and_reach_the_mutable_guard() {
+    let sources = sources();
+    let markers = [
+        ".register_run(",
+        ".build_run_candidate(",
+        ".try_spawn_run_preadmitted(",
+        ".try_spawn_run_with_handoff(",
+        ".admit_run(",
+        ".start_seeded_chat(",
+        ".continue_chat_fenced(",
+        ".commit_chat_resume(",
+    ];
+    let methods = Regex::new(
+        r"\n[ \t]*(?:pub(?:\([a-z:]+\))?\s+)?(?:async\s+)?fn\s+([a-z_0-9]+)\s*(?:<[^>]*>)?\(",
+    )
+    .unwrap();
+    let mut actual = std::collections::BTreeSet::new();
+    for (file, text) in &sources {
+        if ![
+            "runtime.rs",
+            "runtime/admission.rs",
+            "runtime/chat_restore.rs",
+        ]
+        .contains(&file.as_str())
+        {
+            continue;
+        }
+        for capture in methods.captures_iter(text) {
+            let name = &capture[1];
+            let content = body(text, capture.get(0).unwrap().start() + 1);
+            if name == "build_run_candidate"
+                || markers.iter().any(|marker| content.contains(marker))
+            {
+                actual.insert(format!("{file}::{name}"));
+            }
+        }
+    }
+    let routes = [
+        (
+            "runtime.rs::register_run",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime.rs::spawn_run_with_handoff",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::try_spawn_run_with_handoff",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::try_spawn_run_preadmitted",
+            Some(("runtime.rs", "try_spawn_run_preadmitted")),
+        ),
+        (
+            "runtime.rs::build_run_candidate",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime.rs::registration_installs_seed_without_reading_a_closed_store",
+            None,
+        ), // Unit fixture, no live retention producer.
+        (
+            "runtime/admission.rs::register_without_admission",
+            Some(("runtime.rs", "build_run_candidate")),
+        ),
+        (
+            "runtime/admission.rs::admit_run",
+            Some(("runtime/admission.rs", "admit_run")),
+        ),
+        (
+            "runtime/chat_restore.rs::resume_chat_fenced",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::continue_chat",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::continue_chat_fenced",
+            Some(("runtime/chat_restore.rs", "continue_chat_fenced")),
+        ),
+        (
+            "runtime/chat_restore.rs::delegate_chat_seeded",
+            Some(("runtime/chat_restore.rs", "delegate_chat_seeded")),
+        ),
+    ];
+    assert_eq!(
+        actual,
+        routes.iter().map(|(key, _)| (*key).to_string()).collect(),
+        "classify every new internal activation caller"
+    );
+    for (key, route) in routes {
+        if let Some((file, name)) = route {
+            assert!(
+                mentions_guard(definition(&sources, file, name).unwrap()),
+                "{key} must reach the mutable guard"
+            );
         }
     }
 }

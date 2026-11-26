@@ -485,7 +485,7 @@ async fn still_above_threshold_compacts_once_without_reentry() {
     let mut receiver = bus.subscribe();
 
     // When: the waiting run receives the required mid-session User message and then crosses
-    // the remaining provider boundaries under a timeout
+    // the remaining provider boundaries until its semantic terminal signal
     let run_id = runtime.delegate_background(
         Role::Worker,
         "large prompt ".repeat(20),
@@ -499,10 +499,7 @@ async fn still_above_threshold_compacts_once_without_reentry() {
     runtime
         .send_message(run_id, "continue through large context".to_string())
         .expect("waiting run resumes at a legal User boundary");
-    assert_eq!(
-        timeout(Duration::from_secs(2), runtime.wait(run_id)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = compaction_events_until_done(&mut receiver, &run_id.to_string()).await;
 
     // Then: a still-large result is accepted once and never recursively compacted

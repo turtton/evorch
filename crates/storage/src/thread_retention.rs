@@ -10,6 +10,7 @@
 
 mod authority;
 pub mod decision;
+pub mod online;
 #[cfg(feature = "test-support")]
 pub use authority::ExclusiveFixtureStorage;
 pub use authority::{AutoArchiveAuthority, AutoArchivePolicy};
@@ -559,8 +560,31 @@ impl Database {
         crate::repo::thread_retention::identity(&self.conn)
     }
 
-    /// Every tombstoned identity. Small by construction; read it once and test
-    /// membership instead of querying per item.
+    /// One immutable tombstone identity in primary-key order. Expendable caller
+    /// cursors may wrap; no all-history scan or durable cleanup cursor is needed.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn retention_tombstoned_thread_after(
+        &self,
+        after: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
+        use rusqlite::OptionalExtension;
+        let result = if let Some(after) = after {
+            self.conn.query_row("SELECT thread_id FROM thread_tombstones WHERE thread_id > ?1 ORDER BY thread_id LIMIT 1", [after], |r| r.get(0)).optional()?
+        } else {
+            self.conn
+                .query_row(
+                    "SELECT thread_id FROM thread_tombstones ORDER BY thread_id LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?
+        };
+        Ok(result)
+    }
+
+    /// Every tombstoned identity for the shared startup guard.
     ///
     /// # Errors
     /// Returns an error if SQLite access fails.

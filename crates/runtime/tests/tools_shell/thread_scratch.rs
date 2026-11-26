@@ -148,7 +148,9 @@ async fn thread_runs_share_tmpdir_with_children_escalation_and_file_tools() {
     assert_eq!(runtime.wait(first).await, Ok(AgentRunPhase::Done));
     let second = runtime.reserve_run_id();
     runtime.bind_thread_root("thread-b", second).unwrap();
-    runtime.spawn_reserved(second, None, Role::Worker, "CHECK", RunConfig::default());
+    runtime
+        .spawn_reserved(second, None, Role::Worker, "CHECK", RunConfig::default())
+        .unwrap();
     assert_eq!(runtime.wait(second).await, Ok(AgentRunPhase::Done));
 
     let observed = model.observed().await;
@@ -224,7 +226,9 @@ async fn rebinding_a_thread_root_keeps_its_scratch_directory() {
     for _ in 0..2 {
         let root = runtime.reserve_run_id();
         runtime.bind_thread_root("thread", root).unwrap();
-        runtime.spawn_reserved(root, None, Role::Worker, "WORK", RunConfig::default());
+        runtime
+            .spawn_reserved(root, None, Role::Worker, "WORK", RunConfig::default())
+            .unwrap();
         assert_eq!(runtime.wait(root).await, Ok(AgentRunPhase::Done));
     }
     let unbound = runtime.delegate_background(Role::Worker, "WORK".into(), RunConfig::default());

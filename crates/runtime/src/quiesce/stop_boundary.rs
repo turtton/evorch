@@ -15,6 +15,7 @@ pub struct StopDelivery<'a> {
     run: RunId,
     scope: StopScope,
     expected_incarnation: Option<String>,
+    between_turns_only: bool,
 }
 impl<'a> StopDelivery<'a> {
     pub(crate) fn new(runtime: &'a AgentRuntime, run: RunId, scope: StopScope) -> Self {
@@ -23,11 +24,16 @@ impl<'a> StopDelivery<'a> {
             run,
             scope,
             expected_incarnation: None,
+            between_turns_only: false,
         }
     }
     /// Deliver only while the run's execution is still this incarnation.
     pub(crate) fn expecting_incarnation(mut self, incarnation: String) -> Self {
         self.expected_incarnation = Some(incarnation);
+        self
+    }
+    pub(crate) fn between_turns_only(mut self) -> Self {
+        self.between_turns_only = true;
         self
     }
     /// After the lifecycle owner chooses shutdown, commit terminal-only runtime
@@ -42,6 +48,7 @@ impl<'a> StopDelivery<'a> {
                 self.run,
                 self.scope,
                 self.expected_incarnation.as_deref(),
+                self.between_turns_only,
             )
         })
     }

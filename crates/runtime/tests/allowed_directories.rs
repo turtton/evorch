@@ -75,7 +75,9 @@ async fn run_in(runtime: &AgentRuntime, thread: &str, role: Role, root: &Path) -
         project_root: Some(root.to_path_buf()),
         ..RunConfig::default()
     };
-    runtime.spawn_reserved(run, None, role, "WORK", config);
+    runtime
+        .spawn_reserved(run, None, role, "WORK", config)
+        .unwrap();
     runtime.wait(run).await.unwrap()
 }
 
@@ -327,16 +329,18 @@ async fn running_worker_scenario() {
     runtime.set_sandbox_escalation(EscalationApproval::Off, false);
     let run = runtime.reserve_run_id();
     runtime.bind_thread_root("thread-a", run).unwrap();
-    runtime.spawn_reserved(
-        run,
-        None,
-        Role::Worker,
-        "WORK",
-        RunConfig {
-            project_root: Some(dirs.repo.clone()),
-            ..RunConfig::default()
-        },
-    );
+    runtime
+        .spawn_reserved(
+            run,
+            None,
+            Role::Worker,
+            "WORK",
+            RunConfig {
+                project_root: Some(dirs.repo.clone()),
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
 
     // Each request carries the previous tool result, so the list changes between calls.
     // A gate holds one permit, so each response is released only once its request waits.

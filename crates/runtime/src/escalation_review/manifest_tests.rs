@@ -691,13 +691,15 @@ async fn a_live_answer_has_the_evidence_id_storage_gave_it() {
     )
     .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     let root = runtime.reserve_run_id();
-    runtime.spawn_reserved(
-        root,
-        None,
-        Role::Orchestrator,
-        "Investigate",
-        crate::RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved(
+            root,
+            None,
+            Role::Orchestrator,
+            "Investigate",
+            crate::RunConfig::default(),
+        )
+        .unwrap();
     let question = runtime
         .request_user_question(root, "May I clean up?".into(), vec![], true)
         .unwrap();

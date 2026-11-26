@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod attachment_tests;
-mod idle;
+pub(super) mod idle;
 #[path = "output/idle/adoption.rs"]
 mod input_adoption;
 
