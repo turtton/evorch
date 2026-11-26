@@ -413,9 +413,22 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
             .any(|t| t.id == id)
     );
     if unrelated == 0 {
-        // Failed post-commit publication leaves this exact durable state: the
-        // tombstone committed, but the old sidebar persisted. Repair uses the
-        // tombstone rather than re-running permission/undoing deletion.
+        // Inject an actual post-commit sidebar I/O failure without permissions
+        // or clock assumptions: a directory cannot be read as the sidebar file.
+        // No other core file/DB/root is moved or made unwritable.
+        let sidebar_path = config.join("sidebar.json");
+        std::fs::remove_file(&sidebar_path).unwrap();
+        std::fs::create_dir(&sidebar_path).unwrap();
+        assert!(store.read_unlocked().is_err());
+        for _ in 0..2 {
+            measurements.tick(&core, due, false);
+        }
+        assert!(db.tombstones().unwrap().runs.contains(&run.to_string()));
+        assert!(core.runtime.inspect_agent(run).is_err());
+        std::fs::remove_dir(&sidebar_path).unwrap();
+        // Restore the stale durable state a failed publication would leave.
+        // Repair uses committed tombstones, never re-evaluating permission or
+        // undoing deletion after the I/O failure.
         store.write(&store.lock().unwrap(), &stale_sidebar).unwrap();
         for _ in 0..2 {
             measurements.tick(&core, due, false);

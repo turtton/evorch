@@ -7,7 +7,8 @@ fn assert_deleted<T: std::fmt::Debug>(result: Result<T, RuntimeError>) {
         Err(RuntimeError::RunRestoreFailed {
             reason: RunRestoreFailure::ThreadDeleted(_),
             ..
-        }) => {}
+        })
+        | Err(RuntimeError::ThreadDeleted(_)) => {}
         other => panic!("expected a thread-deleted refusal, got {other:?}"),
     }
 }
@@ -27,8 +28,10 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
             .set_tombstone_guard(tombstones(&["gone-thread"], &[&gone.to_string()]))
             .is_ok()
     );
-    let phase = |run| runtime.inspect_agent(run).unwrap().phase;
-    let before = phase(gone);
+    assert!(matches!(
+        runtime.inspect_agent(gone),
+        Err(RuntimeError::ThreadDeleted(_))
+    ));
 
     let attachment_root = runtime.attachment_root().unwrap();
     assert!(runtime.attachment_read_directories("gone-thread").is_err());
@@ -95,7 +98,12 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
         Err(crate::restore::SnapshotError::ThreadDeleted(_))
     ));
 
-    assert_eq!(phase(gone), before, "no refusal changed the run");
+    assert!(
+        runtime
+            .list_agents()
+            .iter()
+            .all(|entry| entry.run_id != gone)
+    );
     assert!(
         fixture
             .runtime

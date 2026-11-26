@@ -331,3 +331,88 @@ fn initial_reclaim_page_includes_an_empty_sql_family_key() {
     .unwrap();
     assert_eq!(cursor.as_deref(), Some(""));
 }
+
+#[test]
+fn supplemental_protection_must_clear_before_confirmation() {
+    let (db, req) = fixture();
+    db.conn.execute_batch("INSERT INTO restart_transactions(restart_id,capture_id,revision,phase,metadata_json,old_builtin_tool_names_json) VALUES('restart','capture',0,'captured','{}','[]');
+        INSERT INTO restart_expected_members(restart_id,run_id,root_run_id,member_json) VALUES('restart','ra','ra','{}');").unwrap();
+    assert_hold(&db, &req, OnlineBudget::default(), "RestartEvidence");
+    db.conn
+        .execute("UPDATE restart_transactions SET phase='completed'", [])
+        .unwrap();
+    assert!(matches!(
+        db.retention_online_prepare(&req, OnlineBudget::default())
+            .unwrap(),
+        OnlineOutcome::Ready(_)
+    ));
+
+    db.conn.execute_batch("INSERT INTO recovery_manifests(manifest_id,schema_version,committed,member_count,edge_count,edges_json) VALUES('manifest',1,1,1,0,'[]');
+        INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json) VALUES('manifest','ra','old',0,1,'{}');
+        INSERT INTO recovery_claims(claim_id,manifest_id,state) VALUES('claim','manifest','prepared');
+        INSERT INTO recovery_claim_members(claim_id,run_id,old_incarnation,reserved_revision,new_incarnation) VALUES('claim','ra','old',0,'new');").unwrap();
+    assert_hold(&db, &req, OnlineBudget::default(), "PreparedRecoveryClaim");
+    db.conn
+        .execute("UPDATE recovery_claims SET state='released'", [])
+        .unwrap();
+    assert!(matches!(
+        db.retention_online_prepare(&req, OnlineBudget::default())
+            .unwrap(),
+        OnlineOutcome::Ready(_)
+    ));
+
+    db.conn.execute_batch("INSERT INTO lanes(lane_id,thread_id,origin_thread_id,origin_run_id,creation_key,request_hash,scope,policy,management_revision,management_projection_revision,brief_json,brief_revision,start_seed,root_run_id,generation,created_at_ns,updated_at_ns,last_activity_at_ns) VALUES('lane','a','a','ra','creation','hash','lane','detached',3,1,'{}',1,'{}','ra',1,0,0,0);").unwrap();
+    assert_hold(
+        &db,
+        &req,
+        OnlineBudget::default(),
+        "MembershipProjectionPending",
+    );
+    db.conn
+        .execute("UPDATE lanes SET management_projection_revision=3", [])
+        .unwrap();
+    assert!(matches!(
+        confirm(&db.conn, &req, OnlineBudget::default(), &Fence::default()).unwrap(),
+        OnlineOutcome::Confirmed(_)
+    ));
+}
+
+#[test]
+fn committed_manifest_links_sidebar_families_but_superseded_manifest_does_not() {
+    for superseded in [false, true] {
+        let (db, mut req) = fixture();
+        db.conn.execute_batch("INSERT INTO threads(thread_id,root_run_id,archived,created_at_ns,updated_at_ns,source) VALUES('b','rb',1,0,0,'host');
+            INSERT INTO thread_runs VALUES('rb','b','rb',0);
+            INSERT INTO run_contexts(run_id,role,name,config_json,checkpoints_json,terminal_phase,restorable,updated_at_ns) VALUES('rb','worker','w','{}','[]','done',1,0);
+            INSERT INTO recovery_manifests(manifest_id,schema_version,committed,member_count,edge_count,edges_json) VALUES('manifest',1,1,2,0,'[]');
+            INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json) VALUES('manifest','ra','old',0,1,'{}'),('manifest','rb','old',0,1,'{}');").unwrap();
+        db.conn
+            .execute("UPDATE recovery_manifests SET superseded=?1", [superseded])
+            .unwrap();
+        req.expected = match db
+            .retention_online_closure("a", OnlineBudget::default())
+            .unwrap()
+        {
+            OnlineOutcome::Ready(closure) => closure,
+            other => panic!("{other:?}"),
+        };
+        let mut b = req.input.threads[0].clone();
+        b.thread_id = "b".into();
+        b.pinned = true;
+        req.input.threads.push(b);
+        if !superseded {
+            assert_eq!(req.expected.threads, ["a", "b"]);
+            assert_hold(&db, &req, OnlineBudget::default(), "Pinned");
+            req.input.threads[1].pinned = false;
+        } else {
+            assert_eq!(req.expected.threads, ["a"]);
+        }
+        assert!(matches!(
+            confirm(&db.conn, &req, OnlineBudget::default(), &Fence::default()).unwrap(),
+            OnlineOutcome::Confirmed(_)
+        ));
+        let tombstones = db.tombstones().unwrap();
+        assert!(tombstones.contains_run("ra"));
+        assert_eq!(tombstones.contains_run("rb"), !superseded);
+    }
+}

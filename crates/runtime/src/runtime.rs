@@ -2808,11 +2808,9 @@ impl AgentRuntime {
         // observation to avoid a run-map -> status / send -> run-map lock cycle.
         // Nothing in this closure re-enters the trusted-send serializer.
         let send = || {
-            if inbox.sealed() {
-                return Err(RuntimeError::RunTerminated {
-                    run_id: run_id.to_string(),
-                });
-            }
+            // Internal notices use the same retention/input serializer, but a
+            // host-input seal alone does not close their still-live channel.
+            // Retention Stop also sets the incarnation interrupt under this lock.
             self.validate_run_mutation(run_id)?;
             // A sealed incarnation has drained its inbox for good: refuse before
             // reserving, persisting or creating a goal.
@@ -3897,14 +3895,12 @@ impl AgentRuntime {
 
     pub(crate) fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
         self.deny_deleted_run(&run_id.to_string())?;
-        let permit = {
+        let (permit, stopped) = {
             let entry = self.entry(run_id)?;
-            if matches!(*entry.execution.cancel_tx.borrow(), RunInterrupt::Stop) {
-                return Err(RuntimeError::RunTerminated {
-                    run_id: run_id.to_string(),
-                });
-            }
-            entry.config.ownership.clone()
+            (
+                entry.config.ownership.clone(),
+                matches!(*entry.execution.cancel_tx.borrow(), RunInterrupt::Stop),
+            )
         };
         if let Some(permit) = permit {
             permit
@@ -3912,6 +3908,11 @@ impl AgentRuntime {
                 .map_err(|_| RuntimeError::StaleOwnership {
                     run_id: run_id.to_string(),
                 })?;
+        }
+        if stopped {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
         }
         Ok(())
     }
