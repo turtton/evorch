@@ -204,3 +204,34 @@ pub fn write_root_binding(
         Err(error) => Err(error.into()),
     }
 }
+
+/// Establish both sides before automatic root cleanup. Call without host/sidebar locks.
+pub fn ensure_binding(
+    database: &Database,
+    writer: &storage::StorageHandle,
+    authority: &storage::thread_retention::AutoArchiveAuthority<'_>,
+    paths: BindingPaths<'_>,
+    db_path: &Path,
+    now_ns: i64,
+) -> Result<BindingStatus, RetentionError> {
+    authority.validate(db_path, paths.ownership_root)?;
+    match check_binding(database, paths)? {
+        BindingStatus::Unbound => {}
+        status => return Ok(status),
+    }
+    write_root_binding(
+        paths.ownership_root,
+        &database.retention_identity()?,
+        db_path,
+        now_ns,
+    )?;
+    writer.ensure_retention_binding(
+        authority,
+        storage::thread_retention::BindingInput {
+            ownership_root: canonical_string(paths.ownership_root)?,
+            sidebar_path: canonical_string(paths.sidebar_path)?,
+        },
+        now_ns,
+    )?;
+    check_binding(database, paths)
+}

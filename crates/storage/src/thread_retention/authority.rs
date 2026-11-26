@@ -1,5 +1,5 @@
-//! Scoped single-writer capability. No production bootstrap wiring in PR1.
-use crate::{ExclusiveLeases, StorageError};
+//! Scoped capability from dedicated exclusive DB/root writer leases.
+use crate::{StorageError, WriterLeases};
 use std::path::Path;
 
 /// Proof borrowed from exclusive leases, never a flag or a shared handle.
@@ -8,20 +8,23 @@ use std::path::Path;
 ///
 /// ```compile_fail
 /// use std::time::Duration;
-/// use storage::{ExclusiveLeases, thread_retention::AutoArchiveAuthority};
-/// fn forbidden(leases: ExclusiveLeases) {
-///     let authority = AutoArchiveAuthority::new(&leases);
-///     let shared = leases.downgrade(Duration::ZERO);
+/// use storage::{WriterLeases, thread_retention::AutoArchiveAuthority};
+/// fn forbidden(leases: WriterLeases) {
+///     let authority = leases.authority().unwrap();
+///     let shared = drop(leases);
 ///     drop(authority);
 /// }
 /// ```
 pub struct AutoArchiveAuthority<'a> {
-    leases: &'a ExclusiveLeases,
+    leases: &'a WriterLeases,
 }
 impl<'a> AutoArchiveAuthority<'a> {
     #[must_use]
-    pub fn new(leases: &'a ExclusiveLeases) -> Self {
+    pub(crate) fn new(leases: &'a WriterLeases) -> Self {
         Self { leases }
+    }
+    pub(crate) fn owned_leases(&self) -> std::sync::Arc<WriterLeases> {
+        std::sync::Arc::new(self.leases.clone())
     }
     pub fn validate(&self, db: &Path, root: &Path) -> Result<(), StorageError> {
         self.leases.validate_archive_identity(db, root)
@@ -67,11 +70,11 @@ impl AutoArchivePolicy {
 ///
 /// ```compile_fail
 /// use std::{path::Path, time::Duration};
-/// use storage::{ExclusiveLeases, StorageConfig, thread_retention::ExclusiveFixtureStorage};
-/// fn forbidden(config: StorageConfig, leases: ExclusiveLeases) {
+/// use storage::{WriterLeases, StorageConfig, thread_retention::ExclusiveFixtureStorage};
+/// fn forbidden(config: StorageConfig, leases: WriterLeases) {
 ///     let fixture = ExclusiveFixtureStorage::open(config, Path::new("root"), &leases).unwrap();
 ///     let handle = fixture.handle();
-///     let _shared = leases.downgrade(Duration::ZERO);
+///     let _shared = drop(leases);
 ///     let _ = handle.barrier();
 /// }
 /// ```
@@ -80,32 +83,33 @@ impl AutoArchivePolicy {
 ///
 /// ```no_run
 /// use std::{path::Path, time::Duration};
-/// use storage::{ExclusiveLeases, StorageConfig, thread_retention::ExclusiveFixtureStorage};
-/// fn allowed(config: StorageConfig, leases: ExclusiveLeases) {
+/// use storage::{WriterLeases, StorageConfig, thread_retention::ExclusiveFixtureStorage};
+/// fn allowed(config: StorageConfig, leases: WriterLeases) {
 ///     let fixture = ExclusiveFixtureStorage::open(config, Path::new("root"), &leases).unwrap();
 ///     let handle = fixture.handle();
 ///     drop(fixture);
-///     let _shared = leases.downgrade(Duration::ZERO);
+///     let _shared = drop(leases);
 ///     let _ = handle.barrier();
 /// }
 /// ```
 #[cfg(feature = "test-support")]
 pub struct ExclusiveFixtureStorage<'a> {
     storage: Option<crate::Storage>,
-    _leases: &'a ExclusiveLeases,
+    _leases: &'a WriterLeases,
 }
 #[cfg(feature = "test-support")]
 impl<'a> ExclusiveFixtureStorage<'a> {
     pub fn open(
         config: crate::StorageConfig,
         root: &Path,
-        leases: &'a ExclusiveLeases,
+        leases: &'a WriterLeases,
     ) -> Result<Self, StorageError> {
         leases.validate_archive_identity(&config.db_path, root)?;
         Ok(Self {
-            storage: Some(crate::Storage::open_with_lease(
-                config,
-                leases.archive_writer_lease()?,
+            storage: Some(crate::Storage::open_with_writer_lease(
+                config.clone(),
+                crate::maintenance::offline::writer_lease(&config.db_path)?,
+                leases.db_lease(),
             )?),
             _leases: leases,
         })

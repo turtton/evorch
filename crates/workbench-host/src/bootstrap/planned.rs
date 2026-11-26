@@ -13,6 +13,7 @@ pub struct PlannedStorage {
     pub(super) storage: storage::Storage,
     pub(super) storage_config: storage::StorageConfig,
     pub(super) leases: storage::SharedLeases,
+    pub(super) writer_leases: Arc<storage::WriterLeases>,
     pub(super) seed: StartupRuntime,
     pub(super) bus: Arc<EventBus>,
     pub(super) collector: Arc<super::recovery_disposal::LiveGraphCollector>,
@@ -40,7 +41,7 @@ impl ClaimedBootstrap {
 }
 impl PlannedStorage {
     pub async fn open(options: BootstrapOptions) -> Result<Self, BootstrapError> {
-        Self::open_with_lease_wait(options, Duration::from_secs(30)).await
+        Self::open_with_lease_wait(options, storage::WRITER_LEASE_WAIT).await
     }
     pub async fn open_with_lease_wait(
         options: BootstrapOptions,
@@ -54,14 +55,22 @@ impl PlannedStorage {
         })?;
         let db = options.config_dir.join("evorch-events.db");
         let root = options.ownership_root.clone();
-        // Shared-only: migration keeps its own existing schema/lease checks.
-        let leases =
-            tokio::task::spawn_blocking(move || storage::shared_with_wait(&db, &root, wait))
-                .await??;
+        let (writer_leases, leases) = tokio::task::spawn_blocking(move || {
+            let budget = wait.min(storage::WRITER_LEASE_WAIT);
+            let started = std::time::Instant::now();
+            let writer = Arc::new(storage::WriterLeases::acquire(&db, &root, budget)?);
+            let leases =
+                storage::shared_with_wait(&db, &root, budget.saturating_sub(started.elapsed()))?;
+            Ok::<_, BootstrapError>((writer, leases))
+        })
+        .await??;
         let storage_config =
             components::storage_config(&config, options.config_dir.join("evorch-events.db"));
-        let storage =
-            storage::Storage::open_with_lease(storage_config.clone(), leases.db_lease()?)?;
+        let storage = storage::Storage::open_with_writer_lease(
+            storage_config.clone(),
+            leases.db_lease()?,
+            writer_leases.db_lease(),
+        )?;
         let bus = Arc::new(EventBus::new(4096));
         let seed = StartupRuntime::new(
             bus.clone(),
@@ -84,6 +93,7 @@ impl PlannedStorage {
             storage,
             storage_config,
             leases,
+            writer_leases,
             seed,
             bus,
         })
@@ -124,6 +134,7 @@ impl PlannedStorage {
             self.config.ownership.clone(),
             self.bus.clone(),
         )?);
+        owner.retain_writer_leases(self.writer_leases.clone());
         let tombstones = storage::Database::open(&self.storage_config)?.tombstones()?;
         owner
             .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))

@@ -100,6 +100,7 @@ pub fn acquire_leases(
     plan: &RetentionPlan,
     wait: Duration,
 ) -> Result<SharedLeases, BootstrapError> {
+    let started = std::time::Instant::now();
     let exclusive = if plan.sidebar_path.exists() {
         storage::try_exclusive(&plan.db_path, &plan.ownership_root)?
     } else {
@@ -109,7 +110,7 @@ pub fn acquire_leases(
         return Ok(storage::shared_with_wait(
             &plan.db_path,
             &plan.ownership_root,
-            wait,
+            wait.saturating_sub(started.elapsed()),
         )?);
     };
     match run_phase(plan, &exclusive) {
@@ -122,5 +123,5 @@ pub fn acquire_leases(
             tracing::warn!(target: "thread_retention", %error, "core retention phase failed");
         }
     }
-    Ok(exclusive.downgrade(wait)?)
+    Ok(exclusive.downgrade(wait.saturating_sub(started.elapsed()))?)
 }

@@ -220,18 +220,23 @@ async fn shutdown_and_planned_stop_release_before_the_barrier_and_never_step_aga
         } else {
             host.shutdown().await.unwrap();
         }
-        let next = Storage::open(config).unwrap();
-        let lease = next
-            .handle()
-            .acquire_thread_index_lease(&other(), 1, S)
-            .unwrap();
-        assert!(
-            matches!(lease, LeaseResult::Acquired(_)),
-            "handoff must not wait for old expiry: {lease:?}"
-        );
-        next.close();
         if planned {
+            // This is still the same resident writer until process exit.
+            let lease = handle.acquire_thread_index_lease(&other(), 1, S).unwrap();
+            assert!(matches!(lease, LeaseResult::Acquired(_)));
             host.shutdown().await.unwrap();
+        } else {
+            drop(host);
+            let next = Storage::open(config).unwrap();
+            let lease = next
+                .handle()
+                .acquire_thread_index_lease(&other(), 1, S)
+                .unwrap();
+            assert!(
+                matches!(lease, LeaseResult::Acquired(_)),
+                "no old expiry wait: {lease:?}"
+            );
+            next.close();
         }
     }
 }
@@ -337,7 +342,7 @@ impl Drop for GuiChild {
 }
 
 #[tokio::test]
-async fn core_and_legacy_gui_processes_exclude_steps_and_transfer_the_lease() {
+async fn core_rejects_a_live_legacy_writer_and_takes_over_after_its_exit() {
     let dir = test_socket_dir::SplitDir::new();
     let mut first = open(&dir).await;
     let path = first.composition.storage.db_path.clone();
@@ -345,33 +350,37 @@ async fn core_and_legacy_gui_processes_exclude_steps_and_transfer_the_lease() {
     drop(first);
     let mut gui = GuiChild::start(&path);
     assert_eq!(gui.event(), "ready");
+    let refused = BootstrappedHost::open(BootstrapOptions {
+        config_dir: dir.path().into(),
+        project_root: dir.path().into(),
+        ownership_root: dir.sockets().into(),
+    })
+    .await;
+    assert!(
+        refused
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("DB writer lease unavailable")
+    );
+    fixture(&conn(&dir), "gui-owned", false);
+    assert!(gui.command("tick").starts_with("steps="));
+    assert_eq!(state(&conn(&dir), "gui-owned"), "completed_with_gaps");
+    assert_eq!(gui.command("stop"), "stopped-and-fenced");
+    use std::io::Write;
+    writeln!(gui.input, "exit").unwrap();
+    gui.input.flush().unwrap();
+    assert!(gui.child.wait().unwrap().success());
     let mut host = open(&dir).await;
     let handle = writer(&host);
     handle
         .set_thread_index_clock_for_test(Arc::new(AtomicI64::new(AT)))
         .unwrap();
-    let before = handle.tick_thread_index_for_test().unwrap();
-    assert!(before.owner_lease.is_none());
-    assert_eq!(before.counters.steps, 0);
-    fixture(&conn(&dir), "gui-owned", false);
-    assert!(gui.command("tick").starts_with("steps="));
-    assert_eq!(state(&conn(&dir), "gui-owned"), "completed_with_gaps");
-    assert_eq!(
-        handle.tick_thread_index_for_test().unwrap().counters.steps,
-        0
-    );
-    assert_eq!(gui.command("stop"), "stopped-and-fenced");
     fixture(&conn(&dir), "core-owned", false);
     let status = handle.tick_thread_index_for_test().unwrap();
     assert!(status.owner_lease.is_some());
     assert!(status.counters.steps > 0);
     assert_eq!(state(&conn(&dir), "core-owned"), "completed_with_gaps");
-    let stopped_steps = gui.command("tick");
-    assert_eq!(
-        gui.command("tick"),
-        stopped_steps,
-        "a stopped GUI cannot step after core takeover"
-    );
     host.shutdown().await.unwrap();
 }
 

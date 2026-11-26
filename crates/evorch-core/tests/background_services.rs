@@ -10,7 +10,7 @@ use std::{
     },
 };
 use storage::pull_requests::*;
-use storage::{Storage, StorageConfig, StorageHandle};
+use storage::{Storage, StorageConfig};
 use tokio::sync::{Barrier, Notify};
 use workbench_host::bootstrap::{
     BootstrapOptions, BootstrappedHost, TestSeams, lane_pr::PullRequestAdapters,
@@ -96,7 +96,6 @@ impl PullRequestLogSource for Logs {
 }
 struct Fixture {
     dir: test_socket_dir::SplitDir,
-    storage: Storage,
     root: std::path::PathBuf,
 }
 impl Fixture {
@@ -114,13 +113,15 @@ impl Fixture {
             ..Default::default()
         })
         .unwrap();
-        Self { dir, storage, root }
+        storage.close();
+        Self { dir, root }
     }
     fn seed(&self) {
         self.seed_with_ownership(true);
     }
     fn seed_with_ownership(&self, requires_ownership: bool) {
-        self.storage.handle().create_lane(storage::lanes::NewLane {
+        let storage = self.seed_storage();
+        storage.handle().create_lane(storage::lanes::NewLane {
             lane_id: "recover".into(), thread_id: "lane-thread".into(), origin_thread_id: "lead".into(),
             origin_run_id: "run-41".into(), creation_key: "before-crash".into(),
             brief: serde_json::from_value(serde_json::json!({
@@ -152,17 +153,23 @@ impl Fixture {
         .await
         .unwrap()
     }
-    fn handle(&self) -> StorageHandle {
-        self.storage.handle()
+    fn seed_storage(&self) -> Storage {
+        Storage::open(StorageConfig {
+            db_path: self.root.join("evorch-events.db"),
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     fn seed_broken_after_first(&self) {
-        let lane = self
+        let storage = self.seed_storage();
+        let lane = storage
             .handle()
             .lane_by_thread("lane-thread")
             .unwrap()
             .unwrap();
-        self.handle()
+        storage
+            .handle()
             .create_lane(storage::lanes::NewLane {
                 lane_id: "zz-broken".into(),
                 thread_id: "zz-broken-thread".into(),
@@ -324,14 +331,17 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     gate.arrived().await;
     published(&core.runtime.event_bus());
     candidate(&mut events).await;
-    let policy = f.handle().pr_auto_fix_state(key()).unwrap();
+    let policy = core.storage_writer().pr_auto_fix_state(key()).unwrap();
     service
         .set_auto_fix("lane-thread", 1, policy.policy_revision, true, &permit)
         .await
         .unwrap();
     gate.release_ok(fetched(&head));
     logs.entered.notified().await;
-    let notices = f.handle().pr_notices(key(), String::new()).unwrap();
+    let notices = core
+        .storage_writer()
+        .pr_notices(key(), String::new())
+        .unwrap();
     assert_eq!(notices.len(), 1);
     assert_eq!(
         notices[0].mode,
@@ -363,99 +373,13 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
 }
 
 #[tokio::test]
-async fn embedded_and_core_share_thread_authority_without_duplicate_recovery_or_monitor() {
-    let f = Fixture::new();
-    let head = checkout(f.dir.path());
-    f.seed();
-    f.handle()
-        .upsert_threads_host(&[storage::threads::ThreadUpsert {
-            thread_id: "core-marker".into(),
-            ..Default::default()
-        }])
-        .unwrap();
-    let model = Arc::new(Model::default());
-    let embedded_source = Arc::new(FakePullRequestSource::new());
-    let gate = embedded_source.push_gate(&key());
-    let logs = Arc::new(Logs::default());
-    // Both adapters use exactly the shared factory used by the embedded GUI.
-    // No renderer or GUI dependency is needed to exercise the authority boundary.
-    let mut embedded = f
-        .core(model.clone(), embedded_source.clone(), logs.clone())
-        .await;
-    model.entered.notified().await;
-    let other_model = Arc::new(Model::default());
-    let other_source = Arc::new(FakePullRequestSource::new());
-    let mut core = f
-        .core(other_model.clone(), other_source.clone(), logs.clone())
-        .await;
-    assert!(core.owner.owned_permit("lane-thread").is_err());
-    assert!(core.runtime.inspect_agent(RunId::new(42)).is_err());
-    let permit = embedded.owner.owned_permit("lane-thread").unwrap();
-    embedded
-        .runtime
-        .pull_requests()
-        .unwrap()
-        .link("lane-thread", "owner/repo#7", 0, &permit)
-        .await
-        .unwrap();
-    gate.arrived().await;
-    let service = embedded.runtime.pull_requests().unwrap();
-    let mut events = embedded.runtime.event_bus().subscribe();
-    published(&core.runtime.event_bus());
-    published(&embedded.runtime.event_bus());
-    candidate(&mut events).await;
-    let policy = f.handle().pr_auto_fix_state(key()).unwrap();
-    service
-        .set_auto_fix("lane-thread", 1, policy.policy_revision, true, &permit)
-        .await
-        .unwrap();
-    gate.release_ok(fetched(&head));
-    logs.entered.notified().await;
-    // An owned marker fetch proves the other scheduler has scanned the same DB
-    // after the embedded link existed. It must not also launch key 7.
-    let marker = PullRequestKey::github("owner/repo", 8).unwrap();
-    let marker_gate = other_source.push_gate(&marker);
-    let marker_permit = core.owner.start("core-marker").unwrap();
-    core.runtime
-        .pull_requests()
-        .unwrap()
-        .link("core-marker", "owner/repo#8", 0, &marker_permit)
-        .await
-        .unwrap();
-    marker_gate.arrived().await;
-    // Draining is a terminal barrier: assertions do not infer quiescence from time.
-    core.shutdown().await.unwrap();
-    assert_eq!(
-        other_source
-            .calls()
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>(),
-        [marker]
-    );
-    drop(marker_gate);
-    assert_eq!(other_model.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(embedded_source.calls().len(), 1);
-    assert_eq!(logs.calls.load(Ordering::SeqCst), 1);
-    assert!(logs.active.load(Ordering::SeqCst)); // stopping core must not stop the other owner
-    let notices = f.handle().pr_notices(key(), String::new()).unwrap();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(
-        notices[0].mode,
-        storage::pull_request_auto_fix::PrNoticeMode::Auto
-    );
-    embedded.shutdown().await.unwrap();
-    assert!(!logs.active.load(Ordering::SeqCst));
-}
-
-#[tokio::test]
-async fn concurrent_startup_does_not_steal_a_live_pending_lane_and_stops_retrying_on_drain() {
+async fn a_second_core_is_rejected_while_the_first_has_a_pending_lane_and_drain_cancels_it() {
     for requires_ownership in [true, false] {
         let f = Fixture::new();
         f.seed_with_ownership(requires_ownership);
         let model = Arc::new(Model::default());
         model.hold_admission.store(true, Ordering::SeqCst);
-        let mut embedded = f
+        let mut core = f
             .core(
                 model.clone(),
                 Arc::new(FakePullRequestSource::new()),
@@ -463,31 +387,39 @@ async fn concurrent_startup_does_not_steal_a_live_pending_lane_and_stops_retryin
             )
             .await;
         model.admission.notified().await;
-        assert_eq!(f.handle().unstarted_lanes(10).unwrap().len(), 1);
+        assert_eq!(core.storage_writer().unstarted_lanes(10).unwrap().len(), 1);
         let other = Arc::new(Model::default());
-        let mut core = f
-            .core(
-                other.clone(),
-                Arc::new(FakePullRequestSource::new()),
-                Arc::new(Logs::default()),
-            )
-            .await;
+        let result = BootstrappedHost::open_with_service_seams(
+            BootstrapOptions {
+                config_dir: f.root.clone(),
+                ownership_root: f.dir.sockets().into(),
+                project_root: f.dir.path().into(),
+            },
+            TestSeams {
+                model: other.clone(),
+                sandbox: Arc::new(Direct),
+            },
+            PullRequestAdapters {
+                source: Arc::new(FakePullRequestSource::new()),
+                logs: Arc::new(Logs::default()),
+            },
+        )
+        .await;
         assert!(
-            core.runtime
-                .recover_unstarted_lanes(Some(&core.owner))
+            result
+                .err()
                 .unwrap()
-                .is_empty()
+                .to_string()
+                .contains("DB writer lease unavailable")
         );
-        core.shutdown().await.unwrap();
         assert_eq!(other.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(f.handle().unstarted_lanes(10).unwrap().len(), 1);
-        assert!(embedded.busy(), "pending admission retains the core");
+        assert!(core.busy(), "pending admission retains the core");
         assert!(model.admitting.load(Ordering::SeqCst));
-        embedded.shutdown().await.unwrap();
+        core.shutdown().await.unwrap();
         assert!(!model.admitting.load(Ordering::SeqCst));
-        assert!(embedded.runtime.pending_lane_admissions().is_empty());
+        assert!(core.runtime.pending_lane_admissions().is_empty());
         model.release_admission.notify_one();
-        assert!(embedded.runtime.list_agents().is_empty());
+        assert!(core.runtime.list_agents().is_empty());
         assert_eq!(model.calls.load(Ordering::SeqCst), 0);
     }
 }
@@ -515,19 +447,15 @@ async fn manual_and_background_lane_retries_share_the_handoff_fence() {
 async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_retry: bool) {
     let f = Fixture::new();
     f.seed_with_ownership(false);
+    let store = f.seed_storage();
+    let writer = store.handle();
     let old_admission = Arc::new(Barrier::new(2));
     let old_model = Arc::new(Model {
         hold_admission: AtomicBool::new(true),
         admission_barrier: std::sync::Mutex::new(Some(old_admission.clone())),
         ..Default::default()
     });
-    let mut old = f
-        .core(
-            old_model.clone(),
-            Arc::new(FakePullRequestSource::new()),
-            Arc::new(Logs::default()),
-        )
-        .await;
+    let mut old = f.logical_runtime(old_model.clone(), writer.clone());
     old_admission.wait().await;
     assert!(old_model.admitting.load(Ordering::SeqCst));
     let next_admission = Arc::new(Barrier::new(2));
@@ -536,13 +464,7 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_r
         admission_barrier: std::sync::Mutex::new(Some(next_admission.clone())),
         ..Default::default()
     });
-    let mut next = f
-        .core(
-            next_model.clone(),
-            Arc::new(FakePullRequestSource::new()),
-            Arc::new(Logs::default()),
-        )
-        .await;
+    let mut next = f.logical_runtime(next_model.clone(), writer.clone());
     let permit = old.owner.owned_permit("lane-thread").unwrap();
     old.owner.handoff(&permit, &next.owner).unwrap();
     if finish_admission {
@@ -597,9 +519,11 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_r
         assert!(old.runtime.wait(RunId::new(42)).await.is_err());
     }
     next.shutdown().await.unwrap();
-    let lane = f.handle().lane_by_thread("lane-thread").unwrap().unwrap();
+    let lane = writer.lane_by_thread("lane-thread").unwrap().unwrap();
     assert_eq!(lane.generation, 1);
-    assert!(f.handle().unstarted_lanes(10).unwrap().is_empty());
+    assert!(writer.unstarted_lanes(10).unwrap().is_empty());
+    drop((old, next));
+    store.close();
     let restarted_model = Arc::new(Model::default());
     // A new core uses the graph-aware bootstrap; already-started legacy seeds
     // are still NoCommittedManifest and must never acquire a second admission.
@@ -622,14 +546,6 @@ async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_r
     assert_eq!(
         restarted_model.admissions_requested.load(Ordering::SeqCst),
         0
-    );
-    assert_eq!(
-        f.handle()
-            .lane_by_thread("lane-thread")
-            .unwrap()
-            .unwrap()
-            .generation,
-        1
     );
 }
 
@@ -680,5 +596,76 @@ async fn partial_recovery_failure_drains_registered_roots_and_reserved_admission
             weak.upgrade().is_none(),
             "failed bootstrap retains no runtime task"
         );
+    }
+}
+
+// Ownership/admission races are logical-runtime contracts, not permission for two
+// production cores. Keep them on one real shared-mode writer, without any lease bypass.
+struct LogicalHost {
+    runtime: runtime::AgentRuntime,
+    owner: Arc<runtime::ownership::OwnerHost>,
+    services: workbench_host::bootstrap::services::BackgroundServices,
+    executor: Arc<tools::ToolExecutor>,
+    _service: workbench_host::commands::CommandService,
+}
+impl LogicalHost {
+    async fn shutdown(&mut self) -> Result<(), workbench_host::bootstrap::BootstrapError> {
+        workbench_host::bootstrap::lane_pr::stop_and_drain(
+            &mut self.services,
+            &self.runtime,
+            &self.owner,
+            &self.executor,
+        )
+        .await?;
+        self.owner.release_ready()?;
+        self.owner.stop_scratch_cleanup()?;
+        Ok(())
+    }
+}
+impl Fixture {
+    fn logical_runtime(&self, model: Arc<Model>, writer: storage::StorageHandle) -> LogicalHost {
+        let bus = Arc::new(event_bus::EventBus::new(4096));
+        let executor = Arc::new(tools::ToolExecutor::new(bus.clone()));
+        let config = StorageConfig {
+            db_path: self.root.join("evorch-events.db"),
+            ..Default::default()
+        };
+        let runtime = runtime::AgentRuntime::with_sandbox_factory(
+            bus.clone(),
+            executor.clone(),
+            model,
+            Arc::new(Direct),
+        )
+        .with_run_store(runtime::RunStore::open(&config, writer.clone()).unwrap());
+        let owner = Arc::new(
+            runtime::ownership::OwnerHost::open(self.dir.sockets(), Default::default(), bus)
+                .unwrap(),
+        );
+        let service = workbench_host::commands::CommandService::new(
+            runtime.clone(),
+            tokio::runtime::Handle::current(),
+        )
+        .with_team_writer(writer)
+        .with_ownership(owner.clone());
+        service.bind_lane_delivery();
+        let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
+        workbench_host::bootstrap::lane_pr::start(
+            &mut services,
+            &runtime,
+            &owner,
+            Default::default(),
+            PullRequestAdapters {
+                source: Arc::new(FakePullRequestSource::new()),
+                logs: Arc::new(Logs::default()),
+            },
+        )
+        .unwrap();
+        LogicalHost {
+            runtime,
+            owner,
+            services,
+            executor,
+            _service: service,
+        }
     }
 }

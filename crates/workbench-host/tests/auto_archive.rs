@@ -2,10 +2,10 @@
 //! every tick receives its `now` and every event its time.
 mod common;
 use std::sync::{Arc, Mutex};
+use storage::WriterLeases;
 use storage::thread_retention::ExclusiveFixtureStorage;
 use storage::thread_retention::{AutoArchiveAuthority, AutoArchivePolicy};
 use storage::{Database, StorageConfig, StorageHandle};
-use storage::{ExclusiveLeases, try_exclusive};
 use workbench_host::thread_retention::{AutoArchiveCoordinator, RetentionReport};
 use workbench_host::{
     CommandHost,
@@ -59,10 +59,13 @@ impl World {
                 .unwrap(),
         }
     }
-    fn leases(&self) -> ExclusiveLeases {
-        try_exclusive(&self.config.db_path, self.dir.path())
-            .unwrap()
-            .unwrap()
+    fn leases(&self) -> WriterLeases {
+        WriterLeases::acquire(
+            &self.config.db_path,
+            self.dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .unwrap()
     }
     fn host(&self, handle: StorageHandle) -> Arc<Mutex<CommandHost>> {
         let runtime = common::runtime()
@@ -175,7 +178,7 @@ macro_rules! live {
         let $storage =
             ExclusiveFixtureStorage::open($w.config.clone(), $w.dir.path(), &$leases).unwrap();
         let $host = $w.host($storage.handle());
-        let $a = AutoArchiveAuthority::new(&$leases);
+        let $a = $leases.authority().unwrap();
         let mut $c = $w.coordinator();
     };
 }
@@ -424,7 +427,7 @@ fn capability_cannot_authorize_another_mirror_writer() {
     let before = std::fs::read(w.store.path()).unwrap();
     let report = w
         .coordinator()
-        .tick(&host, Some(&AutoArchiveAuthority::new(&leases)), 8 * DAY);
+        .tick(&host, Some(&leases.authority().unwrap()), 8 * DAY);
     assert_eq!(report.published, 0);
     assert_eq!(report.attachment_calls, 0);
     assert!(
@@ -453,7 +456,7 @@ fn partial_attachment_cleanup_resumes_after_restart_with_archiving_disabled_and_
     std::fs::write(outside.join("keep"), b"keep").unwrap();
     std::os::unix::fs::symlink(&outside, files.join("outside-link")).unwrap();
     let leases = w.leases();
-    let authority = AutoArchiveAuthority::new(&leases);
+    let authority = leases.authority().unwrap();
     let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
     let host = w.host(storage.handle());
     let mut first = w.coordinator();
@@ -494,7 +497,7 @@ fn manual_restore_finishes_old_cleanup_and_stale_cursor_keeps_new_active_attachm
     let w = World::new(1);
     let (root, files) = many_attachments(&w);
     let leases = w.leases();
-    let authority = AutoArchiveAuthority::new(&leases);
+    let authority = leases.authority().unwrap();
     let storage = ExclusiveFixtureStorage::open(w.config.clone(), w.dir.path(), &leases).unwrap();
     let host = w.host(storage.handle());
     let mut c = w.coordinator();
@@ -687,7 +690,7 @@ mod c0_measure {
         sql.execute_batch("INSERT INTO events(schema_version,monotonic_ns,kind,subkind,run_id,wall_clock_ns,payload) SELECT 1,0,'Message','MessageCompleted',run_id,1700100000000000000,'{}' FROM thread_runs").unwrap();
         drop(sql);
         let host = w.host(storage.handle());
-        let authority = AutoArchiveAuthority::new(&leases);
+        let authority = leases.authority().unwrap();
         let now = 1_702_000_000_000_000_000;
         let (mut heavy, mut normal_published, mut normal_held) =
             (Vec::new(), Vec::new(), Vec::new());

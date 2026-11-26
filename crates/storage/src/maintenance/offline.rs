@@ -156,12 +156,17 @@ fn lock_shared_within(file: &File, what: &str, max_wait: Duration) -> Result<(),
 
 fn shared_pair(db: File, root: File, max_wait: Duration) -> Result<SharedLeases, StorageError> {
     // A failure of the root lock drops `db` and with it the database lock.
+    let started = std::time::Instant::now();
     lock_shared_within(&db, "database", max_wait)?;
-    lock_shared_within(&root, "ownership root", max_wait)?;
+    lock_shared_within(
+        &root,
+        "ownership root",
+        max_wait.saturating_sub(started.elapsed()),
+    )?;
     Ok(SharedLeases { db, root })
 }
 
-/// Take both locks shared, waiting up to `max_wait` for each. Nothing stays
+/// Take both locks shared, within one total `max_wait` budget. Nothing stays
 /// locked on failure.
 ///
 /// # Errors
@@ -177,22 +182,6 @@ pub fn shared_with_wait(
 }
 
 impl ExclusiveLeases {
-    pub(crate) fn validate_archive_identity(
-        &self,
-        db: &Path,
-        root: &Path,
-    ) -> Result<(), StorageError> {
-        same_lease(&self.db, &lease_path(db)?)?;
-        same_lease(&self.root, &root.join(".ownership-lock"))
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) fn archive_writer_lease(&self) -> Result<File, StorageError> {
-        self.db
-            .try_clone()
-            .map_err(|error| StorageError::Io(error.to_string()))
-    }
-
     /// Give up exclusivity and hold both locks shared for the rest of the process.
     ///
     /// A flock conversion is not atomic: the exclusive lock is removed first, so
@@ -249,7 +238,7 @@ impl RecoveryStartupComplete {
     }
 }
 
-fn same_lease(file: &File, path: &Path) -> Result<(), StorageError> {
+pub(super) fn same_lease(file: &File, path: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -350,7 +339,7 @@ pub(super) fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
 }
 
 /// `<canonical db path><suffix>`; the database need not exist yet.
-fn sibling_path(path: &Path, suffix: &str) -> Result<PathBuf, StorageError> {
+pub(super) fn sibling_path(path: &Path, suffix: &str) -> Result<PathBuf, StorageError> {
     let canonical = path
         .canonicalize()
         .or_else(|_| {

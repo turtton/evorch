@@ -1374,16 +1374,6 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
     let dir = fixture(&mock);
     let mut source = Process::spawn(&dir, "capture_lane");
     source.checkpoint("captured").await;
-    let mut recovered = Process::spawn(&dir, "restore_lane");
-    recovered.checkpoint("bootstrapped").await;
-    recovered.checkpoint("owner_blocked").await;
-    assert_eq!(
-        mock.recorded_requests()
-            .iter()
-            .filter(|r| r.path == "/v1/chat/completions")
-            .count(),
-        1
-    );
     source
         .child
         .stdin
@@ -1394,6 +1384,28 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
         .unwrap();
     source.checkpoint("handed_off").await;
     source.kill().await;
+    // Keep an external ownership claim, not a second core's forbidden DB writer.
+    let blocker = runtime::ownership::OwnerHost::open(
+        dir.sockets(),
+        Default::default(),
+        Arc::new(event_bus::EventBus::new(64)),
+    )
+    .unwrap();
+    blocker
+        .claim(&blocker.attach("orphan-thread").unwrap())
+        .unwrap();
+    let mut recovered = Process::spawn(&dir, "restore_lane");
+    recovered.checkpoint("bootstrapped").await;
+    recovered.checkpoint("owner_blocked").await;
+    assert_eq!(
+        mock.recorded_requests()
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .count(),
+        1
+    );
+    assert!(!blocker.begin_quiesce().unwrap());
+    assert!(!blocker.release_ready().unwrap());
     recovered.checkpoint("lane_restored").await;
     assert!(recovered.child.wait().await.unwrap().success());
     let db = storage::Database::open(&storage::StorageConfig {

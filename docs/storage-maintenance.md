@@ -548,7 +548,7 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - 長時間続く reader は、バックフィル中に WAL の増大を招く。
 - 常時稼働中の live retention（[io-performance.md](io-performance.md#イベントの永続化と保持)）は 1 tick あたりの削除量と時間を制限するため、既存の大きな滞留は本手順で一括処理する。
 
-## thread 自動 archive（PR1: 正本判定と保留中の実装）
+## thread 自動 archive（PR2a: core の writer authority）
 
 ```toml
 [storage.thread_retention]
@@ -557,8 +557,13 @@ archived_delete_after_days = 7
 ```
 
 - それぞれ独立に 0 で新規の archive／削除確定を無効化する。明示した 30 などの値は維持する。確定済み削除の回収や確定済み archive の添付整理は、必要な authority があれば続く。
-- **削除の省略時既定値が 30 日から 7 日へ変わる。次回の core・旧 GUI の起動時排他フェーズでは、7〜30 日前の既存 archive も削除対象になり得る。** 既定値の変更を避ける場合は 30 を明示する。PR1 は削除判定・起動時確定経路を変えない。時刻のない旧 archive の扱いも従来どおり。
-- **PR1 の通常 core は、単一 core 運用でも authority 未配線のため自動 archive・添付整理・scratch hint を実行しない（`AuthorityUnavailable`）。PR2 で authority を配線して有効化する。** この保留時の tick は DB・sidebar・添付を開かず、host mutex も sidebar／添付 lock も取らない。迂回設定はない。
+- **削除の省略時既定値が 30 日から 7 日へ変わる。次回の core・旧 GUI の起動時排他フェーズでは、7〜30 日前の既存 archive も削除対象になり得る。** 既定値の変更を避ける場合は 30 を明示する。PR2a は削除判定・起動時確定経路をオンライン化しない。時刻のない旧 archive の扱いも従来どおり。
+- **通常の単一 core では、自動 archive・添付整理・scratch hint がクライアント接続なしでも動く。** 専用 DB writer lease（`.writer-lock`）は排他必須。競合時は async executor 外で最大 100ms の待機予算（10ms × 10 回、短命 writer の解放待ち）を使い、解放されなければ理由付きで起動を拒否する。maintenance lease の取得も残り予算を使い、core の lease 待機全体を同じ 100ms 予算に収める（既存の起動時排他処理自体の所要時間は別）。通常の前景 handler はこの待機に入らない。OS スケジューリングによる超過はあり得る。
+- root writer lease（`.ownership-writer-lock`）は DB の後に一度だけ試行する。別 config-dir／別 DB の core が同じ ownership root を使う場合、後発も起動するが、自動 archive・自動 root 配下整理だけを `AuthorityUnavailable` として無効にする。root に触れない既存 DB reclaim は継続する。先発終了後も昇格せず、再起動まで無効のまま。保留 tick は DB・sidebar・添付を開かず、host mutex も sidebar／添付 lock も取らない。起動ログに理由を出す。
+- writer lease と既存 maintenance lease は別物。core と read-only inspect は maintenance を共有し、offline 保守は排他のまま。lock ファイルは unlink しない。直接 `Storage::open` と旧 `--legacy-embedded` は DB writer lease を共有取得するため、core 稼働中は接続案内付きで拒否される。新 lease を守らない古いバイナリとの同時利用は保証しない。
+- 自動添付整理／scratch hint は、両 writer lease の authority と DB/root/sidebar の binding 一致が条件。Unbound は host lock の外で root 側を durable に書き、writer ACK で DB 側を確定し、再確認してから整理する。Mismatch でも archive 自体は保存するが、自動 root 配下操作はしない。symlink は辿らず root 外を消さない。
+- planned successor も DB 必須／root 試行で取得し、adopt・activation 前に retention producer を起動しない。停止時は新規 tick 停止→worker join→storage barrier／終了の順で、writer・OwnerHost・producer の寿命を lease が覆う。保守は core の idle busy 理由を増やさず、core 終了後には処理しない。
+- オンライン削除確定・fence・回収統合は PR2b。PR2a は PR1 の sidebar family と正本判定を変更しない。
 - **判定は派生状態を持たない。** 1 tick は 1 family だけを、host mutex の `try_lock` と sidebar lock の同一区間で、正本（events・受理表・`run_contexts`・質問・評価サンプル・lane・`lane_handoffs`）から直接判定する。tick を跨いで持つのは巡回位置だけで、判定の途中結果・投影・backfill・trigger はない。v75 は索引 4 本だけを足す（表・trigger なし）。
 - 判定の手順は、sidebar 再読込、admission の gate stamp（全体・thread・run）採取、メモリ上の確認（実行中 run、メモリ上の goal）、stamp 採取後に始めた 1 つの read transaction での DB 判定、stamp の一致確認、保存・mirror・通知の順。stamp 採取から再確認までの間に前景の admission や event の publish が入ると publish しない。再確認後の admission は archive 済み family 上の通常操作として扱う。
 - 活動は、events の `run_id` ヘッダと受理表（`host_input_receipts`・`host_chat_submissions`）の `accepted_at_ns` で見る。種別は MessageCompleted／FinalResultPublished／MessagePart、TurnCompleted、Delivered（再送も数える）、Running への出入りを示す AgentRunStateChanged（この行だけ復号）。閲覧、sidebar 操作、goal/lane/usage、履歴再構築、handoff コピー（元の時刻を保つ）、復元時の再公開、質問取消、lane close は活動ではない。family の期限は全 member の最終活動の最大から 24 時間×日数（境界時刻以上で到達、overflow で早期処理しない）。
