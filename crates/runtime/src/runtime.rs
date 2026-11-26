@@ -3356,17 +3356,28 @@ impl AgentRuntime {
             .iter()
             .zip(&gates)
             .map(|(_target, gate)| {
+                if between_turns_only {
+                    // Retention already holds the input serializer. Continue
+                    // takes this gate before that serializer, so never wait
+                    // here: an in-flight Continue makes this candidate busy.
+                    return match gate.try_lock() {
+                        Ok(guard) => Ok(guard),
+                        Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+                        Err(std::sync::TryLockError::WouldBlock) => Err(RuntimeError::RestartBusy),
+                    };
+                }
                 #[cfg(test)]
                 {
-                    self.lock_stop_test_gate(*_target, gate)
+                    Ok(self.lock_stop_test_gate(*_target, gate))
                 }
                 #[cfg(not(test))]
                 {
-                    gate.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    Ok(gate
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner))
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
         // Under the restore gates a resume of this run cannot interleave.
         if let Some(expected) = expected
             && self.execution_snapshot(run_id)?.publication().incarnation() != expected

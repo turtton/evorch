@@ -245,3 +245,116 @@ async fn resume_race_cancel_after_registration_prevents_lane_resume_commit() {
         "Cancel won before lane commit: {result:?}"
     );
 }
+
+// A real Continue holds stop_restore_gate before taking the inbox serializer.
+// Pause retention inside that serializer, then let Continue reach its serializer
+// acquisition. Retention must yield instead of forming a lock-order cycle.
+#[tokio::test]
+async fn retention_idle_stop_yields_to_ordinary_continue_holding_restore_gate() {
+    struct PauseStop {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<Barrier>,
+    }
+    impl crate::quiesce::StopBoundary for PauseStop {
+        fn stop(&self, delivery: crate::quiesce::StopDelivery<'_>) -> Result<(), RuntimeError> {
+            let entered = self.entered.lock().unwrap().take();
+            if let Some(entered) = entered {
+                entered.send(()).unwrap();
+                self.release.wait();
+            }
+            delivery.deliver()
+        }
+    }
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let mut events = runtime.shared.bus.subscribe();
+    let mut to_persist = runtime.shared.bus.subscribe();
+    let run = runtime
+        .delegate_chat(
+            "retention-race",
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    loop {
+        if matches!(events.recv().await.unwrap().kind,
+            event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Waiting, ..
+            }) if run_id == run.to_string())
+        {
+            break;
+        }
+    }
+    runtime.bind_thread_root("retention-race", run).unwrap();
+    // This chat fixture has no workbench event pump. Persist and ACK its initial
+    // bus output before taking the retention snapshot, just as the host does.
+    for event in to_persist.drain_pending_snapshot() {
+        if !matches!(event.kind, event_bus::EventKind::Usage(_)) {
+            fixture.storage.handle().append_event(None, &event).unwrap();
+            runtime
+                .shared
+                .bus
+                .persistence_notifications()
+                .notify(&event, event_bus::PersistenceStage::Committed);
+        }
+    }
+    fixture.storage.handle().barrier().unwrap();
+    let old = runtime.execution_snapshot(run).unwrap();
+    let inbox = runtime.entry(run).unwrap().user_inbox.clone();
+    let pause = inbox.pause_next_send(crate::runtime::user_inbox::SendPausePoint::BeforeLock);
+    let release = Arc::new(Barrier::new(2));
+    let (entered, prepared) = tokio::sync::oneshot::channel();
+    runtime
+        .install_stop_boundary(Arc::new(PauseStop {
+            entered: Mutex::new(Some(entered)),
+            release: release.clone(),
+        }))
+        .unwrap();
+    let scope = format!("r:{run}");
+    let before = vec![(scope.clone(), runtime.shared.retention_gate.stamp(&scope))];
+    let retaining = runtime.clone();
+    assert_eq!(before[0].1.pending, 0);
+    let mut stop = tokio::task::spawn_blocking(move || retaining.stop_retention_idle(run, &before));
+    tokio::select! {
+        result = prepared => result.unwrap(),
+        result = &mut stop => panic!("retention did not reach its boundary: {result:?}"),
+    }
+    let continuing = runtime.clone();
+    let send = tokio::task::spawn_blocking(move || {
+        continuing.continue_goal(run, "ordinary followup".into(), RunConfig::default())
+    });
+    let pause = tokio::task::spawn_blocking(move || {
+        pause.reached.recv().unwrap();
+        pause
+    })
+    .await
+    .unwrap();
+    // Continue now owns stop_restore_gate. Both paths may proceed; under the
+    // old blocking Stop they would wait for each other's lock indefinitely.
+    pause.resume.send(()).unwrap();
+    release.wait();
+    assert!(matches!(
+        stop.await.unwrap(),
+        Err(RuntimeError::RestartBusy)
+    ));
+    assert_eq!(send.await.unwrap().unwrap(), run);
+    loop {
+        if matches!(events.recv().await.unwrap().kind,
+            event_bus::EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id, to: AgentRunPhase::Waiting, ..
+            }) if run_id == run.to_string())
+        {
+            break;
+        }
+    }
+    assert!(Arc::ptr_eq(&old, &runtime.execution_snapshot(run).unwrap()));
+    assert!(!runtime.operator_stopped(run));
+    assert_eq!(inbox.status().pending, 0);
+    cleanup(runtime, run).await;
+}
