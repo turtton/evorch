@@ -10,7 +10,12 @@ use std::sync::{
 use storage::thread_retention::TombstoneSet;
 use workspace_state::{ProjectId, SidebarDocument, SidebarStore, ThreadId, ThreadRecord};
 const DAY_NS: i64 = 86_400_000_000_000;
-struct CountedModel(Arc<AtomicUsize>);
+#[derive(Default)]
+struct FirstTurnPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+struct CountedModel(Arc<AtomicUsize>, Option<Arc<FirstTurnPause>>);
 #[async_trait::async_trait]
 impl AgentModel for CountedModel {
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
@@ -23,7 +28,13 @@ impl AgentModel for CountedModel {
         _: &[Message],
         _: &[providers::ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        let previous = self.0.fetch_add(1, Ordering::SeqCst);
+        if previous == 0
+            && let Some(pause) = &self.1
+        {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
         Ok(ChatResponse {
             message: Message {
                 role: MessageRole::Assistant,
@@ -147,7 +158,7 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
         "online family",
     ));
     for i in 0..unrelated {
-        let other = ThreadId::new(&format!("zz-unrelated-{i:04}"));
+        let other = ThreadId::new(format!("zz-unrelated-{i:04}"));
         doc.sidebar.threads.push(ThreadRecord::new(
             other.clone(),
             ProjectId::new("project"),
@@ -158,6 +169,7 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
     doc.sidebar.refresh_derived();
     store.write(&store.lock().unwrap(), &doc).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
+    let first_turn = (unrelated == 0).then(|| Arc::new(FirstTurnPause::default()));
     let mut core = BootstrappedHost::open_with_test_seams(
         BootstrapOptions {
             config_dir: config.clone(),
@@ -165,7 +177,7 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
             project_root: root.path().into(),
         },
         TestSeams {
-            model: Arc::new(CountedModel(calls.clone())),
+            model: Arc::new(CountedModel(calls.clone(), first_turn.clone())),
             sandbox: Arc::new(FixtureSandbox),
         },
     )
@@ -188,6 +200,29 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
             },
         )
         .unwrap();
+    if let Some(pause) = first_turn {
+        pause.entered.notified().await;
+        assert_eq!(
+            core.runtime.inspect_agent(run).unwrap().phase,
+            AgentRunPhase::Running
+        );
+        let before = [String::new(), "t:online-family".into(), format!("r:{run}")]
+            .into_iter()
+            .map(|scope| {
+                let stamp = core.runtime.retention_gate_stamp(&scope);
+                (scope, stamp)
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            core.runtime.stop_retention_idle(run, &before),
+            Err(RuntimeError::RestartBusy)
+        ));
+        assert_eq!(
+            core.runtime.inspect_agent(run).unwrap().phase,
+            AgentRunPhase::Running
+        );
+        pause.release.notify_one();
+    }
     let expected = if interactive {
         AgentRunPhase::Waiting
     } else {
@@ -293,6 +328,7 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
         )
         .unwrap();
     }
+    let stale_sidebar = store.read_unlocked().unwrap();
     let pages_before: i64 = read
         .query_row("PRAGMA page_count", [], |r| r.get(0))
         .unwrap();
@@ -326,6 +362,31 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
                     calls_after_stop,
                     "a failed confirmation never auto-resumes"
                 );
+                // Stop won first. The next explicit user interaction uses the
+                // existing chat restoration route, never an automatic wake.
+                let permit = core.owner.owned_permit("online-family").unwrap();
+                let resumed = core
+                    .runtime
+                    .delegate_chat(
+                        "online-family",
+                        Role::Worker,
+                        "input after Stop".into(),
+                        RunConfig {
+                            interactive: true,
+                            keep_alive: true,
+                            ownership: Some(permit),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == &resumed.to_string())
+                    {
+                        break;
+                    }
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), calls_after_stop + 1);
                 core.shutdown().await.unwrap();
                 return measurements;
             }
@@ -351,6 +412,24 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
             .iter()
             .any(|t| t.id == id)
     );
+    if unrelated == 0 {
+        // Failed post-commit publication leaves this exact durable state: the
+        // tombstone committed, but the old sidebar persisted. Repair uses the
+        // tombstone rather than re-running permission/undoing deletion.
+        store.write(&store.lock().unwrap(), &stale_sidebar).unwrap();
+        for _ in 0..2 {
+            measurements.tick(&core, due, false);
+        }
+        assert!(
+            !store
+                .read_unlocked()
+                .unwrap()
+                .sidebar
+                .threads
+                .iter()
+                .any(|t| t.id == id)
+        );
+    }
     // Exercise retained terminal entries, not an unload/restart shortcut.
     let before = calls.load(Ordering::SeqCst);
     let mut after_delete = core.runtime.event_bus().subscribe();
