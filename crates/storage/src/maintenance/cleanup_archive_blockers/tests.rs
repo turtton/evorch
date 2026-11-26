@@ -15,6 +15,7 @@ struct F {
     config: PathBuf,
     db: PathBuf,
     sidebar: PathBuf,
+    root: PathBuf,
 }
 
 impl F {
@@ -30,7 +31,10 @@ impl F {
         .unwrap();
         drop(database);
         lease_file(&db).unwrap();
+        let root = dir.path().join("threads");
+        fs::create_dir(&root).unwrap();
         let f = Self {
+            root,
             sidebar: config.join("sidebar.json"),
             dir,
             config,
@@ -161,6 +165,7 @@ impl F {
         CleanupApplyOptions {
             db: self.db.clone(),
             config_dir: self.config.clone(),
+            ownership_root: self.root.clone(),
             sidebar: self.sidebar.clone(),
             plan: plan.to_owned(),
             backup: backup.to_owned(),
@@ -564,6 +569,51 @@ fn a_non_empty_wal_is_refused_by_preview_and_apply_and_never_recovered() {
     );
     assert!(!f.backup_path().exists());
     drop(live);
+}
+
+#[test]
+fn a_running_writer_of_either_lease_refuses_apply_and_changes_nothing() {
+    use crate::maintenance::writer_leases::WriterLeases;
+    use std::time::Duration;
+    let f = F::standard();
+    let plan = f.preview();
+    let path = f.save(&plan);
+    let before = f.state();
+    let backup = f.backup_path();
+
+    // A core's writer leases (DB and root): apply is refused until they are released.
+    let core = WriterLeases::acquire(&f.db, &f.root, Duration::ZERO).unwrap();
+    assert!(core.has_root_writer());
+    let message = error_text(apply_archive_blocker_cleanup(&f.options(&path, &backup)));
+    assert!(message.contains("DB writer"), "{message}");
+    assert_eq!(f.state(), before);
+    assert!(!backup.exists());
+    drop(core);
+
+    // Another core that only shares the ownership root (a different database).
+    let other_db = f.dir.path().join("other.db");
+    drop(
+        Database::open(&StorageConfig {
+            db_path: other_db.clone(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let other = WriterLeases::acquire(&other_db, &f.root, Duration::ZERO).unwrap();
+    assert!(other.has_root_writer());
+    let message = error_text(apply_archive_blocker_cleanup(&f.options(&path, &backup)));
+    assert!(message.contains("root writer lease"), "{message}");
+    assert_eq!(f.state(), before);
+    assert!(!backup.exists());
+    drop(other);
+
+    // With both released the same plan applies.
+    assert_eq!(
+        apply_archive_blocker_cleanup(&f.options(&path, &backup))
+            .unwrap()
+            .status,
+        "applied"
+    );
 }
 
 #[test]

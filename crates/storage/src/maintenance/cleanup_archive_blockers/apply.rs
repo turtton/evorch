@@ -23,6 +23,8 @@ const MAX_PLAN_BYTES: u64 = 256 * 1024 * 1024;
 pub struct CleanupApplyOptions {
     pub db: PathBuf,
     pub config_dir: PathBuf,
+    /// The ownership root the cores of this database use (root writer lease).
+    pub ownership_root: PathBuf,
     pub sidebar: PathBuf,
     pub plan: PathBuf,
     pub backup: PathBuf,
@@ -161,8 +163,8 @@ fn read_receipt(conn: &Connection, plan_hash: &str) -> Result<Option<Receipt>, S
 /// Applies `plan` to the database.
 ///
 /// The caller holds the configuration's launch and lifetime locks for the whole call (the
-/// storage crate cannot take them); this function holds the database maintenance lease and
-/// the SQLite exclusive lock.
+/// storage crate cannot take them); this function holds the database maintenance lease, the DB
+/// and root writer leases (in that order) and the SQLite exclusive lock.
 ///
 /// # Errors
 /// Any difference between the plan and the database, a non-empty WAL, a missing or
@@ -189,6 +191,9 @@ pub(super) fn apply_with(
             "database is in use; stop all evorch processes: {error}"
         ))
     })?;
+    // The writer leases are independent of the maintenance lease: DB first, then root.
+    let _writers =
+        super::super::writer_leases::exclusive_writer_proof(&db, &options.ownership_root)?;
     require_empty_wal(&db)?;
     let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     enable_foreign_keys(&conn)?;

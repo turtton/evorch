@@ -231,12 +231,20 @@ fn run_cleanup(db: Option<PathBuf>, cleanup: CleanupArgs) -> Result<Value, Strin
         let plan = cleanup.plan.ok_or(USAGE)?;
         let backup = cleanup.backup.ok_or(USAGE)?;
         let _guard = core_instance::MaintenanceGuard::acquire(&config_dir).map_err(refused)?;
+        // The same directory a core uses for its owner registry and root writer lease.
+        let ownership_root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
+            .ok_or("cannot resolve the ownership state directory")?
+            .join("evorch")
+            .join("threads");
         eprintln!(
             "Applying the saved plan: cancels pending questions and discards open lanes in one transaction after a verified backup. Keep the backup secure: it holds the original data."
         );
         let summary = apply_archive_blocker_cleanup(&CleanupApplyOptions {
             db,
             config_dir,
+            ownership_root,
             sidebar,
             plan,
             backup,

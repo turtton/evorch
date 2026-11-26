@@ -185,6 +185,50 @@ impl WriterLeases {
     }
 }
 
+/// Offline maintenance that changes data proves no writer exists: the DB writer lease and then
+/// the root writer lease, both exclusive and never waited for (DB first, as in
+/// [`WriterLeases::acquire`]). A running core, a legacy embedded writer or another core sharing
+/// the ownership root makes it fail. A root directory that does not exist yet has no writer.
+/// Held until dropped; the lock files are never unlinked.
+#[derive(Debug)]
+pub struct ExclusiveWriterProof {
+    _db: File,
+    _root: Option<File>,
+}
+
+/// # Errors
+/// Either writer lease is held by another process, or a lock file is not the one at its path.
+pub fn exclusive_writer_proof(
+    db: &Path,
+    root: &Path,
+) -> Result<ExclusiveWriterProof, StorageError> {
+    let db_path = sibling_path(db, ".writer-lock")?;
+    let lock = open(&db_path)?;
+    lock.try_lock().map_err(|error| {
+        invalid(format!(
+            "a DB writer (a core or a legacy embedded writer) is running; stop it completely first: {error}"
+        ))
+    })?;
+    same_lease(&lock, &db_path)?;
+    let root = if root.is_dir() {
+        let path = root.join(".ownership-writer-lock");
+        let file = open(&path)?;
+        file.try_lock().map_err(|error| {
+            invalid(format!(
+                "another core holds the root writer lease of this ownership root; stop it completely first: {error}"
+            ))
+        })?;
+        same_lease(&file, &path)?;
+        Some(file)
+    } else {
+        None
+    };
+    Ok(ExclusiveWriterProof {
+        _db: lock,
+        _root: root,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

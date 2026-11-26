@@ -595,12 +595,11 @@ evorch maintenance cleanup-archive-blockers --config-dir "$CONFIG" --apply \
 - commit 後に checkpoint が終わらなかった場合は、通常の起動 → 正常終了 → **同じ plan で apply を再実行**して `already_applied` を確認する。
 - 上記以外（receipt なしで DB が変わっている等）は無変更で拒否される。再 preview から始める。
 
-### PR2a（writer lease）との関係
+### writer lease（PR2a）
 
-PR2a の DB／root writer 専用 lease が入った後は、その lease も apply の排他証明に含める（取得順は DB → root）。PR3 が先にマージされた場合、その追加は PR2a が担う。
+apply は config の launch／lifetime lock と DB 保守 lease に加え、core の **DB writer 専用 lease（`<db>.writer-lock`）と root writer 専用 lease（`<ownership root>/.ownership-writer-lock`）を DB → root の順で排他取得**してから WAL を確認する。待機はせず、core・legacy embedded writer・同じ ownership root を共有する別 DB の core のいずれかが動いていれば無変更で拒否する。ownership root は core と同じ `$XDG_STATE_HOME/evorch/threads`（未設定なら `~/.local/state/evorch/threads`）。ディレクトリが無ければ writer は存在しないので root lease は取らない。preview は lease を取らず、lock ファイルも作らない。
 
 ## thread 自動 archive（PR2a: core の writer authority）
->>>>>>> 22e9a287 (feat(maintenance): cancel pending questions and discard open lanes once, offline (PR3))
 
 ```toml
 [storage.thread_retention]

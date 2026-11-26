@@ -1239,6 +1239,7 @@ async fn offline_cancelled_question_neither_blocks_finish_nor_is_injected_as_an_
         &storage::maintenance::CleanupApplyOptions {
             db: config.db_path.clone(),
             config_dir: config_dir.clone(),
+            ownership_root: dir.path().join("threads"),
             sidebar: config_dir.join("sidebar.json"),
             plan,
             backup: dir.path().join("backup.db"),

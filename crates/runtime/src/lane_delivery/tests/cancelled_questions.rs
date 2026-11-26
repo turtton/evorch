@@ -119,6 +119,7 @@ async fn restart_and_tick(apply_cleanup: bool) -> (usize, usize, i64) {
             &::storage::maintenance::CleanupApplyOptions {
                 db: config.db_path.clone(),
                 config_dir: config_dir.clone(),
+                ownership_root: config_dir.join("threads"),
                 sidebar: config_dir.join("sidebar.json"),
                 plan,
                 backup: config_dir.join("backup.db"),
