@@ -597,7 +597,7 @@ evorch maintenance cleanup-archive-blockers --config-dir "$CONFIG" --apply \
 
 ### writer lease（PR2a）
 
-apply は config の launch／lifetime lock と DB 保守 lease に加え、core の **DB writer 専用 lease（`<db>.writer-lock`）と root writer 専用 lease（`<ownership root>/.ownership-writer-lock`）を DB → root の順で排他取得**してから WAL を確認する。待機はせず、core・legacy embedded writer・同じ ownership root を共有する別 DB の core のいずれかが動いていれば無変更で拒否する。ownership root は core と同じ `$XDG_STATE_HOME/evorch/threads`（未設定なら `~/.local/state/evorch/threads`）。ディレクトリが無ければ writer は存在しないので root lease は取らない。preview は lease を取らず、lock ファイルも作らない。
+apply は config の launch／lifetime lock と DB 保守 lease に加え、core の **DB writer 専用 lease（`<db>.writer-lock`）と root writer 専用 lease（`<ownership root>/.ownership-writer-lock`）を DB → root の順で排他取得**してから WAL を確認する。待機はせず、core・legacy embedded writer・同じ ownership root を共有する別 DB の core のいずれかが動いていれば無変更で拒否する。ownership root は core と同じ `$XDG_STATE_HOME/evorch/threads`（未設定なら `~/.local/state/evorch/threads`）。ディレクトリが無ければ作成して root lease を実際に取得し、apply の終了まで保持する（作成も取得もできなければ拒否する）。preview は lease を取らず、lock ファイルも作らない。
 
 ## thread 自動 archive（PR2a: core の writer authority）
 
