@@ -53,6 +53,7 @@ pub(super) enum Fault {
     AfterLanes,
     BeforeCommit,
     AfterCommit,
+    Checkpoint,
 }
 
 impl Fault {
@@ -248,11 +249,22 @@ pub(super) fn apply_with(
     summary.backup = Some(backup.path);
     summary.backup_reused = backup.reused;
     fault.hit(Fault::AfterCommit)?;
-    let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-    if busy != 0 {
-        return Err(invalid(
-            "the cleanup is COMMITTED (its receipt is stored) but the WAL checkpoint is incomplete: start evorch once, exit it cleanly, then rerun the same apply command to confirm already_applied",
-        ));
+    const COMMITTED: &str = "the cleanup is COMMITTED (its receipt is stored) but the WAL checkpoint is incomplete: start evorch once, exit it cleanly, then rerun the same apply command to confirm already_applied";
+    // Any failure of the checkpoint (a busy reader or an SQL/I/O error) is reported as
+    // committed: the receipt is stored, so the same plan confirms it on a rerun.
+    let checkpoint = fault
+        .hit(Fault::Checkpoint)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| error.to_string())
+        });
+    match checkpoint {
+        Ok(0) => {}
+        Ok(_) => return Err(invalid(COMMITTED)),
+        Err(error) => return Err(invalid(format!("{COMMITTED} ({error})"))),
     }
     summary.checkpoint_truncated = true;
     summary.message = "applied and checkpointed".into();

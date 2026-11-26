@@ -638,6 +638,23 @@ fn a_failure_after_commit_keeps_one_receipt_and_the_rerun_confirms_it() {
 }
 
 #[test]
+fn a_checkpoint_error_after_commit_is_reported_as_committed() {
+    let f = F::standard();
+    let plan = f.preview();
+    let path = f.save(&plan);
+    let backup = f.backup_path();
+    let error = apply_with(&f.options(&path, &backup), Fault::Checkpoint).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("COMMITTED"), "{message}");
+    assert!(message.contains("already_applied"), "{message}");
+    let after = f.state();
+    assert_eq!(after.iter().filter(|row| row.len() == 64).count(), 1);
+    let again = apply_archive_blocker_cleanup(&f.options(&path, &backup)).unwrap();
+    assert_eq!(again.status, "already_applied");
+    assert_eq!(f.state(), after);
+}
+
+#[test]
 fn backups_are_never_overwritten_or_aliased() {
     let f = F::standard();
     let plan = f.preview();
@@ -747,6 +764,14 @@ fn an_unreadable_sidebar_makes_the_plan_unappliable_and_nothing_is_assumed() {
         (
             "run_ids",
             Some("{\"threads\":[{\"id\":\"t\",\"run_ids\":[1]}]}"),
+        ),
+        (
+            "run_ids missing",
+            Some("{\"threads\":[{\"id\":\"t\",\"root_run_id\":\"r\"}]}"),
+        ),
+        (
+            "run_ids null",
+            Some("{\"threads\":[{\"id\":\"t\",\"run_ids\":null}]}"),
         ),
     ] {
         let f = F::standard();

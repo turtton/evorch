@@ -63,7 +63,11 @@ impl SidebarBindings {
                 .ok_or("a sidebar thread has no string `id`")?;
             let mut runs = Vec::new();
             match thread.get("run_ids") {
-                None | Some(Value::Null) => {}
+                None | Some(Value::Null) => {
+                    return Err(format!(
+                        "sidebar thread {id} has no `run_ids`: its bindings cannot be established"
+                    ));
+                }
                 Some(Value::Array(items)) => {
                     for item in items {
                         runs.push(

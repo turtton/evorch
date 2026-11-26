@@ -90,6 +90,8 @@ pub(super) fn ensure_backup(
 ) -> Result<Backup, StorageError> {
     let target = target_path(source, backup)?;
     let source_meta = fs::metadata(source).map_err(io)?;
+    // The source's own headroom is needed whether the backup is new or reused.
+    require_space(parent_of(source), HEADROOM_BYTES)?;
     match fs::symlink_metadata(&target) {
         Ok(meta) => {
             if meta.file_type().is_symlink() || !meta.is_file() {
@@ -124,7 +126,6 @@ pub(super) fn ensure_backup(
     let size = source_meta.len();
     require_space(&parent, size.saturating_add(HEADROOM_BYTES))?;
     let source_parent = parent_of(source);
-    require_space(source_parent, HEADROOM_BYTES)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
