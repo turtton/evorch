@@ -243,18 +243,31 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
             instance.identity.clone(),
         ))
     };
-    let current = Arc::new(Mutex::new(backend_for(&boot)));
+    let current = Arc::new(Mutex::new(Some(backend_for(&boot))));
     let cuts = Arc::new(Mutex::new(Vec::<tokio::sync::watch::Sender<bool>>::new()));
+    let connections = Arc::new(Mutex::new(Vec::new()));
     let (accepted, mut acceptances) = tokio::sync::watch::channel(0usize);
     let serving = tokio::spawn({
-        let (current, cuts, accepted) = (current.clone(), cuts.clone(), accepted.clone());
+        let (current, cuts, connections, accepted) = (
+            current.clone(),
+            cuts.clone(),
+            connections.clone(),
+            accepted.clone(),
+        );
         async move {
             while let Ok((stream, _)) = listener.accept().await {
+                let Some(backend) = current.lock().unwrap().clone() else {
+                    continue;
+                };
                 let (cut, stopped) = tokio::sync::watch::channel(false);
                 cuts.lock().unwrap().push(cut);
-                let backend = current.lock().unwrap().clone();
                 accepted.send_modify(|count| *count += 1);
-                tokio::spawn(evorch_core::unix::connection(stream, backend, stopped));
+                connections
+                    .lock()
+                    .unwrap()
+                    .push(tokio::spawn(evorch_core::unix::connection(
+                        stream, backend, stopped,
+                    )));
             }
         }
     });
@@ -368,13 +381,19 @@ async fn two_windows_edit_the_sidebar_through_the_core_and_converge_across_a_cor
         .cursor()
         .unwrap()
         .core_epoch;
-    boot.shutdown().await.unwrap();
-    drop(boot);
-    let mut boot = open_core(&config, &repo, &owners).await;
-    *current.lock().unwrap() = backend_for(&boot);
+    // A real process exit releases every backend reference, not only bootstrap.
+    *current.lock().unwrap() = None;
     for cut in cuts.lock().unwrap().drain(..) {
         cut.send(true).unwrap();
     }
+    let closing = std::mem::take(&mut *connections.lock().unwrap());
+    for connection in closing {
+        assert!(connection.await.is_ok());
+    }
+    boot.shutdown().await.unwrap();
+    drop(boot);
+    let mut boot = open_core(&config, &repo, &owners).await;
+    *current.lock().unwrap() = Some(backend_for(&boot));
     // The windows reconnect when asked to (a user's "reconnect" or the
     // supervisor's retry), not on their own.
     for actions in [&actions_a, &actions_b] {

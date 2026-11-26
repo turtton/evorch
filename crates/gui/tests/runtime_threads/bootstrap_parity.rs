@@ -226,6 +226,7 @@ max_bytes = 2097152
             .is_empty()
     );
     core.shutdown().await.unwrap();
+    drop(core);
 
     // Exercise real GUI approval and its serialized sidebar, not a hand-written
     // projection. Both paths must grant the same access and project rules.
