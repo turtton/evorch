@@ -8,6 +8,7 @@ mod save;
 mod save_agent_bindings;
 mod save_codex_provider;
 mod save_context_contract;
+mod save_feature_settings;
 mod save_model_kinds;
 mod save_provider;
 mod save_routing;

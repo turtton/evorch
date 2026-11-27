@@ -634,69 +634,6 @@ fn a_new_provider_form_names_what_is_missing_and_sends_nothing() {
     screen.get_by_label("Enter a base URL.");
 }
 
-// Given: a screen with the Agent web tools control
-// When: web tools are enabled and the core accepts, disabled and the core refuses, and
-//       enabled again with a lost reply
-// Then: each click sends exactly one execution command with the chosen value; the
-//       outcomes are shown; a lost reply is shown as unknown and nothing is resent
-#[test]
-fn the_agent_web_tools_control_sends_one_command_and_shows_each_outcome() {
-    use workbench_protocol::commands::SetAgentWebToolsEnabled;
-    use workbench_protocol::namespaces::ExecutionCommand;
-    let web = |action: &crate::core_client::features::FeatureAction| match command_of(action) {
-        Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
-            SetAgentWebToolsEnabled { enabled },
-        )) => *enabled,
-        other => panic!("a web tools command was expected: {other:?}"),
-    };
-    let mut screen = loaded('a');
-    screen.get_by_label("Enable web tools").click();
-    let sent = asked(&mut screen);
-    assert_eq!(sent.len(), 1);
-    assert!(web(&sent[0]));
-    answer(&mut screen, sent[0].tag, ok_command());
-    assert!(
-        screen
-            .query_all_by_label_contains("Agent web tools enabled")
-            .next()
-            .is_some()
-    );
-
-    screen.get_by_label("Disable web tools").click();
-    let sent = asked(&mut screen);
-    assert!(!web(&sent[0]));
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::new("permission denied"))),
-    );
-    assert!(
-        screen
-            .query_all_by_label_contains("Could not disable Agent web tools: permission denied")
-            .next()
-            .is_some()
-    );
-
-    screen.get_by_label("Enable web tools").click();
-    let sent = asked(&mut screen);
-    assert!(web(&sent[0]));
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
-    );
-    assert!(
-        screen
-            .query_all_by_label_contains("is unknown (not resent)")
-            .next()
-            .is_some()
-    );
-    assert!(
-        asked(&mut screen).is_empty(),
-        "a lost reply is not sent again"
-    );
-}
-
 // Given: a provider form opened at revision `a`
 // When: the file changes to `b` before it is saved, and then the form is saved as it is,
 //       and then opened again on the newest content and saved
@@ -807,125 +744,6 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
     screen.get_by_label("Save");
 }
 
-// Given: a web tools change whose reply was lost
-// When: the screen reconnects (its features are reset) and the core's recorded result for
-//       that command then arrives
-// Then: the result replaces "unknown" on the screen, and nothing was sent again
-#[test]
-fn a_web_tools_result_resolved_after_a_reconnect_is_shown() {
-    let mut screen = loaded('a');
-    screen.get_by_label("Enable web tools").click();
-    let sent = asked(&mut screen);
-    assert_eq!(sent.len(), 1);
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
-    );
-    assert!(
-        screen
-            .query_all_by_label_contains("is unknown (not resent)")
-            .next()
-            .is_some()
-    );
-    screen.state_mut().feature.reset();
-    let read = asked(&mut screen);
-    answer(&mut screen, read[0].tag, snapshot('a', 'a'));
-    // The resolved reply is for the same tag: it comes after the reset.
-    answer(&mut screen, sent[0].tag, ok_command());
-    assert!(
-        screen
-            .query_all_by_label_contains("Agent web tools enabled")
-            .next()
-            .is_some(),
-        "the resolved result is shown"
-    );
-    assert!(
-        screen
-            .query_all_by_label_contains("is unknown (not resent)")
-            .next()
-            .is_none()
-    );
-    assert!(
-        asked(&mut screen).iter().all(|a| matches!(
-            a.request,
-            crate::core_client::features::FeatureRequest::Query(_)
-        )),
-        "no command is sent again"
-    );
-
-    // A refusal that resolves later is shown with its reason as well.
-    screen.get_by_label("Disable web tools").click();
-    let sent = asked(&mut screen);
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
-    );
-    screen.state_mut().feature.reset();
-    let read = asked(&mut screen);
-    answer(&mut screen, read[0].tag, snapshot('a', 'a'));
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::new("permission denied"))),
-    );
-    assert!(
-        screen
-            .query_all_by_label_contains("Could not disable Agent web tools: permission denied")
-            .next()
-            .is_some()
-    );
-}
-
-// Given: a web tools change whose reply was lost, and the core has no record of it (the
-//        receipt stays unknown, so no resolved result ever arrives)
-// When: nothing more arrives, and then the user chooses again
-// Then: "unknown" stays on the screen, nothing is sent by itself, the controls work again,
-//       and the new choice is one new command
-#[test]
-fn a_web_tools_change_with_no_recorded_result_does_not_disable_the_controls() {
-    use workbench_protocol::commands::SetAgentWebToolsEnabled;
-    use workbench_protocol::namespaces::ExecutionCommand;
-    let mut screen = loaded('a');
-    screen.get_by_label("Enable web tools").click();
-    let sent = asked(&mut screen);
-    assert_eq!(sent.len(), 1);
-    answer(
-        &mut screen,
-        sent[0].tag,
-        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
-    );
-    screen.state_mut().feature.reset();
-    let read = asked(&mut screen);
-    answer(&mut screen, read[0].tag, snapshot('a', 'a'));
-    assert!(asked(&mut screen).is_empty(), "nothing is sent by itself");
-    assert!(
-        screen
-            .query_all_by_label_contains("is unknown (not resent)")
-            .next()
-            .is_some(),
-        "the unknown outcome stays shown"
-    );
-    // Both controls accept a click again.
-    screen.get_by_label("Disable web tools").click();
-    let again = asked(&mut screen);
-    assert_eq!(again.len(), 1, "one click, one new command");
-    assert!(matches!(
-        command_of(&again[0]),
-        Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
-            SetAgentWebToolsEnabled { enabled: false }
-        ))
-    ));
-    answer(&mut screen, again[0].tag, ok_command());
-    assert!(
-        screen
-            .query_all_by_label_contains("Agent web tools disabled")
-            .next()
-            .is_some()
-    );
-}
-
 // Given: a reload whose reply was lost
 // When: asking for its operation fails with an error other than not-found
 // Then: the screen is not left busy, and the error is shown
@@ -978,4 +796,145 @@ fn the_footer_opens_the_modal_while_an_operation_runs() {
     let feature = screen.state_mut().feature.as_settings_mut().unwrap();
     feature.open_modal(SettingsTab::Routing);
     assert_eq!(feature.modal_tab(), Some(SettingsTab::Routing));
+}
+
+fn feature_view(revision: char, web_tools: bool) -> FeatureReply {
+    use workbench_protocol::namespaces::settings::{
+        BrowserFeature, FeatureSettingsView, FeatureValues, PullRequestFeature,
+        ThreadCleanupFeature,
+    };
+    let values = FeatureValues {
+        pull_requests: PullRequestFeature {
+            enabled: false,
+            auto_fix_enabled: false,
+            include_in_review: true,
+            pending_poll_seconds: 30,
+            stable_poll_seconds: 300,
+            timeout_seconds: 30,
+        },
+        agent_web_tools: web_tools,
+        browser: BrowserFeature {
+            enabled: true,
+            executable: None,
+            max_pages: 8,
+            max_tabs: 4,
+            coordinate_actions: false,
+        },
+        thread_cleanup: ThreadCleanupFeature {
+            auto_archive_after_days: 0,
+            archived_delete_after_days: 0,
+        },
+    };
+    FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::FeatureSettings(
+        Box::new(FeatureSettingsView {
+            revision: revision_of(revision),
+            saved: values.clone(),
+            running: values,
+            restart_pending: vec![],
+            problem: None,
+        }),
+    ))))
+}
+
+fn revision_of(c: char) -> SettingsRevision {
+    revision(c)
+}
+
+/// A screen with the Features modal open over a view saved at revision `a`.
+fn features_loaded() -> Harness<'static, Screen> {
+    let mut screen = loaded('a');
+    screen
+        .state_mut()
+        .feature
+        .as_settings_mut()
+        .expect("the settings feature")
+        .open_features();
+    let asked = asked(&mut screen);
+    let query = asked
+        .iter()
+        .find(|action| {
+            matches!(
+                query_of(action),
+                Query::Settings(SettingsQuery::GetFeatureSettings {})
+            )
+        })
+        .expect("the feature view is read when the modal opens");
+    answer(&mut screen, query.tag, feature_view('a', true));
+    screen.run_steps(8);
+    screen
+}
+
+// Given: the Config file tab / When: it is drawn
+// Then: it has no session-only web tools switch (the persistent one is in Features)
+#[test]
+fn the_config_file_tab_has_no_session_only_web_tools_switch() {
+    let screen = loaded('a');
+    for label in ["Enable web tools", "Disable web tools", "Agent web tools"] {
+        assert!(screen.query_by_label(label).is_none(), "{label}");
+    }
+}
+
+// Given: the Features modal on a view saved at `a`
+// When: Agent web tools is switched off and saved, and the core refuses
+// Then: exactly one command quotes `a` with only the web tools section, the refusal is
+//       shown, the draft is kept, and the same save can be sent again as a new operation
+#[test]
+fn a_refused_feature_save_keeps_the_draft_and_can_be_sent_again() {
+    let mut screen = features_loaded();
+    screen
+        .get_by_role_and_label(Role::CheckBox, "Agent web tools")
+        .click();
+    screen.run_steps(4);
+    screen.get_by_label("Save").click();
+    let sent = asked(&mut screen);
+    assert_eq!(sent.len(), 1);
+    let SettingsCommand::SaveFeatureSettings(first) = settings_command(&sent[0]) else {
+        panic!("a feature save was expected");
+    };
+    assert_eq!(first.expected_revision, revision('a'));
+    assert_eq!(first.changes.agent_web_tools, Some(false));
+    assert!(first.changes.pull_requests.is_none());
+    assert!(first.changes.browser.is_none());
+    assert!(first.changes.thread_cleanup.is_none());
+    let first_id = first.operation_id.clone();
+
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::new("permission denied"))),
+    );
+    screen.run_steps(4);
+    assert!(screen.query_all_by_label("permission denied").count() >= 1);
+    screen.get_by_label("Save").click();
+    let again: Vec<_> = asked(&mut screen)
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                action.request,
+                crate::core_client::features::FeatureRequest::Command(_)
+            )
+        })
+        .collect();
+    assert_eq!(again.len(), 1);
+    let SettingsCommand::SaveFeatureSettings(second) = settings_command(&again[0]) else {
+        panic!("a feature save was expected");
+    };
+    assert_ne!(second.operation_id, first_id);
+    assert_eq!(second.changes.agent_web_tools, Some(false));
+}
+
+// Given: a feature save in flight
+// When: the screen is pressed to Save again before the core answers
+// Then: nothing more is sent
+#[test]
+fn a_feature_save_in_flight_is_not_sent_twice() {
+    let mut screen = features_loaded();
+    screen
+        .get_by_role_and_label(Role::CheckBox, "Agent web tools")
+        .click();
+    screen.run_steps(4);
+    screen.get_by_label("Save").click();
+    assert_eq!(asked(&mut screen).len(), 1);
+    screen.run_steps(4);
+    assert!(asked(&mut screen).is_empty());
 }

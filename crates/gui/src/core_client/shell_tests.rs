@@ -3110,6 +3110,7 @@ mod sidebar_lanes;
 
 mod composer;
 mod english_panes;
+mod features;
 mod many_subagents;
 mod new_chat;
 mod pull_requests;

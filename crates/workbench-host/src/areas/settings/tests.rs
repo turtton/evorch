@@ -95,6 +95,7 @@ async fn announcements_in_order(first: Change, second: Change) {
         reload_models: Arc::new(|| Ok(())),
         tasks: super::super::AreaTasks::new(handle.clone()),
         source: projection.source("settings").unwrap(),
+        features: Arc::new(feature_options::Unwired),
     });
     let inner = settings.inner.as_ref().unwrap().clone();
     let mut events = projection

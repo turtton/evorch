@@ -15,6 +15,7 @@
 //! handlers only look at the table. The task keeps the restart permit its
 //! command was accepted with until the outcome is settled: a save is bounded
 //! I/O, it never waits for a person.
+pub mod feature_options;
 pub(in crate::areas) mod operations;
 pub(in crate::areas) mod store;
 
@@ -61,6 +62,8 @@ pub struct SettingsParts {
     pub reload_models: ReloadModels,
     pub tasks: super::AreaTasks,
     pub source: ProjectionSource,
+    /// What the Features screen follows at once in the running core.
+    pub features: Arc<dyn feature_options::FeatureRuntime>,
 }
 
 struct Inner {
@@ -68,6 +71,7 @@ struct Inner {
     reload: ReloadModels,
     tasks: super::AreaTasks,
     source: ProjectionSource,
+    features: Arc<dyn feature_options::FeatureRuntime>,
     state: Mutex<State>,
     /// One writer at a time, held across compare, check and write.
     writer: Arc<tokio::sync::Mutex<()>>,
@@ -78,6 +82,8 @@ struct Inner {
 struct State {
     operations: Operations<SettingsOperationView>,
     snapshot: SettingsSnapshot,
+    /// The Features values the files held when they were last read.
+    features: feature_options::SavedFeatures,
     /// Numbers the re-reads in the order they started, and the number of the
     /// newest one whose result was published: a slower, older re-read never
     /// replaces what a newer one already published.
@@ -155,6 +161,7 @@ impl SettingsArea {
             reload_models: handles.reload_models.clone(),
             tasks: handles.tasks.clone(),
             source,
+            features: Arc::new(handles.runtime.clone()),
         }))
     }
 
@@ -164,15 +171,18 @@ impl SettingsArea {
         let store = Arc::new(ConfigStore::new(parts.config_dir, parts.startup));
         let applied = store.revision().unwrap_or_else(|_| revision_of(&[]));
         let snapshot = store.snapshot(Some(&applied));
+        let features = feature_options::SavedFeatures::read(&store);
         Self {
             inner: Some(Arc::new(Inner {
                 store,
                 reload: parts.reload_models,
                 tasks: parts.tasks,
                 source: parts.source,
+                features: parts.features,
                 state: Mutex::new(State {
                     operations: Operations::new(MAX_OPERATIONS),
                     snapshot,
+                    features,
                     reads_started: 0,
                     reads_published: 0,
                 }),
@@ -403,6 +413,7 @@ impl Inner {
                 })
             }
             SettingsCommand::ReloadModels(_) => self.reload_models().await,
+            SettingsCommand::SaveFeatureSettings(save) => self.save_feature_settings(save).await,
         }
     }
 
@@ -477,6 +488,10 @@ impl Inner {
         };
         let store = self.store.clone();
         let mut fresh = Self::blocking(move || store.snapshot(applied.as_ref())).await?;
+        let saved_features = {
+            let store = self.store.clone();
+            Self::blocking(move || feature_options::SavedFeatures::read(&store)).await?
+        };
         // Only the snapshot update and its publication are serialized here;
         // file I/O stays outside the state lock.
         let mut state = lock(&self.state);
@@ -484,6 +499,7 @@ impl Inner {
             return Ok(());
         }
         state.reads_published = ticket;
+        state.features = saved_features;
         fresh
             .applied_revision
             .clone_from(&state.snapshot.applied_revision);
