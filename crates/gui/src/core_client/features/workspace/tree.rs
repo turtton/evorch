@@ -367,6 +367,9 @@ pub struct LaneLimit<'a> {
     pub rows: Vec<(ThreadRow<'a>, usize)>,
     /// The groups by the thread they belong to.
     pub groups: HashMap<&'a str, LaneGroup>,
+    /// What the limit left out anywhere below a kept row, by the row's thread: a folded
+    /// row adds it to what its shown descendants roll up.
+    pub omitted_below: HashMap<&'a str, Hidden>,
     /// By the index in `rows` of the last row of a thread's subtree, the threads whose
     /// lane controls follow it, innermost first.
     pub controls: HashMap<usize, Vec<&'a str>>,
@@ -486,6 +489,24 @@ pub fn limit_lanes<'a>(
             kept.push(*row);
         }
     }
+    let mut omitted_below: HashMap<&'a str, Hidden> = HashMap::new();
+    let mut ancestors: Vec<(usize, usize)> = Vec::new();
+    for (index, &(row, depth)) in rows.iter().enumerate() {
+        while ancestors.last().is_some_and(|&(_, above)| above >= depth) {
+            ancestors.pop();
+        }
+        if dropped[index] {
+            for &(ancestor, _) in ancestors.iter().filter(|&&(at, _)| !dropped[at]) {
+                let below = omitted_below.entry(rows[ancestor].0.id()).or_default();
+                *below = Hidden {
+                    count: below.count + 1,
+                    running: below.running || row.running,
+                    attention: below.attention.merge(row.own),
+                };
+            }
+        }
+        ancestors.push((index, depth));
+    }
     let mut controls: HashMap<usize, Vec<&'a str>> = HashMap::new();
     // A deeper thread starts later in tree order, so reading backwards gives innermost first.
     for &(lead, end) in ends.iter().rev() {
@@ -496,6 +517,7 @@ pub fn limit_lanes<'a>(
     LaneLimit {
         rows: kept,
         groups,
+        omitted_below,
         controls,
     }
 }
@@ -988,5 +1010,46 @@ mod tests {
         let page = limit_lanes(&tree.main, LANE_PAGE, |_| LaneView::Page);
         assert_eq!(page.rows.len(), tree.main.len());
         assert_eq!(page.groups["lead"].omitted_lanes, 0);
+    }
+
+    // Given: root → lane "mid" → lanes "a" and "b" of mid, b asking for an answer, and mid's
+    //        own lane list collapsed
+    // When: the lanes are limited
+    // Then: mid and root both count the two omitted lanes and what b asks, once each; mid's
+    //       own group says the same, and an open view omits nothing below either
+    #[test]
+    fn omitted_lanes_are_counted_for_every_ancestor_once() {
+        let mut world = World::new(&[("root", 10), ("mid", 9), ("a", 8), ("b", 7)]);
+        for (lane, lead) in [("mid", "root"), ("a", "mid"), ("b", "mid")] {
+            world.cache.threads.get_mut(lane).unwrap().lead_thread =
+                Some(ThreadId::new(lead).unwrap());
+        }
+        for id in ["root", "mid", "a", "b"] {
+            world.detail(detail(id));
+        }
+        let tree = world.tree();
+        let mut rows = tree.main.clone();
+        for (row, _) in &mut rows {
+            row.own.question = row.id() == "b";
+        }
+        let collapsed_mid = |lead: &str| {
+            if lead == "mid" {
+                LaneView::Collapsed
+            } else {
+                LaneView::All
+            }
+        };
+        let limited = limit_lanes(&rows, LANE_PAGE, collapsed_mid);
+        assert_eq!(ids(&limited.rows), ["root", "mid"]);
+        for owner in ["root", "mid"] {
+            let below = limited.omitted_below[owner];
+            assert_eq!(below.count, 2, "{owner}");
+            assert!(below.attention.question, "{owner}");
+        }
+        assert_eq!(limited.groups["mid"].omitted, limited.omitted_below["mid"]);
+        assert_eq!(limited.groups["root"].omitted, Hidden::default());
+
+        let open = limit_lanes(&rows, LANE_PAGE, |_| LaneView::All);
+        assert!(open.omitted_below.is_empty());
     }
 }

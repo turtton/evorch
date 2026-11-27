@@ -143,15 +143,22 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
     }
 }
 
-/// A lane of thr-1 a test added to the cache, "thr-lane-3" being titled "Lane 3".
+/// A lane a test added to the cache: "thr-lane-3" is "Lane 3", a lane of thr-1; "thr-alane-3"
+/// is "Archived lane 3", a lane of the archived thr-5.
 fn extra_lane(id: &str) -> Option<Fixture> {
-    let number = id.strip_prefix("thr-lane-")?;
-    let title: &'static str = Box::leak(format!("Lane {number}").into_boxed_str());
+    let (lead, archived, title) =
+        match (id.strip_prefix("thr-lane-"), id.strip_prefix("thr-alane-")) {
+            (Some(number), _) => ("thr-1", false, format!("Lane {number}")),
+            (_, Some(number)) => ("thr-5", true, format!("Archived lane {number}")),
+            _ => return None,
+        };
+    let title: &'static str = Box::leak(title.into_boxed_str());
     let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
     Some(Fixture {
-        lead: Some("thr-1"),
-        parent: Some(("thr-1", LineageType::Fork)),
-        family: "thr-1",
+        lead: Some(lead),
+        parent: Some((lead, LineageType::Fork)),
+        family: lead,
+        archived,
         ..thread(id, title, 0)
     })
 }

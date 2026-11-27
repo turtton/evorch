@@ -217,11 +217,12 @@ fn threads(
             || row.own.unread
     });
     // Lanes whose close stands go after the others; a lane not read yet counts as open.
-    let rows = tree::order_lanes(&rows, |row| {
+    let closed = |row: &ThreadRow<'_>| {
         scope
             .lanes
             .is_some_and(|menu| menu.current_close(&row.summary.id).is_some())
-    });
+    };
+    let rows = tree::order_lanes(&rows, closed);
     let lane_view = |lead: &str| {
         if !opened_lanes.contains(lead) {
             tree::LaneView::Collapsed
@@ -236,11 +237,13 @@ fn threads(
         }
     };
     let lanes = tree::limit_lanes(&rows, tree::LANE_PAGE, lane_view);
+    let archived_rows = tree::order_lanes(&tree.archived, closed);
+    let archived_lanes = tree::limit_lanes(&archived_rows, tree::LANE_PAGE, lane_view);
     draw_tree(
         ui,
         scope,
-        &lanes.rows,
-        Some((&lanes, opened_lanes)),
+        TreeKind::Live,
+        (&lanes, &mut *opened_lanes),
         folded,
         rename,
         requests,
@@ -262,7 +265,15 @@ fn threads(
             egui::CollapsingHeader::new(format!("Archived ({})", tree.archived.len()))
                 .id_salt(("archived-threads", project))
                 .show(ui, |ui| {
-                    draw_tree(ui, scope, &tree.archived, None, folded, rename, requests);
+                    draw_tree(
+                        ui,
+                        scope,
+                        TreeKind::Archived,
+                        (&archived_lanes, opened_lanes),
+                        folded,
+                        rename,
+                        requests,
+                    );
                 });
         });
     }
@@ -273,20 +284,25 @@ fn lane_all_id(project: &str, lead: &str) -> egui::Id {
     egui::Id::new(("sidebar-lane-all", project, lead))
 }
 
-/// What the live tree adds to the archived one: the lane lists, collapsed or limited,
-/// and the set of threads whose list the person opened.
-type LaneLists<'a, 'b> = Option<(&'a tree::LaneLimit<'a>, &'b mut BTreeSet<String>)>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeKind {
+    Live,
+    Archived,
+}
 
+/// Draws a section's rows, whose lane lists were limited as `lanes` says; `opened` holds the
+/// threads whose lane list the person opened.
 fn draw_tree(
     ui: &mut Ui,
     scope: &Scope<'_>,
-    rows: &[(ThreadRow<'_>, usize)],
-    mut lanes: LaneLists<'_, '_>,
+    kind: TreeKind,
+    (lanes, opened): (&tree::LaneLimit<'_>, &mut BTreeSet<String>),
     folded: &mut BTreeSet<String>,
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
-    let archived = lanes.is_none();
+    let archived = kind == TreeKind::Archived;
+    let rows = &lanes.rows[..];
     let rails = TreeRails::new(rows);
     let clip = ui.clip_rect();
     // Rails bridge the vertical gap between rows so a branch reads as one line.
@@ -311,23 +327,23 @@ fn draw_tree(
         let mut expansion = CollapsingState::load_with_default_open(ui.ctx(), id, true);
         // The folds are kept in the session file, so they decide over what egui remembers.
         expansion.set_open(!folded.contains(row.id()));
-        let mut hidden = if has_children && !expansion.is_open() {
-            roll_up(rows, index, |row| (row.running, row.own))
+        // Lanes the limit left out are hidden descendants too: they keep their count and what
+        // they ask of the user on the row. A folded row rolls up everything below it, the
+        // omitted lanes of its descendants too; an open one only its own omitted lanes.
+        let hidden = if has_children && !expansion.is_open() {
+            let shown = roll_up(rows, index, |row| (row.running, row.own));
+            let omitted = lanes
+                .omitted_below
+                .get(row.id())
+                .copied()
+                .unwrap_or_default();
+            sum_hidden(shown, omitted)
         } else {
-            Hidden::default()
+            lanes
+                .groups
+                .get(row.id())
+                .map_or_else(Hidden::default, |group| group.omitted)
         };
-        // Lanes the limit left out are hidden children too: they keep their count and
-        // what they ask of the user on the row.
-        if let Some(group) = lanes
-            .as_ref()
-            .and_then(|(lanes, _)| lanes.groups.get(row.id()))
-        {
-            hidden = Hidden {
-                count: hidden.count + group.omitted.count,
-                running: hidden.running || group.omitted.running,
-                attention: hidden.attention.merge(group.omitted.attention),
-            };
-        }
         let colors = if archived {
             None
         } else {
@@ -430,15 +446,21 @@ fn draw_tree(
         {
             ui.label(muted(format!("Shared workspace: {root}")));
         }
-        if let Some((limit, opened)) = lanes.as_mut()
-            && let Some(leads) = limit.controls.get(&index)
-        {
+        if let Some(leads) = lanes.controls.get(&index) {
             for lead in leads {
-                if let Some(group) = limit.groups.get(lead) {
+                if let Some(group) = lanes.groups.get(lead) {
                     lane_controls(ui, scope.project.as_str(), lead, group, opened);
                 }
             }
         }
+    }
+}
+
+fn sum_hidden(left: Hidden, right: Hidden) -> Hidden {
+    Hidden {
+        count: left.count + right.count,
+        running: left.running || right.running,
+        attention: left.attention.merge(right.attention),
     }
 }
 

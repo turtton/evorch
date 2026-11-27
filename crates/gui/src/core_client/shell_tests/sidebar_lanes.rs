@@ -85,9 +85,12 @@ impl Screen {
                 let Query::Lanes(LanesQuery::ListLanes(list)) = query else {
                     panic!("only the lane list is asked for");
                 };
-                assert_eq!(list.lead_thread.as_str(), "thr-1");
                 asked += 1;
-                let items = listed_lanes();
+                let items = if list.lead_thread.as_str() == "thr-1" {
+                    listed_lanes()
+                } else {
+                    Vec::new()
+                };
                 let reply = view(json!({"type": "lanes", "payload": {"type": "lanes",
                     "payload": {"items": items, "snapshot_revision": "1"}}}));
                 let reply = FeatureReply::Query(Ok(reply));
@@ -190,4 +193,110 @@ fn lanes_run_newest_first_with_the_closed_ones_last_and_the_oldest_left_out() {
             .count(),
         4
     );
+}
+
+/// Adds a lane thread `id` titled `title` that hangs under `lead`.
+fn add_lane(shared: &mut Shared, id: &str, title: &str, lead: &str, updated: u64) {
+    let thread: ThreadSummary = view(json!({
+        "id": id, "project": "proj-1", "title": title, "state": "idle",
+        "lead_thread": lead, "revision": "3", "updated_at": updated.to_string(),
+    }));
+    shared.cache.threads.insert(id.into(), thread);
+}
+
+fn screen_patched(patch: impl FnOnce(&mut Shared)) -> Screen {
+    screen_from(
+        egui::vec2(1440.0, 900.0),
+        super::super::local::LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            None,
+        ),
+        patch,
+    )
+}
+
+// Given: thr-7, whose lane list is open and whose children are folded, with lane "Lane 1" and,
+//        under that lane, "Lane 2" that waits for an approval; Lane 2's list is collapsed
+// When: the sidebar is drawn
+// Then: neither lane shows, and thr-7's row still says an approval waits below it, though the
+//       approval is on a lane the limit left out under a lane that is itself folded away
+#[test]
+fn a_folded_thread_still_shows_what_a_limited_lane_below_its_child_asks() {
+    let mut screen = screen_patched(|shared| {
+        add_lane(shared, "thr-lane-1", "Lane 1", "thr-7", 1_793_800_001_000);
+        add_lane(
+            shared,
+            "thr-lane-2",
+            "Lane 2",
+            "thr-lane-1",
+            1_793_800_002_000,
+        );
+        let approval: ApprovalView = view(json!({
+            "id": "ap-9", "core_epoch": "7", "revision": "2", "thread": "thr-lane-2",
+            "run": "run-9", "tool_name": "shell", "summary": "cargo test", "summary_truncated": false,
+            "input_bytes": "10", "state": "pending",
+        }));
+        shared.cache.approvals.insert("ap-9".into(), approval);
+        let workspace = shared.features.workspace_mut().unwrap();
+        workspace.restore_opened_lanes(["thr-7".to_owned()]);
+        workspace.restore_folded_threads(["thr-7".to_owned()]);
+    });
+    screen.settle_with_listed_lanes();
+    assert!(screen.harness.query_by_label("↳ Lane 1").is_none());
+    assert!(screen.harness.query_by_label("↳ Lane 2").is_none());
+    screen.harness.get_by_label(&format!(
+        "Thread attention: {}",
+        crate::panes::sidebar_widgets::APPROVAL_HIDDEN_NOTE
+    ));
+}
+
+// Given: the archived thr-5 with seven lanes and the lane list the person left collapsed
+// When: the Archived section is opened, "Show lanes" is pressed, and "See more" after it
+// Then: the section shows no lane at first; then the five newest lanes with "See more (2)",
+//       then all seven; the Archived section follows the same lane list as the live threads
+#[test]
+fn the_archived_section_collapses_and_limits_its_lanes_too() {
+    let mut screen = screen_patched(|shared| {
+        for number in 1..=7 {
+            let id = format!("thr-alane-{number}");
+            let title = format!("Archived lane {number}");
+            add_lane(
+                shared,
+                &id,
+                &title,
+                "thr-5",
+                1_793_700_000_000 + number * 1000,
+            );
+        }
+        shared
+            .features
+            .workspace_mut()
+            .unwrap()
+            .restore_opened_lanes(Vec::new());
+    });
+    screen.settle_with_listed_lanes();
+    screen.harness.get_by_label("Archived (8)").click();
+    screen.harness.run_steps(2);
+    screen.settle_with_listed_lanes();
+    let shown = |screen: &Screen| -> Vec<u64> {
+        let mut rows: Vec<(f32, u64)> = (1..=7)
+            .filter_map(|number| {
+                let label = format!("↳ Archived lane {number}");
+                let row = screen.harness.query_by_label(&label)?;
+                Some((row.rect().min.y, number))
+            })
+            .collect();
+        rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+        rows.into_iter().map(|(_, number)| number).collect()
+    };
+    assert!(shown(&screen).is_empty());
+    screen.harness.get_by_label("Show lanes (7)").click();
+    screen.harness.run_steps(2);
+    screen.settle_with_listed_lanes();
+    assert_eq!(shown(&screen), [7, 6, 5, 4, 3]);
+    screen.harness.get_by_label("See more (2)").click();
+    screen.harness.run_steps(2);
+    screen.settle_with_listed_lanes();
+    assert_eq!(shown(&screen), [7, 6, 5, 4, 3, 2, 1]);
+    screen.capture("archived-lanes");
 }
