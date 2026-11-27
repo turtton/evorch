@@ -104,6 +104,7 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 /// different settings saves. Existing loops own the snapshot they captured.
 #[derive(Clone, Default)]
 pub(crate) struct ModelSettings {
+    tool_descriptions: config::model_tool_descriptions::ModelToolDescriptions,
     compaction: Option<CompactionSettings>,
     resolution: Option<Arc<crate::model_resolve::ModelResolution>>,
 }
@@ -1064,6 +1065,7 @@ impl AgentRuntime {
             |resolution| resolution.reconfigured(config),
         );
         *current = Arc::new(ModelSettings {
+            tool_descriptions: config.model_tool_descriptions.clone(),
             compaction: Some(CompactionSettings::from(&config.compaction)),
             resolution: Some(Arc::new(resolution)),
         });
@@ -1099,6 +1101,7 @@ impl AgentRuntime {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let settings = Arc::make_mut(&mut current);
+            settings.tool_descriptions = config.model_tool_descriptions.clone();
             settings.resolution.get_or_insert_with(|| {
                 Arc::new(crate::model_resolve::ModelResolution::new(
                     config,
@@ -4517,6 +4520,7 @@ pub(crate) fn loop_shared(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         LoopShared {
+            tool_description_settings: settings.tool_descriptions.clone(),
             bus: Arc::clone(&shared.bus),
             executor: Arc::clone(
                 &shared

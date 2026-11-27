@@ -2,6 +2,7 @@
 use super::tool_calls::{append_subagent_context_note, retain_backed_tools, visible_tool_specs};
 use providers::ToolSpec;
 pub(crate) struct CatalogOptions<'a> {
+    pub descriptions: Option<&'a config::model_tool_descriptions::ToolDescriptions>,
     pub skills: bool,
     pub child: bool,
     pub web: bool,
@@ -11,15 +12,33 @@ pub(crate) struct CatalogOptions<'a> {
     pub family: crate::ModelFamily,
 }
 pub(crate) fn compose(
-    specs: Vec<ToolSpec>,
+    mut specs: Vec<ToolSpec>,
     policy: &crate::ExecutionPolicy,
     options: CatalogOptions<'_>,
 ) -> Vec<ToolSpec> {
+    // The sole application point: change top-level descriptions before filters
+    // and harness-owned suffixes. Schema, name and order are untouched.
+    if let Some(descriptions) = options.descriptions {
+        for spec in &mut specs {
+            if let Some(description) = descriptions.get(&spec.name) {
+                spec.description.clone_from(description);
+            }
+        }
+    }
     let mut specs = visible_tool_specs(specs, policy, options.skills, options.child, options.web);
     retain_backed_tools(&mut specs, options.artifacts);
     super::run_js_host::apply_run_js_specs(&mut specs, options.run_js, options.run_js_settings);
     append_subagent_context_note(&mut specs, options.family);
     specs
+}
+/// Eligible names come from executor registration provenance and fixed meta ops,
+/// never from a public-name pattern or the current role's visibility.
+pub(crate) fn description_registry(
+    executor: &tools::ToolExecutor,
+) -> std::collections::BTreeSet<String> {
+    let mut names = executor.fixed_description_names();
+    names.extend(crate::META_OPS.iter().map(|name| (*name).to_string()));
+    names
 }
 /// Full build-owned registry, not the role-visible subset. Base executors hold
 /// standard/host tools; MCP tools are registered only in disposable run forks.
@@ -113,6 +132,73 @@ mod tests {
         );
     }
     #[test]
+    fn overrides_only_change_top_level_descriptions_before_harness_suffixes_and_filters() {
+        let executor = tools::ToolExecutor::with_standard_tools(
+            std::sync::Arc::new(event_bus::EventBus::new(4)),
+            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        let registry = description_registry(&executor);
+        assert!(registry.contains("read"));
+        assert!(registry.contains("delegate"));
+        assert!(!registry.contains("run_js"));
+        assert!(!registry.contains("task_claim"));
+        let raw = super::super::tool_calls::standard_tool_specs(&executor);
+        let descriptions = [
+            ("read".into(), "Custom read".into()),
+            ("shell".into(), "Custom shell".into()),
+            ("edit".into(), "Custom edit".into()),
+            ("delegate".into(), "Custom delegate".into()),
+        ]
+        .into();
+        let settings = config::RunJsConfig::default();
+        for role in [
+            crate::Role::Worker,
+            crate::Role::Explorer,
+            crate::Role::Orchestrator,
+        ] {
+            let policy = crate::ExecutionPolicy::for_role(role);
+            for run_js in [false, true] {
+                let compose_with = |descriptions| {
+                    compose(
+                        raw.clone(),
+                        &policy,
+                        CatalogOptions {
+                            descriptions,
+                            skills: false,
+                            child: false,
+                            web: false,
+                            artifacts: false,
+                            run_js,
+                            run_js_settings: &settings,
+                            family: crate::ModelFamily::Gpt5,
+                        },
+                    )
+                };
+                let baseline = compose_with(None);
+                let changed = compose_with(Some(&descriptions));
+                assert_eq!(baseline.len(), changed.len());
+                for (old, new) in baseline.iter().zip(&changed) {
+                    assert_eq!(old.name, new.name);
+                    assert_eq!(old.input_schema, new.input_schema);
+                    if let Some(description) = descriptions.get(&new.name) {
+                        assert!(new.description.starts_with(description));
+                        if new.name == "delegate" {
+                            assert!(new.description.ends_with(crate::SUBAGENT_CONTEXT_NOTE));
+                        }
+                        if run_js && ["shell", "edit"].contains(&new.name.as_str()) {
+                            assert!(
+                                new.description.len() > description.len(),
+                                "harness hint cannot be removed"
+                            );
+                        }
+                    } else {
+                        assert_eq!(old.description, new.description);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn full_builtin_catalog_run_js_hint_change_is_an_explained_standard_tool_boundary() {
         use tools::Tool;
         struct OldRead;
@@ -155,6 +241,7 @@ mod tests {
                 super::super::tool_calls::standard_tool_specs(base),
                 &policy,
                 CatalogOptions {
+                    descriptions: None,
                     skills: false,
                     child: true,
                     web: false,
@@ -232,6 +319,7 @@ mod tests {
                             base,
                             &policy,
                             CatalogOptions {
+                                descriptions: None,
                                 skills: enabled,
                                 child,
                                 web: enabled,
@@ -301,6 +389,7 @@ mod tests {
                         preview.clone(),
                         &policy,
                         CatalogOptions {
+                            descriptions: None,
                             skills: true,
                             child,
                             web: true,

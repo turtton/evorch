@@ -40,6 +40,7 @@ pub(crate) fn persist_escalation_seed(
     let descriptor = RunRestoreDescriptor {
         recovery_waits: Vec::new(),
         recovery_boundary: None,
+        tool_descriptions: None,
         mcp_snapshot: None,
         harness_notice_pending: false,
         lane_scope: config.lane_scope,

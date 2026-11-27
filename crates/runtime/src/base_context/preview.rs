@@ -10,10 +10,7 @@ use super::{
     ContextExclusion, ContextSection, ContextSectionKind, ContextSource, ContextTool, SystemInputs,
     compose_system_sections, resolve_preset_origins, workspace_note,
 };
-use crate::agent_loop::{
-    LoopShared, append_subagent_context_note, apply_run_js_specs, retain_backed_tools,
-    shared_active_root, standard_tool_specs, visible_tool_specs,
-};
+use crate::agent_loop::{LoopShared, shared_active_root, standard_tool_specs, tool_catalog};
 use crate::allowed_directories;
 use crate::compaction::estimator::estimate_tool_tokens;
 use crate::memory::MemoryBoundary;
@@ -141,7 +138,7 @@ impl AgentRuntime {
             .for_run_config(&config, !request.child)
             .with_image_generation(shared.model.image_generation_enabled());
         let (tools, excluded_tools) =
-            self.preview_tools(&shared, &policy, &request, &selected_model);
+            self.preview_tools(&shared, &policy, &request, &selected_model)?;
         let sandbox_root = self
             .shared
             .sandbox_root
@@ -267,23 +264,37 @@ impl AgentRuntime {
         policy: &ExecutionPolicy,
         request: &BaseContextRequest,
         selected_model: &str,
-    ) -> (Vec<ContextTool>, Vec<ContextExclusion>) {
+    ) -> Result<(Vec<ContextTool>, Vec<ContextExclusion>), RuntimeError> {
         let all = standard_tool_specs(&shared.executor);
         let web_tools_enabled = self.web_tools_enabled();
-        let mut visible = visible_tool_specs(
+        let registry = tool_catalog::description_registry(&shared.executor);
+        let snapshot = crate::tool_descriptions::FrozenToolDescriptions::select(
+            &shared.tool_description_settings,
+            shared.model.as_ref(),
+            &crate::AgentInvocationContext {
+                run_id: "runtime-selected-model".into(),
+                category: request.category.clone(),
+                ..Default::default()
+            },
+            request.role,
+            classify(selected_model),
+            &registry,
+        )?;
+        let (descriptions, _) = snapshot.project(&registry);
+        let mut visible = tool_catalog::compose(
             all.clone(),
             policy,
-            shared.skills.is_some(),
-            request.child,
-            web_tools_enabled,
+            tool_catalog::CatalogOptions {
+                descriptions: Some(&descriptions),
+                skills: shared.skills.is_some(),
+                child: request.child,
+                web: web_tools_enabled,
+                artifacts: self.artifact_pages().is_some(),
+                run_js: self.run_js_offered_to(request.role, request.category.as_deref()),
+                run_js_settings: &self.run_js_settings(),
+                family: snapshot.family,
+            },
         );
-        retain_backed_tools(&mut visible, self.artifact_pages().is_some());
-        apply_run_js_specs(
-            &mut visible,
-            self.run_js_offered_to(request.role, request.category.as_deref()),
-            &self.run_js_settings(),
-        );
-        append_subagent_context_note(&mut visible, classify(selected_model));
         let choice = shared
             .model
             .edit_tool_for_run(
@@ -328,7 +339,7 @@ impl AgentRuntime {
                 input_schema: spec.input_schema,
             })
             .collect();
-        (tools, excluded)
+        Ok((tools, excluded))
     }
 }
 

@@ -12,6 +12,7 @@ pub mod load;
 pub mod mcp;
 mod merge;
 mod migrate;
+pub mod model_tool_descriptions;
 pub mod presets;
 pub mod prompt_sources;
 pub mod save;

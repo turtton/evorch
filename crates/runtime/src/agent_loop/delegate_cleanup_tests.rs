@@ -119,6 +119,7 @@ fn fixture_for_runtime(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        tool_descriptions: None,
         recovery_waits: Vec::new(),
         delegate_wait_calls: Vec::new(),
         last_provider_input: None,

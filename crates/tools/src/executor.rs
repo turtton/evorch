@@ -201,6 +201,33 @@ impl ToolExecutor {
         }
     }
 
+    /// Fixed build-owned description registry, independent of role visibility.
+    /// Concrete standard types prevent an external tool called "read" from
+    /// becoming a builtin. Fixed host implementations explicitly opt in.
+    pub fn fixed_description_names(&self) -> std::collections::BTreeSet<String> {
+        use std::any::TypeId;
+        let fixed = [
+            TypeId::of::<Read>(),
+            TypeId::of::<Edit>(),
+            TypeId::of::<Write>(),
+            TypeId::of::<ApplyPatch>(),
+            TypeId::of::<Grep>(),
+            TypeId::of::<Shell>(),
+            TypeId::of::<GitDiff>(),
+            TypeId::of::<WebFetch>(),
+            TypeId::of::<WebSearch>(),
+            TypeId::of::<crate::tools::BrowserTool>(),
+        ];
+        self.tools
+            .iter()
+            .filter(|(_, entry)| {
+                fixed.contains(&std::any::Any::type_id(entry.tool.as_ref()))
+                    || entry.tool.fixed_host_description()
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// ツールを登録し、スキーマを検証器としてキャッシュする。
     ///
     /// 同名ツールの再登録ではエントリごと差し替えるため、旧検証器が残る

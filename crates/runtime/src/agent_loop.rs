@@ -72,10 +72,7 @@ use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
-pub(crate) use run_js_host::apply_run_js_specs;
-pub(crate) use tool_calls::{
-    append_subagent_context_note, retain_backed_tools, standard_tool_specs, visible_tool_specs,
-};
+pub(crate) use tool_calls::standard_tool_specs;
 
 pub(crate) struct RunTask {
     pub(crate) startup_failure: Option<String>,
@@ -139,6 +136,7 @@ pub(crate) struct LoopChannels {
 }
 
 pub(crate) struct LoopShared {
+    pub(crate) tool_description_settings: config::model_tool_descriptions::ModelToolDescriptions,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
@@ -187,6 +185,7 @@ fn unobserved_jobs_reminder(jobs: &[String]) -> String {
 }
 
 pub(crate) struct LoopState {
+    pub(crate) tool_descriptions: Option<crate::tool_descriptions::FrozenToolDescriptions>,
     pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
     pub(crate) delegate_wait_calls: Vec<crate::quiesce::DelegateWaitCall>,
     pub(crate) last_provider_input: Option<crate::quiesce::ProviderInput>,
@@ -303,6 +302,7 @@ impl LoopState {
             ..Default::default()
         };
         Self {
+            tool_descriptions: None,
             recovery_waits: Vec::new(),
             delegate_wait_calls: Vec::new(),
             last_provider_input: None,
@@ -437,6 +437,9 @@ pub(crate) async fn run_agent(
             .upgrade()
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
+    let tool_descriptions = restored
+        .as_ref()
+        .and_then(|state| state.tool_descriptions.clone());
     let mcp_snapshot = if benchmark_mode {
         None
     } else {
@@ -555,6 +558,7 @@ pub(crate) async fn run_agent(
         );
     }
     state.inherited_mcp_snapshot = mcp_snapshot;
+    state.tool_descriptions = tool_descriptions;
     state.budget.spawn_credits = state.task.config.spawn_credits.clone();
     state.thread_id = thread_id;
     state.boundary_pending = boundary_pending;
@@ -796,10 +800,68 @@ pub(crate) async fn run_agent(
             .runtime()
             .map(|r| r.run_js_settings())
             .unwrap_or_default();
+        let registry = tool_catalog::description_registry(&state.shared.executor);
+        if !is_restored {
+            let invocation = AgentInvocationContext {
+                run_id: state.task.run_id.to_string(),
+                model_preference: state.channels.model_preference_rx.borrow().clone(),
+                category: state.task.config.category.clone(),
+                ..Default::default()
+            };
+            match crate::tool_descriptions::FrozenToolDescriptions::select(
+                &state.shared.tool_description_settings,
+                state.shared.model.as_ref(),
+                &invocation,
+                state.task.role,
+                classify(&selected_model),
+                &registry,
+            ) {
+                Ok(snapshot) => state.tool_descriptions = Some(snapshot),
+                Err(error) => {
+                    state.finish_error(error.to_string());
+                    return;
+                }
+            }
+        }
+        if state.benchmark_selected_leaf()
+            && state
+                .tool_descriptions
+                .as_ref()
+                .is_some_and(|s| !s.descriptions.is_empty())
+        {
+            state.finish_error("benchmark unsupported: model tool description overrides".into());
+            return;
+        }
+        let (descriptions, missing) = state
+            .tool_descriptions
+            .as_ref()
+            .map(|s| s.project(&registry))
+            .unwrap_or_default();
+        for name in missing {
+            state
+                .shared
+                .bus
+                .emit(Event::new(event_bus::DiagnosticEvent {
+                    source: "tool_catalog".into(),
+                    severity: event_bus::DiagnosticSeverity::Warning,
+                    code: "SAVED_TOOL_DESCRIPTION_TARGET_REMOVED".into(),
+                    detail: format!(
+                        "Saved description target is no longer a fixed builtin: {name}"
+                    ),
+                    run_id: Some(state.task.run_id.to_string()),
+                    thread_id: None,
+                    call_id: None,
+                }));
+        }
+        let family = state
+            .tool_descriptions
+            .as_ref()
+            .map_or_else(|| classify(&selected_model), |s| s.family);
         state.tool_specs = tool_catalog::compose(
             standard_tool_specs(&state.shared.executor),
             &state.policy,
             tool_catalog::CatalogOptions {
+                descriptions: Some(&descriptions),
                 skills: state.skills().is_some(),
                 child: state.task.parent.is_some() || benchmark_replay,
                 web: state.runtime().is_some_and(|r| r.web_tools_enabled()),
@@ -811,7 +873,7 @@ pub(crate) async fn run_agent(
                         r.run_js_offered_to(state.task.role, state.task.config.category.as_deref())
                     }),
                 run_js_settings: &run_js_settings,
-                family: classify(&selected_model),
+                family,
             },
         );
         if !is_restored {

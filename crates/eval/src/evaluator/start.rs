@@ -211,6 +211,9 @@ pub(super) async fn launch_holding<T: Send + 'static>(
 
 #[async_trait::async_trait]
 impl Tool for StartEvaluation {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_start"
     }

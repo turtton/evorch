@@ -85,6 +85,9 @@ pub const CURRENT_VERSION: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Exact provider profile / routing model ID / builtin tool descriptions.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_tool_descriptions: super::model_tool_descriptions::ModelToolDescriptions,
     /// 設定スキーマのバージョン。
     pub version: u32,
     pub core: CoreConfig,
@@ -139,6 +142,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            model_tool_descriptions: BTreeMap::new(),
             version: CURRENT_VERSION,
             core: CoreConfig::default(),
             web: WebConfig::default(),

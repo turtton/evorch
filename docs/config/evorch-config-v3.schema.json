@@ -134,6 +134,19 @@
       },
       "default": {}
     },
+    "model_tool_descriptions": {
+      "description": "Exact provider profile / routing model ID / builtin tool descriptions.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "orchestration": {
       "description": "オーケストレーション設定。",
       "$ref": "#/$defs/OrchestrationConfig",

@@ -104,6 +104,13 @@ pub trait Tool: Send + Sync + std::any::Any {
         self.name()
     }
 
+    /// Opt-in registry entry for fixed, build-owned host tools only. Dynamic /
+    /// external tools must keep the default. Standard tools are registered by
+    /// concrete type in ToolExecutor, not by this flag or their public names.
+    fn fixed_host_description(&self) -> bool {
+        false
+    }
+
     /// Advisory identity for callers inspecting tool metadata. Registration
     /// verifies the concrete type instead; external implementations can spoof
     /// this method and must never gain reserved-name privileges from it.

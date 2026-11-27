@@ -395,6 +395,9 @@ fn list_entry(
 
 #[async_trait::async_trait]
 impl Tool for ListThreads {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_list_threads"
     }
@@ -547,6 +550,9 @@ fn inspect(database: &Database, thread_id: &str, prices: &PriceTable) -> Result<
 
 #[async_trait::async_trait]
 impl Tool for InspectThread {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_inspect_thread"
     }
@@ -703,6 +709,9 @@ fn checks_schema() -> Value {
 
 #[async_trait::async_trait]
 impl Tool for SaveSample {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_save_sample"
     }
@@ -824,6 +833,9 @@ struct RemoveSample(Arc<Shared>);
 
 #[async_trait::async_trait]
 impl Tool for RemoveSample {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_remove_sample"
     }
@@ -1108,6 +1120,9 @@ fn read_report(shared: &Shared, args: &ReportArgs) -> Result<Value, String> {
 
 #[async_trait::async_trait]
 impl Tool for ReadReport {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_report"
     }

@@ -259,6 +259,7 @@ impl Live {
             &self.overrides,
             self.max_summary_bytes,
         );
+        self.runtime.reload_model_settings(&config);
         self.live
             .replace(routed(&config, &self.store, &self.bus, &self.mock));
     }

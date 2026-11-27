@@ -13,6 +13,7 @@ const ROOT_KEYS: &[&str] = &[
     "web",
     "providers",
     "model_presets",
+    "model_tool_descriptions",
     "routing",
     "role_profile",
     "role_profiles",
