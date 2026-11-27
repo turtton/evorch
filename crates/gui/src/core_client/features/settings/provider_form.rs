@@ -258,7 +258,7 @@ impl ProviderForm {
                     ui.push_id(index, |ui| {
                         switch(ui, &mut model.enabled, &format!("Enable {}", model.id));
                     });
-                    ui.add(egui::Label::new(egui::RichText::new(&model.id).monospace()).truncate());
+                    ui.label(egui::RichText::new(&model.id).monospace());
                     let is_default = self.default_model == model.id;
                     let (icon, name) = if is_default {
                         (
