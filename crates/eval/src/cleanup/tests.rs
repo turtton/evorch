@@ -24,6 +24,9 @@ fn fixture(root: &Path, finished: bool, lock: bool) {
         verify: None,
         candidate_overlay: None,
         swapped_roles: vec![],
+        common_overlay: None,
+        changes: Default::default(),
+        pins: None,
         configurations: vec!["baseline".into()],
         repeat: 1,
         simulator: BindingSummary {
@@ -39,6 +42,7 @@ fn fixture(root: &Path, finished: bool, lock: bool) {
             index: 1,
             dir: "../../outside".into(),
             nonce: "fixture".into(),
+            observed: None,
             started_at: "fixture".into(),
             finished_at: None,
             status: None,

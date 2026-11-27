@@ -86,6 +86,13 @@ impl Fixture {
         }
     }
 
+    /// Route the worker and the judge to the configured model, as a real configuration does.
+    fn with_routes(&self) {
+        let path = self.user.path().join("config.toml");
+        let routes = "\n[routing.routes]\nworker = [{ profile = \"main\", model = \"gpt-test\" }]\norchestrator = [{ profile = \"main\", model = \"gpt-test\" }]\n";
+        std::fs::write(&path, format!("{CONFIG}{routes}")).unwrap();
+    }
+
     async fn call_in_run(&self, name: &str, args: Value) -> ToolResult {
         let ctx = ToolExecutionContext {
             run_id: "run-7".into(),
@@ -448,6 +455,9 @@ fn manifest(finished: bool) -> Manifest {
         verify: None,
         candidate_overlay: None,
         swapped_roles: Vec::new(),
+        common_overlay: None,
+        changes: Default::default(),
+        pins: None,
         configurations: vec!["baseline".into(), "candidate".into()],
         repeat: 1,
         simulator: BindingSummary {
@@ -462,6 +472,7 @@ fn manifest(finished: bool) -> Manifest {
             index: 1,
             dir: "runs/baseline-1".into(),
             nonce: "nonce".into(),
+            observed: None,
             started_at: "2026-10-20T00:00:00.000Z".into(),
             finished_at: finished.then(|| "2026-10-20T00:10:00.000Z".into()),
             status: None,

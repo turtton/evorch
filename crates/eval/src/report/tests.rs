@@ -200,6 +200,7 @@ impl Fixture {
             index: 1,
             dir: format!("runs/{label}-1"),
             nonce: format!("{label}-nonce"),
+            observed: None,
             started_at: "2026-10-20T00:00:00.000Z".into(),
             finished_at: Some("2026-10-20T00:10:00.000Z".into()),
             status: Some(Status::Completed),
@@ -236,6 +237,9 @@ impl Fixture {
                     "claude-sonnet-9",
                 )],
             }],
+            common_overlay: None,
+            changes: Default::default(),
+            pins: None,
             configurations: vec![BASELINE.into(), CANDIDATE.into()],
             repeat: 1,
             simulator: BindingSummary {

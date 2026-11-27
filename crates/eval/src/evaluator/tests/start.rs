@@ -171,7 +171,7 @@ async fn unpinned_threads_and_unusable_overlays_are_refused_without_asking() {
         forbidden.content
     );
     assert!(
-        unchanged.is_error && unchanged.content.contains("changes no role"),
+        unchanged.is_error && unchanged.content.contains("changes nothing"),
         "{}",
         unchanged.content
     );
@@ -191,6 +191,8 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
         repeat,
         cost,
         project_root: PathBuf::from("/project"),
+        role: runtime::Role::Worker,
+        sample_hash: "0123456789abcdef".into(),
     };
     let plan = [
         planned(
@@ -253,6 +255,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
 async fn a_declined_evaluation_starts_nothing() {
     // Given: a pinned sample whose original cost $2.
     let fixture = Fixture::new();
+    fixture.with_routes();
     fixture.thread("thread-1").await;
     fixture.pin("thread-1", "skipped the failing test").await;
 
@@ -276,12 +279,172 @@ async fn a_declined_evaluation_starts_nothing() {
         "Estimated total: $8.0000",
         "  worker: ",
         "temperature = 0.2",
+        "Cost and limits:",
+        "Runs: 4 replays (1 threads × baseline and candidate × repeat)",
+        "2 judged pairs",
+        "Models the agents run on: main/gpt-test",
+        "Budget per replay, over its whole delegation tree: 5000000 tokens, 500 tool calls, 20 user turns, 3600 s",
+        "up to $50.00 per replay, $200.00 for all 4 replays",
+        "not a spending limit",
+        "Billed separately, in neither figure above: the simulated user",
+        "the judge (main/gpt-test; about 3 requests per pair, so about 6 in all",
+        "Stops: a replay ends as incomplete when it reaches any budget limit",
+        "pinned: sample ",
     ] {
         assert!(summary.contains(expected), "{expected:?} in {summary}");
     }
     assert!(result.is_error && result.content.contains("nothing was started"));
     assert!(!fixture.user.path().join("eval").exists());
     assert_eq!(fixture.pending_notices(), 0);
+}
+
+#[tokio::test]
+async fn a_common_overlay_reaches_both_sides_and_is_shown_before_approval() {
+    // Given: a pinned sample, a common overlay that fixes the worker's effort and a candidate.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let common = "[agents.worker.generation]\nmax_tokens = 4000\n";
+    let approval = fixture.answer_approval(true);
+
+    // When: the evaluation is approved.
+    let result = fixture
+        .call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": CANDIDATE, "common": common, "repeat": 1}),
+        )
+        .await;
+    let shown = approval.await.unwrap();
+    let value = started(&result);
+
+    // Then: the user saw the common overlay, and the process got it as a file next to the candidate.
+    let summary = shown["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Common overlay (both baseline and candidate):"),
+        "{summary}"
+    );
+    assert!(summary.contains("max_tokens = 4000"), "{summary}");
+    let [target] = value["evaluations"].as_array().unwrap().as_slice() else {
+        panic!("one evaluation: {value}");
+    };
+    let _ = fixture.notice().await;
+    let args = args_of(&target["dir"]);
+    let at = args.iter().position(|arg| arg == "--common").unwrap();
+    assert_eq!(std::fs::read_to_string(&args[at + 1]).unwrap(), common);
+}
+
+#[tokio::test]
+async fn a_common_overlay_may_set_only_models_and_roles() {
+    // Given: a pinned sample.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+
+    // When: the common overlay tries to change the sandbox or the budget.
+    let refused = |common: &str| {
+        fixture.call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": CANDIDATE, "common": common}),
+        )
+    };
+    let sandbox = refused("[sandbox]\nweb_tools_enabled = false\n").await;
+    let eval = refused("[eval.budget]\nmax_tokens = 1\n").await;
+
+    // Then: both are refused without asking.
+    for result in [sandbox, eval] {
+        assert!(
+            result.is_error && result.content.contains("cannot be set by a common overlay"),
+            "{}",
+            result.content
+        );
+    }
+    assert_eq!(approvals_requested(&mut events).await, 0);
+}
+
+#[tokio::test]
+async fn a_tool_description_candidate_and_a_candidate_with_no_effect_are_refused_before_asking() {
+    // Given: a pinned sample, and a candidate that rewrites a description, one that
+    // sets a description for a tool that is not a fixed builtin, and one that only
+    // restates what the baseline already has.
+    let fixture = Fixture::new();
+    fixture.with_routes();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+    let candidate =
+        |tool: &str| format!("[model_tool_descriptions.main.gpt-test]\n{tool} = \"Read files.\"\n");
+
+    // When: each is started.
+    let start = |candidate: String| {
+        fixture.call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": candidate}),
+        )
+    };
+    let description = start(candidate("read")).await;
+    let run_js = start(candidate("run_js")).await;
+    let restated = start("[agents.worker]\n".into()).await;
+
+    // Then: the first waits for the judge to learn about descriptions, the others are invalid
+    // comparisons, and none reached the user.
+    assert!(
+        description.is_error && description.content.contains("judge is not yet told"),
+        "{}",
+        description.content
+    );
+    assert!(
+        run_js.is_error && run_js.content.contains("not a fixed builtin"),
+        "{}",
+        run_js.content
+    );
+    assert!(
+        restated.is_error && restated.content.contains("changes nothing"),
+        "{}",
+        restated.content
+    );
+    assert_eq!(approvals_requested(&mut events).await, 0);
+    assert!(!fixture.user.path().join("eval").exists());
+}
+
+#[tokio::test]
+async fn a_sample_changed_while_the_approval_was_pending_starts_nothing() {
+    // Given: a pinned sample, and an approval that is being answered.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+    let bus = Arc::clone(&fixture.bus);
+
+    // When: the sample's problem is rewritten after the user was shown it, and then approved.
+    let start = fixture.call_in_run(
+        "eval_start",
+        json!({"thread_id": "thread-1", "candidate": CANDIDATE, "repeat": 1}),
+    );
+    let answer = async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                fixture.pin("thread-1", "a different problem").await;
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&call_id, true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
+                return;
+            }
+        }
+    };
+    let (result, ()) = tokio::join!(start, answer);
+
+    // Then: what was approved is not what is there, so nothing was started.
+    assert!(
+        result.is_error
+            && result
+                .content
+                .contains("changed while the approval was pending"),
+        "{}",
+        result.content
+    );
+    assert!(!fixture.user.path().join("eval").exists());
 }
 
 #[tokio::test]
@@ -325,7 +488,7 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
     assert_eq!(std::fs::read_to_string(&candidate).unwrap(), CANDIDATE);
     let dir = target["dir"].as_str().unwrap();
     assert!(Path::new(dir).starts_with(&eval), "{dir}");
-    let expected = |thread_id: &str, problem: &str, repeat: &str, dir: &str| {
+    let expected = |thread_id: &str, problem: &str, repeat: &str, dir: &str, digest: &str| {
         [
             "eval",
             "run",
@@ -333,6 +496,8 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
             thread_id,
             "--candidate",
             &candidate.display().to_string(),
+            "--approved-digest",
+            digest,
             "--problem",
             problem,
             "--repeat",
@@ -345,13 +510,45 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
         .map(str::to_owned)
         .to_vec()
     };
+    let digest_of = |value: &Value| {
+        let args = args_of(value);
+        let at = args
+            .iter()
+            .position(|arg| arg == "--approved-digest")
+            .unwrap();
+        args[at + 1].clone()
+    };
+    let (target_digest, regression_digest) =
+        (digest_of(&target["dir"]), digest_of(&regression["dir"]));
+    for digest in [&target_digest, &regression_digest] {
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{digest}"
+        );
+    }
+    assert_ne!(
+        target_digest, regression_digest,
+        "each sample is approved on its own inputs"
+    );
     assert_eq!(
         args_of(&target["dir"]),
-        expected("thread-1", "skipped the failing test", "3", dir)
+        expected(
+            "thread-1",
+            "skipped the failing test",
+            "3",
+            dir,
+            &target_digest
+        )
     );
     assert_eq!(
         args_of(&regression["dir"]),
-        expected("fail-2", "slow", "1", regression["dir"].as_str().unwrap())
+        expected(
+            "fail-2",
+            "slow",
+            "1",
+            regression["dir"].as_str().unwrap(),
+            &regression_digest
+        )
     );
 
     // Then: exactly one notice reached the starting run with each evaluation's outcome,

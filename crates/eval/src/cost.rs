@@ -274,6 +274,40 @@ impl PriceTable {
         self.catalog.as_deref()
     }
 
+    /// What one million tokens of `model` can cost at most, in USD: the
+    /// dearest of its uncached input, output and, when it has one, cache write
+    /// price, at the speed its id names. `None` when the input or output has
+    /// no price, so an unknown price is never read as a cheap one.
+    pub fn ceiling_per_million(&self, model: &crate::roles::ModelRef) -> Option<f64> {
+        const MILLION: u64 = 1_000_000;
+        let fast = model.model.ends_with("+fast");
+        let request = |input: u64, output: u64, cache_write: u64| RequestUsage {
+            provider: model
+                .provider_type
+                .map_or_else(|| model.profile.clone(), |kind| kind.as_str().to_owned()),
+            profile: Some(model.profile.clone()),
+            model: model.model.clone(),
+            run_id: None,
+            role: None,
+            purpose: None,
+            failed: false,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: cache_write,
+            service_tier: fast.then(|| "priority".to_owned()),
+            usage_reported: true,
+        };
+        let priced = |usage: &RequestUsage| {
+            let cost = self.cost([usage]);
+            cost.is_complete().then_some(cost.usd)
+        };
+        let input = priced(&request(MILLION, 0, 0))?;
+        let output = priced(&request(0, MILLION, 0))?;
+        let cache_write = priced(&request(MILLION, 0, MILLION)).unwrap_or(0.0);
+        Some(input.max(output).max(cache_write))
+    }
+
     /// Price every request with tokens at its own speed and input-size tier.
     pub fn cost<'a>(&self, requests: impl IntoIterator<Item = &'a RequestUsage>) -> Cost {
         let mut cost = Cost::default();

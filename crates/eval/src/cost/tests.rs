@@ -244,3 +244,36 @@ fn request_usage_serde_keeps_the_gap_and_defaults_old_data_to_reported() {
             .usage_reported
     );
 }
+
+#[tokio::test]
+async fn the_ceiling_is_the_dearest_price_and_an_unpriced_model_has_none() {
+    // Given: a priced API model, a priced subscription model and a local one without a price.
+    let table = table().await;
+    let model = |profile: &str, provider_type, name: &str| crate::roles::ModelRef {
+        profile: profile.into(),
+        provider_type: Some(provider_type),
+        model: name.into(),
+    };
+
+    // When: each model's per-million ceiling is asked for.
+    let api = table
+        .ceiling_per_million(&model("api", ProviderTypeConfig::OpenAi, "gpt-9"))
+        .unwrap();
+    let claude = table
+        .ceiling_per_million(&model(
+            "claude",
+            ProviderTypeConfig::AnthropicSubscription,
+            "claude-sonnet-9",
+        ))
+        .unwrap();
+    let local = table.ceiling_per_million(&model(
+        "local",
+        ProviderTypeConfig::OpenAiCompatible,
+        "llama",
+    ));
+
+    // Then: the output price (or a dearer tier of it) is the ceiling, and no price is not zero.
+    assert!(api >= 10.0, "{api}");
+    assert!(close(claude, 15.0), "{claude}");
+    assert_eq!(local, None);
+}

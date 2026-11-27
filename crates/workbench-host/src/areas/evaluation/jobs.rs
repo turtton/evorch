@@ -532,10 +532,15 @@ impl Jobs {
     ) -> Ended {
         let root = self.parts.root.clone();
         let thread = run.thread.as_str().to_owned();
-        let (output, candidate) = (run.output.clone(), run.candidate.clone());
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare_run(&root, &thread, output, candidate))
-                .await;
+        let (output, candidate, common) = (
+            run.output.clone(),
+            run.candidate.clone(),
+            run.common.clone(),
+        );
+        let prepared = tokio::task::spawn_blocking(move || {
+            prepare_run(&root, &thread, output, candidate, common)
+        })
+        .await;
         let prepared = match prepared {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(ended)) => return ended,
@@ -545,6 +550,8 @@ impl Jobs {
         let args = EvalArgs {
             thread_id: run.thread.as_str().to_owned(),
             candidate: prepared.candidate.as_ref().map(|file| file.0.clone()),
+            common: prepared.common.as_ref().map(|file| file.0.clone()),
+            approved_digest: run.approved_digest.clone(),
             repeat: run.repeat,
             output: Some(prepared.dir.clone()),
             db: Some(self.parts.database.clone()),
@@ -572,9 +579,14 @@ impl Jobs {
         )
         .await;
         let candidate_path = prepared.candidate.as_ref().map(|file| file.0.clone());
-        // The overlay is read: the file is no longer needed.
+        let common_path = prepared.common.as_ref().map(|file| file.0.clone());
+        // The overlays are read: the files are no longer needed.
         drop(prepared.candidate);
-        let scrub = self.scrubber(candidate_path.as_deref());
+        drop(prepared.common);
+        let scrub = self.scrubber(&[
+            (candidate_path.as_deref(), "<candidate>"),
+            (common_path.as_deref(), "<common>"),
+        ]);
         if *cancel.borrow() {
             // The runs were stopped and awaited by the runner.
             return Ended::Cancelled(CancelReason::Requested);
@@ -622,7 +634,7 @@ impl Jobs {
 
     fn record_run(&self, id: &OperationId, report: &RunReport) {
         let outcome = &report.outcome;
-        let scrub = self.scrubber(None);
+        let scrub = self.scrubber(&[]);
         let line = EvaluationRunLine {
             label: truncate(&report.label, MAX_NAME_BYTES),
             index: report.index,
@@ -674,7 +686,7 @@ impl Jobs {
     /// Workspaces the runner could not remove: the view says so, the job's own
     /// result does not change.
     fn record_cleanup(&self, id: &OperationId, dir: &Path, cleanup: &eval::cleanup::Report) {
-        let scrub = self.scrubber(None);
+        let scrub = self.scrubber(&[]);
         let warnings: Vec<String> = cleanup
             .entries
             .iter()
@@ -710,7 +722,7 @@ impl Jobs {
         rejudge: bool,
         checks_only: bool,
     ) -> Ended {
-        let scrub = self.scrubber(None);
+        let scrub = self.scrubber(&[]);
         let made = if checks_only {
             self.make_checks(id, &targets).await
         } else {
@@ -830,10 +842,12 @@ impl Jobs {
     }
 
     /// Replaces every path the core knows by a label, then masks secrets.
-    fn scrubber(&self, candidate: Option<&Path>) -> Scrub {
+    fn scrubber(&self, overlays: &[(Option<&Path>, &'static str)]) -> Scrub {
         let mut paths: Vec<(PathBuf, &'static str)> = Vec::new();
-        if let Some(path) = candidate {
-            paths.push((path.to_path_buf(), "<candidate>"));
+        for (path, label) in overlays {
+            if let Some(path) = path {
+                paths.push((path.to_path_buf(), label));
+            }
         }
         paths.push((self.parts.root.clone(), "<evaluations>"));
         paths.push((self.parts.database.clone(), "<database>"));
@@ -950,7 +964,9 @@ fn failed_run(error: &EvalError, scrub: &Scrub) -> Ended {
             (EvaluationJobFailure::Source, ErrorCode::StorageUnavailable)
         }
         EvalError::Source(_) => (EvaluationJobFailure::Source, ErrorCode::InvalidRequest),
-        EvalError::Overlay(_) => (EvaluationJobFailure::Overlay, ErrorCode::InvalidRequest),
+        EvalError::Overlay(_) | EvalError::Common(_) | EvalError::Comparison(_) => {
+            (EvaluationJobFailure::Overlay, ErrorCode::InvalidRequest)
+        }
         EvalError::Io(_) | EvalError::Credential(_) | EvalError::CredentialTask(_) => {
             (EvaluationJobFailure::Io, ErrorCode::StorageUnavailable)
         }
@@ -1037,6 +1053,7 @@ struct Prepared {
     name: String,
     dir: PathBuf,
     candidate: Option<OverlayFile>,
+    common: Option<OverlayFile>,
 }
 
 /// Resolve the output directory under the root and write the overlay to a
@@ -1046,6 +1063,7 @@ fn prepare_run(
     thread: &str,
     output: Option<String>,
     candidate: Option<String>,
+    common: Option<String>,
 ) -> Result<Prepared, Ended> {
     std::fs::create_dir_all(root)
         .map_err(|_| Ended::io("the evaluation root cannot be created"))?;
@@ -1072,10 +1090,12 @@ fn prepare_run(
         return Err(Ended::usage(format!("{name} is a link, not a directory")));
     }
     let candidate = candidate.map(|text| write_overlay(&text)).transpose()?;
+    let common = common.map(|text| write_overlay(&text)).transpose()?;
     Ok(Prepared {
         name,
         dir,
         candidate,
+        common,
     })
 }
 

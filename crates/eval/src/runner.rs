@@ -11,6 +11,7 @@ use event_bus::EventBus;
 use recorder::pricing::UsagePricing;
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use routing::EnvLookup;
+use runtime::tool_descriptions::BuiltinCatalog;
 use runtime::{
     AgentModel, ExecutionPolicy, ModelSource, ProjectTrust, Role, RunConfig, RunStore,
     RuntimeComposition, compose_runtime, production_executor_with_config,
@@ -19,8 +20,10 @@ use sandbox::credential::CredentialStore;
 use sandbox::{DirectSandbox, Sandbox};
 use tools::ToolExecutor;
 
+use crate::changes::{self, Changes};
 use crate::driver::{self, Replay, ReplayOutcome, Status};
 use crate::output::{self, BindingSummary, Manifest, Outcome, RunEntry, StartSummary};
+use crate::pins::{self, Overlay};
 use crate::roles;
 use crate::simulator::UserSimulator;
 use crate::source::{OriginalThread, SourceError};
@@ -30,6 +33,8 @@ use crate::workspace::{self, CommitIdentity, Workspace};
 const BUS_CAPACITY: usize = 65_536;
 const BRIDGE_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 const OVERLAY_FORBIDDEN_KEYS: [&str; 3] = ["eval", "tools", "comment_checker"];
+/// What the common overlay may set: the models and role setup both sides run on.
+const COMMON_ALLOWED_KEYS: [&str; 4] = ["agents", "routing", "role_profile", "role_profiles"];
 pub const BASELINE: &str = "baseline";
 pub const CANDIDATE: &str = "candidate";
 
@@ -39,6 +44,12 @@ pub(crate) mod preflight;
 pub struct EvalArgs {
     pub thread_id: String,
     pub candidate: Option<PathBuf>,
+    /// An overlay both the baseline and the candidate run under, such as the
+    /// models under evaluation. See [`COMMON_ALLOWED_KEYS`].
+    pub common: Option<PathBuf>,
+    /// The [`pins::Inputs::digest`] the evaluation was approved on. When set,
+    /// the evaluation runs only while the inputs still hash to it.
+    pub approved_digest: Option<String>,
     pub repeat: Option<u32>,
     pub output: Option<PathBuf>,
     pub db: Option<PathBuf>,
@@ -97,6 +108,10 @@ pub enum EvalError {
     Source(#[from] SourceError),
     #[error("the candidate overlay is unusable: {0}")]
     Overlay(String),
+    #[error("the common overlay is unusable: {0}")]
+    Common(String),
+    #[error("the comparison is not valid: {0}")]
+    Comparison(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -128,6 +143,7 @@ struct Context {
     verify: Option<String>,
     verify_timeout: Duration,
     simulator: Config,
+    inputs_guard: pins::Guard,
     identity: CommitIdentity,
     trust: ProjectTrust,
     credentials: Arc<dyn CredentialStore>,
@@ -191,19 +207,72 @@ pub async fn run_with_cleanup(
         (thread, sample.map(output::PinnedSample::of))
     };
     let base = load_config(user_config_dir.as_deref(), None, None)?;
-    let overlay = match &args.candidate {
-        Some(path) => Some(read_overlay(path, user_config_dir.as_deref())?),
-        None => None,
-    };
-    let swapped_roles = match &overlay {
-        Some((_, value)) => {
-            let project = Some(thread.project_root.as_path());
-            let baseline = load_config(user_config_dir.as_deref(), project, None)?;
-            let candidate = load_config(user_config_dir.as_deref(), project, Some(value))
+    let common = args
+        .common
+        .as_deref()
+        .map(|path| read_common(path, user_config_dir.as_deref()))
+        .transpose()?;
+    let candidate = args
+        .candidate
+        .as_deref()
+        .map(|path| read_overlay(path, user_config_dir.as_deref()))
+        .transpose()?;
+    let (baseline_overlay, candidate_overlay) = pins::compose(common.as_ref(), candidate.as_ref());
+    // Everything below that can refuse the comparison runs before any
+    // preflight or replay, so a refused evaluation makes no provider request.
+    let project = Some(thread.project_root.as_path());
+    let baseline_config = load_config(
+        user_config_dir.as_deref(),
+        project,
+        baseline_overlay.as_ref(),
+    )
+    .map_err(|error| match common {
+        Some(_) => EvalError::Common(error.to_string()),
+        None => EvalError::Config(error),
+    })?;
+    let builtin = BuiltinCatalog::for_evaluation()
+        .map_err(|error| EvalError::Comparison(error.to_string()))?;
+    let (swapped_roles, changes, candidate_config) = match &candidate_overlay {
+        Some(value) => {
+            let candidate_config = load_config(user_config_dir.as_deref(), project, Some(value))
                 .map_err(|error| EvalError::Overlay(error.to_string()))?;
-            roles::swapped_roles(&baseline, &candidate)
+            let changes = changes::accept(&baseline_config, &candidate_config, &builtin)
+                .map_err(EvalError::Comparison)?;
+            let swapped = roles::swapped_roles(&baseline_config, &candidate_config);
+            (swapped, changes, Some(candidate_config))
         }
-        None => Vec::new(),
+        None => (Vec::new(), Changes::default(), None),
+    };
+    let inputs = pins::collect(
+        user_config_dir.as_deref(),
+        &thread.project_root,
+        sample.as_ref().map(|sample| sample.hash.clone()),
+        common.as_ref(),
+        candidate.as_ref(),
+    )
+    .map_err(EvalError::Usage)?;
+    if let Some(approved) = &args.approved_digest
+        && *approved != inputs.digest()
+    {
+        return Err(EvalError::Usage(
+            "the sample, overlays, configuration or prompt presets changed after the evaluation \
+             was approved; nothing was run. Start it again to approve the current ones"
+                .into(),
+        ));
+    }
+    let pinned = pins::Pins::new(
+        inputs.clone(),
+        pins::Build::current(&builtin),
+        thread.role.name(),
+        &baseline_config,
+        candidate_config.as_ref(),
+    );
+    let inputs_guard = pins::Guard {
+        user_config_dir: user_config_dir.clone(),
+        project_root: thread.project_root.clone(),
+        common: common.clone(),
+        candidate: candidate.clone(),
+        pinned: inputs,
     };
     let repeat = args.repeat.unwrap_or(base.eval.repeat_target);
     if repeat == 0 {
@@ -225,9 +294,14 @@ pub async fn run_with_cleanup(
         }
     };
     let (simulator, simulator_summary) = simulator_config(&base);
-    let configurations: Vec<(&str, Option<&toml::Value>)> = std::iter::once((BASELINE, None))
-        .chain(overlay.as_ref().map(|(_, value)| (CANDIDATE, Some(value))))
-        .collect();
+    let configurations: Vec<(&str, Option<&toml::Value>)> =
+        std::iter::once((BASELINE, baseline_overlay.as_ref()))
+            .chain(
+                candidate_overlay
+                    .as_ref()
+                    .map(|value| (CANDIDATE, Some(value))),
+            )
+            .collect();
     let mut manifest = Manifest {
         thread_id: thread.thread_id.clone(),
         source_db,
@@ -236,8 +310,11 @@ pub async fn run_with_cleanup(
         problem: args.problem.clone(),
         sample,
         verify: args.verify.clone(),
-        candidate_overlay: overlay.as_ref().map(|(text, _)| text.clone()),
+        candidate_overlay: candidate.as_ref().map(|overlay| overlay.text.clone()),
+        common_overlay: common.as_ref().map(|overlay| overlay.text.clone()),
         swapped_roles,
+        changes,
+        pins: Some(pinned),
         configurations: configurations
             .iter()
             .map(|(label, _)| (*label).to_owned())
@@ -265,6 +342,7 @@ pub async fn run_with_cleanup(
             verify: args.verify,
             verify_timeout: args.verify_timeout.unwrap_or(verify::DEFAULT_TIMEOUT),
             simulator,
+            inputs_guard,
             credentials,
             deps,
         };
@@ -285,6 +363,11 @@ pub async fn run_with_cleanup(
                 if driver::is_cancelled(context.deps.cancel.as_ref()) {
                     break 'runs;
                 }
+                if let Err(reason) = context.inputs_guard.verify() {
+                    manifest.finished_at = Some(output::timestamp(SystemTime::now()));
+                    output::write_json(&manifest_path, &manifest)?;
+                    return Err(EvalError::Usage(reason));
+                }
                 let run_dir = dir.join("runs").join(format!("{label}-{index}"));
                 let nonce = nonce()?;
                 manifest.runs.push(RunEntry {
@@ -295,12 +378,14 @@ pub async fn run_with_cleanup(
                     started_at: output::timestamp(SystemTime::now()),
                     finished_at: None,
                     status: None,
+                    observed: None,
                 });
                 output::write_json(&manifest_path, &manifest)?;
                 let outcome = replay_once(&context, overlay, &run_dir, &nonce).await?;
                 if let Some(entry) = manifest.runs.last_mut() {
                     entry.finished_at = Some(output::timestamp(SystemTime::now()));
                     entry.status = Some(outcome.status);
+                    entry.observed = observe(&run_dir);
                 }
                 output::write_json(&manifest_path, &manifest)?;
                 let report = RunReport {
@@ -342,15 +427,86 @@ pub(crate) fn load_config(
     })
 }
 
-fn read_overlay(
-    path: &Path,
-    user_config_dir: Option<&Path>,
-) -> Result<(String, toml::Value), EvalError> {
+fn read_overlay(path: &Path, user_config_dir: Option<&Path>) -> Result<Overlay, EvalError> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
     let value = parse_overlay(&text, user_config_dir)
         .map_err(|error| EvalError::Overlay(format!("{}: {error}", path.display())))?;
-    Ok((text, value))
+    Ok(Overlay { text, value })
+}
+
+fn read_common(path: &Path, user_config_dir: Option<&Path>) -> Result<Overlay, EvalError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| EvalError::Common(format!("{}: {error}", path.display())))?;
+    let value = parse_common(&text, user_config_dir)
+        .map_err(|error| EvalError::Common(format!("{}: {error}", path.display())))?;
+    Ok(Overlay { text, value })
+}
+
+/// A common overlay: a TOML table of only [`COMMON_ALLOWED_KEYS`], which loads
+/// over the user's configuration. It is applied to both sides, so it can fix
+/// the models under evaluation but cannot be what is compared.
+pub(crate) fn parse_common(
+    text: &str,
+    user_config_dir: Option<&Path>,
+) -> Result<toml::Value, String> {
+    let value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| "the overlay must be a TOML table".to_owned())?;
+    if let Some(key) = table
+        .keys()
+        .find(|key| !COMMON_ALLOWED_KEYS.contains(&key.as_str()))
+    {
+        return Err(format!(
+            "`{key}` cannot be set by a common overlay; it may set only {}",
+            COMMON_ALLOWED_KEYS.join(", ")
+        ));
+    }
+    load_config(user_config_dir, None, Some(&value)).map_err(|error| error.to_string())?;
+    Ok(value)
+}
+
+/// What a finished replay actually used: the models its requests went to and
+/// the tool description snapshot each of its runs froze. `None` when the
+/// replay left no readable database.
+fn observe(run_dir: &Path) -> Option<output::Observed> {
+    let db = run_dir.join(output::DATABASE_FILE);
+    let record = crate::metrics::RunRecord::load(&db).ok()?;
+    let metrics = crate::metrics::RunMetrics::from_record(&record, 0, 0, 0);
+    let run_ids: Vec<String> = metrics
+        .delegations
+        .iter()
+        .map(|delegation| delegation.run_id.clone())
+        .collect();
+    let contexts = storage::Database::open_read_only(&db)
+        .ok()?
+        .run_contexts_for(&run_ids)
+        .ok()?;
+    let tool_descriptions = contexts
+        .iter()
+        .filter_map(|context| {
+            let config: serde_json::Value = serde_json::from_str(&context.config_json).ok()?;
+            let frozen = config.get("tool_descriptions")?;
+            let text = |key: &str| frozen.get(key)?.as_str().map(str::to_owned);
+            Some(output::AppliedDescriptions {
+                run_id: context.run_id.clone(),
+                role: context.role.clone(),
+                profile: text("profile"),
+                route_model_id: text("route_model_id"),
+                hash: text("hash")?,
+                tools: frozen
+                    .get("descriptions")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|tools| tools.keys().cloned().collect())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+    Some(output::Observed {
+        models: metrics.models,
+        tool_descriptions,
+    })
 }
 
 /// A candidate overlay as `eval run` accepts it: a TOML table that leaves the
@@ -375,7 +531,7 @@ pub(crate) fn parse_overlay(
 
 /// The simulated user runs on the user's configuration, never the candidate's,
 /// with its binding in the worker slot it is invoked through.
-fn simulator_config(base: &Config) -> (Config, BindingSummary) {
+pub(crate) fn simulator_config(base: &Config) -> (Config, BindingSummary) {
     let mut config = base.clone();
     let summary = match &base.eval.user_simulator {
         Some(binding) => {

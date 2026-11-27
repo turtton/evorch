@@ -210,6 +210,8 @@ fn run_of(id: &str, thread: &str) -> StartEvaluationRun {
         operation_id: operation(id),
         thread: ThreadId::new(thread).unwrap(),
         candidate: None,
+        common: None,
+        approved_digest: None,
         repeat: Some(1),
         output: Some("cache-run".into()),
         problem: None,
