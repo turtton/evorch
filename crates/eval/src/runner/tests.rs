@@ -1439,3 +1439,52 @@ async fn the_project_layer_is_read_from_the_rebuilt_start_not_the_live_checkout(
         from_live.digest()
     );
 }
+
+#[test]
+fn the_offered_tools_are_those_whose_description_the_models_edit_interface_sends() {
+    use config::EditToolConfig::{ApplyPatch, Edit};
+
+    // Given: the tools a run recorded as offered, which still list both edit interfaces'
+    // tools, and an arm whose profile `p` uses each interface in turn.
+    let catalog = BuiltinCatalog::for_evaluation().unwrap();
+    let recorded = serde_json::json!(["read", "edit", "write", "apply_patch", "run_js"]);
+    let arm = |edit_tool| {
+        let mut config = Config::default();
+        config.providers.insert(
+            "p".into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAi,
+                edit_tool: Some(edit_tool),
+                ..config::ProviderProfileConfig::default()
+            },
+        );
+        config
+    };
+    let offered = |config: &Config, profile| {
+        offered_tools(
+            Some(&recorded),
+            Some((config, &catalog)),
+            profile,
+            Some("m"),
+        )
+    };
+
+    // When / Then: only the tools whose description is sent remain; apply_patch and the
+    // non-builtin run_js never do.
+    assert_eq!(
+        offered(&arm(Edit), Some("p")).unwrap(),
+        ["read", "edit", "write"]
+    );
+    assert_eq!(offered(&arm(ApplyPatch), Some("p")).unwrap(), ["read"]);
+    // Then: an unknown profile, no profile, no record or no arm says nothing.
+    assert_eq!(offered(&arm(Edit), Some("other")), None);
+    assert_eq!(offered(&arm(Edit), None), None);
+    assert_eq!(
+        offered_tools(None, Some((&arm(Edit), &catalog)), Some("p"), Some("m")),
+        None
+    );
+    assert_eq!(
+        offered_tools(Some(&recorded), None, Some("p"), Some("m")),
+        None
+    );
+}

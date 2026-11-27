@@ -1866,3 +1866,34 @@ async fn a_replay_started_and_not_ended_makes_every_cost_view_unknown_apart_from
                 && pending.subject == "candidate")
     );
 }
+
+#[tokio::test]
+async fn a_description_the_models_edit_interface_did_not_send_is_not_applied_in_the_report() {
+    // Given: a worker's snapshot that lists `write` and `edit`; the replay's observation
+    // kept only the tools whose description its model's edit interface sends.
+    for (tool, offered, applied) in [
+        // apply-patch model: edit and write are narrowed away before the request.
+        ("write", vec!["read"], false),
+        ("edit", vec!["read"], false),
+        // edit model: its own tool arrives.
+        ("edit", vec!["read", "edit", "write"], true),
+    ] {
+        let fixture = Fixture::new(None, CONFIG);
+        describe_tool(
+            &fixture,
+            tool,
+            Some(applied_by(tool, "candidate-worker", "Worker", &offered)),
+        );
+        let deps = fixture.deps(judge_answers_without_problem()).await;
+
+        // When: the directory is reported.
+        let reports = report(fixture.args(false), &deps).await.unwrap();
+
+        // Then: the change is in force only when the description could reach the wire.
+        assert_eq!(
+            !pending_kinds(&reports[0]).contains(&PendingKind::NotApplied),
+            applied,
+            "{tool} with {offered:?}"
+        );
+    }
+}

@@ -252,11 +252,22 @@ fn base_model(id: &str) -> &str {
 
 /// What `entry`'s replay used of the description changes in `changes`.
 ///
-/// A description counts as used only by a run that froze it, whose role is one
-/// the change reaches, and whose own persisted record lists the tool among those
-/// offered to the model: a snapshot lists every tool the model has an override
-/// for, including ones the run's role or its being a child never offers. When the
-/// record does not say what was offered, nothing counts as used.
+/// A description counts as applied only when all four hold:
+///
+/// 1. the run's frozen snapshot selects the change's (profile, route model ID),
+///    taken from the candidate's own configuration, and lists the tool;
+/// 2. the tool is among the `tool_names` the run's own record offered, so the
+///    run's role and its being a child are accounted for (and its role is one
+///    the change reaches);
+/// 3. the replay's requests for the role were all answered by a model the
+///    changed descriptions are for. This reads the usage ledger's actual
+///    profile and model, never the fallback events, and is checked for baseline
+///    and candidate alike (`fallbacks`);
+/// 4. the description reaches the model's wire: `offered` already holds only
+///    the tools that pass `BuiltinCatalog::description_reaches_wire` for the
+///    edit interface of the run's profile and model.
+///
+/// When any of it cannot be told, nothing counts as applied.
 pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
     let observed: Option<&Observed> = entry.and_then(|entry| entry.observed.as_ref());
     let Some(observed) = observed else {

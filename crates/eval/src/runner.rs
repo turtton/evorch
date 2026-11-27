@@ -360,7 +360,11 @@ pub async fn run_with_cleanup(
                 report: preflight_path,
             });
         }
+        let delivery_catalog = BuiltinCatalog::for_evaluation().ok();
         'runs: for (label, overlay) in configurations {
+            // What decides which tools' descriptions reach the wire: the arm's own
+            // providers. Unreadable here, no run's tools can be told to have been sent.
+            let arm_config = load_config(context.user_config_dir.as_deref(), None, overlay).ok();
             for index in 1..=repeat {
                 if driver::is_cancelled(context.deps.cancel.as_ref()) {
                     break 'runs;
@@ -387,7 +391,8 @@ pub async fn run_with_cleanup(
                 if let Some(entry) = manifest.runs.last_mut() {
                     entry.finished_at = Some(output::timestamp(SystemTime::now()));
                     entry.status = Some(outcome.status);
-                    entry.observed = observe(&run_dir);
+                    entry.observed =
+                        observe(&run_dir, arm_config.as_ref().zip(delivery_catalog.as_ref()));
                 }
                 output::write_json(&manifest_path, &manifest)?;
                 let report = RunReport {
@@ -472,7 +477,12 @@ pub(crate) fn parse_common(
 /// What a finished replay actually used: the models its requests went to and
 /// the tool description snapshot each of its runs froze. `None` when the
 /// replay left no readable database.
-fn observe(run_dir: &Path) -> Option<output::Observed> {
+///
+/// `arm` is the arm's configuration and the builtin catalog: a run's `offered`
+/// tools are those its own record lists that also survive the send-time
+/// narrowing of its model's edit interface; without them, or when the run's
+/// profile is not among the arm's, it is `None`.
+fn observe(run_dir: &Path, arm: Option<(&Config, &BuiltinCatalog)>) -> Option<output::Observed> {
     let db = run_dir.join(output::DATABASE_FILE);
     let record = crate::metrics::RunRecord::load(&db).ok()?;
     let metrics = crate::metrics::RunMetrics::from_record(&record, 0, 0, 0);
@@ -502,15 +512,12 @@ fn observe(run_dir: &Path) -> Option<output::Observed> {
                     .and_then(serde_json::Value::as_object)
                     .map(|tools| tools.keys().cloned().collect())
                     .unwrap_or_default(),
-                offered: config
-                    .get("tool_names")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|names| {
-                        names
-                            .iter()
-                            .filter_map(|name| name.as_str().map(str::to_owned))
-                            .collect()
-                    }),
+                offered: offered_tools(
+                    config.get("tool_names"),
+                    arm,
+                    text("profile").as_deref(),
+                    text("route_model_id").as_deref(),
+                ),
             })
         })
         .collect();
@@ -518,6 +525,30 @@ fn observe(run_dir: &Path) -> Option<output::Observed> {
         models: metrics.models,
         tool_descriptions,
     })
+}
+
+/// The fixed tools whose description reached a run's model: those the run's own
+/// record lists among the tools it was offered, that also pass the one
+/// predicate of what the model's edit interface and wire carry
+/// ([`BuiltinCatalog::description_reaches_wire`]), judged by the edit interface
+/// the arm's providers give the run's profile and model.
+fn offered_tools(
+    recorded: Option<&serde_json::Value>,
+    arm: Option<(&Config, &BuiltinCatalog)>,
+    profile: Option<&str>,
+    model: Option<&str>,
+) -> Option<Vec<String>> {
+    let (config, catalog) = arm?;
+    let edit_tool = config.providers.get(profile?)?.edit_tool_for(model?);
+    Some(
+        recorded?
+            .as_array()?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|name| catalog.description_reaches_wire(name, edit_tool))
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// A candidate overlay as `eval run` accepts it: a TOML table that leaves the
