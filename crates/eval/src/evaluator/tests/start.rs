@@ -363,17 +363,14 @@ async fn a_common_overlay_may_set_only_models_and_roles() {
 }
 
 #[tokio::test]
-async fn a_tool_description_candidate_and_a_candidate_with_no_effect_are_refused_before_asking() {
-    // Given: a pinned sample, and a candidate that rewrites a description, one that
-    // sets a description for a tool that is not a fixed builtin, and one that only
-    // restates what the baseline already has.
+async fn invalid_description_candidates_and_a_candidate_with_no_effect_are_refused_before_asking() {
+    // Given: a pinned sample, a candidate that sets a description for a tool that is not a
+    // fixed builtin, and one that only restates what the baseline already has.
     let fixture = Fixture::new();
     fixture.with_routes();
     fixture.thread("thread-1").await;
     fixture.pin("thread-1", "skipped the failing test").await;
     let mut events = fixture.bus.subscribe();
-    let candidate =
-        |tool: &str| format!("[model_tool_descriptions.main.gpt-test]\n{tool} = \"Read files.\"\n");
 
     // When: each is started.
     let start = |candidate: String| {
@@ -382,17 +379,11 @@ async fn a_tool_description_candidate_and_a_candidate_with_no_effect_are_refused
             json!({"thread_id": "thread-1", "candidate": candidate}),
         )
     };
-    let description = start(candidate("read")).await;
-    let run_js = start(candidate("run_js")).await;
+    let run_js =
+        start("[model_tool_descriptions.main.gpt-test]\nrun_js = \"Read files.\"\n".into()).await;
     let restated = start("[agents.worker]\n".into()).await;
 
-    // Then: the first waits for the judge to learn about descriptions, the others are invalid
-    // comparisons, and none reached the user.
-    assert!(
-        description.is_error && description.content.contains("judge is not yet told"),
-        "{}",
-        description.content
-    );
+    // Then: both are invalid comparisons, and none reached the user.
     assert!(
         run_js.is_error && run_js.content.contains("not a fixed builtin"),
         "{}",
@@ -405,6 +396,46 @@ async fn a_tool_description_candidate_and_a_candidate_with_no_effect_are_refused
     );
     assert_eq!(approvals_requested(&mut events).await, 0);
     assert!(!fixture.user.path().join("eval").exists());
+}
+
+#[tokio::test]
+async fn a_description_only_candidate_is_put_to_the_user_as_a_description_change() {
+    // Given: a pinned sample, and a candidate that only rewrites the description of `read`
+    // for the model the worker uses.
+    let fixture = Fixture::new();
+    fixture.with_routes();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let approval = fixture.answer_approval(true);
+    let candidate = "[model_tool_descriptions.main.gpt-test]\nread = \"Read files.\"\n";
+
+    // When: the evaluation is started and approved.
+    let result = fixture
+        .call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": candidate, "repeat": 1}),
+        )
+        .await;
+    let shown = approval.await.unwrap();
+    let value = started(&result);
+
+    // Then: no role is shown as swapped, the description change and the roles it reaches are.
+    let summary = shown["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Tool descriptions the candidate changes:\n  read for main/gpt-test"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Roles the candidate moves to other models, routes or presets: none"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Roles the changes can reach: orchestrator, worker"),
+        "{summary}"
+    );
+    assert_eq!(value["swapped_roles"], json!([]));
+    assert_eq!(value["changes"]["tool_descriptions"][0]["tool"], "read");
+    let _ = fixture.notice().await;
 }
 
 #[tokio::test]

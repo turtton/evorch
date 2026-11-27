@@ -1280,33 +1280,57 @@ async fn a_common_overlay_cannot_change_anything_but_models_and_roles() {
 }
 
 #[tokio::test]
-async fn candidates_that_change_nothing_or_a_tool_description_are_refused_before_any_replay() {
-    // Given: a candidate equal to the baseline, and one that rewrites a tool description.
+async fn a_candidate_that_changes_nothing_is_refused_before_any_replay() {
+    // Given: a candidate equal to the baseline.
     let fixture = Fixture::new().await;
-    for (candidate, reason) in [
-        ("[agents.worker]\n", "changes nothing"),
-        (
-            "[model_tool_descriptions.primary.gpt-4o]\nread = \"Read.\"\n",
-            "judge is not yet told",
-        ),
-    ] {
-        let deps = fixture.deps(vec![], vec![]);
+    let deps = fixture.deps(vec![], vec![]);
 
-        // When: the evaluation is started.
-        let error = run(fixture.args(Some(candidate)), deps, |_| {
-            panic!("no replay may start")
-        })
+    // When: the evaluation is started.
+    let error = run(fixture.args(Some("[agents.worker]\n")), deps, |_| {
+        panic!("no replay may start")
+    })
+    .await
+    .unwrap_err();
+
+    // Then: the comparison is refused with its reason, with no output and no model built.
+    assert!(
+        matches!(&error, EvalError::Comparison(text) if text.contains("changes nothing")),
+        "{error}"
+    );
+    assert!(!fixture.user.path().join("out").exists());
+    assert!(fixture.agents.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_description_only_candidate_runs_and_each_replay_records_its_initial_context() {
+    // Given: a user configuration whose worker uses gpt-4o of `primary`, and a candidate that
+    // only rewrites the description of `read` for that model.
+    let fixture = Fixture::new().await;
+    preflight_config(&fixture, "http://127.0.0.1:1".into());
+    let candidate = "[model_tool_descriptions.primary.gpt-4o]\nread = \"Read.\"\n";
+    let deps = fixture.deps(vec![text("done")], vec![decision("finish", "")]);
+
+    // When: the evaluation runs.
+    let evaluation = run(fixture.args(Some(candidate)), deps, |_| {})
         .await
-        .unwrap_err();
+        .unwrap();
 
-        // Then: the comparison is refused with its reason, with no output and no model built.
+    // Then: it is accepted as a description change and not as a role swap, and every replay
+    // left the initial system and tools its own runtime composed.
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["swapped_roles"], serde_json::json!([]));
+    assert_eq!(manifest["changes"]["bindings"], serde_json::json!([]));
+    assert_eq!(manifest["changes"]["tool_descriptions"][0]["tool"], "read");
+    for run in manifest["runs"].as_array().unwrap() {
+        let dir = evaluation.dir.join(run["dir"].as_str().unwrap());
+        let recorded: output::BaseContextSummary =
+            serde_json::from_slice(&std::fs::read(dir.join(output::BASE_CONTEXT_FILE)).unwrap())
+                .unwrap();
         assert!(
-            matches!(&error, EvalError::Comparison(text) if text.contains(reason))
-                || matches!(&error, EvalError::Overlay(_) | EvalError::Config(_)),
-            "{error}"
+            recorded.tool_count > 0 && recorded.tools_tokens > 0,
+            "{recorded:?}"
         );
-        assert!(!fixture.user.path().join("out").exists());
-        assert!(fixture.agents.lock().unwrap().is_empty());
+        assert!(recorded.system_tokens > 0, "{recorded:?}");
     }
 }
 

@@ -239,9 +239,14 @@ fn summary(
         ));
     }
     text.push_str(&format!(
-        "\nEstimated total: {}\nThis is {ESTIMATE_NOTE}.\n\nCost and limits:\n{bounds}\nRoles the candidate changes:\n",
+        "\nEstimated total: {}\nThis is {ESTIMATE_NOTE}.\n\nCost and limits:\n{bounds}\n",
         usd(&total(plan))
     ));
+    if swapped.is_empty() {
+        text.push_str("Roles the candidate moves to other models, routes or presets: none\n");
+    } else {
+        text.push_str("Roles the candidate changes:\n");
+    }
     for role in swapped {
         text.push_str(&format!(
             "  {}: {} → {}\n",
@@ -508,7 +513,7 @@ impl Tool for StartEvaluation {
             Ok(builtin) => builtin,
             Err(error) => return Ok(ToolResult::error(error.to_string())),
         };
-        let changes = match changes::accept(baseline, candidate_config, &builtin) {
+        let changes = match changes::derive(baseline, candidate_config, &builtin) {
             Ok(changes) => changes,
             Err(reason) => {
                 return Ok(ToolResult::error(format!(

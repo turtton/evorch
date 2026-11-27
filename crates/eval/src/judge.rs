@@ -11,6 +11,9 @@ use runtime::{AgentInvocationContext, AgentModel, Role};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use storage::eval_sample::sha256_hex;
+
+use crate::changes::{Changes, ToolDescriptionChange};
 use crate::cost::RequestUsage;
 use crate::structured::{self, ATTEMPTS, Unusable};
 
@@ -21,7 +24,12 @@ pub const ROLE: Role = Role::Orchestrator;
 pub const ASPECTS: [&str; 4] = ["requirement", "correctness", "scope", "efficiency"];
 pub const PROBLEM_ASPECT: &str = "problem";
 
-const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past conversation between a user and a coding agent. Both started from the same repository state, and a simulated user replayed the original user's messages (`original_user_messages`) to each. For each replay you get its status, the conversation the user saw (the root run's messages only), `delegated_outputs` (the final output of each delegated child run, such as a Reviewer's or Worker's report; `focus` marks the roles whose configuration differs between the replays, and `delegated_by` names the delegating role), the diff from the start state, the verification command's result when one ran, metrics, and its cost in USD. A replay that did not complete is still judged on what it achieved. When a delegated child's output is part of the evidence, judge its quality and whether the root relied on it correctly, rather than only the root's summary of it. Judge each aspect on its own and return the winner (\"A\", \"B\" or \"tie\") with a short reason that cites evidence:
+/// The version of the judge's instructions and payloads. It is part of the
+/// identity of every cached judgment: bump it with any change to what the judge
+/// is asked or sent that the instruction texts below do not already show.
+pub const PAYLOAD_VERSION: u32 = 2;
+
+const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past conversation between a user and a coding agent. Both started from the same repository state, and a simulated user replayed the original user's messages (`original_user_messages`) to each. For each replay you get its status, the conversation the user saw (the root run's messages only), `delegated_outputs` (the final output of each delegated child run, such as a Reviewer's or Worker's report; `delegated_by` names the delegating role), the diff from the start state, the verification command's result when one ran, metrics, and its cost in USD. `changes` states in what the configurations of A and B differ, and only in that; `focus` marks the delegated runs of the roles those differences can reach. A difference is one of: `role_bindings` (the listed roles are bound to other models, routes or presets), or `tool_descriptions` (for the listed tool, A and B send different description texts to the same model; the model is not changed, and `description_hash_A` / `description_hash_B` identify the two texts). Do not assume that a model differs unless `role_bindings` names the role. Judge what each replay did, not what its configuration was meant to achieve, and do not credit a difference the replays show no sign of. A replay that did not complete is still judged on what it achieved. When a delegated child's output is part of the evidence, judge its quality and whether the root relied on it correctly, rather than only the root's summary of it. Judge each aspect on its own and return the winner (\"A\", \"B\" or \"tie\") with a short reason that cites evidence:
 - requirement: how fully the original requests were met.
 - correctness: whether the changes are correct, from the diff and the verification result.
 - scope: whether the replay kept to what was asked, without unrequested changes.
@@ -29,12 +37,12 @@ const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past
 - problem (only when `problem` is given): whether the described problem occurred; the replay where it did not occur, or that fixed it, wins.
 Answer \"tie\" when the evidence does not separate the replays. The order in which they are presented carries no meaning.";
 
-const ANALYZE_INSTRUCTION: &str = "You analyse how two replays, baseline and candidate, of one past conversation between a user and a coding agent went. The candidate's configuration differs from the baseline's only in `swapped_roles`. For each replay you get its status, metrics, `delegated_outputs` (the final output of each delegated child run; `focus` marks the swapped roles) and a bounded summary of its events: token totals per role, then timestamped delegations, tool calls with short inputs, durations and errors, turns, provider failures and notable diagnostics. Answer each field concisely with concrete evidence from the timelines:
+const ANALYZE_INSTRUCTION: &str = "You analyse how two replays, baseline and candidate, of one past conversation between a user and a coding agent went. The candidate's configuration differs from the baseline's only in `changes`: `role_bindings` (roles bound to other models, routes or presets) and `tool_descriptions` (another description of a tool for the same model; the model itself is not changed). `affected_roles` lists the roles those differences can reach, and `applied` says, for each changed description, whether the candidate's runs really used it and whether any request went to another model. Do not infer an effect from a difference that `applied` shows was not in force. For each replay you get its status, metrics, `delegated_outputs` (the final output of each delegated child run; `focus` marks the affected roles) and a bounded summary of its events: token totals per role, then timestamped delegations, tool calls with short inputs, durations and errors, turns, provider failures and notable diagnostics. Answer each field concisely with concrete evidence from the timelines:
 - time_and_tokens: where time and tokens went in each replay.
 - detours: detours, and duplicated or redundant tool calls.
 - delegation: whether the delegations were appropriate.
-- swapped_roles: how the swapped roles behaved in each replay.
-- difference: the difference between the replays, focused on the swapped roles and, when given, on `problem`.";
+- affected_roles: how the affected roles behaved in each replay, and whether the change showed in their behaviour.
+- difference: the difference between the replays, focused on the affected roles and, when given, on `problem`.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Winner {
@@ -60,7 +68,7 @@ pub struct ProcessAnalysis {
     pub time_and_tokens: String,
     pub detours: String,
     pub delegation: String,
-    pub swapped_roles: String,
+    pub affected_roles: String,
     pub difference: String,
 }
 
@@ -103,10 +111,25 @@ impl Preferred {
     }
 }
 
+/// Why an aspect's winner is what it is, so that a tie the judge gave in both
+/// orders is not confused with one that two disagreeing answers made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Basis {
+    /// Both orders named the same winner.
+    Agreed,
+    /// Both orders answered tie: the replays are alike on this aspect.
+    BothTie,
+    /// The orders named different winners (or one named a winner and the
+    /// other a tie): the answer followed the position, so there is no result.
+    OrderDisagreement,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AspectResult {
     pub aspect: String,
     pub winner: Preferred,
+    pub basis: Basis,
     pub baseline_first: AspectVerdict,
     pub candidate_first: AspectVerdict,
 }
@@ -120,7 +143,8 @@ pub fn aspects(problem: bool) -> Vec<&'static str> {
 }
 
 /// Map both orders back to baseline and candidate; an aspect whose two
-/// answers disagree is a tie.
+/// answers disagree is a tie, recorded as a disagreement and not as a tie both
+/// orders gave.
 pub fn aggregate(
     baseline_first: &Verdicts,
     candidate_first: &Verdicts,
@@ -133,14 +157,73 @@ pub fn aggregate(
             let second = candidate_first.get(*aspect)?;
             let left = Preferred::of(first.winner, Order::BaselineFirst);
             let right = Preferred::of(second.winner, Order::CandidateFirst);
+            let basis = match (left == right, left) {
+                (true, Preferred::Tie) => Basis::BothTie,
+                (true, _) => Basis::Agreed,
+                (false, _) => Basis::OrderDisagreement,
+            };
             Some(AspectResult {
                 aspect: (*aspect).to_owned(),
                 winner: if left == right { left } else { Preferred::Tie },
+                basis,
                 baseline_first: first.clone(),
                 candidate_first: second.clone(),
             })
         })
         .collect()
+}
+
+type HashOf = fn(&ToolDescriptionChange) -> &str;
+
+/// What the comparison tells the judge about the differences between A and B.
+/// Each side is named by its position, never as baseline or candidate: with
+/// `order`, the first replay is A, so the hashes follow the same order and the
+/// payload reveals nothing about which configuration is which.
+pub fn comparison_changes(changes: &Changes, order: Order) -> serde_json::Value {
+    let (first, second): (HashOf, HashOf) = match order {
+        Order::BaselineFirst => (|c| &c.baseline_hash, |c| &c.candidate_hash),
+        Order::CandidateFirst => (|c| &c.candidate_hash, |c| &c.baseline_hash),
+    };
+    let descriptions: Vec<serde_json::Value> = changes
+        .tool_descriptions
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "tool": change.tool,
+                "profile": change.profile,
+                "model": change.route_model_id,
+                "description_hash_A": first(change),
+                "description_hash_B": second(change),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "role_bindings": changes.bindings,
+        "tool_descriptions": descriptions,
+        "affected_roles": changes.affected_roles,
+    })
+}
+
+fn identity(parts: &[&str]) -> String {
+    sha256_hex(format!("judge-payload-{PAYLOAD_VERSION}\n{}", parts.join("\n")).as_bytes())
+}
+
+/// Names the instruction, the payload version, the aspects asked and the
+/// differences told, so that a judgment made under any other is not reused.
+pub fn compare_identity(aspects: &[&str], changes: &Changes) -> String {
+    identity(&[
+        COMPARE_INSTRUCTION,
+        &aspects.join(","),
+        &serde_json::to_string(changes).unwrap_or_default(),
+    ])
+}
+
+/// [`compare_identity`] for the process analysis.
+pub fn analysis_identity(changes: &Changes) -> String {
+    identity(&[
+        ANALYZE_INSTRUCTION,
+        &serde_json::to_string(changes).unwrap_or_default(),
+    ])
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -308,7 +391,7 @@ fn analysis_schema() -> JsonSchema {
         "time_and_tokens",
         "detours",
         "delegation",
-        "swapped_roles",
+        "affected_roles",
         "difference",
     ];
     let properties: serde_json::Map<String, serde_json::Value> = fields
@@ -384,6 +467,118 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_in_both_orders_is_told_apart_from_a_tie_the_orders_made() {
+        // Given: scope is a tie in both orders; efficiency is won by A in both, so each order
+        // names another side; correctness is a tie in one order and a win in the other;
+        // requirement agrees on the candidate.
+        let baseline_first = verdicts(&[
+            ("requirement", Winner::B),
+            ("correctness", Winner::Tie),
+            ("scope", Winner::Tie),
+            ("efficiency", Winner::A),
+        ]);
+        let candidate_first = verdicts(&[
+            ("requirement", Winner::A),
+            ("correctness", Winner::A),
+            ("scope", Winner::Tie),
+            ("efficiency", Winner::A),
+        ]);
+
+        // When: the two orders are aggregated.
+        let results = aggregate(&baseline_first, &candidate_first, &aspects(false));
+
+        // Then: every tie is a tie, and only the basis says which was the judge's and which the
+        // orders'.
+        let seen: Vec<(&str, Preferred, Basis)> = results
+            .iter()
+            .map(|result| (result.aspect.as_str(), result.winner, result.basis))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("requirement", Preferred::Candidate, Basis::Agreed),
+                ("correctness", Preferred::Tie, Basis::OrderDisagreement),
+                ("scope", Preferred::Tie, Basis::BothTie),
+                ("efficiency", Preferred::Tie, Basis::OrderDisagreement),
+            ]
+        );
+    }
+
+    fn description_change() -> Changes {
+        Changes {
+            bindings: Vec::new(),
+            tool_descriptions: vec![ToolDescriptionChange {
+                profile: "p".into(),
+                route_model_id: "m".into(),
+                tool: "read".into(),
+                baseline_hash: "hash-of-baseline-text".into(),
+                candidate_hash: "hash-of-candidate-text".into(),
+            }],
+            affected_roles: vec!["worker".into()],
+        }
+    }
+
+    #[test]
+    fn the_changes_follow_the_presentation_order_and_never_name_the_configurations() {
+        // Given: a description change, shown with each configuration first in turn.
+        let changes = description_change();
+
+        // When: the judge's view of the changes is built for both orders.
+        let baseline_first = comparison_changes(&changes, Order::BaselineFirst);
+        let candidate_first = comparison_changes(&changes, Order::CandidateFirst);
+
+        // Then: the hashes sit under the side that sends them, and nothing says which side is the
+        // baseline or the candidate.
+        assert_eq!(
+            baseline_first["tool_descriptions"][0]["description_hash_A"],
+            "hash-of-baseline-text"
+        );
+        assert_eq!(
+            candidate_first["tool_descriptions"][0]["description_hash_A"],
+            "hash-of-candidate-text"
+        );
+        assert_eq!(
+            candidate_first["tool_descriptions"][0]["description_hash_B"],
+            "hash-of-baseline-text"
+        );
+        assert_eq!(baseline_first["role_bindings"], serde_json::json!([]));
+        assert_eq!(
+            candidate_first["affected_roles"],
+            serde_json::json!(["worker"])
+        );
+        for view in [&baseline_first, &candidate_first] {
+            let keys = serde_json::to_string(&view.as_object().unwrap().keys().collect::<Vec<_>>())
+                .unwrap();
+            assert!(
+                !keys.contains("baseline") && !keys.contains("candidate"),
+                "{keys}"
+            );
+            let tool = view["tool_descriptions"][0].as_object().unwrap();
+            assert!(
+                tool.keys()
+                    .all(|key| !key.contains("baseline") && !key.contains("candidate"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_judgment_is_reused_only_under_the_same_instructions_aspects_and_changes() {
+        // Given: the identity of a comparison and of an analysis.
+        let changes = description_change();
+        let known = compare_identity(&aspects(false), &changes);
+
+        // When / Then: another aspect set, another change, or the other kind of question is
+        // another identity, and the same question is the same one.
+        assert_eq!(known, compare_identity(&aspects(false), &changes));
+        assert_ne!(known, compare_identity(&aspects(true), &changes));
+        let mut other = changes.clone();
+        other.tool_descriptions[0].candidate_hash = "another".into();
+        assert_ne!(known, compare_identity(&aspects(false), &other));
+        assert_ne!(analysis_identity(&changes), analysis_identity(&other));
+        assert_ne!(known, analysis_identity(&changes));
+    }
+
+    #[test]
     fn the_problem_aspect_is_asked_only_when_a_problem_is_described() {
         // Given / When: the aspects and schemas with and without a problem statement.
         let without = aspects(false);
@@ -421,7 +616,7 @@ mod tests {
         )
     }
 
-    const ANALYSIS: &str = r#"{"time_and_tokens":"a","detours":"b","delegation":"c","swapped_roles":"d","difference":"e"}"#;
+    const ANALYSIS: &str = r#"{"time_and_tokens":"a","detours":"b","delegation":"c","affected_roles":"d","difference":"e"}"#;
 
     #[tokio::test]
     async fn an_analysis_with_prose_around_it_or_asked_again_is_used() {

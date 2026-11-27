@@ -237,7 +237,7 @@ pub async fn run_with_cleanup(
         Some(value) => {
             let candidate_config = load_config(user_config_dir.as_deref(), project, Some(value))
                 .map_err(|error| EvalError::Overlay(error.to_string()))?;
-            let changes = changes::accept(&baseline_config, &candidate_config, &builtin)
+            let changes = changes::derive(&baseline_config, &candidate_config, &builtin)
                 .map_err(EvalError::Comparison)?;
             let swapped = roles::swapped_roles(&baseline_config, &candidate_config);
             (swapped, changes, Some(candidate_config))
@@ -793,6 +793,7 @@ async fn drive_in(
         runtime.set_web_tools_enabled(true);
         let simulator =
             UserSimulator::new(simulator_model(context, &bus)?, &context.thread.thread_id);
+        capture_base_context(&runtime, role, &project, run_dir).await;
         driver::drive(Replay {
             runtime: &runtime,
             bus: &bus,
@@ -816,6 +817,35 @@ async fn drive_in(
     }
     bridge.shutdown();
     Ok(outcome)
+}
+
+/// Record the initial system and tools size this replay's own runtime composes,
+/// before the replay sends anything: the same composition the agent loop uses,
+/// computed without a model call and without touching what is sent. A failure
+/// only leaves the size unknown in the report; the replay goes on.
+async fn capture_base_context(
+    runtime: &runtime::AgentRuntime,
+    role: Role,
+    project: &Path,
+    run_dir: &Path,
+) {
+    let mut request = runtime::base_context::BaseContextRequest::new(role);
+    request.category = replay_category(role);
+    request.conversation = true;
+    request.project_root = Some(project.to_path_buf());
+    match runtime.preview_base_context(request).await {
+        Ok(report) => {
+            let summary = output::BaseContextSummary::of(&report);
+            if let Err(error) =
+                output::write_json(&run_dir.join(output::BASE_CONTEXT_FILE), &summary)
+            {
+                tracing::warn!(%error, "the initial context size could not be recorded");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the initial context size could not be composed");
+        }
+    }
 }
 
 fn replay_category(role: Role) -> Option<String> {

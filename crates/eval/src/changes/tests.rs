@@ -83,18 +83,6 @@ fn a_description_only_candidate_is_recorded_as_a_description_change_not_a_bindin
 }
 
 #[test]
-fn a_description_change_is_refused_until_the_judge_can_be_told_about_it() {
-    // Given: a valid description-only candidate.
-    let baseline = baseline();
-    let candidate = with_description(baseline.clone(), "m", "read", "Read a file, briefly.");
-
-    // When / Then: the comparison is valid, but is not accepted for judging.
-    assert!(derive(&baseline, &candidate, &catalog()).is_ok());
-    let refused = accept(&baseline, &candidate, &catalog()).unwrap_err();
-    assert!(refused.contains("judge"), "{refused}");
-}
-
-#[test]
 fn a_binding_only_candidate_is_accepted_and_names_the_roles_it_swaps() {
     // Given: a candidate that moves the worker to another route.
     let baseline = baseline();
@@ -102,7 +90,7 @@ fn a_binding_only_candidate_is_accepted_and_names_the_roles_it_swaps() {
     candidate.agents.worker.base.models = vec![ChainEntryConfig::route("other")];
 
     // When: it is accepted.
-    let changes = accept(&baseline, &candidate, &catalog()).unwrap();
+    let changes = derive(&baseline, &candidate, &catalog()).unwrap();
 
     // Then: the binding difference is recorded and no description is.
     assert_eq!(changes.bindings, ["worker"]);

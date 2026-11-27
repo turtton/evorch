@@ -308,6 +308,8 @@ fn report(runs: &[(&str, u32, f64)]) -> Report {
         pairs: Vec::new(),
         tally: Vec::new(),
         warnings: Vec::new(),
+        changes: Default::default(),
+        breakdown: Default::default(),
         generated_at: "2026-10-20T00:30:00.000Z".into(),
     }
 }

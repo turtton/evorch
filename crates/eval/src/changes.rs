@@ -43,26 +43,6 @@ pub struct Changes {
     pub affected_roles: Vec<String>,
 }
 
-impl Changes {
-    /// The judge is told that the candidate differs in role bindings only.
-    /// Until it is told about tool descriptions, such a candidate would be
-    /// judged on a false premise, so it is refused.
-    ///
-    /// # Errors
-    /// The candidate changes a tool description.
-    pub fn ensure_judgeable(&self) -> Result<(), String> {
-        if self.tool_descriptions.is_empty() {
-            return Ok(());
-        }
-        Err(
-            "the candidate changes tool descriptions, which the judge is not yet told about \
-             (it would be asked to compare role bindings only); candidates that change tool \
-             descriptions are not accepted until the judge and report handle them"
-                .into(),
-        )
-    }
-}
-
 const NO_CHANGE: &str = "the candidate changes nothing: no role binding, route or preset differs \
 and no tool description it sets differs from the baseline's, so both configurations would be the \
 same; with a role_profile active, change role_profiles.<name>";
@@ -116,20 +96,6 @@ pub fn derive(
         tool_descriptions: descriptions,
         affected_roles: affected.into_iter().collect(),
     })
-}
-
-/// [`derive`], and then the judge's limit on what it can be asked about.
-///
-/// # Errors
-/// As [`derive`] and [`Changes::ensure_judgeable`].
-pub fn accept(
-    baseline: &Config,
-    candidate: &Config,
-    catalog: &BuiltinCatalog,
-) -> Result<Changes, String> {
-    let changes = derive(baseline, candidate, catalog)?;
-    changes.ensure_judgeable()?;
-    Ok(changes)
 }
 
 fn description_changes(

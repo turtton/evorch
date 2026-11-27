@@ -526,6 +526,7 @@ fn evaluation_report() -> Report {
             verdicts: vec![AspectResult {
                 aspect: "problem".into(),
                 winner: Preferred::Candidate,
+                basis: crate::judge::Basis::Agreed,
                 baseline_first: verdict(Winner::B, &"ran the test ".repeat(200)),
                 candidate_first: verdict(Winner::A, "ran the test"),
             }],
@@ -534,13 +535,15 @@ fn evaluation_report() -> Report {
                 time_and_tokens: "faster".into(),
                 detours: "none".into(),
                 delegation: "same".into(),
-                swapped_roles: "worker".into(),
+                affected_roles: "worker".into(),
                 difference: "ran the test first".into(),
             }),
             process_error: None,
         }],
         tally: Vec::new(),
         warnings: Vec::new(),
+        changes: Default::default(),
+        breakdown: Default::default(),
         generated_at: "2026-10-20T00:30:00.000Z".into(),
     }
 }
