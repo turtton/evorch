@@ -117,7 +117,7 @@ jobs:
           name: core-gui-visual
           path: ${{ runner.temp }}/gui-visual/out
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 7
       - name: Summary
         if: always() && steps.scope.outputs.relevant == 'true'
         env:
