@@ -287,7 +287,7 @@ fn orphan_scratch_root_marker_and_symlink_replacements_are_not_deleted() {
             if replaced == "symlink" {
                 symlink(&aside, &path).unwrap();
             } else {
-                fs::create_dir(&path).unwrap();
+                fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
                 fs::write(path.join("keep"), "keep").unwrap();
             }
         }
@@ -415,7 +415,8 @@ fn orphan_scratch_fixed_marker_is_new_only_and_hidden_from_normal_sweeps() {
     for existing in [true, false] {
         let parent = temp.path().join(if existing { "existing" } else { "new" });
         if existing {
-            fs::create_dir(&parent).unwrap();
+            // Model a valid old root independently of the runner's umask.
+            fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
         }
         let mut root = ScratchRoot::at(parent.clone()).identified("full-digest");
         root.managed = Some(Format::new(Kind::Fixed, Some(&temp.path().join("owner"))));
@@ -440,7 +441,7 @@ fn orphan_scratch_uid_checks_and_cached_lease_replacement_fail_closed() {
     assert!(!managed::private(&s));
     let lease = Lease::acquire(&path).unwrap();
     fs::rename(&path, temp.path().join("old")).unwrap();
-    fs::create_dir(&path).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
     assert!(lease.validate(&path).is_err());
 }
 
