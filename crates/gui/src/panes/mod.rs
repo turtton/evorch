@@ -30,6 +30,7 @@ pub mod memory;
 pub mod memory_widgets;
 pub mod model_metadata;
 pub mod model_picker;
+pub mod model_settings;
 pub mod notification_widgets;
 pub mod notifications;
 pub mod phase_indicator;

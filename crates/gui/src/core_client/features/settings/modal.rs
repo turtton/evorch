@@ -6,13 +6,14 @@
 //! when its own section (the routes, or the agents) is what the draft started from, and is
 //! otherwise refused a save, as legacy refuses a Routing draft whose routes another save
 //! changed.
-use crate::model::role_profiles::RoleProfileAction;
+use crate::model::role_profiles::{RoleProfileAction, RoleProfilePicker};
 use crate::model::role_settings::RoleSettingsModel;
 use crate::model::routing_settings::RoutingSettingsModel;
 use crate::model::settings_document::SettingsDocument;
 use crate::model::settings_tabs::ROUTING_CONFLICT;
-use crate::panes::role_settings::{RoleSettingsAction, role_settings_body};
-use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_body};
+use crate::panes::role_profiles::role_profile_header;
+use crate::panes::role_settings::{RoleSettingsAction, role_settings_hosted_body};
+use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_hosted_body};
 use crate::panes::settings::{SettingsTab, unavailable_tab};
 use workbench_protocol::namespaces::settings::{SettingsRevision, SettingsSnapshot};
 
@@ -349,7 +350,7 @@ impl Modal {
                 let routing = self.routing.as_mut()?;
                 let action = ui
                     .add_enabled_ui(!busy, |ui| {
-                        routing_settings_body(ui, &mut routing.model, locked)
+                        routing_settings_hosted_body(ui, &mut routing.model, locked)
                     })
                     .inner?;
                 match action {
@@ -367,7 +368,9 @@ impl Modal {
                 }
                 let roles = self.roles.as_mut()?;
                 let action = ui
-                    .add_enabled_ui(!busy, |ui| role_settings_body(ui, &mut roles.model, locked))
+                    .add_enabled_ui(!busy, |ui| {
+                        role_settings_hosted_body(ui, &mut roles.model, locked)
+                    })
                     .inner?;
                 match action {
                     RoleSettingsAction::Save => self.save_roles(),
@@ -379,6 +382,35 @@ impl Modal {
                 }
             }
         }
+    }
+
+    /// The profile control of the Model Settings header. It follows the section: Routing and
+    /// Agent Roles edit the same profile (a change reseeds both), and Providers shows it muted,
+    /// since a provider does not belong to a profile.
+    pub(super) fn header_profile(&mut self, ui: &mut egui::Ui, busy: bool) -> Option<ModalSave> {
+        let locked = self.dirty();
+        let fallback = self.session_profile();
+        let picker = match self.tab {
+            SettingsTab::Routing => self
+                .routing
+                .as_mut()
+                .map(|seeded| &mut seeded.model.profiles),
+            SettingsTab::AgentRoles => self.roles.as_mut().map(|seeded| &mut seeded.model.profiles),
+            SettingsTab::Providers => None,
+        };
+        let action = match picker {
+            Some(picker) => role_profile_header(ui, picker, !busy, locked),
+            None => {
+                let mut shown = RoleProfilePicker::default();
+                if let Some(profile) = fallback {
+                    shown.names = vec![profile.clone()];
+                    shown.selected = profile;
+                }
+                role_profile_header(ui, &mut shown, false, false);
+                None
+            }
+        };
+        self.profile(action?, locked)
     }
 
     fn save_routing(&mut self) -> Option<ModalSave> {

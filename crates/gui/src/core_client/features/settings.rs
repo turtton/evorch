@@ -15,13 +15,18 @@
 //! was not seen (after a reconnect, or when a reply was lost).
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::model::settings_document::new_provider_defaults;
 use crate::panes::provider_widgets::{
     EDIT_IN_CONFIG_FILE, ProviderRowAction, provider_kind_label, provider_list_row,
 };
-use crate::panes::settings::{SettingsModalAction, SettingsTab, settings_modal};
-use crate::theme::{text::muted, tokens::palette};
+use crate::panes::settings::SettingsTab;
+use crate::theme::{
+    icons,
+    text::{medium, muted},
+    tokens::*,
+    widgets::{accessible, primary_button, soft_frame},
+};
 use workbench_protocol::{
     commands::{Command, CommandResult, SetAgentWebToolsEnabled},
     errors::ErrorCode,
@@ -39,10 +44,22 @@ use workbench_protocol::{
     queries::{Query, QueryReply},
 };
 
+mod config_file;
 mod modal;
+mod model_shell;
 mod provider_form;
 use modal::{Modal, ModalSave};
 use provider_form::{FormAction, FormKind, ProviderForm};
+
+/// What a menu or a button elsewhere asks of the settings screens. It is applied by the
+/// window (`apply_effect`); nothing of it is a protocol message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsIntent {
+    /// Open Model Settings on a section, without touching the dock.
+    ModelSettings(SettingsTab),
+    /// Bring the Config file tab forward.
+    ConfigFile,
+}
 
 #[derive(Debug, Clone)]
 enum Pending {
@@ -112,6 +129,8 @@ pub struct SettingsFeature {
     quiet_refreshes: BTreeSet<OperationId>,
     /// The revision each running provider save or delete quoted.
     provider_quoted: BTreeMap<OperationId, SettingsRevision>,
+    /// Closing was asked while edits were unsaved; the footer asks whether to discard them.
+    confirm_close: bool,
 }
 
 impl Default for SettingsFeature {
@@ -139,6 +158,7 @@ impl Default for SettingsFeature {
             refresh_after_stale: false,
             quiet_refreshes: BTreeSet::new(),
             provider_quoted: BTreeMap::new(),
+            confirm_close: false,
         }
     }
 }
@@ -221,6 +241,46 @@ impl SettingsFeature {
         self.modal = None;
         self.form = None;
         self.confirm_delete = None;
+        self.confirm_close = false;
+    }
+
+    /// Whether closing the modal would drop something typed and not saved: a Routing or Agent
+    /// Roles draft, or a provider form that differs from what it was opened as.
+    fn modal_dirty(&self) -> bool {
+        let form_edited = |snapshot: &SettingsSnapshot, form: &ProviderForm| {
+            let source = match &form.original {
+                Some(name) => snapshot
+                    .providers
+                    .iter()
+                    .find(|provider| &provider.name == name)
+                    .and_then(ProviderForm::from_view),
+                None => Some(ProviderForm::new(
+                    form.kind,
+                    new_provider_defaults(form.kind.new_provider(), |name| {
+                        snapshot.providers.iter().any(|p| p.name == name)
+                    }),
+                )),
+            };
+            source.is_none_or(|source| form.edited_from(&source))
+        };
+        self.modal.as_ref().is_some_and(Modal::dirty)
+            || self
+                .form
+                .as_ref()
+                .zip(self.snapshot.as_ref())
+                .is_some_and(|(form, snapshot)| form_edited(snapshot, form))
+    }
+
+    /// The × icon, Esc or the backdrop: closes at once, or asks first when edits are unsaved. A
+    /// second request while it asks keeps the edits.
+    fn request_close(&mut self) {
+        if self.confirm_close {
+            self.confirm_close = false;
+        } else if self.modal_dirty() {
+            self.confirm_close = true;
+        } else {
+            self.close_modal();
+        }
     }
 
     /// The core answers `not_found` for an operation whose end was not seen.
@@ -461,6 +521,7 @@ impl SettingsFeature {
         ui: &mut egui::Ui,
         snapshot: &SettingsSnapshot,
         busy: bool,
+        body_height: f32,
     ) -> Option<ProviderAction> {
         let mut action = None;
         let Some(form) = &mut self.form else {
@@ -508,7 +569,7 @@ impl SettingsFeature {
                 action = Some(ProviderAction::Reread);
             }
         }
-        let height = (ui.ctx().viewport_rect().height() - 240.0).max(100.0);
+        let height = (body_height - 70.0).max(120.0);
         egui::ScrollArea::vertical()
             .id_salt("provider-editor")
             .auto_shrink([false, false])
@@ -615,71 +676,6 @@ impl SettingsFeature {
             }
         }
     }
-
-    fn render_modal(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &mut FeatureContext<'_>,
-        snapshot: Option<&SettingsSnapshot>,
-    ) {
-        let Some(tab) = self.modal_tab() else {
-            return;
-        };
-        let busy = self.running();
-        let egui_ctx = ui.ctx().clone();
-        let mut provider_action = None;
-        let mut save = None;
-        let mut reload = false;
-        let (modal_action, _) = settings_modal(&egui_ctx, tab, busy, |ui| {
-            match (tab, snapshot) {
-                (SettingsTab::Providers, Some(snapshot)) => {
-                    provider_action = self.providers_body(ui, snapshot, busy);
-                }
-                (SettingsTab::Providers, None) => {
-                    ui.label("Loading settings…");
-                }
-                _ => {
-                    if let Some(modal) = &mut self.modal {
-                        save = modal.body(ui, snapshot, busy);
-                    }
-                }
-            }
-            if !self.status.is_empty() {
-                ui.label(&self.status);
-            }
-            if busy {
-                ui.label("Working…");
-            }
-            if let Some(snapshot) = snapshot.filter(|s| s.pending_apply()) {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(applied_label(snapshot));
-                    reload = ui
-                        .add_enabled(!busy, egui::Button::new("Reload models"))
-                        .clicked();
-                });
-            }
-            None::<()>
-        });
-        if reload {
-            self.reload_models(ctx);
-        }
-        match modal_action {
-            Some(SettingsModalAction::SelectTab(tab)) => {
-                if let Some(modal) = &mut self.modal {
-                    modal.select(tab);
-                }
-            }
-            Some(SettingsModalAction::Close) => self.close_modal(),
-            None => {}
-        }
-        if let (Some(action), Some(snapshot)) = (provider_action, snapshot) {
-            self.apply_provider_action(ctx, snapshot, action);
-        }
-        if let Some(save) = save {
-            let id = self.send_document(ctx, save.expected_revision.clone(), save.text.clone());
-            self.modal_saves.insert(id, save);
-        }
-    }
 }
 
 impl Feature for SettingsFeature {
@@ -688,7 +684,7 @@ impl Feature for SettingsFeature {
     }
 
     fn title(&self) -> &'static str {
-        "Settings"
+        "Config file"
     }
 
     fn availability(&self) -> Availability {
@@ -813,8 +809,14 @@ impl Feature for SettingsFeature {
         }
     }
 
-    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        if self.stale && !self.snapshot_in_flight {
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        if !visibility.available {
+            return;
+        }
+        // The snapshot is read for whatever shows it: the Config file tab, or the Model Settings
+        // modal over any tab. What was started is looked up whether or not anything shows it.
+        let shown = visibility.is_visible() || self.modal.is_some();
+        if shown && self.stale && !self.snapshot_in_flight {
             self.stale = false;
             self.snapshot_in_flight = true;
             let tag = self.tag(Pending::Snapshot);
@@ -835,133 +837,14 @@ impl Feature for SettingsFeature {
                 Query::Settings(SettingsQuery::GetSettingsOperation { operation_id: id }),
             );
         }
-        let snapshot = self.snapshot.clone();
-        if self.modal.is_some() {
-            // The modal carries the status and the applied state while it is open, so the
-            // tab behind it does not repeat them.
-            self.render_modal(ui, ctx, snapshot.as_ref());
-            return;
-        }
-        if !self.status.is_empty() {
-            ui.label(&self.status);
-        }
-        let Some(snapshot) = snapshot else {
-            ui.label("Loading settings…");
-            return;
-        };
-        if let Some(problem) = snapshot.problem {
-            ui.colored_label(ui.visuals().warn_fg_color, problem_label(problem));
-        }
-        let busy = self.running();
-        let mut reload = false;
-        let mut reread = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(applied_label(&snapshot));
-            reload = ui
-                .add_enabled(!busy, egui::Button::new("Reload models"))
-                .clicked();
-            reread = ui
-                .add_enabled(!busy, egui::Button::new("Re-read file"))
-                .clicked();
-        });
-        if reload {
-            self.reload_models(ctx);
-        }
-        if reread {
-            self.draft = None;
-            self.stale = true;
-            let operation_id = new_operation();
-            self.send(
-                ctx,
-                SettingsCommand::RefreshSettings(RefreshSettings { operation_id }),
-            );
-        }
-        if busy {
-            ui.label("Working…");
-        }
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            for tab in SettingsTab::ALL {
-                if ui
-                    .add_enabled(!busy, egui::Button::new(tab.label()))
-                    .clicked()
-                {
-                    self.open_modal(tab);
-                }
-            }
-        });
-        ui.separator();
-        ui.strong("Agent web tools");
-        ui.label("Applies to the running core only. The settings file is not changed, and a core restart goes back to the file's value. The current value cannot be read here.");
-        let web_waiting = self
-            .pending
-            .values()
-            .any(|pending| matches!(pending, Pending::WebTools(_)));
-        let mut web_tools = None;
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!web_waiting, egui::Button::new("Enable web tools"))
-                .clicked()
-            {
-                web_tools = Some(true);
-            }
-            if ui
-                .add_enabled(!web_waiting, egui::Button::new("Disable web tools"))
-                .clicked()
-            {
-                web_tools = Some(false);
-            }
-        });
-        if !self.web_tools_status.is_empty() {
-            ui.label(&self.web_tools_status);
-        }
-        if let Some(enabled) = web_tools {
-            let tag = self.tag(Pending::WebTools(enabled));
-            ctx.command(
-                tag,
-                Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
-                    SetAgentWebToolsEnabled { enabled },
-                )),
-            );
-        }
-        ui.separator();
-        ui.strong("Settings file");
-        let mut save = None;
-        let mut discard = false;
-        if let Some(draft) = &mut self.draft {
-            egui::ScrollArea::vertical()
-                .id_salt("settings-document")
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut draft.text)
-                            .code_editor()
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(draft.dirty() && !busy, egui::Button::new("Save file"))
-                    .clicked()
-                {
-                    save = Some((draft.text.clone(), draft.based_on.clone()));
-                }
-                if ui
-                    .add_enabled(draft.dirty(), egui::Button::new("Discard changes"))
-                    .clicked()
-                {
-                    discard = true;
-                }
-            });
-        }
-        if discard {
-            self.draft = None;
-            self.stale = true;
-        }
-        if let Some((text, expected_revision)) = save {
-            let id = self.send_document(ctx, expected_revision, text.clone());
-            self.saving.insert(id, text);
-        }
+    }
+
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.config_file(ui, ctx);
+    }
+
+    fn render_overlay(&mut self, egui_ctx: &egui::Context, ctx: &mut FeatureContext<'_>) {
+        self.render_model_settings(egui_ctx, ctx);
     }
 
     fn as_settings_mut(&mut self) -> Option<&mut SettingsFeature> {

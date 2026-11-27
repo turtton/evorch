@@ -25,6 +25,7 @@
 //! | [`Feature::selection_changed`] | first composition and changed project/thread, before maintain |
 //! | [`Feature::maintain`] | every non-minimized composition pass or minimized native logic tick, regardless of availability, collapse or connection |
 //! | [`Feature::render`] | available, expanded, non-minimized bodies only; lifecycle work belongs in maintain |
+//! | [`Feature::render_overlay`] | available, non-minimized passes, over the whole window and whichever tab is in front (a modal); lifecycle work belongs in maintain |
 //! | [`Feature::render_selector`] | the project/thread selector at the top of the conversation view; return `true` to replace the built-in one (what was queued is applied either way) |
 //! | [`Feature::unsupported`] | a note for the list of unsupported operations while the feature is a placeholder |
 //!
@@ -486,6 +487,11 @@ pub trait Feature: Send {
 
     /// Draw the feature. Called only while it is available.
     fn render(&mut self, _ui: &mut egui::Ui, _ctx: &mut FeatureContext<'_>) {}
+
+    /// Draw what floats over the whole window (a modal) rather than inside a tab. Called every
+    /// non-minimized pass while the feature is available, after the dock, whichever tab is in
+    /// front; lifecycle work still belongs in maintain.
+    fn render_overlay(&mut self, _egui_ctx: &egui::Context, _ctx: &mut FeatureContext<'_>) {}
 
     /// What this area cannot do in this mode, shown in the list of unsupported
     /// operations while the feature is a [`Availability::Placeholder`]. `None`
@@ -1207,6 +1213,30 @@ impl<'a> DockPass<'a> {
         let outcome = render_selector(self.features, self.data, ui, self.view);
         self.frame.absorb(outcome.frame);
         outcome.replaced
+    }
+
+    /// Draw what the available features show over the whole window, after the dock. The
+    /// feature is maintained by the pass as usual: this only draws.
+    pub fn render_overlays(&mut self, egui_ctx: &egui::Context) {
+        if self.minimized {
+            return;
+        }
+        for feature in self.features.iter_mut() {
+            if !is_available(
+                feature.as_ref(),
+                self.view.connected,
+                self.view.capabilities,
+            ) {
+                continue;
+            }
+            let mut ctx = FeatureContext {
+                feature: feature.id(),
+                view: self.view,
+                frame: &mut self.frame,
+                data: self.data,
+            };
+            feature.render_overlay(egui_ctx, &mut ctx);
+        }
     }
 
     /// End the pass and hand back what the features asked for. The selector is asked even

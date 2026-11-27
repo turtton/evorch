@@ -143,6 +143,36 @@ impl ProviderForm {
         }
     }
 
+    /// Whether the user typed anything into the form: it differs from the form its source (the
+    /// provider as the snapshot has it, or the defaults of a new one) would open as.
+    pub(super) fn edited_from(&self, source: &Self) -> bool {
+        (
+            self.kind,
+            &self.name,
+            &self.base_url,
+            self.env_credential,
+            &self.env_var,
+            &self.keyring_service,
+            &self.account,
+            &self.models,
+            &self.new_model,
+            &self.excluded,
+            &self.default_model,
+        ) != (
+            source.kind,
+            &source.name,
+            &source.base_url,
+            source.env_credential,
+            &source.env_var,
+            &source.keyring_service,
+            &source.account,
+            &source.models,
+            &source.new_model,
+            &source.excluded,
+            &source.default_model,
+        )
+    }
+
     /// Draw the fields; [`Self::footer`] draws the buttons.
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) {
         let previous_name = self.name.clone();

@@ -23,6 +23,25 @@ pub fn role_settings_body(
     model: &mut RoleSettingsModel,
     profile_locked: bool,
 ) -> Option<RoleSettingsAction> {
+    role_settings_content(ui, model, profile_locked, true)
+}
+
+/// The same body for a host that draws the profile control itself (the Model Settings
+/// header) and scrolls the body: the bar and its locked notice are left out.
+pub fn role_settings_hosted_body(
+    ui: &mut egui::Ui,
+    model: &mut RoleSettingsModel,
+    profile_locked: bool,
+) -> Option<RoleSettingsAction> {
+    role_settings_content(ui, model, profile_locked, false)
+}
+
+fn role_settings_content(
+    ui: &mut egui::Ui,
+    model: &mut RoleSettingsModel,
+    profile_locked: bool,
+    profile_bar: bool,
+) -> Option<RoleSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
     let ctx = ui.ctx().clone();
@@ -32,20 +51,29 @@ pub fn role_settings_body(
             ui.label(muted(
                 "Worker and reviewer categories take precedence over their role defaults; other roles use their role model.",
             ));
-            ui.add_enabled_ui(!busy && !profile_locked, |ui| {
-                if let Some(profile) =
-                    crate::panes::role_profiles::role_profile_bar(ui, "role", &mut model.profiles)
-                {
-                    action = Some(RoleSettingsAction::Profile(profile));
+            if profile_bar {
+                ui.add_enabled_ui(!busy && !profile_locked, |ui| {
+                    if let Some(profile) = crate::panes::role_profiles::role_profile_bar(
+                        ui,
+                        "role",
+                        &mut model.profiles,
+                    ) {
+                        action = Some(RoleSettingsAction::Profile(profile));
+                    }
+                });
+                if profile_locked {
+                    ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
                 }
-            });
-            if profile_locked {
-                ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
             }
+            let scroll_height = if profile_bar {
+                (ctx.viewport_rect().height() - TOPBAR * 7.0).max(TOPBAR)
+            } else {
+                f32::INFINITY
+            };
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("role-bindings")
-                    .max_height((ctx.viewport_rect().height() - TOPBAR * 7.0).max(TOPBAR))
+                    .max_height(scroll_height)
                     .show(ui, |ui| {
                         if model.routes_empty {
                             surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {

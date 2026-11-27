@@ -85,6 +85,10 @@ fn answer_snapshot(screen: &mut Harness<'static, Screen>, saved: char, document:
 }
 
 fn type_into(screen: &mut Harness<'static, Screen>, label: &str, text: &str) {
+    screen
+        .get_by_role_and_label(Role::TextInput, label)
+        .scroll_to_me();
+    screen.run();
     screen.get_by_role_and_label(Role::TextInput, label).focus();
     screen.run();
     screen
@@ -93,7 +97,10 @@ fn type_into(screen: &mut Harness<'static, Screen>, label: &str, text: &str) {
     screen.run();
 }
 
+/// Presses the control named `label`, scrolled into view first: the section's body scrolls.
 fn click(screen: &mut Harness<'static, Screen>, label: &str) {
+    screen.get_by_label(label).scroll_to_me();
+    screen.run();
     screen.get_by_label(label).click();
     screen.run();
 }
@@ -135,7 +142,7 @@ fn add_route(screen: &mut Harness<'static, Screen>, name: &str) {
 fn a_provider_row_names_its_type_and_is_deleted_only_after_its_confirmation() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("Provider settings");
+    screen.get_by_label("Where models come from, with their sign-in and model list");
     screen.get_by_label("OpenAI-compatible");
     screen.get_by_label("Claude API");
     screen.get_all_by_label("Edit").nth(1).unwrap().click();
@@ -264,7 +271,9 @@ fn a_kimi_subscription_is_added_with_its_defaults() {
 fn a_routing_save_quotes_its_revision_and_keeps_the_rest_of_the_file() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Routing");
-    screen.get_by_label("Routing settings");
+    screen.get_by_label(
+        "Logical model name to real provider and model. Candidates are tried from the top",
+    );
     add_route(&mut screen, "slow");
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
@@ -381,7 +390,7 @@ fn a_routing_draft_whose_routes_changed_elsewhere_is_not_saved() {
 fn agent_roles_and_role_profiles_are_saved_at_the_revision_they_were_made_from() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Agent roles");
-    screen.get_by_label("Agent role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
     click(&mut screen, "Save role settings");
     let roles = document_save(&mut screen);
     assert_eq!(roles.expected_revision, revision('a'));
@@ -392,6 +401,7 @@ fn agent_roles_and_role_profiles_are_saved_at_the_revision_they_were_made_from()
     screen.get_by_label("Agent role settings updated. Reload models to apply them.");
     answer_snapshot(&mut screen, 'e', &roles.text);
 
+    click(&mut screen, "Profile menu");
     type_into(&mut screen, "New profile name", "night");
     click(&mut screen, "New profile");
     let created = document_save(&mut screen);
@@ -404,6 +414,7 @@ fn agent_roles_and_role_profiles_are_saved_at_the_revision_they_were_made_from()
     screen.get_by_label("Role profile 'night' created. Reload models to apply it.");
     answer_snapshot(&mut screen, 'e', &created.text);
 
+    click(&mut screen, "Profile menu");
     click(&mut screen, "Delete profile");
     let deleted = document_save(&mut screen);
     assert!(!deleted.text.contains("night"));
@@ -446,13 +457,15 @@ fn create_route_opens_routing_and_returns_to_agent_roles_after_the_save() {
     open_modal(&mut screen, "Agent roles");
     click(&mut screen, "Orchestrator");
     click(&mut screen, "Create route");
-    screen.get_by_label("Routing settings");
+    screen.get_by_label(
+        "Logical model name to real provider and model. Candidates are tried from the top",
+    );
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
     assert_eq!(save.expected_revision, revision('a'));
     assert!(save.text.contains("orchestrator"), "{}", save.text);
     end(&mut screen, &save, OperationState::Ready);
-    screen.get_by_label("Agent role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
 }
 
 fn snapshot_changed(screen: &mut Harness<'static, Screen>, saved: char) {
@@ -534,7 +547,7 @@ fn settings<'a>(screen: &'a mut Harness<'static, Screen>) -> &'a mut SettingsFea
 fn a_rename_seen_in_the_snapshot_before_its_own_save_ends_leaves_agent_roles_saveable() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Agent roles");
-    screen.get_by_label("Agent role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
     {
         let modal = settings(&mut screen).modal.as_mut().expect("the modal");
         let roles = modal.roles.as_mut().expect("the roles draft");
@@ -654,4 +667,76 @@ fn renaming_an_existing_subscription_keeps_its_keychain_account() {
     };
     assert_ne!(name, "claude");
     assert_eq!(account, "claude");
+}
+
+// Given: Model Settings open on Routing with nothing edited
+// When: Esc is pressed
+// Then: it closes at once, without asking
+#[test]
+fn escape_closes_a_clean_modal_at_once() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    assert!(settings(&mut screen).modal_tab().is_some());
+    screen.key_press(egui::Key::Escape);
+    screen.run();
+    assert!(settings(&mut screen).modal_tab().is_none());
+}
+
+// Given: a Routing draft with an added route
+// When: × is pressed, "Keep editing" is chosen, then Esc and "Discard and close"
+// Then: the first request only asks and keeps the draft; discarding closes the modal and sends
+//       nothing
+#[test]
+fn closing_a_dirty_modal_asks_first_and_discarding_sends_nothing() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "slow");
+    screen.get_by_label("● Unsaved changes");
+
+    screen.get_by_label("Close").click();
+    screen.run();
+    screen.get_by_label("Discard unsaved changes and close?");
+    assert!(settings(&mut screen).modal_tab().is_some());
+    screen.get_by_label("Keep editing").click();
+    screen.run();
+    assert!(
+        screen
+            .query_by_label("Discard unsaved changes and close?")
+            .is_none()
+    );
+    screen.get_by_label("● Unsaved changes");
+
+    screen.key_press(egui::Key::Escape);
+    screen.run();
+    screen.get_by_label("Discard unsaved changes and close?");
+    screen.get_by_label("Discard and close").click();
+    screen.run();
+    assert!(settings(&mut screen).modal_tab().is_none());
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: a screen that has not read the settings yet
+// When: Model Settings is opened and the screen is drawn over several frames
+// Then: the snapshot is asked for once (by maintain), not once per frame and not once per
+//       surface that draws the feature
+#[test]
+fn the_snapshot_is_asked_for_by_maintain_once_while_the_modal_is_open() {
+    let mut screen = screen(Box::<SettingsFeature>::default(), None);
+    settings(&mut screen).open_modal(SettingsTab::Providers);
+    screen.run_steps(6);
+    let snapshots = asked(&mut screen)
+        .iter()
+        .filter(|action| {
+            matches!(
+                query_of(action),
+                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+            )
+        })
+        .count();
+    assert_eq!(snapshots, 1);
+    screen.run_steps(6);
+    assert!(
+        asked(&mut screen).is_empty(),
+        "nothing is asked again while it waits"
+    );
 }
