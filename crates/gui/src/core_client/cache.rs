@@ -166,10 +166,13 @@ impl Cache {
         self.older_loading.remove(id);
     }
 
-    /// The ask failed. It is made again when the person retries, not every frame.
+    /// The ask failed. It is made again when the person retries, not every frame. The
+    /// answer of a run that was forgotten meanwhile is dropped.
     pub fn older_failed(&mut self, id: &str) {
         self.older_loading.remove(id);
-        self.older_failed.insert(id.into());
+        if self.history.contains_key(id) || self.run_history.contains_key(id) {
+            self.older_failed.insert(id.into());
+        }
     }
 
     pub fn older_read_failed(&self, id: &str) -> bool {
@@ -222,6 +225,7 @@ impl Cache {
             self.older_loading.remove(thread);
         } else {
             self.older_for_roots.remove(thread);
+            self.older_failed.remove(thread);
         }
         merge(
             self.history.entry(thread.into()).or_default(),
@@ -242,6 +246,7 @@ impl Cache {
             self.older_loading.remove(run);
         } else {
             self.run_failed.remove(run);
+            self.older_failed.remove(run);
         }
     }
 }
@@ -424,5 +429,25 @@ mod tests {
         assert!(cache.read_older_for_roots("thr"));
         cache.history_page("thr", page(vec![message("run-c", 9)], None), false);
         assert!(!cache.read_older_for_roots("thr"), "the history begins");
+    }
+
+    // Given: a run whose older read was asked for, then forgotten with its tab
+    // When: the read fails late, the tab opens again, and a failure of the new tab is
+    //       followed by its first page
+    // Then: the late failure leaves nothing to retry, and the first page clears a failure
+    #[test]
+    fn an_older_read_failure_does_not_outlive_its_run_tab() {
+        let mut cache = Cache::default();
+        assert!(cache.want_run("run-b"));
+        cache.older_asked("run-b");
+        cache.forget_run("run-b");
+        cache.older_failed("run-b");
+        assert!(!cache.older_read_failed("run-b"));
+
+        assert!(cache.want_run("run-b"));
+        cache.older_failed("run-b");
+        assert!(cache.older_read_failed("run-b"));
+        cache.run_history_page("run-b", page(vec![message("run-b", 1)], Some("c1")), false);
+        assert!(!cache.older_read_failed("run-b"));
     }
 }

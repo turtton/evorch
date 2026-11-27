@@ -89,21 +89,23 @@ pub(super) fn transcript(
     };
     let loading = cache.older_loading(older_id);
     let older_failed = cache.older_read_failed(older_id);
-    // What the area looked like last frame: its first message and its content height.
-    // Older messages put in front of the first one push the rest down by their height,
-    // which the offset takes up so the messages in view stay where they are.
-    let memory = ui.make_persistent_id(salt).with("older-anchor");
-    let before: Option<(Option<String>, f32)> = ui.data(|data| data.get_temp(memory));
-    let first = messages
-        .first()
-        .map(|message| format!("{}/{:?}", message.run, message.index));
-    let prepended = matches!((&before, &first), (Some((Some(was), _)), Some(now)) if was != now);
+    // The first message that starts in view last frame and where it sat in the content.
+    // Whatever changes the height above it (older messages put in front, a body that
+    // arrives for a message above) moves it, and the offset takes that up so the
+    // messages in view stay where they are.
+    let memory = ui.make_persistent_id(salt).with("view-anchor");
+    let before: Option<Option<(String, f32)>> = ui.data(|data| data.get_temp(memory));
+    let previous = before.clone().flatten();
+    let mut anchor: Option<(String, f32)> = None;
+    let mut moved_to = None;
     let mut near_top = false;
     let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let origin = ui.cursor().min.y;
+            let view_top = ui.clip_rect().min.y;
             ui.add_space(SP_2);
             if older.is_some_and(Option::is_some) {
                 if older_failed {
@@ -138,6 +140,8 @@ pub(super) fn transcript(
                 empty(ui);
             }
             for item in items(&messages) {
+                let key = item_key(&item);
+                let top = ui.cursor().min.y;
                 match item {
                     Item::Message(message) => {
                         message_row(ui, requested_bodies, cache, base, message, effects);
@@ -153,22 +157,30 @@ pub(super) fn transcript(
                         folded: false,
                     } => tool_cards(ui, requested_bodies, cache, &tools, effects),
                 }
+                if previous.as_ref().is_some_and(|(was, _)| *was == key) {
+                    moved_to = Some(top - origin);
+                }
+                if anchor.is_none() && top >= view_top {
+                    anchor = Some((key, top - origin));
+                }
                 ui.add_space(SP_2);
             }
             cards(ui, effects);
             ui.add_space(SP_2);
         });
-    let content = output.content_size.y;
-    let grown = before.as_ref().map_or(0.0, |(_, was)| content - was);
-    let shifted = prepended && grown > 0.0;
+    let shift = match (&previous, moved_to) {
+        (Some((_, was)), Some(now)) if (now - was).abs() > 0.5 => now - was,
+        _ => 0.0,
+    };
+    let shifted = shift != 0.0;
     if shifted {
         let mut state = output.state;
-        state.offset.y += grown;
+        state.offset.y = (state.offset.y + shift).max(0.0);
         state.store(ui.ctx(), output.id);
         ui.ctx()
             .request_discard("keep the messages in view in place");
     }
-    ui.data_mut(|data| data.insert_temp(memory, (first, content)));
+    ui.data_mut(|data| data.insert_temp(memory, anchor));
     // The first frame of an area is laid out at the top before it follows the newest
     // message, so it only measures; a page is read from the next frame on.
     if before.is_none() || shifted {
@@ -188,6 +200,14 @@ enum Item<'a> {
         tools: Vec<&'a CommittedMessage>,
         folded: bool,
     },
+}
+
+fn item_key(item: &Item) -> String {
+    let message = match item {
+        Item::Message(message) => message,
+        Item::Tools { tools, .. } => tools[0],
+    };
+    format!("{}/{:?}", message.run, message.index)
 }
 
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {

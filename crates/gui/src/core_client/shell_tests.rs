@@ -1701,6 +1701,75 @@ mod run_tabs {
         assert_eq!(spinners(&screen), spinners_before + 1);
     }
 
+    // Given: thr-1 scrolled to its first message, and an older page of messages whose
+    //        bodies are sent apart from the page
+    // When: the page arrives, and the bodies arrive in a later frame
+    // Then: the message stays where it was on screen after each, not only after the page
+    #[test]
+    fn the_view_stays_in_place_when_a_body_of_an_older_page_arrives_later() {
+        use workbench_protocol::views::{BodyRef, MessageContent};
+        use workbench_protocol::{ids::BodyId, wire::ByteOffset};
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                let history = (0..60)
+                    .map(|index| message(index, "user", &format!("Question {index}")))
+                    .collect();
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label("You: Question 0")
+            .scroll_to_me();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        let before = screen.harness.get_by_label("You: Question 0").rect();
+
+        let mut page = older_page("run-0", 0, 20, Some("c2"));
+        for (index, message) in page.items.iter_mut().enumerate() {
+            message.content = MessageContent::Body(BodyRef {
+                body_id: BodyId::new(format!("body-{index}")).unwrap(),
+                total_bytes: ByteOffset(2048),
+            });
+        }
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        let after_page = screen.harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_page.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_page:?} with the page"
+        );
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            for index in 0..20 {
+                let text = (0..12)
+                    .map(|line| format!("line {line} of body {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                shared.cache.bodies.insert(format!("body-{index}"), text);
+            }
+        }
+        frames(&mut screen);
+        let after_bodies = screen.harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_bodies.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_bodies:?} with the bodies"
+        );
+    }
+
     // Given: thr-1 has more messages than the window shows, followed to the newest, and an
     //        older page exists
     // When: the first message is scrolled into view, and the older page arrives
