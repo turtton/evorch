@@ -81,6 +81,14 @@ pub struct ResumeIntent {
 }
 
 impl ResumeIntent {
+    /// Safe because no inactive intent resumes from its messages; re-admission reuses only settings.
+    pub(crate) fn release_inactive_provider_messages(&mut self) {
+        if !self.active
+            && let Some(input) = &mut self.provider_input
+        {
+            input.request.messages = Vec::new();
+        }
+    }
     pub(crate) fn decode(row: storage::resume_intent::ResumeIntentRecord) -> Result<Self, String> {
         let intent: Self = serde_json::from_str(&row.payload).map_err(|e| e.to_string())?;
         if intent.version != 1

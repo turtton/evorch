@@ -69,6 +69,8 @@ pub struct CompactSummary {
     pub blob_stored_bytes_created: u64,
     /// Existing individual rows over 64 KiB cannot be split without changing IDs.
     pub oversized_rows: u64,
+    /// Inactive resume intents whose provider messages were (preview: would be) released.
+    pub inactive_intent_messages: u64,
     pub backup: Option<PathBuf>,
     pub required_free_space_bytes: u64,
     pub vacuum: bool,
@@ -225,6 +227,7 @@ pub fn compact_events(
         blobs_created: 0,
         blob_stored_bytes_created: 0,
         oversized_rows: 0,
+        inactive_intent_messages: 0,
         backup: None,
         required_free_space_bytes: basis.saturating_mul(4),
         vacuum: false,
@@ -285,6 +288,11 @@ pub fn compact_events(
     if let Some(cutoff) = cutoff {
         summary.provider_observations = delete_matching(&db.conn, options, Some(cutoff))?;
     }
+    summary.inactive_intent_messages = if options.apply {
+        crate::resume_intent::release_inactive_provider_messages(&db.conn)?
+    } else {
+        crate::resume_intent::inactive_provider_message_rows(&db.conn)?.len() as u64
+    };
     let (sample, rows) = statistics::compress_events(&db.conn, options, virtual_deltas)?;
     summary.event_compression = sample;
     summary.compressed_event_rows = rows;
