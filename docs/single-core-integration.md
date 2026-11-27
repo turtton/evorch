@@ -207,9 +207,12 @@ The old GUI keeps two direct paths: `gui/src/runtime_sink/pull_requests.rs`
 calls `PullRequestService` directly and `gui/src/app/pull_requests.rs`
 (`StoragePullRequestReader`, the limit-notice claim) reads and claims in the
 database directly. The scope of `pr15` does not cover these files, and ADR 0045
-§12 removes them with the old GUI (stage 20, boundary allowlist zeroed in 19b),
-not by rewriting it. The boundary allowlists hold no entry specific to pull
-requests, so nothing is dropped from them here.
+§12 removes the old embedded GUI and its verification infrastructure in A,
+separates non-owner responsibilities without behavior changes in C0, removes
+the ownership machinery in C (PR 20), then removes GUI internal-crate
+dependencies in 19b-G and zeros the full allowlist, including CLI, in 19b-C.
+These paths are not rewritten here. The boundary allowlists hold no entry
+specific to pull requests, so nothing is dropped from them here.
 
 ## PR 15 (part B): the `core_client` pull request screen
 
@@ -700,8 +703,11 @@ implementation:
 | **F4-E** | After 19a: CEF restart and two consecutive restarts; recommended before 20 |
 | **O-V2** | After 19a: integrated real-browser/GUI agent observation |
 | **O-V3** | After O-V2 and the basic restart check: observation plus Stop/restart/cache |
-| **20** | After 19a: remove old ownership such as owners.db, claim and shared_feed |
-| **19b** | After 20: reduce the client-crate internal-dependency allowlist to zero |
+| **A** | After 19a: remove the old embedded GUI (`--legacy-embedded`) and GUI-only verification infrastructure |
+| **C0** | After A: separate responsibilities other than ownership without changing behavior |
+| **20 (C)** | After C0: remove old ownership such as owners.db, claim and shared_feed; this resolves the delayed persistence of Stop |
+| **19b-G (B)** | After 20: remove GUI internal-crate dependencies; although it has no technical dependency on C, its broad GUI/protocol changes follow C to avoid collisions with parallel lanes |
+| **19b-C (D)** | After 19b-G: zero the full internal-dependency allowlist, including CLI |
 | **Q1/Q2 GUI and read-only parity** | After 19a; management recovery remains available through the admin CLI |
 | **SetThreadExtraReadDirs screen** | Deferred by 19a; the GUI marks the operation unsupported |
 | **CLI crash-continuity integration test** | Crash a core with a CLI run active and verify that the run is not revived |
