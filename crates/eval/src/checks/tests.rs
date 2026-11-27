@@ -91,6 +91,7 @@ fn observe(events: &[Event]) -> Observation<'_> {
         events,
         truncated: false,
         status: None,
+        evidence_missing: false,
     }
 }
 
@@ -102,9 +103,21 @@ fn verdicts(sample: &EvalSample, observation: &Observation<'_>) -> Vec<Verdict> 
         .collect()
 }
 
+fn ended(run_id: &str) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run_id.into(),
+        from: event_bus::AgentRunPhase::Running,
+        to: event_bus::AgentRunPhase::Done,
+        reason: None,
+        waiting: None,
+    })
+}
+
+/// A finished root and worker, and `calls` made in between.
 fn tree_with(calls: Vec<Event>) -> Vec<Event> {
     let mut events = vec![started("root", "orchestrator"), started("w1", "worker")];
     events.extend(calls);
+    events.extend([ended("w1"), ended("root")]);
     events
 }
 
@@ -251,6 +264,7 @@ fn a_role_scope_counts_only_those_roles_and_needs_the_role_to_have_run() {
     // Given: an explorer error, and no worker at all.
     let mut events = vec![started("root", "orchestrator"), started("x1", "explorer")];
     events.extend(call("x1", "a", "shell", true));
+    events.extend([ended("x1"), ended("root")]);
     let worker = sample(
         SampleKind::Regression,
         vec![errors(
@@ -318,6 +332,7 @@ fn an_incomplete_record_never_passes_by_absence_but_can_still_fail() {
         events,
         truncated: true,
         status: None,
+        evidence_missing: false,
     };
 
     // When/Then: zero errors is indeterminate on a cut record; an observed error still fails.
@@ -340,6 +355,7 @@ fn passing_checks_on_an_unfinished_replay_are_not_a_quality_pass() {
         events: &events,
         truncated: false,
         status: Some(Status::Incomplete),
+        evidence_missing: false,
     };
     let finished = Observation {
         status: Some(Status::Completed),
@@ -444,6 +460,7 @@ fn a_regression_sample_needs_every_check_to_pass_on_a_complete_recording() {
         events: &events,
         truncated: true,
         status: None,
+        evidence_missing: false,
     };
 
     // When/Then: it is accepted only when everything passes on the whole record.
@@ -509,4 +526,78 @@ fn source_references_must_exist_and_belong_to_the_thread() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn missing_evidence_never_passes_an_absence_check() {
+    // Given: no events because the recorded database was not there.
+    let missing = Observation {
+        events: &[],
+        truncated: false,
+        status: Some(Status::Completed),
+        evidence_missing: true,
+    };
+    let checks = sample(
+        SampleKind::Regression,
+        vec![
+            errors("shell", 0, CheckScope::Tree, CallRange::Direct),
+            successes("read", None, Some(0)),
+            Check::Diagnostics {
+                code: diagnostic_codes::NO_PROGRESS.into(),
+                max: 0,
+                scope: CheckScope::Tree,
+            },
+        ],
+    );
+
+    // When: the checks are graded.
+    let grading = grade(&checks, &missing);
+
+    // Then: nothing is concluded, and the replay is not a valid record.
+    assert_eq!(
+        grading
+            .results
+            .iter()
+            .map(|result| result.verdict)
+            .collect::<Vec<_>>(),
+        [Verdict::Indeterminate; 3]
+    );
+    assert!(grading.results[0].reason.contains("evidence is missing"));
+    assert!(!grading.validity.valid);
+    assert_ne!(grading.quality(), Quality::Pass);
+}
+
+#[test]
+fn an_empty_record_or_one_with_only_run_starts_is_not_a_valid_passing_record() {
+    let absence = sample(
+        SampleKind::Regression,
+        vec![errors("shell", 0, CheckScope::Tree, CallRange::Direct)],
+    );
+    fn finished(events: &[Event]) -> Observation<'_> {
+        Observation {
+            events,
+            truncated: false,
+            status: Some(Status::Completed),
+            evidence_missing: false,
+        }
+    }
+
+    // Given: a database that exists but holds no event.
+    let empty = grade(&absence, &finished(&[]));
+    // Given: a record with the start of the runs and nothing after it.
+    let starts = [started("root", "orchestrator"), started("w1", "worker")];
+    let only_starts = grade(&absence, &finished(&starts));
+
+    // Then: both are indeterminate and invalid, never a quality pass.
+    for grading in [&empty, &only_starts] {
+        assert_eq!(
+            grading.results[0].verdict,
+            Verdict::Indeterminate,
+            "{grading:?}"
+        );
+        assert!(!grading.validity.valid, "{grading:?}");
+        assert_ne!(grading.quality(), Quality::Pass);
+    }
+    assert!(empty.validity.issues[0].contains("no run start"));
+    assert!(only_starts.validity.issues[0].contains("no recorded end"));
 }

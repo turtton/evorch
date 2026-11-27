@@ -1,8 +1,13 @@
 use super::*;
 
-/// Calls and diagnostics added to the explorer run of `Fixture::thread`.
+/// Calls added to the explorer run of `Fixture::thread`.
 fn explorer_calls(fixture: &Fixture, root: &str, calls: &[(&str, bool)]) {
-    let child = format!("{root}-explorer");
+    run_calls(fixture, &format!("{root}-explorer"), calls);
+}
+
+/// Calls recorded for `child`, each with its start and its end.
+fn run_calls(fixture: &Fixture, child: &str, calls: &[(&str, bool)]) {
+    let child = child.to_owned();
     let handle = fixture.recorded.storage.handle();
     for (index, (tool, is_error)) in calls.iter().enumerate() {
         let call_id = format!("extra-{index}");
@@ -27,6 +32,29 @@ fn explorer_calls(fixture: &Fixture, root: &str, calls: &[(&str, bool)]) {
             handle.append_event(Some("gui"), &event).unwrap();
         }
     }
+}
+
+fn state_change(run: &str, to: event_bus::AgentRunPhase) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from: event_bus::AgentRunPhase::Running,
+        to,
+        reason: None,
+        waiting: None,
+    })
+}
+
+/// The explorer of `Fixture::thread` ends, as a delegated run does.
+fn end_explorer(fixture: &Fixture, root: &str) {
+    fixture
+        .recorded
+        .storage
+        .handle()
+        .append_event(
+            Some("gui"),
+            &state_change(&format!("{root}-explorer"), event_bus::AgentRunPhase::Done),
+        )
+        .unwrap();
 }
 
 /// Closes the `read` call `Fixture::thread` leaves without a terminal event.
@@ -132,6 +160,7 @@ async fn a_regression_sample_needs_its_checks_to_pass_on_a_complete_recording() 
     // When: it is saved before and after the call's terminal event is recorded.
     let incomplete = save().await;
     finish_read(&fixture, &root);
+    end_explorer(&fixture, &root);
     let complete = save().await;
 
     // Then: only the complete recording gives a pass.
@@ -233,4 +262,74 @@ async fn a_sample_without_checks_gets_no_machine_judgment_and_inspection_grades_
     assert_eq!(result["verdict"], "fail");
     assert_eq!(result["observed"], 1);
     assert_eq!(result["evidence"][0]["call_id"], "extra-0");
+}
+
+#[tokio::test]
+async fn a_check_on_the_root_role_is_graded_though_the_root_started_before_the_capture() {
+    // Given: a thread whose root run announced itself before its start state was captured
+    // (as every real thread does), and a root-run grep that failed after the capture.
+    let fixture = Fixture::new();
+    let root = fixture.thread("thread-1").await;
+    let captured_at_ns = Database::open_read_only(&fixture.recorded.config.db_path)
+        .unwrap()
+        .thread_start_state("thread-1")
+        .unwrap()
+        .unwrap()
+        .captured_at_ns;
+    let mut start = Event::new(LifecycleEvent::AgentRunStarted {
+        run_id: root.clone(),
+        parent_run_id: None,
+        agent_name: "worker".into(),
+        role: "worker".into(),
+    });
+    start.meta.wall_clock = std::time::UNIX_EPOCH
+        + Duration::from_nanos(u64::try_from(captured_at_ns).unwrap() - 1_000_000);
+    let handle = fixture.recorded.storage.handle();
+    handle.append_event(Some("gui"), &start).unwrap();
+    run_calls(&fixture, &root, &[("grep", true)]);
+    handle
+        .append_event(
+            Some("gui"),
+            &state_change(&root, event_bus::AgentRunPhase::Done),
+        )
+        .unwrap();
+    let database = Database::open_read_only(&fixture.recorded.config.db_path).unwrap();
+    let from_capture = |from_ns| {
+        database
+            .events_for_runs(std::slice::from_ref(&root), from_ns, 1_000)
+            .unwrap()
+            .0
+            .into_iter()
+            .any(|stored| {
+                matches!(
+                    stored.event.kind,
+                    EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { .. })
+                )
+            })
+    };
+    assert!(
+        !from_capture(captured_at_ns),
+        "the root's start must precede the capture for this test to mean anything"
+    );
+    assert!(from_capture(i64::MIN));
+
+    // When: a failure sample with a check scoped to the root's own role is saved.
+    let saved = fixture
+        .call(
+            "eval_save_sample",
+            json!({
+                "thread_id": "thread-1", "problem": "grep failed in the root",
+                "checks": [{
+                    "type": "tool_errors", "tool": "grep", "max": 0,
+                    "scope": {"roles": ["Worker"]}, "calls": "direct",
+                }],
+            }),
+        )
+        .await;
+
+    // Then: the root's role is known, so the check fails on the recording and the
+    // sample is accepted.
+    assert!(!saved.is_error, "{}", saved.content);
+    let saved: Value = serde_json::from_str(&saved.content).unwrap();
+    assert_eq!(saved["checks_on_recording"]["quality"], "fail");
 }

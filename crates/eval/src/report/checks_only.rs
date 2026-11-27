@@ -2,9 +2,10 @@
 //! directories against a sample's checks, from their recorded evidence alone.
 //!
 //! Nothing here asks a provider: no judge, no user simulator, no verification
-//! command, no price table. The result goes to its own file named after the
-//! sample's hash, so an earlier result, `report.json` and the manifest are
-//! never rewritten.
+//! command, no price table. Each analysis goes to its own files, named after
+//! the sample's hash and a number that counts the analyses of that sample, and
+//! no file is ever replaced: an earlier result, `report.json` and the manifest
+//! stay as they were.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -12,7 +13,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use storage::eval_sample::{EvalSample, SampleKind};
 
-use super::{grade_run, load_database, read_json_in};
+use super::{grade_run, load_record, read_json_in};
 use crate::checks::{self, Grading};
 use crate::driver::Status;
 use crate::output::{self, Manifest, Outcome};
@@ -42,6 +43,8 @@ pub struct ChecksReport {
     pub thread_id: String,
     pub basis: Basis,
     pub sample_hash: String,
+    /// Which analysis of this sample hash in the directory this is, from 1.
+    pub analysis: u32,
     pub kind: SampleKind,
     pub check_version: u32,
     pub checks: Vec<String>,
@@ -55,8 +58,9 @@ impl ChecksReport {
     #[must_use]
     pub fn file_name(&self, extension: &str) -> String {
         format!(
-            "checks-{}.{extension}",
-            self.sample_hash.chars().take(12).collect::<String>()
+            "checks-{}-{}.{extension}",
+            self.sample_hash.chars().take(12).collect::<String>(),
+            self.analysis
         )
     }
 
@@ -84,7 +88,9 @@ impl ChecksReport {
     }
 }
 
-/// Grade every directory and write `checks-<hash>.json` and `.md` in it.
+/// Grade every directory and write `checks-<hash>-<n>.json` and `.md` in it,
+/// `n` being the first number not taken: a second analysis of the same sample
+/// leaves the first one untouched.
 /// `sample_database` is read, read-only, only for a directory whose manifest
 /// pinned no sample.
 ///
@@ -101,13 +107,26 @@ pub async fn checks_only_pinned(
     }
     let mut reports = Vec::new();
     for (index, dir) in dirs.iter().enumerate() {
-        let report = checks_dir(dir, sample_database)?;
-        dir.write_json(&report.file_name("json"), &report)?;
-        dir.write(&report.file_name("md"), markdown(&report).as_bytes())?;
+        let mut report = checks_dir(dir, sample_database)?;
+        write_new_result(dir, &mut report)?;
         on_written(index);
         reports.push(report);
     }
     Ok(reports)
+}
+
+/// Write the result under the first analysis number whose files are free.
+fn write_new_result(dir: &output::PinnedDir, report: &mut ChecksReport) -> Result<(), EvalError> {
+    loop {
+        report.analysis += 1;
+        match dir.write_json_new(&report.file_name("json"), report) {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    dir.write_new(&report.file_name("md"), markdown(report).as_bytes())?;
+    Ok(())
 }
 
 fn current_sample(
@@ -165,11 +184,11 @@ fn checks_dir(
         let run_dir = dir.open_below(&entry.dir)?;
         let outcome: Outcome =
             read_json_in(&run_dir, output::OUTCOME_FILE).map_err(EvalError::Usage)?;
-        let record = load_database(&run_dir)?;
+        let (record, evidence_missing) = load_record(&run_dir)?;
         runs.push(RunChecks {
             run: format!("{}-{}", entry.label, entry.index),
             status: outcome.status,
-            grading: grade_run(&sample, &record, outcome.status),
+            grading: grade_run(&sample, &record, outcome.status, evidence_missing),
         });
     }
     let mut note = match basis {
@@ -189,6 +208,7 @@ fn checks_dir(
         thread_id: manifest.thread_id,
         basis,
         sample_hash: hash,
+        analysis: 0,
         kind: sample.kind,
         check_version: sample.check_version,
         checks: sample.checks.iter().map(checks::describe).collect(),

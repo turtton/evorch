@@ -379,7 +379,7 @@ fn load_run(
         .read(output::DIFF_FILE)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    let record = load_database(&run_dir)?;
+    let (record, evidence_missing) = load_record(&run_dir)?;
     let summary = RunSummary {
         label: entry.label.clone(),
         index: entry.index,
@@ -393,7 +393,7 @@ fn load_run(
         pushed_refs: outcome.pushed_refs.len(),
         checks: sample
             .filter(|sample| !sample.checks.is_empty())
-            .map(|sample| grade_run(sample, &record, outcome.status)),
+            .map(|sample| grade_run(sample, &record, outcome.status, evidence_missing)),
     };
     Ok(LoadedRun {
         summary,
@@ -409,16 +409,26 @@ fn load_run(
 /// from no-follow descriptors, and that copy is opened. A link in its place
 /// gives an empty record, and a directory replaced after it was pinned is not
 /// followed.
+#[cfg(test)]
 fn load_database(run_dir: &output::PinnedDir) -> Result<RunRecord, EvalError> {
+    load_record(run_dir).map(|(record, _)| record)
+}
+
+/// [`load_database`], and whether the database was not there: the empty record
+/// then stands for evidence that could not be read, which grading must not
+/// take for a run in which nothing happened.
+fn load_record(run_dir: &output::PinnedDir) -> Result<(RunRecord, bool), EvalError> {
     let database = run_dir.join(output::DATABASE_FILE);
     let fail = |source| EvalError::Database {
         path: database.clone(),
         source,
     };
     let Some(snapshot) = DatabaseSnapshot::copy(run_dir)? else {
-        return Ok(RunRecord::default());
+        return Ok((RunRecord::default(), true));
     };
-    RunRecord::load(&snapshot.database()).map_err(fail)
+    RunRecord::load(&snapshot.database())
+        .map(|record| (record, false))
+        .map_err(fail)
 }
 
 /// A private copy of a run's database, removed when dropped.
@@ -662,13 +672,19 @@ async fn report_dir(
 
 /// The grading of a replay's record against the sample's checks, which also
 /// asks whether the replay ended normally.
-pub(crate) fn grade_run(sample: &EvalSample, record: &RunRecord, status: Status) -> Grading {
+pub(crate) fn grade_run(
+    sample: &EvalSample,
+    record: &RunRecord,
+    status: Status,
+    evidence_missing: bool,
+) -> Grading {
     checks::grade(
         sample,
         &checks::Observation {
             events: &record.events,
             truncated: false,
             status: Some(status),
+            evidence_missing,
         },
     )
 }

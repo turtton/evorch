@@ -1114,3 +1114,51 @@ async fn an_evaluation_without_a_pinned_sample_is_graded_post_hoc_and_kept_apart
     let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
     assert!(manifest.get("sample").is_none());
 }
+
+#[tokio::test]
+async fn regrading_the_same_sample_keeps_the_earlier_result_and_writes_a_new_one() {
+    // Given: a finished evaluation that pinned a sample, graded once.
+    let fixture = Fixture::new().await;
+    fixture
+        .recorded
+        .storage
+        .handle()
+        .save_eval_sample(pinned_sample(&[]))
+        .unwrap();
+    let evaluation = run(
+        fixture.args(None),
+        fixture.deps(writes_notes(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let grade = || async {
+        let dir = output::PinnedDir::open_path(&evaluation.dir).unwrap();
+        crate::report::checks_only_pinned(vec![dir], None, |_| {})
+            .await
+            .unwrap()
+            .remove(0)
+    };
+    let first = grade().await;
+    let first_json = std::fs::read(evaluation.dir.join(first.file_name("json"))).unwrap();
+    let first_md = std::fs::read(evaluation.dir.join(first.file_name("md"))).unwrap();
+
+    // When: the same sample is graded again from the same evidence.
+    let second = grade().await;
+
+    // Then: the second analysis has its own numbered files, and the first result's files
+    // are exactly as they were.
+    assert_eq!(first.sample_hash, second.sample_hash);
+    assert_eq!((first.analysis, second.analysis), (1, 2));
+    assert_ne!(first.file_name("json"), second.file_name("json"));
+    assert!(evaluation.dir.join(second.file_name("json")).is_file());
+    assert!(evaluation.dir.join(second.file_name("md")).is_file());
+    assert_eq!(
+        std::fs::read(evaluation.dir.join(first.file_name("json"))).unwrap(),
+        first_json
+    );
+    assert_eq!(
+        std::fs::read(evaluation.dir.join(first.file_name("md"))).unwrap(),
+        first_md
+    );
+}

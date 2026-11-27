@@ -405,6 +405,49 @@ impl PinnedDir {
         renamed
     }
 
+    /// [`Self::write`] that never replaces a file: the bytes reach `name` only
+    /// when nothing is there, atomically, so a reader never sees a part of
+    /// them.
+    ///
+    /// # Errors
+    /// `AlreadyExists` when `name` is taken (nothing is changed then); else as
+    /// [`Self::write`].
+    pub fn write_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        use std::io::Write as _;
+        plain(name)?;
+        let partial = format!(".{name}.partial");
+        match rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(errno) => return Err(errno.into()),
+        }
+        let fd = rustix::fs::openat(
+            &self.fd,
+            &partial,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH,
+        )?;
+        let mut file = std::fs::File::from(fd);
+        let written = file.write_all(bytes).and_then(|()| file.flush());
+        drop(file);
+        let linked = written.and_then(|()| {
+            rustix::fs::linkat(&self.fd, &partial, &self.fd, name, AtFlags::empty())
+                .map_err(Into::into)
+        });
+        let _ = rustix::fs::unlinkat(&self.fd, &partial, AtFlags::empty());
+        linked
+    }
+
+    /// [`Self::write_new`] of `value` as pretty JSON.
+    ///
+    /// # Errors
+    /// As [`Self::write_new`].
+    pub fn write_json_new(&self, name: &str, value: &impl Serialize) -> io::Result<()> {
+        let mut text = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+        text.push(b'\n');
+        self.write_new(name, &text)
+    }
+
     /// [`Self::write`] of `value` as pretty JSON.
     ///
     /// # Errors
@@ -546,5 +589,30 @@ mod tests {
         assert!(PinnedDir::open_path(&root.path().join("link")).is_err());
         assert!(pinned.open_dir("../real").is_err());
         assert!(pinned.open_below("real/../real").is_err());
+    }
+}
+
+#[cfg(test)]
+mod write_new_tests {
+    use super::*;
+
+    #[test]
+    fn write_new_creates_a_file_and_refuses_to_replace_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = PinnedDir::open_path(dir.path()).unwrap();
+
+        pinned.write_new("result.json", b"first").unwrap();
+        let again = pinned.write_new("result.json", b"second").unwrap_err();
+
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(dir.path().join("result.json")).unwrap(),
+            b"first"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, ["result.json"]);
     }
 }

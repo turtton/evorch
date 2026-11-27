@@ -277,15 +277,26 @@ fn thread_record(database: &Database, thread_id: &str) -> Result<ThreadRecord, S
 }
 
 /// The sample's checks graded on the thread as it was recorded.
-fn grade_recorded(sample: &EvalSample, recorded: &ThreadRecord) -> checks::Grading {
-    checks::grade(
+///
+/// The events are read from the start of the runs, not from the capture of the
+/// thread's start state: a run announces itself (and its role, which role
+/// scoped checks need) before the capture is taken.
+fn grade_recorded(
+    database: &Database,
+    sample: &EvalSample,
+    recorded: &ThreadRecord,
+) -> Result<checks::Grading, String> {
+    let (record, truncated) = RunRecord::of_runs(database, &recorded.runs, i64::MIN, MAX_EVENTS)
+        .map_err(storage_error)?;
+    Ok(checks::grade(
         sample,
         &checks::Observation {
-            events: &recorded.record.events,
-            truncated: recorded.events_truncated,
+            events: &record.events,
+            truncated,
             status: None,
+            evidence_missing: false,
         },
-    )
+    ))
 }
 
 fn grading_value(grading: &checks::Grading) -> Value {
@@ -491,13 +502,16 @@ fn inspect(database: &Database, thread_id: &str, prices: &PriceTable) -> Result<
     let entries = conversation::recorded(&chat.turns, &record.events, &chat.lineage);
     let refusal = replay_refusal(database, thread_id);
     let sample = database.eval_sample(thread_id).map_err(storage_error)?;
-    let checks = sample.as_ref().map(|sample| {
-        if sample.checks.is_empty() {
-            json!({"quality": checks::Quality::NoMachineJudgment.label(), "note": "the sample declares no checks"})
-        } else {
-            grading_value(&grade_recorded(sample, &recorded))
-        }
-    });
+    let checks = sample
+        .as_ref()
+        .map(|sample| -> Result<Value, String> {
+            if sample.checks.is_empty() {
+                Ok(json!({"quality": checks::Quality::NoMachineJudgment.label(), "note": "the sample declares no checks"}))
+            } else {
+                Ok(grading_value(&grade_recorded(database, sample, &recorded)?))
+            }
+        })
+        .transpose()?;
     let mut value = json!({
         "thread_id": thread_id,
         "role": chat.role.name(),
@@ -796,7 +810,7 @@ fn check_sample(
     let recorded = thread_record(database, thread_id)?;
     checks::verify_sources(database, &recorded.runs, &sample.source_refs)
         .map_err(|error| format!("source_refs: {error}"))?;
-    let grading = grade_recorded(sample, &recorded);
+    let grading = grade_recorded(database, sample, &recorded)?;
     checks::accept(sample, &grading).map_err(|reason| {
         format!(
             "the sample was not saved: {reason}. Checks on the recording: {}",

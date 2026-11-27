@@ -156,6 +156,9 @@ pub struct Observation<'a> {
     pub truncated: bool,
     /// How a replay ended; `None` for a thread read as it was recorded.
     pub status: Option<Status>,
+    /// The file or database the events come from is not there, so `events`
+    /// is empty because nothing could be read, not because nothing happened.
+    pub evidence_missing: bool,
 }
 
 /// One tool call, assembled from its start and terminal events.
@@ -179,7 +182,8 @@ struct Record {
     run_roles: HashMap<String, String>,
     calls: Vec<Call>,
     diagnostics: Vec<Diagnostic>,
-    /// Runs whose last recorded phase is `Pending` or `Running`.
+    /// Runs that started and whose recorded phase is not an end: still `Pending`
+    /// or `Running`, or with no phase recorded at all.
     open_runs: BTreeSet<String>,
 }
 
@@ -265,10 +269,16 @@ fn read_record(events: &[Event]) -> Record {
             _ => {}
         }
     }
-    let open_runs = phases
-        .into_iter()
-        .filter(|(_, phase)| matches!(phase, AgentRunPhase::Pending | AgentRunPhase::Running))
-        .map(|(run, _)| run.to_owned())
+    let open_runs = run_roles
+        .keys()
+        .map(String::as_str)
+        .chain(phases.keys().copied())
+        .filter(|run| {
+            phases.get(run).is_none_or(|phase| {
+                matches!(phase, AgentRunPhase::Pending | AgentRunPhase::Running)
+            })
+        })
+        .map(str::to_owned)
         .collect();
     Record {
         run_roles,
@@ -278,8 +288,21 @@ fn read_record(events: &[Event]) -> Record {
     }
 }
 
+/// Why nothing can be concluded from the absence of an occurrence in a
+/// record that is missing or holds no run at all.
+fn record_gaps(observation: &Observation<'_>, record: &Record) -> Option<&'static str> {
+    if observation.evidence_missing {
+        Some("the recorded evidence is missing")
+    } else if record.run_roles.is_empty() {
+        Some("the record holds no run start, so it is empty or incomplete")
+    } else {
+        None
+    }
+}
+
 fn validity(observation: &Observation<'_>, record: &Record) -> Validity {
     let mut issues = Vec::new();
+    issues.extend(record_gaps(observation, record).map(str::to_owned));
     if observation.truncated {
         issues.push("events were left out because the read limit was reached".to_owned());
     }
@@ -290,7 +313,7 @@ fn validity(observation: &Observation<'_>, record: &Record) -> Validity {
     }
     if !record.open_runs.is_empty() {
         issues.push(format!(
-            "{} run(s) were still running when the record ends",
+            "{} run(s) have no recorded end when the record ends",
             record.open_runs.len()
         ));
     }
@@ -462,6 +485,7 @@ fn doubts(
     check_open_calls: bool,
 ) -> Vec<String> {
     let mut doubts = Vec::new();
+    doubts.extend(record_gaps(observation, record).map(str::to_owned));
     if observation.truncated {
         doubts.push("events were left out because the read limit was reached".to_owned());
     }
@@ -471,7 +495,7 @@ fn doubts(
         doubts.push(format!("the replay did not complete ({status:?})"));
     }
     if !record.open_runs.is_empty() {
-        doubts.push("a run was still running when the record ends".to_owned());
+        doubts.push("a run has no recorded end when the record ends".to_owned());
     }
     if check_open_calls && tally.unfinished > 0 {
         doubts.push(format!(
