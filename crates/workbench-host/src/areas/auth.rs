@@ -144,9 +144,17 @@ fn options(dir: &std::path::Path) -> config::LoadOptions {
     }
 }
 
+/// The providers of the file at `dir`, or why it cannot be read. What the core started with is no
+/// answer to "what does the file say now".
+fn load_profiles(dir: &std::path::Path) -> Result<Vec<Profile>, config::ConfigError> {
+    config::Config::load_unresolved(&options(dir)).map(|config| profiles_of(&config))
+}
+
 fn read_profiles(dir: &std::path::Path, startup: &config::Config) -> Vec<Profile> {
-    let loaded = config::Config::load_unresolved(&options(dir));
-    let config = loaded.as_ref().unwrap_or(startup);
+    load_profiles(dir).unwrap_or_else(|_| profiles_of(startup))
+}
+
+fn profiles_of(config: &config::Config) -> Vec<Profile> {
     config
         .providers
         .iter()
@@ -713,8 +721,16 @@ impl Inner {
 
     /// Every provider of the file as it is now, kept as what the core knows.
     async fn read_fresh(&self) -> Result<Vec<Profile>, Failure> {
-        let (dir, startup) = (self.config_dir.clone(), self.startup.clone());
-        let fresh = Self::blocking(move || read_profiles(&dir, &startup)).await?;
+        let dir = self.config_dir.clone();
+        // A file that cannot be read is a failure, never the configuration the core started with:
+        // a deletion confirmed against that could remove what the file no longer says is unused.
+        // The reason is fixed: an error from the loader may quote the file.
+        let fresh = Self::blocking(move || load_profiles(&dir))
+            .await?
+            .map_err(|_| Failure {
+                code: ErrorCode::StorageUnavailable,
+                message: "the configuration file could not be read",
+            })?;
         let copy = fresh
             .iter()
             .map(|p| Profile {

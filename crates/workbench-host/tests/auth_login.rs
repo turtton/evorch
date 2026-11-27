@@ -1040,3 +1040,35 @@ async fn the_same_operation_id_with_another_confirmation_conflicts() {
     f.run(delete("d-2", "key", "key-acct", &["b", "a"]))
         .unwrap();
 }
+
+/// The file was made unreadable after the core started (with other providers than the file had):
+/// a deletion, and a stored key, are refused with a fixed sentence, and nothing is touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_file_is_a_failure_not_the_configuration_the_core_started_with() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    f.rewrite(|_| "version = 3\n[providers.key\nthis is not toml".to_owned());
+    f.run(delete("d-1", "key", "key-acct", &[])).unwrap();
+    let view = f.settled("d-1").await;
+    assert_eq!(
+        view.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::StorageUnavailable
+        }
+    );
+    assert_eq!(
+        view.message.as_deref(),
+        Some("the configuration file could not be read"),
+        "a fixed sentence, nothing of the file"
+    );
+    assert!(f.store.value("key-acct").is_some());
+
+    f.run(save_key("k-1", "key", "new-value")).unwrap();
+    assert_eq!(
+        f.settled("k-1").await.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::StorageUnavailable
+        }
+    );
+    assert_eq!(f.store.value("key-acct").as_deref(), Some("secret"));
+}
