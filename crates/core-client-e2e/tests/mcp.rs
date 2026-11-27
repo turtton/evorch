@@ -354,7 +354,8 @@ async fn the_screen_adds_approves_tests_revokes_and_deletes_a_server_through_the
         "a revoked server starts nothing"
     );
 
-    // Delete: the row goes away and the override leaves the file.
+    // Delete (in the row's menu): the row goes away and the override leaves the file.
+    click(&mut window, "More actions");
     click(&mut window, "Delete");
     until(&mut window, "the server is gone", |w| {
         w.query_by_label("mock").is_none()

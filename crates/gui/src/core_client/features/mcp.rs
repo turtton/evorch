@@ -1134,10 +1134,10 @@ impl McpFeature {
                 ui.label(muted(state_reason_text(reason)));
             }
             for (name, state) in &server.secret_states {
-                ui.label(muted(icons::with_icon(
-                    icons::KEY,
-                    format!("{name} \u{b7} {}", secret_state_label(*state)),
-                )));
+                ui.label(format!(
+                    "Keychain entry {name}: {}",
+                    secret_state_label(*state)
+                ));
             }
             if let Some(note) = &note {
                 row_note(ui, note);

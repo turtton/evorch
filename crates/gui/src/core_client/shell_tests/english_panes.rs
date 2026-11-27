@@ -723,12 +723,10 @@ fn the_mcp_tab_shows_each_server_state_in_english() {
         "Approval was revoked; calls to this server are refused.",
         "Connection test: ready.",
         "Testing the connection…",
+        "Keychain entry token: a value is stored",
     ] {
         screen.harness.get_by_label(label);
     }
-    screen
-        .harness
-        .get_by_label_contains("token · a value is stored");
     assert!(
         screen
             .harness
