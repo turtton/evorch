@@ -1,6 +1,7 @@
 //! gpt-6.x は GPT-5 以降の family に分類され、Orchestrator の `delegate` 説明に
 //! `SUBAGENT_CONTEXT_NOTE` が付く。通常ターンでは System と tools (順序込み) が不変で、
-//! アップグレード前に保存した run の復元では tools の説明が 1 回だけ変わり、その後は固定される。
+//! snapshot のある run は開始時 family を復元後も意図的に固定する。snapshot 導入前の
+//! record だけは復元時の family を使い、その後の tools と prefix は固定される。
 mod support;
 
 use std::sync::Arc;
@@ -240,12 +241,21 @@ async fn gpt6_orchestrator_keeps_system_and_tools_byte_stable_across_turns() {
     assert_eq!(mock.remaining_scripts(), 0);
 }
 
-// Given: gpt-6.x の family 化より前の状態として、family 未分類のモデルで保存した Orchestrator の chat
-// When: gpt-6.1-sol を選んだ runtime で 2 回続けて復元し継続する
-// Then: 復元直後の 1 回だけ tools の `delegate` 説明が変わり (note が 1 回付くだけで他は同一)、
-//       保存済みの System は再合成されず、その後は tools と prefix が固定されて cache を再利用する
+// 開始時 family の snapshot がある場合、設定上の binding を変更して復元しても
+// delegate の追記を再選択しない。これは B の意図した挙動変更である。
 #[tokio::test]
-async fn restored_pre_family_chat_changes_delegate_description_once_then_stays_fixed() {
+async fn stored_initial_family_is_intentionally_frozen_across_restore() {
+    assert_restored_family(true).await;
+}
+
+// 導入前の record は現在設定の説明 override を選ばず、従来どおり family を計算する。
+// 最初の復元後は tools と prefix が固定され、入力由来 mock cache を再利用する。
+#[tokio::test]
+async fn pre_snapshot_chat_recomputes_family_once_then_stays_fixed() {
+    assert_restored_family(false).await;
+}
+
+async fn assert_restored_family(has_snapshot: bool) {
     let review_storage = support::ReviewStorage::new();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
         vec![
@@ -275,7 +285,25 @@ async fn restored_pre_family_chat_changes_delegate_description_once_then_stays_f
         },
     );
     through(&mut legacy_events, prior, AgentRunPhase::Done).await;
+    legacy.wait(prior).await.unwrap();
+    let mut record = legacy
+        .with_storage_reader(|db| db.run_context(&prior.to_string()))
+        .unwrap()
+        .flatten()
+        .unwrap();
     drop(legacy);
+    let handle = storage.handle();
+    let mut descriptor: Value = serde_json::from_str(&record.config_json).unwrap();
+    assert!(descriptor.get("tool_descriptions").is_some());
+    if !has_snapshot {
+        // 導入前 build の record を再現する。稼働中の writer は上の wait で完了済み。
+        descriptor
+            .as_object_mut()
+            .unwrap()
+            .remove("tool_descriptions");
+        record.config_json = descriptor.to_string();
+        handle.upsert_run_context(&record).unwrap();
+    }
 
     // 復元側: gpt-6.1-sol。再起動後の runtime で 2 回続けて復元する。
     let config = load_config(directory.path(), &mock, "gpt6");
@@ -304,15 +332,20 @@ async fn restored_pre_family_chat_changes_delegate_description_once_then_stays_f
             .count(),
         0
     );
-    // 境界: delegate の説明が note 1 回分だけ変わり、tools の数・順序と他の tool は同一。
     assert_eq!(tool_names(first), tool_names(before));
-    assert_eq!(
-        delegate_description(first),
-        format!("{}{SUBAGENT_CONTEXT_NOTE}", delegate_description(before))
-    );
-    for (old, new) in tools_of(before).iter().zip(tools_of(first)) {
-        if old["function"]["name"] != "delegate" {
-            assert_eq!(old, new);
+    if has_snapshot {
+        // 初期 family が保存されていれば、新しい family の追記を足さない。
+        assert_eq!(tools_of(first), tools_of(before));
+    } else {
+        // 旧 record のみ、delegate の追記 1 回分以外は変更しない。
+        assert_eq!(
+            delegate_description(first),
+            format!("{}{SUBAGENT_CONTEXT_NOTE}", delegate_description(before))
+        );
+        for (old, new) in tools_of(before).iter().zip(tools_of(first)) {
+            if old["function"]["name"] != "delegate" {
+                assert_eq!(old, new);
+            }
         }
     }
     // 保存済みの System は再合成されない (gpt-5 以降の family section が復元後も入らない)。
@@ -324,13 +357,13 @@ async fn restored_pre_family_chat_changes_delegate_description_once_then_stays_f
             .to_string()
             .contains(FAMILY_MARK)
     );
-    // 境界の後は tools も prefix も固定され、入力由来の cache が再利用される。
+    // いずれの record も、復元後の tools と prefix は固定され cache を再利用する。
     assert_eq!(tools_of(second), tools_of(first));
     assert_eq!(
         delegate_description(second)
             .matches(SUBAGENT_CONTEXT_NOTE)
             .count(),
-        1
+        usize::from(!has_snapshot)
     );
     assert_append_only(CacheProtocol::OpenAi, first, second).unwrap();
     assert_eq!(usage.len(), 2);
