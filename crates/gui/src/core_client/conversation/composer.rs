@@ -1,6 +1,7 @@
 //! The composer at the bottom of the conversation, laid out and keyed as the embedded
 //! workbench's: slash command and `@` file completions above the role and team
-//! selectors, the attachments, and the input with Stop, Queue and Send.
+//! selectors, the attached files as chips, and the input with the attach "+" on its
+//! left and Stop, Queue and Send on its right.
 use egui::Ui;
 use workbench_protocol::namespaces::{ConversationCommand, ExecutionCommand};
 use workbench_protocol::{commands::*, ids::*};
@@ -13,7 +14,8 @@ use crate::core_client::connection::Action;
 use crate::core_client::features::Navigation;
 use crate::core_client::shell::Effect;
 use crate::panes::attachment_widgets::{
-    AttachmentRowStatus, AttachmentRowView, attach_files_button, attachment_rows, preparing,
+    AttachmentRowStatus, AttachmentRowView, attach_plus_button, attachment_chips, preparing,
+    retry_upload_button,
 };
 use crate::panes::completion_widgets::{completion_keys, completion_list};
 use crate::panes::transcript_widgets::{ime_composing, stop_button as shared_stop_button};
@@ -201,8 +203,13 @@ pub(super) fn composer(
                 let completing = !items.is_empty();
                 let can_stop = (activity.root_active && !completing) || activity.stopped;
                 selectors(ui, pane);
-                attachments(ui, pane, io, project, thread, effects);
-                ui.horizontal(|ui| {
+                attachments(ui, io, project, thread, effects);
+                // As tall as the input, so the attach "+" on its left and the buttons on
+                // its right sit at its bottom.
+                let row = egui::vec2(ui.available_width(), wanted);
+                let bottom_up = egui::Layout::left_to_right(egui::Align::BOTTOM);
+                ui.allocate_ui_with_layout(row, bottom_up, |ui| {
+                    attach_button(ui, pane, io.sending, project, thread, effects);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                         let draft_text = io
                             .drafts
@@ -399,38 +406,54 @@ fn selectors(ui: &mut Ui, pane: &mut ConversationPane) {
     });
 }
 
-/// The embedded workbench's attachment block: "Attach files…", the files being read,
-/// and a row per file with Remove; Retry upload offers again what the core did not
-/// take.
-fn attachments(
+/// The "+" left of the input opens the file picker; it waits while the thread's
+/// message is being sent, as pasted and dropped files do.
+fn attach_button(
     ui: &mut Ui,
     pane: &mut ConversationPane,
+    sending: &std::collections::BTreeSet<String>,
+    project: &ProjectId,
+    thread: &ThreadId,
+    effects: &mut Vec<Effect>,
+) {
+    let enabled = !sending.contains(thread.as_str());
+    let picked = ui
+        .add_enabled_ui(enabled, |ui| {
+            attach_plus_button(ui)
+                .on_disabled_hover_text(crate::core_client::WAIT_FOR_SEND_TO_ATTACH)
+                .clicked()
+        })
+        .inner;
+    if picked {
+        pane.intakes
+            .push((project.clone(), thread.clone(), Intake::ChooseFiles));
+        pane.submit_intakes(ui.ctx(), sending, effects);
+    }
+}
+
+/// The files being read and a chip per file with Remove, in one wrapping row; Retry
+/// upload offers again what the core did not take.
+fn attachments(
+    ui: &mut Ui,
     io: &ConversationIo<'_>,
     project: &ProjectId,
     thread: &ThreadId,
     effects: &mut Vec<Effect>,
 ) {
     let sending = io.sending.contains(thread.as_str());
-    let picked = ui
-        .add_enabled_ui(!sending, |ui| attach_files_button(ui).clicked())
-        .inner;
-    if picked {
-        pane.intakes
-            .push((project.clone(), thread.clone(), Intake::ChooseFiles));
-        pane.submit_intakes(ui.ctx(), io.sending, effects);
-    }
-    preparing(
-        ui,
-        io.loading_attachments
-            .get(thread.as_str())
-            .copied()
-            .unwrap_or(0),
-    );
+    let loading = io
+        .loading_attachments
+        .get(thread.as_str())
+        .copied()
+        .unwrap_or(0);
     let files = io
         .attachment_drafts
         .get(thread.as_str())
         .map(Vec::as_slice)
         .unwrap_or_default();
+    if loading == 0 && files.is_empty() {
+        return;
+    }
     let rows: Vec<_> = files
         .iter()
         .map(|file| AttachmentRowView {
@@ -450,21 +473,25 @@ fn attachments(
             removable: !sending && !file.uploading,
         })
         .collect();
-    if let Some(index) = attachment_rows(ui, &rows) {
-        effects.push(Effect::RemoveAttachment {
-            thread: thread.clone(),
-            id: files[index].id.clone(),
-        });
-    }
     let pending = files
         .iter()
         .any(|file| file.reference.is_none() && !file.uploading && !file.uncertain);
-    if pending && ui.add(ghost("Retry upload")).clicked() {
-        effects.push(Effect::RetryAttachments {
-            project: project.clone(),
-            thread: thread.clone(),
-        });
-    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(SP_1, SP_1);
+        preparing(ui, loading);
+        if let Some(index) = attachment_chips(ui, &rows) {
+            effects.push(Effect::RemoveAttachment {
+                thread: thread.clone(),
+                id: files[index].id.clone(),
+            });
+        }
+        if pending && retry_upload_button(ui).clicked() {
+            effects.push(Effect::RetryAttachments {
+                project: project.clone(),
+                thread: thread.clone(),
+            });
+        }
+    });
 }
 
 /// Carries out a slash command, or sends the draft as a message (or, with Team

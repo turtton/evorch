@@ -565,6 +565,42 @@ fn remove_drops_one_file_and_discards_its_upload() {
     assert_eq!(left, ["busy", "failed"]);
 }
 
+// Given: thr-1 with three files, one of them long-named, in a window whose composer has
+//        no room for all three chips in a row
+// Then: the chips wrap onto another row inside the composer, and each still has Remove
+#[test]
+fn attachment_chips_wrap_inside_a_narrow_composer() {
+    let mut screen = screen(egui::vec2(900.0, 600.0));
+    screen.settle();
+    screen.shared.lock().unwrap().attachment_drafts.insert(
+        "thr-1".into(),
+        vec![
+            file("a-long-screenshot-name-from-the-clipboard", true, false),
+            file("busy", false, true),
+            file("failed", false, false),
+        ],
+    );
+    screen.harness.run_steps(4);
+    screen.capture("narrow-chips");
+    // The composer's Stop ends its input row; the header's Stop is further left.
+    let right = screen
+        .harness
+        .get_all_by_label("Stop")
+        .map(|node| node.rect().max.x)
+        .fold(f32::MIN, f32::max);
+    let removes: Vec<_> = screen
+        .harness
+        .get_all_by_label("Remove")
+        .map(|node| node.rect())
+        .collect();
+    assert_eq!(removes.len(), 3);
+    assert!(
+        removes.iter().all(|r| r.max.x <= right),
+        "{removes:?} {right}"
+    );
+    assert!(removes[2].min.y > removes[0].max.y, "{removes:?}");
+}
+
 #[derive(Debug)]
 struct DroppedPath(std::path::PathBuf);
 
@@ -624,15 +660,35 @@ fn a_hidden_composer_leaves_tab_and_dropped_files_to_the_window() {
     );
 }
 
+// Given: the composer of thr-1
+// When: the attach "+" gets keyboard focus
+// Then: its tooltip says files can also be pasted or dropped, without hovering
+#[test]
+fn the_attach_button_mentions_paste_and_drop_on_focus() {
+    let mut screen = composer();
+    screen.harness.get_by_label("Attach files").focus();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label_contains("paste or drop");
+    screen.capture("attach-focus");
+}
+
 // Given: thr-1's message being sent, with the composer focused
 // When: Ctrl+V arrives as the platform's empty paste
-// Then: nothing is prepared, and the person is told to wait for the send
+// Then: nothing is prepared, the person is told to wait for the send, and the attach
+//       "+" waits too
 #[test]
 fn a_paste_while_sending_is_refused_with_a_status() {
     let mut screen = composer();
     screen.type_message("see");
     screen.shared.lock().unwrap().sending.insert("thr-1".into());
     screen.harness.run_steps(2);
+    assert!(
+        screen
+            .harness
+            .get_by_label("Attach files")
+            .accesskit_node()
+            .is_disabled()
+    );
 
     let mut raw = egui::RawInput {
         events: vec![egui::Event::Paste(String::new())],

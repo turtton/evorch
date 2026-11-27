@@ -100,7 +100,8 @@ fn the_plus_button_returns_to_each_projects_unsent_draft_and_asks_for_nothing() 
 // Given: a new conversation
 // When: the window is large, and when it is only as tall as a few lines
 // Then: the heading is above the composer, which is near the middle (a little below it) of
-//       the large window, and in the small one the composer and Send stay inside the window
+//       the large window, and in the small one the composer and Send stay inside the window;
+//       the attach "+" is left of the two-line input and shares Send's bottom
 #[test]
 fn the_composer_sits_below_the_heading_near_the_middle_and_stays_reachable() {
     for (size, small) in [
@@ -117,6 +118,12 @@ fn the_composer_sits_below_the_heading_near_the_middle_and_stays_reachable() {
         let heading = screen.harness.get_by_label(HEADING).rect();
         let input = screen.harness.get_by_label("Message").rect();
         let send = screen.harness.get_by_label("Send").rect();
+        let attach = screen.harness.get_by_label("Attach files").rect();
+        assert!(attach.max.x <= input.min.x, "{attach:?} {input:?}");
+        assert!(
+            (attach.max.y - send.max.y).abs() < 1.0,
+            "{attach:?} {send:?}"
+        );
         assert!(heading.max.y < input.min.y, "{heading:?} {input:?}");
         if small {
             for rect in [heading, input, send] {
