@@ -115,11 +115,11 @@ LaneBrief
 
 開始済みの管理下 lane（`attached` / `summary`）に対して lead から後から指示を送る tool として、`lane_send` と `lane_revise_brief` を設ける（schema は run 内で固定し、lane 側および非 root には公開しない。migration は v59）。
 
-- **`lane_send`（補足）**: 現在の brief に対する補足（最大 4 KiB）を送る操作であり、brief revision を上げない。既存の Ready や検証・close の根拠を失効させない。
+- **`lane_send`（補足）**: 現在の brief に対する補足（最大 4 KiB）を送る操作であり、brief revision を上げない。既存の Ready や検証・close の根拠を失効させない。共通の本文を `targets`（1〜32 件、lane の重複不可。各要素が `lane_id` と 2 つの expected revision を持つ）の各 lane へ送れる。lane ごとに独立して受理・拒否され、結果は入力順の `results` に lane 別に載る（1 lane の失敗は他を取り消さず、止めない）。1 件も受理されなかったときだけ tool 結果が error になる。
 - **`lane_revise_brief`（再 brief）**: brief を全面改訂する操作（差分パッチではなく全フィールドを送る。`report_policy` は現在の policy と一致させる）であり、変更があれば brief revision を +1 上げる（同一内容は no-op）。revision が上がると既存の検証・close の根拠は失効する。
 - **会話末尾への追記と由来の明示**: 補足も改訂も、lane の会話の末尾に追記する（cache 契約）。本文には lead Orchestrator（agent）が出した指示であることを明示し、実ユーザーの依頼・実行許可には昇格させない。
 - **認可**: 呼び出せるのは現在の lead root（lane 外の root Orchestrator）だけとする。実行主体は dispatcher が付与し、detached な lane・lane 自身・子 run・旧 lead は `not_current_lead` で拒否する。
-- **全文保存と receipt**: 認可、`expected_management_revision` / `expected_brief_revision` の CAS、brief 更新、不変の指示全文（`lane_instructions`）の保存、outbox（`Instruction { instruction_seq }`）への配送予約、および操作 receipt（`lane_instruction_receipts`）の発行を 1 つの IMMEDIATE transaction で行う。指示は受理した時点で全文を保存し、そのあと receipt を発行する（全文保存前に receipt を出さない。同一 `operation_id` の再送は receipt から元の結果を replay し、別要求への再利用は `operation_id_conflict` で拒否する）。送信元 thread が削除されても、受理済みの本文は lane が残る限り保持する。
+- **全文保存と receipt**: 認可、`expected_management_revision` / `expected_brief_revision` の CAS、brief 更新、不変の指示全文（`lane_instructions`）の保存、outbox（`Instruction { instruction_seq }`）への配送予約、および操作 receipt（`lane_instruction_receipts`）の発行を 1 つの IMMEDIATE transaction で行う。指示は受理した時点で全文を保存し、そのあと receipt を発行する（全文保存前に receipt を出さない。同一 `operation_id` の再送は receipt から元の結果を replay し、別要求への再利用は `operation_id_conflict` で拒否する）。`lane_send` の保存上の `operation_id` は、宛先が 1 件でも `<呼び出しの operation_id>:<lane_id>`（256 UTF-8 バイト以下。超過する宛先があれば全件を受理しない）で、再送は同じ引数で行い、受理済みの lane は receipt から replay し、未受理の lane だけが新たに受理される。送信元 thread が削除されても、受理済みの本文は lane が残る限り保持する。
 - **配送順序**: 配送は lane 内連番（`instruction_seq`）および revision の順に行う（未配送の最小連番を 1 件ずつ claim し、会話 snapshot と配送 receipt を同時に保存する）。
 - **detach 前後の扱い**: 受理済みの指示は、その後 detach（または再 attach）された後も同じ lane へ配送する（management revision は配送時に re-stamp する）。detach 後に旧 lead が送ったものは認可・revision fence で拒否する。
 - **wake と Stop**: `Done` または `Error` の lane は、既存の永続 wake guard 付きで起こす（guard が suppressed の間は解除まで保留し、免除しない）。明示的に Stop されている lane では配送を保留する。

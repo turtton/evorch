@@ -163,7 +163,10 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
     );
     contract::<meta::lane_instructions::SendArgs>(
         "lane_send",
-        json!({"operation_id":"send-1","lane_id":"lane","expected_management_revision":1,"expected_brief_revision":1,"message":"Prefer the smaller fix"}),
+        json!({"operation_id":"send-1","message":"Prefer the smaller fix","targets":[
+            {"lane_id":"lane","expected_management_revision":1,"expected_brief_revision":1},
+            {"lane_id":"other","expected_management_revision":2,"expected_brief_revision":3}
+        ]}),
     );
     contract::<meta::lane_instructions::ReviseArgs>(
         "lane_revise_brief",
@@ -221,6 +224,63 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
     ] {
         contract::<EmptyArgs>(name, json!({}));
     }
+}
+
+#[test]
+fn lane_send_schema_and_handler_reject_the_same_malformed_targets() {
+    let schema = tool_spec("lane_send").input_schema;
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(
+        schema["properties"]["targets"]["items"]["additionalProperties"],
+        false
+    );
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let target = |lane: &str| json!({"lane_id":lane,"expected_management_revision":1,"expected_brief_revision":1});
+    let call = |targets: Value| json!({"operation_id":"op","message":"m","targets":targets});
+    let many =
+        |count: usize| Value::Array((0..count).map(|n| target(&format!("lane-{n}"))).collect());
+    let handler_accepts = |input: &Value| {
+        serde_json::from_value::<meta::lane_instructions::SendArgs>(input.clone())
+            .is_ok_and(|args| meta::lane_instructions::validate_send(&args).is_ok())
+    };
+    let max = meta::lane_instructions::SEND_MAX_TARGETS;
+    assert_eq!(schema["properties"]["targets"]["minItems"], 1);
+    assert_eq!(schema["properties"]["targets"]["maxItems"], max);
+    for valid in [call(many(1)), call(many(max))] {
+        assert!(validator.is_valid(&valid) && handler_accepts(&valid));
+    }
+    let mut zero_revision = target("a");
+    zero_revision["expected_brief_revision"] = json!(0);
+    let mut extra_field = target("a");
+    extra_field["note"] = json!("x");
+    let mut no_brief_revision = target("a");
+    no_brief_revision
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_brief_revision");
+    let mut extra_top = call(many(1));
+    extra_top["lane_id"] = json!("a");
+    let mut flat = json!({"operation_id":"op","message":"m"});
+    flat["lane_id"] = json!("a");
+    flat["expected_management_revision"] = json!(1);
+    flat["expected_brief_revision"] = json!(1);
+    for invalid in [
+        call(json!([])),
+        call(many(max + 1)),
+        call(json!([zero_revision])),
+        call(json!([extra_field])),
+        call(json!([no_brief_revision])),
+        call(json!(target("a"))),
+        extra_top,
+        flat,
+    ] {
+        assert!(!validator.is_valid(&invalid), "schema: {invalid}");
+        assert!(!handler_accepts(&invalid), "handler: {invalid}");
+    }
+    // What a schema cannot express is the handler's alone.
+    let duplicated = call(json!([target("a"), target("a")]));
+    assert!(validator.is_valid(&duplicated));
+    assert!(!handler_accepts(&duplicated));
 }
 
 #[test]

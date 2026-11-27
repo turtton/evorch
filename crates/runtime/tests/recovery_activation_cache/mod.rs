@@ -4,6 +4,7 @@ use runtime::quiesce::{RecoveryRecipe, ResumePolicy};
 use runtime::{AgentModel, CurrentRecoveryAuthority};
 use std::collections::BTreeMap;
 
+mod lane_send_schema;
 mod output_attachment_schema;
 mod plan_schema;
 mod question_listing_schema;
@@ -23,6 +24,8 @@ enum SchemaCase {
     OutputAttachmentsUnchanged,
     QuestionListing,
     QuestionListingUnchanged,
+    LaneSend,
+    LaneSendUnchanged,
 }
 
 pub(super) fn settings(h: &Harness) -> Config {
@@ -231,6 +234,7 @@ async fn recover_case(
     let wait_liveness = matches!(schema_case, SchemaCase::WaitLiveness);
     let output_attachments = matches!(schema_case, SchemaCase::OutputAttachments);
     let question_listing = matches!(schema_case, SchemaCase::QuestionListing);
+    let lane_send = matches!(schema_case, SchemaCase::LaneSend);
     let plan_schema = matches!(
         schema_case,
         SchemaCase::Plan | SchemaCase::PlanUnchanged | SchemaCase::PlanRetry
@@ -240,7 +244,11 @@ async fn recover_case(
         || wait_schema
         || output_attachments
         || question_listing
+        || lane_send
         || matches!(schema_case, SchemaCase::Plan | SchemaCase::PlanRetry);
+    // lane_send is offered to a lane-external root Orchestrator only, so its unchanged
+    // control must run as one too or it would not carry the tool at all.
+    let orchestrator = schema_change || matches!(schema_case, SchemaCase::LaneSendUnchanged);
     let mut script = if tools_case {
         vec![
             read_response(0),
@@ -266,6 +274,9 @@ async fn recover_case(
     }
     if question_listing {
         script.insert(0, question_listing_schema::legacy_call());
+    }
+    if lane_send {
+        script.insert(0, lane_send_schema::legacy_call());
     }
     if wait_schema {
         // The successor rejects this retired call, but its historical name, input,
@@ -317,6 +328,7 @@ async fn recover_case(
             plan: plan_schema,
             output_attachments,
             question_listing,
+            lane_send,
             wait_liveness,
             ..Default::default()
         })
@@ -335,7 +347,7 @@ async fn recover_case(
     let run = old
         .delegate_chat(
             "wire-recovery-thread",
-            if schema_change {
+            if orchestrator {
                 Role::Orchestrator
             } else {
                 Role::Worker
@@ -350,7 +362,7 @@ async fn recover_case(
         )
         .unwrap();
     let pin = runtime::RoutePinRecord {
-        chain: if schema_change {
+        chain: if orchestrator {
             "orchestrator"
         } else {
             "worker"
@@ -532,7 +544,7 @@ async fn recover_case(
         }
         let evidence = comparison.unwrap();
         assert_eq!(evidence.boundary, changed_tool || schema_change);
-        if wait_schema || wait_liveness || question_listing {
+        if wait_schema || wait_liveness || question_listing || lane_send {
             wait_schema::assert_evidence(&evidence);
         }
         if plan_schema && schema_change {
@@ -581,7 +593,7 @@ async fn recover_case(
                 .restart_tools_evidence("routed-wire", &run.to_string(), incarnation)
                 .unwrap()
                 .unwrap();
-            if wait_schema || wait_liveness || question_listing {
+            if wait_schema || wait_liveness || question_listing || lane_send {
                 wait_schema::assert_evidence(&saved);
             }
             if plan_schema {
@@ -822,6 +834,14 @@ async fn recover_case(
                 .any(|m| m["role"] == "tool" || m["type"] == "function_call_output")
         );
     }
+    if matches!(schema_case, SchemaCase::LaneSendUnchanged) {
+        for request in &requests {
+            assert!(
+                request["tools"].to_string().contains("\"lane_send\""),
+                "the unchanged control must carry lane_send"
+            );
+        }
+    }
     if wait_schema {
         wait_schema::assert_transition(
             h.wire,
@@ -852,6 +872,20 @@ async fn recover_case(
     }
     if question_listing {
         question_listing_schema::assert_transition(
+            h.wire,
+            &requests,
+            after_index,
+            &old_input.request.tools,
+            &predecessor
+                .as_ref()
+                .unwrap()
+                .successor_tools
+                .lock()
+                .unwrap(),
+        );
+    }
+    if lane_send {
+        lane_send_schema::assert_transition(
             h.wire,
             &requests,
             after_index,
