@@ -13,6 +13,8 @@
 //! (this scenario has none: its turns are text).
 #[path = "../shared-test-support/product_exec.rs"]
 mod product_exec;
+#[path = "../shared-test-support/public_restart_lanes.rs"]
+mod public_restart_lanes;
 #[path = "../shared-test-support/public_restart_product.rs"]
 mod public_restart_product;
 
@@ -69,6 +71,11 @@ fn a_same_build_public_restart_preserves_the_sent_prefix_and_settings() {
 #[test]
 fn a_restart_asked_during_a_turn_preserves_the_sent_prefix_and_settings() {
     check(true);
+}
+
+#[test]
+fn an_unopened_lane_graph_survives_public_restart_with_its_cache_and_report_close_authority() {
+    public_restart_lanes::drive(&ProductArtifact::require());
 }
 
 #[test]

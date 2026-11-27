@@ -142,12 +142,32 @@ impl ProductProcess<'_> {
     pub fn wait_ready(&mut self) -> Result<Ready, LaunchError> {
         let (value, at) = self
             .process
-            .wait_for(READY_WATCHDOG, |line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .filter(|v| v["status"] == "ready")
-            })
+            .wait_for(READY_WATCHDOG, Self::ready_line)
             .map_err(LaunchError::Wait)?;
+        self.remember_ready(value, at)
+    }
+
+    /// Ready/exit event wait with no per-test deadline. Hang detection belongs
+    /// to the runner. This also waits for a successor Ready after exec.
+    pub fn wait_ready_event(&mut self) -> Result<Ready, LaunchError> {
+        let (value, at) = self
+            .process
+            .wait_for_event(Self::ready_line)
+            .map_err(LaunchError::Wait)?;
+        self.remember_ready(value, at)
+    }
+
+    fn ready_line(line: &str) -> Option<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .filter(|v| v["status"] == "ready")
+    }
+
+    fn remember_ready(
+        &mut self,
+        value: serde_json::Value,
+        at: Instant,
+    ) -> Result<Ready, LaunchError> {
         let ready = Ready {
             at,
             socket: value["socket"]

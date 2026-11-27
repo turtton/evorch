@@ -1,7 +1,7 @@
 //! A supervised child process (the leader of a family). Every wait is an event: a
 //! line on its stdout, its exit notification, or the join of a reader thread.
-//! The deadlines below exist only so that a hung child fails the test instead of
-//! the runner; no deadline is ever the way two things are ordered.
+//! Deadline-free waits leave hang detection to the test runner. Legacy bounded
+//! waits and cleanup bounds remain for existing fixture users.
 //!
 //! Who owns what
 //! -------------
@@ -111,6 +111,7 @@ pub struct ManagedProcess {
     pidfd: OwnedFd,
     spawned_at: Instant,
     lines: mpsc::Receiver<Line>,
+    output_changed: mpsc::Receiver<()>,
     events: Events,
     status: Option<ExitStatus>,
     stdin: Option<std::fs::File>,
@@ -259,8 +260,11 @@ impl ManagedProcess {
         let (leader_tx, leader_rx) = mpsc::channel();
         let (exit_tx, exit_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
+        // Coalesce wakeups: stdout and exit state remain in their own queues.
+        let (output_wake, output_changed) = mpsc::sync_channel(1);
         let mut readers = Vec::new();
         {
+            let output_wake = output_wake.clone();
             let (done_tx, done_rx) = mpsc::channel();
             let handle = std::thread::spawn(move || {
                 for line in BufReader::new(events_out).lines() {
@@ -282,12 +286,15 @@ impl ManagedProcess {
                         "EXITED" => {
                             let raw = data.as_i64().unwrap_or(0) as i32;
                             let _ = exit_tx.send(ExitStatus::from_raw(raw));
+                            let _ = output_wake.try_send(());
                         }
                         kind => {
                             let _ = reply_tx.send((kind.to_owned(), data));
                         }
                     }
                 }
+                drop(exit_tx);
+                let _ = output_wake.try_send(());
                 let _ = done_tx.send(());
             });
             readers.push((handle, done_rx));
@@ -434,7 +441,10 @@ impl ManagedProcess {
                     if line_tx.send(line).is_err() {
                         break;
                     }
+                    let _ = output_wake.try_send(());
                 }
+                drop(line_tx);
+                let _ = output_wake.try_send(());
                 let _ = done_tx.send(());
             });
             readers.push((handle, done_rx));
@@ -470,6 +480,7 @@ impl ManagedProcess {
             pidfd,
             spawned_at,
             lines,
+            output_changed,
             events: Events {
                 leader: leader_rx,
                 exit: exit_rx,
@@ -577,6 +588,43 @@ impl ManagedProcess {
             if let Some(value) = select(&line.text) {
                 return Ok((value, line.at));
             }
+        }
+    }
+
+    /// Awaits stdout or process termination without an elapsed-time condition.
+    /// A hung product is terminated by the test runner, not this wait.
+    pub fn wait_for_event<T>(
+        &mut self,
+        mut select: impl FnMut(&str) -> Option<T>,
+    ) -> Result<(T, Instant), WaitError> {
+        loop {
+            let output_closed = match self.lines.try_recv() {
+                Ok(line) => {
+                    if let Some(value) = select(&line.text) {
+                        return Ok((value, line.at));
+                    }
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => true,
+            };
+            if let Some(status) = self.note_exit() {
+                return Err(WaitError::Exited(status, self.stderr()));
+            }
+            if output_closed {
+                // stdout EOF and the reaper's exit event arrive on different
+                // pipes. Await the latter rather than making their order a race.
+                self.status = self.events.exit.recv().ok();
+                return Err(match self.status {
+                    Some(status) => WaitError::Exited(status, self.stderr()),
+                    None => WaitError::OutputClosed,
+                });
+            }
+            // State is checked before receiving, and producers notify only
+            // after changing it, so coalescing cannot lose a pending change.
+            self.output_changed
+                .recv()
+                .map_err(|_| WaitError::OutputClosed)?;
         }
     }
 

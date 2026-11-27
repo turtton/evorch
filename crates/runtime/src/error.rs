@@ -31,6 +31,9 @@ pub enum RuntimeError {
     /// observing it. Nothing was committed: the observation may be taken again.
     #[error("restart preparation observed a changed run set")]
     RestartObservationChanged,
+    /// A specific live member cannot supply safe restart evidence.
+    #[error("restart unsupported: {run_id}: {reason}")]
+    RestartRunUnavailable { run_id: RunId, reason: String },
     #[error("cannot withdraw follow-up: {0}")]
     FollowUpWithdrawal(#[from] crate::runtime::FollowUpWithdrawalError),
     #[error(transparent)]
