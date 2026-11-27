@@ -280,6 +280,6 @@ fn all_default_codex_catalog_entry_points_select_the_same_process_instance() {
     .unwrap();
     assert!(Arc::ptr_eq(
         &default,
-        composition.runtime.codex_catalog_cache().unwrap()
+        &composition.runtime.codex_catalog_cache().unwrap()
     ));
 }

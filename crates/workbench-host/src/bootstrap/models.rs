@@ -189,11 +189,26 @@ impl ProjectModels {
 pub fn reload_models(
     main: Option<&(ProductionModel, Arc<runtime::compose::SwitchableModel>)>,
     projects: Option<&ProjectModels>,
+    runtime: Option<&runtime::AgentRuntime>,
 ) -> Result<(), String> {
-    if let Some((context, model)) = main {
-        model.replace(context.reload()?);
+    let replacement = match main {
+        Some((context, model)) => {
+            let config =
+                config::Config::load(&context.load_options).map_err(|error| error.to_string())?;
+            let routed =
+                compose_production_model(&config, context).map_err(|error| error.to_string())?;
+            Some((model, config, routed))
+        }
+        None => None,
+    };
+    projects.map_or(Ok(()), ProjectModels::reload_all)?;
+    if let Some((model, config, routed)) = replacement {
+        model.replace(routed);
+        if let Some(runtime) = runtime {
+            runtime.reload_model_settings(&config);
+        }
     }
-    projects.map_or(Ok(()), ProjectModels::reload_all)
+    Ok(())
 }
 
 /// Publishes refreshed models.dev data to the startup model and every project model.
