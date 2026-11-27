@@ -635,6 +635,15 @@ impl Features {
     /// Route a delivered event to the feature owning its namespace.
     pub fn event(&mut self, event: &UiEvent) {
         route_event(&mut self.features, event);
+        // The workspace feature caches the model catalog (from the applied
+        // settings) but only receives workspace events: tell it when they may
+        // have changed. A project-settings reload leaves the user settings
+        // revision unchanged, so a finished reload counts as well.
+        if invalidates_model_catalog(event)
+            && let Some(workspace) = self.workspace_mut()
+        {
+            workspace.invalidate_model_catalogs();
+        }
     }
 
     /// Route the answer to a request back to the feature that made it.
@@ -892,6 +901,17 @@ fn begin_session(features: &mut [Box<dyn Feature>], delivered: &[UiEvent], held:
     } in held
     {
         route_reply(features, feature, tag, reply);
+    }
+}
+
+fn invalidates_model_catalog(event: &UiEvent) -> bool {
+    use workbench_protocol::namespaces::settings::{SettingsEvent, SettingsOperationKind};
+    match event {
+        UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged { .. }) => true,
+        UiEvent::Settings(SettingsEvent::SettingsOperationCompleted { operation }) => {
+            operation.kind == SettingsOperationKind::ReloadModels
+        }
+        _ => false,
     }
 }
 

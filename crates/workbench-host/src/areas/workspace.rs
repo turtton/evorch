@@ -326,9 +326,16 @@ impl WorkspaceArea {
         };
         let deleted = service.deleted().map_err(|e| internal(&format!("{e:?}")))?;
         if deleted(thread) {
-            return Err(internal("thread was deleted"));
+            return Err(not_found("thread was deleted"));
         }
-        let lock = service.store.lock().map_err(|e| internal(&e.to_string()))?;
+        let lock = service.store.lock().map_err(|error| match error {
+            StoreError::Busy => WorkbenchError::new(
+                ErrorCode::Busy,
+                "the shared sidebar is being saved; send again",
+                RetryAdvice::SameRequest,
+            ),
+            error => internal(&error.to_string()),
+        })?;
         let mut document = service
             .store
             .read(&lock)
@@ -357,7 +364,7 @@ impl WorkspaceArea {
                 .threads
                 .iter_mut()
                 .find(|t| t.id.to_string() == thread)
-                .ok_or_else(|| internal("thread is not registered"))?;
+                .ok_or_else(|| not_found("thread is not registered"))?;
             let changed = record.model_preference.as_ref() != Some(&selection);
             record.model_preference = Some(selection.clone());
             let revision = thread_revision(record);

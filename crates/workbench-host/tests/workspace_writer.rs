@@ -212,6 +212,7 @@ fn title_on_disk(fixture: &Fixture, id: &str) -> Option<String> {
 struct ChoiceModel {
     seen: std::sync::Mutex<Vec<Option<runtime::ModelPreference>>>,
     reached: tokio::sync::Notify,
+    answer: bool,
 }
 
 #[async_trait::async_trait]
@@ -243,6 +244,19 @@ impl runtime::AgentModel for ChoiceModel {
             .unwrap()
             .push(invocation.model_preference.clone());
         self.reached.notify_one();
+        if self.answer {
+            return Ok(providers::ChatResponse {
+                message: providers::Message {
+                    role: providers::Role::Assistant,
+                    content: vec![providers::ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                },
+                finish_reason: providers::FinishReason::Stop,
+                usage_reported: true,
+                usage: Default::default(),
+            });
+        }
         std::future::pending().await
     }
 }
@@ -480,6 +494,105 @@ fn send_receipts_use_the_original_choice_and_duplicates_never_roll_back_saved_se
     let run = run.as_str().parse().unwrap();
     runtime.cancel(run).unwrap();
     rt.block_on(runtime.wait(run)).unwrap();
+}
+
+#[test]
+fn a_saved_only_change_reaches_the_next_wire_send_not_an_internal_wake() {
+    use workbench_host::{
+        CommandHost,
+        areas::Areas,
+        commands::{ChatInput, CommandService, ComposerRole, HostCommand},
+        projects::StaticProjects,
+    };
+    use workbench_protocol::{
+        commands::{Command, ModelChoice, ModelPreference},
+        namespaces::ConversationCommand,
+    };
+    let f = fixture(vec![thread("t1")]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let config = storage::StorageConfig {
+        db_path: f.config.join("runtime.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let model = Arc::new(ChoiceModel {
+        answer: true,
+        ..Default::default()
+    });
+    let runtime = runtime::AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        model.clone(),
+    )
+    .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let mut projects = StaticProjects::default();
+    projects.insert(&wire_project(), f.root.clone());
+    let area = WorkspaceArea::with_store(
+        SidebarStore::new(f.store.path()),
+        Some(runtime.clone()),
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    );
+    let mut host = CommandHost::new(CommandService::new(runtime, rt.handle().clone()))
+        .with_projects(projects)
+        .with_areas(Areas {
+            workspace: area,
+            ..Default::default()
+        });
+    let effort = |effort: &str| ModelPreference {
+        profile: "known".into(),
+        model: None,
+        reasoning_effort: Some(effort.into()),
+    };
+    let wire = |id: &str, preference: Option<ModelPreference>| {
+        let mut send = common::send("t1", id, id);
+        send.project = wire_project();
+        send.model_preference = preference;
+        Command::Conversation(ConversationCommand::SendChat(send))
+    };
+    let seen = |index: usize| {
+        model.seen.lock().unwrap()[index]
+            .as_ref()
+            .and_then(|p| p.reasoning_effort.clone())
+    };
+    host.handle_command(wire("first", Some(effort("applied"))), local_desktop())
+        .unwrap();
+    rt.block_on(model.reached.notified());
+    assert_eq!(seen(0).as_deref(), Some("applied"));
+    // Save a different choice without sending: nothing live is changed.
+    host.handle_command(
+        Command::Workspace(WorkspaceCommand::SetThreadModelChoice(
+            SetThreadModelChoice {
+                thread: wire_thread("t1"),
+                expected_revision: f.detail("t1").revision,
+                choice: ModelChoice::Explicit(effort("saved-only")),
+            },
+        )),
+        local_desktop(),
+    )
+    .unwrap();
+    // An internal input keeps what the run applied and never reads the saved choice.
+    let internal = ChatInput {
+        submission_id: "internal-wake".into(),
+        project_root: Some(f.root.clone()),
+        composer_role: ComposerRole::Worker,
+        thread_id: "t1".into(),
+        text: "internal wake".into(),
+        skills: vec![],
+        attachments: vec![],
+        model_preference: runtime::ModelPreferenceUpdate::Keep,
+        fork_seed: None,
+    };
+    host.submit_local(HostCommand::SendChat(internal), &local_desktop());
+    rt.block_on(model.reached.notified());
+    assert_eq!(seen(1).as_deref(), Some("applied"));
+    // The next ordinary send resolves the saved choice.
+    host.handle_command(wire("ordinary", None), local_desktop())
+        .unwrap();
+    rt.block_on(model.reached.notified());
+    assert_eq!(seen(2).as_deref(), Some("saved-only"));
 }
 
 #[test]

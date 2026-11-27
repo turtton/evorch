@@ -1000,9 +1000,16 @@ impl CommandHost {
             {
                 Ok(choice) => chat.model_preference = choice,
                 Err(error) => {
+                    let kind = match error.code {
+                        ErrorCode::Busy => RejectKind::Busy,
+                        ErrorCode::NotFound => RejectKind::NotFound,
+                        ErrorCode::StorageUnavailable => RejectKind::Unavailable,
+                        ErrorCode::InvalidRequest => RejectKind::Invalid,
+                        _ => RejectKind::Failed,
+                    };
                     return Executed::Events(vec![HostEvent::chat_rejected(
                         &chat.thread_id,
-                        RejectKind::Invalid,
+                        kind,
                         error.message,
                     )]);
                 }

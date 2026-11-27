@@ -332,6 +332,14 @@ impl WorkspaceFeature {
         self.model_catalogs.get(project)
     }
 
+    /// Forget the model catalogs: the applied settings changed. `Features`
+    /// calls this for the settings events (the feature only receives its own
+    /// namespace). Answers of requests sent earlier are dropped by generation.
+    pub(super) fn invalidate_model_catalogs(&mut self) {
+        self.model_catalogs.clear();
+        self.model_catalog_generation += 1;
+    }
+
     pub fn model_choice_pending(&self, thread: &str) -> bool {
         self.intents.contains_key(thread)
             || self
@@ -910,15 +918,6 @@ impl Feature for WorkspaceFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
-        if matches!(
-            event,
-            UiEvent::Settings(
-                workbench_protocol::namespaces::settings::SettingsEvent::SettingsSnapshotChanged { .. }
-            )
-        ) {
-            self.model_catalogs.clear();
-            self.model_catalog_generation += 1;
-        }
         if matches!(
             event,
             UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged { .. })
@@ -2224,6 +2223,86 @@ mod tests {
             assert_eq!(feature.model.details["t1"].model_choice, choice);
             assert!(feature.take_outbox().is_empty());
         }
+    }
+
+    // Given: a cached model catalog in the workspace feature of `Features`
+    // When: a settings snapshot change or a finished model reload arrives (the
+    //       latter with the user settings revision unchanged)
+    // Then: the catalog is dropped and an answer requested before is ignored;
+    //       a finished save does not drop it
+    #[test]
+    fn settings_events_invalidate_the_model_catalog_through_features() {
+        use crate::core_client::features::Features;
+        use workbench_protocol::ids::{OperationId, ProjectId};
+        use workbench_protocol::namespaces::settings::{
+            ProjectModelChoices, RoleModelChoice, SettingsEvent, SettingsOperationKind,
+            SettingsOperationView, SettingsReply, SettingsRevision,
+        };
+        use workbench_protocol::operation::{OperationState, OperationView};
+        let operation = |kind, state| {
+            UiEvent::Settings(SettingsEvent::SettingsOperationCompleted {
+                operation: SettingsOperationView {
+                    operation: OperationView {
+                        operation_id: OperationId::new("op-1").unwrap(),
+                        state,
+                        revision: Revision(1),
+                        result: None,
+                    },
+                    kind,
+                    revision: None,
+                    message: None,
+                },
+            })
+        };
+        let role = RoleModelChoice {
+            model: "m".into(),
+            reasoning_effort: None,
+        };
+        let project = ProjectId::new("p").unwrap();
+        let catalog = ProjectModelChoices {
+            project: project.clone(),
+            profiles: Vec::new(),
+            worker: role.clone(),
+            orchestrator: role,
+        };
+        let revision = SettingsRevision::new("a".repeat(64)).unwrap();
+        let events = [
+            UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
+                revision: revision.clone(),
+                applied_revision: Some(revision),
+            }),
+            operation(SettingsOperationKind::ReloadModels, OperationState::Ready),
+        ];
+        for event in &events {
+            let mut features = Features::default();
+            let workspace = features.workspace_mut().unwrap();
+            workspace.model_catalogs.insert("p".into(), catalog.clone());
+            workspace.model_catalogs.remove("p");
+            workspace.want_model_catalog(&project);
+            let stale_tag = match workspace.take_outbox().as_slice() {
+                [Outgoing::Query(tag, _)] => *tag,
+                other => panic!("{other:?}"),
+            };
+            workspace.model_catalogs.insert("p".into(), catalog.clone());
+            features.event(event);
+            let workspace = features.workspace_mut().unwrap();
+            assert!(workspace.model_catalog("p").is_none(), "{event:?}");
+            workspace.on_reply(
+                stale_tag,
+                FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ModelChoices(
+                    catalog.clone(),
+                )))),
+            );
+            assert!(workspace.model_catalog("p").is_none(), "{event:?}");
+        }
+        let mut features = Features::default();
+        let workspace = features.workspace_mut().unwrap();
+        workspace.model_catalogs.insert("p".into(), catalog);
+        features.event(&operation(
+            SettingsOperationKind::SaveDocument,
+            OperationState::Ready,
+        ));
+        assert!(features.workspace().unwrap().model_catalog("p").is_some());
     }
 
     #[test]
