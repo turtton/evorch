@@ -463,6 +463,11 @@ fn durations_match_in_indexed_live_and_legacy_history_for_all_tool_names() {
         .map(|_| next_message(&f, &mut sub))
         .collect();
     assert_eq!(live, indexed);
-    dirty(&f);
+    // Invalidate via the existing trigger without changing a timestamp: `dirty`
+    // advances the first start by 1ns, which correctly changes a floored duration.
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    db.execute("UPDATE events SET wall_clock_ns=wall_clock_ns WHERE id=(SELECT MIN(id) FROM events WHERE run_id='run-1')", []).unwrap();
     assert_eq!(read_all(&f, HistoryDirection::Forward, false), indexed);
+    rebuild(&f);
+    assert_eq!(read_all(&f, HistoryDirection::Backward, true), indexed);
 }
