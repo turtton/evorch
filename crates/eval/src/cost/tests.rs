@@ -323,3 +323,32 @@ fn a_fast_model_is_priced_at_its_fast_rates_and_an_unknown_price_makes_the_ceili
     assert_eq!(missing.ceiling_per_million(&manual_model("m")), None);
     assert_eq!(missing.ceiling_per_million(&manual_model("other")), None);
 }
+
+#[test]
+fn a_fast_model_without_any_fast_prices_has_no_ceiling_instead_of_the_standard_one() {
+    // Given: a model with standard prices only, so a fast request would be charged
+    // at a rate the table does not know (the standard rate is merely a lower bound).
+    let table = manual_table(manual_entry());
+
+    // When / Then: the standard id has its ceiling, the fast id has none.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(table.ceiling_per_million(&manual_model("m+fast")), None);
+}
+
+#[test]
+fn a_fast_model_missing_part_of_its_fast_prices_has_no_ceiling() {
+    // Given: fast prices that omit the cache write, which the standard set does have.
+    let mut entry = manual_entry();
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(2.0),
+        output: Some(20.0),
+        cache_read: Some(0.2),
+        cache_write: None,
+    });
+    let table = manual_table(entry);
+
+    // When / Then: the standard set's cache write is not borrowed, so the fast id has no
+    // ceiling, while the standard id keeps its own.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(table.ceiling_per_million(&manual_model("m+fast")), None);
+}

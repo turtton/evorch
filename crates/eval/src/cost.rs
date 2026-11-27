@@ -254,24 +254,25 @@ impl Cost {
 }
 
 /// The dearest per-million price among every token kind and every input-size
-/// tier of `schedule` at `speed`, or `None` when any price a request of any
-/// size could be charged at is unknown.
+/// tier of the price set `speed` selects, or `None` when any price a request of
+/// any size could be charged at is unknown. The standard price never stands in
+/// for a missing fast one: that fallback gives a lower bound, which is no ceiling.
 fn schedule_ceiling(
     schedule: &config::types::provider::PriceSchedule,
     speed: config::types::provider::ModelSpeed,
 ) -> Option<f64> {
-    let mut thresholds = vec![0_u64];
-    let sets = std::iter::once(&schedule.standard).chain(schedule.fast.as_ref());
-    for set in sets {
-        thresholds.extend(
-            set.tiers
-                .iter()
-                .map(|tier| tier.above_input_tokens.saturating_add(1)),
-        );
-    }
+    let set = match speed {
+        config::types::provider::ModelSpeed::Fast => schedule.fast.as_ref()?,
+        config::types::provider::ModelSpeed::Standard => &schedule.standard,
+    };
+    let thresholds = std::iter::once(0_u64).chain(
+        set.tiers
+            .iter()
+            .map(|tier| tier.above_input_tokens.saturating_add(1)),
+    );
     let mut dearest = 0.0_f64;
     for input_tokens in thresholds {
-        let rates = schedule.rates_for(input_tokens, speed);
+        let rates = set.rates_for(input_tokens);
         for price in [
             rates.input,
             rates.output,
