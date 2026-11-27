@@ -49,7 +49,6 @@ pub struct RoutingSettingsModel {
     pub route_name_edits: BTreeMap<String, String>,
     pub validation_error: Option<String>,
     pub profiles: super::role_profiles::RoleProfilePicker,
-    pub(crate) job: super::role_profiles::RoleProfileJob,
     pub(crate) save_rx: Option<Receiver<Result<Config, String>>>,
 }
 

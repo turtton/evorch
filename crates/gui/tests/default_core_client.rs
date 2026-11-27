@@ -110,11 +110,10 @@ fn default_launch_is_a_core_client_and_a_missing_core_does_not_fall_back() {
 }
 
 // Given: the same installation
-// When: an option that only the embedded runtime has is given without --legacy-embedded,
-//       and --legacy-embedded is combined with the core client's --config-dir
-// Then: the start is refused by name before anything is opened
+// When: an option of the removed embedded runtime is given, alone or with --config-dir
+// Then: the start is refused as an argument error before anything is opened
 #[test]
-fn embedded_only_options_do_not_start_the_embedded_runtime_implicitly() {
+fn removed_embedded_options_are_refused_and_start_nothing() {
     let install = install();
     let state = install.config.join("sidebar.json");
     let state = state.to_str().unwrap();

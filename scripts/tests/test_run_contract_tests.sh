@@ -9,8 +9,7 @@ cd "$(dirname "$0")/../.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/scripts" "$work/bin"
-cp scripts/run-contract-tests.sh scripts/contract-test-filters.sh scripts/ci-test-groups.json \
-  scripts/ci-main-only-gui.sh scripts/ci-main-only-gui-tests.json "$work/scripts/"
+cp scripts/run-contract-tests.sh scripts/contract-test-filters.sh scripts/ci-test-groups.json "$work/scripts/"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$STUB_OUT"\n' > "$work/scripts/guard-cargo.sh"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "$STUB_OUT"\n' > "$work/bin/cargo"
 chmod +x "$work/scripts/guard-cargo.sh" "$work/bin/cargo" "$work/scripts/run-contract-tests.sh"
@@ -23,7 +22,7 @@ selected() { # <file>
 fails=0
 for group in runtime gui storage-tools support; do
   shards=$(jq -r --arg g "$group" '.groups[$g].shards' scripts/ci-test-groups.json)
-  for suite in cache io remaining ci-remaining main-only-gui; do
+  for suite in cache io remaining; do
     for ((k = 1; k <= shards; k++)); do
       export STUB_OUT="$work/list.out"
       PATH="$work/bin:$PATH" "$work/scripts/run-contract-tests.sh" --group "$group" --shard "$k/$shards" --list "$suite"
@@ -46,7 +45,7 @@ done
 # to main select the same tests, so the inventory they merge is the same.
 for group in runtime gui storage-tools support; do
   shards=$(jq -r --arg g "$group" '.groups[$g].shards' scripts/ci-test-groups.json)
-  for suite in cache io remaining ci-remaining main-only-gui; do
+  for suite in cache io remaining; do
     for event in "pull_request refs/pull/762/merge" "push refs/heads/main" "workflow_dispatch refs/heads/other"; do
       export STUB_OUT="$work/event.${event%% *}.out"
       GITHUB_EVENT_NAME=${event%% *} GITHUB_REF=${event#* } PATH="$work/bin:$PATH" \
@@ -65,17 +64,14 @@ for script in run-contract-tests.sh run-test-group.sh verify-test-inventory.sh; 
   fi
 done
 
-# The local remaining suite keeps its meaning: it is neither cache nor io, and it
-# does not mention the main-only registry.
-if "$work/scripts/run-contract-tests.sh" --print-filter remaining | grep -q 'binary(=attention)'; then
-  echo "FAIL: remaining must not depend on the main-only registry" >&2
-  fails=$((fails + 1))
-fi
-main_only=$("$work/scripts/run-contract-tests.sh" --print-filter main-only-gui)
-if [[ "$("$work/scripts/run-contract-tests.sh" --print-filter ci-remaining)" != *"not ($main_only)" ]]; then
-  echo "FAIL: ci-remaining must be remaining without the main-only filter" >&2
-  fails=$((fails + 1))
-fi
+# remaining is what neither cache nor io selects, and no suite is left to a main push:
+# the removed main-only suites are refused instead of being read as something else.
+for removed in ci-remaining main-only-gui; do
+  if "$work/scripts/run-contract-tests.sh" --print-filter "$removed" 2> /dev/null; then
+    echo "FAIL: the removed suite $removed is still accepted" >&2
+    fails=$((fails + 1))
+  fi
+done
 if ((fails > 0)); then
   echo "$fails failure(s)" >&2
   exit 1

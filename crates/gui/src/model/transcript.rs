@@ -398,40 +398,6 @@ impl TranscriptModel {
         self.deferred_body = None;
     }
 
-    /// Replaces every body in the transcript, as a test would read them all.
-    #[cfg(test)]
-    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
-        for entry in &mut self.entries {
-            match entry {
-                TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
-                    *text = f(text);
-                }
-                TranscriptEntry::Compaction { summary, .. } => *summary = f(summary),
-                TranscriptEntry::Tool {
-                    output: Some(output),
-                    ..
-                } => *output = f(output),
-                _ => {}
-            }
-        }
-    }
-
-    /// Whether any body is still in the store.
-    #[cfg(test)]
-    pub(crate) fn has_deferred_bodies(&self) -> bool {
-        self.entries.iter().any(|entry| match entry {
-            TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
-                text.has_deferred()
-            }
-            TranscriptEntry::Compaction { summary, .. } => summary.has_deferred(),
-            TranscriptEntry::Tool {
-                output: Some(output),
-                ..
-            } => output.has_deferred(),
-            _ => false,
-        })
-    }
-
     pub(crate) fn set_deferred_body(&mut self, body: Option<BodyText>) {
         self.deferred_body = body;
     }
@@ -1042,70 +1008,6 @@ impl TranscriptModel {
             notice_id: notice_id.to_owned(),
             card: None,
         });
-    }
-
-    /// The notice IDs shown without their card yet.
-    pub(crate) fn unfilled_harness_notices(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter_map(|entry| match entry {
-                TranscriptEntry::HarnessNotice {
-                    notice_id,
-                    card: None,
-                } => Some(notice_id.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Fills the card of `notice_id`, when it is shown. Returns whether it was.
-    pub(crate) fn fill_harness_card(&mut self, card: &super::harness_card::HarnessCard) -> bool {
-        let Some(index) = self.entries.iter().position(|entry| {
-            matches!(entry, TranscriptEntry::HarnessNotice { notice_id, .. } if *notice_id == card.notice_id)
-        }) else {
-            return false;
-        };
-        if let Some(TranscriptEntry::HarnessNotice { card: slot, .. }) = self.entry_mut(index) {
-            *slot = Some(Box::new(card.clone()));
-        }
-        true
-    }
-
-    pub(crate) fn push_host_input(&mut self, id: &str, text: String, skills: Vec<String>) {
-        if self.capacity == 0 || (!id.is_empty() && self.host_inputs.contains_key(id)) {
-            return;
-        }
-        let entry_id = self.next_entry_id;
-        self.push(TranscriptEntry::UserMessage { text, skills });
-        if !id.is_empty() {
-            self.host_inputs.insert(id.into(), entry_id);
-        }
-    }
-
-    /// Replaces the words and chips of an already shown host input.
-    pub(crate) fn update_host_input(&mut self, id: &str, text: &str, skills: &[String]) {
-        if let Some(entry) = self.host_inputs.get(id).copied()
-            && let Some(index) = self.entry_index(entry)
-            && let Some(TranscriptEntry::UserMessage {
-                text: shown,
-                skills: chips,
-            }) = self.entry_mut(index)
-        {
-            text.clone_into(shown);
-            skills.clone_into(chips);
-        }
-    }
-
-    pub(crate) fn remove_host_input(&mut self, id: &str) {
-        if let Some(entry) = self.host_inputs.get(id).copied()
-            && let Some(index) = self.entry_index(entry)
-            && matches!(
-                self.entries.get(index),
-                Some(TranscriptEntry::UserMessage { .. })
-            )
-        {
-            self.remove_entry(index);
-        }
     }
 
     pub(crate) fn push(&mut self, entry: TranscriptEntry) {

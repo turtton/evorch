@@ -86,8 +86,5 @@ floating node can replace an empty root. A completely empty main window returns
 a typed migration error instead of manufacturing an invalid empty tabs node.
 
 Historical screenshot directories document earlier releases and may still show
-the removed surfaces. Current capture command:
-
-```sh
-cargo run -p gui --bin headless_capture -- --demo --out /tmp/opencode/w-ef.png
-```
+the removed surfaces. The `headless_capture` binary that produced them has been
+removed together with the embedded window; their README commands no longer run.

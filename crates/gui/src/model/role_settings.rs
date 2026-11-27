@@ -33,7 +33,6 @@ pub struct RoleSettingsModel {
     /// are not saved over the newer file, only discarded.
     pub conflicted: BTreeSet<&'static str>,
     pub profiles: super::role_profiles::RoleProfilePicker,
-    pub(crate) job: super::role_profiles::RoleProfileJob,
     pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
 }
 

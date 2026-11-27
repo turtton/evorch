@@ -46,108 +46,11 @@ impl Default for TranscriptRegistry {
 }
 
 impl TranscriptRegistry {
-    pub(crate) fn log_restore_census(&self) {
-        if !tracing::enabled!(target: "gui::restore", tracing::Level::INFO) {
-            return;
-        }
-        let mut entries = 0usize;
-        let mut tool_input_bytes = 0usize;
-        let mut tool_detail_bytes = 0usize;
-        let mut tool_output_bytes = 0usize;
-        let mut message_bytes = 0usize;
-        let mut reasoning_bytes = 0usize;
-        for model in std::iter::once(&self.thread)
-            .chain(self.threads.values())
-            .chain(self.runs.values())
-        {
-            for entry in model.entries() {
-                entries += 1;
-                match entry {
-                    TranscriptEntry::Tool {
-                        input,
-                        detail,
-                        output,
-                        ..
-                    } => {
-                        tool_input_bytes += input.as_ref().map_or(0, json_bytes);
-                        tool_detail_bytes += detail.as_ref().map_or(0, json_bytes);
-                        tool_output_bytes += output.as_ref().map_or(0, BodyText::len);
-                    }
-                    TranscriptEntry::Message { text, .. } => message_bytes += text.len(),
-                    TranscriptEntry::Reasoning { text, .. } => reasoning_bytes += text.len(),
-                    _ => {}
-                }
-            }
-        }
-        let (vm_rss_kib, vm_hwm_kib) = crate::restore_metrics::process_memory();
-        tracing::info!(
-            target: "gui::restore",
-            thread_models = self.threads.len(),
-            fallback_models = 1,
-            run_models = self.runs.len(),
-            entries,
-            tool_input_bytes,
-            tool_detail_bytes,
-            tool_output_bytes,
-            message_bytes,
-            reasoning_bytes,
-            vm_rss_kib,
-            vm_hwm_kib,
-            "restore census (logical payload bytes, including duplicate deliveries)"
-        );
-    }
-
-    fn all_models(&self) -> impl Iterator<Item = &TranscriptModel> {
-        std::iter::once(&self.thread)
-            .chain(self.threads.values())
-            .chain(self.runs.values())
-    }
-
-    /// Notice IDs some transcript shows without their card.
-    pub(crate) fn unfilled_harness_notices(&self) -> BTreeSet<String> {
-        self.all_models()
-            .flat_map(TranscriptModel::unfilled_harness_notices)
-            .collect()
-    }
-
-    /// Fills the card in every transcript that shows its notice (the thread's and the
-    /// run's). Returns whether any did.
-    pub(crate) fn fill_harness_card(
-        &mut self,
-        card: &crate::model::harness_card::HarnessCard,
-    ) -> bool {
-        let mut filled = self.thread.fill_harness_card(card);
-        for model in self.threads.values_mut().chain(self.runs.values_mut()) {
-            filled |= model.fill_harness_card(card);
-        }
-        filled
-    }
-
     pub(crate) fn finish_history(&mut self) {
         self.thread.finish_history();
         for model in self.threads.values_mut().chain(self.runs.values_mut()) {
             model.finish_history();
         }
-    }
-
-    /// Interrupts `run_id`'s running calls in every transcript that shows them,
-    /// for runs whose terminal phase was reconciled without an event.
-    pub(crate) fn interrupt_run_tools(&mut self, run_id: &str) {
-        self.thread.interrupt_compactions(Some(run_id));
-        self.thread.interrupt_running_tools(run_id);
-        for model in self.threads.values_mut().chain(self.runs.values_mut()) {
-            model.interrupt_compactions(Some(run_id));
-            model.interrupt_running_tools(run_id);
-        }
-    }
-
-    pub(crate) fn running_tool_runs(&self) -> BTreeSet<String> {
-        std::iter::once(&self.thread)
-            .chain(self.threads.values())
-            .chain(self.runs.values())
-            .flat_map(TranscriptModel::running_tool_runs)
-            .map(str::to_owned)
-            .collect()
     }
 
     pub fn new() -> Self {
@@ -556,22 +459,6 @@ impl TranscriptRegistry {
         true
     }
 
-    /// Replaces every body in every transcript (tests only).
-    #[cfg(test)]
-    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
-        for model in self.models_mut() {
-            model.map_bodies(f);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_deferred_bodies(&self) -> bool {
-        std::iter::once(&self.thread)
-            .chain(self.threads.values())
-            .chain(self.runs.values())
-            .any(TranscriptModel::has_deferred_bodies)
-    }
-
     fn models_mut(&mut self) -> impl Iterator<Item = &mut TranscriptModel> {
         std::iter::once(&mut self.thread)
             .chain(self.threads.values_mut())
@@ -712,78 +599,6 @@ impl TranscriptRegistry {
         self.active_thread = id;
     }
 
-    pub(crate) fn thread_model(&self, thread: &str) -> Option<&TranscriptModel> {
-        self.threads.get(thread)
-    }
-
-    /// Install a branched conversation's inherited history.
-    pub(crate) fn insert_thread(&mut self, thread: &str, model: TranscriptModel) {
-        self.threads.insert(thread.into(), model);
-    }
-
-    pub(crate) fn push_to_thread(&mut self, thread: &str, entry: TranscriptEntry) {
-        self.threads.entry(thread.into()).or_default().push(entry);
-    }
-
-    pub(crate) fn push_host_input(
-        &mut self,
-        thread: &str,
-        id: &str,
-        text: String,
-        skills: Vec<String>,
-    ) {
-        self.threads
-            .entry(thread.into())
-            .or_default()
-            .push_host_input(id, text, skills);
-    }
-
-    pub(crate) fn update_host_input(
-        &mut self,
-        thread: &str,
-        id: &str,
-        text: &str,
-        skills: &[String],
-    ) {
-        if let Some(model) = self.threads.get_mut(thread) {
-            model.update_host_input(id, text, skills);
-        }
-    }
-
-    pub(crate) fn remove_host_input(&mut self, thread: &str, id: &str) {
-        if let Some(model) = self.threads.get_mut(thread) {
-            model.remove_host_input(id);
-        }
-    }
-
-    /// Adopt output that may arrive before the escalation event names its owner.
-    pub(crate) fn adopt_thread_root(&mut self, thread: &str, run: &str) {
-        if !self.thread_roots.contains_key(thread) {
-            let transcript = self.runs.get(run).cloned().unwrap_or_default();
-            self.threads.insert(thread.into(), transcript);
-        }
-        self.bind_thread_root(thread, run);
-    }
-
-    /// While set, events that no conversation owns are not shown anywhere.
-    /// Returns the previous setting, to restore when the scope ends.
-    pub(crate) fn set_foreign_scope(&mut self, on: bool) -> bool {
-        std::mem::replace(&mut self.foreign_scope, on)
-    }
-
-    /// The conversation a run is bound to, if any.
-    pub(crate) fn run_thread(&self, run: &str) -> Option<&str> {
-        self.run_threads.get(run).map(String::as_str)
-    }
-
-    /// Drops what was shown for `run` while no conversation owned it, ahead of
-    /// replaying its events under the conversation that does.
-    pub(crate) fn forget_run(&mut self, run: &str) {
-        self.runs.remove(run);
-        self.compaction_checkpoints
-            .retain(|(checkpoint_run, _)| checkpoint_run != run);
-    }
-
     pub fn bind_run(&mut self, run: &str, thread: &str) {
         self.thread_roots
             .retain(|owner, root| owner == thread || root != run);
@@ -817,21 +632,6 @@ impl TranscriptRegistry {
 
     pub fn run_ids(&self) -> impl Iterator<Item = &String> {
         self.runs.keys()
-    }
-}
-
-// Estimate retained JSON payload without allocating a second serialized copy.
-fn json_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Null => 4,
-        serde_json::Value::Bool(_) => 5,
-        serde_json::Value::Number(_) => 8,
-        serde_json::Value::String(text) => text.len(),
-        serde_json::Value::Array(values) => values.iter().map(json_bytes).sum(),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .map(|(key, value)| key.len() + json_bytes(value))
-            .sum(),
     }
 }
 

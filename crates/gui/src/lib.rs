@@ -11,7 +11,6 @@ compile_error!(
      see docs/browser.md for the CEF distribution"
 );
 
-pub mod app;
 pub mod attachments;
 pub mod body;
 pub mod browser;
@@ -20,11 +19,8 @@ pub mod core_client;
 pub mod diff;
 pub mod dock;
 pub mod events;
-pub mod evidence;
 pub mod fixture;
 pub mod format;
-pub mod headless;
-pub mod html_preview;
 pub mod keymap;
 pub mod logging;
 pub mod mcp;
@@ -34,10 +30,6 @@ pub mod panes;
 pub mod pty;
 pub mod repaint;
 pub mod restore_metrics;
-pub mod runtime_sink;
-pub mod shared_state;
-pub mod startup;
-pub mod startup_restore;
 pub mod terminal;
 pub mod theme;
 pub mod window;

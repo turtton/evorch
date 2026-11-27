@@ -8,15 +8,10 @@
 #   cache         = C
 #   io            = I - C
 #   remaining     = all - (C | I)
-#   ci-remaining  = remaining - main-only-gui
-#   main-only-gui = the registered gui integration-test binaries
-#                   (scripts/ci-main-only-gui-tests.json)
 #   default       = every non-ignored test (list / print-filter only)
 #   all           = every test including ignored ones (--list only)
-# `remaining` keeps its meaning whatever the event: a local run of it is every test
-# that is neither cache nor I/O. CI runs cache, io and ci-remaining everywhere and
-# main-only-gui on a main push only; remaining = ci-remaining + main-only-gui, and
-# the inventory merge gate checks that for every event.
+# CI runs cache, io and remaining on every event; the inventory merge gate checks
+# that they are disjoint and add up to `default`. No suite is left to a main push.
 #
 # Selection:
 #   no --group   `--workspace --locked` (all packages, the workspace feature union).
@@ -46,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     *) break ;;
   esac
 done
-suite="${1:?expected cache, io, remaining, ci-remaining or main-only-gui}"
+suite="${1:?expected cache, io or remaining}"
 shift
 
 extra=()
@@ -54,8 +49,6 @@ case "$suite" in
   cache) filter="$CACHE_CONTRACT_FILTER" ;;
   io) filter="($IO_CONTRACT_FILTER) & not ($CACHE_CONTRACT_FILTER)" ;;
   remaining) filter="not (($CACHE_CONTRACT_FILTER) | ($IO_CONTRACT_FILTER))" ;;
-  ci-remaining) filter="(not (($CACHE_CONTRACT_FILTER) | ($IO_CONTRACT_FILTER))) & not ($(scripts/ci-main-only-gui.sh filter))" ;;
-  main-only-gui) filter="$(scripts/ci-main-only-gui.sh filter)" ;;
   default) filter="" ;;
   all) filter=""; extra=(--run-ignored all) ;;
   *) echo "unknown contract suite: $suite" >&2; exit 2 ;;

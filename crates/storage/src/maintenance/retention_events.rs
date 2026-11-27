@@ -9,7 +9,7 @@
 //!
 //! `RequestStarted` is deliberately kept: replaying history uses it as the
 //! boundary that tells whether a run's final answer was already completed
-//! (`gui::app::history`), so removing it would change what is restored.
+//! (the history restore of the core client), so removing it would change what is restored.
 //!
 //! One [`tick`] runs in one immediate transaction, so it holds the write lock
 //! for its whole duration, and is bounded three ways: it deletes at most

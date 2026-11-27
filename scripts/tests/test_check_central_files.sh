@@ -57,7 +57,7 @@ expect ok "pr10 changes only its own files" "$central" --scope pr10 --files-from
 for central_file in crates/workbench-host/src/areas/mod.rs Cargo.lock \
   crates/workbench-protocol/src/namespaces/mod.rs crates/gui/src/core_client/features/mod.rs \
   scripts/contract-test-filters.sh crates/evorch/src/main.rs \
-  scripts/ci-main-only-gui-tests.json scripts/ci-main-only-gui.sh scripts/tests/test_ci_main_only_gui.sh; do
+  scripts/ci-test-groups.json; do
   files crates/workbench-host/src/areas/settings.rs "$central_file"
   expect fail "$central_file is central" "$central" --scope pr10 --files-from "$work/files"
 done

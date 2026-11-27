@@ -1394,6 +1394,162 @@ async fn another_clients_close_puts_a_badge_on_an_open_window_and_a_new_report_t
     }
 }
 
+/// The saved model input and settings of `runs`, as the database holds them.
+fn saved_contexts(world: &World, runs: &[runtime::RunId]) -> Vec<(String, String)> {
+    let db = storage::Database::open_read_only(
+        &world
+            ._dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("evorch-events.db"),
+    )
+    .unwrap();
+    runs.iter()
+        .map(|run| {
+            let record = db.run_context(&run.to_string()).unwrap().unwrap();
+            (record.messages_json, record.config_json)
+        })
+        .collect()
+}
+
+/// Cache contract (replaces the embedded window's `lane_delivery_host` attention test): a lane
+/// with an unresolved attention item (a Ready report nobody closed, with the lead's notices
+/// held) is read by the window, shown on the screen, read again by a second window and by the
+/// Web client, and none of it makes the model see anything new or changes the saved model
+/// input and settings. Reading does not resolve the item either.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_lane_attention_read_and_shown_leaves_the_provider_input_and_saved_prefix_unchanged()
+ {
+    let world = start().await;
+    let lane = world
+        .boot
+        .runtime
+        .open_lane(world.lead, "e2e-attention", brief())
+        .unwrap();
+    waiting(&world.boot.runtime, lane.root_run_id).await;
+    let runs = [world.lead, lane.root_run_id];
+    let mut desktop = world.desktop();
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows(OBJECTIVE)).await;
+    // The lead is stopped, so a report is held and the roots stay idle (a static fixture: no
+    // delivery is scheduled that could add a request of its own).
+    desktop.click(OBJECTIVE).await;
+    desktop.until(|d| d.shows_part("management revision")).await;
+    world
+        .boot
+        .runtime
+        .stop(world.lead, runtime::StopScope::SelfOnly)
+        .unwrap();
+    desktop
+        .until(|d| d.shows_part("The lead was stopped"))
+        .await;
+
+    // The lane reports Ready and nobody closes it: an unresolved attention item.
+    let seen = world
+        .web_close_preview("web-attention-seen", &lane.lane_id)
+        .await;
+    let side = world.boot.storage_writer().clone();
+    let appended = side
+        .clone()
+        .append_lane_report_with_delivery(
+            lane.lane_id.clone(),
+            seen.management_revision.0,
+            event_bus::LaneReportInput {
+                status: event_bus::LaneStatus::Ready,
+                summary: "unverified artifact".into(),
+                artifact_revision: None,
+                failure_episode: None,
+                artifact_refs: vec![],
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::lane::LaneReportProducer::LaneAgent,
+            },
+            100,
+        )
+        .unwrap();
+    world.boot.runtime.event_bus().emit(event_bus::Event::new(
+        appended
+            .lane
+            .report_appended_event(&appended.report, Some(lane.root_run_id.to_string())),
+    ));
+    desktop
+        .until(|d| d.shows_part("Ready (awaiting close)"))
+        .await;
+    let attention = |detail: &workbench_protocol::namespaces::lanes::LaneDetail| {
+        detail
+            .attention
+            .iter()
+            .map(|item| item.tag)
+            .collect::<Vec<_>>()
+    };
+    let lane_id = workbench_protocol::lane_attention::LaneId::new(&lane.lane_id).unwrap();
+    let read = |id: &'static str| {
+        let lane_id = lane_id.clone();
+        let world = &world;
+        async move {
+            let QueryReply::Lanes(LanesReply::Lane(detail)) = world
+                .web(id, Query::Lanes(LanesQuery::GetLane { lane_id }))
+                .await
+            else {
+                panic!("a lane detail was expected");
+            };
+            *detail
+        }
+    };
+    let before = read("web-attention-1").await;
+    assert!(
+        attention(&before)
+            .contains(&workbench_protocol::namespaces::lanes::LaneAttentionTag::ReadyUnclosed),
+        "the report left an unresolved item: {:?}",
+        attention(&before)
+    );
+
+    let requests = world.model.2.load(std::sync::atomic::Ordering::SeqCst);
+    let saved = saved_contexts(&world, &runs);
+
+    // Reading and drawing it again: another thread and back, a second window that connects
+    // now, the Web client.
+    desktop.select("some-other-thread");
+    desktop
+        .until(|d| !d.shows_part("Ready (awaiting close)"))
+        .await;
+    desktop.select(LEAD);
+    desktop.until(|d| d.shows(OBJECTIVE)).await;
+    desktop.click(OBJECTIVE).await;
+    desktop
+        .until(|d| d.shows_part("Ready (awaiting close)"))
+        .await;
+    let mut second = world.restarted_desktop().await;
+    second.select(LEAD);
+    second.until(|d| d.shows(OBJECTIVE)).await;
+    second.click(OBJECTIVE).await;
+    second
+        .until(|d| d.shows_part("Ready (awaiting close)"))
+        .await;
+    let after = read("web-attention-2").await;
+
+    assert_eq!(
+        attention(&after),
+        attention(&before),
+        "reading resolved nothing"
+    );
+    assert_eq!(
+        world.model.2.load(std::sync::atomic::Ordering::SeqCst),
+        requests,
+        "reading and showing attention makes no model request"
+    );
+    assert_eq!(
+        saved_contexts(&world, &runs),
+        saved,
+        "the saved model input and settings are not replaced by a read or a redraw"
+    );
+    for run in runs {
+        let _ = world.boot.runtime.cancel(run);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_click_on_a_team_task_opens_the_detail_the_core_and_the_web_client_report() {
     let world = start().await;
