@@ -2428,6 +2428,7 @@ mod many_subagents;
 mod new_chat;
 mod pull_requests;
 mod read_panes;
+mod thread_search;
 
 // Given: the lane thr-4 asked its lead thr-1 a question the lead has not passed on
 // When: the lead thread thr-1 is shown
