@@ -1826,6 +1826,115 @@ mod run_tabs {
         }
     }
 
+    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled so that
+    //        the header's top edge is just out of view, and a reply after the group
+    // When: the header is pressed to open the group
+    // Then: the header stays where it was on screen; the reply moves down with the cards
+    #[test]
+    fn opening_a_group_whose_header_is_partly_out_of_view_leaves_it_in_place() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (0..20)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(20, "assistant", "Done.".into()));
+                history.extend((21..61).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let header = |screen: &Screen| {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .rect()
+        };
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        let at_top = header(&screen);
+        screen.harness.hover_at(at_top.center());
+        screen.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -12.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        frames(&mut screen);
+        let before = header(&screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .click();
+        frames(&mut screen);
+        let after = header(&screen);
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the header moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: thr-1 with more messages than the window shows, followed to the newest
+    // When: a message is added at the end, then the view is scrolled up and another is added
+    // Then: the new message is in view while following; scrolled up, what is read stays put
+    #[test]
+    fn a_new_message_follows_the_end_and_leaves_a_scrolled_up_view_alone() {
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let history = (0..60)
+                    .map(|index| message(index, "user", &format!("Question {index}")))
+                    .collect();
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let push = |screen: &Screen, index: u64| {
+            let mut shared = screen.shared.lock().unwrap();
+            let text = format!("Question {index}");
+            let history = shared.cache.history.get_mut("thr-1").unwrap();
+            history.push(message(index, "user", &text));
+        };
+        push(&screen, 60);
+        frames(&mut screen);
+        screen.harness.get_by_label("You: Question 60");
+
+        screen
+            .harness
+            .get_by_label("You: Question 30")
+            .scroll_to_me();
+        frames(&mut screen);
+        let before = screen.harness.get_by_label("You: Question 30").rect();
+        push(&screen, 61);
+        frames(&mut screen);
+        let after = screen.harness.get_by_label("You: Question 30").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after:?}"
+        );
+    }
+
     // Given: a folded group of tool outputs that was opened, with older outputs of its run
     // When: the older page arrives and joins the group
     // Then: the group stays open, its header and the output below it stay where they were

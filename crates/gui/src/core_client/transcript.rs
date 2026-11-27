@@ -90,16 +90,24 @@ pub(super) fn transcript(
     let loading = cache.older_loading(older_id);
     let older_failed = cache.older_read_failed(older_id);
     // The first message that starts in view last frame (else the one that spans the top
-    // of the view) and where it started in the content. Whatever changes the height
-    // above it (older messages put in front, a body that arrives for a message above)
-    // moves it, and the offset takes that up so the messages in view stay where they
-    // are. A message that spans the top is the second choice: it may grow itself.
+    // of the view) and where it started in the content. When the data shown changed
+    // since then (older messages put in front, a body that arrives for a message above)
+    // the content above it may have changed height and moved it, and the offset takes
+    // that up so the messages in view stay where they are. A frame that changed nothing
+    // but the view (a group opened, a scroll, a resize) is left to egui. A message that
+    // spans the top is the second choice: it may grow itself.
     let memory = ui.make_persistent_id(salt).with("view-anchor");
-    let before: Option<Option<(String, f32)>> = ui.data(|data| data.get_temp(memory));
+    let before: Option<(Option<(String, f32)>, u64)> = ui.data(|data| data.get_temp(memory));
+    let shown = data_fingerprint(
+        cache,
+        &messages,
+        (older.is_some_and(Option::is_some), older_failed),
+    );
     let mut view = ViewAnchor {
-        previous: before.clone().flatten(),
+        previous: before.clone().and_then(|(anchor, _)| anchor),
         ..ViewAnchor::default()
     };
+    let data_changed = before.as_ref().is_some_and(|(_, was)| *was != shown);
     let mut near_top = false;
     let output = egui::ScrollArea::vertical()
         .id_salt(salt)
@@ -165,7 +173,7 @@ pub(super) fn transcript(
             ui.add_space(SP_2);
         });
     let shift = match (&view.previous, view.moved_to) {
-        (Some((_, was)), Some(now)) if (now - was).abs() > 0.5 => now - was,
+        (Some((_, was)), Some(now)) if data_changed && (now - was).abs() > 0.5 => now - was,
         _ => 0.0,
     };
     let shifted = shift != 0.0;
@@ -176,7 +184,7 @@ pub(super) fn transcript(
         ui.ctx()
             .request_discard("keep the messages in view in place");
     }
-    ui.data_mut(|data| data.insert_temp(memory, view.first.or(view.spanning)));
+    ui.data_mut(|data| data.insert_temp(memory, (view.first.or(view.spanning), shown)));
     // The first frame of an area is laid out at the top before it follows the newest
     // message, so it only measures; a page is read from the next frame on.
     if before.is_none() || shifted {
@@ -196,6 +204,27 @@ enum Item<'a> {
         tools: Vec<&'a CommittedMessage>,
         folded: bool,
     },
+}
+
+/// What the messages shown and the row above them are made of: it differs between two
+/// frames when messages came or went, or a body was read.
+fn data_fingerprint(cache: &Cache, messages: &[&CommittedMessage], older_row: (bool, bool)) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    older_row.hash(&mut hasher);
+    for message in messages {
+        message.run.as_str().hash(&mut hasher);
+        message.index.get().hash(&mut hasher);
+        match &message.content {
+            MessageContent::Inline { text } => text.len().hash(&mut hasher),
+            MessageContent::Body(body) => cache
+                .bodies
+                .get(body.body_id.as_str())
+                .map(String::len)
+                .hash(&mut hasher),
+        }
+    }
+    hasher.finish()
 }
 
 fn message_key(message: &CommittedMessage) -> String {
