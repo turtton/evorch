@@ -245,35 +245,81 @@ fn request_usage_serde_keeps_the_gap_and_defaults_old_data_to_reported() {
     );
 }
 
-#[tokio::test]
-async fn the_ceiling_is_the_dearest_price_and_an_unpriced_model_has_none() {
-    // Given: a priced API model, a priced subscription model and a local one without a price.
-    let table = table().await;
-    let model = |profile: &str, provider_type, name: &str| crate::roles::ModelRef {
-        profile: profile.into(),
-        provider_type: Some(provider_type),
-        model: name.into(),
-    };
+fn manual_table(entry: config::ModelEntryConfig) -> PriceTable {
+    PriceTable::new(
+        BTreeMap::from([(
+            "manual".into(),
+            ProviderProfileConfig {
+                provider_type: ProviderTypeConfig::OpenAiCompatible,
+                models: vec![entry],
+                ..ProviderProfileConfig::default()
+            },
+        )]),
+        None,
+    )
+}
 
-    // When: each model's per-million ceiling is asked for.
-    let api = table
-        .ceiling_per_million(&model("api", ProviderTypeConfig::OpenAi, "gpt-9"))
-        .unwrap();
-    let claude = table
-        .ceiling_per_million(&model(
-            "claude",
-            ProviderTypeConfig::AnthropicSubscription,
-            "claude-sonnet-9",
-        ))
-        .unwrap();
-    let local = table.ceiling_per_million(&model(
-        "local",
-        ProviderTypeConfig::OpenAiCompatible,
-        "llama",
-    ));
+fn manual_model(id: &str) -> crate::roles::ModelRef {
+    crate::roles::ModelRef {
+        profile: "manual".into(),
+        provider_type: Some(ProviderTypeConfig::OpenAiCompatible),
+        model: id.into(),
+    }
+}
 
-    // Then: the output price (or a dearer tier of it) is the ceiling, and no price is not zero.
-    assert!(api >= 10.0, "{api}");
-    assert!(close(claude, 15.0), "{claude}");
-    assert_eq!(local, None);
+fn manual_entry() -> config::ModelEntryConfig {
+    config::ModelEntryConfig {
+        input_price: Some(1.0),
+        output_price: Some(10.0),
+        cache_read_price: Some(0.1),
+        cache_write_price: Some(12.0),
+        ..config::ModelEntryConfig::enabled("m")
+    }
+}
+
+#[test]
+fn the_ceiling_is_the_dearest_price_of_any_token_kind_under_any_tier() {
+    // Given: a model whose cache write costs more than its output, with a long-input tier
+    // that raises only the output price.
+    let mut entry = manual_entry();
+    entry.price_tiers = Some(vec![config::types::provider::PriceTier {
+        above_input_tokens: 200_000,
+        input: None,
+        output: Some(40.0),
+        cache_read: None,
+        cache_write: None,
+    }]);
+    let tiered = manual_table(entry);
+    let flat = manual_table(manual_entry());
+
+    // When / Then: the ceiling is the single highest price that can apply: the long-input
+    // output price, not the output price of a request with no input.
+    assert_eq!(tiered.ceiling_per_million(&manual_model("m")), Some(40.0));
+    assert_eq!(flat.ceiling_per_million(&manual_model("m")), Some(12.0));
+}
+
+#[test]
+fn a_fast_model_is_priced_at_its_fast_rates_and_an_unknown_price_makes_the_ceiling_unknown() {
+    // Given: a model with fast prices dearer than its standard ones.
+    let mut entry = manual_entry();
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(2.0),
+        output: Some(20.0),
+        cache_read: Some(0.2),
+        cache_write: Some(25.0),
+    });
+    let table = manual_table(entry);
+
+    // When / Then: the fast id uses the fast set, and a model missing any needed price
+    // (here the cache write) has no ceiling rather than a lower one.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(
+        table.ceiling_per_million(&manual_model("m+fast")),
+        Some(25.0)
+    );
+    let mut missing = manual_entry();
+    missing.cache_write_price = None;
+    let missing = manual_table(missing);
+    assert_eq!(missing.ceiling_per_million(&manual_model("m")), None);
+    assert_eq!(missing.ceiling_per_million(&manual_model("other")), None);
 }

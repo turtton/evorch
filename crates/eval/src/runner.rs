@@ -220,7 +220,8 @@ pub async fn run_with_cleanup(
     let (baseline_overlay, candidate_overlay) = pins::compose(common.as_ref(), candidate.as_ref());
     // Everything below that can refuse the comparison runs before any
     // preflight or replay, so a refused evaluation makes no provider request.
-    let project = Some(thread.project_root.as_path());
+    let probe = pins::Probe::prepare(&thread).map_err(EvalError::Usage)?;
+    let project = Some(probe.project_dir.as_path());
     let baseline_config = load_config(
         user_config_dir.as_deref(),
         project,
@@ -245,7 +246,7 @@ pub async fn run_with_cleanup(
     };
     let inputs = pins::collect(
         user_config_dir.as_deref(),
-        &thread.project_root,
+        &probe.project_dir,
         sample.as_ref().map(|sample| sample.hash.clone()),
         common.as_ref(),
         candidate.as_ref(),
@@ -269,10 +270,11 @@ pub async fn run_with_cleanup(
     );
     let inputs_guard = pins::Guard {
         user_config_dir: user_config_dir.clone(),
-        project_root: thread.project_root.clone(),
+        project_root: probe.project_dir.clone(),
         common: common.clone(),
         candidate: candidate.clone(),
         pinned: inputs,
+        probe: Some(std::sync::Arc::new(probe)),
     };
     let repeat = args.repeat.unwrap_or(base.eval.repeat_target);
     if repeat == 0 {

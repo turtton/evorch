@@ -191,7 +191,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
         repeat,
         cost,
         project_root: PathBuf::from("/project"),
-        role: runtime::Role::Worker,
+        _probe: None,
         sample_hash: "0123456789abcdef".into(),
     };
     let plan = [
@@ -807,4 +807,99 @@ async fn an_abandoned_launch_keeps_its_producer_permit_until_it_returns() {
     release_tx.send(()).unwrap();
     drained.await;
     assert_eq!(gate.active(), 0);
+}
+
+const TWO_PROVIDERS: &str = r#"version = 3
+
+[providers.main]
+provider_type = "openai"
+default_model = "gpt-test"
+models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0, cache_read_price = 0.2, cache_write_price = 2.5 }]
+
+[providers.child]
+provider_type = "openai"
+default_model = "gpt-child"
+models = [{ id = "gpt-child", enabled = true, input_price = 3.0, output_price = 15.0, cache_read_price = 0.3, cache_write_price = 3.5 }]
+
+[routing.routes]
+worker = [{ profile = "main", model = "gpt-test" }]
+orchestrator = [{ profile = "main", model = "gpt-test" }]
+explorer = [{ profile = "child", model = "gpt-child" }]
+
+[role_profiles.post_capture.agents.worker.generation]
+max_tokens = 123
+"#;
+
+/// What `eval_start` showed for a declined evaluation.
+async fn shown_summary(fixture: &Fixture, common: Option<&str>) -> String {
+    let approval = fixture.answer_approval(false);
+    let mut args = json!({"thread_id": "thread-1", "candidate": CANDIDATE, "repeat": 1});
+    if let Some(common) = common {
+        args["common"] = json!(common);
+    }
+    let result = fixture.call_in_run("eval_start", args).await;
+    let shown = approval.await.unwrap();
+    assert!(result.content.contains("nothing was started"));
+    shown["summary"].as_str().unwrap().to_owned()
+}
+
+fn pinned_inputs(summary: &str) -> String {
+    let at = summary.find("inputs ").expect("pinned inputs shown");
+    summary[at..].lines().next().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn the_shown_models_and_the_approved_digest_follow_the_rebuilt_start_and_every_role() {
+    // Given: a pinned sample, and an explorer that runs on a model no change touches.
+    let fixture = Fixture::new();
+    std::fs::write(fixture.user.path().join("config.toml"), TWO_PROVIDERS).unwrap();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let before = shown_summary(&fixture, None).await;
+
+    // When: the live checkout selects a role profile after the thread's start was recorded.
+    let live = fixture.project().join(".evorch");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("config.toml"), "role_profile = 'post_capture'\n").unwrap();
+    let after = shown_summary(&fixture, None).await;
+
+    // Then: the replays would not see it, so neither the digest the approval binds nor
+    // the shown models change, and the unchanged child role's model is shown and priced.
+    assert_eq!(pinned_inputs(&before), pinned_inputs(&after));
+    assert!(
+        before.contains("Models the agents run on: child/gpt-child, main/gpt-test"),
+        "{before}"
+    );
+    assert!(
+        before.contains("priced at the dearest of those models ($15.00/M tokens)"),
+        "{before}"
+    );
+}
+
+#[tokio::test]
+async fn the_simulator_and_the_judge_shown_are_the_users_not_the_common_overlays() {
+    // Given: a common overlay that moves the worker to another model for both groups.
+    let fixture = Fixture::new();
+    std::fs::write(fixture.user.path().join("config.toml"), TWO_PROVIDERS).unwrap();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let common = "[routing.routes]\nworker = [{ profile = \"child\", model = \"gpt-child\" }]\n\
+                  orchestrator = [{ profile = \"child\", model = \"gpt-child\" }]\n";
+
+    // When: the evaluation is shown.
+    let summary = shown_summary(&fixture, Some(common)).await;
+
+    // Then: the agents run on the common overlay's model, while the simulated user and the
+    // judge, which the runner and the report resolve from the user's configuration alone,
+    // are shown on the user's models.
+    assert!(
+        summary.contains("the simulated user (main/gpt-test;"),
+        "{summary}"
+    );
+    assert!(summary.contains("the judge (main/gpt-test;"), "{summary}");
+    assert!(
+        summary.contains("Models the agents run on: child/gpt-child, main/gpt-test")
+            || summary.contains("Models the agents run on: child/gpt-child"),
+        "{summary}"
+    );
 }

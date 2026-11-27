@@ -28,6 +28,21 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Lowercase hex SHA-256 of the file at `path`, read in chunks.
+///
+/// # Errors
+/// The file cannot be read.
+pub fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 /// What the sample is kept for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -253,6 +253,38 @@ impl Cost {
     }
 }
 
+/// The dearest per-million price among every token kind and every input-size
+/// tier of `schedule` at `speed`, or `None` when any price a request of any
+/// size could be charged at is unknown.
+fn schedule_ceiling(
+    schedule: &config::types::provider::PriceSchedule,
+    speed: config::types::provider::ModelSpeed,
+) -> Option<f64> {
+    let mut thresholds = vec![0_u64];
+    let sets = std::iter::once(&schedule.standard).chain(schedule.fast.as_ref());
+    for set in sets {
+        thresholds.extend(
+            set.tiers
+                .iter()
+                .map(|tier| tier.above_input_tokens.saturating_add(1)),
+        );
+    }
+    let mut dearest = 0.0_f64;
+    for input_tokens in thresholds {
+        let rates = schedule.rates_for(input_tokens, speed);
+        for price in [
+            rates.input,
+            rates.output,
+            rates.cache_read,
+            rates.cache_write,
+        ] {
+            let price = price.filter(|price| price.is_finite())?;
+            dearest = dearest.max(price);
+        }
+    }
+    Some(dearest)
+}
+
 /// The prices of one report: the user's provider settings over models.dev.
 pub struct PriceTable {
     pricing: UsagePricing,
@@ -274,38 +306,20 @@ impl PriceTable {
         self.catalog.as_deref()
     }
 
-    /// What one million tokens of `model` can cost at most, in USD: the
-    /// dearest of its uncached input, output and, when it has one, cache write
-    /// price, at the speed its id names. `None` when the input or output has
-    /// no price, so an unknown price is never read as a cheap one.
+    /// What one million tokens of `model` can cost at most, in USD: the dearest
+    /// price of any token kind (uncached input, output, cache read, cache write)
+    /// under any input-size tier that can apply, at the speed its id names.
+    /// `None` when any of those prices is unknown, so an unknown price is never
+    /// read as a cheap one.
     pub fn ceiling_per_million(&self, model: &crate::roles::ModelRef) -> Option<f64> {
-        const MILLION: u64 = 1_000_000;
-        let fast = model.model.ends_with("+fast");
-        let request = |input: u64, output: u64, cache_write: u64| RequestUsage {
-            provider: model
-                .provider_type
-                .map_or_else(|| model.profile.clone(), |kind| kind.as_str().to_owned()),
-            profile: Some(model.profile.clone()),
-            model: model.model.clone(),
-            run_id: None,
-            role: None,
-            purpose: None,
-            failed: false,
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: 0,
-            cache_write_tokens: cache_write,
-            service_tier: fast.then(|| "priority".to_owned()),
-            usage_reported: true,
-        };
-        let priced = |usage: &RequestUsage| {
-            let cost = self.cost([usage]);
-            cost.is_complete().then_some(cost.usd)
-        };
-        let input = priced(&request(MILLION, 0, 0))?;
-        let output = priced(&request(0, MILLION, 0))?;
-        let cache_write = priced(&request(MILLION, 0, MILLION)).unwrap_or(0.0);
-        Some(input.max(output).max(cache_write))
+        let provider = model
+            .provider_type
+            .map_or_else(|| model.profile.clone(), |kind| kind.as_str().to_owned());
+        let (base, speed) = config::types::provider::parse_model_speed(&model.model);
+        let (schedule, _) =
+            self.pricing
+                .comparable_pricing(&provider, Some(&model.profile), base)?;
+        schedule_ceiling(&schedule, speed)
     }
 
     /// Price every request with tokens at its own speed and input-size tier.

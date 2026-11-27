@@ -12,6 +12,8 @@ use storage::eval_sample::sha256_hex;
 
 use crate::roles::{self, ModelRef};
 use crate::runner;
+use crate::source::OriginalThread;
+use crate::workspace::{self, CommitIdentity};
 
 /// An overlay as given: its text, and the parsed table.
 #[derive(Debug, Clone)]
@@ -155,24 +157,94 @@ pub fn collect(
     })
 }
 
-/// What this build is: the evaluation code's version and a hash of the tool
-/// descriptions it ships, which are what a description change is measured
-/// against.
+/// What this build is: the evaluation code's version, a hash of the tool
+/// descriptions it ships (what a description change is measured against), and
+/// a hash of the executable that runs the evaluation, which is what actually
+/// identifies the build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     pub package: String,
     pub version: String,
     pub tool_descriptions_hash: String,
+    /// File name of the running executable; `None` when it cannot be resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    /// SHA-256 of the running executable's bytes; `None` when it cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_sha256: Option<String>,
+}
+
+fn running_executable() -> &'static (Option<String>, Option<String>) {
+    static EXECUTABLE: std::sync::OnceLock<(Option<String>, Option<String>)> =
+        std::sync::OnceLock::new();
+    EXECUTABLE.get_or_init(|| {
+        let Ok(path) = std::env::current_exe() else {
+            return (None, None);
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        (name, storage::eval_sample::sha256_file_hex(&path).ok())
+    })
 }
 
 impl Build {
     pub fn current(catalog: &BuiltinCatalog) -> Self {
         let descriptions = serde_json::to_string(&catalog.descriptions()).unwrap_or_default();
+        let (executable, executable_sha256) = running_executable().clone();
         Self {
             package: env!("CARGO_PKG_NAME").into(),
             version: env!("CARGO_PKG_VERSION").into(),
             tool_descriptions_hash: sha256_hex(descriptions.as_bytes()),
+            executable,
+            executable_sha256,
         }
+    }
+}
+
+/// The project configuration a replay will load: that of the workspace
+/// rebuilt from the thread's recorded start, not of the live checkout, which
+/// may have moved on. Approval, change detection, pinning and the replays all
+/// resolve the project layer here. The directory is removed when this drops.
+pub struct Probe {
+    root: PathBuf,
+    /// The project root inside the rebuilt workspace.
+    pub project_dir: PathBuf,
+}
+
+impl Probe {
+    /// # Errors
+    /// The workspace cannot be rebuilt from the recorded start.
+    pub fn prepare(thread: &OriginalThread) -> Result<Self, String> {
+        let mut bytes = [0_u8; 8];
+        getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
+        let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let root = std::env::temp_dir().join(format!("evorch-eval-probe-{suffix}"));
+        let probe = |root: PathBuf| {
+            workspace::prepare(
+                &thread.source_toplevel,
+                &thread.snapshot,
+                &root.join("workspace"),
+                &CommitIdentity::from_host(&thread.source_toplevel),
+            )
+            .map(|workspace| Self {
+                project_dir: workspace.project_dir,
+                root,
+            })
+        };
+        probe(root.clone()).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&root);
+            format!(
+                "thread {}'s start cannot be rebuilt to read its project configuration: {error}",
+                thread.thread_id
+            )
+        })
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -221,6 +293,8 @@ pub struct Guard {
     pub common: Option<Overlay>,
     pub candidate: Option<Overlay>,
     pub pinned: Inputs,
+    /// Keeps the rebuilt project on disk while the replays re-check it.
+    pub probe: Option<std::sync::Arc<Probe>>,
 }
 
 impl Guard {

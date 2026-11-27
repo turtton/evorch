@@ -120,6 +120,7 @@ fn the_guard_refuses_inputs_that_changed_after_they_were_pinned() {
         common: None,
         candidate: Some(candidate),
         pinned,
+        probe: None,
     };
     guard.verify().unwrap();
 
@@ -132,5 +133,30 @@ fn the_guard_refuses_inputs_that_changed_after_they_were_pinned() {
     assert!(
         refused.contains("baseline prompt presets") && refused.contains("candidate prompt presets"),
         "{refused}"
+    );
+}
+
+#[test]
+fn the_build_pin_identifies_the_executable_that_runs() {
+    // Given: the running test executable.
+    let builtin = BuiltinCatalog::for_evaluation().unwrap();
+
+    // When: the build is pinned.
+    let build = Build::current(&builtin);
+
+    // Then: it carries the executable's own content hash, which a rebuild with the same
+    // package version would change, so the approval's build cannot be mistaken for another.
+    let path = std::env::current_exe().unwrap();
+    assert_eq!(
+        build.executable_sha256.as_deref(),
+        Some(
+            storage::eval_sample::sha256_file_hex(&path)
+                .unwrap()
+                .as_str()
+        )
+    );
+    assert_eq!(
+        build.executable.as_deref(),
+        path.file_name().and_then(|name| name.to_str())
     );
 }

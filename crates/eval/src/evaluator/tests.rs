@@ -21,7 +21,7 @@ const CONFIG: &str = r#"version = 3
 [providers.main]
 provider_type = "openai"
 default_model = "gpt-test"
-models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0 }]
+models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0, cache_read_price = 0.2, cache_write_price = 2.5 }]
 "#;
 
 /// Records notices and reloads, and answers every notice as the run's root.

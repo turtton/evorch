@@ -382,6 +382,7 @@ async fn preflight_accepts_explicit_simulator_with_conversation_only_worker() {
             user_config_dir: Some(fixture.user.path().into()),
             project_root: fixture.user.path().into(),
             common: None,
+            probe: None,
             candidate: None,
             pinned: pins::collect(
                 Some(fixture.user.path()),
@@ -726,33 +727,28 @@ async fn a_cancel_during_the_first_replay_leaves_it_incomplete_and_starts_no_oth
 }
 
 #[tokio::test]
-async fn unpreparable_workspace_is_recorded_as_prepare_failed() {
+async fn an_unrebuildable_start_is_refused_before_any_replay() {
     // Given: a recorded thread whose source repository has since lost its history.
     let fixture = Fixture::new().await;
     std::fs::remove_dir_all(fixture.recorded.source.root().join(".git")).unwrap();
 
-    // When: the baseline is replayed.
-    let evaluation = run(
+    // When: the evaluation is started.
+    let error = run(
         fixture.args(None),
         fixture.deps(Vec::new(), Vec::new()),
-        |_| {},
+        |_| panic!("no replay may start"),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    // Then: the replay never started and its outcome says why.
-    let [report] = evaluation.runs.as_slice() else {
-        panic!("one replay");
-    };
-    assert_eq!(report.outcome.status, Status::PrepareFailed);
-    assert_eq!(
-        read_json(&report.dir.join(output::OUTCOME_FILE))["status"],
-        "prepare_failed"
+    // Then: the project configuration the replays would load cannot be resolved, so the
+    // evaluation is refused with the reason, and no model was built or output written.
+    assert!(
+        matches!(&error, EvalError::Usage(text) if text.contains("cannot be rebuilt")),
+        "{error}"
     );
-    assert!(!report.dir.join(output::DATABASE_FILE).exists());
     assert!(fixture.agents.lock().unwrap().is_empty());
-    assert!(!evaluation.dir.join("preflight-workspace").exists());
-    assert!(!report.dir.join("workspace").exists());
+    assert!(!fixture.user.path().join("out").exists());
 }
 
 #[tokio::test]
@@ -1361,4 +1357,61 @@ async fn a_preset_edited_after_the_baseline_stops_the_evaluation_before_the_cand
     let manifest = read_json(&fixture.user.path().join("out").join(output::MANIFEST_FILE));
     assert_eq!(manifest["runs"].as_array().unwrap().len(), 1);
     assert!(manifest["finished_at"].is_string());
+}
+
+#[tokio::test]
+async fn the_project_layer_is_read_from_the_rebuilt_start_not_the_live_checkout() {
+    // Given: a role profile that routes the worker to another model, which the live checkout
+    // selects after the thread's start was captured.
+    let fixture = Fixture::new().await;
+    let mut config = preflight_config(&fixture, "http://127.0.0.1:1".into());
+    let mut late = config.role_profile_config(None).unwrap();
+    late.routing.routes.get_mut("worker").unwrap()[0].model = Some("missing".into());
+    config.role_profiles.insert("post_capture".into(), late);
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let live_root = fixture.recorded.source.root();
+    std::fs::create_dir_all(live_root.join(".evorch")).unwrap();
+    std::fs::write(
+        live_root.join(".evorch/config.toml"),
+        "role_profile = 'post_capture'\n",
+    )
+    .unwrap();
+    let live = load_config(Some(fixture.user.path()), Some(&live_root), None).unwrap();
+    assert_eq!(roles::role_models(&live, "worker")[0].model, "missing");
+    let deps = fixture.deps(vec![text("done")], vec![decision("finish", "")]);
+
+    // When: the evaluation runs.
+    let evaluation = run(fixture.args(Some(WORKER_TEMPERATURE)), deps, |_| {})
+        .await
+        .unwrap();
+
+    // Then: the pinned models and hashes are those of the start the replays rebuild, and
+    // differ from what the live checkout would have given.
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    let pinned = &manifest["pins"]["configured_models"];
+    assert_eq!(pinned["baseline"][0]["model"], "gpt-4o", "{pinned}");
+    assert_eq!(pinned["candidate"][0]["model"], "gpt-4o", "{pinned}");
+    let candidate = Overlay {
+        text: WORKER_TEMPERATURE.into(),
+        value: toml::from_str(WORKER_TEMPERATURE).unwrap(),
+    };
+    let sample = manifest["pins"]["inputs"]["sample_hash"]
+        .as_str()
+        .map(str::to_owned);
+    let from_live = pins::collect(
+        Some(fixture.user.path()),
+        &live_root,
+        sample,
+        None,
+        Some(&candidate),
+    )
+    .unwrap();
+    assert_ne!(
+        manifest["pins"]["digest"].as_str().unwrap(),
+        from_live.digest()
+    );
 }

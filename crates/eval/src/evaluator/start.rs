@@ -40,9 +40,11 @@ pub(super) struct Planned {
     pub problem: String,
     pub repeat: u32,
     pub cost: Cost,
+    /// The project root of the workspace rebuilt from the thread's recorded
+    /// start, which is where the replays read their project configuration.
     pub(super) project_root: PathBuf,
-    /// The role the thread's replays start as.
-    pub(super) role: runtime::Role,
+    /// Keeps `project_root` on disk while the plan is in use.
+    pub(super) _probe: Option<std::sync::Arc<pins::Probe>>,
     /// The sample's content hash when it was planned.
     pub(super) sample_hash: String,
 }
@@ -113,28 +115,18 @@ pub(super) struct Bounds<'a> {
     pub judge: Vec<roles::ModelRef>,
 }
 
-/// The models a comparison runs its agents on: the role each thread starts as
-/// and every role the changes reach, in the baseline and in the candidate.
-pub(super) fn models_under_evaluation(
-    plan: &[Planned],
-    changes: &Changes,
-    baseline: &Config,
-    candidate: &Config,
-) -> Vec<roles::ModelRef> {
-    let mut addresses: Vec<String> = changes.affected_roles.clone();
-    addresses.extend(
-        plan.iter()
-            .filter_map(|planned| roles::address(planned.role.name()))
-            .map(str::to_owned),
-    );
-    addresses.sort();
-    addresses.dedup();
-    let mut found: Vec<roles::ModelRef> = addresses
+/// Every model any role (child roles, categories and the compactor included)
+/// can send to, in the baseline and in the candidate of each sample's own
+/// project configuration. The whole set is used rather than the roles the
+/// changes reach: a replay delegates, so an unchanged child role is billed too.
+pub(super) fn models_under_evaluation(sides: &[(Config, Config)]) -> Vec<roles::ModelRef> {
+    let mut found: Vec<roles::ModelRef> = sides
         .iter()
-        .flat_map(|address| {
-            [baseline, candidate]
-                .into_iter()
-                .flat_map(|config| roles::role_models(config, address))
+        .flat_map(|(baseline, candidate)| [baseline, candidate])
+        .flat_map(|config| {
+            roles::ROLES
+                .iter()
+                .flat_map(|address| roles::role_models(config, address))
         })
         .collect();
     found.sort_by(|a, b| (&a.profile, &a.model).cmp(&(&b.profile, &b.model)));
@@ -378,14 +370,15 @@ impl StartEvaluation {
                         let chat = ChatThread::load(database, &thread_id, &start.root_run_id).ok();
                         let cost = thread_cost(database, chat.as_ref(), &start.root_run_id, &prices)?;
                         let sample_hash = sample.content_hash();
+                        let probe = std::sync::Arc::new(pins::Probe::prepare(&thread)?);
                         Ok(Planned {
                             thread_id,
                             purpose,
                             problem: sample.problem,
                             repeat,
                             cost,
-                            project_root: thread.project_root,
-                            role: thread.role,
+                            project_root: probe.project_dir.clone(),
+                            _probe: Some(probe),
                             sample_hash,
                         })
                     })
@@ -490,26 +483,32 @@ impl Tool for StartEvaluation {
             Ok(plan) => plan,
             Err(message) => return Ok(ToolResult::error(message)),
         };
-        let project = Some(plan[0].project_root.as_path());
         let (baseline_overlay, candidate_overlay) =
             pins::compose(common.as_ref(), Some(&candidate));
-        let (baseline, candidate_config) = match (
-            runner::load_config(Some(&user), project, baseline_overlay.as_ref()),
-            runner::load_config(Some(&user), project, candidate_overlay.as_ref()),
-        ) {
-            (Ok(baseline), Ok(candidate)) => (baseline, candidate),
-            (Err(error), _) | (_, Err(error)) => {
-                return Ok(ToolResult::error(format!(
-                    "the overlays are unusable in {}: {error}",
-                    plan[0].project_root.display()
-                )));
+        // Each sample's project layer comes from the workspace rebuilt from its
+        // recorded start, which is what its replays load, not the live checkout.
+        let mut sides = Vec::new();
+        for planned in &plan {
+            let project = Some(planned.project_root.as_path());
+            match (
+                runner::load_config(Some(&user), project, baseline_overlay.as_ref()),
+                runner::load_config(Some(&user), project, candidate_overlay.as_ref()),
+            ) {
+                (Ok(baseline), Ok(candidate)) => sides.push((baseline, candidate)),
+                (Err(error), _) | (_, Err(error)) => {
+                    return Ok(ToolResult::error(format!(
+                        "the overlays are unusable for thread {}'s project: {error}",
+                        planned.thread_id
+                    )));
+                }
             }
-        };
+        }
+        let (baseline, candidate_config) = &sides[0];
         let builtin = match runtime::tool_descriptions::BuiltinCatalog::for_evaluation() {
             Ok(builtin) => builtin,
             Err(error) => return Ok(ToolResult::error(error.to_string())),
         };
-        let changes = match changes::accept(&baseline, &candidate_config, &builtin) {
+        let changes = match changes::accept(baseline, candidate_config, &builtin) {
             Ok(changes) => changes,
             Err(reason) => {
                 return Ok(ToolResult::error(format!(
@@ -518,19 +517,30 @@ impl Tool for StartEvaluation {
                 )));
             }
         };
-        let swapped = roles::swapped_roles(&baseline, &candidate_config);
+        let swapped = roles::swapped_roles(baseline, candidate_config);
         let prices = match self.0.prices().await {
             Ok(prices) => prices,
             Err(message) => return Ok(ToolResult::error(message)),
         };
-        let agents = models_under_evaluation(&plan, &changes, &baseline, &candidate_config);
-        let simulator = roles::role_models(&runner::simulator_config(&baseline).0, "worker");
-        let judge = roles::role_models(&report::judge_config(&baseline).0, "orchestrator");
+        let agents = models_under_evaluation(&sides);
+        // The simulator, the judge and the budget come from the user's own
+        // configuration, as the runner and the report resolve them, never from
+        // the common overlay or a project.
+        let own = match runner::load_config(Some(&user), None, None) {
+            Ok(own) => own,
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "cannot load the configuration: {error}"
+                )));
+            }
+        };
+        let simulator = roles::role_models(&runner::simulator_config(&own).0, "worker");
+        let judge = roles::role_models(&report::judge_config(&own).0, "orchestrator");
         let bounds = bounds_text(&Bounds {
             plan: &plan,
             dearest: dearest_price(&prices, &agents),
             models: agents,
-            budget: &baseline.eval.budget,
+            budget: &own.eval.budget,
             simulator,
             judge,
         });
