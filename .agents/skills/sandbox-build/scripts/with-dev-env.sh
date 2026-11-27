@@ -56,39 +56,47 @@ fi
 
 # Process-guard helper bundle (what CI and flake.nix export). An already set
 # EVORCH_PROCESS_GUARD_BUNDLE is never overwritten. Otherwise the bundle lives
-# in a directory keyed by the content of everything the helper is built from,
-# so a changed helper source gets a fresh bundle. An existing bundle is
-# re-verified (manifest, helper hash and ABI) and rebuilt when broken. It is
-# prepared in a private directory and moved into place, so concurrent
-# invocations never see a half-written bundle. A failure only warns: commands
-# that do not start guarded children still run.
+# in a directory keyed by the content of everything the helper is built from
+# (a deleted or renamed file counts as a change), so a changed helper source
+# gets a fresh bundle. An existing bundle is re-verified (manifest, helper hash
+# and ABI) and replaced when broken or without a manifest. It is prepared in a
+# private directory and moved into place, so concurrent invocations never see
+# a half-written bundle. Everything runs in a subshell that only reports the
+# manifest path on stdout: whatever goes wrong there only warns, and the
+# requested command always runs.
+prepare_guard_bundle() {
+  local script="$root/scripts/guard-artifact.sh" key dir f
+  if [[ ! -x "$script" ]]; then
+    echo "with-dev-env: $script not found" >&2
+    return 1
+  fi
+  key="$({
+    git ls-files -z --cached --others --exclude-standard -- crates/process-guard \
+      Cargo.toml Cargo.lock rust-toolchain.toml scripts/guard-artifact.sh | sort -zu |
+      while IFS= read -r -d '' f; do
+        if [[ -f "$f" ]]; then sha256sum -- "$f"; else printf 'missing  %s\n' "$f"; fi
+      done
+  } | sha256sum | cut -c1-16)"
+  dir="$TMPDIR/evorch-guard-$key"
+  if [[ -e "$dir" ]] && ! "$script" verify "$dir/guard-bundle.json" > /dev/null 2>&1; then
+    echo "with-dev-env: guard bundle $dir is broken, rebuilding" >&2
+    rm -rf "$dir"
+  fi
+  if [[ ! -e "$dir" ]]; then
+    guard_tmp="$(mktemp -d "$TMPDIR/evorch-guard-$key.tmp.XXXXXX")"
+    trap 'rm -rf "$guard_tmp"' EXIT
+    "$script" prepare --profile release --out "$guard_tmp/bundle" > /dev/null
+    # Another invocation may have finished first; then its bundle stays.
+    mv -T "$guard_tmp/bundle" "$dir" 2> /dev/null || true
+  fi
+  [[ -e "$dir/guard-bundle.json" ]] || return 1
+  printf '%s\n' "$dir/guard-bundle.json"
+}
 if [[ -z "${EVORCH_PROCESS_GUARD_BUNDLE:-}" ]]; then
-  guard_script="$root/scripts/guard-artifact.sh"
-  if [[ -x "$guard_script" ]]; then
-    guard_key="$(git ls-files -z -- crates/process-guard Cargo.toml Cargo.lock \
-      rust-toolchain.toml scripts/guard-artifact.sh 2>/dev/null |
-      xargs -0 sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
-    guard_dir="$TMPDIR/evorch-guard-$guard_key"
-    if [[ -e "$guard_dir/guard-bundle.json" ]] &&
-      ! "$guard_script" verify "$guard_dir/guard-bundle.json" > /dev/null 2>&1; then
-      echo "with-dev-env: guard bundle $guard_dir is broken, rebuilding" >&2
-      rm -rf "$guard_dir"
-    fi
-    if [[ ! -e "$guard_dir/guard-bundle.json" ]]; then
-      guard_tmp="$(mktemp -d "$TMPDIR/evorch-guard-$guard_key.tmp.XXXXXX")"
-      if "$guard_script" prepare --profile release --out "$guard_tmp/bundle" > /dev/null; then
-        # Another invocation may have finished first; then keep its bundle.
-        mv -T "$guard_tmp/bundle" "$guard_dir" 2> /dev/null || true
-      else
-        echo "with-dev-env: could not prepare the process-guard bundle" >&2
-      fi
-      rm -rf "$guard_tmp"
-    fi
-    if [[ -e "$guard_dir/guard-bundle.json" ]]; then
-      export EVORCH_PROCESS_GUARD_BUNDLE="$guard_dir/guard-bundle.json"
-    fi
+  if guard_bundle="$(prepare_guard_bundle)" && [[ -n "$guard_bundle" ]]; then
+    export EVORCH_PROCESS_GUARD_BUNDLE="$guard_bundle"
   else
-    echo "with-dev-env: $guard_script not found, EVORCH_PROCESS_GUARD_BUNDLE not set" >&2
+    echo "with-dev-env: EVORCH_PROCESS_GUARD_BUNDLE not set (process-guard bundle unavailable)" >&2
   fi
 fi
 exec "$@"
