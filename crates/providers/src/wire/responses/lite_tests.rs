@@ -305,3 +305,90 @@ fn openai_dialect_ignores_codex_capabilities() {
     };
     assert_eq!(build(None), build(Some(astra())));
 }
+
+fn schema_request(schema: Value) -> ChatRequest {
+    serde_json::from_value(json!({
+        "model": "gpt-6.2-astra",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "present", "description": "d", "input_schema": schema}]
+    }))
+    .unwrap()
+}
+
+fn has_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(map) => map.contains_key(key) || map.values().any(|v| has_key(v, key)),
+        Value::Array(items) => items.iter().any(|v| has_key(v, key)),
+        _ => false,
+    }
+}
+
+// Given: a tool schema that uses keywords strict structured outputs does not implement
+// (nested in properties, items and anyOf) next to ones it accepts, plus a property that is
+// merely named `uniqueItems`
+// When: serialized for Codex, with a Lite model, a non-Lite model, and without a catalog
+// Then: no unsupported keyword is left, accepted keywords and the property survive,
+// and the canonical tool definition is untouched
+#[test]
+fn codex_tool_schemas_drop_keywords_strict_mode_rejects() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "ids": {"type": "array", "uniqueItems": true, "minItems": 1, "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "pattern": "^a"}},
+            "nested": {"type": "object", "minProperties": 1,
+                "properties": {"tags": {"type": "array", "uniqueItems": true,
+                    "items": {"anyOf": [{"type": "array", "uniqueItems": true}]}}}},
+            "uniqueItems": {"type": "boolean", "default": {"uniqueItems": true}}
+        },
+        "required": ["ids"],
+        "additionalProperties": false
+    });
+    let request = schema_request(schema.clone());
+    for model in [Some(astra()), Some(CodexModelCapabilities::default()), None] {
+        let value = wire_with(&request, model);
+        let tool = if value.get("tools").is_some() {
+            value["tools"][0].clone()
+        } else {
+            value["input"][0]["tools"][0]["tools"][0].clone()
+        };
+        let parameters = &tool["parameters"];
+        assert!(!has_key(&parameters["properties"]["ids"], "uniqueItems"));
+        assert!(!has_key(&parameters["properties"]["nested"], "uniqueItems"));
+        assert!(!has_key(
+            &parameters["properties"]["nested"],
+            "minProperties"
+        ));
+        let ids = &parameters["properties"]["ids"];
+        assert_eq!(ids["minItems"], 1);
+        assert_eq!(ids["maxItems"], 8);
+        assert_eq!(
+            ids["items"],
+            json!({"type": "string", "minLength": 1, "pattern": "^a"})
+        );
+        assert_eq!(
+            parameters["properties"]["uniqueItems"],
+            json!({"type": "boolean", "default": {"uniqueItems": true}})
+        );
+        assert_eq!(parameters["required"], json!(["ids"]));
+    }
+    assert_eq!(request.tools[0].input_schema, schema);
+}
+
+// Given: the same schema / When: serialized for the official OpenAI dialect
+// Then: it is sent as is (the tool is not strict there, so every keyword is accepted)
+#[test]
+fn openai_dialect_keeps_tool_schemas_untouched() {
+    let schema = json!({"type": "object", "properties": {
+        "ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}}});
+    let value = serde_json::to_value(to_wire_request(
+        &schema_request(schema.clone()),
+        &ResponsesRequestOptions {
+            dialect: ResponsesDialect::OpenAi,
+            prompt_cache_key: None,
+            codex_model: None,
+        },
+    ))
+    .unwrap();
+    assert_eq!(value["tools"][0]["parameters"], schema);
+}

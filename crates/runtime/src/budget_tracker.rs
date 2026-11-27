@@ -89,7 +89,7 @@ pub struct BudgetSettings {
 impl Default for BudgetSettings {
     fn default() -> Self {
         Self {
-            max_tool_calls: ResourceLimit::Bounded(400),
+            max_tool_calls: ResourceLimit::Bounded(1000),
             max_elapsed: ResourceLimit::Bounded(Duration::from_secs(2 * 60 * 60)),
             max_tokens: ResourceLimit::Unlimited,
             max_file_rereads: 20,

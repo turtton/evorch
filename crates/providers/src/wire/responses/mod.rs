@@ -431,6 +431,18 @@ impl ResponsesDialect {
         }
     }
 
+    /// function tool の `parameters`。Codex backend は tool の schema を strict structured
+    /// outputs の subset として検査し、未実装の keyword (`uniqueItems` など) を
+    /// `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は検証用の完全な schema を
+    /// 持つため、Codex には送信直前に非対応 keyword を除いた写しを送ります。
+    fn tool_parameters(self, schema: &serde_json::Value) -> serde_json::Value {
+        let mut parameters = schema.clone();
+        if self == Self::Codex {
+            strip_unsupported_keywords(&mut parameters);
+        }
+        parameters
+    }
+
     /// 公式 compaction の暗号化状態を再送できるか。暗号文は Codex backend が発行したものです。
     fn replays_compaction(self) -> bool {
         match self {
@@ -659,9 +671,52 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
     Tool::Function(FunctionTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
-        parameters: tool.input_schema.clone(),
+        parameters: dialect.tool_parameters(&tool.input_schema),
         strict: dialect.function_strict(),
     })
+}
+
+/// strict structured outputs が実装していない JSON Schema keyword。`uniqueItems` は
+/// Codex backend が実際に拒否した keyword で、残りは OpenAI の structured outputs
+/// 文書が「未対応」とする配列・object 向けの keyword。`minItems` / `maxItems` /
+/// `minLength` / `maxLength` / `pattern` などは受理されるため、ここには含めません。
+const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &[
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "patternProperties",
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+];
+
+/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を再帰的に取り除きます。
+///
+/// `properties` / `$defs` / `definitions` の key は利用者の名前なので、同名でも消さず値の
+/// schema だけを辿ります。`enum` / `const` / `default` / `examples` はデータなので辿りません。
+fn strip_unsupported_keywords(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    match schema {
+        Value::Object(map) => {
+            for keyword in STRICT_UNSUPPORTED_KEYWORDS {
+                map.remove(*keyword);
+            }
+            for (key, child) in map.iter_mut() {
+                match (key.as_str(), child) {
+                    ("enum" | "const" | "default" | "examples", _) => {}
+                    ("properties" | "$defs" | "definitions", Value::Object(named)) => {
+                        named.values_mut().for_each(strip_unsupported_keywords);
+                    }
+                    (_, child) => strip_unsupported_keywords(child),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_unsupported_keywords),
+        _ => {}
+    }
 }
 
 fn image_url(media_type: &str, data: &str) -> InputContent {

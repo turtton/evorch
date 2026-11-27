@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct BudgetConfig {
-    /// 1 run あたりのツール実行回数の上限 (既定: 400)。
+    /// 1 run あたりのツール実行回数の上限 (既定: 1000)。
     pub max_tool_calls: u32,
     /// Optional cumulative usage guard for operators who explicitly want a run-level cap.
     /// This is not a context-window limit and is disabled by default.
@@ -27,7 +27,7 @@ pub struct BudgetConfig {
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: 400,
+            max_tool_calls: 1000,
             max_tokens: None,
             max_elapsed_secs: 7_200,
             max_no_progress_rounds: 100,

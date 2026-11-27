@@ -135,10 +135,26 @@ pub(super) fn wire_tools(wire: Wire, tools: &[ToolSpec]) -> Value {
                 Wire::Responses => json!({"type":"function", "name":tool.name,
             "description":tool.description, "parameters":tool.input_schema, "strict":false}),
                 Wire::Codex => json!({"type":"function", "name":tool.name,
-            "description":tool.description, "parameters":tool.input_schema}),
+            "description":tool.description,
+            "parameters":without_unique_items(&tool.input_schema)}),
             })
             .collect(),
     )
+}
+
+/// The Codex backend rejects `uniqueItems` in tool schemas (strict structured outputs
+/// does not implement it), so the Codex wire carries the schema without it.
+fn without_unique_items(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| key.as_str() != "uniqueItems")
+                .map(|(key, value)| (key.clone(), without_unique_items(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_unique_items).collect()),
+        other => other.clone(),
+    }
 }
 
 pub(super) fn assert_transition(
