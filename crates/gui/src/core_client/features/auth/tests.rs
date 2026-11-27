@@ -1,17 +1,24 @@
-//! The auth feature drawn headless: a login is finished by pasting what the
-//! browser ended on, a secret is sent once and is nowhere in what the screen
-//! keeps or shows, and an operation is asked for, never sent again.
+//! The auth controller drawn headless in the Providers section of Model Settings: a login is
+//! finished by pasting what the browser ended on, a secret is sent once and is nowhere in what
+//! the screen keeps or shows, an operation is asked for, never sent again, and a sign-in that
+//! waits for the save of its provider starts only when that save worked.
 use super::*;
 use crate::core_client::features::execution::tests::{
     Screen, answer, asked, command_of, query_of, screen,
 };
+use crate::core_client::features::settings::SettingsFeature;
 use crate::core_client::features::{FeatureAction, FeatureError, FeatureReply, FeatureRequest};
+use crate::panes::settings::SettingsTab;
 use egui::accesskit::Role;
 use egui_kittest::{
     Harness,
     kittest::{NodeT, Queryable},
 };
-use workbench_protocol::{commands::CommandReply, namespaces::settings::ProviderKind};
+use workbench_protocol::commands::CommandReply;
+use workbench_protocol::namespaces::settings::{
+    ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply, SettingsRevision,
+    SettingsSnapshot,
+};
 
 const SECRET: &str = "SENTINEL-d41d8cd98f00b204";
 
@@ -124,15 +131,98 @@ fn commands(actions: &[FeatureAction]) -> Vec<&AuthCommand> {
         .collect()
 }
 
+fn provider(name: &str, kind: ProviderKind, credential: CredentialRef) -> ProviderView {
+    ProviderView {
+        name: name.into(),
+        kind,
+        base_url: "https://llm.example.invalid/v1".into(),
+        credential,
+        models: vec![ModelView {
+            id: "m".into(),
+            enabled: true,
+        }],
+        excluded_models: vec![],
+        default_model: "m".into(),
+    }
+}
+
+fn providers() -> Vec<ProviderView> {
+    vec![
+        provider(
+            "claude",
+            ProviderKind::AnthropicSubscription,
+            keyring("claude-acct"),
+        ),
+        provider("key", ProviderKind::OpenaiCompatible, keyring("key-acct")),
+        provider(
+            "envkey",
+            ProviderKind::OpenaiCompatible,
+            CredentialRef::Env {
+                var: "ENV_KEY".into(),
+            },
+        ),
+    ]
+}
+
+fn revision(c: char) -> SettingsRevision {
+    SettingsRevision::new(c.to_string().repeat(64)).unwrap()
+}
+
+fn snapshot_reply(providers: Vec<ProviderView>, saved: char) -> FeatureReply {
+    FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::Settings(Box::new(
+        SettingsSnapshot {
+            revision: revision(saved),
+            applied_revision: Some(revision(saved)),
+            apply_failure: None,
+            document: "version = 3\n".into(),
+            providers,
+            problem: None,
+        },
+    )))))
+}
+
+/// The Providers section opened over the given providers and credential status; the first
+/// provider is the selected one.
+fn opened(
+    feature: SettingsFeature,
+    providers: Vec<ProviderView>,
+    status: FeatureReply,
+) -> Harness<'static, Screen> {
+    let mut screen = screen(Box::new(feature), None);
+    screen
+        .state_mut()
+        .feature
+        .as_settings_mut()
+        .expect("the settings feature")
+        .open_modal(SettingsTab::Providers);
+    screen.run();
+    for action in asked(&mut screen) {
+        match query_of(&action) {
+            Query::Settings(SettingsQuery::GetSettingsSnapshot {}) => answer(
+                &mut screen,
+                action.tag,
+                snapshot_reply(providers.clone(), 'a'),
+            ),
+            Query::Auth(AuthQuery::GetCredentialStatus {}) => {
+                answer(&mut screen, action.tag, status.clone());
+            }
+            other => panic!("unexpected query {other:?}"),
+        }
+    }
+    screen.run_steps(4);
+    screen
+}
+
+/// The screen with the Claude provider selected.
 fn loaded() -> Harness<'static, Screen> {
-    let mut screen = screen(Box::<AuthFeature>::default(), None);
-    let first = asked(&mut screen);
-    assert_eq!(first.len(), 1);
-    assert!(matches!(
-        query_of(&first[0]),
-        Query::Auth(AuthQuery::GetCredentialStatus {})
-    ));
-    answer(&mut screen, first[0].tag, status_reply());
+    opened(SettingsFeature::default(), providers(), status_reply())
+}
+
+/// The screen with the API-key provider `key` selected.
+fn loaded_key() -> Harness<'static, Screen> {
+    let mut screen = loaded();
+    screen.get_by_label("key").click();
+    screen.run_steps(4);
     screen
 }
 
@@ -184,13 +274,23 @@ fn type_secret(screen: &mut Harness<'static, Screen>, text: &str) {
 }
 
 #[test]
-fn every_slot_shows_its_state_and_only_what_can_be_done_with_it() {
-    let screen = loaded();
+fn every_provider_shows_its_state_and_only_what_can_be_done_with_it() {
+    let mut screen = loaded();
     screen.get_by_label("Sign in to Claude");
+    assert!(screen.query_all_by_label("Not signed in").next().is_some());
+    assert_eq!(screen.query_all_by_role(Role::PasswordInput).count(), 0);
+
+    screen.get_by_label("key").click();
+    screen.run_steps(4);
     screen.get_by_label("Stored");
+    screen.get_by_label("Remove key");
+    assert_eq!(screen.query_all_by_role(Role::PasswordInput).count(), 1);
+
+    screen.get_by_label("envkey").click();
+    screen.run_steps(4);
     screen.get_by_label("Read from environment variable ENV_KEY.");
-    // A login profile takes no typed key.
-    assert_eq!(screen.get_all_by_role(Role::PasswordInput).count(), 1);
+    screen.get_by_label("Environment variable ENV_KEY is not set");
+    assert_eq!(screen.query_all_by_role(Role::PasswordInput).count(), 0);
 }
 
 #[test]
@@ -318,7 +418,7 @@ fn cancelling_a_login_names_that_login_only() {
 
 #[test]
 fn a_typed_key_is_sent_once_and_the_box_is_cleared() {
-    let mut screen = loaded();
+    let mut screen = loaded_key();
     type_secret(&mut screen, SECRET);
     screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
@@ -350,7 +450,7 @@ fn a_typed_key_is_sent_once_and_the_box_is_cleared() {
 
 #[test]
 fn a_lost_reply_asks_for_the_operation_and_never_sends_it_again() {
-    let mut screen = loaded();
+    let mut screen = loaded_key();
     type_secret(&mut screen, "value");
     screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
@@ -388,7 +488,7 @@ fn not_found() -> FeatureReply {
 
 #[test]
 fn a_key_save_whose_end_was_lost_with_a_core_restart_is_unknown_not_busy() {
-    let mut screen = loaded();
+    let mut screen = loaded_key();
     type_secret(&mut screen, "value");
     screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
@@ -447,6 +547,16 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
     // The connection came back to a core that restarted meanwhile.
     screen.state_mut().feature.reset();
     let questions = asked(&mut screen);
+    let snapshot = questions
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of(a),
+                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+            )
+        })
+        .expect("the settings are read again");
+    answer(&mut screen, snapshot.tag, snapshot_reply(providers(), 'a'));
     let login = questions
         .iter()
         .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetLogin { login_id }) if *login_id == id))
@@ -480,7 +590,7 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
 
 #[test]
 fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() {
-    let mut screen = loaded();
+    let mut screen = loaded_key();
     type_secret(&mut screen, "value");
     screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
@@ -518,11 +628,13 @@ fn a_pending_reply_arriving_after_the_end_does_not_make_the_screen_busy_again() 
 
 #[test]
 fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
-    let mut screen = screen(Box::<AuthFeature>::default(), None);
-    let first = asked(&mut screen);
-    answer(
-        &mut screen,
-        first[0].tag,
+    let mut screen = opened(
+        SettingsFeature::default(),
+        vec![provider(
+            "cursor",
+            ProviderKind::Cursor,
+            keyring("cursor-acct"),
+        )],
         FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
             revision: Revision(1),
             slots: vec![slot(
@@ -534,7 +646,7 @@ fn a_cursor_profile_takes_a_typed_api_key_next_to_its_login() {
         })))),
     );
     screen.get_by_label("Sign in to Cursor");
-    assert_eq!(screen.get_all_by_role(Role::PasswordInput).count(), 1);
+    assert_eq!(screen.query_all_by_role(Role::PasswordInput).count(), 1);
     type_secret(&mut screen, SECRET);
     screen.get_by_label("Save API key").click();
     let sent = asked(&mut screen);
@@ -626,19 +738,11 @@ const NOW: u64 = 1_791_000_000;
 
 // Given: sign-ins that expire in 5h 20m, that expired, and whose expiry cannot be read, on a
 //        fixed clock
-// When: the status is shown
-// Then: each reads as legacy's editor reads it, the expired one says it renews by itself,
-//       and every row carries the badge of its provider type
+// When: each provider is selected
+// Then: its Account card reads as legacy's editor reads it, and the expired one says it
+//       renews by itself
 #[test]
-fn a_sign_in_expiry_reads_as_time_left_with_the_provider_badge() {
-    let mut screen = screen(
-        Box::new(AuthFeature {
-            now: || NOW,
-            ..AuthFeature::default()
-        }),
-        None,
-    );
-    let first = asked(&mut screen);
+fn a_sign_in_expiry_reads_as_time_left_in_the_account_card() {
     let signed_in = |profile: &str, kind, at, login| CredentialSlot {
         profile: profile.into(),
         kind,
@@ -648,9 +752,17 @@ fn a_sign_in_expiry_reads_as_time_left_with_the_provider_badge() {
         },
         login: Some(login),
     };
-    answer(
-        &mut screen,
-        first[0].tag,
+    let mut screen = opened(
+        SettingsFeature::with_clock(|| NOW),
+        vec![
+            provider(
+                "claude",
+                ProviderKind::AnthropicSubscription,
+                keyring("claude"),
+            ),
+            provider("codex", ProviderKind::OpenaiCodex, keyring("codex")),
+            provider("cursor", ProviderKind::Cursor, keyring("cursor")),
+        ],
         FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
             revision: Revision(1),
             slots: vec![
@@ -676,34 +788,36 @@ fn a_sign_in_expiry_reads_as_time_left_with_the_provider_badge() {
         })))),
     );
     screen.get_by_label("Signed in · token expires in 5h 20m");
+    screen.get_by_label("Claude subscription");
+    screen.get_by_label("codex").click();
+    screen.run_steps(4);
     screen.get_by_label("Signed in · token expired");
     screen.get_by_label("Token expired; it will renew automatically when used.");
+    screen.get_by_label("Sign in to Codex");
+    screen.get_by_label("cursor").click();
+    screen.run_steps(4);
     screen.get_by_label("Signed in · token expiry unknown");
-    for badge in ["Claude subscription", "Codex subscription", "Cursor"] {
-        screen.get_by_label(badge);
-    }
     assert!(screen.query_by_label_contains("UNIX").is_none());
 }
 
 // Given: a stored API key
-// When: Delete credential is pressed, then Keep credential, then Delete credential and
-//       Confirm delete
+// When: Remove key is pressed, then Keep credential, then Remove key and Confirm remove key
 // Then: nothing is sent until the confirmation, and then exactly one delete of that profile
 #[test]
 fn a_credential_is_deleted_only_after_its_confirmation() {
-    let mut screen = loaded();
-    delete_key_credential(&mut screen);
+    let mut screen = loaded_key();
+    screen.get_by_label("Remove key").click();
     screen.run_steps(2);
     assert!(asked(&mut screen).is_empty());
-    screen.get_by_label("Delete the credential of key?");
+    screen.get_by_label("Remove the API key of key?");
     screen.get_by_label("Keep credential").click();
     screen.run_steps(2);
     assert!(asked(&mut screen).is_empty());
-    assert!(screen.query_by_label("Confirm delete").is_none());
+    assert!(screen.query_by_label("Confirm remove key").is_none());
 
-    delete_key_credential(&mut screen);
+    screen.get_by_label("Remove key").click();
     screen.run_steps(2);
-    screen.get_by_label("Confirm delete").click();
+    screen.get_by_label("Confirm remove key").click();
     let sent = asked(&mut screen);
     let sent = commands(&sent);
     assert_eq!(sent.len(), 1);
@@ -713,8 +827,221 @@ fn a_credential_is_deleted_only_after_its_confirmation() {
     ));
 }
 
-fn delete_key_credential(screen: &mut Harness<'static, Screen>) {
-    let buttons: Vec<_> = screen.query_all_by_label("Delete credential").collect();
-    assert_eq!(buttons.len(), 2);
-    buttons[1].click();
+// Given: two providers that name the same keychain entry
+// When: Sign out is asked for one of them
+// Then: the confirmation says the other loses the sign-in too
+#[test]
+fn signing_out_says_which_other_providers_share_the_credential() {
+    let mut shared = providers();
+    shared.push(provider(
+        "claude-2",
+        ProviderKind::AnthropicSubscription,
+        keyring("claude-acct"),
+    ));
+    let signed_in = CredentialSlot {
+        state: CredentialState::Present {
+            expires_at_unix: None,
+        },
+        ..slot(
+            "claude",
+            keyring("claude-acct"),
+            CredentialState::Missing,
+            Some(LoginMethod::Claude),
+        )
+    };
+    let mut screen = opened(
+        SettingsFeature::default(),
+        shared,
+        FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
+            revision: Revision(1),
+            slots: vec![signed_in],
+        })))),
+    );
+    screen.get_by_label("Sign out").click();
+    screen.run_steps(2);
+    screen.get_by_label("Sign out of claude?");
+    screen.get_by_label("Also used by claude-2: they lose it too.");
+    assert!(asked(&mut screen).is_empty(), "nothing is sent yet");
+}
+
+/// What the screen asked since the last call, without the credential status.
+fn sent_commands(screen: &mut Harness<'static, Screen>) -> Vec<FeatureAction> {
+    asked(screen)
+        .into_iter()
+        .filter(|a| matches!(a.request, FeatureRequest::Command(_)))
+        .collect()
+}
+
+fn save_provider_of(
+    action: &FeatureAction,
+) -> workbench_protocol::namespaces::settings::SaveProvider {
+    let Command::Settings(workbench_protocol::namespaces::settings::SettingsCommand::SaveProvider(
+        save,
+    )) = command_of(action)
+    else {
+        panic!("a provider save was expected");
+    };
+    (**save).clone()
+}
+
+fn settings_view(
+    id: &OperationId,
+    state: OperationState,
+) -> workbench_protocol::namespaces::settings::SettingsOperationView {
+    workbench_protocol::namespaces::settings::SettingsOperationView {
+        operation: OperationView {
+            operation_id: id.clone(),
+            state,
+            revision: Revision(1),
+            result: None,
+        },
+        kind: workbench_protocol::namespaces::settings::SettingsOperationKind::SaveProvider,
+        revision: Some(revision('b')),
+        message: None,
+    }
+}
+
+fn settings_ended(id: &OperationId, state: OperationState) -> UiEvent {
+    UiEvent::Settings(
+        workbench_protocol::namespaces::settings::SettingsEvent::SettingsOperationCompleted {
+            operation: settings_view(id, state),
+        },
+    )
+}
+
+/// A screen over the three providers where a new Claude subscription is added and
+/// "Save & sign in" is pressed. Returns the save that was sent and the name it writes.
+fn save_and_sign_in() -> (Harness<'static, Screen>, OperationId, String) {
+    let mut screen = loaded();
+    screen.get_by_label("Add").click();
+    screen.run();
+    screen.get_by_role_and_label(Role::Button, "Claude").click();
+    screen.run();
+    screen.get_by_label("Save & sign in").click();
+    let sent = sent_commands(&mut screen);
+    assert_eq!(sent.len(), 1, "only the save is sent");
+    let save = save_provider_of(&sent[0]);
+    let name = save.provider.name().to_owned();
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Ok(CommandReply::with_result(
+            workbench_protocol::commands::CommandResult::Settings(
+                workbench_protocol::namespaces::settings::SettingsResult::Operation(settings_view(
+                    &save.operation_id,
+                    OperationState::Pending,
+                )),
+            ),
+        ))),
+    );
+    (screen, save.operation_id, name)
+}
+
+fn answer_new_snapshot(screen: &mut Harness<'static, Screen>, name: &str) {
+    let queries = asked(screen);
+    let snapshot = queries
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of(a),
+                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+            )
+        })
+        .expect("the settings are read again");
+    let mut all = providers();
+    all.push(provider(
+        name,
+        ProviderKind::AnthropicSubscription,
+        keyring(name),
+    ));
+    answer(screen, snapshot.tag, snapshot_reply(all, 'b'));
+    screen.run_steps(4);
+}
+
+// Given: a new subscription provider that is not saved
+// When: Save & sign in is pressed, the save works and the settings of it are read
+// Then: the save is the only command until then, and the sign-in of that provider starts after
+#[test]
+fn save_and_sign_in_starts_the_login_only_after_the_save_worked() {
+    let (mut screen, id, name) = save_and_sign_in();
+    screen.run_steps(4);
+    assert!(
+        sent_commands(&mut screen).is_empty(),
+        "no sign-in while the save runs"
+    );
+    screen
+        .state_mut()
+        .feature
+        .event(&settings_ended(&id, OperationState::Ready));
+    screen.run_steps(4);
+    answer_new_snapshot(&mut screen, &name);
+    let sent = sent_commands(&mut screen);
+    let [AuthCommand::StartLogin(start)] = commands(&sent)[..] else {
+        panic!("one login start was expected: {sent:?}");
+    };
+    assert_eq!(start.profile, name);
+}
+
+// Given: Save & sign in whose save is refused
+// When: the refusal is seen and the settings are read again
+// Then: no sign-in starts
+#[test]
+fn a_refused_save_starts_no_login() {
+    let (mut screen, id, name) = save_and_sign_in();
+    screen.state_mut().feature.event(&settings_ended(
+        &id,
+        OperationState::Failed {
+            code: ErrorCode::InvalidRequest,
+        },
+    ));
+    screen.run_steps(4);
+    answer_new_snapshot(&mut screen, &name);
+    assert!(sent_commands(&mut screen).is_empty());
+    screen.run_steps(4);
+    assert!(sent_commands(&mut screen).is_empty());
+}
+
+// Given: Save & sign in whose reply was lost
+// When: the end of the save is later seen as done
+// Then: its outcome was unknown when it was asked for, so no sign-in starts
+#[test]
+fn a_save_of_unknown_outcome_starts_no_login() {
+    let mut screen = loaded();
+    screen.get_by_label("Add").click();
+    screen.run();
+    screen.get_by_role_and_label(Role::Button, "Claude").click();
+    screen.run();
+    screen.get_by_label("Save & sign in").click();
+    let sent = sent_commands(&mut screen);
+    let save = save_provider_of(&sent[0]);
+    let name = save.provider.name().to_owned();
+    answer(
+        &mut screen,
+        sent[0].tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+    );
+    screen
+        .state_mut()
+        .feature
+        .event(&settings_ended(&save.operation_id, OperationState::Ready));
+    screen.run_steps(4);
+    answer_new_snapshot(&mut screen, &name);
+    assert!(sent_commands(&mut screen).is_empty());
+}
+
+// Given: Save & sign in whose save worked
+// When: another provider is chosen before the settings of the save arrive
+// Then: no sign-in starts for the provider that was left
+#[test]
+fn choosing_another_provider_drops_the_login_that_waited_for_the_save() {
+    let (mut screen, id, name) = save_and_sign_in();
+    screen
+        .state_mut()
+        .feature
+        .event(&settings_ended(&id, OperationState::Ready));
+    screen.run_steps(4);
+    screen.get_by_role_and_label(Role::Button, "key").click();
+    screen.run_steps(4);
+    answer_new_snapshot(&mut screen, &name);
+    assert!(sent_commands(&mut screen).is_empty());
 }

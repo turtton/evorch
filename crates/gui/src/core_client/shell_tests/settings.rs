@@ -1,5 +1,5 @@
-//! The settings modal and the Authentication tab in the full window: each ⚙ entry opens the
-//! modal on its tab over the core's snapshot, and the text reads in English.
+//! The settings modal in the full window: each ⚙ entry opens the modal on its tab over the
+//! core's snapshot, sign-in lives in the Providers section, and the text reads in English.
 use super::*;
 use egui_kittest::kittest::NodeT;
 use workbench_protocol::namespaces::{
@@ -190,7 +190,9 @@ fn settings_snapshot(action: &FeatureAction) -> Option<FeatureReply> {
 /// ⚙ → Model Settings, then the section `section` of its navigation.
 fn settings(section: &str) -> (Screen, std::collections::BTreeSet<String>) {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
-    let before = open(&mut screen, "Model Settings", settings_snapshot);
+    let before = open(&mut screen, "Model Settings", |action| {
+        settings_snapshot(action).or_else(|| auth_status(action))
+    });
     if section != "Providers" {
         screen.harness.get_by_label(section).click();
         screen.harness.run_steps(8);
@@ -200,40 +202,48 @@ fn settings(section: &str) -> (Screen, std::collections::BTreeSet<String>) {
 
 // Given: a core whose file has four providers of four types
 // When: ⚙ → Model Settings
-// Then: the modal lists each with its type badge and default model, Edit and Delete, and
-//       the legacy add buttons; Delete asks before anything is sent
+// Then: the list names each provider, the first is open with its Account card, connection and
+//       models, the Add menu offers each kind, and Delete asks before anything is sent
 #[test]
-fn the_providers_tab_shows_type_badges_and_confirms_a_delete() {
+fn the_providers_section_lists_providers_and_confirms_a_delete() {
     let (mut screen, before) = settings("Providers");
     let harness = &screen.harness;
     harness.get_by_label("Where models come from, with their sign-in and model list");
+    for name in ["local", "codex", "claude", "api"] {
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, name);
+    }
     for label in [
         "OpenAI-compatible",
-        "Codex subscription",
-        "Claude subscription",
-        "Claude API",
+        "Add",
+        "Refresh credentials",
+        "Duplicate provider",
+        "Delete provider",
+        "Name",
+        "Base URL",
+        "Save",
+        "Discard",
         "qwen3-coder",
-        "gpt-5.3-codex",
-        "+ Add OpenAI-compatible",
-        "+ Add Codex subscription",
-        "+ Add Claude subscription",
-        "+ Add Cursor",
-        "+ Add Kimi subscription",
+        "gpt-oss-20b",
     ] {
         harness.get_by_label(label);
     }
-    assert_eq!(harness.get_all_by_label("Delete").count(), 4);
     assert_english(&screen, &before);
     screen.capture("providers");
 
-    screen
-        .harness
-        .get_all_by_label("Delete")
-        .nth(1)
-        .unwrap()
-        .click();
+    screen.harness.get_by_label("Add").click();
     screen.harness.run_steps(4);
-    screen.harness.get_by_label("Delete codex?");
+    for kind in ["Codex", "Claude", "Cursor", "Kimi"] {
+        screen
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, kind);
+    }
+    screen.capture("add-menu");
+    screen.harness.key_press(egui::Key::Escape);
+    screen.harness.run_steps(4);
+
+    screen.harness.get_by_label("Delete provider").click();
+    screen.harness.run_steps(4);
+    screen.harness.get_by_label("Delete local?");
     screen.harness.get_by_label("Confirm delete");
     screen.harness.get_by_label("Keep profile");
     assert!(
@@ -241,36 +251,60 @@ fn the_providers_tab_shows_type_badges_and_confirms_a_delete() {
         "nothing is sent before the confirmation"
     );
     screen.capture("delete-confirm");
-
     screen.harness.get_by_label("Keep profile").click();
     screen.harness.run_steps(4);
-    assert!(screen.harness.query_by_label("Delete codex?").is_none());
+    assert!(screen.harness.query_by_label("Delete local?").is_none());
+    assert_english(&screen, &before);
+}
+
+// Given: sign-ins that expire later or expired, a key that is missing, and a provider of a
+//        type the form cannot write
+// When: each provider is chosen in Model Settings → Providers
+// Then: its Account card shows its state with a readable expiry, the way to sign in or out,
+//       and the unsupported type is read-only with a way to the Config file, in English
+#[test]
+fn the_account_card_reads_state_and_expiry_in_english() {
+    let (mut screen, before) = settings("Providers");
+    let select = |screen: &mut Screen, name: &str| {
+        screen
+            .harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, name)
+            .click();
+        screen.harness.run_steps(8);
+    };
     screen
         .harness
-        .get_all_by_label("Edit")
-        .next()
-        .unwrap()
-        .click();
-    screen.harness.run_steps(8);
-    for label in [
-        "Name",
-        "Base URL",
-        "Keyring (recommended)",
-        "Environment variable",
-        "API key env var",
-        "Excluded models",
-        "Default model",
-        "Save",
-        "Back to list",
-    ] {
-        screen.harness.get_by_label(label);
-    }
+        .get_by_label("Environment variable LOCAL_KEY is not set");
+    screen
+        .harness
+        .get_by_label("Read from environment variable LOCAL_KEY.");
+    screen.capture("provider-api-key-missing");
+
+    select(&mut screen, "codex");
+    let harness = &screen.harness;
+    harness.get_by_label_contains("Signed in · token expires in 5h");
+    harness.get_by_label("Sign in to Codex");
+    harness.get_by_label("Sign out");
+    harness.get_by_label("Codex subscription");
+    assert_english(&screen, &before);
+    screen.capture("provider-signed-in");
+
+    select(&mut screen, "claude");
+    let harness = &screen.harness;
+    harness.get_by_label("Signed in · token expired");
+    harness.get_by_label("Token expired; it will renew automatically when used.");
+    assert_english(&screen, &before);
+
+    select(&mut screen, "api");
+    let harness = &screen.harness;
+    harness.get_by_label("Open Config file");
+    harness.get_by_label("Claude API");
     assert!(
-        screen.settle().is_empty(),
-        "opening the editor sends nothing"
+        harness.query_by_label("Save").is_none(),
+        "a type the form cannot write has nothing to save"
     );
     assert_english(&screen, &before);
-    screen.capture("provider-editor");
+    screen.capture("provider-config-file-only");
 }
 
 // Given: a file with two routes / When: ⚙ → Model Settings → Routing
@@ -365,33 +399,6 @@ fn auth_status(action: &FeatureAction) -> Option<FeatureReply> {
             ],
         }),
     ))))
-}
-
-// Given: sign-ins that expire later, expired, and keys stored or missing
-// When: ⚙ → Authentication
-// Then: each profile shows its type badge and a readable expiry, in English
-#[test]
-fn the_authentication_tab_reads_expiry_and_types_in_english() {
-    let mut screen = screen(egui::vec2(1440.0, 900.0));
-    let before = open(&mut screen, "Authentication", auth_status);
-    let harness = &screen.harness;
-    harness.get_by_label_contains("Signed in · token expires in 5h");
-    harness.get_by_label("Signed in · token expired");
-    harness.get_by_label("Token expired; it will renew automatically when used.");
-    harness.get_by_label("Stored");
-    harness.get_by_label("Sign in to Codex");
-    harness.get_by_label("Read from environment variable LOCAL_KEY.");
-    for badge in [
-        "Codex subscription",
-        "Claude subscription",
-        "Kimi subscription",
-        "OpenAI-compatible",
-        "Cursor",
-    ] {
-        harness.get_by_label(badge);
-    }
-    assert_english(&screen, &before);
-    screen.capture("auth");
 }
 
 // Given: the smallest supported window, 960×600

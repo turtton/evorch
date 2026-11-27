@@ -15,11 +15,10 @@
 //! was not seen (after a reconnect, or when a reply was lost).
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::auth::{self as auth_controller, AuthFeature};
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::model::settings_document::new_provider_defaults;
-use crate::panes::provider_widgets::{
-    EDIT_IN_CONFIG_FILE, ProviderRowAction, provider_kind_label, provider_list_row,
-};
+use crate::panes::provider_widgets::provider_kind_label;
 use crate::panes::settings::SettingsTab;
 use crate::theme::{
     icons,
@@ -48,12 +47,14 @@ mod feature_options;
 mod modal;
 mod model_shell;
 mod provider_form;
+mod providers;
 mod roles;
 mod routing;
 mod rows;
 use feature_options::FeatureOptions;
 use modal::{Modal, ModalSave};
 use provider_form::{FormAction, FormKind, ProviderForm};
+use providers::{LoginAfterSave, ProviderAction, form_edited};
 
 /// What a menu or a button elsewhere asks of the settings screens. It is applied by the
 /// window (`apply_effect`); nothing of it is a protocol message.
@@ -93,14 +94,6 @@ impl Draft {
     }
 }
 
-enum ProviderAction {
-    Edit(ProviderView),
-    Delete(String),
-    Add(FormKind),
-    Reread,
-    Form(FormAction),
-}
-
 pub struct SettingsFeature {
     next_tag: u64,
     pending: BTreeMap<u64, Pending>,
@@ -127,6 +120,13 @@ pub struct SettingsFeature {
     form_serial: u64,
     /// The Features modal (its own draft, view and save).
     features: FeatureOptions,
+    /// The provider selected in the Providers list (the form edits it), when one is.
+    selected: Option<String>,
+    /// The name the running provider save writes: it is selected when the save worked.
+    saving_name: Option<String>,
+    login_after_save: Option<LoginAfterSave>,
+    /// What the controller of the `auth` area holds: the credential of every provider.
+    auth: AuthFeature,
     modal: Option<Modal>,
     modal_saves: BTreeMap<OperationId, ModalSave>,
     confirm_delete: Option<String>,
@@ -158,6 +158,10 @@ impl Default for SettingsFeature {
             saving_form: None,
             form_serial: 0,
             features: FeatureOptions::default(),
+            selected: None,
+            saving_name: None,
+            login_after_save: None,
+            auth: AuthFeature::default(),
             modal: None,
             modal_saves: BTreeMap::new(),
             confirm_delete: None,
@@ -165,6 +169,17 @@ impl Default for SettingsFeature {
             quiet_refreshes: BTreeSet::new(),
             provider_quoted: BTreeMap::new(),
             confirm_close: false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl SettingsFeature {
+    /// A feature whose credential controller reads the time from `now`.
+    pub(in crate::core_client::features) fn with_clock(now: fn() -> u64) -> Self {
+        Self {
+            auth: AuthFeature::with_clock(now),
+            ..Self::default()
         }
     }
 }
@@ -237,6 +252,9 @@ impl SettingsFeature {
             Some(modal) => modal.select(tab),
             None => self.modal = Some(Modal::new(tab)),
         }
+        if tab == SettingsTab::Providers {
+            self.auth.want_status();
+        }
     }
 
     pub fn modal_tab(&self) -> Option<SettingsTab> {
@@ -246,6 +264,9 @@ impl SettingsFeature {
     fn close_modal(&mut self) {
         self.modal = None;
         self.form = None;
+        self.selected = None;
+        self.login_after_save = None;
+        self.auth.cancel_confirm();
         self.confirm_delete = None;
         self.confirm_close = false;
     }
@@ -253,22 +274,6 @@ impl SettingsFeature {
     /// Whether closing the modal would drop something typed and not saved: a Routing or Agent
     /// Roles draft, or a provider form that differs from what it was opened as.
     fn modal_dirty(&self) -> bool {
-        let form_edited = |snapshot: &SettingsSnapshot, form: &ProviderForm| {
-            let source = match &form.original {
-                Some(name) => snapshot
-                    .providers
-                    .iter()
-                    .find(|provider| &provider.name == name)
-                    .and_then(ProviderForm::from_view),
-                None => Some(ProviderForm::new(
-                    form.kind,
-                    new_provider_defaults(form.kind.new_provider(), |name| {
-                        snapshot.providers.iter().any(|p| p.name == name)
-                    }),
-                )),
-            };
-            source.is_none_or(|source| form.edited_from(&source))
-        };
         self.modal.as_ref().is_some_and(Modal::dirty)
             || self
                 .form
@@ -307,8 +312,10 @@ impl SettingsFeature {
         self.quiet_refreshes.remove(id);
         self.provider_quoted.remove(id);
         self.modal_saves.remove(id);
+        self.drop_login_after(id);
         if self.provider_saving.as_ref() == Some(id) {
             self.provider_saving = None;
+            self.saving_name = None;
         }
         self.stale = true;
         self.status =
@@ -378,11 +385,13 @@ impl SettingsFeature {
             self.provider_saving = None;
             // A saved provider closes the form; a refused one keeps what was typed.
             let saved_form = self.saving_form.take();
-            if matches!(state, OperationState::Ready)
-                && self.form.as_ref().map(|form| form.serial) == saved_form
-            {
+            let saved_name = self.saving_name.take();
+            let worked = matches!(state, OperationState::Ready);
+            if worked && self.form.as_ref().map(|form| form.serial) == saved_form {
                 self.form = None;
+                self.selected = saved_name;
             }
+            self.provider_save_ended(&id, worked);
         }
         match state {
             OperationState::Pending => {}
@@ -531,167 +540,6 @@ impl SettingsFeature {
             SettingsCommand::ReloadModels(ReloadModels { operation_id }),
         );
     }
-
-    fn providers_body(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &SettingsSnapshot,
-        busy: bool,
-        body_height: f32,
-    ) -> Option<ProviderAction> {
-        let mut action = None;
-        let Some(form) = &mut self.form else {
-            if snapshot.providers.is_empty() {
-                ui.label(muted("No provider profiles."));
-            }
-            ui.add_enabled_ui(!busy, |ui| {
-                for provider in &snapshot.providers {
-                    let editable = ProviderForm::from_view(provider).is_some();
-                    match provider_list_row(
-                        ui,
-                        &provider.name,
-                        provider_kind_label(provider.kind),
-                        &provider.default_model,
-                        (!editable).then_some(EDIT_IN_CONFIG_FILE),
-                        &mut self.confirm_delete,
-                    ) {
-                        Some(ProviderRowAction::Edit) => {
-                            action = Some(ProviderAction::Edit(provider.clone()));
-                        }
-                        Some(ProviderRowAction::Delete) => {
-                            action = Some(ProviderAction::Delete(provider.name.clone()));
-                        }
-                        None => {}
-                    }
-                }
-                for kind in FormKind::ALL {
-                    if ui.button(kind.add_label()).clicked() {
-                        action = Some(ProviderAction::Add(kind));
-                    }
-                }
-            });
-            return action;
-        };
-        if form
-            .based_on
-            .as_ref()
-            .is_some_and(|based| based != &snapshot.revision)
-        {
-            ui.colored_label(
-                palette().WARNING_FG,
-                "The settings file changed after this form was opened; saving will be refused.",
-            );
-            if ui.button("Reopen with the latest settings").clicked() {
-                action = Some(ProviderAction::Reread);
-            }
-        }
-        let height = (body_height - 70.0).max(120.0);
-        egui::ScrollArea::vertical()
-            .id_salt("provider-editor")
-            .auto_shrink([false, false])
-            .min_scrolled_height(height)
-            .max_height(height)
-            .show(ui, |ui| form.draw(ui));
-        let drawn = form.footer(ui, busy);
-        action.or(Some(ProviderAction::Form(drawn)))
-    }
-
-    fn apply_provider_action(
-        &mut self,
-        ctx: &mut FeatureContext<'_>,
-        snapshot: &SettingsSnapshot,
-        action: ProviderAction,
-    ) {
-        match action {
-            ProviderAction::Edit(provider) => {
-                // The form is opened from the revision this snapshot has; the save quotes
-                // that one. A form is not replaced while its save runs.
-                if self.provider_saving.is_none() {
-                    self.form_serial += 1;
-                    self.form = ProviderForm::from_view(&provider).map(|mut form| {
-                        form.based_on = Some(snapshot.revision.clone());
-                        form.serial = self.form_serial;
-                        form
-                    });
-                }
-            }
-            ProviderAction::Delete(name) => {
-                self.confirm_delete = None;
-                let operation_id = new_operation();
-                self.send(
-                    ctx,
-                    SettingsCommand::DeleteProvider(DeleteProvider {
-                        operation_id,
-                        expected_revision: snapshot.revision.clone(),
-                        name,
-                    }),
-                );
-            }
-            ProviderAction::Add(kind) => {
-                if self.provider_saving.is_none() {
-                    self.form_serial += 1;
-                    let defaults = new_provider_defaults(kind.new_provider(), |name| {
-                        snapshot.providers.iter().any(|p| p.name == name)
-                    });
-                    self.form = Some(ProviderForm {
-                        based_on: Some(snapshot.revision.clone()),
-                        serial: self.form_serial,
-                        ..ProviderForm::new(kind, defaults)
-                    });
-                }
-            }
-            ProviderAction::Reread => {
-                let current = self.form.take();
-                self.form_serial += 1;
-                self.form = current.and_then(|old| {
-                    let mut form = match &old.original {
-                        Some(name) => snapshot
-                            .providers
-                            .iter()
-                            .find(|provider| &provider.name == name)
-                            .and_then(ProviderForm::from_view)?,
-                        None => ProviderForm {
-                            based_on: None,
-                            ..old
-                        },
-                    };
-                    form.based_on = Some(snapshot.revision.clone());
-                    form.serial = self.form_serial;
-                    Some(form)
-                });
-            }
-            ProviderAction::Form(FormAction::None) => {}
-            ProviderAction::Form(FormAction::Cancel) => self.form = None,
-            ProviderAction::Form(FormAction::Save) => {
-                let Some(form) = &mut self.form else {
-                    return;
-                };
-                match form.to_input() {
-                    Ok(provider) => {
-                        form.error = None;
-                        let operation_id = new_operation();
-                        self.provider_saving = Some(operation_id.clone());
-                        self.saving_form = Some(form.serial);
-                        let expected_revision = form
-                            .based_on
-                            .clone()
-                            .unwrap_or_else(|| snapshot.revision.clone());
-                        let original_name = form.original.clone();
-                        self.send(
-                            ctx,
-                            SettingsCommand::SaveProvider(Box::new(SaveProvider {
-                                operation_id,
-                                expected_revision,
-                                original_name,
-                                provider,
-                            })),
-                        );
-                    }
-                    Err(missing) => form.error = Some(missing),
-                }
-            }
-        }
-    }
 }
 
 impl Feature for SettingsFeature {
@@ -710,6 +558,15 @@ impl Feature for SettingsFeature {
     }
 
     fn reset(&mut self) {
+        self.auth.reset();
+        // A save whose end the reconnect may have hidden starts no sign-in.
+        if self
+            .login_after_save
+            .as_ref()
+            .is_some_and(|login| !login.saved())
+        {
+            self.login_after_save = None;
+        }
         self.snapshot = None;
         self.snapshot_in_flight = false;
         self.stale = true;
@@ -725,6 +582,10 @@ impl Feature for SettingsFeature {
         }
     }
 
+    fn listens_to(&self, namespace: &str) -> bool {
+        matches!(namespace, "settings" | "auth")
+    }
+
     fn event(&mut self, event: &UiEvent) {
         match event {
             UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged { .. }) => {
@@ -734,11 +595,16 @@ impl Feature for SettingsFeature {
             UiEvent::Settings(SettingsEvent::SettingsOperationCompleted { operation }) => {
                 self.operation_update(operation.clone());
             }
+            UiEvent::Auth(_) => self.auth.event(event),
             _ => {}
         }
     }
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
+        if tag >= auth_controller::TAG_BASE {
+            self.auth.reply(tag, reply);
+            return;
+        }
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
@@ -780,6 +646,8 @@ impl Feature for SettingsFeature {
                 }
                 Err(error) => {
                     self.status = error.message.clone();
+                    // A save whose end is not known starts no sign-in, whatever it turns out to be.
+                    self.drop_login_after(&id);
                     if error.outcome_unknown {
                         // The command may have been applied: its operation is
                         // asked for, not sent again.
@@ -793,6 +661,7 @@ impl Feature for SettingsFeature {
                         self.modal_saves.remove(&id);
                         if self.provider_saving.as_ref() == Some(&id) {
                             self.provider_saving = None;
+                            self.saving_name = None;
                         }
                     }
                 }
@@ -805,6 +674,9 @@ impl Feature for SettingsFeature {
         if !visibility.available {
             return;
         }
+        self.auth
+            .maintain(ctx, self.modal_tab() == Some(SettingsTab::Providers));
+        self.start_login_after_save(ctx);
         // The snapshot is read for whatever shows it: the Config file tab, or the Model Settings
         // modal over any tab. What was started is looked up whether or not anything shows it.
         let shown = visibility.is_visible() || self.modal.is_some();

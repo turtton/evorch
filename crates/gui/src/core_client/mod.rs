@@ -1108,6 +1108,7 @@ impl CoreClientScreen {
         };
         self.conversation.end_frame();
         self.window_rects.track(&self.dock, ui.ctx());
+        effects.extend(frame.settings.iter().copied().map(shell::Effect::Settings));
         if !frame.lanes.is_empty() || !frame.pull_requests.is_empty() {
             // What a lane menu chose is sent in the lanes feature's next pass.
             ui.ctx().request_repaint();

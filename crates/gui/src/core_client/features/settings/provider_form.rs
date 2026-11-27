@@ -3,10 +3,14 @@
 //! credential is the name of an environment variable or a keychain entry, never the key
 //! itself, so nothing to hide reaches the screen, the command or a log.
 use crate::model::settings_document::{NewProvider, NewProviderDefaults};
-use crate::panes::provider_widgets::{
-    ADD_CLAUDE_SUBSCRIPTION, ADD_CODEX, ADD_CURSOR, ADD_KIMI, ADD_OPENAI_COMPATIBLE,
+use crate::theme::{
+    icons,
+    text::muted,
+    tokens::*,
+    widgets::{accessible, ghost, icon_button},
 };
-use crate::theme::{text::muted, tokens::palette, widgets::primary_button};
+use egui::vec2;
+use workbench_protocol::namespaces::auth::LoginMethod;
 use workbench_protocol::namespaces::settings::{
     CredentialRef, ModelInput, OpenaiCompatibleKind, ProviderInput, ProviderKind, ProviderView,
     SettingsRevision, SubscriptionKind,
@@ -25,21 +29,35 @@ pub(super) enum FormKind {
 const KEYRING_SERVICE: &str = "evorch";
 
 impl FormKind {
-    pub(super) const ALL: [Self; 5] = [
-        Self::OpenaiCompatible,
-        Self::Codex,
-        Self::ClaudeSubscription,
-        Self::Cursor,
-        Self::Kimi,
-    ];
-
-    pub(super) const fn add_label(self) -> &'static str {
+    /// The name of the kind in the Add menu.
+    pub(super) const fn menu_title(self) -> &'static str {
         match self {
-            Self::OpenaiCompatible => ADD_OPENAI_COMPATIBLE,
-            Self::Kimi => ADD_KIMI,
-            Self::Codex => ADD_CODEX,
-            Self::ClaudeSubscription => ADD_CLAUDE_SUBSCRIPTION,
-            Self::Cursor => ADD_CURSOR,
+            Self::OpenaiCompatible => "OpenAI-compatible",
+            Self::Kimi => "Kimi",
+            Self::Codex => "Codex",
+            Self::ClaudeSubscription => "Claude",
+            Self::Cursor => "Cursor",
+        }
+    }
+
+    /// The line under it.
+    pub(super) const fn menu_hint(self) -> &'static str {
+        match self {
+            Self::OpenaiCompatible => "Any /v1 endpoint with an API key",
+            Self::Kimi => "Kimi subscription key",
+            Self::Codex => "ChatGPT plan \u{b7} browser sign-in",
+            Self::ClaudeSubscription => "Claude plan \u{b7} browser sign-in",
+            Self::Cursor => "Browser sign-in or user API key",
+        }
+    }
+
+    /// The browser sign-in the kind uses; the others keep an API key.
+    pub(super) const fn login(self) -> Option<LoginMethod> {
+        match self {
+            Self::Codex => Some(LoginMethod::Codex),
+            Self::ClaudeSubscription => Some(LoginMethod::Claude),
+            Self::Cursor => Some(LoginMethod::Cursor),
+            Self::OpenaiCompatible | Self::Kimi => None,
         }
     }
 
@@ -101,7 +119,6 @@ pub(super) struct ProviderForm {
 /// What the user did with the form this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FormAction {
-    None,
     Save,
     Cancel,
 }
@@ -173,8 +190,9 @@ impl ProviderForm {
         )
     }
 
-    /// Draw the fields; [`Self::footer`] draws the buttons.
-    pub(super) fn draw(&mut self, ui: &mut egui::Ui) {
+    /// Draw the Connection fields: what names the provider and where its credential is kept.
+    /// The Account card above them holds the credential itself; nothing secret is typed here.
+    pub(super) fn draw_connection(&mut self, ui: &mut egui::Ui) {
         let previous_name = self.name.clone();
         labelled_line(ui, "Name", &mut self.name, None);
         // An edited provider keeps its account: following the rename would leave its stored
@@ -185,8 +203,9 @@ impl ProviderForm {
         labelled_line(ui, "Base URL", &mut self.base_url, None);
         if self.kind.names_credential() {
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.env_credential, false, "Keyring (recommended)");
-                ui.radio_value(&mut self.env_credential, true, "Environment variable");
+                ui.label("Credential");
+                ui.selectable_value(&mut self.env_credential, false, "Keyring");
+                ui.selectable_value(&mut self.env_credential, true, "Env var");
             });
             if self.env_credential {
                 labelled_line(
@@ -199,9 +218,6 @@ impl ProviderForm {
                 labelled_line(ui, "Keyring service", &mut self.keyring_service, None);
                 labelled_line(ui, "Keyring account", &mut self.account, None);
             }
-            ui.label(muted(
-                "Store the API key itself in Authentication; this form only names where it is kept.",
-            ));
         } else {
             let label = if self.kind == FormKind::Codex {
                 "Account"
@@ -209,108 +225,94 @@ impl ProviderForm {
                 "Credential account"
             };
             labelled_line(ui, label, &mut self.account, None);
-            ui.label(muted("Sign in from Authentication after saving."));
         }
-        self.models_editor(ui);
         if self.kind.has_excluded_models() {
             let width = ui.available_width();
             let label = ui.label("Excluded models");
             ui.add(
                 egui::TextEdit::multiline(&mut self.excluded)
                     .hint_text("one per line")
-                    .desired_rows(3)
+                    .desired_rows(2)
                     .desired_width(width)
                     .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
         }
-        let label = ui.label("Default model");
-        let choices: Vec<String> = self
-            .models
-            .iter()
-            .filter(|model| model.enabled)
-            .map(|model| model.id.clone())
-            .collect();
-        egui::ComboBox::from_id_salt("provider-default-model")
-            .width(ui.available_width())
-            .selected_text(&self.default_model)
-            .show_ui(ui, |ui| {
-                for id in choices {
-                    ui.selectable_value(&mut self.default_model, id.clone(), id);
-                }
-            })
-            .response
-            .labelled_by(label.id);
-        ui.add(
-            egui::Label::new(muted(
-                "Used when a route doesn't override the model and when re-resolving a pinned session.",
-            ))
-            .wrap(),
-        );
     }
 
-    /// The error and the Save / Back to list buttons, kept below the scrolled fields as
-    /// legacy does. `busy` stops a second save while one runs.
-    pub(super) fn footer(&self, ui: &mut egui::Ui, busy: bool) -> FormAction {
-        let mut action = FormAction::None;
-        if let Some(error) = &self.error {
-            crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
-        }
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                if primary_button(ui, "Save").clicked() {
-                    action = FormAction::Save;
-                }
-            });
-            if ui.button("Back to list").clicked() {
-                action = FormAction::Cancel;
-            }
-        });
-        action
-    }
-
-    fn models_editor(&mut self, ui: &mut egui::Ui) {
-        ui.label(crate::theme::text::badge("Models"));
+    /// The models table: On, the id, the default model (a star) and removal, with a row to add
+    /// an id by hand.
+    pub(super) fn draw_models(&mut self, ui: &mut egui::Ui) {
         let mut remove = None;
-        for (index, model) in self.models.iter_mut().enumerate() {
-            ui.push_id(index, |ui| {
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut model.enabled, "Enabled");
-                    ui.label(&model.id);
-                    let button = ui.button("Remove");
-                    let id = model.id.clone();
-                    button.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            ui.is_enabled(),
-                            format!("Remove {id}"),
-                        )
+        let mut default = None;
+        egui::Grid::new("provider-models")
+            .num_columns(4)
+            .spacing(vec2(SP_3, SP_1))
+            .striped(false)
+            .show(ui, |ui| {
+                for title in ["On", "Model", "Default", ""] {
+                    ui.label(muted(title));
+                }
+                ui.end_row();
+                for (index, model) in self.models.iter_mut().enumerate() {
+                    ui.push_id(index, |ui| {
+                        switch(ui, &mut model.enabled, &format!("Enable {}", model.id));
                     });
-                    if button.clicked() {
+                    ui.add(egui::Label::new(egui::RichText::new(&model.id).monospace()).truncate());
+                    let is_default = self.default_model == model.id;
+                    let (icon, name) = if is_default {
+                        (
+                            icons::filled(ui, icons::STAR).color(palette().WARNING),
+                            format!("Default model: {}", model.id),
+                        )
+                    } else {
+                        (
+                            egui::RichText::new(icons::STAR).color(palette().TEXT_MUTED),
+                            format!("Make {} the default model", model.id),
+                        )
+                    };
+                    let star = ui.add_enabled(model.enabled, ghost(icon));
+                    accessible(&star, &name);
+                    if star.on_hover_text(&name).clicked() {
+                        default = Some(model.id.clone());
+                    }
+                    let trash = icon_button(ui, icons::TRASH, &format!("Remove {}", model.id));
+                    if trash.clicked() {
                         remove = Some(index);
                     }
-                });
+                    ui.end_row();
+                }
             });
+        if let Some(id) = default {
+            self.default_model = id;
         }
         if let Some(index) = remove {
-            self.models.remove(index);
-        }
-        let label = ui.label("Add model");
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.new_model)
-                    .desired_width((ui.available_width() - 60.0).max(40.0))
-                    .background_color(palette().INPUT),
-            )
-            .labelled_by(label.id);
-            if ui.button("Add").clicked() {
-                let id = self.new_model.trim().to_owned();
-                if !id.is_empty() && !self.models.iter().any(|model| model.id == id) {
-                    self.models.push(ModelRow { id, enabled: true });
-                    self.new_model.clear();
-                }
+            let removed = self.models.remove(index);
+            if self.default_model == removed.id {
+                self.default_model.clear();
             }
+        }
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.new_model)
+                    .hint_text("Add a model ID manually…")
+                    .desired_width((ui.available_width() - 40.0).max(40.0))
+                    .background_color(palette().INPUT),
+            );
+            let enter = edit.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            add = icon_button(ui, icons::PLUS, "Add model").clicked() || enter;
         });
+        if add {
+            let id = self.new_model.trim().to_owned();
+            if !id.is_empty() && !self.models.iter().any(|model| model.id == id) {
+                if self.default_model.is_empty() {
+                    self.default_model.clone_from(&id);
+                }
+                self.models.push(ModelRow { id, enabled: true });
+                self.new_model.clear();
+            }
+        }
     }
 
     /// The form for editing `view`, or `None` for a provider the core cannot write back from
@@ -452,4 +454,28 @@ impl ProviderForm {
             },
         })
     }
+}
+
+/// A switch painted as a pill with a knob; its accessible name is `label` and it reads as
+/// checked while on.
+pub(super) fn switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(30.0, 16.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let enabled = ui.is_enabled();
+    let checked = *on;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, label)
+    });
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id, checked, HOVER_FADE);
+    let track = palette().BORDER.lerp_to_gamma(palette().ACCENT, t);
+    let painter = ui.painter();
+    painter.rect_filled(rect, rect.height() / 2.0, track);
+    let knob = egui::lerp(rect.left() + 8.0..=rect.right() - 8.0, t);
+    painter.circle_filled(egui::pos2(knob, rect.center().y), 6.0, palette().ACCENT_FG);
+    response.on_hover_text(label)
 }
