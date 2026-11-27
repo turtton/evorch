@@ -44,6 +44,7 @@ egui_plot = "0.37"
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
 egui_dock = { workspace = true }
 egui-phosphor = { version = "0.14", default-features = false, features = ["regular", "fill"] }
+egui_kittest = { workspace = true }
 eval = { path = "../eval" }
 event-bus = { path = "../event-bus" }
 image = { workspace = true, default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
@@ -86,7 +87,6 @@ wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 notify-rust = "4"
 
 [dev-dependencies]
-egui_kittest = { workspace = true }
 test-socket-dir = { path = "../test-socket-dir" }
 workbench-host = { path = "../workbench-host", features = ["test-support"] }
 # The history restore test converts a database the build wrote, after taking it back to version 39.

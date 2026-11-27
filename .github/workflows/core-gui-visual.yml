@@ -79,8 +79,10 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-ci-workspace-v2
           save-if: false
-      # The package list of the ci gui-evidence job, so that its cached .debs are the ones
-      # restored here and this job saves no cache entry of its own.
+      # The gui-evidence job of ci that used to share this package list is gone, so no main
+      # push saves these .debs any more: a pull request run saves them under its own ref
+      # (apt-install does that on a miss) and an earlier run of the same PR restores them.
+      # A miss only costs the download; the install falls back to a second mirror.
       - name: Install headless rendering and build dependencies
         if: steps.scope.outputs.relevant == 'true'
         timeout-minutes: 30
