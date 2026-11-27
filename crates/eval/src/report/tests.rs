@@ -1088,11 +1088,31 @@ fn describe_tool(fixture: &Fixture, tool: &str, observed: Option<Observed>) {
             } else {
                 Some(Observed {
                     models: vec![model_use("api", "gpt-9")],
-                    tool_descriptions: Vec::new(),
+                    tool_descriptions: vec![frozen("baseline-worker", "worker", "gpt-9", &[])],
                 })
             };
         }
     });
+}
+
+/// A run's snapshot for `api`/`model` that overrides `tools`, all of which it was offered.
+fn frozen(run_id: &str, role: &str, model: &str, tools: &[&str]) -> AppliedDescriptions {
+    AppliedDescriptions {
+        run_id: run_id.into(),
+        role: role.into(),
+        profile: Some("api".into()),
+        route_model_id: Some(model.into()),
+        hash: "snapshot".into(),
+        tools: tools.iter().map(|name| (*name).to_owned()).collect(),
+        offered: Some(tools.iter().map(|name| (*name).to_owned()).collect()),
+    }
+}
+
+fn used_by(role: &str, model: &str) -> ModelUse {
+    ModelUse {
+        role: Some(role.into()),
+        ..model_use("api", model)
+    }
 }
 
 fn model_use(profile: &str, model: &str) -> ModelUse {
@@ -1895,5 +1915,123 @@ async fn a_description_the_models_edit_interface_did_not_send_is_not_applied_in_
             applied,
             "{tool} with {offered:?}"
         );
+    }
+}
+
+/// Both the worker's model `api/a` and the reviewer's `api/b` have a changed `read`.
+fn describe_read_for_two_models(fixture: &Fixture, baseline: Observed, candidate: Observed) {
+    edit_manifest(fixture, |manifest| {
+        manifest.swapped_roles.clear();
+        manifest.changes = Changes {
+            bindings: Vec::new(),
+            tool_descriptions: ["a", "b"]
+                .into_iter()
+                .map(|model| ToolDescriptionChange {
+                    profile: "api".into(),
+                    route_model_id: model.into(),
+                    tool: "read".into(),
+                    baseline_hash: READ_BASELINE.into(),
+                    candidate_hash: READ_CANDIDATE.into(),
+                })
+                .collect(),
+            affected_roles: vec!["reviewer".into(), "worker".into()],
+        };
+        for entry in &mut manifest.runs {
+            entry.observed = Some(if entry.label == CANDIDATE {
+                candidate.clone()
+            } else {
+                baseline.clone()
+            });
+        }
+    });
+}
+
+fn two_model_replay(prefix: &str, worker_sent_to: &str) -> Observed {
+    Observed {
+        models: vec![used_by("worker", worker_sent_to), used_by("reviewer", "b")],
+        tool_descriptions: vec![
+            frozen(&format!("{prefix}-worker"), "worker", "a", &["read"]),
+            frozen(&format!("{prefix}-reviewer"), "reviewer", "b", &["read"]),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn a_fallback_to_another_described_model_is_told_from_each_roles_own_fixed_model() {
+    // Given: the worker is fixed to `a` and the reviewer to `b`, and both models' descriptions
+    // changed. In both replays the worker fell back to `b`, which is also described.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read_for_two_models(
+        &fixture,
+        two_model_replay("baseline", "b"),
+        two_model_replay("candidate", "b"),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the worker's fallback is found in the baseline and in the candidate, and the
+    // reviewer, which stayed on its own model, is not accused.
+    let held: Vec<(&str, &str)> = reports[0]
+        .breakdown
+        .validity
+        .pending
+        .iter()
+        .filter(|pending| pending.kind == PendingKind::ModelFallback)
+        .map(|pending| (pending.subject.as_str(), pending.reason.as_str()))
+        .collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    for (subject, reason) in &held {
+        assert!(["baseline-1", "candidate-1"].contains(subject), "{subject}");
+        assert!(
+            reason.contains("worker is fixed to api/a") && reason.contains("api/b"),
+            "{reason}"
+        );
+    }
+    assert!(!reports[0].breakdown.validity.valid);
+
+    // When: each role stays on its own model.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read_for_two_models(
+        &fixture,
+        two_model_replay("baseline", "a"),
+        two_model_replay("candidate", "a"),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: nothing is held for a fallback.
+    assert!(!pending_kinds(&reports[0]).contains(&PendingKind::ModelFallback));
+}
+
+#[tokio::test]
+async fn a_role_whose_runs_do_not_fix_one_model_cannot_be_told_from_a_fallback() {
+    // Given: two worker runs fixed to different described models, and a worker request that
+    // went to one of them; a replay in which the reviewer left no snapshot at all.
+    let mut two_workers = two_model_replay("candidate", "a");
+    two_workers
+        .tool_descriptions
+        .push(frozen("candidate-worker-2", "worker", "b", &["read"]));
+    let mut unrecorded_reviewer = two_model_replay("candidate", "a");
+    unrecorded_reviewer.tool_descriptions.truncate(1);
+    for candidate in [two_workers, unrecorded_reviewer] {
+        let fixture = Fixture::new(None, CONFIG);
+        describe_read_for_two_models(&fixture, two_model_replay("baseline", "a"), candidate);
+        let deps = fixture.deps(judge_answers_without_problem()).await;
+
+        // When: the directory is reported.
+        let reports = report(fixture.args(false), &deps).await.unwrap();
+
+        // Then: the candidate's judgment is held, since no unique fixed model decides it.
+        let held: Vec<&str> = reports[0]
+            .breakdown
+            .validity
+            .pending
+            .iter()
+            .filter(|pending| pending.kind == PendingKind::ModelFallback)
+            .map(|pending| pending.subject.as_str())
+            .collect();
+        assert_eq!(held, ["candidate-1"]);
     }
 }

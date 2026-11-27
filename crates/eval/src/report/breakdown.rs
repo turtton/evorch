@@ -6,7 +6,7 @@
 //! A number that is missing is unknown, never zero: an unreported usage, an
 //! unpriced model or a replay without a database leaves the figure `None`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -259,10 +259,12 @@ fn base_model(id: &str) -> &str {
 /// 2. the tool is among the `tool_names` the run's own record offered, so the
 ///    run's role and its being a child are accounted for (and its role is one
 ///    the change reaches);
-/// 3. the replay's requests for the role were all answered by a model the
-///    changed descriptions are for. This reads the usage ledger's actual
-///    profile and model, never the fallback events, and is checked for baseline
-///    and candidate alike (`fallbacks`);
+/// 3. every request of the role was answered by the (profile, base model) the
+///    role's own runs were fixed to, as their snapshots record. This reads the
+///    usage ledger's actual profile and model, never the fallback events, and is
+///    checked for baseline and candidate alike. A role whose runs do not fix
+///    exactly one known model cannot be told from a fallback, and is held
+///    (`fallbacks`);
 /// 4. the description reaches the model's wire: `offered` already holds only
 ///    the tools that pass `BuiltinCatalog::description_reaches_wire` for the
 ///    edit interface of the run's profile and model.
@@ -309,31 +311,57 @@ pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
         })
         .map(|applied| applied.run_id.clone())
         .collect();
-    let described: Vec<(&str, &str)> = changes
-        .tool_descriptions
-        .iter()
-        .map(|change| (change.profile.as_str(), base_model(&change.route_model_id)))
-        .collect();
     let mut fallbacks = Vec::new();
-    if !described.is_empty() {
+    if !changes.tool_descriptions.is_empty() {
+        // The model each role was fixed to, read from its own runs' snapshots: one
+        // (profile, base model) per role, or else it cannot be told.
+        let mut fixed: BTreeMap<&str, BTreeSet<Option<(String, String)>>> = BTreeMap::new();
+        for applied in &observed.tool_descriptions {
+            if let Some(address) = roles::address(&applied.role) {
+                let identity = applied
+                    .profile
+                    .as_deref()
+                    .zip(applied.route_model_id.as_deref())
+                    .map(|(profile, model)| (profile.to_owned(), base_model(model).to_owned()));
+                fixed.entry(address).or_default().insert(identity);
+            }
+        }
         for used in &observed.models {
-            let affected = used
-                .role
-                .as_deref()
-                .and_then(roles::address)
-                .is_some_and(|address| changes.affected_roles.iter().any(|role| role == address));
-            let described_for = used
-                .profile
-                .as_deref()
-                .is_none_or(|profile| described.contains(&(profile, base_model(&used.model))));
-            if affected && !described_for {
+            let name = used.role.as_deref().unwrap_or("a request with no role");
+            let Some(address) = used.role.as_deref().and_then(roles::address) else {
                 fallbacks.push(format!(
-                    "{} sent {} request(s) to {}/{}, which the changed descriptions are not for",
-                    used.role.as_deref().unwrap_or("an affected role"),
+                    "{name}: {} request(s) to {}/{} cannot be attributed to a role, so a fallback cannot be ruled out",
                     used.requests,
                     used.profile.as_deref().unwrap_or(&used.provider),
                     used.model
                 ));
+                continue;
+            };
+            if !changes.affected_roles.iter().any(|role| role == address) {
+                continue;
+            }
+            let sent = used
+                .profile
+                .as_deref()
+                .map(|profile| (profile.to_owned(), base_model(&used.model).to_owned()));
+            match fixed.get(address).map(|set| set.iter().collect::<Vec<_>>()) {
+                Some(identities) if identities.len() == 1 && identities[0].is_some() => {
+                    if sent.as_ref() != identities[0].as_ref() {
+                        let (profile, model) = identities[0].clone().unwrap_or_default();
+                        fallbacks.push(format!(
+                            "{name} is fixed to {profile}/{model} by its own run, but sent {} request(s) to {}/{}",
+                            used.requests,
+                            used.profile.as_deref().unwrap_or(&used.provider),
+                            used.model
+                        ));
+                    }
+                }
+                _ => fallbacks.push(format!(
+                    "{name}: its runs do not fix one model (none recorded, an unknown one or several), so {} request(s) to {}/{} cannot be told from a fallback",
+                    used.requests,
+                    used.profile.as_deref().unwrap_or(&used.provider),
+                    used.model
+                )),
             }
         }
     }
