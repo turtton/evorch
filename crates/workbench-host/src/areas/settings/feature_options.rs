@@ -194,6 +194,7 @@ fn edit_of(
         thread_retention: patch.thread_cleanup.map(|cleanup| ThreadRetentionConfig {
             auto_archive_after_days: cleanup.auto_archive_after_days,
             archived_delete_after_days: cleanup.archived_delete_after_days,
+            ..baseline.storage.thread_retention
         }),
     })
 }

@@ -43,6 +43,7 @@ fn full_edit() -> FeatureSettingsEdit {
         thread_retention: Some(ThreadRetentionConfig {
             auto_archive_after_days: 0,
             archived_delete_after_days: 30,
+            ..Default::default()
         }),
     }
 }
@@ -167,4 +168,25 @@ fn a_key_another_layer_overrides_is_not_rewritten_when_it_is_not_edited() {
         text.replace("enabled = false", "enabled = true"),
         "{edited}"
     );
+}
+
+#[test]
+fn the_retention_key_the_screen_does_not_have_stays_as_the_file_has_it() {
+    let text = "version = 3\n[storage.thread_retention]\nauto_archive_after_days = 7\ntool_body_delete_after_days = 3\n";
+    let baseline = effective(text);
+    let edit = FeatureSettingsEdit {
+        thread_retention: Some(ThreadRetentionConfig {
+            auto_archive_after_days: 0,
+            ..baseline.storage.thread_retention
+        }),
+        ..Default::default()
+    };
+
+    let edited = edit_feature_settings_text(text, &edit, &baseline).unwrap();
+
+    assert_eq!(
+        edited,
+        text.replace("auto_archive_after_days = 7", "auto_archive_after_days = 0")
+    );
+    assert_eq!(edit.differing(&effective(&edited)), Vec::<&str>::new());
 }
