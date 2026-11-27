@@ -124,6 +124,12 @@ pub struct ExecutionFeature {
     /// The runs whose names were asked for, so each is asked once per session unless the
     /// read went unanswered or was refused for a while.
     asked_names: BTreeSet<RunId>,
+    /// The runs whose model the shell wants and that were not asked for yet, with whether
+    /// each was live when wanted.
+    wanted_models: BTreeMap<RunId, (ThreadId, bool)>,
+    /// The runs whose model was asked for this session, with whether the run was live then:
+    /// a read made while it was not does not stand in for one once it works.
+    asked_models: BTreeMap<RunId, bool>,
     /// How often this session's name read of a run was refused for a while.
     name_refusals: BTreeMap<RunId, u8>,
     /// The last `maintain` could ask for names: a thread was selected and the area was
@@ -190,13 +196,28 @@ impl ExecutionFeature {
         }
     }
 
+    /// Ask the core for `run`'s model in a later `maintain`, whether its name is known or
+    /// not. Once per session while the run is not live, and once more when it is live: a
+    /// run history only remained of gets a model when it works again.
+    pub fn want_model(&mut self, thread: ThreadId, run: RunId, live: bool) {
+        if !self.models.contains_key(&run) && !self.model_asked(&run, live) {
+            self.wanted_models.insert(run, (thread, live));
+        }
+    }
+
+    fn model_asked(&self, run: &RunId, live: bool) -> bool {
+        self.asked_models
+            .get(run)
+            .is_some_and(|asked_live| *asked_live || !live)
+    }
+
     /// Names are wanted that the next `maintain` may ask for: the view draws again. While
     /// [`NAME_READS_IN_FLIGHT`] are unanswered, their answers draw it; while no thread is
     /// selected or the area is unavailable, the `maintain` that can ask is drawn by the
     /// selection or the connection that makes it so.
     pub fn names_waiting(&self) -> bool {
         self.names_askable
-            && !self.wanted_names.is_empty()
+            && !(self.wanted_names.is_empty() && self.wanted_models.is_empty())
             && self.name_reads_in_flight() < NAME_READS_IN_FLIGHT
     }
 
@@ -213,13 +234,20 @@ impl ExecutionFeature {
     fn send_name_reads(&mut self, ctx: &mut FeatureContext<'_>) {
         let mut in_flight = self.name_reads_in_flight();
         while in_flight < NAME_READS_IN_FLIGHT {
-            let Some((run, thread)) = self.wanted_names.pop_first() else {
+            let target = if let Some((run, thread)) = self.wanted_names.pop_first() {
+                if self.names.contains_key(&run) || !self.asked_names.insert(run.clone()) {
+                    continue;
+                }
+                RunRef { thread, run }
+            } else if let Some((run, (thread, live))) = self.wanted_models.pop_first() {
+                if self.models.contains_key(&run) || self.model_asked(&run, live) {
+                    continue;
+                }
+                self.asked_models.insert(run.clone(), live);
+                RunRef { thread, run }
+            } else {
                 break;
             };
-            if self.names.contains_key(&run) || !self.asked_names.insert(run.clone()) {
-                continue;
-            }
-            let target = RunRef { thread, run };
             let tag = self.tag(Pending::Name(target.clone()));
             ctx.query(tag, Query::Execution(ExecutionQuery::GetRun(target)));
             in_flight += 1;
@@ -575,6 +603,7 @@ impl Feature for ExecutionFeature {
         // A name not read yet is asked for again from the new session.
         let names = &self.names;
         self.asked_names.retain(|run| names.contains_key(run));
+        self.asked_models.clear();
         self.name_refusals.clear();
     }
 
@@ -697,6 +726,7 @@ impl Feature for ExecutionFeature {
                 };
                 if again {
                     self.asked_names.remove(&target.run);
+                    self.asked_models.remove(&target.run);
                     self.want_name(target.thread, target.run);
                 }
             }

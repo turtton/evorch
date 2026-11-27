@@ -28,6 +28,7 @@ use std::{
 };
 use workbench_client::ClientConfig;
 use workbench_protocol::namespaces::ConversationCommand;
+use workbench_protocol::views::RunPhase;
 use workbench_protocol::{
     commands::*,
     handshake::{BuildInfo, Capability},
@@ -472,18 +473,38 @@ impl CoreClientScreen {
                 run_tabs.set_model(id, model);
             }
         }
-        // A tab without a name or a model asks the core for its run once, whatever the
-        // Subagents tab shows: a restored tab keeps its name but not the model.
+        // What a tab lacks is asked of the core on its own terms, whatever the Subagents
+        // tab shows: a name once, a model once and once more when the run works.
         let wanted: Vec<_> = run_tabs
             .shown_tabs()
             .filter(|(_, tab)| tab.name.is_none() || tab.model.is_none())
-            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone(), tab.name.is_none()))
+            .map(|(id, tab)| {
+                (
+                    id,
+                    tab.thread.clone(),
+                    tab.run.clone(),
+                    (tab.name.is_none(), tab.model.is_none()),
+                )
+            })
             .collect();
-        for (id, thread, run, unnamed) in wanted {
-            match execution.run_name(&run) {
-                Some(name) if unnamed => run_tabs.set_name(id, name),
-                Some(_) => {}
-                None => execution.want_name(thread, run),
+        for (id, thread, run, (unnamed, modelless)) in wanted {
+            if unnamed {
+                match execution.run_name(&run) {
+                    Some(name) => run_tabs.set_name(id, name),
+                    None => execution.want_name(thread.clone(), run.clone()),
+                }
+            }
+            if modelless {
+                let live = shared.cache.runs.get(run.as_str()).is_some_and(|summary| {
+                    matches!(
+                        summary.phase,
+                        RunPhase::Pending
+                            | RunPhase::Running
+                            | RunPhase::WaitingForUser
+                            | RunPhase::WaitingForApproval
+                    )
+                });
+                execution.want_model(thread, run, live);
             }
         }
     }

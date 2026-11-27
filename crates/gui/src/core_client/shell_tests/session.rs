@@ -402,13 +402,10 @@ fn folding_and_unfolding_a_thread_is_kept_across_windows() {
     assert!(store.load().unwrap().folded_threads.is_empty());
 }
 
-// Given: a session file that kept a named subagent tab of thr-1 while a file tab hid the
-//        Subagents tab, and the core lists that run as live with a model
-// When: the window connects
-// Then: the run is read once although the tab has its name, and the answer's model is the
-//       tab's, shown under its title
-#[test]
-fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() {
+/// A window restored on a named subagent tab (run-9, a child of thr-1's root) with a file
+/// tab in front of the Subagents tab, so that tab is never drawn; the cache holds run-9 in
+/// `phase`. Returns the window with the actions its connecting left.
+fn restored_named_subagent(phase: &str) -> (Screen, Vec<Action>) {
     let dir = tempfile::tempdir().unwrap();
     let notes = dir.path().join("NOTES.md");
     std::fs::write(&notes, "# Notes\n").unwrap();
@@ -437,9 +434,16 @@ fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() 
         })
         .unwrap();
     let mut screen = restored(store, false);
+    set_run_phase(&screen, phase);
+    screen.harness.run_steps(1);
+    let asked = connect(&mut screen);
+    (screen, asked)
+}
+
+fn set_run_phase(screen: &Screen, phase: &str) {
     let run: RunSummary = view(json!({
         "id": "run-9", "thread": "thr-1", "parent_run": "run-1",
-        "role": "worker", "phase": "running", "revision": "4",
+        "role": "worker", "phase": phase, "revision": "4",
     }));
     screen
         .shared
@@ -447,45 +451,90 @@ fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() 
         .unwrap()
         .cache
         .runs
-        .insert("run-9".into(), run.clone());
-    screen.harness.run_steps(1);
-    let mut asked = connect(&mut screen);
+        .insert("run-9".into(), run);
+}
 
-    let mut reads = Vec::new();
+/// Runs frames and answers every read of run-9 with `model` (none for a run only history
+/// remains of); returns how many reads were asked.
+fn answer_run_reads(screen: &mut Screen, asked: &mut Vec<Action>, model: Option<&str>) -> usize {
+    let mut reads = 0;
     for _ in 0..4 {
         screen.harness.run_steps(2);
         asked.extend(screen.settle());
-        for action in std::mem::take(&mut asked) {
-            if let Action::Feature(FeatureAction {
+        for action in std::mem::take(asked) {
+            let Action::Feature(FeatureAction {
                 feature: FeatureId::Execution,
                 tag,
                 request: FeatureRequest::Query(Query::Execution(ExecutionQuery::GetRun(target))),
             }) = action
-            {
-                let detail = json!({"summary": serde_json::to_value(&run).unwrap(),
-                    "name": "tester", "lifecycle": "active", "source": "live",
-                    "model": "work/gpt-5", "child_count": 0, "revision": "4"});
-                let reply = FeatureReply::Query(Ok(view(
-                    json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
-                )));
-                screen
-                    .shared
-                    .lock()
-                    .unwrap()
-                    .features
-                    .reply(FeatureId::Execution, tag, reply);
-                reads.push(target.run.as_str().to_owned());
-            }
+            else {
+                continue;
+            };
+            assert_eq!(target.run.as_str(), "run-9");
+            let mut detail = json!({"summary": {"id": "run-9", "thread": "thr-1",
+                    "parent_run": "run-1", "role": "worker", "phase": "running",
+                    "revision": "4"},
+                "name": "tester", "lifecycle": "active", "source": "live",
+                "child_count": 0, "revision": "4"});
+            detail["model"] = json!(model);
+            let reply = FeatureReply::Query(Ok(view(
+                json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
+            )));
+            screen
+                .shared
+                .lock()
+                .unwrap()
+                .features
+                .reply(FeatureId::Execution, tag, reply);
+            reads += 1;
         }
     }
     screen.harness.run_steps(2);
+    reads
+}
 
-    assert_eq!(reads, ["run-9"]);
+fn run_9_model(screen: &Screen) -> Option<String> {
     let state = screen.harness.state();
-    let tab = state
+    let (_, tab) = state
         .run_tabs
         .iter()
         .find(|(_, tab)| tab.run.as_str() == "run-9")
-        .map(|(_, tab)| tab.model.clone());
-    assert_eq!(tab, Some(Some("work/gpt-5".to_owned())));
+        .unwrap();
+    tab.model.clone()
+}
+
+// Given: a session file that kept a named subagent tab of thr-1 while a file tab hid the
+//        Subagents tab, and run-9 is live
+// When: the window connects
+// Then: the run is read once although the tab has its name, and the answer's model is the
+//       tab's
+#[test]
+fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() {
+    let (mut screen, mut asked) = restored_named_subagent("running");
+
+    let reads = answer_run_reads(&mut screen, &mut asked, Some("work/gpt-5"));
+
+    assert_eq!(reads, 1);
+    assert_eq!(run_9_model(&screen).as_deref(), Some("work/gpt-5"));
+}
+
+// Given: the same window, but only history remains of run-9 (the core restarted)
+// When: the tab's run is read, and then the parent's message resumes the run
+// Then: the first read finds no model and is not repeated while the run rests; once the run
+//       works it is read once more, and the model it reports is the tab's
+#[test]
+fn a_history_only_run_that_resumes_gets_its_model_while_subagents_stays_hidden() {
+    let (mut screen, mut asked) = restored_named_subagent("done");
+
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 1);
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 0);
+    assert_eq!(run_9_model(&screen), None);
+
+    set_run_phase(&screen, "running");
+    assert_eq!(
+        answer_run_reads(&mut screen, &mut asked, Some("work/gpt-5")),
+        1
+    );
+    assert_eq!(run_9_model(&screen).as_deref(), Some("work/gpt-5"));
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 0);
 }
