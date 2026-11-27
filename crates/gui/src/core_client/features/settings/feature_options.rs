@@ -20,6 +20,8 @@ use workbench_protocol::namespaces::settings::{
 
 /// Days a step starts with when it is turned on after being off.
 const DEFAULT_DAYS: u32 = 7;
+/// Room kept at the right of a card for its switch.
+const SWITCH_GUTTER: f32 = 56.0;
 const MODAL_WIDTH: f32 = 720.0;
 const MODAL_MAX_HEIGHT: f32 = 760.0;
 const MODAL_MARGIN: f32 = SP_4 * 1.5;
@@ -463,8 +465,7 @@ fn chip(ui: &mut egui::Ui, restart: bool) {
 /// what the card shows under them.
 fn card(
     ui: &mut egui::Ui,
-    icon: &str,
-    title: &str,
+    (icon, title): (&str, &str),
     restart: bool,
     description: &str,
     on: Option<&mut bool>,
@@ -480,6 +481,7 @@ fn card(
                     .color(palette().INFO),
             );
             ui.vertical(|ui| {
+                ui.set_max_width(ui.available_width() - SWITCH_GUTTER);
                 ui.horizontal(|ui| {
                     ui.label(medium(title).size(FONT_H4));
                     chip(ui, restart);
@@ -500,6 +502,7 @@ fn card(
 fn option_row(ui: &mut egui::Ui, label: &str, help: &str, on: &mut bool) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - SWITCH_GUTTER);
             ui.label(label);
             ui.label(muted(help));
         });
@@ -545,8 +548,7 @@ fn pull_request_card(
     let mut enabled = pr.enabled;
     card(
         ui,
-        icons::LINK,
-        "Pull request view",
+        (icons::LINK, "Pull request view"),
         restart,
         "Track the CI and review state of the pull request linked to a thread and show it above the conversation. Uses the GitHub CLI (gh).",
         Some(&mut enabled),
@@ -630,8 +632,7 @@ fn web_tools_card(ui: &mut egui::Ui, options: &mut FeatureOptions, restart: bool
     };
     card(
         ui,
-        icons::GLOBE,
-        "Agent web tools",
+        (icons::GLOBE, "Agent web tools"),
         restart,
         "Lets roles that are allowed use web search and fetch. Each call still follows the tool policy. A run that already started keeps the tools it was sent.",
         Some(&mut draft.web_tools),
@@ -655,8 +656,7 @@ fn browser_card(ui: &mut egui::Ui, options: &mut FeatureOptions, restart: bool, 
     let mut enabled = browser.enabled;
     card(
         ui,
-        icons::EYE,
-        "Agent browser",
+        (icons::EYE, "Agent browser"),
         restart,
         "Tools that let the agent operate a browser. They are registered when a Chromium or Chrome executable is found.",
         Some(&mut enabled),
@@ -695,8 +695,7 @@ fn cleanup_card(ui: &mut egui::Ui, options: &mut FeatureOptions, restart: bool, 
     let (archive, delete) = (&mut draft.archive, &mut draft.delete);
     card(
         ui,
-        icons::ARCHIVE,
-        "Thread cleanup",
+        (icons::ARCHIVE, "Thread cleanup"),
         restart,
         "Archive threads that are no longer used, and delete archived threads after a while. Pinned threads, evaluation samples and running threads are left alone.",
         None,
