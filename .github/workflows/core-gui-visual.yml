@@ -1,0 +1,28 @@
+name: core-gui-visual
+
+# TEMPORARY first revision: only the real-API check of the evidence writer.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  group: core-gui-visual-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  api-selftest:
+    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Exercise the evidence branch writer with the job token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/core-gui-visual/api-selftest.mjs
