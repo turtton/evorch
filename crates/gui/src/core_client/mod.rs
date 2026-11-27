@@ -17,6 +17,7 @@ pub mod run_tabs;
 pub mod shell;
 mod subagent_panes;
 pub mod theme;
+mod thread_search;
 mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
@@ -326,6 +327,7 @@ pub struct CoreClientScreen {
     /// those of threads the core no longer has.
     pending_run_tab_prune: bool,
     theme: theme::ThemePicker,
+    thread_search: thread_search::ThreadSearch,
     stats: Option<crate::panes::system_footer::SystemFooter>,
 }
 
@@ -355,6 +357,7 @@ impl CoreClientScreen {
             pending_selection: None,
             pending_run_tab_prune: false,
             theme: theme::ThemePicker::default(),
+            thread_search: thread_search::ThreadSearch::default(),
             stats: None,
         }
     }
@@ -979,7 +982,15 @@ impl CoreClientScreen {
                 );
             });
         let mut save_now = false;
-        match ui.input(|input| self.keymap.action_for_input(input)) {
+        // Ctrl+K, and while the search is open every key belongs to it, not to the chords.
+        self.thread_search
+            .begin_frame(ui.ctx(), self.project.as_ref());
+        let chord = if self.thread_search.is_open() {
+            None
+        } else {
+            ui.input(|input| self.keymap.action_for_input(input))
+        };
+        match chord {
             Some(KeyAction::FocusAgentPane) => {
                 effects.push(shell::Effect::Open(shell::CoreTab::Conversation));
             }
@@ -1107,6 +1118,26 @@ impl CoreClientScreen {
             );
         }
         self.theme.show(ui.ctx());
+        let model = shared
+            .features
+            .workspace()
+            .map(|workspace| workspace.model());
+        if let Some(thread_search::Outcome::Open(row)) =
+            self.thread_search.show(ui.ctx(), &shared.cache, model)
+        {
+            let navigation = Navigation::SelectThread {
+                project: row.project,
+                thread: row.thread,
+            };
+            apply_navigation(
+                &self.actions,
+                &mut shared,
+                &mut self.project,
+                &mut self.selected,
+                navigation,
+            );
+            shell::focus(&mut self.dock, shell::CoreTab::Conversation);
+        }
         // Closing a file tab or a reset layout drops its preview.
         self.local.sweep_files(ui.ctx(), &self.dock);
         // Closing a tab, a reset layout or another thread drops its run's history.
