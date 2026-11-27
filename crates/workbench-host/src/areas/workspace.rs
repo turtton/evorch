@@ -246,8 +246,8 @@ impl WorkspaceArea {
                 registered: Default::default(),
                 needs_projection: AtomicBool::new(true),
                 scratch_hint: Some({
-                    let owner = handles.owner.clone();
-                    Arc::new(move |thread: &str| owner.hint_scratch_archive(thread))
+                    let archive = handles.scratch_archive.clone();
+                    Arc::new(move |thread: &str| archive.hint(thread))
                 }),
             }),
         })

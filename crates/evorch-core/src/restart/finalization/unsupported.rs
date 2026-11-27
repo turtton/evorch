@@ -20,6 +20,7 @@ impl RestartCoordinator {
         _: RestartId,
         armed: ArmedFinalization,
         _: Arc<runtime::ownership::OwnerHost>,
+        _: Arc<runtime::scratch::archive::ArchiveService>,
         _: storage::StorageHandle,
     ) -> Result<(), String> {
         match armed {}

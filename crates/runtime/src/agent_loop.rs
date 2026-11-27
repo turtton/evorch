@@ -411,7 +411,9 @@ pub(crate) async fn run_agent(
         policy.capabilities.allowed_tools.remove("plan_read");
         policy.capabilities.allowed_tools.remove("plan_update");
     }
-    let thread_id = runtime.thread_of_live_run(task.run_id);
+    let thread_id = runtime
+        .trusted_thread_context(task.run_id)
+        .map(|context| context.thread_id().to_owned());
     drop(runtime);
     // A sandboxed runtime mounts the run's own project instead of the active one.
     let sandbox_root = shared.upgrade().and_then(|runtime| {
@@ -2501,12 +2503,7 @@ impl LoopState {
                 OWNERSHIP_WAIT_NOTICE.as_secs()
             ),
             run_id: Some(self.task.run_id.to_string()),
-            thread_id: self
-                .task
-                .config
-                .ownership
-                .as_ref()
-                .map(|permit| permit.thread_id.clone()),
+            thread_id: self.thread_id.clone(),
             call_id: None,
         }));
         let result = operation.await;

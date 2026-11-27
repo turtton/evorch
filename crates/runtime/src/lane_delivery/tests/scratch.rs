@@ -59,7 +59,8 @@ async fn lane_delivery_registers_and_recreates_reclaimed_scratch_before_the_mode
     let scratch = host.thread_scratch();
     f.runtime.set_thread_scratch(scratch.clone());
     let (consulted, mut received) = tokio::sync::mpsc::unbounded_channel();
-    host.set_scratch_archive_checker(Arc::new(move |_| {
+    let archive = runtime_archive(&host);
+    archive.set_checker(Arc::new(move |_| {
         consulted.send(()).unwrap();
         Ok(true)
     }));
@@ -67,9 +68,9 @@ async fn lane_delivery_registers_and_recreates_reclaimed_scratch_before_the_mode
     let lane = f.lane(lead, "scratch-resume").await;
     let dir = scratch.thread_dir("delivery-lead");
     std::fs::write(dir.join("keep"), "keep").unwrap();
-    host.hint_scratch_archive("delivery-lead");
+    archive.hint("delivery-lead");
     received.recv().await.unwrap();
-    let pass = host.scratch_archive_barrier();
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
@@ -87,8 +88,8 @@ async fn lane_delivery_registers_and_recreates_reclaimed_scratch_before_the_mode
         "lane input must recreate the same scratch before model use"
     );
     assert!(!dir.join("keep").exists(), "the resumed scratch is empty");
-    host.hint_scratch_archive("delivery-lead");
-    let pass = host.scratch_archive_barrier();
+    archive.hint("delivery-lead");
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
@@ -135,7 +136,8 @@ async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
     let (lead, _) = f.lead().await;
     let lane = f.lane(lead, "archive-busy-lane").await;
     host.start(&lane.thread_id).unwrap();
-    host.set_scratch_archive_checker(Arc::new(|_| Ok(true)));
+    let archive = runtime_archive(&host);
+    archive.set_checker(Arc::new(|_| Ok(true)));
     // Opening an attached lane may also wake the lead. Only this lane's
     // invocation proves that its scratch registration has resumed.
     *model.target.lock().unwrap() = Some(lane.root_run_id.to_string());
@@ -150,8 +152,8 @@ async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
     assert!(scratch.archive_snapshot(&lane.thread_id).is_none());
     let dir = scratch.thread_dir(&lane.thread_id);
     std::fs::write(dir.join("keep"), "lane scratch").unwrap();
-    host.hint_scratch_archive(&lane.thread_id);
-    let pass = host.scratch_archive_barrier();
+    archive.hint(&lane.thread_id);
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
@@ -160,11 +162,19 @@ async fn active_lane_thread_scratch_is_kept_until_its_execution_ends() {
         .stop(lane.root_run_id, crate::StopScope::SelfOnly)
         .unwrap();
     f.runtime.wait(lane.root_run_id).await.unwrap();
-    let pass = host.scratch_archive_barrier();
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
     assert!(!dir.exists());
     f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
     f.runtime.wait(lead).await.unwrap();
+}
+
+fn runtime_archive(host: &crate::ownership::OwnerHost) -> crate::scratch::archive::ArchiveService {
+    crate::scratch::archive::ArchiveService::new(
+        &host.thread_scratch(),
+        host.scratch_archive_authority(),
+    )
+    .unwrap()
 }

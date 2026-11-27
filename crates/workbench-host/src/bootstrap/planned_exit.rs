@@ -53,6 +53,7 @@ pub struct PlannedExit {
     workers_result: Option<Result<(), String>>,
     cleanup_result: Option<Result<(), String>>,
     holds: Arc<RestartHolds>,
+    scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
 }
 impl BootstrappedHost {
     /// The bridge moved here, so ordinary shutdown must reclaim it before
@@ -114,6 +115,7 @@ impl BootstrappedHost {
             .service_mut()
             .take_background_tasks();
         let resources = Arc::new(tokio::sync::Mutex::new(PlannedExit {
+            scratch_archive: self.scratch_archive.clone(),
             ledger: self.spawn_ledger.clone(),
             runtime: self.runtime.clone(),
             area_tasks: self.area_tasks.clone(),
@@ -144,6 +146,9 @@ impl BootstrappedHost {
     }
 }
 impl PlannedExit {
+    pub fn scratch_archive(&self) -> Arc<runtime::scratch::archive::ArchiveService> {
+        self.scratch_archive.clone()
+    }
     pub fn completed(&self) -> Option<ExitStage> {
         self.completed
     }

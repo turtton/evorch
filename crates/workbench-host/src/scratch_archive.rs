@@ -1,9 +1,8 @@
 //! Wiring of archive-time thread scratch recovery.
 //!
-//! The runtime owns the archive worker, the fenced rename and the trash
-//! collector. It knows nothing about the sidebar, so the host and the native
-//! GUI inject the saved shared-sidebar state here, through the one function
-//! both production paths call ([`install`]).
+//! The host owns the scratch module's worker and injects saved shared-sidebar
+//! state through [`install`]. The worker knows nothing about sidebar structure;
+//! its ownership adapter still fences every rename against the current lease.
 //!
 //! The checker runs only on the runtime's archive worker thread. It reads the
 //! shared sidebar file without its save lock ([`SidebarStore::read_unlocked`]:
@@ -15,7 +14,7 @@
 //!
 //! Only a resolved family decides: archived (collect) or not archived (the
 //! hint is dropped). Attachments are never touched from here.
-use runtime::ownership::{OwnerHost, ScratchArchiveChecker};
+use runtime::scratch::archive::{ArchiveService, ScratchArchiveChecker};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,8 +50,8 @@ pub fn sidebar_checker(sidebar: Option<PathBuf>) -> Arc<ScratchArchiveChecker> {
     })
 }
 
-/// Connects `owner` to the saved shared sidebar. Call once per owner host
+/// Connects the host-owned archive worker to the saved shared sidebar. Call once
 /// before archive hints can arrive.
-pub fn install(owner: &OwnerHost, sidebar: Option<PathBuf>) {
-    owner.set_scratch_archive_checker(sidebar_checker(sidebar));
+pub fn install(archive: &ArchiveService, sidebar: Option<PathBuf>) {
+    archive.set_checker(sidebar_checker(sidebar));
 }

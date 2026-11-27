@@ -4802,7 +4802,8 @@ async fn archive_reclaim_resume_appends_one_notice_and_preserves_wire_prefix() {
     .unwrap();
     host.start("thread").unwrap();
     let (consulted_tx, mut consulted) = tokio::sync::mpsc::unbounded_channel();
-    host.set_scratch_archive_checker(Arc::new(move |_| {
+    let archive = runtime_archive(&host);
+    archive.set_checker(Arc::new(move |_| {
         let _ = consulted_tx.send(());
         Ok(true)
     }));
@@ -4848,9 +4849,9 @@ async fn archive_reclaim_resume_appends_one_notice_and_preserves_wire_prefix() {
 
     // The archive worker reaches the saved-sidebar checker only after the idle
     // run released its scratch usage, and the same pass renames the directory.
-    host.hint_scratch_archive("thread");
+    archive.hint("thread");
     consulted.recv().await.unwrap();
-    let barrier = host.scratch_archive_barrier();
+    let barrier = archive.barrier();
     tokio::task::spawn_blocking(move || barrier.recv().unwrap())
         .await
         .unwrap();
@@ -6632,4 +6633,14 @@ async fn interactive_delegate_turn_output_preserves_parent_wire_prefix() {
         harness.runtime.cancel(child.run_id).unwrap();
         harness.runtime.wait(child.run_id).await.unwrap();
     }
+}
+
+fn runtime_archive(
+    host: &runtime::ownership::OwnerHost,
+) -> runtime::scratch::archive::ArchiveService {
+    runtime::scratch::archive::ArchiveService::new(
+        &host.thread_scratch(),
+        host.scratch_archive_authority(),
+    )
+    .unwrap()
 }

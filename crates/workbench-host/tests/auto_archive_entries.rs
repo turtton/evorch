@@ -67,8 +67,8 @@ fn workspace_attachment_and_shutdown_entries_have_canonical_lock_or_admission_ro
         ),
         (
             "bootstrap/planned_exit.rs",
-            "cleanup completed first_five restart_holds take_planned_exit validate_planned_exit writer",
-            "G10 delegated: retained producers stop/join at WorkersJoined before StorageDrained; getters/cleanup do not admit new work.",
+            "cleanup completed first_five restart_holds scratch_archive take_planned_exit validate_planned_exit writer",
+            "G10 delegated: retained producers stop/join at WorkersJoined before StorageDrained; scratch_archive only exposes the already-owned worker for stop/join before exec. Getters/cleanup do not admit new work.",
         ),
     ];
     let actual = rows

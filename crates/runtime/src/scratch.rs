@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::agent_loop::LoopState;
 use crate::{AgentContext, AgentRuntime, RunId};
 
+pub mod archive;
 mod conditional_reset;
 pub(crate) mod usage;
 pub(crate) use conditional_reset::GraphDisposalKey;

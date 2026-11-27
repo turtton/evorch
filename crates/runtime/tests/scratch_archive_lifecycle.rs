@@ -116,7 +116,8 @@ impl Gate {
 
 struct World {
     runtime: AgentRuntime,
-    host: OwnerHost,
+    _host: OwnerHost,
+    archive: runtime::scratch::archive::ArchiveService,
     model: Arc<ScriptedModel>,
     bus: Arc<EventBus>,
     events: EventReceiver,
@@ -140,7 +141,12 @@ impl World {
         host.start(THREAD).unwrap();
         let scratch = host.thread_scratch();
         let (consulted_tx, consulted) = unbounded_channel();
-        host.set_scratch_archive_checker(Arc::new(move |_| {
+        let archive = runtime::scratch::archive::ArchiveService::new(
+            &scratch,
+            host.scratch_archive_authority(),
+        )
+        .unwrap();
+        archive.set_checker(Arc::new(move |_| {
             let _ = consulted_tx.send(());
             Ok(true)
         }));
@@ -169,7 +175,8 @@ impl World {
         runtime.set_thread_scratch(scratch.clone());
         Self {
             runtime,
-            host,
+            _host: host,
+            archive,
             model,
             bus,
             events,
@@ -215,7 +222,7 @@ impl World {
 
     /// Returns after one full pass of the archive worker.
     async fn pass(&self) {
-        let barrier = self.host.scratch_archive_barrier();
+        let barrier = self.archive.barrier();
         tokio::task::spawn_blocking(move || barrier.recv().unwrap())
             .await
             .unwrap();
@@ -223,7 +230,7 @@ impl World {
 
     /// The pass met a user: it read no sidebar and left `file` in place.
     async fn assert_held(&mut self, file: &str, why: &str) {
-        self.host.hint_scratch_archive(THREAD);
+        self.archive.hint(THREAD);
         self.pass().await;
         assert!(self.consulted.try_recv().is_err(), "{why}: sidebar read");
         assert!(self.dir.join(file).exists(), "{why}: scratch renamed");
@@ -232,7 +239,7 @@ impl World {
     /// A hint outlives busy passes, so the sidebar is consulted once the last
     /// user left. The pass that consulted it also renamed the directory.
     async fn assert_reclaimed(&mut self) {
-        self.host.hint_scratch_archive(THREAD);
+        self.archive.hint(THREAD);
         self.consulted.recv().await.unwrap();
         self.pass().await;
         assert!(!self.dir.exists(), "scratch was not reclaimed");

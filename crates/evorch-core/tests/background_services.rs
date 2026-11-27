@@ -604,6 +604,7 @@ async fn partial_recovery_failure_drains_registered_roots_and_reserved_admission
 struct LogicalHost {
     runtime: runtime::AgentRuntime,
     owner: Arc<runtime::ownership::OwnerHost>,
+    scratch_archive: runtime::scratch::archive::ArchiveService,
     services: workbench_host::bootstrap::services::BackgroundServices,
     executor: Arc<tools::ToolExecutor>,
     _service: workbench_host::commands::CommandService,
@@ -618,7 +619,7 @@ impl LogicalHost {
         )
         .await?;
         self.owner.release_ready()?;
-        self.owner.stop_scratch_cleanup()?;
+        self.scratch_archive.stop_cleanup()?;
         Ok(())
     }
 }
@@ -653,6 +654,7 @@ impl Fixture {
             &mut services,
             &runtime,
             &owner,
+            &owner.thread_scratch(),
             Default::default(),
             PullRequestAdapters {
                 source: Arc::new(FakePullRequestSource::new()),
@@ -660,9 +662,15 @@ impl Fixture {
             },
         )
         .unwrap();
+        let scratch_archive = runtime::scratch::archive::ArchiveService::new(
+            &owner.thread_scratch(),
+            owner.scratch_archive_authority(),
+        )
+        .unwrap();
         LogicalHost {
             runtime,
             owner,
+            scratch_archive,
             services,
             executor,
             _service: service,

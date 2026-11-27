@@ -103,7 +103,7 @@ impl World {
     /// A scratch directory with content under the owner's identity-marked root.
     fn scratch(&self, thread: &str) -> PathBuf {
         self.boot.owner.start(thread).unwrap();
-        let dir = self.boot.owner.thread_scratch().thread_dir(thread);
+        let dir = self.boot.scratch.clone().thread_dir(thread);
         let canonical = self.owners.canonicalize().unwrap();
         let digest = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
         let name = dir.file_name().unwrap().to_str().unwrap();
@@ -181,7 +181,7 @@ async fn archiving_through_the_host_collects_the_scratch() {
     let archived = w.scratch("t");
     let kept = w.scratch("other");
     w.archive("t");
-    w.boot.owner.scratch_archive_barrier().recv().unwrap();
+    w.boot.scratch_archive.barrier().recv().unwrap();
     assert!(!archived.exists());
     assert!(kept.join("keep").exists());
 }
@@ -226,7 +226,7 @@ async fn host_attachment_removal_failure_after_save_does_not_prevent_scratch_det
         result,
         WorkspaceResult::Rejected(WorkspaceRejection::StorageFailed { .. })
     ));
-    w.boot.owner.scratch_archive_barrier().recv().unwrap();
+    w.boot.scratch_archive.barrier().recv().unwrap();
     assert!(
         !dir.exists(),
         "saved archive is collectible despite attachment failure"
