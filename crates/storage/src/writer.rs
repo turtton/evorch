@@ -407,8 +407,15 @@ impl std::fmt::Debug for RequestAdmissions {
     }
 }
 
+/// Called after a usage ledger write has committed, with the run of each record
+/// written (`None` for a request that belongs to no run).
+pub type UsageCommitObserver = dyn Fn(&[Option<String>]) + Send + Sync;
+
 #[derive(Default)]
-struct CommitObservers(std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>);
+struct CommitObservers {
+    events: std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
+    usage: std::sync::Mutex<Vec<std::sync::Weak<UsageCommitObserver>>>,
+}
 impl std::fmt::Debug for CommitObservers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CommitObservers").finish_non_exhaustive()
@@ -417,7 +424,7 @@ impl std::fmt::Debug for CommitObservers {
 impl CommitObservers {
     fn notify(&self) {
         let observers: Vec<_> = {
-            let mut observers = self.0.lock().unwrap();
+            let mut observers = self.events.lock().unwrap();
             observers.retain(|o| o.strong_count() > 0);
             observers
                 .iter()
@@ -426,6 +433,20 @@ impl CommitObservers {
         };
         for observer in observers {
             observer();
+        }
+    }
+
+    fn notify_usage(&self, runs: &[Option<String>]) {
+        let observers: Vec<_> = {
+            let mut observers = self.usage.lock().unwrap();
+            observers.retain(|o| o.strong_count() > 0);
+            observers
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect()
+        };
+        for observer in observers {
+            observer(runs);
         }
     }
 }
@@ -491,7 +512,17 @@ impl StorageHandle {
     /// Notifications may coalesce; readers must follow their durable event ID.
     /// Retain the callback to stay subscribed; dropping it unregisters lazily.
     pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
-        self.3.0.lock().unwrap().push(Arc::downgrade(observer));
+        self.3.events.lock().unwrap().push(Arc::downgrade(observer));
+    }
+
+    /// Register a callback for each usage ledger write that has committed, with
+    /// the run of each record written. It runs on the thread that asked for the write,
+    /// after the commit and only when the write succeeded, so a reader that it
+    /// wakes sees the rows. It must not block or do I/O: store what it needs and
+    /// wake the worker that does. Retain the callback to stay subscribed;
+    /// dropping it unregisters lazily.
+    pub fn observe_usage_commits(&self, observer: &Arc<UsageCommitObserver>) {
+        self.3.usage.lock().unwrap().push(Arc::downgrade(observer));
     }
 
     /// Core-local memory-only registration retained through the synchronous writer ACK.
@@ -1386,7 +1417,12 @@ impl StorageHandle {
         if records.is_empty() {
             return Ok(());
         }
-        self.request(|reply| Command::RecordUsageRequests(records, reply))
+        let runs: Vec<Option<String>> = records.iter().map(|r| r.run_id.clone()).collect();
+        let result = self.request(|reply| Command::RecordUsageRequests(records, reply));
+        if result.is_ok() {
+            self.3.notify_usage(&runs);
+        }
+        result
     }
 
     /// run の所属 thread / project を待たずに送ります。キューが満杯なら

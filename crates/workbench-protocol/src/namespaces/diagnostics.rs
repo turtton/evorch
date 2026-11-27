@@ -31,13 +31,23 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod usage;
+pub use usage::{
+    GetLiveUsage, GetRunUsage, GetThreadUsage, LIVE_USAGE_MINUTES, LiveUsage,
+    MAX_QUOTA_WINDOW_USAGES, MAX_USAGE_CHANGED_RUNS, QuotaWindowUsage, RunUsage, ThreadUsage,
+    UsageChange, UsageValue,
+};
+
 pub const COMMAND_OPERATIONS: &[&str] = &[];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "get_usage_summary",
     "get_run_context",
     "get_diagnostics_operation",
+    "get_thread_usage",
+    "get_run_usage",
+    "get_live_usage",
 ];
-pub const EVENT_TYPES: &[&str] = &["diagnostics_operation_changed"];
+pub const EVENT_TYPES: &[&str] = &["diagnostics_operation_changed", "usage_changed"];
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
@@ -318,6 +328,9 @@ pub enum DiagnosticsQuery {
     GetUsageSummary(GetUsageSummary),
     GetRunContext(GetRunContext),
     GetDiagnosticsOperation(OperationTarget),
+    GetThreadUsage(GetThreadUsage),
+    GetRunUsage(GetRunUsage),
+    GetLiveUsage(GetLiveUsage),
 }
 
 impl DiagnosticsQuery {
@@ -327,7 +340,11 @@ impl DiagnosticsQuery {
 
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
-            Self::GetUsageSummary(_) | Self::GetDiagnosticsOperation(_) => Ok(()),
+            Self::GetUsageSummary(_)
+            | Self::GetDiagnosticsOperation(_)
+            | Self::GetThreadUsage(_)
+            | Self::GetRunUsage(_)
+            | Self::GetLiveUsage(_) => Ok(()),
             Self::GetRunContext(query) => query.page.validate(),
         }
     }
@@ -344,6 +361,9 @@ pub enum DiagnosticsReply {
     Usage(Box<ReadOutcome<UsageSummary>>),
     Context(Box<ReadOutcome<RunContext>>),
     Operation(OperationView),
+    ThreadUsage(Box<ReadOutcome<ThreadUsage>>),
+    RunUsage(Box<ReadOutcome<RunUsage>>),
+    LiveUsage(Box<ReadOutcome<LiveUsage>>),
 }
 
 impl DiagnosticsReply {
@@ -352,6 +372,9 @@ impl DiagnosticsReply {
             Self::Usage(outcome) => outcome.validate_with(UsageSummary::validate),
             Self::Context(outcome) => outcome.validate_with(RunContext::validate),
             Self::Operation(view) => view.validate(),
+            Self::ThreadUsage(outcome) => outcome.validate_with(|_| Ok(())),
+            Self::RunUsage(outcome) => outcome.validate_with(|_| Ok(())),
+            Self::LiveUsage(outcome) => outcome.validate_with(LiveUsage::validate),
         }
     }
 }
@@ -366,12 +389,17 @@ impl DiagnosticsReply {
 pub enum DiagnosticsEvent {
     /// A read operation reached a final state; ask again for its data.
     DiagnosticsOperationChanged { view: OperationView },
+    /// Requests were committed to the usage ledger: ask again for the usage
+    /// that matters to you. The event carries no value and no delta; it is
+    /// sent at most once per interval, however many requests committed.
+    UsageChanged { change: UsageChange },
 }
 
 impl DiagnosticsEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
             Self::DiagnosticsOperationChanged { view } => view.validate(),
+            Self::UsageChanged { change } => change.validate(),
         }
     }
 }

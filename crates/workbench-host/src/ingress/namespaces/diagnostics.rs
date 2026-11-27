@@ -33,6 +33,15 @@ impl CommandHost {
             DiagnosticsQuery::GetRunContext(get) => {
                 DiagnosticsReply::Context(Box::new(diagnostics.context(get)?))
             }
+            DiagnosticsQuery::GetThreadUsage(get) => {
+                DiagnosticsReply::ThreadUsage(Box::new(diagnostics.thread_usage(get)?))
+            }
+            DiagnosticsQuery::GetRunUsage(get) => {
+                DiagnosticsReply::RunUsage(Box::new(diagnostics.run_usage(get)?))
+            }
+            DiagnosticsQuery::GetLiveUsage(get) => {
+                DiagnosticsReply::LiveUsage(Box::new(diagnostics.live_usage(get)?))
+            }
             DiagnosticsQuery::GetDiagnosticsOperation(target) => {
                 DiagnosticsReply::Operation(diagnostics.operation(&target.operation_id)?)
             }

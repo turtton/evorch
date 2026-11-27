@@ -43,9 +43,22 @@ pub fn samples() -> AreaSamples {
                 json!({"operation_id": "op-2", "run": "run-1"}),
             ),
             query("get_diagnostics_operation", json!({"operation_id": "op-1"})),
+            query(
+                "get_thread_usage",
+                json!({"operation_id": "op-3", "thread": "thr-1"}),
+            ),
+            query(
+                "get_run_usage",
+                json!({"operation_id": "op-4", "run": "run-1"}),
+            ),
+            query("get_live_usage", json!({"operation_id": "op-5"})),
         ],
-        ui_events: vec![de::<UiEvent>(json!({"type": "diagnostics", "payload": {
-            "type": "diagnostics_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}}))],
+        ui_events: vec![
+            de::<UiEvent>(json!({"type": "diagnostics", "payload": {
+            "type": "diagnostics_operation_changed", "payload": {"view": view(json!({"type": "ready"}))}}})),
+            de::<UiEvent>(json!({"type": "diagnostics", "payload": {
+                "type": "usage_changed", "payload": {"change": {"runs": ["run-1", "run-2"], "all_runs": false}}}})),
+        ],
         query_replies: vec![
             reply(
                 "usage",
@@ -69,6 +82,33 @@ pub fn samples() -> AreaSamples {
                         "snapshot_revision": "3"}}}),
             ),
             reply("operation", view(json!({"type": "pending"}))),
+            reply(
+                "thread_usage",
+                json!({"operation": view(json!({"type": "ready"})), "data": {
+                    "thread": "thr-1",
+                    "total": {"totals": totals(), "incomplete": false},
+                    "conversation": {"totals": totals(), "incomplete": true}}}),
+            ),
+            reply(
+                "run_usage",
+                json!({"operation": view(json!({"type": "ready"})), "data": {
+                    "run": "run-1", "total": {"totals": totals(), "incomplete": false}}}),
+            ),
+            reply(
+                "live_usage",
+                json!({"operation": view(json!({"type": "ready"})), "data": {
+                    "as_of_ms": 1700000000000u64,
+                    // Two buckets keep the golden file short; `tests/usage.rs` checks
+                    // that a valid reply holds exactly 180.
+                    "minutes": [totals(), {"requests": 0, "failed": 0, "input_tokens": 0,
+                        "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "reasoning_tokens": 0, "recorded_cost_micro_usd": 0,
+                        "unpriced_tokens": 0, "unreported_requests": 0}],
+                    "local_day": "2026-01-07",
+                    "day_start_ms": 1699999000000u64, "day_end_ms": 1700085400000u64,
+                    "today": totals(), "month": totals(),
+                    "quota_windows": [{"profile": "codex", "window": "5h", "totals": totals()}]}}),
+            ),
         ],
     }
 }

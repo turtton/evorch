@@ -141,7 +141,7 @@ pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewE
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
 pub use writer::{
     MutationAdmission, Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS,
-    ThreadIndexCounters, ThreadIndexJobStatus, WalWaitStatus,
+    ThreadIndexCounters, ThreadIndexJobStatus, UsageCommitObserver, WalWaitStatus,
 };
 
 /// A pause point in the conversation plan write, for tests of a stop around the commit.

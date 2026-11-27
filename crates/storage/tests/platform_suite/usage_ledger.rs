@@ -433,3 +433,61 @@ fn reported_requests_read_back_as_reported() {
         .unwrap();
     assert!(rows[0].record.usage_reported);
 }
+
+#[test]
+fn a_usage_commit_is_announced_after_the_rows_are_visible_and_only_when_the_write_succeeded() {
+    use std::sync::{Arc, Mutex};
+
+    // Given: an observer that reads the ledger from another connection the moment it is called.
+    let temp_dir = TempDir::new().unwrap();
+    let config = config(&temp_dir);
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    type Announcement = (Vec<Option<String>>, usize);
+    let seen: Arc<Mutex<Vec<Announcement>>> = Arc::default();
+    let observer: Arc<storage::UsageCommitObserver> = {
+        let seen = Arc::clone(&seen);
+        let reader = Mutex::new(Database::open_read_only(&config.db_path).unwrap());
+        Arc::new(move |runs: &[Option<String>]| {
+            let rows = reader
+                .lock()
+                .unwrap()
+                .usage_requests_between(0, i64::MAX)
+                .unwrap()
+                .len();
+            seen.lock().unwrap().push((runs.to_vec(), rows));
+        })
+    };
+    handle.observe_usage_commits(&observer);
+    let now = SystemTime::now();
+
+    // When: a write is refused (a token count the ledger cannot store), then two succeed.
+    let mut unstorable = record("req-bad", now, None);
+    unstorable.input_tokens = u64::MAX;
+    handle.record_usage_requests(vec![unstorable]).unwrap_err();
+    assert!(seen.lock().unwrap().is_empty(), "a refused write is silent");
+    let mut orphan = record("req-2", now, None);
+    orphan.run_id = None;
+    handle
+        .record_usage_requests(vec![record("req-1", now, Some(0.25)), orphan])
+        .unwrap();
+    handle
+        .record_usage_requests(vec![record("req-3", now, None)])
+        .unwrap();
+
+    // Then: each commit was announced once, after its rows could be read, with their runs.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (vec![Some("run-1".to_owned()), None], 2),
+            (vec![Some("run-1".to_owned())], 3),
+        ]
+    );
+
+    // And: a dropped observer is not called again.
+    drop(observer);
+    handle
+        .record_usage_requests(vec![record("req-4", now, None)])
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
