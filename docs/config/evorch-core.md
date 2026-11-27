@@ -137,6 +137,21 @@ durable lane の自動復旧と安全点再起動・自動再開も後続であ�
 
 ## スレッド保守と idle
 
+~~~toml
+[storage.thread_retention]
+tool_body_delete_after_days = 7 # 0 は Tool 本文の除去だけを無効化
+~~~
+
+Tool の長い表示用本文は、canonical thread（root と子 run 全体）に最後の活動から
+7 日以上更新がないと [removed by retention] へ置換される。archive の有無は問わず、
+ツール名・呼び出し ID・成否などの概要は残る。既定 7 日は既存の自動 archive とそろえた値。
+1 週間以上更新のない本文の参照は少なく、必要な thread は pin や eval sample で守れる。
+実行中・入力待ち・未確定 admission・未回答質問・attached/summary の open lane・
+pin・eval sample は保護される（detached lane や未完了 goal だけでは保護しない）。
+provider 用の run_messages・run_contexts・checkpoint は変更せず、共有 blob も残るため、
+完全な情報消去ではない。参照を外した後の GC と online incremental vacuum は独立して
+進む。[予算・所要時間・停止中の full VACUUM](../storage-maintenance.md#tool-本文の保持期限とオンライン回収) を参照。
+
 [storage.thread_retention] の auto_archive_after_days と archived_delete_after_days はそれぞれ既定 7 日、独立した 0 で新規処理を停止する。削除の既定 30→7 日化により、次回の起動時排他フェーズで 7〜30 日前の既存 archive が削除対象になり得る。30 の明示設定は維持される。
 
 PR1 は通常 core（単一 core でも）へ auto-archive authority を渡さず、`AuthorityUnavailable` で自動 archive・添付整理・scratch hint を保留する（この間は DB・sidebar・添付を開かず lock も取らない）。PR2 で配線される。判定は派生状態を持たず、1 tick・1 family を正本から直接読む。詳細は [ストレージ保守](../storage-maintenance.md#thread-自動-archivepr1-正本判定と保留中の実装)。

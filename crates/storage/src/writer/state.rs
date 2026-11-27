@@ -11,6 +11,9 @@ use crate::projection;
 use crate::repo::{catalog, event, metrics};
 use crate::{HardLimits, StorageConfig, StorageError};
 
+#[path = "tool_body_retention.rs"]
+mod tool_body_retention;
+
 #[path = "diagnostic.rs"]
 mod diagnostic;
 
@@ -898,6 +901,9 @@ pub(super) fn run_writer_with_index(
                     &state.conn,
                     &artifact_ids,
                 ));
+            }
+            Ok(Command::RetainToolBodies(leases, request, reply)) => {
+                let _ = reply.send(tool_body_retention::retain(&mut state, &leases, &request));
             }
             Ok(Command::ConfirmRetentionOnline(leases, request, budget, fence, reply)) => {
                 let result = (|| {

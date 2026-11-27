@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
+// The Core-client screens name these through the model, which owns the settings types.
+pub use config::{CategoryBindingConfig, ChainEntryConfig, ChainPurpose, RoleBindingConfig};
+
 /// 設定用の共通定義からカテゴリを取得する。shell 監査専用の reviewer 設定も含む。
 pub fn categories_for_role(
     role: &str,
@@ -24,6 +27,11 @@ pub struct RoleSettingsModel {
     pub routes_empty: bool,
     pub resolved_previews: BTreeMap<String, Option<String>>,
     pub error: Option<String>,
+    /// The role (see [`ROLES`]) whose detail is shown, and the one a save or discard is for.
+    pub selected: Option<&'static str>,
+    /// Roles whose saved bindings were changed elsewhere while they had unsaved edits: they
+    /// are not saved over the newer file, only discarded.
+    pub conflicted: BTreeSet<&'static str>,
     pub profiles: super::role_profiles::RoleProfilePicker,
     pub(crate) job: super::role_profiles::RoleProfileJob,
     pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
@@ -68,6 +76,48 @@ impl RoleSettingsModel {
     /// Whether the draft differs from what was seeded or last saved.
     pub fn is_dirty(&self) -> bool {
         self.agents != self.base_agents
+    }
+
+    /// Whether `role`'s chain, preset, generation or categories differ from the saved ones.
+    pub fn role_is_dirty(&self, role: &RoleInfo) -> bool {
+        !role_eq(&self.agents, &self.base_agents, role.address)
+    }
+
+    pub fn dirty_roles(&self) -> Vec<&'static RoleInfo> {
+        ROLES
+            .iter()
+            .filter(|role| self.role_is_dirty(role))
+            .collect()
+    }
+
+    /// Puts `role` back to what is saved, leaving every other role's edits alone.
+    pub fn discard_role(&mut self, role: &RoleInfo) {
+        copy_role(&mut self.agents, &self.base_agents, role.address);
+        self.conflicted.remove(role.address);
+        self.error = None;
+    }
+
+    /// The route a chain head names, or the role's own name when it has no chain (the
+    /// implicit lookup), as `AgentsConfig::binding_for` resolves it.
+    pub fn effective_route<'a>(&'a self, role: &'a RoleInfo) -> &'a str {
+        parts(&self.agents, role.address)
+            .0
+            .head_route()
+            .unwrap_or(role.key)
+    }
+
+    /// What a route resolves to now: its first candidate, as `profile · model`.
+    pub fn resolved_target(&self, route: &str) -> Option<String> {
+        let candidate = self.routes.get(route)?.first()?;
+        let model = candidate.model.clone().or_else(|| {
+            self.providers
+                .get(&candidate.profile)
+                .map(|profile| profile.default_model.clone())
+        });
+        Some(match model {
+            Some(model) if !model.is_empty() => format!("{} · {model}", candidate.profile),
+            _ => candidate.profile.clone(),
+        })
     }
 
     /// Takes the route and provider fields of `config` (a profile view) and leaves the
@@ -164,6 +214,26 @@ impl RoleSettingsModel {
         Ok(())
     }
 
+    /// The checks of [`Self::validate`] for the binding of `role` and its categories only, so
+    /// an invalid edit of another role does not stop this one from being saved.
+    pub fn validate_role(&self, role: &RoleInfo) -> Result<(), config::ConfigError> {
+        let (binding, categories) = parts(&self.agents, role.address);
+        Self::validate_chain(&format!("agents.{}.models", role.address), &binding.models)?;
+        validate_generation(&binding.generation, role.address)?;
+        for (category, binding) in categories.into_iter().flatten() {
+            self.agents.binding_for(role.key, Some(category))?;
+            Self::validate_chain(
+                &format!("agents.{}.categories.{category}.models", role.key),
+                &binding.models,
+            )?;
+            validate_generation(
+                &binding.generation,
+                &format!("{}.categories.{category}", role.key),
+            )?;
+        }
+        Ok(())
+    }
+
     fn validate_chain(
         path: &str,
         models: &[config::ChainEntryConfig],
@@ -175,6 +245,216 @@ impl RoleSettingsModel {
             });
         }
         Ok(())
+    }
+}
+
+/// How the Agent Roles list groups the roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleGroup {
+    Core,
+    Specialist,
+    System,
+}
+
+impl RoleGroup {
+    pub const ALL: [Self; 3] = [Self::Core, Self::Specialist, Self::System];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Core => "Core agents",
+            Self::Specialist => "Specialists",
+            Self::System => "System",
+        }
+    }
+
+    pub const fn singular(self) -> &'static str {
+        match self {
+            Self::Core => "Core agent",
+            Self::Specialist => "Specialist",
+            Self::System => "System",
+        }
+    }
+}
+
+/// One role of the Agent Roles list.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RoleInfo {
+    /// Where its binding is in the settings file (the address `explicit_refs` uses).
+    pub address: &'static str,
+    /// Its name as a route and a category owner.
+    pub key: &'static str,
+    pub label: &'static str,
+    pub group: RoleGroup,
+    pub blurb: &'static str,
+}
+
+impl RoleInfo {
+    pub fn is_compactor(&self) -> bool {
+        self.key == "compactor"
+    }
+
+    pub fn is_image_generator(&self) -> bool {
+        self.key == "image_generator"
+    }
+}
+
+const fn role(
+    address: &'static str,
+    key: &'static str,
+    label: &'static str,
+    group: RoleGroup,
+    blurb: &'static str,
+) -> RoleInfo {
+    RoleInfo {
+        address,
+        key,
+        label,
+        group,
+        blurb,
+    }
+}
+
+/// Every role, in the order the list shows them within a group.
+pub const ROLES: [RoleInfo; 11] = [
+    role(
+        "orchestrator",
+        "orchestrator",
+        "Orchestrator",
+        RoleGroup::Core,
+        "Plans the work and hands it to the other agents.",
+    ),
+    role(
+        "explorer",
+        "explorer",
+        "Explorer",
+        RoleGroup::Core,
+        "Reads and searches the project without changing it.",
+    ),
+    role(
+        "worker",
+        "worker",
+        "Worker",
+        RoleGroup::Core,
+        "Carries out the implementation. A category override takes precedence over this chain.",
+    ),
+    role(
+        "reviewer",
+        "reviewer",
+        "Reviewer",
+        RoleGroup::Core,
+        "Checks the result against the request. A category override takes precedence over this chain.",
+    ),
+    role(
+        "roles.web_researcher",
+        "web_researcher",
+        "WebResearcher",
+        RoleGroup::Specialist,
+        "Looks things up on the web.",
+    ),
+    role(
+        "roles.planner",
+        "planner",
+        "Planner",
+        RoleGroup::Specialist,
+        "Writes the plan before the work starts.",
+    ),
+    role(
+        "roles.advisor",
+        "advisor",
+        "Advisor",
+        RoleGroup::Specialist,
+        "A read-only consultant before a decision.",
+    ),
+    role(
+        "roles.multimodal_looker",
+        "multimodal_looker",
+        "Multimodal Looker",
+        RoleGroup::Specialist,
+        "Reads images and other inputs that are not text.",
+    ),
+    role(
+        "roles.evaluator",
+        "evaluator",
+        "Evaluator",
+        RoleGroup::Specialist,
+        "Scores a result against what was asked.",
+    ),
+    role(
+        "roles.compactor",
+        "compactor",
+        "Compactor",
+        RoleGroup::System,
+        "Summarises long conversations. Without a chain it uses the running role's own.",
+    ),
+    role(
+        "roles.image_generator",
+        "image_generator",
+        "Image generator",
+        RoleGroup::System,
+        "Generates images. Only image routes can be chosen; without a chain image generation is off.",
+    ),
+];
+
+/// A role's own binding and, for the two roles that have them, its category overrides.
+type RoleParts<'a> = (
+    &'a config::RoleBindingConfig,
+    Option<&'a BTreeMap<String, config::CategoryBindingConfig>>,
+);
+
+pub fn parts<'a>(agents: &'a config::AgentsConfig, address: &str) -> RoleParts<'a> {
+    match address {
+        "orchestrator" => (&agents.orchestrator, None),
+        "explorer" => (&agents.explorer, None),
+        "worker" => (&agents.worker.base, Some(&agents.worker.categories)),
+        "reviewer" => (&agents.reviewer.base, Some(&agents.reviewer.categories)),
+        "roles.web_researcher" => (&agents.roles.web_researcher, None),
+        "roles.planner" => (&agents.roles.planner, None),
+        "roles.advisor" => (&agents.roles.advisor, None),
+        "roles.multimodal_looker" => (&agents.roles.multimodal_looker, None),
+        "roles.evaluator" => (&agents.roles.evaluator, None),
+        "roles.compactor" => (&agents.roles.compactor, None),
+        _ => (&agents.roles.image_generator, None),
+    }
+}
+
+/// The mutable binding of `address` and its category overrides.
+pub fn parts_mut<'a>(
+    agents: &'a mut config::AgentsConfig,
+    address: &str,
+) -> (
+    &'a mut config::RoleBindingConfig,
+    Option<&'a mut BTreeMap<String, config::CategoryBindingConfig>>,
+) {
+    match address {
+        "orchestrator" => (&mut agents.orchestrator, None),
+        "explorer" => (&mut agents.explorer, None),
+        "worker" => (&mut agents.worker.base, Some(&mut agents.worker.categories)),
+        "reviewer" => (
+            &mut agents.reviewer.base,
+            Some(&mut agents.reviewer.categories),
+        ),
+        "roles.web_researcher" => (&mut agents.roles.web_researcher, None),
+        "roles.planner" => (&mut agents.roles.planner, None),
+        "roles.advisor" => (&mut agents.roles.advisor, None),
+        "roles.multimodal_looker" => (&mut agents.roles.multimodal_looker, None),
+        "roles.evaluator" => (&mut agents.roles.evaluator, None),
+        "roles.compactor" => (&mut agents.roles.compactor, None),
+        _ => (&mut agents.roles.image_generator, None),
+    }
+}
+
+/// Whether `address` is bound the same way in `a` and `b`, categories included.
+pub fn role_eq(a: &config::AgentsConfig, b: &config::AgentsConfig, address: &str) -> bool {
+    parts(a, address) == parts(b, address)
+}
+
+/// Copies the binding of `address` (categories included) from `src` into `dst`.
+pub fn copy_role(dst: &mut config::AgentsConfig, src: &config::AgentsConfig, address: &str) {
+    let (binding, categories) = parts(src, address);
+    let (target, target_categories) = parts_mut(dst, address);
+    *target = binding.clone();
+    if let (Some(target), Some(categories)) = (target_categories, categories) {
+        *target = categories.clone();
     }
 }
 

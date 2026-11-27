@@ -427,6 +427,14 @@ impl CoreClientScreen {
                 .into_iter()
                 .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
                 .collect(),
+            opened_lanes: shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.opened_lanes())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
+                .collect(),
         };
         let saved = if explicit {
             store.save(&state).map(|()| true)
@@ -531,6 +539,12 @@ impl CoreClientScreen {
             workspace.restore_folded_threads(
                 state
                     .folded_threads
+                    .iter()
+                    .map(|thread| thread.as_str().to_owned()),
+            );
+            workspace.restore_opened_lanes(
+                state
+                    .opened_lanes
                     .iter()
                     .map(|thread| thread.as_str().to_owned()),
             );

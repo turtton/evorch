@@ -1,4 +1,7 @@
 //! Production workers are unchanged; fake-model bootstrap fixtures opt in.
+#[cfg(all(test, feature = "test-support"))]
+#[path = "tool_body_retention_tests.rs"]
+mod tests;
 use super::*;
 
 pub(super) struct RetentionStartup {
@@ -45,6 +48,12 @@ impl BootstrappedHost {
                     after_days: self.config.storage.thread_retention.auto_archive_after_days,
                 },
             )
+            .with_tool_body_policy(
+                self.config
+                    .storage
+                    .thread_retention
+                    .tool_body_delete_after_days,
+            )
             .with_send_slot(send_slot)
             .with_delete_policy(storage::thread_retention::ThreadRetentionPolicy {
                 archived_delete_after_days: self
@@ -88,6 +97,17 @@ impl BootstrappedHost {
             .ok_or("reclaim producer not activated")?
             .tick_for_test()
             .map_err(Into::into)
+    }
+
+    /// Await the recorder ACK before a fixture takes a durable retention snapshot.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flush_retention_events_for_test(&mut self) -> Result<(), BootstrapError> {
+        self.bridge
+            .as_mut()
+            .ok_or("storage bridge unavailable")?
+            .flush()?;
+        self.storage_writer().barrier()?;
+        Ok(())
     }
 
     /// Start the real retention producers in a fake-model composition fixture.

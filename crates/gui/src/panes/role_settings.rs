@@ -23,24 +23,13 @@ pub fn role_settings_body(
     model: &mut RoleSettingsModel,
     profile_locked: bool,
 ) -> Option<RoleSettingsAction> {
-    role_settings_content(ui, model, profile_locked, true)
-}
-
-/// The same body for a host that draws the profile control itself (the Model Settings
-/// header) and scrolls the body: the bar and its locked notice are left out.
-pub fn role_settings_hosted_body(
-    ui: &mut egui::Ui,
-    model: &mut RoleSettingsModel,
-    profile_locked: bool,
-) -> Option<RoleSettingsAction> {
-    role_settings_content(ui, model, profile_locked, false)
+    role_settings_content(ui, model, profile_locked)
 }
 
 fn role_settings_content(
     ui: &mut egui::Ui,
     model: &mut RoleSettingsModel,
     profile_locked: bool,
-    profile_bar: bool,
 ) -> Option<RoleSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
@@ -51,25 +40,17 @@ fn role_settings_content(
             ui.label(muted(
                 "Worker and reviewer categories take precedence over their role defaults; other roles use their role model.",
             ));
-            if profile_bar {
-                ui.add_enabled_ui(!busy && !profile_locked, |ui| {
-                    if let Some(profile) = crate::panes::role_profiles::role_profile_bar(
-                        ui,
-                        "role",
-                        &mut model.profiles,
-                    ) {
-                        action = Some(RoleSettingsAction::Profile(profile));
-                    }
-                });
-                if profile_locked {
-                    ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
+            ui.add_enabled_ui(!busy && !profile_locked, |ui| {
+                if let Some(profile) =
+                    crate::panes::role_profiles::role_profile_bar(ui, "role", &mut model.profiles)
+                {
+                    action = Some(RoleSettingsAction::Profile(profile));
                 }
+            });
+            if profile_locked {
+                ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
             }
-            let scroll_height = if profile_bar {
-                (ctx.viewport_rect().height() - TOPBAR * 7.0).max(TOPBAR)
-            } else {
-                f32::INFINITY
-            };
+            let scroll_height = (ctx.viewport_rect().height() - TOPBAR * 7.0).max(TOPBAR);
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("role-bindings")
@@ -259,10 +240,10 @@ fn role_settings_content(
 /// Shown when the image generator has no chain: image generation is off (ADR 0038).
 pub const IMAGE_GENERATION_DISABLED: &str = "Disabled (generate_image unavailable)";
 /// What conversation and compactor chains accept.
-const CHAT_ROUTES: &str =
+pub(crate) const CHAT_ROUTES: &str =
     "Only routes of chat models are offered for agent roles and the compactor.";
 /// What the image generator chain accepts.
-const IMAGE_ROUTES: &str =
+pub(crate) const IMAGE_ROUTES: &str =
     "Only routes of image generation models on Codex or OpenAI profiles are offered.";
 
 /// `AgentsConfig::binding_for` と同じ優先順で、編集中のチェーンの先頭 route を解決する。
@@ -419,7 +400,7 @@ fn entry_effort(
 }
 
 /// 推論強度の ComboBox。一覧外の現在値は `(custom)` として保持する。
-fn effort_picker(
+pub(crate) fn effort_picker(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     unset: &str,
@@ -449,7 +430,7 @@ fn effort_picker(
         .response
 }
 
-fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+pub(crate) fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     let label = ui.label(label);
     let mut text = value.clone().unwrap_or_default();
     if ui
@@ -466,7 +447,7 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     }
 }
 
-fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
+pub(crate) fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
     optional_number(ui, "Temperature", (&mut value.temperature, 0.0..=2.0));
     optional_number(ui, "Max tokens", (&mut value.max_tokens, 1..=u32::MAX));
 }

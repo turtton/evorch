@@ -11,6 +11,7 @@
 mod authority;
 pub mod decision;
 pub mod online;
+pub mod tool_bodies;
 #[cfg(feature = "test-support")]
 pub use authority::ExclusiveFixtureStorage;
 pub use authority::{AutoArchiveAuthority, AutoArchivePolicy};
