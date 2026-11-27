@@ -23,7 +23,6 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
-    pub(crate) tool_descriptions: Option<crate::tool_descriptions::FrozenToolDescriptions>,
     pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
     pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     pub(crate) harness_notice_pending: bool,
@@ -49,6 +48,7 @@ pub(crate) struct RestoredState {
     pub(crate) plan_notice: crate::conversation_plan::notice::PlanNotice,
     /// Skills the run had handed its escalation reviewer; read again on restore.
     pub(crate) loaded_skills: Vec<crate::escalation_review::LoadedSkillRef>,
+    pub(crate) tool_descriptions: Option<crate::tool_descriptions::FrozenToolDescriptions>,
     /// Prompt IDs of host inputs the saved messages hold. Unreadable lists
     /// restore as empty: they only drive delivery receipts.
     pub(crate) host_inputs: Vec<String>,

@@ -437,9 +437,6 @@ pub(crate) async fn run_agent(
             .upgrade()
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
-    let tool_descriptions = restored
-        .as_ref()
-        .and_then(|state| state.tool_descriptions.clone());
     let mcp_snapshot = if benchmark_mode {
         None
     } else {
@@ -447,6 +444,9 @@ pub(crate) async fn run_agent(
             .as_ref()
             .and_then(|state| state.mcp_snapshot.clone())
     };
+    let tool_descriptions = restored
+        .as_ref()
+        .and_then(|state| state.tool_descriptions.clone());
     let recovery_waits = restored
         .as_ref()
         .map(|s| s.recovery_waits.clone())
