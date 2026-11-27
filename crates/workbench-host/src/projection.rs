@@ -156,6 +156,10 @@ struct BodyCursor {
     scanner: queries::CommitScanner,
     reader: Option<storage::Database>,
 }
+#[derive(Default)]
+struct ModelRefresh {
+    reader: Option<storage::Database>,
+}
 /// Transport-independent host read service. All adapters may share this instance.
 pub struct Projection {
     activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
@@ -165,6 +169,13 @@ pub struct Projection {
     runtime: AgentRuntime,
     registry: Arc<ApprovalRegistry>,
     state: Mutex<State>,
+    /// Lock order: model_refresh -> state. Serializes collect through publish,
+    /// including project reconfiguration, without blocking readers of State.
+    model_refresh: Mutex<ModelRefresh>,
+    #[cfg(test)]
+    model_refreshes: tokio::sync::watch::Sender<usize>,
+    #[cfg(test)]
+    model_event_batches: tokio::sync::watch::Sender<usize>,
     epoch: Arc<tokio::sync::watch::Sender<u64>>,
     status: Mutex<CoreStatus>,
     pager: Pager,
@@ -178,6 +189,7 @@ pub struct Projection {
 }
 // Bound work per wakeup, not time: a continuously busy producer must still let runs advance.
 const MAX_REFRESH_WAKEUPS: usize = 64;
+const MIN_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Default, Debug, PartialEq)]
 struct RefreshWakeups {
@@ -308,6 +320,11 @@ impl Projection {
             bodies_wake: bodies_wake.clone(),
             cut_taken: AtomicBool::new(false),
             limits,
+            model_refresh: Mutex::default(),
+            #[cfg(test)]
+            model_refreshes: tokio::sync::watch::Sender::new(0),
+            #[cfg(test)]
+            model_event_batches: tokio::sync::watch::Sender::new(0),
             state: Mutex::new(State {
                 #[cfg(test)]
                 snapshot_hook: None,
@@ -335,35 +352,96 @@ impl Projection {
         let models = handle.spawn(async move {
             let mut flush = tokio::time::interval(shell_jobs::OUTPUT_INTERVAL);
             flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut ready_at = tokio::time::Instant::now();
+            let mut pending = RefreshWakeups::default();
+            let mut observed = Vec::new();
+            let mut approvals_closed = false;
             loop {
-                enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>), ShellFlush }
-                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a), _ = flush.tick() => Change::ShellFlush };
-                let Some(this) = weak.upgrade() else { break };
-                // Never retain the projection (and its runtime) across a scheduler wait:
-                // failed bootstrap must be able to drop both without another task poll.
-                let closed = match (this, change) {
-                    (this, Change::Event(event)) => {
-                        // Durable model notifications coalesce; live tools retain bus order
-                        // and share the snapshot / cursor publication boundary.
-                        let wakeups = RefreshWakeups::drain(&mut events, event).await;
-                        if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty || !wakeups.activities.is_empty() { Self::in_background(this, move |p| {
-                            if wakeups.dirty && p.refresh_models().is_err() { p.invalidate(); return; }
-                            for event in wakeups.activities { p.observe_shell(event.clone(), tokio::time::Instant::now()); p.observe_activity(event); }
-                        }).await; }
-                        wakeups.closed
-                    }
-                    (this, Change::ShellFlush) => { this.flush_shell(tokio::time::Instant::now()); false }
-                    (this, Change::Approval(Ok(approval))) => { Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
-                    (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
-                        // Lost input means the projection cannot vouch for ANY old cursor.
-                        this.invalidate();
-                        Self::in_background(this, |p| { let _ = p.refresh_models(); }).await;
-                        false
-                    }
-                    (_, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => true,
+                enum Change {
+                    Event(Result<event_bus::Event, RecvError>),
+                    Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>),
+                    Refresh,
+                    ShellFlush,
+                }
+                // Keep draining fragments/dirty notifications during cooldown.
+                // Sleeping the receiver itself can overflow the bus and change
+                // the epoch under an in-flight core restart. Only activity and
+                // approval identities need buffering; bound both before reading
+                // more, retaining the bus's existing lag/resync behavior.
+                let change = tokio::select! {
+                    biased;
+                    () = tokio::time::sleep_until(ready_at), if pending.dirty => Change::Refresh,
+                    change = async {
+                        tokio::select! {
+                            e = events.recv(), if !pending.closed && pending.activities.len() < MAX_REFRESH_WAKEUPS => Change::Event(e),
+                            a = approvals.recv(), if !approvals_closed && observed.len() < MAX_REFRESH_WAKEUPS => Change::Approval(a),
+                            _ = flush.tick() => Change::ShellFlush,
+                        }
+                    } => change,
                 };
-                if closed { break; }
+                // Never retain the projection/runtime across a scheduler wait.
+                let Some(this) = weak.upgrade() else { break };
+                match (this, change) {
+                    (this, Change::Event(event)) => {
+                        let wakeups = RefreshWakeups::drain(&mut events, event).await;
+                        if wakeups.lagged {
+                            pending.activities.clear();
+                            this.invalidate();
+                        }
+                        pending.dirty |= wakeups.dirty;
+                        pending.closed |= wakeups.closed;
+                        pending.activities.extend(wakeups.activities);
+                        #[cfg(test)]
+                        this.model_event_batches.send_modify(|count| *count += 1);
+                        // Output-only batches still bypass storage collection.
+                        // Keep their order behind any already-buffered activity.
+                        if !pending.dirty && !pending.activities.is_empty() {
+                            let activities = std::mem::take(&mut pending.activities);
+                            Self::in_background(this, move |p| {
+                                for event in activities {
+                                    p.observe_shell(event.clone(), tokio::time::Instant::now());
+                                    p.observe_activity(event);
+                                }
+                            }).await;
+                        }
+                    }
+                    (_this, Change::Approval(Ok(approval))) => {
+                        pending.dirty = true;
+                        observed.push(approval.id);
+                    }
+                    (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
+                        pending.activities.clear();
+                        pending.dirty = true;
+                        this.invalidate();
+                    }
+                    (_this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => {
+                        approvals_closed = true;
+                    }
+                    (this, Change::ShellFlush) => this.flush_shell(tokio::time::Instant::now()),
+                    (this, Change::Refresh) => {
+                        pending.dirty = false;
+                        let activities = std::mem::take(&mut pending.activities);
+                        let approvals = std::mem::take(&mut observed);
+                        Self::in_background(this, move |p| {
+                            if p.refresh_models_observed(&approvals).is_err() {
+                                p.invalidate();
+                                return;
+                            }
+                            for event in activities {
+                                p.observe_shell(event.clone(), tokio::time::Instant::now());
+                                p.observe_activity(event);
+                            }
+                        }).await;
+                        // Completion-based throttle, not debounce: even the
+                        // last dirty schedules a trailing pass if input stops.
+                        ready_at = tokio::time::Instant::now() + MIN_REFRESH_INTERVAL;
+                        #[cfg(test)]
+                        if let Some(this) = weak.upgrade() {
+                            this.model_refreshes.send_modify(|count| *count += 1);
+                        }
+                    }
+                }
+                if (pending.closed || approvals_closed) && !pending.dirty { break; }
                 tokio::task::yield_now().await;
             }
         });
@@ -385,6 +463,7 @@ impl Projection {
         let _ = tokio::task::spawn_blocking(move || work(&this)).await;
     }
     pub(crate) fn configure(&self, projects: Vec<(ProjectId, PathBuf)>) {
+        let _refresh = self.model_refresh.lock().unwrap();
         self.state.lock().unwrap().projects = projects;
     }
     /// Sets the project directory and the names shown for it, and reads the
@@ -395,10 +474,12 @@ impl Projection {
         names: std::collections::BTreeMap<String, String>,
     ) -> Result<(), WorkbenchError> {
         {
+            let mut refresh = self.model_refresh.lock().unwrap();
             let mut state = self.state.lock().unwrap();
             state.projects = projects;
             state.project_names = names;
-            self.refresh_models_locked(&mut state, None)?;
+            drop(state);
+            self.refresh_models_serialized(&mut refresh, &[])?;
         }
         self.models_changed();
         Ok(())
@@ -455,19 +536,23 @@ impl Projection {
     }
     /// Reads the models and publishes every committed message before returning.
     pub fn refresh(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), &[])?;
         self.advance_bodies()
     }
     pub(crate) fn refresh_models(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
-        self.models_changed();
-        Ok(())
+        self.refresh_models_observed(&[])
     }
     pub(crate) fn approval_changed(
         &self,
         id: &sandbox::approval::ApprovalId,
     ) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), Some(id))?;
+        self.refresh_models_observed(std::slice::from_ref(id))
+    }
+    fn refresh_models_observed(
+        &self,
+        observed: &[sandbox::approval::ApprovalId],
+    ) -> Result<(), WorkbenchError> {
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), observed)?;
         self.models_changed();
         Ok(())
     }
@@ -531,17 +616,32 @@ impl Projection {
         }
         result.map(drop)
     }
-    fn refresh_models_locked(
+    fn refresh_models_serialized(
         &self,
-        state: &mut State,
-        observed: Option<&sandbox::approval::ApprovalId>,
+        refresh: &mut ModelRefresh,
+        observed: &[sandbox::approval::ApprovalId],
     ) -> Result<(), WorkbenchError> {
-        let mut next = queries::collect(&self.runtime, &state.projects, &state.project_names)
+        let (projects, names) = {
+            let state = self.state.lock().unwrap();
+            (state.projects.clone(), state.project_names.clone())
+        };
+        if refresh.reader.is_none() {
+            refresh.reader = self
+                .runtime
+                .open_storage_reader()
+                .transpose()
+                .map_err(queries::storage_error)?;
+        }
+        let mut next = queries::collect(&self.runtime, refresh.reader.as_ref(), &projects, &names)
             .map_err(queries::storage_error)?;
         #[cfg(test)]
-        if let Some(hook) = state.refresh_hook.take() {
-            hook();
+        {
+            let hook = self.state.lock().unwrap().refresh_hook.take();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
+        let mut state = self.state.lock().unwrap();
         for (id, provenance) in &state.answer_provenance {
             if let Some(answer) = next.questions.get_mut(id).and_then(|q| q.answer.as_mut()) {
                 answer.answered_by = Some(provenance.clone());
@@ -573,7 +673,7 @@ impl Projection {
                 core_epoch: old.core_epoch.get(),
                 value: old.id.as_str().to_owned(),
             })
-            .chain(observed.cloned())
+            .chain(observed.iter().cloned())
         {
             if let Some(a) = self
                 .registry
@@ -645,6 +745,13 @@ impl Projection {
                 ));
             }
         }
+        if state.models.projects != next.projects {
+            // The workspace area may have announced this before collect. A
+            // snapshot cut taken during collect still needs a later refetch.
+            changes.push(UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+                revision: queries::revision(&next.projects),
+            }));
+        }
         if state.models.status() != next.status() {
             changes.push(UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged {
                 status: next.status(),
@@ -684,6 +791,25 @@ impl Projection {
         }
         for event in changes {
             state.publish(event, self.limits);
+        }
+        Ok(())
+    }
+    /// An in-flight refresh will publish after the snapshot's high-water cut.
+    /// Use the last complete models instead of waiting for its database work;
+    /// bootstrap still needs an initial model set.
+    fn refresh_for_snapshot(&self) -> Result<(), WorkbenchError> {
+        let ready = self.state.lock().unwrap().models_ready;
+        let refresh = if ready {
+            match self.model_refresh.try_lock() {
+                Ok(refresh) => Some(refresh),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(error)) => panic!("{error}"),
+            }
+        } else {
+            Some(self.model_refresh.lock().unwrap())
+        };
+        if let Some(mut refresh) = refresh {
+            self.refresh_models_serialized(&mut refresh, &[])?;
         }
         Ok(())
     }
@@ -738,8 +864,9 @@ impl Projection {
         read: impl FnOnce(&Models) -> Result<T, WorkbenchError>,
     ) -> Result<T, WorkbenchError> {
         let read = {
-            let mut state = self.state.lock().unwrap();
-            self.refresh_models_locked(&mut state, None)?;
+            let mut refresh = self.model_refresh.lock().unwrap();
+            self.refresh_models_serialized(&mut refresh, &[])?;
+            let state = self.state.lock().unwrap();
             read(&state.models)
         };
         self.models_changed();
@@ -956,8 +1083,8 @@ impl Projection {
         subscription
     }
     fn subscribe_after_refresh(&self, request: &Subscribe) -> Result<Subscription, WorkbenchError> {
+        self.refresh_for_snapshot()?;
         let mut state = self.state.lock().unwrap();
-        self.refresh_models_locked(&mut state, None)?;
         match &request.scope {
             SubscriptionScope::Project { project }
                 if !state.models.projects.contains_key(project.as_str()) =>
@@ -1133,8 +1260,8 @@ impl Projection {
         &self,
         request: &ReadSnapshot,
     ) -> Result<SnapshotPage, WorkbenchError> {
+        self.refresh_for_snapshot()?;
         let mut state = self.state.lock().unwrap();
-        self.refresh_models_locked(&mut state, None)?;
         state.expire_snapshots();
         let snapshot = state
             .snapshots

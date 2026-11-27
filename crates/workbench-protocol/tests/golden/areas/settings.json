@@ -39,6 +39,38 @@
     },
     "type": "settings"
   },
+  "command/settings/save_feature_settings": {
+    "payload": {
+      "payload": {
+        "changes": {
+          "agent_web_tools": false,
+          "browser": {
+            "coordinate_actions": false,
+            "enabled": true,
+            "executable": "/usr/bin/chromium",
+            "max_pages": 8,
+            "max_tabs": 4
+          },
+          "pull_requests": {
+            "auto_fix_enabled": true,
+            "enabled": true,
+            "include_in_review": false,
+            "pending_poll_seconds": 30,
+            "stable_poll_seconds": 300,
+            "timeout_seconds": 20
+          },
+          "thread_cleanup": {
+            "archived_delete_after_days": 30,
+            "auto_archive_after_days": 0
+          }
+        },
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-features"
+      },
+      "type": "save_feature_settings"
+    },
+    "type": "settings"
+  },
   "command/settings/save_provider": {
     "payload": {
       "payload": {
@@ -72,6 +104,13 @@
     },
     "type": "settings"
   },
+  "query/settings/get_feature_settings": {
+    "payload": {
+      "payload": {},
+      "type": "get_feature_settings"
+    },
+    "type": "settings"
+  },
   "query/settings/get_settings_operation": {
     "payload": {
       "payload": {
@@ -101,6 +140,62 @@
         "project": "project-1"
       },
       "type": "model_choices"
+    },
+    "type": "settings"
+  },
+  "query_reply/settings/feature_settings": {
+    "payload": {
+      "payload": {
+        "restart_pending": [
+          "browser"
+        ],
+        "revision": "2222222222222222222222222222222222222222222222222222222222222222",
+        "running": {
+          "agent_web_tools": true,
+          "browser": {
+            "coordinate_actions": false,
+            "enabled": true,
+            "executable": "/usr/bin/chromium",
+            "max_pages": 8,
+            "max_tabs": 4
+          },
+          "pull_requests": {
+            "auto_fix_enabled": true,
+            "enabled": true,
+            "include_in_review": false,
+            "pending_poll_seconds": 30,
+            "stable_poll_seconds": 300,
+            "timeout_seconds": 20
+          },
+          "thread_cleanup": {
+            "archived_delete_after_days": 7,
+            "auto_archive_after_days": 7
+          }
+        },
+        "saved": {
+          "agent_web_tools": true,
+          "browser": {
+            "coordinate_actions": false,
+            "enabled": false,
+            "executable": "/usr/bin/chromium",
+            "max_pages": 8,
+            "max_tabs": 4
+          },
+          "pull_requests": {
+            "auto_fix_enabled": true,
+            "enabled": true,
+            "include_in_review": false,
+            "pending_poll_seconds": 30,
+            "stable_poll_seconds": 300,
+            "timeout_seconds": 20
+          },
+          "thread_cleanup": {
+            "archived_delete_after_days": 7,
+            "auto_archive_after_days": 7
+          }
+        }
+      },
+      "type": "feature_settings"
     },
     "type": "settings"
   },

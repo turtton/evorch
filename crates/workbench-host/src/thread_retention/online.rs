@@ -45,7 +45,7 @@ impl AutoArchiveCoordinator {
     }
     fn reclaim_deleted_attachment(
         &mut self,
-        runtime: &runtime::AgentRuntime,
+        snapshot: &OnlineSnapshot,
         db: &storage::Database,
         report: &mut RetentionReport,
     ) {
@@ -63,8 +63,16 @@ impl AutoArchiveCoordinator {
             };
         // Advance even on failure; a busy/oversized bucket cannot starve another.
         self.deleted_attachment_after = Some(id.clone());
+        // The caller checked the binding; attachment failure must not suppress this hint.
+        if let Some(hint) = &snapshot.scratch_hint {
+            hint(&id);
+            report.scratch_hints += 1;
+        }
         let result = (|| -> Result<(), String> {
-            let root = runtime.attachment_root().map_err(|e| e.to_string())?;
+            let root = snapshot
+                .runtime
+                .attachment_root()
+                .map_err(|e| e.to_string())?;
             let _lock = root.try_lock_thread(&id).map_err(|e| e.to_string())?;
             report.attachment_calls += 1;
             root.remove_thread(&id).map_err(|e| e.to_string())
@@ -106,7 +114,7 @@ impl AutoArchiveCoordinator {
         let Some(initial) = self.snapshot(host, None, now, report) else {
             return;
         };
-        self.reclaim_deleted_attachment(&initial.runtime, db, report);
+        self.reclaim_deleted_attachment(&initial, db, report);
         if policy.archived_delete_after_days == 0 {
             report.hold("DeletionDisabled");
             return;

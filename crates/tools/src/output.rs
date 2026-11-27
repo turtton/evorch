@@ -441,6 +441,26 @@ impl OutputStore {
         Ok((path, end))
     }
 }
+fn cleanup_slot(root: &Path, slot: usize, now: SystemTime) {
+    if slot_dir(root, slot).is_dir()
+        && let Ok((dir, _lock)) = locked_slot(root, slot)
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.take(3).flatten() {
+            if entry.file_name() != ".lock"
+                && entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_some_and(|age| age > TTL)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 fn start_cleanup(root: PathBuf) {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
@@ -451,23 +471,7 @@ fn start_cleanup(root: PathBuf) {
                 loop {
                     std::thread::sleep(Duration::from_secs(60));
                     // One already-existing slot per minute, outside UI/runtime threads.
-                    if slot_dir(&root, slot).is_dir()
-                        && let Ok((dir, _lock)) = locked_slot(&root, slot)
-                        && let Ok(entries) = std::fs::read_dir(dir)
-                    {
-                        for entry in entries.take(3).flatten() {
-                            if entry.file_name() != ".lock"
-                                && entry
-                                    .metadata()
-                                    .ok()
-                                    .and_then(|m| m.modified().ok())
-                                    .and_then(|t| SystemTime::now().duration_since(t).ok())
-                                    .is_some_and(|age| age > TTL)
-                            {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
-                    }
+                    cleanup_slot(&root, slot, SystemTime::now());
                     slot = (slot + 1) % SLOTS;
                 }
             });
@@ -477,6 +481,79 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_ttl_removes_only_strictly_older_than_seven_days_and_preserves_slot_lock() {
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        for (age, removed) in [
+            (Duration::ZERO, false),
+            (TTL - Duration::from_nanos(1), false),
+            (TTL, false),
+            (TTL + Duration::from_nanos(1), true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (path, _) = OutputStore.save(root.path(), "output").unwrap();
+            File::open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            cleanup_slot(root.path(), 0, modified + age);
+            assert_eq!(!path.exists(), removed, "age={age:?}");
+            assert!(slot_dir(root.path(), 0).join(".lock").is_file());
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (path, _) = OutputStore.save(root.path(), "future").unwrap();
+        File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        cleanup_slot(root.path(), 0, modified - Duration::from_secs(1));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn artifact_ttl_skips_busy_slots_then_collects_after_unlock() {
+        let root = tempfile::tempdir().unwrap();
+        let (path, _) = OutputStore.save(root.path(), "output").unwrap();
+        let modified = SystemTime::UNIX_EPOCH;
+        File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let (_, busy) = locked_slot(root.path(), 0).unwrap();
+        cleanup_slot(root.path(), 0, modified + TTL + Duration::from_secs(1));
+        assert!(path.exists());
+        drop(busy);
+        cleanup_slot(root.path(), 0, modified + TTL + Duration::from_secs(1));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn artifact_ttl_rejects_public_or_symlinked_slot_without_touching_its_contents() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        for linked in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (path, _) = OutputStore.save(root.path(), "keep").unwrap();
+            File::open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+                .unwrap();
+            let dir = slot_dir(root.path(), 0);
+            if linked {
+                let aside = root.path().join("aside");
+                std::fs::rename(&dir, &aside).unwrap();
+                symlink(&aside, &dir).unwrap();
+            } else {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            cleanup_slot(
+                root.path(),
+                0,
+                SystemTime::UNIX_EPOCH + TTL + Duration::from_secs(1),
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        }
+    }
 
     #[test]
     fn trimming_the_start_of_a_cut_shell_result_records_that_its_header_is_gone() {

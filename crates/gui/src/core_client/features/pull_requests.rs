@@ -26,14 +26,18 @@ mod dialogs;
 pub(crate) mod view;
 
 use super::layout::bounded_list;
+use super::settings::SettingsIntent;
 use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::panes::pull_request_widgets::{
     self as widgets, BarChoice, BarMemory, BarView, CandidateChoice, PullRequestBadge, READ_FAILED,
     Status, candidate_offer, now_ns,
 };
+use crate::theme::icons;
 use crate::theme::text::{h3, muted};
-use crate::theme::tokens::palette;
-use crate::theme::widgets::{empty_state, primary_button, reason_label, soft_frame, spinner};
+use crate::theme::tokens::{SP_2, SP_4, palette};
+use crate::theme::widgets::{
+    accessible, empty_state, primary_button, reason_label, soft_frame, spinner,
+};
 use workbench_protocol::{
     commands::{Command, CommandResult},
     errors::{ErrorCode, RetryAdvice},
@@ -191,6 +195,8 @@ pub enum PullRequestIntent {
     Want(ThreadId),
     /// "Link PR…" was chosen in the thread's menu.
     OpenLink(ThreadId),
+    /// The settings changed what tracking is on: every thread is read again.
+    Refresh,
 }
 
 /// What the Projects tab shows of the pull requests: the badges, the threads already read
@@ -821,12 +827,7 @@ impl PullRequestsFeature {
             return;
         };
         if !view.tracking_enabled {
-            empty_state(
-                ui,
-                "Pull request tracking is off",
-                "Turn on [pull_requests] enabled in the core's settings.",
-                None,
-            );
+            tracking_off(ui, ctx);
             return;
         }
         let busy = self.running();
@@ -928,6 +929,25 @@ impl PullRequestsFeature {
             }
         }
     }
+}
+
+const OPEN_FEATURES: &str = "Open Features";
+
+/// What the tab says while tracking is off: where to turn it on, and the button that opens it.
+fn tracking_off(ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(SP_4);
+        ui.label(h3("Pull request view is off"));
+        ui.label(muted(
+            "Turn it on in \u{2699} \u{203a} Features to track this thread's pull request.",
+        ));
+        ui.add_space(SP_2);
+        let open = ui.button(icons::with_icon(icons::SLIDERS_HORIZONTAL, OPEN_FEATURES));
+        accessible(&open, OPEN_FEATURES);
+        if open.clicked() {
+            ctx.settings(SettingsIntent::Features);
+        }
+    });
 }
 
 impl Feature for PullRequestsFeature {
@@ -1116,6 +1136,10 @@ impl Feature for PullRequestsFeature {
             match intent {
                 PullRequestIntent::Want(thread) => self.want(thread),
                 PullRequestIntent::OpenLink(thread) => self.open_link(thread),
+                PullRequestIntent::Refresh => self
+                    .threads
+                    .values_mut()
+                    .for_each(|entry| entry.stale = true),
             }
         }
         for action in std::mem::take(&mut self.bar_actions) {

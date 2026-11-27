@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
-use config::{Config, ConfigError, ModelKind, RouteCandidateConfig, RoutingConfig};
+pub use config::RouteCandidateConfig;
+use config::{Config, ConfigError, ModelKind, RoutingConfig};
 
 /// The model overrides one route candidate can pick (ADR 0038).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,6 +32,13 @@ pub struct RoutingSettingsModel {
     pub pending_new_route: Option<String>,
     pub origin_role_settings: bool,
     pub expanded: BTreeSet<String>,
+    /// The routes added in this session, in the order they were added (the last is the newest).
+    pub added: Vec<String>,
+    /// The route whose card is open, which a save or discard is for (Model Settings shows one).
+    pub selected: Option<String>,
+    /// Routes whose saved candidates were changed elsewhere while they had unsaved edits:
+    /// they are not saved over the newer file, only discarded.
+    pub conflicted: BTreeSet<String>,
     pub profile_names: Vec<String>,
     pub profile_models: BTreeMap<String, Vec<String>>,
     /// 候補の種別 (ADR 0038) を決めるプロバイダ設定。
@@ -80,6 +88,21 @@ pub fn route_effort_choices(config: &Config, route: &str) -> Vec<String> {
 }
 
 impl RoutingSettingsModel {
+    /// The roles and categories whose settings name `route` explicitly, as settings addresses.
+    pub fn explicit_users(&self, route: &str) -> Vec<String> {
+        config::types::agents::roles_using(route, &self.agents)
+    }
+
+    /// The roles and categories that only reach `route` because it is named like the role.
+    pub fn implicit_users(&self, route: &str) -> Vec<String> {
+        config::types::agents::implicit_roles_using(route, &self.agents)
+    }
+
+    /// Whether the candidates serve both chat and image models.
+    pub fn mixes_kinds(&self, candidates: &[RouteCandidateConfig]) -> bool {
+        config::types::routing::route_model_kinds(candidates, &self.providers).len() > 1
+    }
+
     pub fn seed_from_config(config: &Config) -> Self {
         let mut profiles: Vec<_> = config.providers.iter().collect();
         profiles.sort_by_key(|(name, profile)| {
@@ -146,6 +169,97 @@ impl RoutingSettingsModel {
         self.routes != self.base_routes || !self.route_renames().is_empty()
     }
 
+    /// Whether the route drafted under `key` is new, changed or renamed.
+    pub fn route_is_dirty(&self, key: &str) -> bool {
+        let renamed = self
+            .route_name_edits
+            .get(key)
+            .is_some_and(|draft| draft != key);
+        match (self.routes.get(key), self.base_routes.get(key)) {
+            (Some(draft), Some(saved)) => draft != saved || renamed,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    /// The keys of the routes with unsaved edits.
+    pub fn dirty_routes(&self) -> Vec<String> {
+        self.routes
+            .keys()
+            .filter(|key| self.route_is_dirty(key))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the route has never been saved (it is not in the saved routes).
+    pub fn route_is_new(&self, key: &str) -> bool {
+        !self.base_routes.contains_key(key)
+    }
+
+    /// The name `key` has now: the rename typed for it, else itself.
+    pub fn shown_name<'a>(&'a self, key: &'a str) -> &'a str {
+        self.route_name_edits.get(key).map_or(key, String::as_str)
+    }
+
+    /// Puts the route back to what is saved (a new one is dropped), leaving the other
+    /// routes' edits alone.
+    pub fn discard_route(&mut self, key: &str) {
+        self.route_name_edits.remove(key);
+        self.conflicted.remove(key);
+        match self.base_routes.get(key) {
+            Some(saved) => {
+                self.routes.insert(key.into(), saved.clone());
+            }
+            None => {
+                self.routes.remove(key);
+                if self.pending_new_route.as_deref() == Some(key) {
+                    self.pending_new_route = None;
+                }
+            }
+        }
+        if self.selected.as_deref() == Some(key) && !self.routes.contains_key(key) {
+            self.selected = None;
+        }
+        self.validation_error = None;
+    }
+
+    /// Adds a route under a name that is free, to be renamed and saved. It is the open one.
+    pub fn add_draft_route(&mut self) -> String {
+        let taken = |name: &str| {
+            self.routes.contains_key(name)
+                || self.route_name_edits.values().any(|draft| draft == name)
+        };
+        let mut name = String::from("new-route");
+        let mut suffix = 2;
+        while taken(&name) {
+            name = format!("new-route-{suffix}");
+            suffix += 1;
+        }
+        self.add_route(&name).expect("a free name is valid");
+        self.pending_new_route = Some(name.clone());
+        self.selected = Some(name.clone());
+        name
+    }
+
+    /// The name draft of `key`, checked against the other routes and drafts.
+    ///
+    /// # Errors
+    /// The name is blank, or another route or draft has it.
+    pub fn set_route_name(&mut self, key: &str, name: &str) -> Result<(), ConfigError> {
+        let previous = self.route_name_edits.remove(key);
+        let name = name.trim();
+        if name == key {
+            return Ok(());
+        }
+        let result = self.rename_route(key, name);
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            self.route_name_edits.insert(key.into(), previous);
+        }
+        result
+    }
+
     /// Takes the saved-state fields of `config` (a profile view) and leaves the draft alone.
     pub fn refresh_references(&mut self, config: &Config) {
         let fresh = Self::seed_from_config(config);
@@ -207,6 +321,7 @@ impl RoutingSettingsModel {
             }],
         );
         self.expanded.insert(name.into());
+        self.added.push(name.into());
         Ok(())
     }
 
@@ -365,6 +480,63 @@ impl RoutingSettingsModel {
             .filter(|(original, draft)| original != draft)
             .map(|(original, draft)| (original.clone(), draft.clone()))
             .collect()
+    }
+
+    /// The name and candidates `key` would be saved with: its draft alone, checked against the
+    /// saved routes (`saved`) and the names the other drafts have, so another route's unsaved
+    /// edits cannot stop this one.
+    ///
+    /// # Errors
+    /// The name is blank or taken, there is no candidate, or a candidate has no existing profile.
+    pub fn validated_route(
+        &self,
+        key: &str,
+        saved: &BTreeMap<String, Vec<RouteCandidateConfig>>,
+    ) -> Result<(String, Vec<RouteCandidateConfig>), ConfigError> {
+        let name = self.shown_name(key).trim().to_owned();
+        let draft = self
+            .routes
+            .get(key)
+            .ok_or_else(|| ConfigError::InvalidField {
+                path: format!("routing.routes.{key}"),
+                message: "This route no longer exists".into(),
+            })?;
+        let taken = (name != key && saved.contains_key(&name))
+            || self
+                .routes
+                .keys()
+                .any(|other| other != key && self.shown_name(other) == name);
+        if name.is_empty() || taken {
+            return Err(ConfigError::InvalidField {
+                path: "routing.routes".into(),
+                message: "Enter a non-blank, unique logical model name".into(),
+            });
+        }
+        if draft.is_empty() {
+            return Err(ConfigError::InvalidField {
+                path: format!("routing.routes.{name}"),
+                message: "Each route needs a logical model name and at least one candidate".into(),
+            });
+        }
+        let mut candidates = draft.clone();
+        for candidate in &mut candidates {
+            if candidate.profile.trim().is_empty()
+                || !self.profile_names.contains(&candidate.profile)
+            {
+                return Err(ConfigError::InvalidField {
+                    path: format!("routing.routes.{name}.profile"),
+                    message: "Select an existing provider profile".into(),
+                });
+            }
+            if candidate
+                .model
+                .as_ref()
+                .is_some_and(|model| model.trim().is_empty())
+            {
+                candidate.model = None;
+            }
+        }
+        Ok((name, candidates))
     }
 
     /// 保存境界で検証し、空白だけのモデル指定を省略へ正規化する。

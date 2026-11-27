@@ -9,7 +9,13 @@
 //!   the runtime), reduced to an overview, the token budget by role and one
 //!   summary line per message. No message body is carried.
 //!
-//! Both are operations of [`read_ops`]; the database is opened read-only on a
+//! * *Scoped and live usage* (ADR 0045 E4): the usage of one thread or one run,
+//!   read from the ledger rows of its runs, and the live window (three hours by
+//!   minute, today, the month). The core keeps nothing of them between two
+//!   queries. A commit to the ledger is announced as a coalesced `usage_changed`
+//!   event, which only tells a client to ask again.
+//!
+//! All of them are operations of [`read_ops`]; the database is opened read-only on a
 //! blocking worker and the runtime's own connection is never locked.
 use super::{AreaHandles, AreaTasks, ProjectionSource};
 use crate::bootstrap::BootstrapError;
@@ -17,25 +23,30 @@ use crate::queries::{Pager, error, storage_error};
 use providers::{ContentBlock, Message, Role as MessageRole};
 use read_ops::{ReadOps, digest_of, first_line, page_of};
 use runtime::AgentRuntime;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
 use storage::{
-    Database,
+    Database, StorageHandle, UsageCommitObserver,
     usage::{UsageDailyRow, UsageRequestRow, UsageStatus},
 };
+use usage_notice::{USAGE_NOTICE_INTERVAL, UsageNotices};
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     events::UiEvent,
     ids::OperationId,
     namespaces::diagnostics::{
-        ContextMessage, ContextMessageRole, ContextSegment, DiagnosticsEvent, GetRunContext,
-        GetUsageSummary, MAX_CONTEXT_SEGMENTS, MAX_CONTEXT_SUMMARY_BYTES, MAX_CONTEXT_TOOLS,
-        MAX_USAGE_DAYS, MAX_USAGE_MODELS, ReadOutcome, RunContext, RunContextOverview, UsageDay,
-        UsageModel, UsageRange, UsageSummary, UsageTotals,
+        ContextMessage, ContextMessageRole, ContextSegment, DiagnosticsEvent, GetLiveUsage,
+        GetRunContext, GetRunUsage, GetThreadUsage, GetUsageSummary, LiveUsage,
+        MAX_CONTEXT_SEGMENTS, MAX_CONTEXT_SUMMARY_BYTES, MAX_CONTEXT_TOOLS, MAX_USAGE_DAYS,
+        MAX_USAGE_MODELS, ReadOutcome, RunContext, RunContextOverview, RunUsage, ThreadUsage,
+        UsageDay, UsageModel, UsageRange, UsageSummary, UsageTotals,
     },
     operation::OperationView,
 };
 
+mod live;
 pub mod read_ops;
+mod usage;
+mod usage_notice;
 
 /// What a finished read holds, before the messages are cut into pages.
 #[derive(Clone)]
@@ -45,6 +56,9 @@ pub enum DiagnosticsRead {
         overview: Box<RunContextOverview>,
         messages: Vec<ContextMessage>,
     },
+    ThreadUsage(Box<ThreadUsage>),
+    RunUsage(Box<RunUsage>),
+    LiveUsage(Box<LiveUsage>),
 }
 
 /// The `diagnostics` service, reached from `ingress/namespaces/diagnostics.rs` as
@@ -54,12 +68,16 @@ pub struct DiagnosticsArea {
     reads: ReadOps<DiagnosticsRead>,
     pager: Pager,
     wired: Option<Wired>,
+    /// Keeps the ledger's commit notices flowing to the task that announces them.
+    _usage_commits: Option<Arc<UsageCommitObserver>>,
 }
 
 #[derive(Clone)]
 struct Wired {
     runtime: AgentRuntime,
     database: PathBuf,
+    /// How long the ledger keeps a request before it is rolled up into days.
+    retention_days: u32,
 }
 
 impl DiagnosticsArea {
@@ -72,17 +90,47 @@ impl DiagnosticsArea {
             source,
             handles.database.clone(),
             handles.runtime.clone(),
+            &handles.storage,
+            handles.config.metrics.retention_days,
         ))
     }
 
     /// The service over its parts: the host's tasks, the namespace's event
-    /// source, the event database file and the runtime that holds run contexts.
+    /// source, the event database file, the runtime that holds run contexts, the
+    /// storage writer whose usage commits it announces and the ledger's
+    /// retention in days.
     pub fn from_parts(
         tasks: AreaTasks,
         source: ProjectionSource,
         database: PathBuf,
         runtime: AgentRuntime,
+        storage: &StorageHandle,
+        retention_days: u32,
     ) -> Self {
+        let notices = Arc::new(UsageNotices::default());
+        let observer: Arc<UsageCommitObserver> = {
+            let notices = Arc::clone(&notices);
+            Arc::new(move |runs: &[Option<String>]| notices.record(runs))
+        };
+        storage.observe_usage_commits(&observer);
+        let announce = source.clone();
+        let started = tasks.spawn("usage-notices", move |mut stop| async move {
+            notices
+                .run(
+                    |change| {
+                        let _ = announce.publish(UiEvent::Diagnostics(
+                            DiagnosticsEvent::UsageChanged { change },
+                        ));
+                    },
+                    USAGE_NOTICE_INTERVAL,
+                    async move { stop.stopped().await },
+                )
+                .await;
+            Ok(())
+        });
+        if let Err(error) = started {
+            tracing::warn!(%error, "usage change notices are not announced");
+        }
         Self {
             reads: ReadOps::new(tasks, move |view| {
                 let _ = source.publish(UiEvent::Diagnostics(
@@ -90,7 +138,12 @@ impl DiagnosticsArea {
                 ));
             }),
             pager: Pager::default(),
-            wired: Some(Wired { runtime, database }),
+            wired: Some(Wired {
+                runtime,
+                database,
+                retention_days,
+            }),
+            _usage_commits: Some(observer),
         }
     }
 
@@ -125,6 +178,90 @@ impl DiagnosticsArea {
             operation: snapshot.view,
             data: match snapshot.data {
                 Some(DiagnosticsRead::Usage(summary)) => Some(*summary),
+                _ => None,
+            },
+        })
+    }
+
+    /// Start or join the usage of a thread.
+    ///
+    /// # Errors
+    /// See [`ReadOps::submit`]. The operation fails with `NotFound` for a thread
+    /// the database does not know.
+    pub fn thread_usage(
+        &self,
+        request: &GetThreadUsage,
+    ) -> Result<ReadOutcome<ThreadUsage>, WorkbenchError> {
+        let wired = self.wired()?.clone();
+        let thread = request.thread.clone();
+        let snapshot = self.reads.submit(
+            &request.operation_id,
+            digest_of(&("thread_usage", &request.thread)),
+            move || {
+                let database = Database::open_read_only(&wired.database).map_err(storage_error)?;
+                usage::thread_usage(&database, &thread, now_ns(), wired.retention_days)
+                    .map(|usage| DiagnosticsRead::ThreadUsage(Box::new(usage)))
+            },
+        )?;
+        Ok(ReadOutcome {
+            operation: snapshot.view,
+            data: match snapshot.data {
+                Some(DiagnosticsRead::ThreadUsage(usage)) => Some(*usage),
+                _ => None,
+            },
+        })
+    }
+
+    /// Start or join the usage of a run, without the runs it started.
+    ///
+    /// # Errors
+    /// See [`ReadOps::submit`]. The operation fails with `NotFound` for a run
+    /// with neither a request nor a thread.
+    pub fn run_usage(
+        &self,
+        request: &GetRunUsage,
+    ) -> Result<ReadOutcome<RunUsage>, WorkbenchError> {
+        let wired = self.wired()?.clone();
+        let run = request.run.clone();
+        let snapshot = self.reads.submit(
+            &request.operation_id,
+            digest_of(&("run_usage", &request.run)),
+            move || {
+                let database = Database::open_read_only(&wired.database).map_err(storage_error)?;
+                usage::run_usage(&database, &run, now_ns(), wired.retention_days)
+                    .map(|usage| DiagnosticsRead::RunUsage(Box::new(usage)))
+            },
+        )?;
+        Ok(ReadOutcome {
+            operation: snapshot.view,
+            data: match snapshot.data {
+                Some(DiagnosticsRead::RunUsage(usage)) => Some(*usage),
+                _ => None,
+            },
+        })
+    }
+
+    /// Start or join one read of the live usage.
+    ///
+    /// # Errors
+    /// See [`ReadOps::submit`].
+    pub fn live_usage(
+        &self,
+        request: &GetLiveUsage,
+    ) -> Result<ReadOutcome<LiveUsage>, WorkbenchError> {
+        let wired = self.wired()?.clone();
+        let snapshot =
+            self.reads
+                .submit(&request.operation_id, digest_of(&"live_usage"), move || {
+                    let database =
+                        Database::open_read_only(&wired.database).map_err(storage_error)?;
+                    live::live_usage(&database, now_ns())
+                        .map(|usage| DiagnosticsRead::LiveUsage(Box::new(usage)))
+                })?;
+        Ok(ReadOutcome {
+            operation: snapshot.view,
+            data: match snapshot.data {
+                Some(DiagnosticsRead::LiveUsage(usage)) => Some(*usage),
                 _ => None,
             },
         })
@@ -181,6 +318,11 @@ impl DiagnosticsArea {
 }
 
 // ---- usage ------------------------------------------------------------------
+
+/// The wall clock in Unix nanoseconds; the ledger's own clock for its rows.
+fn now_ns() -> i64 {
+    storage::system_time_to_ns(SystemTime::now()).unwrap_or_default()
+}
 
 /// A day as a number counted from 1970-01-01, for the calendar arithmetic of a
 /// range (the ledger already labels every request with its local day).

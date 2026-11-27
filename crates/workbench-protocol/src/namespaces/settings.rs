@@ -30,6 +30,9 @@
 //! * No secret is part of this namespace. A credential is only a reference
 //!   (environment variable name, keychain service and account); the secret
 //!   itself belongs to the `auth` namespace.
+mod feature_options;
+pub use feature_options::*;
+
 use crate::{
     handshake::{Capability, WireLimits},
     ids::OperationId,
@@ -45,10 +48,12 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "save_provider",
     "delete_provider",
     "reload_models",
+    "save_feature_settings",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "model_choices",
     "get_settings_snapshot",
+    "get_feature_settings",
     "get_settings_operation",
     "list_settings_operations",
 ];
@@ -240,6 +245,7 @@ pub enum SettingsOperationKind {
     SaveProvider,
     DeleteProvider,
     ReloadModels,
+    SaveFeatureSettings,
 }
 
 /// An operation with what a settings client needs to explain its end. The
@@ -460,6 +466,7 @@ pub enum SettingsCommand {
     SaveProvider(Box<SaveProvider>),
     DeleteProvider(DeleteProvider),
     ReloadModels(ReloadModels),
+    SaveFeatureSettings(SaveFeatureSettings),
 }
 
 impl SettingsCommand {
@@ -475,6 +482,7 @@ impl SettingsCommand {
             Self::SaveProvider(c) => &c.operation_id,
             Self::DeleteProvider(c) => &c.operation_id,
             Self::ReloadModels(c) => &c.operation_id,
+            Self::SaveFeatureSettings(c) => &c.operation_id,
         }
     }
 
@@ -485,6 +493,7 @@ impl SettingsCommand {
             Self::SaveProvider(_) => SettingsOperationKind::SaveProvider,
             Self::DeleteProvider(_) => SettingsOperationKind::DeleteProvider,
             Self::ReloadModels(_) => SettingsOperationKind::ReloadModels,
+            Self::SaveFeatureSettings(_) => SettingsOperationKind::SaveFeatureSettings,
         }
     }
 
@@ -503,6 +512,7 @@ impl SettingsCommand {
                 c.provider.validate()
             }
             Self::DeleteProvider(c) => check_line("name", &c.name, MAX_NAME_BYTES, false),
+            Self::SaveFeatureSettings(c) => c.changes.validate(),
         }
     }
 }
@@ -531,6 +541,8 @@ pub enum SettingsResult {
 pub enum SettingsQuery {
     /// The snapshot the core holds (`refresh` reads the file again).
     GetSettingsSnapshot {},
+    /// The Features screen's settings: saved, running and waiting for a restart.
+    GetFeatureSettings {},
     ModelChoices {
         project: crate::ids::ProjectId,
     },
@@ -561,6 +573,7 @@ impl SettingsQuery {
 pub enum SettingsReply {
     ModelChoices(ProjectModelChoices),
     Settings(Box<SettingsSnapshot>),
+    FeatureSettings(Box<FeatureSettingsView>),
     Operation(SettingsOperationView),
     Operations {
         operations: Vec<SettingsOperationView>,
@@ -631,6 +644,11 @@ impl SettingsReply {
                 check_text("document", &snapshot.document, MAX_DOCUMENT_BYTES, true)?;
                 check_count("providers", snapshot.providers.len(), MAX_PROVIDERS)
             }
+            Self::FeatureSettings(view) => check_count(
+                "restart_pending",
+                view.restart_pending.len(),
+                MAX_FEATURE_SECTIONS,
+            ),
             Self::Operation(operation) => operation.validate(),
             Self::Operations { operations } => {
                 check_count("operations", operations.len(), MAX_OPERATIONS)?;

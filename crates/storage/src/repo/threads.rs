@@ -324,7 +324,7 @@ pub(crate) fn in_project(
     let fetch = i64::try_from(limit + 1).map_err(|_| StorageError::OutOfRange("thread page"))?;
     let mut threads = match cursor {
         None => {
-            let mut statement = conn.prepare(&format!(
+            let mut statement = conn.prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 AND {live} \
                  ORDER BY updated_at_ns DESC, thread_id DESC LIMIT ?2"
             ))?;
@@ -333,7 +333,7 @@ pub(crate) fn in_project(
                 .collect::<Result<Vec<_>, _>>()?
         }
         Some(cursor) => {
-            let mut statement = conn.prepare(&format!(
+            let mut statement = conn.prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 AND {live} \
                  AND (updated_at_ns < ?2 OR (updated_at_ns = ?2 AND thread_id < ?3)) \
                  ORDER BY updated_at_ns DESC, thread_id DESC LIMIT ?4"
@@ -413,19 +413,15 @@ pub(crate) fn resolve_thread_id(
 }
 
 fn run_tombstoned(conn: &Connection, run_id: &str) -> Result<bool, StorageError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
-        [run_id],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)")?
+        .query_row([run_id], |row| row.get(0))?)
 }
 
 fn thread_tombstoned(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
-        [thread_id],
-        |row| row.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)")?
+        .query_row([thread_id], |row| row.get(0))?)
 }
 
 pub(crate) fn runs_of_thread(
@@ -437,7 +433,7 @@ pub(crate) fn runs_of_thread(
     }
     // Seeds mirror `walk`: bindings, parentless runs named for the thread and
     // the recorded root. Descendants follow both kinds of parent link.
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "WITH RECURSIVE seed(run_id, root_run_id, depth) AS (\
              SELECT run_id, root_run_id, depth FROM thread_runs WHERE thread_id = ?1 \
              UNION SELECT run_id, run_id, 0 FROM run_contexts \
@@ -682,11 +678,12 @@ fn walk_counted(
         }
         if found.is_none() {
             let bound = conn
-                .query_row(
+                .prepare_cached(
                     "SELECT thread_id, root_run_id, depth FROM thread_runs WHERE run_id = ?1",
-                    [&current],
-                    |row| Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?)),
-                )
+                )?
+                .query_row([&current], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?))
+                })
                 .optional()?;
             if let Some((thread_id, root_run_id, depth)) = bound {
                 let row = ThreadRunRow {
@@ -713,12 +710,11 @@ fn walk_counted(
             let thread_id = match named {
                 Some(thread_id) => Some(thread_id),
                 None => conn
-                    .query_row(
+                    .prepare_cached(
                         "SELECT thread_id FROM threads WHERE root_run_id = ?1 \
                          ORDER BY updated_at_ns DESC, thread_id LIMIT 1",
-                        [&current],
-                        |row| row.get(0),
-                    )
+                    )?
+                    .query_row([&current], |row| row.get(0))
                     .optional()?,
             };
             return Ok(match thread_id {
@@ -745,22 +741,20 @@ fn identity(
     run_id: &str,
 ) -> Result<(Option<String>, Option<String>), StorageError> {
     let saved = conn
-        .query_row(
-            "SELECT name, parent_run_id FROM run_contexts WHERE run_id = ?1",
-            [run_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
+        .prepare_cached("SELECT name, parent_run_id FROM run_contexts WHERE run_id = ?1")?
+        .query_row([run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
         .optional()?;
     if let Some((name, Some(parent))) = saved {
         return Ok((Some(name), Some(parent)));
     }
     let ledger_parent = conn
-        .query_row(
+        .prepare_cached(
             "SELECT parent_run_id FROM usage_requests \
              WHERE run_id = ?1 AND parent_run_id IS NOT NULL LIMIT 1",
-            [run_id],
-            |row| row.get(0),
-        )
+        )?
+        .query_row([run_id], |row| row.get(0))
         .optional()?;
     Ok((saved.map(|(name, _)| name), ledger_parent))
 }

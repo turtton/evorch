@@ -1,5 +1,6 @@
 //! Core-owned automatic archive, authorized by dedicated DB/root writer leases.
 mod online;
+mod tool_bodies;
 use crate::CommandHost;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ pub struct RetentionReport {
     /// What the family decision of this tick read, if one ran.
     pub decision: Option<DecisionStats>,
     pub inspected_runs: usize,
+    pub tool_bodies: Option<storage::thread_retention::tool_bodies::Progress>,
     pub published: usize,
     pub attachment_calls: usize,
     pub scratch_hints: usize,
@@ -48,6 +50,9 @@ pub struct AutoArchiveCoordinator {
     stopped: bool,
     last_holds: BTreeMap<&'static str, usize>,
     online_policy: Option<storage::thread_retention::ThreadRetentionPolicy>,
+    tool_body_days: u32,
+    tool_body_cursor: storage::thread_retention::tool_bodies::Cursor,
+    tool_body_run: Option<(String, String, i64)>,
     delete_turn: bool,
     delete_after: Option<String>,
     delete_started: bool,
@@ -68,6 +73,9 @@ impl AutoArchiveCoordinator {
             stopped: false,
             last_holds: BTreeMap::new(),
             online_policy: None,
+            tool_body_days: 0,
+            tool_body_cursor: Default::default(),
+            tool_body_run: None,
             delete_turn: false,
             delete_after: None,
             delete_started: false,
@@ -158,6 +166,7 @@ impl AutoArchiveCoordinator {
                 }
             }
         });
+        self.tool_body_tick(host_arc, authority, &db, now_ns, cleanup_bound, &mut report);
         if self.online_policy.is_some() {
             let deleting = self.delete_turn;
             self.delete_turn = !self.delete_turn;

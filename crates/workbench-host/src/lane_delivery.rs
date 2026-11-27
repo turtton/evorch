@@ -26,13 +26,19 @@ fn permit_for(host: &OwnerHost, thread: &str) -> Result<OwnerPermit, LaneDeliver
             RegistryError::Absent | RegistryError::ThreadDeleted(_)
         )
     };
-    match host.owned_permit(thread) {
+    match host.owned_or_claim_abandoned(thread) {
         Ok(permit) => Ok(permit),
         Err(error) if missing(&error) => Err(LaneDeliveryNack::UnknownThread),
-        Err(RegistryError::Ownership(OwnershipError::Fenced)) => match host.attach(thread) {
+        Err(RegistryError::Ownership(
+            OwnershipError::Fenced
+            | OwnershipError::NotClaimable
+            | OwnershipError::OwnerResponsive
+            | OwnershipError::PlannedHeld,
+        )) => match host.attach(thread) {
             Ok(owner) if owner.lease.owner_id != host.owner_id() => Err(LaneDeliveryNack::Readonly),
             Ok(_) => Err(LaneDeliveryNack::OwnershipLost),
             Err(error) if missing(&error) => Err(LaneDeliveryNack::UnknownThread),
+            Err(error) if error.sqlite_code().is_some() => Err(LaneDeliveryNack::StorageFailed),
             Err(_) => Err(LaneDeliveryNack::OwnershipLost),
         },
         Err(error) if error.sqlite_code().is_some() => Err(LaneDeliveryNack::StorageFailed),
