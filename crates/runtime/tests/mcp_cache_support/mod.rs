@@ -394,6 +394,7 @@ impl Provider {
             default_model: self.model().into(),
             excluded_models: vec![],
             edit_tool: None,
+            show_quota: None,
         }
     }
 }

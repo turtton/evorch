@@ -59,6 +59,7 @@ fn config() -> Config {
                 excluded_models: Vec::new(),
                 default_model: "local-model".to_string(),
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         ..Config::default()

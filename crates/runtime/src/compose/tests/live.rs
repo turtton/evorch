@@ -82,6 +82,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
                 excluded_models: vec![],
                 default_model: "live".into(),
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: RoutingConfig {

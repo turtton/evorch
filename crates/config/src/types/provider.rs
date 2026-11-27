@@ -58,6 +58,14 @@ impl ProviderTypeConfig {
         matches!(self, Self::OpenAi | Self::OpenAiCodex)
     }
 
+    /// 残量 (quota) を取得できる種別か (Codex / Claude subscription / Cursor / Kimi)。
+    pub const fn quota_supported(self) -> bool {
+        matches!(
+            self,
+            Self::OpenAiCodex | Self::AnthropicSubscription | Self::Cursor | Self::KimiSubscription
+        )
+    }
+
     /// Returns models.dev provider slugs to try in order during metadata resolution.
     /// An empty list means no known mapping; callers fall back to profile-name guessing,
     /// uniqueness, or limit-agreement resolution.
@@ -585,9 +593,25 @@ pub struct ProviderProfileConfig {
     /// `gpt-<N>` (N≥5) は apply-patch、それ以外は edit) に従う。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit_tool: Option<EditToolConfig>,
+    /// フッターに残量 (quota) を表示するか。省略時は quota を取得できる種別
+    /// (Codex / Claude subscription / Cursor / Kimi) がオン、それ以外はオフ。
+    /// 取得できない種別では値によらず表示しない。表示と取得の判断は
+    /// [`Self::show_quota_enabled`] だけが行う。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_quota: Option<bool>,
 }
 
 impl ProviderProfileConfig {
+    /// この種別の quota を取得できるか。
+    pub fn quota_supported(&self) -> bool {
+        self.provider_type.quota_supported()
+    }
+
+    /// フッターに quota を表示するか (明示値、なければ種別の既定。取得できない種別は常に false)。
+    pub fn show_quota_enabled(&self) -> bool {
+        self.quota_supported() && self.show_quota.unwrap_or(true)
+    }
+
     /// 有効なモデル ID を設定順で返す。
     pub fn enabled_model_ids(&self) -> Vec<String> {
         self.models
@@ -731,6 +755,7 @@ impl Default for ProviderProfileConfig {
             excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
             edit_tool: None,
+            show_quota: None,
         }
     }
 }
@@ -751,6 +776,7 @@ struct ProviderProfileDe {
     excluded_models: Vec<String>,
     default_model: String,
     edit_tool: Option<EditToolConfig>,
+    show_quota: Option<bool>,
 }
 
 // 省略フィールドは公開構造体の既定値で補完する (コンテナ serde(default) の契約)。
@@ -768,6 +794,7 @@ impl Default for ProviderProfileDe {
             excluded_models: Vec::new(),
             default_model: String::new(),
             edit_tool: None,
+            show_quota: None,
         }
     }
 }
@@ -850,6 +877,7 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             excluded_models: value.excluded_models,
             default_model,
             edit_tool: value.edit_tool,
+            show_quota: value.show_quota,
         })
     }
 }

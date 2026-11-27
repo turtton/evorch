@@ -316,6 +316,7 @@ async fn harness_with_limit(
             default_model: "claude-sonnet-4-6".into(),
             excluded_models: vec![],
             edit_tool: None,
+            show_quota: None,
         },
     );
     config.providers.get_mut("claude").unwrap().models[0].effort_levels = effort_levels;

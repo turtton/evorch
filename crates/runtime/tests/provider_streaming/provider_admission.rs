@@ -52,6 +52,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
                 excluded_models: vec![],
                 default_model: "gpt-4o".into(),
                 edit_tool: None,
+                show_quota: None,
             },
         );
     }

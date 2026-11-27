@@ -492,6 +492,7 @@ pub async fn provider_run_with(
                 default_model: MODEL.into(),
                 excluded_models: vec![],
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: config::RoutingConfig {

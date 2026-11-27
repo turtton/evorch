@@ -1466,6 +1466,13 @@
           "$ref": "#/$defs/ProviderTypeConfig",
           "default": "anthropic"
         },
+        "show_quota": {
+          "description": "フッターに残量 (quota) を表示するか。省略時は quota を取得できる種別\n(Codex / Claude subscription / Cursor / Kimi) がオン、それ以外はオフ。\n取得できない種別では値によらず表示しない。表示と取得の判断は\n[`Self::show_quota_enabled`] だけが行う。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "type": {
           "description": "`provider_type` のエイリアス。",
           "$ref": "#/$defs/ProviderTypeConfig"

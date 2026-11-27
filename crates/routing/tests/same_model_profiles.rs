@@ -25,6 +25,7 @@ fn profile(name: &str, default_model: &str) -> ProviderProfile {
         excluded_models: Vec::new(),
         default_model: default_model.to_string(),
         edit_tool: None,
+        show_quota: None,
     };
     ProviderProfile::try_from((name, &profile_config)).expect("有効な設定は変換できる")
 }

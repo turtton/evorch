@@ -29,6 +29,7 @@ fn provider_config(provider_type: ProviderTypeConfig) -> ProviderProfileConfig {
         excluded_models: Vec::new(),
         default_model: MODEL.to_string(),
         edit_tool: None,
+        show_quota: None,
     }
 }
 

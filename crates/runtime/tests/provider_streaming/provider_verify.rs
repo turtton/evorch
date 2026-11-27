@@ -22,6 +22,7 @@ fn model(urls: &[(&str, String)], bus: Arc<EventBus>) -> Arc<RoutedModel> {
             excluded_models: vec![],
             default_model: "gpt-4o".into(),
             edit_tool: None,
+            show_quota: None,
         };
         config.providers.insert((*name).into(), profile);
     }
@@ -297,6 +298,7 @@ fn codex_model_with_bus_and_cache(
             excluded_models: vec![],
             default_model: "gpt-4o".into(),
             edit_tool: None,
+            show_quota: None,
         },
     );
     compose_routed_model(
