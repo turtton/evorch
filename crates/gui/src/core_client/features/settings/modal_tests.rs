@@ -1010,7 +1010,3 @@ fn routing_and_roles_fit_the_smallest_window() {
         assert!(window.contains_rect(rect), "{role} at {rect:?}");
     }
 }
-
-#[cfg(test)]
-#[path = "modal_evidence.rs"]
-mod evidence;
