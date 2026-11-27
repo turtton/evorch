@@ -58,6 +58,9 @@ const NAME_READ_ATTEMPTS: u8 = 3;
 /// What a request in flight was for.
 #[derive(Debug, Clone)]
 enum Pending {
+    ShellOutput {
+        generation: u64,
+    },
     Runs {
         thread: ThreadId,
         root: RunId,
@@ -88,6 +91,7 @@ struct RunsRead {
 
 #[derive(Default)]
 pub struct ExecutionFeature {
+    shell_jobs: crate::core_client::shell_jobs::ShellJobsPanel,
     next_tag: u64,
     /// Ties a tag to its meaning. Kept across `reset`.
     pending: BTreeMap<u64, Pending>,
@@ -590,7 +594,12 @@ impl Feature for ExecutionFeature {
         }
     }
 
+    fn disconnected(&mut self) {
+        self.shell_jobs.reset();
+    }
+
     fn reset(&mut self) {
+        self.shell_jobs.reset();
         // What came from the core is dropped and asked for again; `pending`
         // stays, because a tag may still be answered.
         let loaded_pages = self.loaded_pages;
@@ -611,7 +620,9 @@ impl Feature for ExecutionFeature {
         let UiEvent::Execution(event) = event else {
             return;
         };
+        self.shell_jobs.event(event);
         let changed = match event {
+            ExecutionEvent::ShellJobChanged { .. } | ExecutionEvent::ShellJobOutput { .. } => None,
             ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => None,
             ExecutionEvent::RunChanged { run } => Some(&run.thread),
             ExecutionEvent::ThreadExecutionChanged { thread, .. } => Some(thread),
@@ -620,6 +631,7 @@ impl Feature for ExecutionFeature {
         if changed == self.thread.as_ref() {
             // Ask again instead of patching: the core's answer is current.
             match event {
+                ExecutionEvent::ShellJobChanged { .. } | ExecutionEvent::ShellJobOutput { .. } => {}
                 ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => (),
                 ExecutionEvent::RunChanged { run } => {
                     self.runs_stale = true;
@@ -641,6 +653,17 @@ impl Feature for ExecutionFeature {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
+        if let Pending::ShellOutput { generation } = pending {
+            let output = match reply {
+                FeatureReply::Query(Ok(QueryReply::Execution(ExecutionReply::ShellOutput(
+                    output,
+                )))) => Ok(output),
+                FeatureReply::Query(Err(error)) => Err(error.message),
+                _ => Err("Unexpected shell output reply".into()),
+            };
+            self.shell_jobs.reply(generation, output);
+            return;
+        }
         if let Pending::Runs { thread, root, path } = &pending {
             // A navigation or reset invalidates the read, even when the user has
             // since returned to the same thread and breadcrumb.
@@ -751,6 +774,17 @@ impl Feature for ExecutionFeature {
     }
 
     fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        if visibility.available
+            && let Some((generation, request)) = self
+                .shell_jobs
+                .request(ctx.selection().thread.as_ref(), &ctx.cache().shell_jobs)
+        {
+            let tag = self.tag(Pending::ShellOutput { generation });
+            ctx.query(
+                tag,
+                Query::Execution(ExecutionQuery::ReadShellOutput(request)),
+            );
+        }
         let selected = ctx.selection().thread.clone();
         if selected != self.thread {
             self.switch_thread(selected);
@@ -804,6 +838,8 @@ impl Feature for ExecutionFeature {
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
+        self.shell_jobs
+            .render(ui, ctx.selection().thread.as_ref(), &ctx.cache().shell_jobs);
         let Some(thread) = self.thread.clone().filter(|_| self.root.is_some()) else {
             no_runs(ui);
             return;

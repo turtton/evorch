@@ -16,6 +16,7 @@ pub mod notifications;
 pub mod persistence;
 pub mod run_tabs;
 pub mod shell;
+mod shell_jobs;
 mod subagent_panes;
 pub mod theme;
 mod thread_search;

@@ -57,3 +57,27 @@ fn shell_observation_bounds_identity_command_and_output_ranges() {
     output.offset = u64::MAX;
     assert!(output.validate().is_err());
 }
+
+#[test]
+fn shell_offsets_preserve_u64_precision_on_the_wire() {
+    let offset = (1_u64 << 53) + 1;
+    let output = workbench_protocol::namespaces::execution::shell::ShellOutput {
+        thread: common::thread(),
+        run: common::run(),
+        job_uid: "uid".into(),
+        available_from: offset,
+        offset,
+        chunk: "tail".into(),
+        output_end: offset + 4,
+    };
+    output.validate().unwrap();
+    let value = serde_json::to_value(&output).unwrap();
+    assert_eq!(value["offset"], offset.to_string());
+    assert_eq!(
+        serde_json::from_value::<workbench_protocol::namespaces::execution::shell::ShellOutput>(
+            value
+        )
+        .unwrap(),
+        output
+    );
+}

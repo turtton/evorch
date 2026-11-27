@@ -104,7 +104,7 @@
       "payload": {
         "chunk": "tail\n",
         "job_uid": "shell-uid",
-        "offset": 7,
+        "offset": "7",
         "run": "run-1",
         "thread": "thr-1"
       },

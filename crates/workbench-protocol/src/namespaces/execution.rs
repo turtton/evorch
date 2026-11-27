@@ -413,6 +413,7 @@ pub enum ExecutionEvent {
         thread: ThreadId,
         run: RunId,
         job_uid: String,
+        #[serde(with = "crate::wire")]
         offset: u64,
         chunk: String,
     },

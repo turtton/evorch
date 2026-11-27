@@ -303,7 +303,8 @@ impl CommandHost {
         provenance: &Provenance,
     ) -> Result<workbench_protocol::queries::QueryReply, WorkbenchError> {
         match namespace_query {
-            workbench_protocol::namespaces::ExecutionQuery::ListRuns(_) => {
+            workbench_protocol::namespaces::ExecutionQuery::ListRuns(_)
+            | workbench_protocol::namespaces::ExecutionQuery::ReadShellOutput(_) => {
                 self.projection.query(query)
             }
             workbench_protocol::namespaces::ExecutionQuery::GetInvocation(get) => {

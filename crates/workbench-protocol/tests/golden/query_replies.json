@@ -127,11 +127,11 @@
   "execution/shell_output": {
     "payload": {
       "payload": {
-        "available_from": 7,
+        "available_from": "7",
         "chunk": "tail\n",
         "job_uid": "shell-uid",
-        "offset": 7,
-        "output_end": 12,
+        "offset": "7",
+        "output_end": "12",
         "run": "run-1",
         "thread": "thr-1"
       },

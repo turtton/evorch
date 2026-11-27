@@ -58,6 +58,7 @@ pub struct ReadShellOutput {
     pub run: RunId,
     pub job_uid: String,
     /// Absolute UTF-8 byte offset; a gap is reported by the returned offset.
+    #[serde(with = "crate::wire")]
     pub offset: u64,
     pub max_bytes: u32,
 }
@@ -79,9 +80,12 @@ pub struct ShellOutput {
     pub thread: ThreadId,
     pub run: RunId,
     pub job_uid: String,
+    #[serde(with = "crate::wire")]
     pub available_from: u64,
+    #[serde(with = "crate::wire")]
     pub offset: u64,
     pub chunk: String,
+    #[serde(with = "crate::wire")]
     pub output_end: u64,
 }
 impl ShellOutput {
