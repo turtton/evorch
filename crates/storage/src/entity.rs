@@ -286,6 +286,9 @@ impl SecretGuard {
             EventKind::Message(MessageEvent::MessageCompleted { text, .. }) => {
                 self.check_text("event", "MessageCompleted.text", text)
             }
+            EventKind::Message(MessageEvent::ReasoningCompleted { text, .. }) => {
+                self.check_text("event", "ReasoningCompleted.text", text)
+            }
             EventKind::Message(MessageEvent::FinalResultPublished { text, .. }) => {
                 self.check_text("event", "FinalResultPublished.text", text)
             }

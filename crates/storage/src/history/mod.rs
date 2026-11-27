@@ -11,10 +11,14 @@ pub(crate) mod meter;
 pub mod read;
 #[cfg(test)]
 mod read_tests;
+pub mod rows;
+#[cfg(test)]
+mod structured_tests;
 #[cfg(test)]
 mod tests;
 
 use event_bus::{EventKind, LifecycleEvent, MessageEvent};
+pub use rows::{Committed, ToolInput, ToolRow};
 
 pub type PendingParts = (usize, usize, Vec<(String, bool)>);
 /// Domain-separated digest of ordered normalized part identities. Fixed size
@@ -38,6 +42,34 @@ pub enum Role {
     User,
     Assistant,
     Tool,
+    Reasoning,
+    Notice,
+    Error,
+}
+
+impl Role {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Reasoning => "reasoning",
+            Self::Notice => "notice",
+            Self::Error => "error",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "tool" => Self::Tool,
+            "reasoning" => Self::Reasoning,
+            "notice" => Self::Notice,
+            "error" => Self::Error,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +77,21 @@ pub struct Message {
     pub index: u64,
     pub role: Role,
     pub parts: Vec<(String, bool)>,
+    pub tool: Option<ToolRow>,
+}
+
+/// Merge adjacent plain parts; a deferred body reference always stands alone.
+pub fn normalize(parts: Vec<(String, bool)>) -> Vec<(String, bool)> {
+    let mut normalized: Vec<(String, bool)> = Vec::new();
+    for (part, tokenized) in parts {
+        let deferred = tokenized && crate::BodyRef::from_token(&part).is_some();
+        if !deferred && let Some((last, false)) = normalized.last_mut() {
+            last.push_str(&part);
+        } else {
+            normalized.push((part, deferred));
+        }
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -55,33 +102,16 @@ pub struct Reducer {
     pub last_assistant: Option<Key>,
 }
 
-pub fn committed_text(kind: &EventKind) -> Option<(&str, Role, &str)> {
-    match kind {
-        EventKind::Message(
-            MessageEvent::MessageCompleted { run_id, text }
-            | MessageEvent::FinalResultPublished { run_id, text },
-        ) => Some((run_id, Role::Assistant, text)),
-        EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
-            run_id,
-            prompt,
-            user_text,
-            ..
-        }) => Some((run_id, Role::User, user_text.as_deref().unwrap_or(prompt))),
-        EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
-            run_id: Some(run),
-            output: Some(output),
-            ..
-        }) => Some((run, Role::Tool, output)),
-        _ => None,
-    }
-}
 impl Reducer {
+    /// `start` is the input of the `ToolStarted` that precedes a `ToolCompleted`.
     pub fn observe(
         &mut self,
         kind: &EventKind,
         tokenized: bool,
         pending: &mut Option<PendingParts>,
+        start: Option<ToolInput>,
     ) -> Option<Message> {
+        let mut tool = None;
         let (role, parts) =
             if let EventKind::Message(MessageEvent::MessagePart {
                 text, index, total, ..
@@ -105,16 +135,18 @@ impl Reducer {
                 let parts = pending.take()?.2;
                 (Role::Assistant, parts)
             } else {
-                let (_, role, body) = committed_text(kind)?;
-                (role, vec![(body.to_owned(), tokenized)])
+                let committed = rows::committed(kind, tokenized, start)?;
+                tool = committed.tool;
+                (committed.role, committed.parts)
             };
         let prompt = matches!(
             kind,
             EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
         );
-        self.message(
+        self.build(
             role,
             parts,
+            tool,
             prompt,
             matches!(
                 kind,
@@ -129,16 +161,22 @@ impl Reducer {
         prompt: bool,
         finish: bool,
     ) -> Option<Message> {
+        self.build(role, parts, None, prompt, finish)
+    }
+    /// The message of a row restored from its sources, which is never a first prompt or a final result.
+    pub fn assemble(&mut self, row: Committed<'_>) -> Option<Message> {
+        self.build(row.role, row.parts, row.tool, false, false)
+    }
+    fn build(
+        &mut self,
+        role: Role,
+        parts: Vec<(String, bool)>,
+        tool: Option<ToolRow>,
+        prompt: bool,
+        finish: bool,
+    ) -> Option<Message> {
         use sha2::{Digest, Sha256};
-        let mut normalized: Vec<(String, bool)> = Vec::new();
-        for (part, tokenized) in parts {
-            let deferred = tokenized && crate::BodyRef::from_token(&part).is_some();
-            if !deferred && let Some((last, false)) = normalized.last_mut() {
-                last.push_str(&part);
-            } else {
-                normalized.push((part, deferred));
-            }
-        }
+        let normalized = normalize(parts);
         let mut digest = Sha256::new();
         digest.update(b"evorch/history/dedupe/v2\0");
         digest.update((normalized.len() as u64).to_be_bytes());
@@ -155,7 +193,7 @@ impl Reducer {
             empty &= len == 0;
         }
         let key: Key = digest.finalize().into();
-        if (role == Role::Assistant && empty)
+        if (matches!(role, Role::Assistant | Role::Reasoning) && empty)
             || (finish && self.last_assistant.as_ref() == Some(&key))
         {
             return None;
@@ -181,6 +219,7 @@ impl Reducer {
             index: self.next,
             role,
             parts: normalized,
+            tool,
         };
         self.next += 1;
         Some(raw)

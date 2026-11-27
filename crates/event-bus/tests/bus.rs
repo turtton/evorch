@@ -73,6 +73,7 @@ async fn interleaved_deltas_from_two_runs_are_attributed_by_payload_run_id() {
             MessageEvent::FinalResultPublished { .. }
             | MessageEvent::MessageCompleted { .. }
             | MessageEvent::MessagePart { .. }
+            | MessageEvent::ReasoningCompleted { .. }
             | MessageEvent::ToolCallDelta { .. }
             | MessageEvent::StreamRetried { .. } => {
                 panic!("expected a delta event")

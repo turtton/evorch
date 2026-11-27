@@ -124,6 +124,7 @@ struct Work {
 const RUN_TABLES: &[(&str, &str)] = &[
     ("history_message_sources", "run_id = ?1"),
     ("history_pending_parts", "run_id = ?1"),
+    ("history_tool_starts", "run_id = ?1"),
     ("history_messages", "run_id = ?1"),
     ("history_event_cuts", "run_id = ?1"),
     ("history_run_state", "run_id = ?1"),

@@ -17,6 +17,7 @@ const UNDO_V40: &str = include_str!("../../undo/undo_v40.sql");
 const UNDO_V43: &str = include_str!("../../undo/undo_v43.sql");
 const UNDO_V46: &str = concat!(
     concat!(
+        include_str!("../../undo/undo_v79.sql"),
         include_str!("../../undo/undo_v78.sql"),
         include_str!("../../undo/undo_v77.sql"),
         include_str!("../../undo/undo_v76.sql"),

@@ -237,6 +237,8 @@
               "provider": "github",
               "repository": "turtton/evorch"
             },
+            "source_call_id": "call-1",
+            "source_run_id": "run-1",
             "state": "presented"
           }
         ],

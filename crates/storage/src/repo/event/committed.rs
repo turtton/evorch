@@ -12,12 +12,18 @@ use crate::StorageError;
 use crate::thread_retention::TombstoneSet;
 
 /// The `(kind, subkind)` pairs of the rows a transcript is built from.
-pub const COMMITTED_SUBKINDS: [(&str, &str); 5] = [
+pub const COMMITTED_SUBKINDS: [(&str, &str); 11] = [
     ("Message", "MessageCompleted"),
+    ("Message", "ReasoningCompleted"),
     ("Message", "FinalResultPublished"),
     ("Message", "MessagePart"),
     ("Lifecycle", "TaskPromptPublished"),
+    ("Tool", "ToolStarted"),
     ("Tool", "ToolCompleted"),
+    ("Lifecycle", "AgentRunStateChanged"),
+    ("Provider", "RequestFailed"),
+    ("Provider", "CooldownStarted"),
+    ("Provider", "FallbackTriggered"),
 ];
 
 /// The columns that tell a stored row from another one written later under the same id.
@@ -40,13 +46,14 @@ pub(crate) const IDS_UNCONVERTED_BETWEEN_SQL: &str =
 // every committed row of every run through the kind/subkind index instead.
 pub(crate) const IDS_COMMITTED_OF_RUN_SQL: &str = "SELECT id FROM events \
      WHERE run_id = ?1 AND id <= ?2 AND CASE +kind \
-     WHEN 'Message' THEN +subkind IN ('MessageCompleted', 'FinalResultPublished', 'MessagePart') \
-     WHEN 'Lifecycle' THEN +subkind = 'TaskPromptPublished' \
-     WHEN 'Tool' THEN +subkind = 'ToolCompleted' ELSE 0 END";
+     WHEN 'Message' THEN +subkind IN ('MessageCompleted', 'ReasoningCompleted', 'FinalResultPublished', 'MessagePart') \
+     WHEN 'Lifecycle' THEN +subkind IN ('TaskPromptPublished', 'AgentRunStateChanged') \
+     WHEN 'Tool' THEN +subkind IN ('ToolStarted', 'ToolCompleted') \
+     WHEN 'Provider' THEN +subkind IN ('RequestFailed', 'CooldownStarted', 'FallbackTriggered') ELSE 0 END";
 // A compressed or tokenized payload cannot be searched for the run id, so it stays a
 // candidate and decoding confirms it.
 pub(crate) const IDS_UNCONVERTED_OF_RUN_SQL: &str = "SELECT id FROM events \
-     WHERE subkind IS NULL AND id <= ?2 AND kind IN ('Message', 'Lifecycle', 'Tool') \
+     WHERE subkind IS NULL AND id <= ?2 AND kind IN ('Message', 'Lifecycle', 'Tool', 'Provider') \
      AND (typeof(payload) = 'blob' OR body_format = 1 \
           OR instr(payload, substr(json_quote(?1), 2, length(json_quote(?1)) - 2)) > 0)";
 pub(crate) const NEWEST_COMMITTED_SQL: &str = "SELECT id, session_id, monotonic_ns, wall_clock_ns \

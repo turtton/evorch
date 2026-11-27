@@ -252,6 +252,7 @@ fn older_history_prepends_but_refresh_replaces_without_reordering_old_pages() {
         content: MessageContent::Inline {
             text: index.to_string(),
         },
+        tool: None,
     };
     let page = |items| Page {
         items,

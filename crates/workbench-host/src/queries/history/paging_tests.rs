@@ -3,7 +3,28 @@ use super::*;
 #[test]
 fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
     use storage::history::{Role, read::Descriptor};
-    for role in [Role::User, Role::Assistant, Role::Tool] {
+    let tool = storage::history::ToolRow {
+        tool_name: "shell".into(),
+        call_id: "call-1".into(),
+        parent_call_id: Some("call-0".into()),
+        is_error: true,
+        input: Some(storage::history::ToolInput {
+            summary: Some("echo \"日本語\"".into()),
+            parts: vec![
+                ("command: echo".into(), false),
+                ("\u{e000}ref".into(), true),
+            ],
+        }),
+        detail: Some(vec![("k: v".into(), false)]),
+    };
+    for role in [
+        Role::User,
+        Role::Assistant,
+        Role::Tool,
+        Role::Reasoning,
+        Role::Notice,
+        Role::Error,
+    ] {
         for index in [0, 9, 10, u64::MAX] {
             for input in [false, true] {
                 let descriptor = Descriptor {
@@ -19,6 +40,7 @@ fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
                         id: "input".into(),
                         bytes: 16385,
                     }),
+                    tool: (role == Role::Tool).then(|| tool.clone()),
                 };
                 let raw = RawMessage::from(descriptor.clone());
                 assert_eq!(

@@ -369,6 +369,7 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
         EventKind::Message(
             MessageEvent::FinalResultPublished { run_id, .. }
             | MessageEvent::MessageCompleted { run_id, .. }
+            | MessageEvent::ReasoningCompleted { run_id, .. }
             | MessageEvent::MessagePart { run_id, .. },
         ) => accepts(run_id),
         EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => accepts(&question.run_id),

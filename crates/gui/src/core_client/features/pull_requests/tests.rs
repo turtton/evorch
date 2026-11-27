@@ -782,6 +782,8 @@ fn candidates_are_offered_by_their_label_and_linked_at_the_revision_read() {
             candidate_id: 5,
             pull_request: reference(),
             state: CandidateState::Presented,
+            source_run_id: workbench_protocol::ids::RunId::new("run-1").unwrap(),
+            source_call_id: "call-1".into(),
         },
     ];
     let mut screen = loaded(view);

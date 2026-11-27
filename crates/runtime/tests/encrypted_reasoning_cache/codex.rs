@@ -871,3 +871,60 @@ async fn fork_never_revives_source_reasoning_even_for_official_compaction() {
             .any(|id| id == "rs_1" || id == "rs_2")
     );
 }
+
+// Given: a worker whose accepted responses carry reasoning with a displayable summary and
+//        an encrypted item, one on a tool round and one on the answer
+// When: both responses are accepted
+// Then: each summary is observed once, ahead of its own response's text, no ciphertext is
+//       observed, and the provider requests still replay the confirmed items append-only
+#[tokio::test]
+async fn accepted_reasoning_is_observed_once_before_its_response_without_touching_the_prefix() {
+    let (r1, r2) = (reasoning("rs_1"), reasoning("rs_2"));
+    let mut live = Live::new(
+        vec![
+            read_after(MODEL_A, 0, &r1),
+            text_after(MODEL_A, "done", &r2),
+        ],
+        FAR_FUTURE_EXP,
+        false,
+    );
+    let run = live.worker("Read with reasoning");
+    let mut events = Vec::new();
+    live.turn(run, &mut events, None).await;
+    live.finish(&[run]).await;
+
+    let observed: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Message(event_bus::MessageEvent::ReasoningCompleted { text, .. }) => {
+                Some(("reasoning", text.as_str()))
+            }
+            EventKind::Message(event_bus::MessageEvent::MessageCompleted { text, .. }) => {
+                Some(("message", text.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            ("reasoning", "Summary of rs_1"),
+            ("message", ""),
+            ("reasoning", "Summary of rs_2"),
+            ("message", "done"),
+        ]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| format!("{:?}", event.kind).contains("enc:")),
+        "ciphertext must not leave the provider layer"
+    );
+    let exchanges = exchanges(live.requests(), run, &events);
+    assert_eq!(exchanges.len(), 2);
+    assert_cache_chain(&exchanges, &[]);
+    for exchange in &exchanges {
+        assert_sealed(&exchange.body, &[&r1, &r2]);
+    }
+    assert_eq!(reasoning_ids(&exchanges[1].body), ["rs_1"]);
+}

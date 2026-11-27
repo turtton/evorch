@@ -48,6 +48,19 @@ impl Database {
         crate::history::read::HistorySnapshot::open(self, thread, run)
     }
 
+    /// The input the `ToolStarted` stored as event `id` carried, as a transcript shows it;
+    /// `None` when that event is not a start or carried no arguments.
+    ///
+    /// # Errors
+    /// Fails when the event is gone or cannot be decoded.
+    pub fn tool_start_input(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::history::ToolInput>, StorageError> {
+        let (kind, tokenized) = crate::history::index::source_kind(&self.conn, id)?;
+        Ok(crate::history::rows::tool_start(&kind, tokenized).and_then(|(_, _, input)| input))
+    }
+
     /// Whether a published reindex request still has pending target work.
     /// Background discovery alone must not retain an otherwise idle core.
     pub fn has_pending_reindex(&self) -> Result<bool, StorageError> {

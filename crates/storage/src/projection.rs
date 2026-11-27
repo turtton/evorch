@@ -151,6 +151,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         EventKind::Message(
             MessageEvent::FinalResultPublished { .. }
             | MessageEvent::MessageCompleted { .. }
+            | MessageEvent::ReasoningCompleted { .. }
             | MessageEvent::MessagePart { .. }
             | MessageEvent::ToolCallDelta { .. }
             | MessageEvent::StreamRetried { .. },

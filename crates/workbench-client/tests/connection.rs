@@ -673,6 +673,7 @@ fn history_message(text: String) -> workbench_protocol::views::CommittedMessage 
         index: Sequence(1),
         role: MessageRole::Assistant,
         content: MessageContent::Inline { text },
+        tool: None,
     }
 }
 

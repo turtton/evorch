@@ -214,7 +214,7 @@ fn append_after_4096_deferred_parts_keeps_fixed_size_reducer_and_no_source_reads
     let state = state(&db.conn, "run").unwrap().unwrap();
     assert_eq!(state.phase, 2);
     assert_eq!(state.source, state.applied);
-    assert_eq!(state.reducer.next, 1);
+    assert_eq!(state.reducer.next, 2);
 }
 
 #[test]
@@ -238,6 +238,7 @@ fn trigger_classification_matches_committed_subkinds_and_undo_is_registered() {
             "Message",
             &[
                 "MessageCompleted",
+                "ReasoningCompleted",
                 "FinalResultPublished",
                 "MessagePart",
                 "MessageDelta",
@@ -246,11 +247,25 @@ fn trigger_classification_matches_committed_subkinds_and_undo_is_registered() {
         ),
         (
             "Lifecycle",
-            &["TaskPromptPublished", "AgentRunStarted", "AgentRunFinished"][..],
+            &[
+                "TaskPromptPublished",
+                "AgentRunStateChanged",
+                "AgentRunStarted",
+                "AgentRunFinished",
+            ][..],
         ),
         (
             "Tool",
             &["ToolCompleted", "ToolStarted", "ToolProgress"][..],
+        ),
+        (
+            "Provider",
+            &[
+                "RequestFailed",
+                "CooldownStarted",
+                "FallbackTriggered",
+                "RequestStarted",
+            ][..],
         ),
     ] {
         for subkind in subkinds {
@@ -278,6 +293,7 @@ fn trigger_classification_matches_committed_subkinds_and_undo_is_registered() {
     assert_eq!(triggers, 6);
     db.conn
         .execute_batch(concat!(
+            include_str!("../../undo/undo_v79.sql"),
             include_str!("../../undo/undo_v78.sql"),
             include_str!("../../undo/undo_v77.sql"),
             include_str!("../../undo/undo_v76.sql"),
@@ -309,6 +325,7 @@ fn derived(db: &Database) -> Vec<Vec<String>> {
         "history_messages",
         "history_message_sources",
         "history_pending_parts",
+        "history_tool_starts",
     ]
     .map(|table| {
         let mut statement = db
@@ -361,7 +378,46 @@ fn rebuilding_from_checkpoints_matches_incremental_inline_tokenized_and_part_row
             text: "pending".into(),
         },
     );
+    let start = |call: &str, input: serde_json::Value| event_bus::ToolEvent::ToolStarted {
+        tool_name: "edit".into(),
+        call_id: call.into(),
+        input: Some(input),
+        run_id: Some("run".into()),
+        parent_call_id: None,
+    };
+    append(
+        &db,
+        MessageEvent::ReasoningCompleted {
+            run_id: "run".into(),
+            text: "thinking".into(),
+        },
+    );
+    append(
+        &db,
+        start(
+            "done",
+            serde_json::json!({"path": "a", "text": "big".repeat(7000)}),
+        ),
+    );
+    append(
+        &db,
+        event_bus::ToolEvent::ToolCompleted {
+            tool_name: "edit".into(),
+            call_id: "done".into(),
+            is_error: true,
+            output: None,
+            detail: None,
+            run_id: Some("run".into()),
+            parent_call_id: None,
+        },
+    );
+    append(&db, start("open", serde_json::json!({"path": "b"})));
     let expected = derived(&db);
+    assert!(
+        expected[4].len() == 1,
+        "only the call still open stays pending: {:?}",
+        expected[4]
+    );
     let reducer = state(&db.conn, "run").unwrap().unwrap().reducer;
     db.conn
         .execute(

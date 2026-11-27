@@ -1554,6 +1554,14 @@ impl LoopState {
             }
             // Keep a complete observational copy: display/storage subscribers can
             // lose individual deltas, while the provider response remains intact.
+            let reasoning: Vec<String> = response
+                .message
+                .content
+                .iter()
+                .filter_map(ContentBlock::reasoning_text)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+                .collect();
             let text = response
                 .message
                 .content
@@ -1593,6 +1601,16 @@ impl LoopState {
                 self.completed_turn_end = None;
                 self.finish_error(format!("Cannot persist assistant explanation: {error}"));
                 return;
+            }
+            // Published before the text so a transcript shows the reasoning first. It is
+            // a copy: nothing of it enters the context or the provider request.
+            for text in reasoning {
+                self.shared
+                    .bus
+                    .emit(Event::new(MessageEvent::ReasoningCompleted {
+                        run_id: self.task.run_id.to_string(),
+                        text,
+                    }));
             }
             self.shared
                 .bus

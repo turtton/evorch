@@ -58,6 +58,8 @@ pub struct Descriptor {
     pub role: Role,
     pub parts: Vec<(String, bool)>,
     pub input: Option<InputBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<super::ToolRow>,
 }
 
 #[derive(Debug)]
@@ -353,6 +355,7 @@ fn inputs(
                     id: id.clone(),
                     bytes,
                 }),
+                tool: None,
             };
             result.push(Input {
                 id,
@@ -473,12 +476,7 @@ impl PreparedHistory<'_> {
                     ))
                 })
                 .ok_or_else(invalid)?;
-            let role = match role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "tool" => Role::Tool,
-                _ => return Err(invalid()),
-            };
+            let role = Role::parse(&role).ok_or_else(invalid)?;
             return Ok(Some(Candidate {
                 order,
                 run,
@@ -587,6 +585,7 @@ impl PreparedHistory<'_> {
                         id: input.id.clone(),
                         bytes: input.bytes,
                     }),
+                    tool: None,
                 })
             }
             Choice::Event(header) => {
@@ -601,26 +600,49 @@ impl PreparedHistory<'_> {
                 if sources.is_empty() || sources.len() > 4096 {
                     return Err(invalid());
                 }
-                let mut parts = Vec::with_capacity(sources.len());
-                let mut bytes = 0usize;
-                for source in sources {
-                    let (kind, tokenized) = index::source_kind(self.conn, source)?;
-                    let text = if let event_bus::EventKind::Message(
-                        event_bus::MessageEvent::MessagePart { text, .. },
-                    ) = &kind
+                let (first, tokenized) = index::source_kind(self.conn, sources[0])?;
+                let message =
+                    if let event_bus::EventKind::Message(event_bus::MessageEvent::MessagePart {
+                        ..
+                    }) = &first
                     {
-                        text.as_str()
+                        let mut parts = Vec::with_capacity(sources.len());
+                        let mut bytes = 0usize;
+                        for (position, source) in sources.iter().enumerate() {
+                            let (kind, tokenized) = if position == 0 {
+                                (first.clone(), tokenized)
+                            } else {
+                                index::source_kind(self.conn, *source)?
+                            };
+                            let event_bus::EventKind::Message(
+                                event_bus::MessageEvent::MessagePart { text, .. },
+                            ) = &kind
+                            else {
+                                return Err(invalid());
+                            };
+                            bytes = bytes.saturating_add(text.len());
+                            if bytes > index::MAX_DESCRIPTOR_BYTES {
+                                return Err(invalid());
+                            }
+                            parts.push((text.clone(), tokenized));
+                        }
+                        super::Reducer::default().message(header.role, parts, false, false)
                     } else {
-                        super::committed_text(&kind).ok_or_else(invalid)?.2
-                    };
-                    bytes = bytes.saturating_add(text.len());
-                    if bytes > index::MAX_DESCRIPTOR_BYTES {
-                        return Err(invalid());
+                        // A row of one event, whose tool row also names the start that carried its input.
+                        let start = match sources.get(1) {
+                            Some(source) => {
+                                let (kind, format) = index::source_kind(self.conn, *source)?;
+                                super::rows::tool_start(&kind, format)
+                                    .ok_or_else(invalid)?
+                                    .2
+                            }
+                            None => None,
+                        };
+                        let row = super::rows::committed(&first, tokenized, start)
+                            .filter(|row| row.role == header.role)
+                            .ok_or_else(invalid)?;
+                        super::Reducer::default().assemble(row)
                     }
-                    parts.push((text.to_owned(), tokenized));
-                }
-                let message = super::Reducer::default()
-                    .message(header.role, parts, false, false)
                     .ok_or_else(invalid)?;
                 Ok(Descriptor {
                     run: run.id.clone(),
@@ -628,6 +650,7 @@ impl PreparedHistory<'_> {
                     role: header.role,
                     parts: message.parts,
                     input: None,
+                    tool: message.tool,
                 })
             }
         }

@@ -375,6 +375,16 @@ impl EventQueue {
     }
 }
 
+/// How an oversized event is cut into storable rows.
+enum Rows {
+    /// `MessagePart`s that readers reassemble.
+    Parts,
+    /// Merged `ReasoningDelta` rows.
+    Delta,
+    /// Independent `ReasoningCompleted` rows.
+    Observations,
+}
+
 /// Keeps the storage hard limit without dropping oversized accepted responses.
 /// The whole text is scanned first: splitting must not hide a secret across
 /// row boundaries. A hit stays whole for storage's ordinary fail-closed check.
@@ -388,11 +398,18 @@ pub(super) fn split_oversize(
             run_id.as_deref(),
             delta,
             max_event_bytes.min(MAX_COALESCED_BYTES),
-            false,
+            Rows::Delta,
         ),
         EventKind::Message(MessageEvent::MessageCompleted { run_id, text }) => {
-            (Some(run_id.as_str()), text, max_event_bytes, true)
+            (Some(run_id.as_str()), text, max_event_bytes, Rows::Parts)
         }
+        // An oversized observation becomes several rows of its own; no reader reassembles them.
+        EventKind::Message(MessageEvent::ReasoningCompleted { run_id, text }) => (
+            Some(run_id.as_str()),
+            text,
+            max_event_bytes,
+            Rows::Observations,
+        ),
         _ => return None,
     };
     if json_len(&event.kind) <= limit || redactor.detect(text).is_some() {
@@ -400,19 +417,22 @@ pub(super) fn split_oversize(
     }
     let response_id = uuid::Uuid::new_v4().to_string();
     let row = |text: &str, index: usize, total: usize| {
-        EventKind::Message(if complete {
-            MessageEvent::MessagePart {
+        EventKind::Message(match complete {
+            Rows::Parts => MessageEvent::MessagePart {
                 run_id: run_id.expect("completed response has a run").to_owned(),
                 response_id: response_id.clone(),
                 text: text.to_owned(),
                 index,
                 total,
-            }
-        } else {
-            MessageEvent::ReasoningDelta {
+            },
+            Rows::Delta => MessageEvent::ReasoningDelta {
                 run_id: run_id.map(str::to_owned),
                 delta: text.to_owned(),
-            }
+            },
+            Rows::Observations => MessageEvent::ReasoningCompleted {
+                run_id: run_id.expect("reasoning observation has a run").to_owned(),
+                text: text.to_owned(),
+            },
         })
     };
     // Neither index nor total can exceed the original byte length.

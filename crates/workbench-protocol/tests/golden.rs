@@ -413,6 +413,16 @@ fn views_golden() {
                 message(MessageContent::Inline { text: "hi".into() }),
             ),
             ("body".into(), message(MessageContent::Body(body_ref()))),
+            ("tool".into(), tool_message()),
+            (
+                "reasoning".into(),
+                CommittedMessage {
+                    role: MessageRole::Reasoning,
+                    ..message(MessageContent::Inline {
+                        text: "think".into(),
+                    })
+                },
+            ),
         ],
     );
 }

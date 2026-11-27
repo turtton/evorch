@@ -51,6 +51,7 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
             | MessageEvent::ToolCallDelta { run_id, .. }
             | MessageEvent::StreamRetried { run_id, .. } => runs.extend(run_id.as_deref()),
             MessageEvent::MessageCompleted { run_id, .. }
+            | MessageEvent::ReasoningCompleted { run_id, .. }
             | MessageEvent::MessagePart { run_id, .. }
             | MessageEvent::FinalResultPublished { run_id, .. } => runs.push(run_id),
         },

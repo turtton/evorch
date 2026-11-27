@@ -5,6 +5,7 @@ use std::{collections::VecDeque, sync::Mutex};
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
     ids::*,
+    limits::{MAX_NAME_BYTES, MAX_TITLE_BYTES},
     queries::{ReadBody, ReadCommittedHistory},
     views::*,
     wire::*,
@@ -88,8 +89,86 @@ impl Bodies {
             self.register(thread, run, Source::Inline(value), bytes)
         }
     }
-    fn message(&self, thread: &ThreadId, raw: RawMessage) -> Option<CommittedMessage> {
-        let run = RunId::new(raw.run).ok()?;
+    fn parts_content(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        parts: &[(String, bool)],
+    ) -> MessageContent {
+        match parts {
+            [] => MessageContent::Inline {
+                text: String::new(),
+            },
+            [(value, tokenized)] => self.content(thread, run, value, *tokenized),
+            _ => {
+                let parts: Vec<_> = parts
+                    .iter()
+                    .map(|(value, tokenized)| {
+                        if *tokenized && let Some(reference) = storage::BodyRef::from_token(value) {
+                            return Source::Stored(reference);
+                        }
+                        Source::Inline(text(value, usize::MAX))
+                    })
+                    .collect();
+                let bytes = parts.iter().map(Source::body_bytes).sum();
+                self.register(thread, run, Source::Parts(parts), bytes)
+            }
+        }
+    }
+    fn tool(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        tool: storage::history::ToolRow,
+    ) -> Result<ToolCallView, WorkbenchError> {
+        // An id joins a call to its parent and to other records, so it is never shortened.
+        let id = |value: &str| {
+            if value.is_empty() || value.len() > MAX_NAME_BYTES {
+                return Err(error(
+                    ErrorCode::LimitExceeded,
+                    "a tool call id is empty or longer than the protocol allows",
+                ));
+            }
+            Ok(value.to_owned())
+        };
+        let name = |value: &str| text(value, MAX_NAME_BYTES);
+        Ok(ToolCallView {
+            tool_name: Some(name(&tool.tool_name))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            call_id: id(&tool.call_id)?,
+            parent_call_id: tool.parent_call_id.as_deref().map(id).transpose()?,
+            input_summary: tool
+                .input
+                .as_ref()
+                .and_then(|input| input.summary.as_deref())
+                .map(|summary| text(summary, MAX_TITLE_BYTES))
+                .filter(|summary| !summary.is_empty()),
+            input: tool
+                .input
+                .as_ref()
+                .map(|input| self.parts_content(thread, run, &input.parts)),
+            status: if tool.is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Succeeded
+            },
+            detail: tool
+                .detail
+                .as_ref()
+                .map(|detail| self.parts_content(thread, run, detail)),
+        })
+    }
+    /// `None` for a message of a run the protocol cannot name; an error for a tool call
+    /// whose ids it cannot carry.
+    fn message(
+        &self,
+        thread: &ThreadId,
+        raw: RawMessage,
+    ) -> Result<Option<CommittedMessage>, WorkbenchError> {
+        let Ok(run) = RunId::new(raw.run) else {
+            return Ok(None);
+        };
         let content = if let Some(input) = raw.input {
             self.register(
                 thread,
@@ -101,29 +180,21 @@ impl Bodies {
                 },
                 input.bytes,
             )
-        } else if raw.parts.len() == 1 {
-            self.content(thread, &run, &raw.parts[0].0, raw.parts[0].1)
         } else {
-            let parts: Vec<_> = raw
-                .parts
-                .iter()
-                .map(|(value, tokenized)| {
-                    if *tokenized && let Some(reference) = storage::BodyRef::from_token(value) {
-                        return Source::Stored(reference);
-                    }
-                    Source::Inline(text(value, usize::MAX))
-                })
-                .collect();
-            let bytes = parts.iter().map(Source::body_bytes).sum();
-            self.register(thread, &run, Source::Parts(parts), bytes)
+            self.parts_content(thread, &run, &raw.parts)
         };
-        Some(CommittedMessage {
+        let tool = raw
+            .tool
+            .map(|tool| self.tool(thread, &run, tool))
+            .transpose()?;
+        Ok(Some(CommittedMessage {
             thread: thread.clone(),
             run,
             index: Sequence(raw.index),
             role: raw.role,
             content,
-        })
+            tool,
+        }))
     }
     pub fn changes(
         &self,
@@ -133,18 +204,24 @@ impl Bodies {
         mut visit: impl FnMut(CommittedMessage),
     ) -> Result<bool, storage::StorageError> {
         let mut step = scanner.advance(db, runs)?;
+        let mut unrepresentable = false;
         if !step.rewritten {
             for (_, message) in std::mem::take(&mut step.fresh) {
                 if let Some(thread) = db.thread_of_run(&message.run)?
                     && db.thread(&thread.thread_id)?.is_some()
                     && let Ok(thread) = ThreadId::new(thread.thread_id)
-                    && let Some(message) = self.message(&thread, message)
                 {
-                    visit(message);
+                    match self.message(&thread, message) {
+                        Ok(Some(message)) => visit(message),
+                        Ok(None) => {}
+                        // The stream cannot carry the row, so clients read the history again
+                        // and get the error there instead of a silent gap.
+                        Err(_) => unrepresentable = true,
+                    }
                 }
             }
         }
-        Ok(scanner.commit(step))
+        Ok(scanner.commit(step) || unrepresentable)
     }
     pub fn read(&self, runtime: &AgentRuntime, q: &ReadBody) -> Result<BodyChunk, WorkbenchError> {
         if !(4..=64 * 1024).contains(&q.max_bytes) {
@@ -244,8 +321,8 @@ impl Bodies {
             items: page
                 .items
                 .into_iter()
-                .filter_map(|raw| self.message(&q.thread, raw))
-                .collect(),
+                .filter_map(|raw| self.message(&q.thread, raw).transpose())
+                .collect::<Result<_, _>>()?,
             next_cursor: page.next_cursor,
             snapshot_revision: page.snapshot_revision,
         };
@@ -363,15 +440,35 @@ fn read_history(
 }
 
 #[cfg(test)]
-fn committed_text(kind: &EventKind) -> Option<(&str, MessageRole, &str)> {
-    storage::history::committed_text(kind).map(|(run, role, text)| (run, message_role(role), text))
+fn committed_row(
+    kind: &EventKind,
+    tokenized: bool,
+    start: Option<storage::history::ToolInput>,
+) -> Option<storage::history::Committed<'_>> {
+    storage::history::rows::committed(kind, tokenized, start)
 }
 
 fn message_role(role: storage::history::Role) -> MessageRole {
+    use storage::history::Role;
     match role {
-        storage::history::Role::User => MessageRole::User,
-        storage::history::Role::Assistant => MessageRole::Assistant,
-        storage::history::Role::Tool => MessageRole::Tool,
+        Role::User => MessageRole::User,
+        Role::Assistant => MessageRole::Assistant,
+        Role::Tool => MessageRole::Tool,
+        Role::Reasoning => MessageRole::Reasoning,
+        Role::Notice => MessageRole::Notice,
+        Role::Error => MessageRole::Error,
+    }
+}
+
+fn storage_role(role: MessageRole) -> storage::history::Role {
+    use storage::history::Role;
+    match role {
+        MessageRole::User => Role::User,
+        MessageRole::Assistant => Role::Assistant,
+        MessageRole::Tool => Role::Tool,
+        MessageRole::Reasoning => Role::Reasoning,
+        MessageRole::Notice => Role::Notice,
+        MessageRole::Error => Role::Error,
     }
 }
 
@@ -424,6 +521,8 @@ struct RawMessage {
     role: MessageRole,
     parts: Vec<(String, bool)>,
     input: Option<InputBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<storage::history::ToolRow>,
 }
 #[derive(Clone, serde::Serialize)]
 struct InputBody {
@@ -441,6 +540,7 @@ impl From<storage::history::read::Descriptor> for RawMessage {
                 id: i.id,
                 bytes: i.bytes,
             }),
+            tool: value.tool,
         }
     }
 }
@@ -484,6 +584,9 @@ struct RunFold {
     merge_max: i64,
     last_id: i64,
     consumed: std::collections::BTreeMap<String, (i64, bool)>,
+    /// Tool calls started and not yet completed, with the id of the event that started them;
+    /// the input is read from that event when the completion is projected.
+    starts: std::collections::BTreeMap<String, i64>,
     chain: Digest,
 }
 impl RunFold {
@@ -495,6 +598,7 @@ impl RunFold {
             merge_max: i64::MIN,
             last_id: 0,
             consumed: Default::default(),
+            starts: Default::default(),
             chain: [0; 32],
         }
     }
@@ -502,6 +606,7 @@ impl RunFold {
     /// acceptance, ties broken by prompt id.
     fn row(
         &mut self,
+        db: &storage::Database,
         row: &storage::DeferredStoredEvent,
         inputs: &mut std::collections::VecDeque<storage::host_input::DeliveredHostInput>,
         emit: &mut impl FnMut(Order, RawMessage, &Digest),
@@ -519,6 +624,8 @@ impl RunFold {
             }
         }
         if let Some(message) = self.observe(
+            db,
+            row.id,
             &row.event.kind,
             row.format == storage::StoredFormat::Tokenized,
         ) {
@@ -561,9 +668,16 @@ impl RunFold {
             role: message_role(message.role),
             parts: message.parts,
             input: None,
+            tool: message.tool,
         }
     }
-    fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
+    fn observe(
+        &mut self,
+        db: &storage::Database,
+        id: i64,
+        kind: &EventKind,
+        tokenized: bool,
+    ) -> Option<RawMessage> {
         let response = match kind {
             EventKind::Message(MessageEvent::MessagePart { response_id, .. }) => {
                 Some(response_id.clone())
@@ -571,7 +685,27 @@ impl RunFold {
             _ => None,
         };
         let mut pending = response.as_ref().and_then(|id| self.parts.remove(id));
-        let message = self.reducer.observe(kind, tokenized, &mut pending);
+        let mut start = None;
+        if let Some((_, call_id, input)) = storage::history::rows::tool_start(kind, tokenized) {
+            // Only a start with arguments can give a completion its input.
+            if input.is_some() {
+                self.starts.insert(call_id.to_owned(), id);
+            } else {
+                self.starts.remove(call_id);
+            }
+        } else if let EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+            call_id,
+            run_id: Some(_),
+            ..
+        }) = kind
+        {
+            // A start that is gone or unreadable leaves the input unknown.
+            start = self
+                .starts
+                .remove(call_id)
+                .and_then(|id| db.tool_start_input(id).ok().flatten());
+        }
+        let message = self.reducer.observe(kind, tokenized, &mut pending, start);
         if let Some((id, pending)) = response.zip(pending) {
             self.parts.insert(id, pending);
         }
@@ -593,6 +727,7 @@ impl RunFold {
                 id: input.prompt_id,
                 bytes: input.text_bytes,
             }),
+            tool: None,
         };
         self.reducer.next += 1;
         Some(raw)
@@ -604,11 +739,7 @@ impl RunFold {
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
-        let role = match role {
-            MessageRole::User => storage::history::Role::User,
-            MessageRole::Assistant => storage::history::Role::Assistant,
-            MessageRole::Tool => storage::history::Role::Tool,
-        };
+        let role = storage_role(role);
         self.reducer
             .message(role, parts, prompt, finish)
             .map(|message| self.raw(message))
@@ -638,7 +769,7 @@ fn fold_run(
     let mut failure = None;
     db.for_each_committed_event_of_run(run, through, |row| match row {
         storage::DeferredRow::Failed(_) => failure = Some(unreadable()),
-        storage::DeferredRow::Event(row) => fold.row(&row, &mut inputs, &mut emit),
+        storage::DeferredRow::Event(row) => fold.row(db, &row, &mut inputs, &mut emit),
     })?;
     match failure {
         Some(e) => Err(e),
@@ -943,7 +1074,7 @@ impl CommitScanner {
                         return;
                     }
                     let fold = staged.entry(run).or_insert_with(|| self.hot(run).clone());
-                    fold.row(&row, pending.get_mut(run).unwrap(), &mut |o, m, c| {
+                    fold.row(db, &row, pending.get_mut(run).unwrap(), &mut |o, m, c| {
                         collector.emit(o, m, c)
                     });
                 }
@@ -962,7 +1093,7 @@ impl CommitScanner {
             collector.resume(run, published, (fold.reducer.next, fold.chain));
             for row in woken.remove(run).unwrap_or_default() {
                 if row.id > fold.last_id {
-                    fold.row(&row, &mut rest, &mut |o, m, c| collector.emit(o, m, c));
+                    fold.row(db, &row, &mut rest, &mut |o, m, c| collector.emit(o, m, c));
                 }
             }
             cold.remove(run);

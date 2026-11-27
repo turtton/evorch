@@ -197,3 +197,54 @@ fn a_non_final_chunk_must_carry_text_and_offsets_must_not_overflow() {
     };
     assert!(overflowing.validate(64).is_err());
 }
+
+#[test]
+fn only_tool_rows_describe_a_call_and_every_tool_row_does() {
+    tool_message().validate().unwrap();
+    for role in [
+        MessageRole::User,
+        MessageRole::Assistant,
+        MessageRole::Reasoning,
+        MessageRole::Notice,
+        MessageRole::Error,
+    ] {
+        let mut row = tool_message();
+        row.role = role;
+        assert!(row.validate().is_err(), "{role:?} must not carry a call");
+        row.tool = None;
+        row.validate().unwrap();
+    }
+    let mut bare = tool_message();
+    bare.tool = None;
+    assert!(bare.validate().is_err());
+}
+
+#[test]
+fn a_tool_call_is_bounded_field_by_field() {
+    let with = |change: fn(&mut ToolCallView)| {
+        let mut row = tool_message();
+        change(row.tool.as_mut().unwrap());
+        row.validate()
+    };
+    assert!(with(|t| t.tool_name = String::new()).is_err());
+    assert!(with(|t| t.tool_name = "x".repeat(257)).is_err());
+    assert!(with(|t| t.call_id = "x".repeat(257)).is_err());
+    assert!(with(|t| t.input_summary = Some("x".repeat(1025))).is_err());
+    assert!(
+        with(|t| {
+            t.input = Some(MessageContent::Inline {
+                text: "x".repeat(16 * 1024 + 1),
+            });
+        })
+        .is_err()
+    );
+    assert!(
+        with(|t| {
+            t.detail = Some(MessageContent::Inline {
+                text: "x".repeat(16 * 1024 + 1),
+            });
+        })
+        .is_err()
+    );
+    assert!(with(|t| t.parent_call_id = None).is_ok());
+}

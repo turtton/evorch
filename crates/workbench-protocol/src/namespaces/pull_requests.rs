@@ -36,7 +36,7 @@
 //!   client together (see [`PullRequestsEvent::AutoFixLimitReached`]).
 use crate::{
     handshake::{Capability, WireLimits},
-    ids::{OperationId, ThreadId},
+    ids::{OperationId, RunId, ThreadId},
     limits::{MAX_ID_BYTES, MAX_NAME_BYTES, MAX_TEXT_BYTES},
     operation::OperationView,
     validation::{ValidationError, check_count, check_line, check_text},
@@ -220,6 +220,9 @@ pub struct CandidateView {
     pub candidate_id: u64,
     pub pull_request: PullRequestRef,
     pub state: CandidateState,
+    /// The run whose tool call suggested it; with `source_call_id` it names that call.
+    pub source_run_id: RunId,
+    pub source_call_id: String,
 }
 
 /// Where the shown head came from, as far as the core knows. Only the process
@@ -314,6 +317,12 @@ impl ThreadPullRequest {
         check_count("candidates", self.candidates.len(), MAX_CANDIDATES)?;
         for candidate in &self.candidates {
             candidate.pull_request.validate()?;
+            check_line(
+                "source_call_id",
+                &candidate.source_call_id,
+                MAX_NAME_BYTES,
+                false,
+            )?;
         }
         Ok(())
     }
