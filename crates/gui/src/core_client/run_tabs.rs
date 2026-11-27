@@ -54,6 +54,8 @@ pub struct RunTab {
     pub thread: ThreadId,
     pub run: RunId,
     pub name: Option<String>,
+    /// The model the core reported for the live run, as `profile/model`.
+    pub model: Option<String>,
     pub child: bool,
     pub title: String,
     pub placement: Placement,
@@ -112,6 +114,7 @@ impl RunTabs {
                 thread: pane.thread,
                 run: pane.run,
                 name,
+                model: None,
                 child: pane.child,
                 title,
                 placement,
@@ -136,6 +139,17 @@ impl RunTabs {
         if let Some(tab) = self.tabs.get_mut(&id).filter(|_| !name.is_empty()) {
             tab.title = title(&tab.run, Some(name), tab.child);
             tab.name = Some(name.to_owned());
+        }
+    }
+
+    /// Shows the model the core reported for the run of `id`.
+    pub fn set_model(&mut self, id: RunTabId, model: &str) {
+        if let Some(tab) = self
+            .tabs
+            .get_mut(&id)
+            .filter(|tab| tab.model.as_deref() != Some(model))
+        {
+            tab.model = Some(model.to_owned());
         }
     }
 

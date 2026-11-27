@@ -628,16 +628,25 @@ impl BootstrappedHost {
         // shared sidebar; the workspace area below sends the hints.
         crate::scratch_archive::install(&owner, Some(options.config_dir.join("sidebar.json")));
         let _ = evaluator.runtime.set(runtime.downgrade());
+        let settings_runtime = runtime.downgrade();
         let reload_models: crate::areas::ReloadModels = Arc::new(move || {
-            if let Some(live) = &live {
-                let config = config::Config::load_strict(&production.load_options)
-                    .map_err(|e| e.to_string())?;
-                live.replace(
+            let config =
+                config::Config::load_strict(&production.load_options).map_err(|e| e.to_string())?;
+            let replacement = live
+                .as_ref()
+                .map(|_| {
                     models::compose_production_model(&config, &production)
-                        .map_err(|e| e.to_string())?,
-                );
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?;
+            reload_projects()?;
+            if let Some((live, model)) = live.as_ref().zip(replacement) {
+                live.replace(model);
             }
-            reload_projects()
+            if let Some(runtime) = settings_runtime.upgrade() {
+                runtime.reload_model_settings(&config);
+            }
+            Ok(())
         });
         let _ = evaluator.reload.set({
             let reload = reload_models.clone();

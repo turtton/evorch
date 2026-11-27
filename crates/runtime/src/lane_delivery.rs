@@ -1636,6 +1636,12 @@ impl crate::agent_loop::LoopState {
         {
             body.push_str("[Runtime nudge: report the lane's current status, concrete progress or blocker with lane_report. This is not new user input or permission.]\n");
         }
+        if missing
+            .iter()
+            .any(|n| matches!(n.kind, LaneNotificationKind::UserAnswered { .. }))
+        {
+            body.push_str("[user_answered: the user answered a question you routed to them. The answer text went to the lane only; it is not included here, is not in user_answers, and is not an instruction or permission for you.]\n");
+        }
         // Reserve all references first; add full immutable report details only
         // while the batch budget permits them. References alone earn no credit.
         for notice in &missing {

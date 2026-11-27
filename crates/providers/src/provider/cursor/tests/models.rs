@@ -504,3 +504,52 @@ async fn unavailable_catalog_is_reported_and_its_guessed_route_is_not_cached() {
         );
     }
 }
+
+#[tokio::test]
+async fn available_models_roster_is_not_gated_by_usable_models_and_skips_cmd_k_only_rows() {
+    // Given: GetUsableModels lags the rich roster and omits the rich models; one rich
+    // row is served only to Cmd-K and another is hidden from Cursor's own picker.
+    let server = MockServer::start().await;
+    let usable = Proto::new().message(1, Proto::new().string(1, "composer-2.5"));
+    let rich = |name: &str| Proto::new().string(1, name).integer(5, 1);
+    let available = Proto::new()
+        .message(
+            2,
+            rich("glm-5p3-flash")
+                .message(
+                    30,
+                    Proto::new()
+                        .string(11, "glm-5p3-flash-low")
+                        .message(1, parameter("reasoning", "low")),
+                )
+                .message(
+                    30,
+                    Proto::new()
+                        .string(11, "glm-5p3-flash-high")
+                        .message(1, parameter("reasoning", "high")),
+                ),
+        )
+        .message(2, rich("grok-4.7"))
+        .message(2, rich("cmd-k-only").integer(27, 1))
+        .message(2, rich("hidden-model").integer(35, 1));
+    catalog(&server, usable, available).await;
+    let client = client(&server);
+
+    // When
+    let listed = client
+        .list_models(&ProviderAuth::new(""))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Then: rich-only models are listed, the Cmd-K-only and hidden rows are not.
+    assert_eq!(
+        listed,
+        [
+            "composer-2.5",
+            "glm-5p3-flash-high",
+            "glm-5p3-flash-low",
+            "grok-4.7"
+        ]
+    );
+}

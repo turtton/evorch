@@ -1779,3 +1779,26 @@ fn a_name_refused_for_a_while_is_read_again_a_few_times() {
         "a new session reads it again: {reads:?}"
     );
 }
+
+// Given: a listing whose live run reports a model, and one whose run has none
+// When: the listing is read
+// Then: the model is known for the first run only
+#[test]
+fn the_model_of_a_listed_live_run_is_kept() {
+    let mut screen = rooted();
+    let first = asked(&mut screen);
+    let mut live = run("run-a", Some("root"), "active", "live", 0);
+    live["model"] = json!("work/gpt-5");
+    answer(
+        &mut screen,
+        runs_tag(&first),
+        runs_reply(
+            vec![live, run("run-b", Some("root"), "active", "live", 0)],
+            false,
+        ),
+    );
+    let (run_a, run_b) = (RunId::new("run-a").unwrap(), RunId::new("run-b").unwrap());
+    let execution = screen.state_mut().feature.as_execution_mut().unwrap();
+    assert_eq!(execution.run_model(&run_a), Some("work/gpt-5"));
+    assert_eq!(execution.run_model(&run_b), None);
+}

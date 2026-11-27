@@ -27,6 +27,15 @@ pub struct PlanBand<'a> {
     pub summary: Option<&'a PlanSummary>,
 }
 
+impl PlanBand<'_> {
+    /// Whether the band has a row to draw: a plan with tasks, or one that was
+    /// cleared (its history still opens). Until a plan is made there is none.
+    pub fn has_row(&self) -> bool {
+        self.summary
+            .is_some_and(|summary| is_planned(&summary.progress) || summary_is_cleared(summary))
+    }
+}
+
 /// What the panel asks of its owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanPanelAction {
@@ -224,6 +233,9 @@ fn progress_bar(
 
 /// One row of the composer band. Returns whether the open button was pressed.
 pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
+    if !band.has_row() {
+        return false;
+    }
     let progress = band.summary.map(|s| &s.progress).filter(|p| is_planned(p));
     let label = band_label(band.summary);
     let mut open = false;
@@ -231,19 +243,11 @@ pub fn band_row(ui: &mut Ui, band: PlanBand<'_>) -> bool {
         ui.set_min_height(ROW_DENSE - SP_1);
         let Some(progress) = progress else {
             // A plan whose tasks were all deleted still has history to open.
-            let cleared = band.summary.is_some_and(summary_is_cleared);
-            let (icon, text) = if cleared {
-                (icons::BROOM, CLEARED)
-            } else {
-                (icons::CIRCLE, NOT_PLANNED)
-            };
-            labeled_icon(ui, icon, palette().TEXT_MUTED, text);
+            labeled_icon(ui, icons::BROOM, palette().TEXT_MUTED, CLEARED);
             progress_bar(ui, egui::vec2(BAR_WIDTH, BAR_HEIGHT), None);
-            ui.label(small(text, palette().TEXT_MUTED));
+            ui.label(small(CLEARED, palette().TEXT_MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled_ui(cleared, |ui| {
-                    open = icon_button(ui, icons::ARROW_SQUARE_OUT, OPEN_LABEL).clicked();
-                });
+                open = icon_button(ui, icons::ARROW_SQUARE_OUT, OPEN_LABEL).clicked();
             });
             return;
         };

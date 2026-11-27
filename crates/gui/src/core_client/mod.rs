@@ -28,6 +28,7 @@ use std::{
 };
 use workbench_client::ClientConfig;
 use workbench_protocol::namespaces::ConversationCommand;
+use workbench_protocol::views::RunPhase;
 use workbench_protocol::{
     commands::*,
     handshake::{BuildInfo, Capability},
@@ -46,6 +47,11 @@ pub struct Shared {
     pub cache: cache::Cache,
     pub drafts: BTreeMap<String, Draft>,
     pub attachment_drafts: BTreeMap<String, Vec<ClientAttachmentDraft>>,
+    /// The new conversation each project has open and not yet sent: a thread id made
+    /// here, which the core does not have until the first message is accepted. Its draft,
+    /// files and sending state are keyed by that id like any thread's, so the first
+    /// message needs no move. Kept while this window lives; never written to disk.
+    pub new_conversations: BTreeMap<ProjectId, ThreadId>,
     pub sending: std::collections::BTreeSet<String>,
     pub loading_attachments: BTreeMap<String, usize>,
     pub outcome_unknown: std::collections::BTreeSet<String>,
@@ -407,6 +413,14 @@ impl CoreClientScreen {
             layout: persistence::extract(&self.dock, &self.local.files, &self.window_rects),
             run_tabs: self.run_tabs.panes(),
             selection: self.saved_selection(shared),
+            folded_threads: shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.folded_threads())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
+                .collect(),
         };
         let saved = if explicit {
             store.save(&state).map(|()| true)
@@ -455,20 +469,66 @@ impl CoreClientScreen {
         let Some(execution) = shared.features.execution_mut() else {
             return;
         };
-        let unnamed: Vec<_> = run_tabs
+        let shown: Vec<_> = run_tabs
             .shown_tabs()
-            .filter(|(_, tab)| tab.name.is_none())
-            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone()))
+            .map(|(id, tab)| (id, tab.run.clone()))
             .collect();
-        for (id, thread, run) in unnamed {
-            match execution.run_name(&run) {
-                Some(name) => run_tabs.set_name(id, name),
-                None => execution.want_name(thread, run),
+        for (id, run) in shown {
+            if let Some(model) = execution.run_model(&run) {
+                run_tabs.set_model(id, model);
+            }
+        }
+        // What a tab lacks is asked of the core on its own terms, whatever the Subagents
+        // tab shows: a name once, a model once and once more when the run works.
+        let wanted: Vec<_> = run_tabs
+            .shown_tabs()
+            .filter(|(_, tab)| tab.name.is_none() || tab.model.is_none())
+            .map(|(id, tab)| {
+                (
+                    id,
+                    tab.thread.clone(),
+                    tab.run.clone(),
+                    (tab.name.is_none(), tab.model.is_none()),
+                )
+            })
+            .collect();
+        for (id, thread, run, (unnamed, modelless)) in wanted {
+            if unnamed {
+                match execution.run_name(&run) {
+                    Some(name) => run_tabs.set_name(id, name),
+                    None => execution.want_name(thread.clone(), run.clone()),
+                }
+            }
+            if modelless {
+                let live = shared.cache.runs.get(run.as_str()).is_some_and(|summary| {
+                    matches!(
+                        summary.phase,
+                        RunPhase::Pending
+                            | RunPhase::Running
+                            | RunPhase::WaitingForUser
+                            | RunPhase::WaitingForApproval
+                    )
+                });
+                execution.want_model(thread, run, live);
             }
         }
     }
 
     fn apply_restore(&mut self, state: persistence::SavedState) {
+        if let Some(workspace) = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .features
+            .workspace_mut()
+        {
+            workspace.restore_folded_threads(
+                state
+                    .folded_threads
+                    .iter()
+                    .map(|thread| thread.as_str().to_owned()),
+            );
+        }
         self.dock = persistence::restore_dock(state.layout.as_ref(), &mut self.local.files);
         self.window_rects = persistence::WindowRects::default();
         self.pending_run_tab_prune = !state.run_tabs.is_empty();
@@ -553,13 +613,15 @@ impl Drop for CoreClientApp {
 
 /// Apply what the features asked for in a frame: send their requests and make
 /// the selection changes they named, as a click on the built-in selector would.
+///
+/// Returns whether a new conversation was opened, which the screen shows and focuses.
 fn apply_frame(
     tx: &tokio::sync::mpsc::Sender<Action>,
     shared: &mut Shared,
     project: &mut Option<ProjectId>,
     selected: &mut Option<ThreadId>,
     frame: FeatureFrame,
-) {
+) -> bool {
     for action in frame.data {
         enqueue(tx, shared, Action::Data(action));
     }
@@ -602,19 +664,23 @@ fn apply_frame(
             pull_requests.enqueue_sidebar(intent);
         }
     }
+    let mut opened = false;
     for navigation in frame.navigation {
-        apply_navigation(tx, shared, project, selected, navigation);
+        opened |= apply_navigation(tx, shared, project, selected, navigation);
     }
+    opened
 }
 
-/// Change the selection as a click on the built-in selector would.
+/// Change the selection as a click on the built-in selector would. Returns whether a new
+/// conversation was opened. Nothing is sent for one: the core learns of the thread when
+/// its first message is.
 fn apply_navigation(
     tx: &tokio::sync::mpsc::Sender<Action>,
     shared: &mut Shared,
     project: &mut Option<ProjectId>,
     selected: &mut Option<ThreadId>,
     navigation: Navigation,
-) {
+) -> bool {
     match navigation {
         Navigation::SelectProject(id) => {
             *project = Some(id);
@@ -629,10 +695,18 @@ fn apply_navigation(
             enqueue(tx, shared, Action::History(thread, None, false));
         }
         Navigation::NewConversation(id) => {
+            // One unsent conversation per project: opening it again returns to its draft.
+            let thread = shared
+                .new_conversations
+                .entry(id.clone())
+                .or_insert_with(|| ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap())
+                .clone();
             *project = Some(id);
-            *selected = Some(ThreadId::new(uuid::Uuid::new_v4().to_string()).unwrap());
+            *selected = Some(thread);
+            return true;
         }
     }
+    false
 }
 
 /// Once connected with nothing selected, select what the session file kept: its thread
@@ -821,7 +895,7 @@ impl CoreClientScreen {
         let frame = s.features.maintain_minimized(view);
         // The log diffs the cache once per pass, so it sees what changes while minimized.
         self.notifications.observe(&s.cache);
-        apply_frame(
+        let _ = apply_frame(
             &self.actions,
             &mut shared,
             &mut self.project,
@@ -921,6 +995,11 @@ impl CoreClientScreen {
             project: self.project.clone(),
             thread: self.selected.clone(),
         };
+        let project_name = selection
+            .project
+            .as_ref()
+            .map(|project| project_name(&shared, project))
+            .unwrap_or_default();
         self.notifications.observe(&shared.cache);
         let roots = local::LocalRoots::resolve(
             &selection,
@@ -968,6 +1047,8 @@ impl CoreClientScreen {
                     connected: s.connected,
                     drafts: &mut s.drafts,
                     attachment_drafts: &s.attachment_drafts,
+                    new_conversations: &s.new_conversations,
+                    project_name: &project_name,
                     sending: &s.sending,
                     loading_attachments: &s.loading_attachments,
                     link_base: link_base.as_deref(),
@@ -991,13 +1072,18 @@ impl CoreClientScreen {
             // What a lane menu chose is sent in the lanes feature's next pass.
             ui.ctx().request_repaint();
         }
-        apply_frame(
+        if apply_frame(
             &self.actions,
             &mut shared,
             &mut self.project,
             &mut self.selected,
             frame,
-        );
+        ) {
+            // A new conversation shows in front of the other tabs, ready to type in.
+            effects.push(shell::Effect::Open(shell::CoreTab::Conversation));
+            self.conversation.request_composer_focus();
+            ui.ctx().request_repaint();
+        }
         if effects.iter().any(|effect| {
             matches!(
                 effect,
@@ -1070,6 +1156,22 @@ impl CoreClientScreen {
             ui.ctx().request_repaint();
         }
     }
+}
+
+/// The project's name as the sidebar shows it: its latest listing, else the snapshot's,
+/// else its id.
+fn project_name(shared: &Shared, project: &ProjectId) -> String {
+    let listed = match shared.features.workspace() {
+        Some(workspace) => workspace.model().project_list(&shared.cache),
+        None => shared.cache.projects.values().collect(),
+    };
+    listed
+        .into_iter()
+        .find(|summary| &summary.id == project)
+        .map_or_else(
+            || project.to_string(),
+            |summary| summary.display_name.clone(),
+        )
 }
 
 fn apply_effect(

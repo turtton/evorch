@@ -870,6 +870,15 @@ pub enum LaneNotificationKind {
         question_id: String,
         routing_revision: u64,
     },
+    /// Addressed to the current lead after the user answered a question that the lead
+    /// had routed to the user. A body-less reference: the answer text goes only to the
+    /// lane (`Answer`) and is never copied to the lead, which is not a recipient of the
+    /// question and gains no `user_answers` or trusted-user evidence from it. It is
+    /// informational and never wakes a completed lead by itself.
+    UserAnswered {
+        question_id: String,
+        routing_revision: u64,
+    },
     Ready {
         revision: Option<ArtifactRevision>,
     },

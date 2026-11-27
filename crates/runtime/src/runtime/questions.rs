@@ -697,6 +697,19 @@ impl AgentRuntime {
                 self,
                 &route.requester.thread_id,
             );
+            // Only delivery is scheduled here; the lead's reference notice was stored
+            // with the answer. A read failure must not fail the committed answer: the
+            // durable outbox is rescanned on resume.
+            if let Some(lead) = store
+                .handle
+                .lane(&route.lane_id)
+                .ok()
+                .flatten()
+                .filter(|lane| lane.policy.is_managed())
+                .and_then(|lane| lane.lead_thread_id)
+            {
+                routing::LaneQuestionBindingSource::schedule_lane_question_delivery(self, &lead);
+            }
         }
         self.shared
             .bus

@@ -116,9 +116,7 @@ impl AgentRuntime {
                 .ok_or_else(|| RuntimeError::Model {
                     reason: "runtime is shutting down".into(),
                 })?;
-        if let Some(resolution) = self.shared.model_resolution.get() {
-            resolution.apply(&mut shared.compaction).await;
-        }
+        shared.resolve_compaction().await;
         let category = request.category.as_deref();
         let selected_model = shared.model.selected_model(request.role, category);
         let lane_scope = match (self.shared.run_store.get(), request.thread_id.as_deref()) {

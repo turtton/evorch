@@ -169,13 +169,40 @@ pub fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
 
 /// The heading of one run's transcript; the run ID itself stays behind a copy button.
 pub fn run_transcript_title(ui: &mut Ui, run_id: &str, agent_name: Option<&str>) {
+    run_transcript_header(ui, run_id, agent_name, None, |_| {});
+}
+
+/// The heading with `status` on its row and, under it in small type, the model and
+/// provider of the run when known.
+pub fn run_transcript_header(
+    ui: &mut Ui,
+    run_id: &str,
+    agent_name: Option<&str>,
+    model: Option<&str>,
+    status: impl FnOnce(&mut Ui),
+) {
     ui.horizontal(|ui| {
         ui.label(crate::theme::text::h3(match agent_name {
             Some(name) => format!("Transcript: {name}"),
             None => "Transcript".to_owned(),
         }));
         crate::theme::widgets::copy_id_button(ui, "Copy run ID", run_id);
+        status(ui);
     });
+    if let Some(model) = model {
+        ui.label(crate::theme::text::muted(model_line(model)));
+    }
+}
+
+/// `profile/model` as "model · provider"; a model without a profile is shown as it is.
+/// The profile is the part before the first slash, as a model id may hold slashes.
+pub fn model_line(model: &str) -> String {
+    match model.split_once('/') {
+        Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+            format!("{model} · {provider}")
+        }
+        _ => model.to_owned(),
+    }
 }
 
 pub fn run_transcript_empty(ui: &mut Ui, agent_name: Option<&str>) {
@@ -217,4 +244,41 @@ pub fn stop_button(ui: &mut Ui, stopped: bool, running_children: usize) -> egui:
     };
     ui.add(egui::Button::new(RichText::new(label).color(color)).fill(fill))
         .on_hover_text(hover)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable as _;
+
+    // Given: models with and without a provider profile
+    // When: they are shown / Then: the model leads and the profile follows, or the model alone
+    #[test]
+    fn model_line_names_model_then_provider() {
+        assert_eq!(model_line("work/gpt-5"), "gpt-5 · work");
+        assert_eq!(model_line("or/anthropic/claude"), "anthropic/claude · or");
+        assert_eq!(model_line("fixed-model"), "fixed-model");
+        assert_eq!(model_line("/x"), "/x");
+    }
+
+    // Given: a run header with a status and a model
+    // When: it is drawn / Then: the status shares the title's row and the model is a line below
+    #[test]
+    fn the_status_shares_the_title_row_and_the_model_follows_below() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            crate::theme::install(ui.ctx());
+            run_transcript_header(ui, "run-a", Some("tester"), Some("work/gpt-5"), |ui| {
+                ui.label("status");
+            });
+        });
+        harness.run();
+        let title = harness.get_by_label("Transcript: tester").rect();
+        let status = harness.get_by_label("status").rect();
+        let model = harness.get_by_label("gpt-5 · work").rect();
+        assert!(
+            (title.center().y - status.center().y).abs() < title.height(),
+            "status on the title row: {title:?} {status:?}"
+        );
+        assert!(model.top() >= title.bottom() - 1.0, "model below the title");
+    }
 }

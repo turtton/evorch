@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use egui::{Key, Modifiers};
+use workbench_protocol::namespaces::ExecutionQuery;
 
 use super::*;
 use crate::core_client::persistence::{ClientStateStore, SavedSelection, SavedState};
@@ -341,4 +342,199 @@ fn a_floating_window_keeps_its_open_rect() {
     assert!((plan.height - 300.0).abs() < 1.0, "{plan:?}");
     let diff = rect("diff");
     assert!(diff.width >= 64.0 && diff.height >= 64.0, "{diff:?}");
+}
+
+const LANE_ROW: &str = "↳ Auth regression tests";
+
+// Given: a session file that kept thr-1, the lane's lead, folded
+// When: the window opens and connects
+// Then: the lane stays hidden under it, while without the fold it is shown
+#[test]
+fn a_thread_folded_before_the_restart_stays_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ClientStateStore::in_config_dir(dir.path());
+    store
+        .save(&SavedState {
+            folded_threads: vec![ThreadId::new("thr-1").unwrap()],
+            ..SavedState::default()
+        })
+        .unwrap();
+    let mut folded = restored(store, true);
+    folded.settle();
+    folded.harness.get_by_label("Expand children of thr-1");
+    assert!(folded.harness.query_by_label(LANE_ROW).is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut open = restored(ClientStateStore::in_config_dir(dir.path()), true);
+    open.settle();
+    open.harness.get_by_label(LANE_ROW);
+}
+
+// Given: a window whose lead thread is shown unfolded
+// When: the person folds it and the state is saved, then a new window reads the file
+// Then: the new window shows the thread folded, and unfolding it there saves it unfolded
+#[test]
+fn folding_and_unfolding_a_thread_is_kept_across_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ClientStateStore::in_config_dir(dir.path());
+    store.save(&SavedState::default()).unwrap();
+    let mut first = restored(store.clone(), true);
+    first.settle();
+    first
+        .harness
+        .get_by_label("Collapse children of thr-1")
+        .click();
+    first.settle();
+    first.harness.state().save_state();
+    assert_eq!(
+        store.load().unwrap().folded_threads,
+        [ThreadId::new("thr-1").unwrap()]
+    );
+
+    let mut second = restored(store.clone(), true);
+    second.settle();
+    second
+        .harness
+        .get_by_label("Expand children of thr-1")
+        .click();
+    second.settle();
+    second.harness.state().save_state();
+    assert!(store.load().unwrap().folded_threads.is_empty());
+}
+
+/// A window restored on a named subagent tab (run-9, a child of thr-1's root) with a file
+/// tab in front of the Subagents tab, so that tab is never drawn; the cache holds run-9 in
+/// `phase`. Returns the window with the actions its connecting left.
+fn restored_named_subagent(phase: &str) -> (Screen, Vec<Action>) {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("NOTES.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    let mut dock = shell::default_dock();
+    let mut files = super::super::local::files::FileTabs::default();
+    let file = CoreTab::File(files.open(notes));
+    shell::place_beside(&mut dock, file, CoreTab::Feature(FeatureId::Execution));
+    shell::focus(&mut dock, file);
+    let pane = crate::core_client::run_tabs::RunPane {
+        thread: ThreadId::new("thr-1").unwrap(),
+        run: RunId::new("run-9").unwrap(),
+        name: "tester".into(),
+        child: true,
+    };
+    let store = ClientStateStore::in_config_dir(&dir.path().join("config"));
+    store
+        .save(&SavedState {
+            layout: crate::core_client::persistence::extract(
+                &dock,
+                &files,
+                &crate::core_client::persistence::WindowRects::default(),
+            ),
+            run_tabs: vec![pane],
+            selection: Some(selection("proj-1", Some("thr-1"))),
+            ..SavedState::default()
+        })
+        .unwrap();
+    let mut screen = restored(store, false);
+    set_run_phase(&screen, phase);
+    screen.harness.run_steps(1);
+    let asked = connect(&mut screen);
+    (screen, asked)
+}
+
+fn set_run_phase(screen: &Screen, phase: &str) {
+    let run: RunSummary = view(json!({
+        "id": "run-9", "thread": "thr-1", "parent_run": "run-1",
+        "role": "worker", "phase": phase, "revision": "4",
+    }));
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .cache
+        .runs
+        .insert("run-9".into(), run);
+}
+
+/// Runs frames and answers every read of run-9 with `model` (none for a run only history
+/// remains of); returns how many reads were asked.
+fn answer_run_reads(screen: &mut Screen, asked: &mut Vec<Action>, model: Option<&str>) -> usize {
+    let mut reads = 0;
+    for _ in 0..4 {
+        screen.harness.run_steps(2);
+        asked.extend(screen.settle());
+        for action in std::mem::take(asked) {
+            let Action::Feature(FeatureAction {
+                feature: FeatureId::Execution,
+                tag,
+                request: FeatureRequest::Query(Query::Execution(ExecutionQuery::GetRun(target))),
+            }) = action
+            else {
+                continue;
+            };
+            assert_eq!(target.run.as_str(), "run-9");
+            let mut detail = json!({"summary": {"id": "run-9", "thread": "thr-1",
+                    "parent_run": "run-1", "role": "worker", "phase": "running",
+                    "revision": "4"},
+                "name": "tester", "lifecycle": "active", "source": "live",
+                "child_count": 0, "revision": "4"});
+            detail["model"] = json!(model);
+            let reply = FeatureReply::Query(Ok(view(
+                json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
+            )));
+            screen
+                .shared
+                .lock()
+                .unwrap()
+                .features
+                .reply(FeatureId::Execution, tag, reply);
+            reads += 1;
+        }
+    }
+    screen.harness.run_steps(2);
+    reads
+}
+
+fn run_9_model(screen: &Screen) -> Option<String> {
+    let state = screen.harness.state();
+    let (_, tab) = state
+        .run_tabs
+        .iter()
+        .find(|(_, tab)| tab.run.as_str() == "run-9")
+        .unwrap();
+    tab.model.clone()
+}
+
+// Given: a session file that kept a named subagent tab of thr-1 while a file tab hid the
+//        Subagents tab, and run-9 is live
+// When: the window connects
+// Then: the run is read once although the tab has its name, and the answer's model is the
+//       tab's
+#[test]
+fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() {
+    let (mut screen, mut asked) = restored_named_subagent("running");
+
+    let reads = answer_run_reads(&mut screen, &mut asked, Some("work/gpt-5"));
+
+    assert_eq!(reads, 1);
+    assert_eq!(run_9_model(&screen).as_deref(), Some("work/gpt-5"));
+}
+
+// Given: the same window, but only history remains of run-9 (the core restarted)
+// When: the tab's run is read, and then the parent's message resumes the run
+// Then: the first read finds no model and is not repeated while the run rests; once the run
+//       works it is read once more, and the model it reports is the tab's
+#[test]
+fn a_history_only_run_that_resumes_gets_its_model_while_subagents_stays_hidden() {
+    let (mut screen, mut asked) = restored_named_subagent("done");
+
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 1);
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 0);
+    assert_eq!(run_9_model(&screen), None);
+
+    set_run_phase(&screen, "running");
+    assert_eq!(
+        answer_run_reads(&mut screen, &mut asked, Some("work/gpt-5")),
+        1
+    );
+    assert_eq!(run_9_model(&screen).as_deref(), Some("work/gpt-5"));
+    assert_eq!(answer_run_reads(&mut screen, &mut asked, None), 0);
 }

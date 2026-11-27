@@ -170,7 +170,7 @@ fn enter_completes_a_command_and_runs_a_finished_one() {
     let selected = state.selected.clone().expect("a new conversation");
     assert_ne!(selected.as_str(), "thr-1");
     assert_eq!(screen.draft("thr-1"), "");
-    screen.harness.get_by_label("Thread: New conversation");
+    screen.harness.get_by_label("What should we do in evorch?");
 }
 
 // Given: thr-1 with a file ready to send
@@ -287,7 +287,7 @@ fn continue_resumes_the_thread_as_the_composers_role() {
     screen.type_message("/new");
     screen.press(Key::Enter);
     screen.harness.run_steps(2);
-    screen.harness.get_by_label("Thread: New conversation");
+    screen.harness.get_by_label("What should we do in evorch?");
     screen.type_message("/continue");
     screen.press(Key::Enter);
     screen
@@ -400,7 +400,7 @@ fn esc_hides_the_completions_of_one_thread_only() {
     screen.type_message("/new");
     screen.press(Key::Enter);
     screen.harness.run_steps(2);
-    screen.harness.get_by_label("Thread: New conversation");
+    screen.harness.get_by_label("What should we do in evorch?");
 
     screen.type_message("/");
     screen.harness.get_by_label("/help");

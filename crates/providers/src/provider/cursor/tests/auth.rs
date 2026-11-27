@@ -26,9 +26,15 @@ async fn browser_pkce_pending_poll_and_refresh_retains_token_family_without_secr
         .mount(&server)
         .await;
     Mock::given(path("/profile"))
+        .and(method("POST"))
+        .and(header(
+            "authorization",
+            format!("Bearer {}", token().access_token),
+        ))
+        .and(header("connect-protocol-version", "1"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(json!({"sub":"user_1","email":"user@example.test"})),
+                .set_body_json(json!({"authId":"auth0|user_1","email":"user@example.test"})),
         )
         .mount(&server)
         .await;
@@ -257,4 +263,32 @@ async fn rejected_api_key_renewal_preserves_the_stored_credential_family() {
     assert_eq!(error.status(), Some(401));
     assert!(!error.to_string().contains("cursor-key-secret"));
     assert_eq!(store.load().unwrap().unwrap(), expired);
+}
+
+#[tokio::test]
+async fn profile_for_another_subject_does_not_provide_the_email() {
+    // Given: the token's sub is `auth0|user_1`, but GetMe answers for another account
+    // whose id only shares the trailing part of the sub.
+    let server = MockServer::start().await;
+    let oauth = oauth(&server);
+    let login = oauth.begin().unwrap();
+    Mock::given(path("/poll"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"accessToken":token().access_token,"refreshToken":"first-refresh"}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(path("/profile"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"authId":"github|user_1","email":"other@example.test"})),
+        )
+        .mount(&server)
+        .await;
+
+    // When
+    let bundle = oauth.poll(&login).await.unwrap().unwrap();
+
+    // Then
+    assert_eq!(bundle.email, None);
 }

@@ -133,6 +133,9 @@ impl SidebarModel {
 struct SidebarView {
     sort: ProjectSort,
     collapsed: BTreeSet<String>,
+    /// The threads whose children the person folded; the rest show theirs. Kept in the
+    /// session file, so a restart does not unfold them.
+    folded_threads: BTreeSet<String>,
 }
 
 impl Default for SidebarView {
@@ -140,7 +143,20 @@ impl Default for SidebarView {
         Self {
             sort: ProjectSort::Name,
             collapsed: BTreeSet::new(),
+            folded_threads: BTreeSet::new(),
         }
+    }
+}
+
+impl WorkspaceFeature {
+    /// The threads folded in the sidebar, for the session file.
+    pub fn folded_threads(&self) -> Vec<String> {
+        self.view.folded_threads.iter().cloned().collect()
+    }
+
+    /// Folds the threads the session file kept.
+    pub fn restore_folded_threads(&mut self, threads: impl IntoIterator<Item = String>) {
+        self.view.folded_threads = threads.into_iter().collect();
     }
 }
 

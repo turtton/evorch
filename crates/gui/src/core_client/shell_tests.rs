@@ -2425,6 +2425,7 @@ mod lanes;
 mod composer;
 mod english_panes;
 mod many_subagents;
+mod new_chat;
 mod pull_requests;
 mod read_panes;
 

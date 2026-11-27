@@ -128,6 +128,8 @@ pub fn progress_band<Q>(
     plan: Option<PlanBand<'_>>,
 ) -> BandOutput<Q> {
     let mut output = BandOutput::default();
+    // Before the first plan there is no plan row, so it does not keep the band open.
+    let plan = plan.filter(PlanBand::has_row);
     if goal.is_none() && queue.is_none() && plan.is_none() {
         return output;
     }
@@ -411,6 +413,37 @@ mod tests {
             },
             Some("goal-1"),
         )
+    }
+
+    // Given: a band with only a plan that was never written to
+    // When: it is drawn / Then: the band takes no room, as with nothing to show
+    #[test]
+    fn a_band_with_only_an_unplanned_plan_draws_nothing() {
+        let summary = workbench_protocol::namespaces::execution::plan::PlanSummary {
+            thread: workbench_protocol::ids::ThreadId::new("A").expect("id"),
+            plan_id: None,
+            revision: workbench_protocol::wire::Revision(0),
+            progress: Default::default(),
+            updated_at_unix_ms: None,
+        };
+        let mut height = None;
+        let mut harness = Harness::new_ui(|ui| {
+            let before = ui.min_rect().height();
+            progress_band::<()>(
+                ui,
+                "A",
+                None,
+                None::<fn(&mut egui::Ui) -> Option<()>>,
+                DETAILS_MAX_HEIGHT,
+                Some(PlanBand {
+                    summary: Some(&summary),
+                }),
+            );
+            height = Some(ui.min_rect().height() - before);
+        });
+        harness.run();
+        drop(harness);
+        assert_eq!(height, Some(0.0));
     }
 
     // Given: the goal's details are open

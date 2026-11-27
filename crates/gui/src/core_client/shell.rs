@@ -491,16 +491,17 @@ impl TabViewer for Viewer<'_, '_> {
             CoreTab::Terminal => self.local.terminal_tab(ui),
             CoreTab::File(id) => self.local.file_tab(ui, id),
             CoreTab::Run(id) => {
-                if let Some((phase, unread)) = self.attention.run_phase(id) {
-                    crate::panes::phase_indicator::phase_indicator_with_ack(ui, phase, unread);
-                }
+                let phase = self.attention.run_phase(id);
                 conversation::run_tab(
                     ui,
                     self.conversation,
                     self.io.cache,
                     self.io.connected,
                     self.io.link_base,
-                    self.run_tabs.get(id),
+                    conversation::RunTabView {
+                        tab: self.run_tabs.get(id),
+                        phase,
+                    },
                     self.effects,
                 );
             }

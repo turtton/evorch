@@ -92,6 +92,11 @@ impl ConversationPane {
         self.mentions.wait();
     }
 
+    /// Puts the cursor in the composer the next time it is drawn.
+    pub(in crate::core_client) fn request_composer_focus(&mut self) {
+        self.completion.focus_requested = true;
+    }
+
     /// A selection change a slash command asked for, for the dock pass to apply.
     pub fn take_navigation(&mut self) -> Option<Navigation> {
         self.navigation.take()
@@ -158,7 +163,10 @@ pub(super) fn composer(
         pane.completion.dismissed_for = None;
         pane.completion.selected = 0;
     }
-    let input_id = ui.id().with("composer-input");
+    // One id for the input wherever the composer is drawn (a new conversation's screen and
+    // a thread's differ in their ui hierarchy), so the focus and the cursor survive the
+    // new conversation becoming the thread.
+    let input_id = egui::Id::new("core-client-composer-input");
     let min_input = COMPOSER_MIN_HEIGHT - 2.0 * SP_2;
     // Wrapped rows are only known after layout, so the viewport follows the
     // last measured document height and the pass is redone when it changes.
@@ -181,7 +189,7 @@ pub(super) fn composer(
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
-                let ime_id = ui.id().with("ime-composing");
+                let ime_id = input_id.with("ime-composing");
                 let ime = ime_composing(ui, ime_id);
                 // Escape clears egui's focus before the frame, so it is matched
                 // against the focus the editor held at the end of the last one.

@@ -458,6 +458,15 @@ impl ModelResolution {
         );
         apply_model_windows(&self.config, catalog.as_ref(), provider_windows, settings);
     }
+
+    pub(crate) fn reconfigured(&self, config: &Config) -> Self {
+        Self::new(
+            config,
+            self.credential_store.clone(),
+            self.catalog_dir.clone(),
+            self.catalog_cache.clone(),
+        )
+    }
 }
 
 #[cfg(test)]
