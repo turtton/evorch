@@ -318,12 +318,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ) {
         let production = self.production_model.clone();
         let projects = self.project_models.clone();
+        let runtime = self.sandbox_settings.runtime.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.provider_save_rx = Some(rx);
         std::thread::spawn(move || {
             let result = job().and_then(|outcome| {
-                crate::model::production::reload_models(production.as_ref(), projects.as_ref())
-                    .map(|()| outcome)
+                crate::model::production::reload_models(
+                    production.as_ref(),
+                    projects.as_ref(),
+                    runtime.as_ref(),
+                )
+                .map(|()| outcome)
             });
             if let Err(error) = &result {
                 tracing::error!(%error, "provider update or recomposition failed");

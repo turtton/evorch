@@ -71,7 +71,7 @@ pub(crate) use chat_restore::SnapshotReservation;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -94,10 +94,22 @@ use crate::prompt::{
 };
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection};
+
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 use crate::skill_source::SkillCatalogSource;
 use crate::state::{RunInterrupt, StopScope};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
+
+/// Published together so a loop cannot combine policy and metadata from
+/// different settings saves. Existing loops own the snapshot they captured.
+#[derive(Clone, Default)]
+pub(crate) struct ModelSettings {
+    compaction: Option<CompactionSettings>,
+    resolution: Option<Arc<crate::model_resolve::ModelResolution>>,
+}
+
+#[cfg(test)]
+mod model_settings_tests;
 
 #[cfg(test)]
 mod host_input_tests;
@@ -204,7 +216,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) skill_source: OnceLock<Arc<SkillCatalogSource>>,
     pub(crate) rules: Mutex<Option<Arc<RulesSource>>>,
-    pub(crate) compaction: OnceLock<CompactionSettings>,
+    pub(crate) model_settings: RwLock<Arc<ModelSettings>>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) lanes: crate::lanes::LaneRuntime,
@@ -212,7 +224,6 @@ pub(crate) struct Shared {
     pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
     /// Test-injected uncollected-lane creation threshold; unset is the default.
     pub(crate) uncollected_lane_open_limit: OnceLock<u32>,
-    pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
@@ -875,13 +886,12 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
                 rules: Mutex::new(None),
-                compaction: OnceLock::new(),
+                model_settings: RwLock::new(Arc::new(ModelSettings::default())),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
                 uncollected_lane_open_limit: OnceLock::new(),
-                model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
@@ -1003,10 +1013,16 @@ impl AgentRuntime {
 
     /// コンテキスト圧縮設定を接続したランタイムを返す。
     pub fn with_compaction(self, settings: config::CompactionConfig) -> Self {
-        let _ = self
-            .shared
-            .compaction
-            .set(CompactionSettings::from(&settings));
+        {
+            let mut current = self
+                .shared
+                .model_settings
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::make_mut(&mut current)
+                .compaction
+                .get_or_insert_with(|| CompactionSettings::from(&settings));
+        }
         self.shared
             .compaction_configured
             .store(true, Ordering::Release);
@@ -1015,11 +1031,39 @@ impl AgentRuntime {
 
     /// Catalog cache selected by composition, if metadata resolution is configured.
     /// Inspecting its identity does not acquire or alter a catalog.
-    pub fn codex_catalog_cache(&self) -> Option<&Arc<providers::CodexCatalogCache>> {
+    pub fn codex_catalog_cache(&self) -> Option<Arc<providers::CodexCatalogCache>> {
         self.shared
-            .model_resolution
-            .get()
-            .map(|resolution| &resolution.catalog_cache)
+            .model_settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resolution
+            .as_ref()
+            .map(|resolution| resolution.catalog_cache.clone())
+    }
+
+    /// Publish policy and model metadata for loops started after a successful
+    /// settings reload. Running loops retain their captured settings and prefix.
+    pub fn reload_model_settings(&self, config: &config::Config) {
+        let mut current = self
+            .shared
+            .model_settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let resolution = current.resolution.as_ref().map_or_else(
+            || {
+                crate::model_resolve::ModelResolution::new(
+                    config,
+                    None,
+                    None,
+                    providers::default_codex_catalog_cache(),
+                )
+            },
+            |resolution| resolution.reconfigured(config),
+        );
+        *current = Arc::new(ModelSettings {
+            compaction: Some(CompactionSettings::from(&config.compaction)),
+            resolution: Some(Arc::new(resolution)),
+        });
     }
 
     pub(crate) fn with_model_resolution_and_catalog_cache(
@@ -1045,19 +1089,25 @@ impl AgentRuntime {
             .shared
             .topology
             .set(crate::CoordinationTopology::from_config(&config.team));
-        let _ = self
-            .shared
-            .model_resolution
-            .set(crate::model_resolve::ModelResolution::new(
-                config,
-                credential_store,
-                catalog_dir,
-                cache,
-            ));
-        let _ = self
-            .shared
-            .compaction
-            .set(CompactionSettings::from(&config.compaction));
+        {
+            let mut current = self
+                .shared
+                .model_settings
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let settings = Arc::make_mut(&mut current);
+            settings.resolution.get_or_insert_with(|| {
+                Arc::new(crate::model_resolve::ModelResolution::new(
+                    config,
+                    credential_store,
+                    catalog_dir,
+                    cache,
+                ))
+            });
+            settings
+                .compaction
+                .get_or_insert_with(|| CompactionSettings::from(&config.compaction));
+        }
         self
     }
 
@@ -1277,13 +1327,12 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 skill_source: OnceLock::new(),
                 rules: Mutex::new(None),
-                compaction: OnceLock::new(),
+                model_settings: RwLock::new(Arc::new(ModelSettings::default())),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
                 uncollected_lane_open_limit: OnceLock::new(),
-                model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
@@ -4451,6 +4500,11 @@ pub(crate) fn loop_shared(
                 shared.skills.get().cloned(),
             ),
         };
+        let settings = shared
+            .model_settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         LoopShared {
             bus: Arc::clone(&shared.bus),
             executor: Arc::clone(
@@ -4470,7 +4524,8 @@ pub(crate) fn loop_shared(
                 None => shared.rules(),
             },
             system_prompt_preamble: shared.system_prompt_preamble.get().cloned(),
-            compaction: shared.compaction.get().cloned().unwrap_or_default(),
+            compaction: settings.compaction.clone().unwrap_or_default(),
+            model_resolution: settings.resolution.clone(),
             compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
             escalation: shared
                 .escalation_settings

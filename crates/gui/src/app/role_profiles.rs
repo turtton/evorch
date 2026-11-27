@@ -87,6 +87,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let options = self.user_settings_options();
         let production = self.production_model.clone();
         let projects = self.project_models.clone();
+        let runtime = self.sandbox_settings.runtime.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = path
@@ -103,6 +104,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     crate::model::production::reload_models(
                         production.as_ref(),
                         projects.as_ref(),
+                        runtime.as_ref(),
                     )?;
                     config::Config::load_unresolved(&options).map_err(|error| error.to_string())
                 });

@@ -146,9 +146,18 @@ pub(crate) struct LoopShared {
     pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
+    pub(crate) model_resolution: Option<Arc<crate::model_resolve::ModelResolution>>,
     pub(crate) compaction_configured: bool,
     pub(crate) escalation: EscalationSettings,
     pub(crate) runtime: Weak<Shared>,
+}
+
+impl LoopShared {
+    pub(crate) async fn resolve_compaction(&mut self) {
+        if let Some(resolution) = self.model_resolution.take() {
+            resolution.apply(&mut self.compaction).await;
+        }
+    }
 }
 
 /// Model switches the loop prepares before a response arrives (ADR 0030). Each one
@@ -379,11 +388,7 @@ pub(crate) async fn run_agent(
     if let Some(model) = &task.recovery_model {
         loop_shared.model = Arc::clone(model);
     }
-    if let Some(runtime) = shared.upgrade()
-        && let Some(resolution) = runtime.model_resolution.get()
-    {
-        resolution.apply(&mut loop_shared.compaction).await;
-    }
+    loop_shared.resolve_compaction().await;
     let runtime = crate::AgentRuntime::from_weak(&shared)?;
     let image_model = loop_shared
         .model

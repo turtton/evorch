@@ -1224,7 +1224,11 @@ fn build_workbench(
             load_options.clone()
         };
         Box::new(move || {
-            gui::model::production::reload_models(production.as_ref(), projects.as_ref())?;
+            gui::model::production::reload_models(
+                production.as_ref(),
+                projects.as_ref(),
+                weak_runtime.upgrade().as_ref(),
+            )?;
             reload_retention_policy(&retention_policy, &options);
             reload_pull_request_settings(&weak_runtime, &options)?;
             reload_index_settings(&handle, &options)

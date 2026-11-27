@@ -276,11 +276,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some((context, model)) = self.production_model.clone() {
             let startup = context.load_options.project_dir.as_deref() == Some(root.as_path());
             let projects = self.project_models.clone();
+            let runtime = self.sandbox_settings.runtime.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             self.project_profile_rx = Some(rx);
             std::thread::spawn(move || {
                 let result = if startup {
-                    context.reload().map(|routed| model.replace(routed))
+                    crate::model::production::reload_models(
+                        Some(&(context, model)),
+                        None,
+                        runtime.as_ref(),
+                    )
                 } else {
                     projects.map_or(Ok(()), |projects| projects.reload(&root))
                 };

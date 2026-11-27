@@ -12,9 +12,7 @@ impl LoopState {
         let weak = Arc::downgrade(&runtime.shared);
         let project = runtime.shared.run_project(&config);
         let mut shared = loop_shared(&weak, project.as_deref()).expect("runtime held");
-        if let Some(resolution) = runtime.shared.model_resolution.get() {
-            resolution.apply(&mut shared.compaction).await;
-        }
+        shared.resolve_compaction().await;
         let image_model = shared
             .model
             .invocation_snapshot()
