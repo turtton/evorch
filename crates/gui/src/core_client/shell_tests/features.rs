@@ -307,3 +307,36 @@ fn the_pull_requests_tab_opens_features_and_follows_the_saved_result() {
             .is_none()
     );
 }
+
+// Given: the smallest window the shell supports
+// When: ⚙ → Features is opened
+// Then: the footer (Save and Discard) stays inside the window, and the cards past the
+//       visible part of the body are reached by scrolling, not cut off
+#[test]
+fn at_the_minimum_window_size_save_stays_in_view_and_the_cards_scroll() {
+    let size = egui::vec2(960.0, 600.0);
+    let mut screen = screen(size);
+    let core = Core {
+        current: view('a', values(true), &[FeatureSection::Browser]).into(),
+        tracking: Cell::new(true),
+        reads: Cell::new(0),
+    };
+    screen.open_features_from_menu(&core);
+    let inside =
+        |rect: egui::Rect| egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(rect);
+    for label in ["Save", "Discard", "Close"] {
+        let node = screen.harness.get_by_label(label);
+        let bounds = node.accesskit_node().bounding_box().expect(label);
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        );
+        assert!(inside(rect), "{label} is outside the window: {rect:?}");
+    }
+    screen.harness.get_by_label("Thread cleanup").scroll_to_me();
+    screen.harness.run_steps(4);
+    screen.capture("features-min");
+    screen
+        .harness
+        .get_by_role_and_label(Role::CheckBox, "Archive inactive threads");
+}

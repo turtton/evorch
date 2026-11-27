@@ -137,3 +137,34 @@ fn a_text_that_is_not_toml_is_refused() {
         .unwrap_err();
     assert!(error.to_string().contains("TOML"), "{error}");
 }
+
+#[test]
+fn a_key_another_layer_overrides_is_not_rewritten_when_it_is_not_edited() {
+    // Given: config.toml says 600 for the backoff and the review window, while the effective
+    // value (a drop-in layer's) is 1800 and 900, and the file keeps `executable` that a layer
+    // above does not set.
+    let text = "version = 3\n[pull_requests]\nenabled = false\nbackoff_max_seconds = 600 # mine\nreview_max_age_seconds = 120\n\n[tools.browser]\nexecutable = \"/usr/bin/chromium\"\n";
+    let mut baseline = effective(text);
+    baseline.pull_requests.backoff_max_seconds = 1800;
+    baseline.pull_requests.review_max_age_seconds = 900;
+    baseline.tools.browser.executable = None;
+
+    // When: only `enabled` of PR view is changed (the other values are the effective ones)
+    // and the browser section is saved with its effective values.
+    let edit = FeatureSettingsEdit {
+        pull_requests: Some(PullRequestsConfig {
+            enabled: true,
+            ..baseline.pull_requests
+        }),
+        browser: Some(baseline.tools.browser.clone()),
+        ..Default::default()
+    };
+    let edited = edit_feature_settings_text(text, &edit, &baseline).unwrap();
+
+    // Then: only `enabled` changed in the text; the overridden keys keep the file's own values.
+    assert_eq!(
+        edited,
+        text.replace("enabled = false", "enabled = true"),
+        "{edited}"
+    );
+}

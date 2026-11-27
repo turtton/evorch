@@ -5,7 +5,7 @@
 //! core) holds the writer lock, compares the revision, checks the result against
 //! the effective configuration and writes it. Only the keys named by the edit are
 //! touched; every other key and comment stays, and a key that is absent and
-//! already has the wanted effective value is not created.
+//! already has the wanted effective value is not touched.
 
 use toml_edit::{DocumentMut, Item, Value};
 
@@ -63,8 +63,10 @@ fn existing<'a>(doc: &'a DocumentMut, tables: &[&str], key: &str) -> Option<&'a 
     table.get(key)
 }
 
-/// Sets `key` to `want`. An existing value is updated in place (its comments stay); an
-/// absent key is only created when the effective value is not already `want`.
+/// Sets `key` to `want`. A key whose effective value is already `want` is not touched, whether
+/// or not the text has it (another layer may be what sets it, and the text keeps its own
+/// value). Otherwise an existing value is updated in place (its comments stay) and an absent
+/// key is created.
 fn put(
     doc: &mut DocumentMut,
     tables: &[&str],
@@ -72,8 +74,7 @@ fn put(
     want: &Scalar,
     already_effective: bool,
 ) -> Result<(), ConfigError> {
-    let present = existing(doc, tables, key).is_some();
-    if !present && already_effective {
+    if already_effective {
         return Ok(());
     }
     let table = table_at(doc, tables)?;
@@ -101,8 +102,8 @@ fn remove(doc: &mut DocumentMut, tables: &[&str], key: &str) -> Result<(), Confi
 }
 
 /// `text` with the sections of `edit` written. `baseline` is the effective
-/// configuration the text is edited from: a key that is absent in the text and
-/// already effective at the wanted value is left out.
+/// configuration the text is edited from: a key already effective at the wanted
+/// value is left as the text has it (or left out).
 ///
 /// # Errors
 /// The text is not a configuration document (not TOML, or an unsupported version), a
@@ -199,7 +200,8 @@ pub fn edit_feature_settings_text(
                 &Scalar::Text(path.to_string_lossy().into_owned()),
                 was.executable.as_ref() == Some(path),
             )?,
-            None => remove(&mut doc, &table, "executable")?,
+            None if was.executable.is_some() => remove(&mut doc, &table, "executable")?,
+            None => {}
         }
         put(
             &mut doc,

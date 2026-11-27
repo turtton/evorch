@@ -599,3 +599,47 @@ async fn the_agent_runtime_follows_the_web_tools_switch_and_says_when_it_has_no_
     assert!(!f.view().running.agent_web_tools);
     assert_eq!(f.view().restart_pending, [FeatureSection::PullRequests]);
 }
+
+#[tokio::test]
+async fn keys_the_screen_did_not_edit_keep_the_files_own_values_under_a_drop_in() {
+    // Given: the file says 600 and 120 for two PR settings, and a drop-in layer makes the
+    // effective values 1800 and 900 (neither is on the screen's list, one is not shown at all).
+    let text = "version = 3\n[pull_requests]\nenabled = false\nbackoff_max_seconds = 600 # mine\nreview_max_age_seconds = 120\n";
+    let mut f = Fixture::new(text, FakeCore::new());
+    let drop_ins = f.dir.path().join("config.d");
+    std::fs::create_dir_all(&drop_ins).unwrap();
+    std::fs::write(
+        drop_ins.join("10-pr.toml"),
+        "version = 3\n[pull_requests]\nbackoff_max_seconds = 1800\nreview_max_age_seconds = 900\n",
+    )
+    .unwrap();
+    let before = f.view();
+    let mut changed = before.saved.pull_requests;
+    changed.enabled = true;
+
+    // When: only `enabled` is changed and saved.
+    let done = f
+        .save_features(
+            "partial",
+            before.revision,
+            FeatureSettingsPatch {
+                pull_requests: Some(changed),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // Then: the file changed in that one value only.
+    assert_eq!(
+        done.operation.state,
+        OperationState::Ready,
+        "{:?}",
+        done.message
+    );
+    assert_eq!(
+        f.file(),
+        text.replace("enabled = false", "enabled = true"),
+        "{}",
+        f.file()
+    );
+}

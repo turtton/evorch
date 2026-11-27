@@ -465,3 +465,233 @@ async fn saved_provider_replaces_the_model_and_the_next_request_still_extends_th
     core.runtime.wait(run).await.unwrap();
     core.shutdown().await.unwrap();
 }
+
+/// Saving the Features through the production settings command applies the web tools and
+/// the PR view to the running core at once, and still leaves what an existing run already
+/// sent alone: the next request extends the first (history, tool definitions and their order,
+/// cache affinity) and its cache is reused.
+#[tokio::test(flavor = "multi_thread")]
+async fn saving_the_features_leaves_the_sent_prefix_of_a_running_conversation_alone() {
+    use workbench_protocol::namespaces::settings::{
+        FeatureSection, FeatureSettingsPatch, FeatureSettingsView, SaveFeatureSettings,
+    };
+
+    let project = cache::Project::new();
+    let provider = cache::Provider::new(false).await;
+    let config = cache::configuration(&provider);
+    let root = project.root().canonicalize().unwrap();
+    let user = root.join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("config.toml"),
+        format!("version = {}\n", config::CURRENT_VERSION),
+    )
+    .unwrap();
+    let store = SidebarStore::new(user.join("sidebar.json"));
+    let mut document = SidebarDocument::default();
+    document
+        .sidebar
+        .add_project(StateProject::new("p"), "repo", &root)
+        .unwrap();
+    document.sidebar.threads.push(ThreadRecord::new(
+        StateThread::new("t1"),
+        StateProject::new("p"),
+        "first",
+    ));
+    document.sidebar.refresh_derived();
+    {
+        let lock = store.lock().unwrap();
+        store.write(&lock, &document).unwrap();
+    }
+    project
+        .secrets
+        .set(
+            "claude",
+            &sandbox::Secret::from(
+                serde_json::json!({
+                    "access_token": "fixture-mcp-token",
+                    "refresh_token": "fixture-refresh",
+                    "expires_at": 4_102_444_800u64
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+    let provider_bus = Arc::new(event_bus::EventBus::new(4096));
+    let mut provider_events = provider_bus.subscribe();
+    let model = workbench_host::bootstrap::models::compose_production_model(
+        &config,
+        &workbench_host::bootstrap::models::ProductionModel {
+            load_options: config::LoadOptions {
+                user_config_dir: Some(user.clone()),
+                ..Default::default()
+            },
+            credential_store: project.secrets.clone(),
+            bus: provider_bus.clone(),
+            env: Arc::new(routing::MapEnv::from_iter([(
+                "MCP_CACHE_KEY",
+                "fixture-key",
+            )])),
+            model_catalog_dir: Some(test_support::model_catalog_dir()),
+        },
+    )
+    .unwrap();
+    let mut core = BootstrappedHost::open_with_test_seams(
+        BootstrapOptions {
+            config_dir: user.clone(),
+            project_root: root.clone(),
+            ownership_root: project.sockets().to_path_buf(),
+        },
+        TestSeams {
+            model,
+            sandbox: Arc::new(Unisolated),
+        },
+    )
+    .await
+    .unwrap();
+    let mut h = cache::Harness {
+        runtime: core.runtime.clone(),
+        receiver: core.runtime.event_bus().subscribe(),
+    };
+    let mut settings_events = core
+        .host
+        .lock()
+        .unwrap()
+        .projection()
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .unwrap();
+
+    provider.enqueue(vec![cache::answer()]);
+    let run: runtime::RunId = {
+        let send = SendChat {
+            project: ProjectId::new("p").unwrap(),
+            thread: ThreadId::new("t1").unwrap(),
+            submission_id: SubmissionId::new("00000000-0000-4000-8000-000000000009").unwrap(),
+            composer_role: ComposerRole::Worker,
+            text: cache::GOAL.into(),
+            skills: vec![],
+            attachments: vec![],
+            model_preference: None,
+            fork_seed: None,
+        };
+        let mut host = core.host.lock().unwrap();
+        host.reserve_new_chat_thread(&send).unwrap();
+        host.handle_command(
+            Command::Conversation(
+                workbench_protocol::namespaces::ConversationCommand::SendChat(send),
+            ),
+            local_desktop(),
+        )
+        .unwrap()
+        .run_id
+        .unwrap()
+        .as_str()
+        .parse()
+        .unwrap()
+    };
+    cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+    assert_eq!(provider.requests().len(), 1);
+
+    let features = |core: &BootstrappedHost| -> FeatureSettingsView {
+        match core
+            .host
+            .lock()
+            .unwrap()
+            .handle_query(
+                &SessionId::new("features-cache").unwrap(),
+                &Query::Settings(SettingsQuery::GetFeatureSettings {}),
+                &local_desktop(),
+            )
+            .unwrap()
+        {
+            QueryReply::Settings(SettingsReply::FeatureSettings(view)) => *view,
+            other => panic!("{other:?}"),
+        }
+    };
+    let before = features(&core);
+    assert!(before.restart_pending.is_empty());
+    let web_tools_before = core.runtime.web_tools_enabled();
+
+    // Save every section through the production command, while the run is alive.
+    let mut pull_requests = before.saved.pull_requests;
+    pull_requests.enabled = !pull_requests.enabled;
+    let mut browser = before.saved.browser.clone();
+    browser.enabled = !browser.enabled;
+    let mut cleanup = before.saved.thread_cleanup;
+    cleanup.auto_archive_after_days += 30;
+    let save = OperationId::new("save-features").unwrap();
+    assert_eq!(
+        settle(
+            &core,
+            &mut settings_events,
+            &save,
+            SettingsCommand::SaveFeatureSettings(SaveFeatureSettings {
+                operation_id: save.clone(),
+                expected_revision: before.revision.clone(),
+                changes: FeatureSettingsPatch {
+                    pull_requests: Some(pull_requests),
+                    agent_web_tools: Some(!web_tools_before),
+                    browser: Some(browser),
+                    thread_cleanup: Some(cleanup),
+                },
+            }),
+        )
+        .await,
+        OperationState::Ready
+    );
+    // The web tools and the PR view followed at once; the browser and the cleanup wait.
+    assert_eq!(core.runtime.web_tools_enabled(), !web_tools_before);
+    let after = features(&core);
+    assert_eq!(after.running.agent_web_tools, !web_tools_before);
+    assert_eq!(
+        after.running.pull_requests.enabled, pull_requests.enabled,
+        "the PR view is applied to the running service"
+    );
+    assert_eq!(
+        after.restart_pending,
+        vec![FeatureSection::Browser, FeatureSection::ThreadCleanup]
+    );
+
+    provider.enqueue(vec![cache::answer()]);
+    core.runtime
+        .send_message(run, "Continue after the features were saved".into())
+        .unwrap();
+    cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+    provider.enqueue(vec![cache::answer()]);
+    core.runtime
+        .send_message(run, "Continue once more".into())
+        .unwrap();
+    cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    // History, tool definitions and their order, and the affinity key are those of the first
+    // request, and each request extends the one before.
+    for request in &requests[1..] {
+        assert_eq!(
+            request["tools"], requests[0]["tools"],
+            "the tool definitions a started run sent did not move after the save"
+        );
+    }
+    cache::assert_frozen(&provider, &requests);
+    let mut completions = Vec::new();
+    while completions.len() < 3 {
+        let event = provider_events.recv().await.unwrap();
+        if matches!(
+            event.kind,
+            event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestCompleted { .. })
+        ) {
+            completions.push(event);
+        }
+    }
+    cache::assert_usage_reuse(&completions, 3);
+    provider.assert_drained();
+    core.runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    core.runtime.wait(run).await.unwrap();
+    core.shutdown().await.unwrap();
+}
