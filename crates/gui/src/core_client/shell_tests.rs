@@ -146,6 +146,13 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
 /// A lane a test added to the cache: "thr-lane-3" is "Lane 3", a lane of thr-1; "thr-alane-3"
 /// is "Archived lane 3", a lane of the archived thr-5.
 fn extra_lane(id: &str) -> Option<Fixture> {
+    if id == "thr-sub-1" {
+        return Some(Fixture {
+            parent: Some(("thr-3", LineageType::Fork)),
+            family: "thr-1",
+            ..thread("thr-sub-1", "Sub thread", 0)
+        });
+    }
     let (lead, archived, title) =
         match (id.strip_prefix("thr-lane-"), id.strip_prefix("thr-alane-")) {
             (Some(number), _) => ("thr-1", false, format!("Lane {number}")),

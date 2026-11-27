@@ -3,7 +3,7 @@
 //! the revision the core reported, or changes of this window's view.
 use egui::collapsing_header::CollapsingState;
 use egui::{Align, Layout, Ui};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use workbench_protocol::ids::{ProjectId, ThreadId};
 use workspace_ui::ProjectSort;
 
@@ -313,8 +313,14 @@ fn draw_tree(
         .get(scope.project.as_str())
         .map(|access| access.root.as_str());
     let mut collapsed_depth = None;
+    // The threads drawn with their children open: only their lane controls are drawn.
+    let mut open_leads = HashSet::new();
+    let project = scope.project.as_str();
     for (index, &(row, depth)) in rows.iter().enumerate() {
         if collapsed_depth.is_some_and(|hidden_depth| depth > hidden_depth) {
+            // The last row of a thread's subtree may sit in a folded child; the thread's
+            // controls follow it all the same.
+            lane_controls_after(ui, project, lanes, &open_leads, index, opened);
             continue;
         }
         collapsed_depth = None;
@@ -439,6 +445,8 @@ fn draw_tree(
         }
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
+        } else {
+            open_leads.insert(row.id());
         }
         if !archived
             && let (Some(root), Some(project_root)) = (row.active_root, project_root)
@@ -446,12 +454,24 @@ fn draw_tree(
         {
             ui.label(muted(format!("Shared workspace: {root}")));
         }
-        if let Some(leads) = lanes.controls.get(&index) {
-            for lead in leads {
-                if let Some(group) = lanes.groups.get(lead) {
-                    lane_controls(ui, scope.project.as_str(), lead, group, opened);
-                }
-            }
+        lane_controls_after(ui, project, lanes, &open_leads, index, opened);
+    }
+}
+
+/// Draws the lane controls that follow `rows[index]`, for the threads drawn open.
+fn lane_controls_after(
+    ui: &mut Ui,
+    project: &str,
+    lanes: &tree::LaneLimit<'_>,
+    open_leads: &HashSet<&str>,
+    index: usize,
+    opened: &mut BTreeSet<String>,
+) {
+    for lead in lanes.controls.get(&index).into_iter().flatten() {
+        if open_leads.contains(lead)
+            && let Some(group) = lanes.groups.get(lead)
+        {
+            lane_controls(ui, project, lead, group, opened);
         }
     }
 }

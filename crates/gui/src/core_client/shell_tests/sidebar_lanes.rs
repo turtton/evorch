@@ -300,3 +300,36 @@ fn the_archived_section_collapses_and_limits_its_lanes_too() {
     assert_eq!(shown(&screen), [7, 6, 5, 4, 3, 2, 1]);
     screen.capture("archived-lanes");
 }
+
+// Given: thr-1 with lanes and a fork (thr-3) that has a child of its own, the fork folded, so the
+//        last row of thr-1's subtree is a thread the fold hides
+// When: the lane list of thr-1 is collapsed, then opened
+// Then: the controls of the lane list are still drawn: "Show lanes (8)", then "See more (3)"
+//       and "Hide lanes"
+#[test]
+fn lane_controls_stay_when_a_child_below_the_last_row_is_folded() {
+    for open in [false, true] {
+        let mut screen = screen_patched(|shared| {
+            for (title, updated, _) in NEW_LANES {
+                add_lane(shared, &thread_id(title), title, "thr-1", updated);
+            }
+            let sub: ThreadSummary = view(json!({
+                "id": "thr-sub-1", "project": "proj-1", "title": "Sub thread", "state": "idle",
+                "revision": "3", "updated_at": "1793799000000",
+            }));
+            shared.cache.threads.insert("thr-sub-1".into(), sub);
+            let workspace = shared.features.workspace_mut().unwrap();
+            workspace.restore_opened_lanes(open.then(|| "thr-1".to_owned()));
+            workspace.restore_folded_threads(["thr-3".to_owned()]);
+        });
+        screen.settle_with_listed_lanes();
+        screen.harness.get_by_label("Expand children of thr-3");
+        assert!(screen.harness.query_by_label("↳ Sub thread").is_none());
+        if open {
+            screen.harness.get_by_label("See more (3)");
+            screen.harness.get_by_label("Hide lanes");
+        } else {
+            screen.harness.get_by_label("Show lanes (8)");
+        }
+    }
+}
