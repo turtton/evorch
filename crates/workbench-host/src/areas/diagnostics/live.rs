@@ -11,24 +11,96 @@ use storage::{
 };
 use workbench_protocol::{
     errors::{ErrorCode, WorkbenchError},
-    namespaces::diagnostics::{LIVE_USAGE_MINUTES, LiveUsage, UsageTotals},
+    namespaces::diagnostics::{
+        LIVE_USAGE_MINUTES, LiveUsage, MAX_QUOTA_WINDOW_USAGES, ProviderQuotas, QuotaProvider,
+        QuotaState, QuotaWindowUsage, UsageTotals,
+    },
 };
 
 const MINUTE_NS: i64 = 60_000_000_000;
 
-pub(super) fn live_usage(database: &Database, now_ns: i64) -> Result<LiveUsage, WorkbenchError> {
+pub(super) fn live_usage_with_quotas(
+    database: &Database,
+    now_ns: i64,
+    quotas: &ProviderQuotas,
+) -> Result<LiveUsage, WorkbenchError> {
+    let ranges = quota_ranges(quotas, now_ns);
     let clock = database.usage_local_clock().map_err(storage_error)?;
-    let (from, month_start) = read_range(&clock.today).ok_or_else(|| {
+    let (mut from, month_start) = read_range(&clock.today).ok_or_else(|| {
         crate::queries::error(
             ErrorCode::StorageUnavailable,
             "the ledger's day is unreadable",
         )
     })?;
+    if let Some(start) = ranges.iter().map(|r| r.from_ns).min() {
+        // A conservative local-day bound (all UTC offsets), then exact ns filtering.
+        let first = day_label(start.div_euclid(86_400_000_000_000) - 1);
+        from = from.min(first);
+    }
     let (requests, daily) = consistent_rows(
         || database.usage_daily_between(&from, &clock.today),
         || database.usage_requests_in_days(&from, &clock.today),
     )?;
-    Ok(reduce_live(&requests, &daily, &clock, &month_start, now_ns))
+    let mut live = reduce_live(&requests, &daily, &clock, &month_start, now_ns);
+    live.quota_windows = sum_quota_windows(&requests, &ranges);
+    Ok(live)
+}
+
+struct QuotaRange {
+    profile: String,
+    window: String,
+    from_ns: i64,
+    until_ns: i64,
+}
+fn quota_ranges(quotas: &ProviderQuotas, now_ns: i64) -> Vec<QuotaRange> {
+    quotas
+        .profiles
+        .iter()
+        .filter(|q| {
+            q.provider == QuotaProvider::Codex
+                && matches!(q.state, QuotaState::Ready | QuotaState::Stale)
+        })
+        .flat_map(|q| {
+            q.windows.iter().filter_map(move |w| {
+                let end = i64::try_from(w.resets_at_ms?.checked_mul(1_000_000)?).ok()?;
+                let duration =
+                    i64::try_from(w.duration_seconds?.checked_mul(1_000_000_000)?).ok()?;
+                if duration <= 0 {
+                    return None;
+                }
+                let from = end.checked_sub(duration)?;
+                let until = end.min(now_ns);
+                (from < until).then(|| QuotaRange {
+                    profile: q.profile.clone(),
+                    window: w.id.clone(),
+                    from_ns: from,
+                    until_ns: until,
+                })
+            })
+        })
+        .take(MAX_QUOTA_WINDOW_USAGES)
+        .collect()
+}
+fn sum_quota_windows(requests: &[UsageRequestRow], ranges: &[QuotaRange]) -> Vec<QuotaWindowUsage> {
+    ranges
+        .iter()
+        .map(|range| {
+            let mut totals = UsageTotals::default();
+            for row in requests.iter().filter(|row| {
+                row.record.profile.as_deref() == Some(range.profile.as_str())
+                    && (range.from_ns..range.until_ns).contains(&row.record.at_ns)
+            }) {
+                add_request(&mut totals, row);
+            }
+            // Rolled-up daily rows lost profile identity: never attribute them to
+            // another account, even if their provider/model happens to match.
+            QuotaWindowUsage {
+                profile: range.profile.clone(),
+                window: range.window.clone(),
+                totals,
+            }
+        })
+        .collect()
 }
 
 /// The first day to read and the first day of the month. The window of the last
@@ -159,6 +231,91 @@ mod tests {
             cost_usd: cost,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn quota_read_extends_before_the_month_in_the_database() {
+        use workbench_protocol::namespaces::diagnostics::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.db");
+        let store = storage::Storage::open(storage::StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        let database = Database::open_read_only(&path).unwrap();
+        let clock = database.usage_local_clock().unwrap();
+        let now = clock.day_start_ns + HOUR_NS;
+        let mut row = request("unused", clock.day_start_ns - 35 * 24 * HOUR_NS, 2.0).record;
+        row.profile = Some("work".into());
+        let writer = store.handle();
+        writer.record_usage_requests(vec![row]).unwrap();
+        writer.flush_usage_now().unwrap();
+        let quotas = ProviderQuotas {
+            profiles: vec![ProviderQuota {
+                profile: "work".into(),
+                provider: QuotaProvider::Codex,
+                state: QuotaState::Ready,
+                fetched_at_ms: Some(1),
+                windows: vec![QuotaWindow {
+                    id: "primary".into(),
+                    label: "45d".into(),
+                    remaining_basis_points: Some(5000),
+                    resets_at_ms: Some(at_ms(clock.day_end_ns)),
+                    duration_seconds: Some(45 * 86400),
+                    usage_label: None,
+                }],
+                issue: None,
+            }],
+        };
+        let live = live_usage_with_quotas(&database, now, &quotas).unwrap();
+        assert_eq!(live.month.requests, 0);
+        assert_eq!(
+            live.quota_windows[0].totals.recorded_cost_micro_usd,
+            2_000_000
+        );
+    }
+
+    #[test]
+    fn codex_windows_keep_profiles_separate_and_include_pre_month_requests() {
+        use workbench_protocol::namespaces::diagnostics::*;
+        let now = DAY_START + HOUR_NS;
+        let quotas = ProviderQuotas {
+            profiles: vec![ProviderQuota {
+                profile: "work".into(),
+                provider: QuotaProvider::Codex,
+                state: QuotaState::Ready,
+                fetched_at_ms: Some(1),
+                windows: vec![QuotaWindow {
+                    id: "primary".into(),
+                    label: "7d".into(),
+                    remaining_basis_points: Some(5000),
+                    resets_at_ms: Some(at_ms(DAY_START + 24 * HOUR_NS)),
+                    duration_seconds: Some(7 * 86400),
+                    usage_label: None,
+                }],
+                issue: None,
+            }],
+        };
+        let ranges = quota_ranges(&quotas, now);
+        assert!(ranges[0].from_ns < DAY_START);
+        let mut rows = vec![
+            request("2026-02-28", DAY_START - HOUR_NS, 2.0),
+            request("2026-03-01", now - 1, 3.0),
+            request("2026-03-01", now - 1, 99.0),
+            request("2026-03-01", now, 99.0),
+        ];
+        for row in &mut rows {
+            row.record.profile = Some("work".into());
+        }
+        rows[2].record.profile = Some("other".into());
+        let summed = sum_quota_windows(&rows, &ranges);
+        assert_eq!(summed[0].totals.requests, 2);
+        assert_eq!(summed[0].totals.recorded_cost_micro_usd, 5_000_000);
+        assert_eq!(summed[0].window, "primary");
+        let mut quotas = quotas;
+        quotas.profiles[0].provider = QuotaProvider::Claude;
+        assert!(quota_ranges(&quotas, now).is_empty());
     }
 
     #[test]

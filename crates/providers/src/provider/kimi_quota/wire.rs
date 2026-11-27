@@ -309,7 +309,8 @@ impl Candidate {
         };
         KimiQuotaWindow {
             label: self.label.clone(),
-            used_percent: used.clamp(0.0, 100.0),
+            // Preserve validity information for diagnostics; legacy remaining stays bounded.
+            used_percent: used,
             remaining_percent: (100.0 - used).clamp(0.0, 100.0),
             resets_at: self.resets_at,
         }
@@ -360,6 +361,20 @@ pub(super) fn parse(raw: &Value) -> Result<Vec<KimiQuotaWindow>, QuotaError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn quota_keeps_out_of_range_source_percent_for_unknown_diagnostics() {
+        let candidate = candidate(
+            WindowId::Week,
+            Source::Named,
+            "week".into(),
+            Some(&json!({"used_ratio":120})),
+            named_usage,
+        );
+        let window = candidate.to_window();
+        assert_eq!(window.used_percent, 120.0);
+        assert_eq!(window.remaining_percent, 0.0);
+    }
 
     #[test]
     fn periods_are_identified_only_by_known_duration_and_unit_pairs() {

@@ -31,6 +31,7 @@ use workbench_protocol::{
 };
 
 mod context;
+pub mod quota;
 pub(crate) mod read;
 mod usage;
 
@@ -70,12 +71,14 @@ impl View {
 
 #[derive(Debug, Clone, Copy)]
 enum Pending {
+    Quota,
     Usage { generation: u64 },
     Today { generation: u64 },
     Context { generation: u64, append: bool },
 }
 
 pub struct DiagnosticsFeature {
+    pub quotas: quota::Quotas,
     next_tag: u64,
     pending: BTreeMap<u64, Pending>,
     view: View,
@@ -107,6 +110,7 @@ pub struct DiagnosticsFeature {
 impl Default for DiagnosticsFeature {
     fn default() -> Self {
         Self {
+            quotas: quota::Quotas::default(),
             next_tag: 0,
             pending: BTreeMap::new(),
             view: View::default(),
@@ -462,6 +466,8 @@ impl Feature for DiagnosticsFeature {
 
     fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
         self.keep_today(ctx, visibility, Instant::now());
+        self.quotas
+            .maintain(ctx, visibility, &mut self.next_tag, &mut self.pending);
     }
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
@@ -480,6 +486,7 @@ impl Feature for DiagnosticsFeature {
     }
 
     fn reset(&mut self) {
+        self.quotas = quota::Quotas::default();
         self.pending.clear();
         self.today_read.forget();
         self.today = None;
@@ -493,6 +500,7 @@ impl Feature for DiagnosticsFeature {
     }
 
     fn event(&mut self, event: &UiEvent) {
+        self.quotas.event(event);
         let UiEvent::Diagnostics(DiagnosticsEvent::DiagnosticsOperationChanged { view }) = event
         else {
             return;
@@ -506,6 +514,10 @@ impl Feature for DiagnosticsFeature {
         let Some(pending) = self.pending.remove(&tag) else {
             return;
         };
+        if matches!(pending, Pending::Quota) {
+            self.quotas.reply(reply);
+            return;
+        }
         let FeatureReply::Query(result) = reply else {
             return;
         };
@@ -514,6 +526,7 @@ impl Feature for DiagnosticsFeature {
             Ok(_) => return,
             Err(error) => {
                 match pending {
+                    Pending::Quota => {}
                     Pending::Usage { generation } => {
                         self.usage_read.fail(generation, error.message);
                     }

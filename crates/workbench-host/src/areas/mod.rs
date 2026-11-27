@@ -162,6 +162,7 @@ impl Areas {
         };
         // Capture the same store/owner now; F2 changes only the leaf provider.
         areas.bind_artifacts(handles.artifacts.clone());
+        areas.diagnostics.bind_quotas(handles, &areas.settings)?;
         Ok(areas)
     }
     /// The unexpired control-reconnection grace of the renderer previews.

@@ -42,6 +42,9 @@ impl CommandHost {
             DiagnosticsQuery::GetLiveUsage(get) => {
                 DiagnosticsReply::LiveUsage(Box::new(diagnostics.live_usage(get)?))
             }
+            DiagnosticsQuery::GetProviderQuotas(_) => {
+                DiagnosticsReply::ProviderQuotas(diagnostics.provider_quotas()?)
+            }
             DiagnosticsQuery::GetDiagnosticsOperation(target) => {
                 DiagnosticsReply::Operation(diagnostics.operation(&target.operation_id)?)
             }

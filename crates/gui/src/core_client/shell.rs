@@ -652,6 +652,7 @@ fn builtin_selector(ui: &mut Ui, pass: &mut DockPass<'_>, selection: &Selection)
 }
 
 pub struct FooterState<'a> {
+    pub quotas: &'a [workbench_protocol::namespaces::diagnostics::ProviderQuota],
     pub stats: Option<&'a crate::panes::system_footer::stats::SystemSnapshot>,
     pub today_cost: Option<String>,
     pub status: &'a str,
@@ -830,6 +831,7 @@ fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>
         {
             effects.push(Effect::Open(CoreTab::Feature(FeatureId::Evaluation)));
         }
+        super::features::diagnostics::quota::footer(ui, state.quotas);
         ui.separator();
         let color = if state.connected {
             palette().SUCCESS

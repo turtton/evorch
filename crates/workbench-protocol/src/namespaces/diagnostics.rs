@@ -31,6 +31,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod quota;
+pub use quota::*;
 mod usage;
 pub use usage::{
     GetLiveUsage, GetRunUsage, GetThreadUsage, LIVE_USAGE_MINUTES, LiveUsage,
@@ -46,8 +48,13 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "get_thread_usage",
     "get_run_usage",
     "get_live_usage",
+    "get_provider_quotas",
 ];
-pub const EVENT_TYPES: &[&str] = &["diagnostics_operation_changed", "usage_changed"];
+pub const EVENT_TYPES: &[&str] = &[
+    "diagnostics_operation_changed",
+    "usage_changed",
+    "provider_quotas_changed",
+];
 /// Tagged choices inside a command's payload that classification names (none).
 pub const NESTED_COMMANDS: &[super::NestedOperation] = &[];
 
@@ -331,6 +338,7 @@ pub enum DiagnosticsQuery {
     GetThreadUsage(GetThreadUsage),
     GetRunUsage(GetRunUsage),
     GetLiveUsage(GetLiveUsage),
+    GetProviderQuotas(GetProviderQuotas),
 }
 
 impl DiagnosticsQuery {
@@ -344,7 +352,8 @@ impl DiagnosticsQuery {
             | Self::GetDiagnosticsOperation(_)
             | Self::GetThreadUsage(_)
             | Self::GetRunUsage(_)
-            | Self::GetLiveUsage(_) => Ok(()),
+            | Self::GetLiveUsage(_)
+            | Self::GetProviderQuotas(_) => Ok(()),
             Self::GetRunContext(query) => query.page.validate(),
         }
     }
@@ -364,6 +373,7 @@ pub enum DiagnosticsReply {
     ThreadUsage(Box<ReadOutcome<ThreadUsage>>),
     RunUsage(Box<ReadOutcome<RunUsage>>),
     LiveUsage(Box<ReadOutcome<LiveUsage>>),
+    ProviderQuotas(ProviderQuotas),
 }
 
 impl DiagnosticsReply {
@@ -375,6 +385,7 @@ impl DiagnosticsReply {
             Self::ThreadUsage(outcome) => outcome.validate_with(|_| Ok(())),
             Self::RunUsage(outcome) => outcome.validate_with(|_| Ok(())),
             Self::LiveUsage(outcome) => outcome.validate_with(LiveUsage::validate),
+            Self::ProviderQuotas(quotas) => quotas.validate(),
         }
     }
 }
@@ -393,6 +404,8 @@ pub enum DiagnosticsEvent {
     /// that matters to you. The event carries no value and no delta; it is
     /// sent at most once per interval, however many requests committed.
     UsageChanged { change: UsageChange },
+    /// Snapshot changed, including removal: replace the list by querying again.
+    ProviderQuotasChanged {},
 }
 
 impl DiagnosticsEvent {
@@ -400,6 +413,7 @@ impl DiagnosticsEvent {
         match self {
             Self::DiagnosticsOperationChanged { view } => view.validate(),
             Self::UsageChanged { change } => change.validate(),
+            Self::ProviderQuotasChanged {} => Ok(()),
         }
     }
 }

@@ -79,6 +79,11 @@ impl ConfigStore {
         Self { dir, startup }
     }
 
+    /// Saved effective configuration, not merely the startup snapshot.
+    pub(super) fn quota_configuration(&self) -> Option<Config> {
+        Config::load_unresolved(&self.options()).ok()
+    }
+
     fn path(&self) -> PathBuf {
         self.dir.join(CONFIG_FILE)
     }

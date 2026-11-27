@@ -243,8 +243,19 @@ fn window(label: &str, raw: &Value, percentage: &str) -> Option<ClaudeQuotaWindo
         .map(|d| d.with_timezone(&Utc));
     Some(ClaudeQuotaWindow {
         label: label.into(),
-        used_percent,
+        // Preserve the source value so diagnostics can mark out-of-range as unknown.
+        used_percent: used,
         remaining_percent: 100.0 - used_percent,
         resets_at,
     })
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    #[test]
+    fn quota_keeps_out_of_range_source_percent_for_unknown_diagnostics() {
+        let window = super::window("5h", &serde_json::json!({"percent":120}), "percent").unwrap();
+        assert_eq!(window.used_percent, 120.0);
+        assert_eq!(window.remaining_percent, 0.0); // Legacy display contract stays bounded.
+    }
 }

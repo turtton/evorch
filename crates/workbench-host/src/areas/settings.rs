@@ -63,12 +63,18 @@ pub struct SettingsParts {
     pub source: ProjectionSource,
 }
 
+type QuotaUpdates = (
+    tokio::sync::watch::Receiver<u64>,
+    Arc<dyn Fn() -> Option<config::Config> + Send + Sync>,
+);
+
 struct Inner {
     store: Arc<ConfigStore>,
     reload: ReloadModels,
     tasks: super::AreaTasks,
     source: ProjectionSource,
     state: Mutex<State>,
+    quota_changed: tokio::sync::watch::Sender<u64>,
     /// One writer at a time, held across compare, check and write.
     writer: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
@@ -177,10 +183,21 @@ impl SettingsArea {
                     reads_published: 0,
                 }),
                 writer: Arc::default(),
+                quota_changed: tokio::sync::watch::channel(0).0,
                 #[cfg(test)]
                 before_snapshot_publish: Mutex::default(),
             })),
         }
+    }
+
+    /// Internal invalidation only; consumers re-read through ConfigStore on a worker.
+    pub(in crate::areas) fn quota_updates(&self) -> Option<QuotaUpdates> {
+        let inner = self.inner.as_ref()?;
+        let store = inner.store.clone();
+        Some((
+            inner.quota_changed.subscribe(),
+            Arc::new(move || store.quota_configuration()),
+        ))
     }
 
     fn inner(&self) -> Result<&Arc<Inner>, WorkbenchError> {
@@ -319,6 +336,10 @@ impl Inner {
             if let Some(hook) = hook {
                 hook(self);
             }
+        }
+        if matches!(event, SettingsEvent::SettingsSnapshotChanged { .. }) {
+            self.quota_changed
+                .send_modify(|version| *version = version.wrapping_add(1));
         }
         if let Err(error) = self.source.publish(UiEvent::Settings(event)) {
             tracing::warn!(code = ?error.code, "settings event could not be published");
