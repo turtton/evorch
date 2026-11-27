@@ -189,8 +189,10 @@ fn process_exists(pid: u32) -> bool {
     }
 }
 
-/// How many lines have been handled (written, or dropped on a full queue), for
-/// [`Logger::flush_within`].
+/// How many queued lines the writing thread has handled, for
+/// [`Logger::flush_within`]. A line dropped on a full queue is never counted:
+/// it was not queued, and counting it would let a flush finish while lines
+/// queued before it are still unwritten.
 #[derive(Default)]
 struct Progress {
     written: Mutex<u64>,
@@ -245,17 +247,13 @@ impl Drop for LineWriter {
         if self.line.is_empty() {
             return;
         }
-        // Counted before it is queued, so a flush that starts while this line
-        // is on its way waits for it. A dropped line is accounted as handled.
-        self.sink.queued.fetch_add(1, Ordering::AcqRel);
-        if self
-            .sink
-            .queue
-            .try_send(std::mem::take(&mut self.line))
-            .is_err()
-        {
-            self.sink.dropped.fetch_add(1, Ordering::Relaxed);
-            self.sink.progress.handled_one();
+        match self.sink.queue.try_send(std::mem::take(&mut self.line)) {
+            Ok(()) => {
+                self.sink.queued.fetch_add(1, Ordering::Release);
+            }
+            Err(_) => {
+                self.sink.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -320,8 +318,6 @@ impl<W: Write + Send + 'static> Logger<W> {
     }
 
     /// [`Logger::flush`] with its bound given; true when everything queued
-    /// before the call was written. Nothing here waits for room in the queue:
-    /// the wait is on a counter, so one deadline covers the whole call.
     /// [`Logger::flush`] with no bound, for callers that must see everything
     /// written (tests); a process that is ending uses [`Logger::flush`].
     pub fn flush_unbounded(&self) {
@@ -337,6 +333,9 @@ impl<W: Write + Send + 'static> Logger<W> {
         );
     }
 
+    /// [`Logger::flush`] with its bound given; true when everything queued
+    /// before the call was written. Nothing here waits for room in the queue:
+    /// the wait is on a counter, so one deadline covers the whole call.
     pub fn flush_within(&self, bound: Duration) -> bool {
         self.start();
         let target = self.sink.queued.load(Ordering::Acquire);
@@ -554,6 +553,43 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_line_never_counts_as_a_written_one_for_a_flush() {
+        let (entered_tx, entered) = mpsc::sync_channel(1);
+        let (release_tx, release) = mpsc::sync_channel(1);
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let logger = Logger::new(
+            Gate {
+                entered: entered_tx,
+                release,
+                out: out.clone(),
+            },
+            2,
+        );
+        let sink = logger.sink();
+        logger.start();
+        // One line is held in the writer and two wait in the queue, unwritten.
+        sink.make_writer().write_all(b"hold\n").unwrap();
+        entered.recv().unwrap();
+        sink.make_writer().write_all(b"first\n").unwrap();
+        sink.make_writer().write_all(b"second\n").unwrap();
+        // Lines that arrive while the queue is full are dropped.
+        sink.make_writer().write_all(b"dropped a\n").unwrap();
+        sink.make_writer().write_all(b"dropped b\n").unwrap();
+        // They add nothing to the lines written, so a flush cannot be satisfied
+        // by them while the earlier lines are still unwritten.
+        assert_eq!(*logger.sink.progress.written.lock().unwrap(), 0);
+        assert!(!logger.flush_within(Duration::ZERO));
+        release_tx.send(()).unwrap();
+        wait_handled(&logger, 3);
+        assert!(logger.flush_within(Duration::ZERO));
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("hold\n") && text.contains("first\n") && text.contains("second\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_full_queue_drops_lines_without_blocking_and_the_next_line_says_how_many() {
         let (entered_tx, entered) = mpsc::sync_channel(1);
         let (release_tx, release) = mpsc::sync_channel(1);
@@ -577,7 +613,7 @@ mod tests {
             sink.make_writer().write_all(line.as_bytes()).unwrap();
         }
         release_tx.send(()).unwrap();
-        wait_handled(&logger, 5);
+        wait_handled(&logger, 3);
         let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
         assert!(text.contains("one\n") && text.contains("two\n"), "{text}");
         assert!(!text.contains("lost"), "{text}");
