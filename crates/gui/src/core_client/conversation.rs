@@ -37,6 +37,7 @@ use crate::theme::widgets::{empty_state, fill_label, ghost, icon_button, pane_ro
 
 mod composer;
 mod mentions;
+mod new_chat;
 mod slash;
 
 const MAX_ANSWER_BYTES: usize = 4096;
@@ -102,6 +103,11 @@ pub struct ConversationIo<'a> {
     pub connected: bool,
     pub drafts: &'a mut BTreeMap<String, Draft>,
     pub attachment_drafts: &'a BTreeMap<String, Vec<ClientAttachmentDraft>>,
+    /// The conversations opened and not yet sent, by project: the selected thread is
+    /// shown as the new-conversation screen only when it is the project's entry here.
+    pub new_conversations: &'a BTreeMap<ProjectId, ThreadId>,
+    /// The selected project's name, for the new-conversation screen's heading.
+    pub project_name: &'a str,
     pub sending: &'a BTreeSet<String>,
     pub loading_attachments: &'a BTreeMap<String, usize>,
     /// What relative links in the transcripts resolve against: the selected
@@ -161,6 +167,12 @@ pub fn show(
                 palette().WARNING_FG,
                 "Not connected to the core. Nothing runs in this window in its place.",
             );
+        }
+        if io.new_conversations.get(&project) == Some(&thread) {
+            ui.add_enabled_ui(io.connected, |ui| {
+                new_chat::new_chat(ui, pane, io, &project, &thread, effects);
+            });
+            return;
         }
         let activity = activity(io.cache, &thread, root);
         ui.add_enabled_ui(io.connected, |ui| {
