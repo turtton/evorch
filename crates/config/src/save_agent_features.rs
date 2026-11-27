@@ -389,7 +389,7 @@ fn empty_array_prefix(trailing: &str) -> String {
 }
 
 /// The table at `tables`, created when missing, with implicit parents.
-fn table_at<'a>(
+pub(crate) fn table_at<'a>(
     doc: &'a mut DocumentMut,
     tables: &[&str],
 ) -> Result<&'a mut dyn toml_edit::TableLike, ConfigError> {
