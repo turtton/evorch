@@ -331,3 +331,97 @@ fn chain_models_reports_every_member_in_declaration_order() {
     );
     assert!(chain.contains(&model.selected_model(Role::Worker, None)));
 }
+
+#[tokio::test]
+async fn continued_run_inherits_primary_pin_but_not_health() {
+    let (model, requests) = flaky_single_member(vec![ProviderError::Http {
+        status: 402,
+        body: "quota".into(),
+    }]);
+    assert!(complete(&model, "old-run").await.is_err());
+    let pins = model.route_pins("old-run");
+    assert_eq!(pins[0].profile, "profile-0");
+    model.restore_route_pins("continued-run", &pins);
+    assert_eq!(complete(&model, "continued-run").await, Ok(response()));
+    assert!(complete(&model, "old-run").await.is_err());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn replacing_model_resets_auth_health_for_the_same_run() {
+    let (model, requests) = flaky_single_member(vec![ProviderError::Http {
+        status: 401,
+        body: "auth".into(),
+    }]);
+    assert!(complete(&model, "run").await.is_err());
+    assert!(complete(&model, "run").await.is_err());
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "same-run health, not a fallback pin, blocks retry"
+    );
+    let switchable = SwitchableModel::new(Arc::new(model));
+    let (fresh, sent) = fixture(vec![None]);
+    switchable.replace(Arc::new(fresh));
+    assert_eq!(
+        switchable
+            .complete(
+                &AgentInvocationContext {
+                    run_id: "run".into(),
+                    ..Default::default()
+                },
+                Role::Worker,
+                &[],
+                &[]
+            )
+            .await,
+        Ok(response())
+    );
+    assert_eq!(sent[0].lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn same_run_cooldown_blocks_retry_without_a_successful_fallback_pin() {
+    for failure in [
+        ProviderError::Http {
+            status: 402,
+            body: "quota".into(),
+        },
+        ProviderError::Http {
+            status: 401,
+            body: "auth".into(),
+        },
+        rate_limited(60),
+    ] {
+        let (model, requests) = flaky_single_member(vec![failure]);
+        assert!(complete(&model, "run").await.is_err());
+        assert!(complete(&model, "run").await.is_err());
+        let invocation = AgentInvocationContext {
+            run_id: "run".into(),
+            ..Default::default()
+        };
+        assert!(model.admit(&invocation, Role::Worker).await.is_err());
+        let tools = [ToolSpec {
+            name: "read".into(),
+            description: "Read".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }];
+        assert!(
+            model
+                .complete(&invocation, Role::Worker, &[], &tools)
+                .await
+                .is_err()
+        );
+        let summary = AgentInvocationContext {
+            purpose: event_bus::RequestPurpose::Compaction,
+            ..invocation
+        };
+        assert!(
+            model
+                .complete(&summary, Role::Worker, &[], &[])
+                .await
+                .is_err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}

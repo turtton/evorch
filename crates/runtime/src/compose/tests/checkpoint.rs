@@ -107,6 +107,10 @@ async fn recovery_validation_is_pure_and_checks_effective_settings_not_display_m
         );
         assert!(requests.lock().unwrap().is_empty());
         assert!(current.checkpoint_inputs.lock().unwrap().is_empty());
+        assert!(
+            current.health_by_run.lock().unwrap().is_empty(),
+            "validation must not register health"
+        );
         assert!(current.recovery_output_limits.lock().unwrap().is_empty());
         assert_eq!(
             current.output_limit_state().is_pinned_to_current("run-1"),

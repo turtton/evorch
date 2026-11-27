@@ -39,10 +39,12 @@ impl RoutedModel {
                 ));
             }
         }
+        let health = self.run_health(&invocation.run_id);
         let router = self
             .router
             .clone()
-            .with_additional_health(Arc::clone(&self.image_health));
+            .with_health(Arc::clone(&health.shared))
+            .with_additional_health(Arc::clone(&health.image));
         let mut scratch = SessionAffinity::default();
         let mut position = router
             .resolve_chain(&mut scratch, &invocation.run_id, &chain)
@@ -92,7 +94,7 @@ impl RoutedModel {
                             | routing::FailureKind::Quota
                             | routing::FailureKind::RateLimited
                     ) {
-                        self.image_health.record_candidate_failure(
+                        health.image.record_candidate_failure(
                             &route.profile,
                             &route.model_id,
                             std::time::Duration::from_secs(60),

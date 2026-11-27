@@ -24,7 +24,8 @@ pub struct Cooldown {
 ///
 /// 支払い・利用上限と認証エラーはプロファイル全体、レート制限は
 /// (プロファイル, モデル) を止める。期限 `None` は runtime の再構成まで続く。
-/// 状態は永続化せず、runtime の再構成で作り直される。
+/// runtime は run ごとにこの状態を保持する。状態は永続化せず、モデルと同寿命で、
+/// runtime の再構成では引き継がない。
 #[derive(Debug, Default)]
 pub struct ProviderHealth {
     policy: config::CooldownConfig,
