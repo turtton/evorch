@@ -159,7 +159,7 @@ fn capture_routing_and_agent_roles_evidence() {
             .routes
             .get_mut("image")
             .expect("the image route")
-            .push(config::RouteCandidateConfig {
+            .push(crate::model::routing_settings::RouteCandidateConfig {
                 profile: "local-llm".into(),
                 model: Some("qwen3".into()),
                 auto: false,

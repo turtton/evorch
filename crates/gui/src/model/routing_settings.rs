@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
-use config::{Config, ConfigError, ModelKind, RouteCandidateConfig, RoutingConfig};
+pub use config::RouteCandidateConfig;
+use config::{Config, ConfigError, ModelKind, RoutingConfig};
 
 /// The model overrides one route candidate can pick (ADR 0038).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,6 +86,21 @@ pub fn route_effort_choices(config: &Config, route: &str) -> Vec<String> {
 }
 
 impl RoutingSettingsModel {
+    /// The roles and categories whose settings name `route` explicitly, as settings addresses.
+    pub fn explicit_users(&self, route: &str) -> Vec<String> {
+        config::types::agents::roles_using(route, &self.agents)
+    }
+
+    /// The roles and categories that only reach `route` because it is named like the role.
+    pub fn implicit_users(&self, route: &str) -> Vec<String> {
+        config::types::agents::implicit_roles_using(route, &self.agents)
+    }
+
+    /// Whether the candidates serve both chat and image models.
+    pub fn mixes_kinds(&self, candidates: &[RouteCandidateConfig]) -> bool {
+        config::types::routing::route_model_kinds(candidates, &self.providers).len() > 1
+    }
+
     pub fn seed_from_config(config: &Config) -> Self {
         let mut profiles: Vec<_> = config.providers.iter().collect();
         profiles.sort_by_key(|(name, profile)| {

@@ -6,14 +6,13 @@ use super::rows::{
     chip, click_row, error_chip, muted_chip, named_combo, named_row, route_chip, warning_chip,
 };
 use crate::model::role_settings::ROLES;
-use crate::model::routing_settings::{ModelChoices, RoutingSettingsModel};
+use crate::model::routing_settings::{ModelChoices, RouteCandidateConfig, RoutingSettingsModel};
 use crate::theme::{
     icons,
     text::{medium, muted},
     tokens::*,
     widgets::{ghost_icon_button, icon_button, primary_icon_button, reason_label, surface_frame},
 };
-use config::types::agents::{implicit_roles_using, roles_using};
 use egui::{Margin, vec2};
 
 /// What a route's controls ask of Model Settings beyond editing the draft.
@@ -103,7 +102,7 @@ fn address_label(address: &str) -> String {
 }
 
 fn infos(model: &RoutingSettingsModel) -> Vec<RouteInfo> {
-    let target = |candidate: &config::RouteCandidateConfig| {
+    let target = |candidate: &RouteCandidateConfig| {
         let model_id = candidate.model.clone().or_else(|| {
             model
                 .providers
@@ -128,17 +127,17 @@ fn infos(model: &RoutingSettingsModel) -> Vec<RouteInfo> {
                     .iter()
                     .map(|candidate| (target(candidate), candidate.auto))
                     .collect(),
-                users: roles_using(key, &model.agents)
+                users: model
+                    .explicit_users(key)
                     .iter()
                     .map(|address| address_label(address))
                     .collect(),
-                implicit_users: implicit_roles_using(key, &model.agents)
+                implicit_users: model
+                    .implicit_users(key)
                     .iter()
                     .map(|address| address_label(address))
                     .collect(),
-                mixed: config::types::routing::route_model_kinds(candidates, &model.providers)
-                    .len()
-                    > 1,
+                mixed: model.mixes_kinds(candidates),
                 dirty: model.route_is_dirty(key),
                 new: model.route_is_new(key),
                 conflicted: model.conflicted.contains(key),

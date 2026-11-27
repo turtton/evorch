@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
+// The Core-client screens name these through the model, which owns the settings types.
+pub use config::{CategoryBindingConfig, ChainEntryConfig, ChainPurpose, RoleBindingConfig};
+
 /// 設定用の共通定義からカテゴリを取得する。shell 監査専用の reviewer 設定も含む。
 pub fn categories_for_role(
     role: &str,

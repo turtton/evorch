@@ -8,8 +8,8 @@ use super::rows::{
     warning_chip,
 };
 use crate::model::role_settings::{
-    ChainRoutes, ROLES, RoleGroup, RoleInfo, RoleSettingsModel, categories_for_role, parts,
-    parts_mut,
+    CategoryBindingConfig, ChainEntryConfig, ChainPurpose, ChainRoutes, ROLES, RoleBindingConfig,
+    RoleGroup, RoleInfo, RoleSettingsModel, categories_for_role, parts, parts_mut,
 };
 use crate::panes::role_settings::{
     CHAT_ROUTES, IMAGE_GENERATION_DISABLED, IMAGE_ROUTES, effort_picker, generation, optional_text,
@@ -56,8 +56,8 @@ struct Context {
 impl Context {
     fn of(model: &RoleSettingsModel) -> Self {
         Self {
-            conversation: model.chain_routes(config::ChainPurpose::Conversation),
-            image: model.chain_routes(config::ChainPurpose::ImageGeneration),
+            conversation: model.chain_routes(ChainPurpose::Conversation),
+            image: model.chain_routes(ChainPurpose::ImageGeneration),
             efforts: model.route_efforts.clone(),
             route_names: model.route_names.clone(),
             targets: model
@@ -154,7 +154,7 @@ fn role_table(ui: &mut egui::Ui, model: &mut RoleSettingsModel, context: &Contex
                         let set = categories_for_role(role.key)
                             .filter(|category| {
                                 categories.get(category.id.as_str()).is_some_and(|binding| {
-                                    *binding != config::CategoryBindingConfig::default()
+                                    *binding != CategoryBindingConfig::default()
                                 })
                             })
                             .count();
@@ -406,7 +406,7 @@ struct Chain<'a> {
 /// the chain cannot be emptied (inherited), so it is not deleted by accident.
 fn chain_editor(
     ui: &mut egui::Ui,
-    models: &mut Vec<config::ChainEntryConfig>,
+    models: &mut Vec<ChainEntryConfig>,
     chain: &Chain<'_>,
     context: &Context,
 ) {
@@ -448,7 +448,7 @@ fn chain_editor(
     });
     match (head, models.first()) {
         (None, _) => models.clear(),
-        (Some(route), None) => models.push(config::ChainEntryConfig::route(route)),
+        (Some(route), None) => models.push(ChainEntryConfig::route(route)),
         (Some(_), Some(_)) => {}
     }
     resolved_line(ui, models.first(), context);
@@ -509,7 +509,7 @@ fn chain_editor(
         .clicked()
         && let Some(route) = next
     {
-        models.push(config::ChainEntryConfig::route(route.clone()));
+        models.push(ChainEntryConfig::route(route.clone()));
     }
 }
 
@@ -544,7 +544,7 @@ fn arrows(
     });
 }
 
-fn resolved_line(ui: &mut egui::Ui, entry: Option<&config::ChainEntryConfig>, context: &Context) {
+fn resolved_line(ui: &mut egui::Ui, entry: Option<&ChainEntryConfig>, context: &Context) {
     let Some(entry) = entry else {
         return;
     };
@@ -564,12 +564,7 @@ fn resolved_line(ui: &mut egui::Ui, entry: Option<&config::ChainEntryConfig>, co
     });
 }
 
-fn entry_effort(
-    ui: &mut egui::Ui,
-    entry: &mut config::ChainEntryConfig,
-    context: &Context,
-    name: &str,
-) {
+fn entry_effort(ui: &mut egui::Ui, entry: &mut ChainEntryConfig, context: &Context, name: &str) {
     let choices = context
         .efforts
         .get(&entry.route)
@@ -591,8 +586,8 @@ fn entry_effort(
 fn category_overrides(
     ui: &mut egui::Ui,
     role: &RoleInfo,
-    base: &config::RoleBindingConfig,
-    categories: &mut BTreeMap<String, config::CategoryBindingConfig>,
+    base: &RoleBindingConfig,
+    categories: &mut BTreeMap<String, CategoryBindingConfig>,
     state: &mut RolesUi,
     context: &Context,
     action: &mut Option<RolesAction>,
@@ -615,7 +610,7 @@ fn category_overrides(
     });
     for id in ids {
         let binding = categories.get(id).cloned().unwrap_or_default();
-        let overridden = binding != config::CategoryBindingConfig::default();
+        let overridden = binding != CategoryBindingConfig::default();
         let editing = state.editing.as_deref() == Some(id);
         let mut reset = false;
         let mut edit = false;
@@ -657,7 +652,7 @@ fn category_overrides(
     }
 }
 
-fn override_summary(ui: &mut egui::Ui, binding: &config::CategoryBindingConfig, context: &Context) {
+fn override_summary(ui: &mut egui::Ui, binding: &CategoryBindingConfig, context: &Context) {
     if let Some(entry) = binding.models.first() {
         route_chip(ui, &entry.route);
         let missing = !context.route_names.contains(&entry.route);
@@ -687,8 +682,8 @@ fn override_summary(ui: &mut egui::Ui, binding: &config::CategoryBindingConfig, 
 fn category_editor(
     ui: &mut egui::Ui,
     role: &RoleInfo,
-    base: &config::RoleBindingConfig,
-    categories: &mut BTreeMap<String, config::CategoryBindingConfig>,
+    base: &RoleBindingConfig,
+    categories: &mut BTreeMap<String, CategoryBindingConfig>,
     id: &str,
     context: &Context,
     action: &mut Option<RolesAction>,
@@ -731,7 +726,7 @@ fn category_editor(
                 generation(ui, &mut draft.generation);
             });
         });
-    if draft == config::CategoryBindingConfig::default() {
+    if draft == CategoryBindingConfig::default() {
         categories.remove(id);
     } else {
         categories.insert(id.to_owned(), draft);
@@ -740,7 +735,7 @@ fn category_editor(
 
 /// The preset reference and the generation overrides of a role, folded away because most
 /// roles use neither; the closed header says what is set.
-fn advanced(ui: &mut egui::Ui, role: &RoleInfo, binding: &mut config::RoleBindingConfig) {
+fn advanced(ui: &mut egui::Ui, role: &RoleInfo, binding: &mut RoleBindingConfig) {
     let mut set = Vec::new();
     if let Some(preset) = &binding.preset {
         set.push(format!("preset {preset}"));
