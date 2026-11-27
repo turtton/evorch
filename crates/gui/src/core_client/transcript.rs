@@ -34,9 +34,13 @@ pub(super) struct TranscriptView<'a> {
     pub base: Option<&'a Path>,
 }
 
-/// Draws the messages of `scope` in a scroll area that follows the newest one, with
-/// "Load earlier messages" while older ones exist. `empty` is drawn when no message is
-/// shown, and `cards` after the messages.
+/// Height of the row above the first message that stands for the older ones.
+const OLDER_ROW_HEIGHT: f32 = 28.0;
+
+/// Draws the messages of `scope` in a scroll area that follows the newest one. While
+/// older ones exist, the row above the first message reads the next older page once it
+/// scrolls into view, with a spinner while that page is read. `empty` is drawn when no
+/// message is shown, and `cards` after the messages.
 pub(super) fn transcript(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
@@ -47,7 +51,7 @@ pub(super) fn transcript(
 ) {
     let TranscriptView { cache, scope, base } = view;
     let mut failed = None;
-    let (salt, messages, older, load_earlier): (_, Vec<_>, _, _) = match scope {
+    let (salt, messages, older, earlier): (_, Vec<_>, _, _) = match scope {
         Scope::Thread(thread) => (
             ("core-transcript", thread.as_str()),
             cache
@@ -58,7 +62,7 @@ pub(super) fn transcript(
                 .filter(|m| cache.shows_in_thread(m))
                 .collect(),
             cache.older.get(thread.as_str()),
-            Action::History(thread.clone(), None, true),
+            (thread.clone(), None),
         ),
         Scope::Run { thread, run } => {
             failed = cache
@@ -74,28 +78,53 @@ pub(super) fn transcript(
                     .filter(|m| &m.run == run)
                     .collect(),
                 cache.run_older.get(run.as_str()),
-                Action::History(thread.clone(), Some(run.clone()), true),
+                (thread.clone(), Some(run.clone())),
             )
         }
     };
-    egui::ScrollArea::vertical()
+    let load_earlier = || Effect::send(Action::History(earlier.0.clone(), earlier.1.clone(), true));
+    let older_id = match scope {
+        Scope::Thread(thread) => thread.as_str(),
+        Scope::Run { run, .. } => run.as_str(),
+    };
+    let loading = cache.older_loading(older_id);
+    let older_failed = cache.older_read_failed(older_id);
+    // What the area looked like last frame: its first message and its content height.
+    // Older messages put in front of the first one push the rest down by their height,
+    // which the offset takes up so the messages in view stay where they are.
+    let memory = ui.make_persistent_id(salt).with("older-anchor");
+    let before: Option<(Option<String>, f32)> = ui.data(|data| data.get_temp(memory));
+    let first = messages
+        .first()
+        .map(|message| format!("{}/{:?}", message.run, message.index));
+    let prepended = matches!((&before, &first), (Some((Some(was), _)), Some(now)) if was != now);
+    let mut near_top = false;
+    let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(SP_2);
             if older.is_some_and(Option::is_some) {
-                ui.vertical_centered(|ui| {
-                    if ui
-                        .add(ghost(icons::with_icon(
-                            icons::ARROW_UP,
-                            "Load earlier messages",
-                        )))
-                        .clicked()
-                    {
-                        effects.push(Effect::send(load_earlier));
+                if older_failed {
+                    ui.horizontal(|ui| {
+                        ui.label(muted("Could not read earlier messages"));
+                        if ui.add(ghost("Retry")).clicked() {
+                            effects.push(load_earlier());
+                        }
+                    });
+                } else {
+                    let (row, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), OLDER_ROW_HEIGHT),
+                        egui::Sense::hover(),
+                    );
+                    near_top = ui.is_rect_visible(row);
+                    if loading {
+                        let spinner =
+                            egui::Rect::from_center_size(row.center(), egui::vec2(16.0, 16.0));
+                        ui.put(spinner, egui::Spinner::new().size(16.0));
                     }
-                });
+                }
             }
             if let Some(retry) = failed {
                 ui.horizontal(|ui| {
@@ -129,6 +158,24 @@ pub(super) fn transcript(
             cards(ui, effects);
             ui.add_space(SP_2);
         });
+    let content = output.content_size.y;
+    let grown = before.as_ref().map_or(0.0, |(_, was)| content - was);
+    let shifted = prepended && grown > 0.0;
+    if shifted {
+        let mut state = output.state;
+        state.offset.y += grown;
+        state.store(ui.ctx(), output.id);
+        ui.ctx()
+            .request_discard("keep the messages in view in place");
+    }
+    ui.data_mut(|data| data.insert_temp(memory, (first, content)));
+    // The first frame of an area is laid out at the top before it follows the newest
+    // message, so it only measures; a page is read from the next frame on.
+    if before.is_none() || shifted {
+        ui.ctx().request_repaint();
+    } else if near_top && !loading && !older_failed {
+        effects.push(load_earlier());
+    }
 }
 
 /// A run of one run's tool outputs folds under one header once the run's next message

@@ -28,6 +28,10 @@ pub struct Cache {
     pub run_older: BTreeMap<String, Option<PageCursor>>,
     /// The wanted runs whose first page could not be read ([`Self::run_failed`]).
     run_failed: std::collections::BTreeSet<String>,
+    /// The threads and runs (by id) whose next older page was asked for and is not
+    /// answered yet, and those whose ask failed ([`Self::older_asked`]).
+    older_loading: std::collections::BTreeSet<String>,
+    older_failed: std::collections::BTreeSet<String>,
     /// The older page of each thread read for the thread view ([`Self::read_older_for_roots`]).
     older_for_roots: BTreeMap<String, PageCursor>,
     pub bodies: BTreeMap<String, String>,
@@ -142,6 +146,34 @@ impl Cache {
         self.run_history.remove(run);
         self.run_older.remove(run);
         self.run_failed.remove(run);
+        self.older_loading.remove(run);
+        self.older_failed.remove(run);
+    }
+
+    /// The next older page of a thread, or of a run when `id` is one, was asked for.
+    /// Until it is answered or fails, no second ask is made.
+    pub fn older_asked(&mut self, id: &str) {
+        self.older_failed.remove(id);
+        self.older_loading.insert(id.into());
+    }
+
+    pub fn older_loading(&self, id: &str) -> bool {
+        self.older_loading.contains(id)
+    }
+
+    /// The ask was not sent after all, so the next frame may make it again.
+    pub fn older_not_asked(&mut self, id: &str) {
+        self.older_loading.remove(id);
+    }
+
+    /// The ask failed. It is made again when the person retries, not every frame.
+    pub fn older_failed(&mut self, id: &str) {
+        self.older_loading.remove(id);
+        self.older_failed.insert(id.into());
+    }
+
+    pub fn older_read_failed(&self, id: &str) -> bool {
+        self.older_failed.contains(id)
     }
 
     /// The first page of a wanted `run` could not be read. Its tab offers to read it
@@ -186,7 +218,9 @@ impl Cache {
     }
 
     pub fn history_page(&mut self, thread: &str, page: Page<CommittedMessage>, older: bool) {
-        if !older {
+        if older {
+            self.older_loading.remove(thread);
+        } else {
             self.older_for_roots.remove(thread);
         }
         merge(
@@ -204,7 +238,9 @@ impl Cache {
         };
         merge(existing, page.items, older);
         self.run_older.insert(run.into(), page.next_cursor);
-        if !older {
+        if older {
+            self.older_loading.remove(run);
+        } else {
             self.run_failed.remove(run);
         }
     }

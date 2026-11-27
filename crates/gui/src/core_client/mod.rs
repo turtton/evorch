@@ -726,6 +726,14 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             }
             image.uploading = true;
         }
+        // One ask per scope at a time: the page it returns moves the cursor on.
+        Action::History(thread, run, true) => {
+            let id = run.as_ref().map_or(thread.as_str(), |run| run.as_str());
+            if shared.cache.older_loading(id) {
+                return;
+            }
+            shared.cache.older_asked(id);
+        }
         _ => (),
     }
     if let Err(error) = tx.try_send(action) {
@@ -764,6 +772,9 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             }
             // The run's first page was not asked for: the next frame asks again.
             Action::History(_, Some(run), false) => shared.cache.forget_run(run.as_str()),
+            Action::History(thread, run, true) => shared
+                .cache
+                .older_not_asked(run.as_ref().map_or(thread.as_str(), |run| run.as_str())),
             _ => (),
         }
         shared.status = QUEUE_FULL.into();
