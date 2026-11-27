@@ -225,6 +225,9 @@ pub(super) struct ApplyConfig(pub(super) Arc<Shared>);
 
 #[async_trait::async_trait]
 impl Tool for ApplyConfig {
+    fn fixed_host_description(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "eval_apply_config"
     }

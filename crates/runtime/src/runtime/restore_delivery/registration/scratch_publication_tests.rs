@@ -53,6 +53,7 @@ async fn restored_publication_invalidates_unused_scratch_observation() {
                     RestoredState {
                         input_selection_transition: None,
                         recovery_waits: Vec::new(),
+                        tool_descriptions: None,
                         mcp_snapshot: None,
                         harness_notice_pending: false,
                         provenance: Default::default(),

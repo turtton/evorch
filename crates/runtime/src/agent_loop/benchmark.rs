@@ -2,7 +2,7 @@ use super::*;
 use crate::benchmark::{BenchmarkCheckpoint, unsupported, validate_config};
 
 impl LoopState {
-    fn benchmark_selected_leaf(&self) -> bool {
+    pub(super) fn benchmark_selected_leaf(&self) -> bool {
         self.benchmark_replay
             || self.shared.runtime.upgrade().is_some_and(|runtime| {
                 runtime.benchmark_recording.get().is_some_and(|recording| {
@@ -118,6 +118,13 @@ impl LoopState {
             if *seen != recording.selector.occurrence {
                 return Ok(());
             }
+        }
+        if self
+            .tool_descriptions
+            .as_ref()
+            .is_some_and(|s| !s.descriptions.is_empty())
+        {
+            return Err(unsupported("model tool description overrides"));
         }
         validate_config(&self.task.config, self.task.role)?;
         let parent = self.task.parent.expect("selected child");

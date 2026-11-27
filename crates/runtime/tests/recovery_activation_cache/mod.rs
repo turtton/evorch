@@ -61,6 +61,7 @@ pub(super) fn settings(h: &Harness) -> Config {
         });
     current.agents.orchestrator.generation.temperature = Some(0.25);
     current.agents.orchestrator.generation.max_tokens = Some(321);
+    super::model_tool_descriptions_cache::configure(&mut current);
     current
 }
 
@@ -141,6 +142,7 @@ fn process_with_tools_and_catalog(
         .with_run_store(runtime::RunStore::open(config, storage.handle()).unwrap())
         .with_system_prompts(contract_prompts())
         .with_compaction(current.compaction.clone());
+    runtime.reload_model_settings(current);
     runtime.set_thread_scratch(Arc::new(runtime::scratch::ThreadScratch::at(
         h._directory.path().join("attachment-scratch"),
     )));
@@ -467,6 +469,13 @@ async fn recover_case(
     );
     let after_index = before.len();
     let original = before.last().unwrap().body.clone();
+    for models in current.model_tool_descriptions.values_mut() {
+        for tools in models.values_mut() {
+            for text in tools.values_mut() {
+                *text = "Must not reselect during restart".into();
+            }
+        }
+    }
     if changed_settings {
         current.agents.worker.base.generation.temperature = Some(0.75);
     }

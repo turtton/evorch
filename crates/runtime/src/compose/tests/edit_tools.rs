@@ -858,6 +858,7 @@ async fn planned_preview_matches_provider_wire_for_edit_patch_switchable_readonl
                 crate::agent_loop::tool_catalog::restored_specs(&executor, None).unwrap(),
                 &policy,
                 crate::agent_loop::tool_catalog::CatalogOptions {
+                    descriptions: None,
                     skills: false,
                     child: !readonly,
                     web: false,

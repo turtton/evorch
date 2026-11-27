@@ -559,6 +559,7 @@ impl AgentRuntime {
         parent: Option<RunId>,
         model: &Arc<dyn AgentModel>,
         mcp: Option<&::tools::mcp::types::FrozenMcpSnapshot>,
+        descriptions: Option<&crate::tool_descriptions::FrozenToolDescriptions>,
     ) -> Result<(), RuntimeError> {
         self.read_adopted_restart(false)?;
         let project = self.shared.run_project(config);
@@ -581,12 +582,22 @@ impl AgentRuntime {
             crate::agent_loop::tool_catalog::allow_saved_mcp_tools(&mut policy, snapshot);
         }
         let settings = self.run_js_settings();
-        let family =
-            crate::prompt::classify(&model.selected_model(role, config.category.as_deref()));
+        let family = descriptions.map_or_else(
+            || crate::prompt::classify(&model.selected_model(role, config.category.as_deref())),
+            |s| s.family,
+        );
+        if let Some(snapshot) = descriptions {
+            snapshot.validate()?;
+        }
+        let registry = crate::agent_loop::tool_catalog::description_registry(&shared.executor);
+        let (descriptions, _) = descriptions
+            .map(|s| s.project(&registry))
+            .unwrap_or_default();
         let effective = crate::agent_loop::tool_catalog::compose(
             raw,
             &policy,
             crate::agent_loop::tool_catalog::CatalogOptions {
+                descriptions: Some(&descriptions),
                 skills: shared.skills.is_some(),
                 child: parent.is_some(),
                 web: self.web_tools_enabled(),

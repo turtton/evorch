@@ -304,6 +304,14 @@ impl AgentModel for SwitchableModel {
             .await
     }
 
+    fn tool_description_identity(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<Option<routing::ResolvedRoute>, RuntimeError> {
+        self.current().tool_description_identity(invocation, role)
+    }
+
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
         self.current().selected_model(role, category)
     }

@@ -391,6 +391,16 @@ pub trait AgentModel: Send + Sync {
         Ok(response)
     }
 
+    /// Resolve run-entry identity in the routing layer, including explicit user selection.
+    /// Fixed models have no route identity and cannot select model overrides.
+    fn tool_description_identity(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+    ) -> Result<Option<routing::ResolvedRoute>, RuntimeError> {
+        Ok(None)
+    }
+
     /// ロールに選択されたモデル識別子を報告する。
     ///
     /// 実装側 (routing profile 層) がロールごとの選択済みモデル identity を報告し、

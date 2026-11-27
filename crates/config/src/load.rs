@@ -316,6 +316,7 @@ impl Config {
         config.self_improvement.validate()?;
         config.storage.validate()?;
         config.pull_requests.validate()?;
+        config.validate_model_tool_descriptions()?;
         // 未定義 route の参照とモデルの種別の不一致 (ADR 0038) は、厳格な読み込みではエラー、
         // 通常の読み込みではそのチェーンを使う時点のエラーに委ねて警告だけにする
         // (他のロールは動かせる)。

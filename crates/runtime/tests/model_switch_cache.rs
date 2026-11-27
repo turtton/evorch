@@ -134,13 +134,37 @@ summarizer = "structural"
         ),
     )
     .unwrap();
-    let config = Config::load(&LoadOptions {
+    let mut config = Config::load(&LoadOptions {
         project_dir: Some(directory.path().into()),
         user_config_dir: Some(directory.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
     .unwrap();
+    config.model_tool_descriptions.insert(
+        "primary".into(),
+        [(
+            PRIMARY_MODEL.into(),
+            [(
+                "working_note_read".into(),
+                "Keep the entry model description".into(),
+            )]
+            .into(),
+        )]
+        .into(),
+    );
+    config.model_tool_descriptions.insert(
+        "small".into(),
+        [(
+            SMALL_MODEL.into(),
+            [(
+                "working_note_read".into(),
+                "Do not reselect on fallback".into(),
+            )]
+            .into(),
+        )]
+        .into(),
+    );
     let bus = Arc::new(EventBus::new(1024));
     let storage_config = storage::StorageConfig {
         db_path: directory.path().join("switch-notes.db"),
@@ -238,6 +262,21 @@ summarizer = "structural"
         let (_, before, after, window) = token_estimates[0];
         assert!(*before > window / 2, "fixture must trigger the boundary");
         assert!(*after < window / 2, "fixture must leave room for reuse");
+    }
+    for request in chat_requests(&primary)
+        .into_iter()
+        .chain(chat_requests(&small))
+    {
+        let tool = request["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["function"]["name"] == "working_note_read")
+            .unwrap();
+        assert_eq!(
+            tool["function"]["description"],
+            "Keep the entry model description"
+        );
     }
     let before = chat_requests(&primary);
     let after = chat_requests(&small);

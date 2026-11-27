@@ -505,6 +505,9 @@ pub mod diagnostic_codes {
     /// The original snapshot is kept untouched as evidence.
     pub const NESTED_ORCHESTRATOR_REJECTED: &str = "NestedOrchestratorRejected";
 
+    /// Restore skips an override whose fixed builtin disappeared, keeping the snapshot intact.
+    pub const SAVED_TOOL_DESCRIPTION_TARGET_REMOVED: &str = "SAVED_TOOL_DESCRIPTION_TARGET_REMOVED";
+
     /// Plan interruption reconciliation could not be confirmed; the run outcome is unchanged.
     pub const CONVERSATION_PLAN_RECONCILE_FAILED: &str = "conversation_plan_reconcile_failed";
 
@@ -574,6 +577,7 @@ pub mod diagnostic_codes {
         BROWSER_SCREENSHOT,
         EVALUATION_FINISHED,
         NESTED_ORCHESTRATOR_REJECTED,
+        SAVED_TOOL_DESCRIPTION_TARGET_REMOVED,
         CONVERSATION_PLAN_RECONCILE_FAILED,
     ];
 }

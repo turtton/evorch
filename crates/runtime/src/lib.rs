@@ -102,6 +102,7 @@ pub mod thread_read_dirs;
 pub mod thread_retention;
 mod thread_start;
 pub mod thread_title;
+pub mod tool_descriptions;
 pub mod topology;
 pub use topology::CoordinationTopology;
 pub mod benchmark;

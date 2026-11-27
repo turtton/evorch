@@ -18,6 +18,7 @@ mod image_generation_cache;
 mod lane_cache;
 #[path = "cache_preservation_e2e/malformed_arguments.rs"]
 mod malformed_arguments_cache;
+mod model_tool_descriptions_cache;
 #[path = "output_attachments_cache/mod.rs"]
 mod output_attachments_cache;
 mod plan_boundary_cache;
@@ -2892,7 +2893,7 @@ async fn compaction_restarts_cache_with_catalog(
         Vec::new(),
         None,
         0.5,
-        |_| {},
+        model_tool_descriptions_cache::configure,
     );
     let run = harness.runtime.delegate_background(
         Role::Worker,
@@ -2919,6 +2920,7 @@ async fn compaction_restarts_cache_with_catalog(
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::Compaction(CompactionEvent::Compacted {reason: actual, ..}) if *actual == reason)));
     verify_trace(&harness, run, &events, 1);
+    model_tool_descriptions_cache::assert_overrides(&harness);
     harness
 }
 
@@ -6413,7 +6415,7 @@ async fn codex_lite_official_compaction_replaces_history_once_then_reuses_the_ne
         Vec::new(),
         None,
         0.5,
-        |_| {},
+        model_tool_descriptions_cache::configure,
     );
     let run = harness.runtime.delegate_background(
         Role::Worker,
@@ -6442,6 +6444,7 @@ async fn codex_lite_official_compaction_replaces_history_once_then_reuses_the_ne
             if *reason == CompactionReason::Manual)));
     assert_codex_lite_prefix(&harness);
     verify_official_compaction_trace(&harness, run, &events);
+    model_tool_descriptions_cache::assert_overrides(&harness);
 
     let all: Vec<_> = harness
         .mock

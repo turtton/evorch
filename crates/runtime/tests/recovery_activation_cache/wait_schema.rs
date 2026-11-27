@@ -81,6 +81,13 @@ impl AgentModel for PredecessorModel {
             .complete_streaming(invocation, role, messages, &self.catalog.tools(tools), bus)
             .await
     }
+    fn tool_description_identity(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<Option<routing::ResolvedRoute>, RuntimeError> {
+        self.inner.tool_description_identity(invocation, role)
+    }
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
         self.inner.selected_model(role, category)
     }

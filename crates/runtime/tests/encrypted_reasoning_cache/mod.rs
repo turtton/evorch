@@ -837,11 +837,24 @@ summarizer = "structural"
         ),
     )
     .unwrap();
-    Config::load(&LoadOptions {
+    let mut config = Config::load(&LoadOptions {
         project_dir: Some(root.into()),
         user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
-    .unwrap()
+    .unwrap();
+    config.model_tool_descriptions.insert(
+        profile.into(),
+        [(
+            model.into(),
+            [(
+                "working_note_read".into(),
+                format!("Frozen finish for {profile}/{model}"),
+            )]
+            .into(),
+        )]
+        .into(),
+    );
+    config
 }

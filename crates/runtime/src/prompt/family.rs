@@ -4,7 +4,7 @@
 //! 未知の id は常に [`ModelFamily::Unknown`] にフォールバックする。
 
 /// model id のファミリ分類結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModelFamily {
     /// Anthropic Claude 系。
     Claude,

@@ -1619,6 +1619,15 @@ impl AgentModel for RoutedModel {
         .await
     }
 
+    fn tool_description_identity(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<Option<routing::ResolvedRoute>, RuntimeError> {
+        self.resolve_invocation(invocation, role, &[])
+            .map(|resolved| Some(resolved.route))
+    }
+
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
         let Ok(binding) = self.agents.binding_for(role_key(role), category) else {
             return format!("unresolved:{}", role_key(role));

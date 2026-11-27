@@ -63,6 +63,7 @@ impl Fixture {
         let restored = RestoredState {
             input_selection_transition: None,
             recovery_waits: Vec::new(),
+            tool_descriptions: None,
             mcp_snapshot: None,
             harness_notice_pending: false,
             provenance: Default::default(),

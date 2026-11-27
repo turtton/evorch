@@ -140,6 +140,7 @@ fn fixture_for_runtime(
         mcp_lease: None,
         mcp_cancellation: None,
         inherited_mcp_snapshot: None,
+        tool_descriptions: None,
         task: RunTask {
             startup_failure: None,
             recovery_model: None,

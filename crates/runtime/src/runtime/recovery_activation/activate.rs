@@ -46,6 +46,9 @@ impl AgentRuntime {
                 restored
                     .as_ref()
                     .and_then(|state| state.mcp_snapshot.as_ref()),
+                restored
+                    .as_ref()
+                    .and_then(|state| state.tool_descriptions.as_ref()),
             )?;
         }
         Ok(())

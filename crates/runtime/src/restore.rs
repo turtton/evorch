@@ -57,6 +57,7 @@ pub(crate) struct RestoredState {
     pub(crate) plan_notice: crate::conversation_plan::notice::PlanNotice,
     /// Skills the run had handed its escalation reviewer; read again on restore.
     pub(crate) loaded_skills: Vec<crate::escalation_review::LoadedSkillRef>,
+    pub(crate) tool_descriptions: Option<crate::tool_descriptions::FrozenToolDescriptions>,
     /// Prompt IDs of host inputs the saved messages hold. Unreadable lists
     /// restore as empty: they only drive delivery receipts.
     pub(crate) host_inputs: Vec<String>,
@@ -98,6 +99,11 @@ impl RestoredState {
         }
         let descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| fail(error.to_string()))?;
+        if let Some(snapshot) = &descriptor.tool_descriptions {
+            snapshot
+                .validate()
+                .map_err(|_| fail("invalid tool description snapshot".into()))?;
+        }
         if !tools_waiting && !descriptor.recovery_waits.is_empty() {
             return Err(fail(
                 "ToolsWaiting requires the dedicated recovery loader".into(),
@@ -127,6 +133,7 @@ impl RestoredState {
         Ok(Self {
             input_selection_transition: descriptor.input_selection_transition,
             recovery_waits: descriptor.recovery_waits,
+            tool_descriptions: descriptor.tool_descriptions,
             mcp_snapshot: descriptor.mcp_snapshot,
             harness_notice_pending: descriptor.harness_notice_pending,
             provenance: provenance::ConversationProvenance::unknown(),
@@ -187,6 +194,12 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::tool_descriptions::deserialize_present"
+    )]
+    pub tool_descriptions: Option<crate::tool_descriptions::FrozenToolDescriptions>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_waits: Vec<crate::quiesce::DurableWait>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -658,6 +671,7 @@ fn write_snapshot_with_context(
             && end == context.messages.len()
             && !state.recovery_waits.is_empty())
         .then_some(crate::checkpoint::CheckpointBoundary::ToolsWaiting),
+        tool_descriptions: state.tool_descriptions.clone(),
         mcp_snapshot: state.frozen_mcp_snapshot().cloned(),
         responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,
