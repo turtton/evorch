@@ -5,8 +5,8 @@ use egui_kittest::kittest::NodeT;
 use workbench_protocol::namespaces::{
     auth::{AuthQuery, AuthReply, AuthStatus, CredentialSlot, CredentialState, LoginMethod},
     settings::{
-        CredentialRef, ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply,
-        SettingsRevision, SettingsSnapshot,
+        CredentialRef, ModelKind, ModelView, ProviderKind, ProviderView, SettingsQuery,
+        SettingsReply, SettingsRevision, SettingsSnapshot,
     },
 };
 
@@ -46,6 +46,13 @@ fn provider(
     models: &[&str],
     credential: CredentialRef,
 ) -> ProviderView {
+    let quota = matches!(
+        kind,
+        ProviderKind::OpenaiCodex
+            | ProviderKind::AnthropicSubscription
+            | ProviderKind::Cursor
+            | ProviderKind::KimiSubscription
+    );
     ProviderView {
         name: name.into(),
         kind,
@@ -56,10 +63,14 @@ fn provider(
             .map(|id| ModelView {
                 id: (*id).into(),
                 enabled: true,
+                kind: ModelKind::Chat,
+                context_override: None,
             })
             .collect(),
         excluded_models: vec![],
         default_model: models[0].into(),
+        show_quota: quota,
+        quota_supported: quota,
     }
 }
 

@@ -112,7 +112,8 @@ impl Fixture {
             tasks: AreaTasks::new(tokio::runtime::Handle::current()),
             source,
             features,
-            model_fetch: workbench_host::areas::settings::provider_models::ModelFetch::unsupported(),
+            model_fetch: workbench_host::areas::settings::provider_models::ModelFetch::unsupported(
+            ),
         });
         let host = host.with_areas(Areas {
             settings: settings.clone(),

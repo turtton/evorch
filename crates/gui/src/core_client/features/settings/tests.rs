@@ -13,7 +13,7 @@ use egui_kittest::{
 };
 use workbench_protocol::{
     commands::CommandReply,
-    namespaces::settings::{CredentialRef, ModelView, ProviderKind},
+    namespaces::settings::{CredentialRef, ModelKind, ModelView, ProviderKind},
     operation::OperationView,
     wire::Revision,
 };
@@ -33,9 +33,13 @@ pub(super) fn provider(name: &str) -> ProviderView {
         models: vec![ModelView {
             id: "m".into(),
             enabled: true,
+            kind: ModelKind::Chat,
+            context_override: None,
         }],
         excluded_models: vec![],
         default_model: "m".into(),
+        show_quota: false,
+        quota_supported: false,
     }
 }
 
@@ -996,4 +1000,213 @@ fn a_feature_save_in_flight_is_not_sent_twice() {
     assert_eq!(asked(&mut screen).len(), 1);
     screen.run_steps(4);
     assert!(asked(&mut screen).is_empty());
+}
+
+fn fetch_command(
+    action: &crate::core_client::features::FeatureAction,
+) -> workbench_protocol::namespaces::settings::FetchProviderModels {
+    let SettingsCommand::FetchProviderModels(fetch) = settings_command(action).clone() else {
+        panic!("a model fetch was expected");
+    };
+    fetch
+}
+
+fn candidates(
+    id: &OperationId,
+    models: &[&str],
+    truncated: bool,
+) -> workbench_protocol::namespaces::settings::ProviderModelCandidates {
+    workbench_protocol::namespaces::settings::ProviderModelCandidates {
+        operation_id: id.clone(),
+        provider: "local".into(),
+        models: models.iter().map(|id| (*id).to_owned()).collect(),
+        truncated,
+    }
+}
+
+/// Clicks Fetch models and answers the command as the core does: pending.
+fn start_fetch(
+    screen: &mut Harness<'static, Screen>,
+) -> workbench_protocol::namespaces::settings::FetchProviderModels {
+    screen.get_by_label("Fetch models").click();
+    let sent = settings_asked(screen);
+    assert_eq!(sent.len(), 1, "one click, one command");
+    let fetch = fetch_command(&sent[0]);
+    answer(
+        screen,
+        sent[0].tag,
+        command_reply(view(
+            &fetch.operation_id,
+            SettingsOperationKind::FetchProviderModels,
+            OperationState::Pending,
+        )),
+    );
+    fetch
+}
+
+// Given: a saved provider open in Providers
+// When: Fetch models is pressed, the operation ends and its result is read
+// Then: the command names the saved provider and the revision only, the panel lists what was
+//       found (a filter narrows it), a picked id is added to the form, and nothing is saved
+#[test]
+fn fetching_models_names_the_provider_lists_the_result_and_adds_picked_ids_to_the_form() {
+    let mut screen = loaded('a');
+    screen.set_size(egui::vec2(1100.0, 1700.0));
+    open_modal(&mut screen, "Providers");
+    let fetch = start_fetch(&mut screen);
+    assert_eq!(fetch.provider, "local");
+    assert_eq!(fetch.expected_revision, revision('a'));
+    screen.get_by_label_contains("Fetching models");
+
+    screen.state_mut().feature.event(&completed(view(
+        &fetch.operation_id,
+        SettingsOperationKind::FetchProviderModels,
+        OperationState::Ready,
+    )));
+    let read = settings_asked(&mut screen);
+    let read: Vec<_> = read
+        .iter()
+        .filter(|a| {
+            matches!(
+                query_of(a),
+                Query::Settings(SettingsQuery::GetProviderModels { .. })
+            )
+        })
+        .collect();
+    assert_eq!(read.len(), 1, "the result is read once");
+    let Query::Settings(SettingsQuery::GetProviderModels { operation_id }) = query_of(read[0])
+    else {
+        unreachable!()
+    };
+    assert_eq!(operation_id, &fetch.operation_id);
+    answer(
+        &mut screen,
+        read[0].tag,
+        FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ProviderModels(
+            candidates(&fetch.operation_id, &["alpha", "beta", "m"], true),
+        )))),
+    );
+    screen.get_by_label_contains("3 available");
+    screen.get_by_label_contains("offers more models");
+    screen.get_by_label("alpha");
+    screen.get_by_label("beta");
+    screen.get_by_label_contains("Added");
+
+    screen.get_by_label("alpha").scroll_to_me();
+    screen.run_steps(4);
+    screen.get_by_label("alpha").click();
+    screen.run_steps(2);
+    screen.get_by_label("Add selected (1)").scroll_to_me();
+    screen.run_steps(4);
+    screen.get_by_label("Add selected (1)").click();
+    screen.run_steps(4);
+    screen.get_by_label("Enable alpha");
+    assert!(
+        settings_asked(&mut screen).iter().all(|a| !matches!(
+            &a.request,
+            crate::core_client::features::FeatureRequest::Command(_)
+        )),
+        "picking models saves nothing"
+    );
+    screen.get_by_label("Save").click();
+    let save = provider_save(&settings_asked(&mut screen)[0]);
+    let workbench_protocol::namespaces::settings::ProviderInput::OpenaiCompatible {
+        models, ..
+    } = &save.provider
+    else {
+        panic!("an OpenAI-compatible provider was expected");
+    };
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["m", "alpha"]
+    );
+}
+
+#[test]
+fn an_unsupported_kind_and_a_failed_fetch_leave_manual_entry_and_say_why() {
+    for (state, message, shown) in [
+        (
+            OperationState::Failed {
+                code: ErrorCode::UnsupportedCapability,
+            },
+            None,
+            "does not list its models",
+        ),
+        (
+            OperationState::Failed {
+                code: ErrorCode::Internal,
+            },
+            Some("the provider answered HTTP 401"),
+            "the provider answered HTTP 401",
+        ),
+    ] {
+        let mut screen = loaded('a');
+        open_modal(&mut screen, "Providers");
+        let fetch = start_fetch(&mut screen);
+        let mut ended = view(
+            &fetch.operation_id,
+            SettingsOperationKind::FetchProviderModels,
+            state,
+        );
+        ended.message = message.map(str::to_owned);
+        screen.state_mut().feature.event(&completed(ended));
+        screen.run_steps(4);
+        screen.get_by_label_contains(shown);
+        screen.get_by_label("Add model");
+        assert!(
+            settings_asked(&mut screen).iter().all(|a| !matches!(
+                query_of_or_none(a),
+                Some(Query::Settings(SettingsQuery::GetProviderModels { .. }))
+            )),
+            "a failed fetch has no result to read"
+        );
+    }
+}
+
+fn query_of_or_none(action: &crate::core_client::features::FeatureAction) -> Option<&Query> {
+    match &action.request {
+        crate::core_client::features::FeatureRequest::Query(query) => Some(query),
+        crate::core_client::features::FeatureRequest::Command(_) => None,
+    }
+}
+
+// Given: a running fetch
+// When: a reconnect resets the screen
+// Then: the panel says to fetch again instead of waiting for a result nobody will read
+#[test]
+fn a_reconnect_ends_a_running_fetch_with_a_message() {
+    let mut screen = loaded('a');
+    open_modal(&mut screen, "Providers");
+    let _ = start_fetch(&mut screen);
+    screen.state_mut().feature.reset();
+    let again = settings_asked(&mut screen);
+    let snapshot_tag = again
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of_or_none(a),
+                Some(Query::Settings(SettingsQuery::GetSettingsSnapshot {}))
+            )
+        })
+        .expect("the snapshot is read again")
+        .tag;
+    answer(&mut screen, snapshot_tag, snapshot('a', 'a'));
+    screen.get_by_label_contains("Fetch again");
+}
+
+// Given: the Context window of a model typed as `400k`
+// When: the provider is saved
+// Then: the override is 400000 tokens; a value that is not a number sends nothing
+#[test]
+fn a_context_window_override_is_saved_as_tokens_and_a_bad_one_is_refused_in_the_form() {
+    let mut screen = loaded('a');
+    open_modal(&mut screen, "Providers");
+    screen.get_by_label("Context window of m").focus();
+    screen.run_steps(4);
+    screen.get_by_label("Context window of m").type_text("lots");
+    screen.run_steps(4);
+    screen.get_by_label("Save").click();
+    screen.run_steps(2);
+    assert!(settings_asked(&mut screen).is_empty(), "nothing is sent");
+    screen.get_by_label_contains("must be a number");
 }

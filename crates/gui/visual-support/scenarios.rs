@@ -28,8 +28,8 @@ use workbench_protocol::{
             plan::{PlanProgress, PlanSummary},
         },
         settings::{
-            CredentialRef, ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply,
-            SettingsRevision, SettingsSnapshot,
+            CredentialRef, ModelKind, ModelView, ProviderKind, ProviderView, SettingsQuery,
+            SettingsReply, SettingsRevision, SettingsSnapshot,
         },
         workspace::{FamilyView, LineageType, ProjectAccessView, ThreadDetail, TrustLevel},
     },
@@ -324,6 +324,13 @@ fn provider(
     models: &[&str],
     credential: CredentialRef,
 ) -> ProviderView {
+    let quota = matches!(
+        kind,
+        ProviderKind::OpenaiCodex
+            | ProviderKind::AnthropicSubscription
+            | ProviderKind::Cursor
+            | ProviderKind::KimiSubscription
+    );
     ProviderView {
         name: name.into(),
         kind,
@@ -334,10 +341,14 @@ fn provider(
             .map(|id| ModelView {
                 id: (*id).into(),
                 enabled: true,
+                kind: ModelKind::Chat,
+                context_override: None,
             })
             .collect(),
         excluded_models: vec![],
         default_model: models[0].into(),
+        show_quota: quota,
+        quota_supported: quota,
     }
 }
 

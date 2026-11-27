@@ -23,6 +23,8 @@ pub(super) enum ProviderAction {
     SaveAndSignIn,
     OpenConfigFile,
     RefreshCredentials,
+    /// Ask the core for the models of this saved provider.
+    FetchModels(String),
 }
 
 /// A login to start once the save of the provider it is for has worked. It is dropped by
@@ -83,9 +85,9 @@ fn provider_row(
     selected: bool,
     locked: bool,
     name: &str,
-    line: &str,
-    line_color: egui::Color32,
+    (line, line_color): (&str, egui::Color32),
     dot: egui::Color32,
+    quota: bool,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
     let hovered = response.hovered() && !locked;
@@ -101,7 +103,17 @@ fn provider_row(
     ui.painter()
         .circle_filled(egui::pos2(rect.left() + SP_3, rect.top() + 15.0), 4.0, dot);
     let left = rect.left() + SP_3 + SP_3;
-    let width = (rect.right() - left - SP_2).max(10.0);
+    let mut width = (rect.right() - left - SP_2).max(10.0);
+    if quota {
+        width = (width - FONT_BODY - SP_1).max(10.0);
+        ui.painter().text(
+            egui::pos2(rect.right() - SP_2, rect.top() + 15.0),
+            egui::Align2::RIGHT_CENTER,
+            icons::GAUGE,
+            egui::FontId::proportional(FONT_BODY),
+            palette().TEXT_MUTED,
+        );
+    }
     let title = one_line(ui, name, FONT_BODY, palette().TEXT, width);
     ui.painter()
         .galley(egui::pos2(left, rect.top() + 6.0), title, palette().TEXT);
@@ -284,9 +296,9 @@ impl SettingsFeature {
                         true,
                         false,
                         name,
-                        "New \u{b7} not saved",
+                        ("New \u{b7} not saved", palette().TEXT_MUTED),
                         palette().TEXT_MUTED,
-                        palette().TEXT_MUTED,
+                        false,
                     );
                 }
                 if snapshot.providers.is_empty() && self.form.is_none() {
@@ -315,8 +327,15 @@ impl SettingsFeature {
                     } else {
                         (state, dot)
                     };
-                    let response =
-                        provider_row(ui, selected, locked, &provider.name, &line, color, dot);
+                    let response = provider_row(
+                        ui,
+                        selected,
+                        locked,
+                        &provider.name,
+                        (&line, color),
+                        dot,
+                        provider.show_quota,
+                    );
                     if locked && !selected {
                         response.clone().on_hover_text(if busy {
                             "A save is running."
@@ -473,8 +492,19 @@ impl SettingsFeature {
             .is_some_and(|name| self.auth.login_of(name));
         ui.add_enabled_ui(!busy, |ui| form.draw_connection(ui, name_locked));
         ui.add_space(SP_2);
-        ui.label(section(format!("MODELS ({})", form.models.len())));
+        ui.horizontal(|ui| {
+            ui.label(section(format!("MODELS ({})", form.models.len())));
+            if let Some(fetch) = self.fetch_header(ui, &form, busy) {
+                action = Some(fetch);
+            }
+        });
+        self.fetch_panel(ui, &mut form);
         ui.add_enabled_ui(!busy, |ui| form.draw_models(ui));
+        if form.kind.quota_supported() {
+            ui.add_space(SP_2);
+            ui.label(section("USAGE DISPLAY"));
+            ui.add_enabled_ui(!busy, |ui| form.draw_quota(ui));
+        }
         if let Some(error) = &form.error {
             crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
         }
@@ -679,6 +709,7 @@ impl SettingsFeature {
                 }
             }
             ProviderAction::RefreshCredentials => self.auth.refresh(ctx),
+            ProviderAction::FetchModels(name) => self.start_fetch(ctx, snapshot, name),
         }
     }
 
@@ -688,6 +719,7 @@ impl SettingsFeature {
         self.form = None;
         self.confirm_delete = None;
         self.login_after_save = None;
+        self.fetch = None;
         self.auth.cancel_confirm();
         self.auth.clear_message();
     }
