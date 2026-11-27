@@ -21,6 +21,31 @@ pub(crate) struct ConnectionLog {
 }
 
 impl ConnectionLog {
+    /// Called on the connection task, before propagating the job failure to
+    /// lifecycle's existing connection JoinError path. Never send a reply whose
+    /// success/failure would claim to know how far a panicking command got.
+    pub(crate) fn blocking_result<T>(
+        &self,
+        job: crate::blocking::Job,
+        result: Result<T, tokio::task::JoinError>,
+    ) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(
+                    conn = self.id,
+                    job = job.name(),
+                    panicked = error.is_panic(),
+                    cancelled = error.is_cancelled(),
+                    "a connection blocking job failed; closing"
+                );
+                if error.is_panic() {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                panic!("connection blocking job was cancelled");
+            }
+        }
+    }
     pub(crate) fn new(shutdown: &watch::Receiver<bool>) -> Self {
         let id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
         tracing::info!(conn = id, "connection accepted");

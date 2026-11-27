@@ -1,5 +1,6 @@
 //! 4-byte BE length + JSON. A dedicated writer multiplexes replies and events.
 use crate::backend::{HostBackend, error};
+use crate::blocking::Job;
 use crate::connection_log::ConnectionLog;
 use std::{collections::BTreeMap, io, sync::Arc};
 use tokio::{
@@ -44,27 +45,44 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
 /// every subscription so before the connection closes, so a client can tell this
 /// from a crash. Bounded: a client that does not read cannot hold the shutdown.
 const GOODBYE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
-async fn say_goodbye(
-    backend: &HostBackend,
-    output: &mpsc::Sender<ServerFrame>,
+struct WriterShutdown {
     finish: tokio::sync::oneshot::Sender<()>,
     flushed: tokio::sync::oneshot::Receiver<()>,
-    subscriptions: &BTreeMap<String, tokio::task::AbortHandle>,
-    subscribed: &BTreeMap<String, workbench_protocol::ids::SubscriptionId>,
+    task: tokio::task::AbortHandle,
+}
+async fn say_goodbye(
+    backend: &Arc<HostBackend>,
+    output: &mpsc::Sender<ServerFrame>,
+    writer: WriterShutdown,
+    ids: Vec<workbench_protocol::ids::SubscriptionId>,
+    pumps: &mut JoinSet<io::Result<bool>>,
+    log: &ConnectionLog,
 ) {
+    let WriterShutdown {
+        finish,
+        mut flushed,
+        task,
+    } = writer;
+    let deadline = tokio::time::Instant::now() + GOODBYE_BOUND;
     // No more events of these subscriptions may follow the goodbye.
-    for task in subscriptions.values() {
-        task.abort();
-    }
-    let _ = tokio::time::timeout(GOODBYE_BOUND, async {
-        for (key, id) in subscribed {
-            if !subscriptions.contains_key(key) {
-                continue;
+    pumps.abort_all();
+    while pumps.join_next().await.is_some() {}
+    // Keep the handle outside the delivery deadline: dropping an await cannot
+    // cancel a running synchronous operation.
+    let mut notice = backend.blocking(Job::Goodbye, move |backend| {
+        ids.iter()
+            .filter_map(|id| backend.mask(backend.projection.shutdown_notice(id)).ok())
+            .collect::<Vec<_>>()
+    });
+    let mut joined = false;
+    let mut writer_flushed = false;
+    let _ = tokio::time::timeout_at(deadline, async {
+        let notices = log.blocking_result(Job::Goodbye, (&mut notice).await);
+        joined = true;
+        for notice in notices {
+            if tokio::time::Instant::now() >= deadline {
+                return;
             }
-            let notice = backend.projection.shutdown_notice(id);
-            let Ok(notice) = backend.mask(notice) else {
-                continue;
-            };
             if output
                 .send(ServerFrame::Event(Box::new(notice)))
                 .await
@@ -74,9 +92,21 @@ async fn say_goodbye(
             }
         }
         let _ = finish.send(());
-        let _ = flushed.await;
+        let _ = (&mut flushed).await;
+        writer_flushed = true;
     })
     .await;
+    // A timed-out delivery must stop the writer now, not after a slow notice
+    // job finishes. The flush sender is owned by the writer, so its closure
+    // also confirms cancellation of any outstanding write.
+    task.abort();
+    if !writer_flushed {
+        let _ = flushed.await;
+    }
+    if !joined {
+        // The two seconds bound wire delivery, not synchronous lock ownership.
+        log.blocking_result(Job::Goodbye, notice.await);
+    }
 }
 
 pub async fn connection(
@@ -131,6 +161,7 @@ async fn serve_connection(
         return Ok(());
     }
     let mut tasks = JoinSet::new();
+    let mut pumps = JoinSet::new();
     let (output, mut frames) = mpsc::channel::<ServerFrame>(64);
     let max = hello.limits.max_frame_bytes;
     let writer_backend = backend.clone();
@@ -139,7 +170,7 @@ async fn serve_connection(
     // and closes only after that.
     let (finish, mut finish_rx) = tokio::sync::oneshot::channel::<()>();
     let (flushed_tx, flushed) = tokio::sync::oneshot::channel::<()>();
-    tasks.spawn(log.task("writer", async move {
+    let writer_task = tasks.spawn(log.task("writer", async move {
         let mut finishing = false;
         loop {
             let frame = tokio::select! {
@@ -164,6 +195,11 @@ async fn serve_connection(
         }
         Ok::<_, io::Error>(true)
     }));
+    let writer = WriterShutdown {
+        finish,
+        flushed,
+        task: writer_task,
+    };
     let (incoming, mut requests) = mpsc::channel(64);
     tasks.spawn(log.task("reader", async move {
         loop {
@@ -191,6 +227,7 @@ async fn serve_connection(
         let bytes = tokio::select! {
             _ = shutdown.changed() => break,
             ended = tasks.join_next() => match ended { Some(Ok(Ok(false))) => continue, Some(Err(e)) if e.is_cancelled() => continue, other => { log.task_ended(&other); break } },
+            ended = pumps.join_next(), if !pumps.is_empty() => match ended { Some(Ok(Ok(false))) => continue, Some(Err(e)) if e.is_cancelled() => continue, other => { log.task_ended(&other); break } },
             r = requests.recv() => match r { Some(r) => r, None => break },
         };
         let request = match decode_request(&bytes, &hello.limits) {
@@ -238,7 +275,13 @@ async fn serve_connection(
                             "too many subscriptions",
                         ))
                     } else {
-                        match backend.subscription(&s, &context) {
+                        let context = context.clone();
+                        let result = backend
+                            .blocking(Job::Subscribe, move |backend| {
+                                backend.subscription(&s, &context)
+                            })
+                            .await;
+                        match log.blocking_result(Job::Subscribe, result) {
                             Err(e) => ReplyResult::Error(e),
                             Ok(mut sub) => {
                                 let sub_id = sub.started.subscription_id.to_string();
@@ -251,7 +294,7 @@ async fn serve_connection(
                                 }
                                 let tx = output.clone();
                                 let backend = backend.clone();
-                                let task = tasks.spawn(async move {
+                                let task = pumps.spawn(async move {
                                     loop {
                                         let Ok(permit) = tx.reserve().await else {
                                             break;
@@ -278,7 +321,13 @@ async fn serve_connection(
                     }
                 }
                 RequestBody::Control(Control::Unsubscribe { subscription_id }) => {
-                    backend.projection.unsubscribe(&subscription_id);
+                    let id = subscription_id.clone();
+                    let result = backend
+                        .blocking(Job::Unsubscribe, move |backend| {
+                            backend.projection.unsubscribe(&id)
+                        })
+                        .await;
+                    log.blocking_result(Job::Unsubscribe, result);
                     subscribed.remove(subscription_id.as_str());
                     if let Some(task) = subscriptions.remove(subscription_id.as_str()) {
                         task.abort();
@@ -335,7 +384,13 @@ async fn serve_connection(
                     });
                     continue;
                 }
-                _ => backend.request(request, context.clone()).result,
+                _ => {
+                    log.blocking_result(
+                        Job::Request,
+                        backend.request_unix(request, context.clone()).await,
+                    )
+                    .result
+                }
             }
         };
         let reply = backend
@@ -344,17 +399,19 @@ async fn serve_connection(
         tokio::select! { _ = shutdown.changed() => break, r = output.send(ServerFrame::Reply(reply)) => { r.map_err(invalid)?; } }
     }
     if *shutdown.borrow() {
-        say_goodbye(
-            &backend,
-            &output,
-            finish,
-            flushed,
-            &subscriptions,
-            &subscribed,
-        )
-        .await;
+        let ids = subscribed
+            .iter()
+            .filter(|(key, _)| subscriptions.contains_key(*key))
+            .map(|(_, id)| id.clone())
+            .collect();
+        say_goodbye(&backend, &output, writer, ids, &mut pumps, log).await;
     }
     tasks.abort_all();
+    pumps.abort_all();
     while tasks.join_next().await.is_some() {}
+    while pumps.join_next().await.is_some() {}
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

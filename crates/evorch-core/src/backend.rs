@@ -31,6 +31,8 @@ pub struct HostBackend {
     web_clients: Mutex<Option<workbench_web::ActivityObserver>>,
     web_deliveries: workbench_web::RestartTasks,
     endpoint: endpoint::Endpoint,
+    #[cfg(test)]
+    pub(crate) blocking_hooks: Mutex<crate::blocking::testing::Hooks>,
 }
 
 #[derive(Default)]
@@ -122,6 +124,8 @@ impl HostBackend {
             web_clients: Mutex::new(None),
             web_deliveries: Default::default(),
             endpoint: Default::default(),
+            #[cfg(test)]
+            blocking_hooks: Default::default(),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
                 capabilities: Capability::IMPLEMENTED.to_vec(),
@@ -274,6 +278,7 @@ impl HostBackend {
     pub fn mask<T: Serialize + DeserializeOwned>(&self, value: T) -> Result<T, WorkbenchError> {
         protect(&self.redactor, value)
     }
+    /// Synchronous entry for Web and embedded callers, not Unix dispatch.
     pub fn request(
         &self,
         request: RequestEnvelope,
@@ -284,6 +289,21 @@ impl HostBackend {
                 request_id: RequestId::new("redacted").unwrap(),
                 result: ReplyResult::Error(error),
             })
+    }
+    /// Unix owns and awaits this job before dispatching the next request.
+    /// Ping has no synchronous waits and stays on the connection task.
+    pub(crate) async fn request_unix(
+        self: &Arc<Self>,
+        request: RequestEnvelope,
+        context: IngressContext,
+    ) -> Result<ReplyEnvelope, tokio::task::JoinError> {
+        if matches!(request.body, RequestBody::Control(Control::Ping { .. })) {
+            return Ok(self.request(request, context));
+        }
+        self.blocking(crate::blocking::Job::Request, move |backend| {
+            backend.request(request, context)
+        })
+        .await
     }
     // HTTP checks the original correlation id before its final egress hook.
     fn raw_request(&self, request: RequestEnvelope, context: IngressContext) -> ReplyEnvelope {
@@ -301,6 +321,9 @@ impl HostBackend {
                 return Err(error(ErrorCode::Busy, "core is draining"));
             }
             request.body.validate(&self.hello.limits)?;
+            if let RequestBody::Control(Control::Ping { nonce }) = &request.body {
+                return Ok(ReplyPayload::Pong { nonce: *nonce });
+            }
             let mut host = self.host.lock().unwrap();
             match request.body {
                 RequestBody::Command(command) => {
@@ -328,7 +351,6 @@ impl HostBackend {
                             })
                         })
                 }
-                RequestBody::Control(Control::Ping { nonce }) => Ok(ReplyPayload::Pong { nonce }),
                 RequestBody::Control(_) => Err(error(
                     ErrorCode::InvalidRequest,
                     "control requires connection scope",
