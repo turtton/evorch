@@ -253,7 +253,7 @@ impl SettingsFeature {
             None => self.modal = Some(Modal::new(tab)),
         }
         if tab == SettingsTab::Providers {
-            self.auth.want_status();
+            self.auth.distrust();
         }
     }
 
@@ -412,6 +412,16 @@ impl SettingsFeature {
                 };
                 if kind == SettingsOperationKind::SaveDocument {
                     self.saved_document(&id, revision.clone());
+                }
+                // The core reads the providers again before an account action is offered: what
+                // the card asks about must be what the core would delete.
+                if matches!(
+                    kind,
+                    SettingsOperationKind::SaveProvider
+                        | SettingsOperationKind::DeleteProvider
+                        | SettingsOperationKind::SaveDocument
+                ) {
+                    self.auth.distrust();
                 }
                 if let (Some(save), Some(modal)) = (&modal_save, &mut self.modal) {
                     modal.saved(&save.job, &save.text, revision);

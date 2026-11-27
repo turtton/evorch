@@ -45,7 +45,9 @@ use workbench_protocol::{
 
 #[derive(Debug, Clone)]
 enum Pending {
-    Status,
+    /// `true`: asked after a refresh that made the core read the settings again, so the answer
+    /// is what the next account action may rely on.
+    Status(bool),
     Operation(OperationId),
     Login(OperationId),
     Command(Sent),
@@ -89,6 +91,13 @@ pub struct AuthFeature {
     login_stale: bool,
     login_in_flight: bool,
     confirm_delete: Option<String>,
+    /// Whether the status is known to follow the saved settings: the core read them again
+    /// (`RefreshCredentials`) after the last change and the status was read after that. A
+    /// credential action waits for it, so what it asks about and what the core deletes agree.
+    trusted: bool,
+    /// The refresh that is to make the status trusted.
+    trusting: Option<OperationId>,
+    awaiting_status: bool,
     now: fn() -> u64,
 }
 
@@ -110,6 +119,9 @@ impl Default for AuthFeature {
             login_stale: false,
             login_in_flight: false,
             confirm_delete: None,
+            trusted: false,
+            trusting: None,
+            awaiting_status: false,
             now: unix_now,
         }
     }
@@ -224,6 +236,12 @@ impl AuthFeature {
             return;
         }
         self.status_stale = true;
+        if kind == AuthOperationKind::RefreshStatus
+            && self.trusting.as_ref() == Some(&id)
+            && matches!(state, OperationState::Ready)
+        {
+            self.awaiting_status = true;
+        }
         if kind == AuthOperationKind::Login && self.session.as_ref().is_some_and(|s| s.id == id) {
             self.session = None;
             self.paste.clear();
@@ -289,7 +307,48 @@ impl AuthFeature {
 
     /// Whether a login can be started now: nothing runs and no other login waits.
     pub(super) fn can_start_login(&self) -> bool {
-        !self.running() && !self.login_active()
+        !self.held() && !self.login_active()
+    }
+
+    /// Whether credential actions wait: an operation runs, or the status is not yet known to
+    /// follow the saved settings.
+    fn held(&self) -> bool {
+        self.running() || !self.trusted
+    }
+
+    /// The saved providers changed (or the section was opened): the core reads them again
+    /// before a credential action is offered.
+    pub(super) fn distrust(&mut self) {
+        self.trusted = false;
+        self.trusting = None;
+        self.awaiting_status = false;
+        self.status_stale = true;
+    }
+
+    /// Whether a sign-in of `profile` is being prepared or waits for a person.
+    pub(super) fn login_of(&self, profile: &str) -> bool {
+        self.session.as_ref().is_some_and(|s| s.profile == profile)
+            || self.operations.iter().any(|(id, view)| {
+                view.kind == AuthOperationKind::Login
+                    && !view.operation.state.is_final()
+                    && !self.lost.contains(id)
+                    && view.profile.as_deref() == Some(profile)
+            })
+    }
+
+    /// The other providers whose credential is the very entry `slot` names.
+    fn shared_with(&self, name: &str, slot: &CredentialSlot) -> Vec<String> {
+        if !matches!(slot.storage, CredentialRef::Keyring { .. }) {
+            return Vec::new();
+        }
+        self.status.as_ref().map_or_else(Vec::new, |status| {
+            status
+                .slots
+                .iter()
+                .filter(|other| other.profile != name && other.storage == slot.storage)
+                .map(|other| other.profile.clone())
+                .collect()
+        })
     }
 
     /// The dot color, the sentence and whether it is fine, for the credential of `name`.
@@ -308,11 +367,6 @@ impl AuthFeature {
     /// Forget a question about deleting a credential.
     pub(super) fn cancel_confirm(&mut self) {
         self.confirm_delete = None;
-    }
-
-    /// The credential status is read again at the next pass (a section that shows it opened).
-    pub(super) fn want_status(&mut self) {
-        self.status_stale = true;
     }
 
     /// Forget the sentence about the last operation.
@@ -334,6 +388,9 @@ impl AuthFeature {
             return;
         }
         let id = new_operation();
+        if !self.trusted {
+            self.trusting = Some(id.clone());
+        }
         self.send(
             ctx,
             id.clone(),
@@ -371,6 +428,10 @@ impl AuthFeature {
         account: &Account<'_>,
     ) -> Option<AccountAction> {
         let slot = self.slot(account.name).cloned();
+        let shared = slot
+            .as_ref()
+            .map(|slot| self.shared_with(account.name, slot))
+            .unwrap_or_default();
         let login = slot.as_ref().and_then(|slot| slot.login).or(account.login);
         let summary = summary(
             slot.as_ref(),
@@ -405,7 +466,7 @@ impl AuthFeature {
                     };
                     ui.add(egui::Label::new(muted(storage)).wrap());
                 }
-                outcome = self.account_actions(ui, ctx, account, slot.as_ref(), login);
+                outcome = self.account_actions(ui, ctx, account, slot.as_ref(), login, &shared);
                 self.login_panel(ui, ctx, account.name);
                 if !self.message.is_empty() {
                     ui.add(egui::Label::new(muted(self.message.as_str())).wrap());
@@ -421,8 +482,9 @@ impl AuthFeature {
         account: &Account<'_>,
         slot: Option<&CredentialSlot>,
         login: Option<LoginMethod>,
+        shared: &[String],
     ) -> Option<AccountAction> {
-        let busy = self.running();
+        let busy = self.held();
         let name = account.name;
         let mut outcome = None;
         let Some(slot) = slot.filter(|_| account.saved) else {
@@ -539,7 +601,7 @@ impl AuthFeature {
             self.confirm_delete = Some(name.to_owned());
         }
         if self.confirm_delete.as_deref() == Some(name) {
-            self.confirm_credential_delete(ui, ctx, account, slot, login.is_some());
+            self.confirm_credential_delete(ui, ctx, account, slot, login.is_some(), shared);
         }
         outcome
     }
@@ -553,8 +615,9 @@ impl AuthFeature {
         account: &Account<'_>,
         slot: &CredentialSlot,
         sign_in: bool,
+        shared: &[String],
     ) {
-        let busy = self.running();
+        let busy = self.held();
         let name = account.name;
         let entry = match &slot.storage {
             CredentialRef::Keyring { service, account } => {
@@ -584,12 +647,12 @@ impl AuthFeature {
                     )))
                     .wrap(),
                 );
-                if !account.shared_with.is_empty() {
+                if !shared.is_empty() {
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(format!(
                                 "Also used by {}: they lose it too.",
-                                account.shared_with.join(", ")
+                                shared.join(", ")
                             ))
                             .color(palette().WARNING_FG),
                         )
@@ -710,8 +773,6 @@ pub(super) struct Account<'a> {
     pub login: Option<LoginMethod>,
     /// Whether the provider is in the saved settings.
     pub saved: bool,
-    /// The other providers that name the same keychain entry.
-    pub shared_with: &'a [String],
     /// Whether the form can be saved as it is.
     pub savable: bool,
     /// A provider save is running.
@@ -821,7 +882,7 @@ fn summary(
 impl AuthFeature {
     pub(super) fn reset(&mut self) {
         self.status = None;
-        self.status_stale = true;
+        self.distrust();
         self.status_in_flight = false;
         self.login_in_flight = false;
         self.login_stale = self.session.is_some();
@@ -857,14 +918,20 @@ impl AuthFeature {
             return;
         };
         match (pending, reply) {
-            (Pending::Status, FeatureReply::Query(result)) => {
+            (Pending::Status(after_refresh), FeatureReply::Query(result)) => {
                 self.status_in_flight = false;
                 match result {
-                    Ok(QueryReply::Auth(AuthReply::Status(status))) => self.status = Some(status),
+                    Ok(QueryReply::Auth(AuthReply::Status(status))) => {
+                        self.status = Some(status);
+                        if after_refresh {
+                            self.trusted = true;
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         self.message = error.message;
                         self.status_stale = true;
+                        self.awaiting_status |= after_refresh;
                     }
                 }
             }
@@ -967,10 +1034,14 @@ impl AuthFeature {
     /// being completed and the operations whose end was not seen are looked up whatever is shown,
     /// so a sign-in does not stall behind a closed modal.
     pub(super) fn maintain(&mut self, ctx: &mut FeatureContext<'_>, shown: bool) {
+        if shown && !self.trusted && self.trusting.is_none() && !self.running() {
+            self.refresh(ctx);
+        }
         if shown && self.status_stale && !self.status_in_flight {
             self.status_stale = false;
             self.status_in_flight = true;
-            let tag = self.tag(Pending::Status);
+            let after_refresh = std::mem::take(&mut self.awaiting_status);
+            let tag = self.tag(Pending::Status(after_refresh));
             ctx.query(tag, Query::Auth(AuthQuery::GetCredentialStatus {}));
         }
         if self.login_stale && !self.login_in_flight {

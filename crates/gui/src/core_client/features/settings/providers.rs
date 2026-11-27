@@ -143,17 +143,6 @@ impl SettingsFeature {
             .is_some_and(|(form, snapshot)| form_edited(snapshot, form))
     }
 
-    /// The providers that name the same keychain entry as `view`, other than itself.
-    fn shared_with(snapshot: &SettingsSnapshot, view: &ProviderView) -> Vec<String> {
-        snapshot
-            .providers
-            .iter()
-            .filter(|other| other.name != view.name && other.credential == view.credential)
-            .filter(|other| matches!(other.credential, CredentialRef::Keyring { .. }))
-            .map(|other| other.name.clone())
-            .collect()
-    }
-
     /// Keeps the selection and the form of the selected provider in step with the snapshot: a
     /// provider is always open as a form (what is not edited follows a newer snapshot), and the
     /// first one is selected when nothing is.
@@ -354,7 +343,7 @@ impl SettingsFeature {
         }
         let selected = self.selected.clone()?;
         let view = snapshot.providers.iter().find(|p| p.name == selected)?;
-        self.read_only_detail(ui, ctx, snapshot, view, busy)
+        self.read_only_detail(ui, ctx, view, busy)
     }
 
     /// The name of the provider and its icons: copy and delete.
@@ -364,9 +353,10 @@ impl SettingsFeature {
         title: &str,
         kind: &str,
         saved: Option<&ProviderView>,
-        busy: bool,
+        (busy, duplicable): (bool, bool),
         action: &mut Option<ProviderAction>,
     ) {
+        let signing_in = saved.is_some_and(|view| self.auth.login_of(&view.name));
         ui.horizontal(|ui| {
             ui.label(h3(title));
             crate::panes::provider_widgets::provider_type_badge(ui, kind);
@@ -374,10 +364,14 @@ impl SettingsFeature {
                 let Some(view) = saved else {
                     return;
                 };
-                ui.add_enabled_ui(!busy, |ui| {
+                // Not while it is signing in (its sign-in could no longer be cancelled from here),
+                // and a copy is made of what is saved, so not over unsaved edits.
+                ui.add_enabled_ui(!busy && !signing_in, |ui| {
                     if icon_button(ui, icons::TRASH, "Delete provider").clicked() {
                         self.confirm_delete = Some(view.name.clone());
                     }
+                });
+                ui.add_enabled_ui(!busy && duplicable, |ui| {
                     if ProviderForm::from_view(view).is_some()
                         && icon_button(ui, icons::COPY, "Duplicate provider").clicked()
                     {
@@ -436,7 +430,15 @@ impl SettingsFeature {
             || form.kind.menu_title().to_owned(),
             |view| provider_kind_label(view.kind).to_owned(),
         );
-        self.detail_header(ui, &title, &kind_label, saved, busy, &mut action);
+        let duplicable = !form_edited(snapshot, &form);
+        self.detail_header(
+            ui,
+            &title,
+            &kind_label,
+            saved,
+            (busy, duplicable),
+            &mut action,
+        );
         if form
             .based_on
             .as_ref()
@@ -452,15 +454,11 @@ impl SettingsFeature {
         }
         ui.add_space(SP_2);
         ui.label(section("ACCOUNT"));
-        let shared = saved
-            .map(|view| Self::shared_with(snapshot, view))
-            .unwrap_or_default();
         let name = saved.map_or_else(|| form.name.trim().to_owned(), |view| view.name.clone());
         let account = Account {
             name: &name,
             login: form.kind.login(),
             saved: saved.is_some(),
-            shared_with: &shared,
             savable: form.to_input().is_ok(),
             saving: self.provider_saving.is_some(),
         };
@@ -469,7 +467,11 @@ impl SettingsFeature {
         }
         ui.add_space(SP_2);
         ui.label(section("CONNECTION"));
-        ui.add_enabled_ui(!busy, |ui| form.draw_connection(ui));
+        let name_locked = form
+            .original
+            .as_ref()
+            .is_some_and(|name| self.auth.login_of(name));
+        ui.add_enabled_ui(!busy, |ui| form.draw_connection(ui, name_locked));
         ui.add_space(SP_2);
         ui.label(section(format!("MODELS ({})", form.models.len())));
         ui.add_enabled_ui(!busy, |ui| form.draw_models(ui));
@@ -486,7 +488,6 @@ impl SettingsFeature {
         &mut self,
         ui: &mut egui::Ui,
         ctx: &mut FeatureContext<'_>,
-        snapshot: &SettingsSnapshot,
         view: &ProviderView,
         busy: bool,
     ) -> Option<ProviderAction> {
@@ -496,7 +497,7 @@ impl SettingsFeature {
             &view.name,
             provider_kind_label(view.kind),
             Some(view),
-            busy,
+            (busy, true),
             &mut action,
         );
         egui::Frame::new()
@@ -519,12 +520,10 @@ impl SettingsFeature {
             });
         ui.add_space(SP_2);
         ui.label(section("ACCOUNT"));
-        let shared = Self::shared_with(snapshot, view);
         let account = Account {
             name: &view.name,
             login: None,
             saved: true,
-            shared_with: &shared,
             savable: false,
             saving: false,
         };
@@ -597,6 +596,9 @@ impl SettingsFeature {
             }
             ProviderAction::Delete(name) => {
                 self.confirm_delete = None;
+                if self.auth.login_of(&name) {
+                    return;
+                }
                 self.auth.forget(&name);
                 if self.selected.as_deref() == Some(name.as_str()) {
                     self.selected = None;
@@ -702,6 +704,13 @@ impl SettingsFeature {
         let Some(form) = &mut self.form else {
             return;
         };
+        if let Some(original) = &form.original
+            && form.name.trim() != original
+            && self.auth.login_of(original)
+        {
+            form.error = Some("Finish or cancel the sign-in before renaming this provider.".into());
+            return;
+        }
         match form.to_input() {
             Ok(provider) => {
                 form.error = None;

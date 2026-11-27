@@ -905,16 +905,30 @@ fn the_snapshot_is_asked_for_by_maintain_once_while_the_modal_is_open() {
     let mut screen = screen(Box::<SettingsFeature>::default(), None);
     settings(&mut screen).open_modal(SettingsTab::Providers);
     screen.run_steps(6);
-    let snapshots = asked(&mut screen)
+    let sent = asked(&mut screen);
+    let snapshots = sent
         .iter()
         .filter(|action| {
             matches!(
-                query_of(action),
-                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+                &action.request,
+                FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {}))
             )
         })
         .count();
     assert_eq!(snapshots, 1);
+    // The core reads the providers again once, so the credential status follows the saved ones.
+    let refreshes = sent
+        .iter()
+        .filter(|action| {
+            matches!(
+                &action.request,
+                FeatureRequest::Command(Command::Auth(
+                    workbench_protocol::namespaces::auth::AuthCommand::RefreshCredentials(_)
+                ))
+            )
+        })
+        .count();
+    assert_eq!(refreshes, 1);
     screen.run_steps(6);
     assert!(
         asked(&mut screen).is_empty(),

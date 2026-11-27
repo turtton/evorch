@@ -192,9 +192,16 @@ impl ProviderForm {
 
     /// Draw the Connection fields: what names the provider and where its credential is kept.
     /// The Account card above them holds the credential itself; nothing secret is typed here.
-    pub(super) fn draw_connection(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn draw_connection(&mut self, ui: &mut egui::Ui, name_locked: bool) {
         let previous_name = self.name.clone();
-        labelled_line(ui, "Name", &mut self.name, None);
+        ui.add_enabled_ui(!name_locked, |ui| {
+            labelled_line(ui, "Name", &mut self.name, None);
+        });
+        if name_locked {
+            ui.label(crate::theme::text::muted(
+                "The name cannot change while this provider is signing in.",
+            ));
+        }
         // An edited provider keeps its account: following the rename would leave its stored
         // sign-in behind under the old account.
         if self.original.is_none() && self.account == previous_name {

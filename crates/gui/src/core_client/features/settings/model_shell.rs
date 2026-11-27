@@ -105,7 +105,7 @@ impl SettingsFeature {
                     modal.select(tab);
                 }
                 if tab == SettingsTab::Providers {
-                    self.auth.want_status();
+                    self.auth.distrust();
                 }
                 self.confirm_close = false;
             }

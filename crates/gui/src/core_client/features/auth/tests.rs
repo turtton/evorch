@@ -196,21 +196,74 @@ fn opened(
         .expect("the settings feature")
         .open_modal(SettingsTab::Providers);
     screen.run();
-    for action in asked(&mut screen) {
-        match query_of(&action) {
-            Query::Settings(SettingsQuery::GetSettingsSnapshot {}) => answer(
-                &mut screen,
-                action.tag,
-                snapshot_reply(providers.clone(), 'a'),
-            ),
-            Query::Auth(AuthQuery::GetCredentialStatus {}) => {
-                answer(&mut screen, action.tag, status.clone());
+    // What the core is asked on opening: the settings, the providers read again by the core,
+    // and the credential status after that. Answered until it asks no more.
+    for _ in 0..6 {
+        let sent = asked(&mut screen);
+        if sent.is_empty() {
+            break;
+        }
+        for action in sent {
+            match &action.request {
+                FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {})) => {
+                    answer(
+                        &mut screen,
+                        action.tag,
+                        snapshot_reply(providers.clone(), 'a'),
+                    );
+                }
+                FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {})) => {
+                    answer(&mut screen, action.tag, status.clone());
+                }
+                FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(
+                    refresh,
+                ))) => answer(
+                    &mut screen,
+                    action.tag,
+                    operation_reply(op_view(
+                        &refresh.operation_id,
+                        AuthOperationKind::RefreshStatus,
+                        OperationState::Ready,
+                    )),
+                ),
+                other => panic!("unexpected request {other:?}"),
             }
-            other => panic!("unexpected query {other:?}"),
         }
     }
     screen.run_steps(4);
     screen
+}
+
+/// Answers what the screen asks about the credential status (the core reading the providers
+/// again, then the status after it) until it asks no more. Returns everything else it asked.
+fn settle(screen: &mut Harness<'static, Screen>, status: &FeatureReply) -> Vec<FeatureAction> {
+    let mut others = Vec::new();
+    for _ in 0..6 {
+        let sent = asked(screen);
+        if sent.is_empty() {
+            break;
+        }
+        for action in sent {
+            match &action.request {
+                FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {})) => {
+                    answer(screen, action.tag, status.clone());
+                }
+                FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(
+                    refresh,
+                ))) => answer(
+                    screen,
+                    action.tag,
+                    operation_reply(op_view(
+                        &refresh.operation_id,
+                        AuthOperationKind::RefreshStatus,
+                        OperationState::Ready,
+                    )),
+                ),
+                _ => others.push(action),
+            }
+        }
+    }
+    others
 }
 
 /// The screen with the Claude provider selected.
@@ -547,6 +600,25 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
     // The connection came back to a core that restarted meanwhile.
     screen.state_mut().feature.reset();
     let questions = asked(&mut screen);
+    for action in &questions {
+        if let FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(refresh))) =
+            &action.request
+        {
+            answer(
+                &mut screen,
+                action.tag,
+                operation_reply(op_view(
+                    &refresh.operation_id,
+                    AuthOperationKind::RefreshStatus,
+                    OperationState::Ready,
+                )),
+            );
+        }
+    }
+    let questions: Vec<_> = questions
+        .into_iter()
+        .filter(|a| matches!(a.request, FeatureRequest::Query(_)))
+        .collect();
     let snapshot = questions
         .iter()
         .find(|a| {
@@ -580,11 +652,11 @@ fn a_login_the_restarted_core_does_not_know_is_dropped_as_unknown() {
     // The status is read again, and a new login can be started.
     let status = questions
         .iter()
-        .chain(asked(&mut screen).iter())
         .find(|a| matches!(query_of(a), Query::Auth(AuthQuery::GetCredentialStatus {})))
         .map(|a| a.tag)
         .expect("the status is asked for");
     answer(&mut screen, status, status_reply());
+    settle(&mut screen, &status_reply());
     screen.get_by_label("Sign in to Claude");
 }
 
@@ -854,7 +926,17 @@ fn signing_out_says_which_other_providers_share_the_credential() {
         shared,
         FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
             revision: Revision(1),
-            slots: vec![signed_in],
+            slots: vec![
+                signed_in,
+                slot(
+                    "claude-2",
+                    keyring("claude-acct"),
+                    CredentialState::Present {
+                        expires_at_unix: None,
+                    },
+                    Some(LoginMethod::Claude),
+                ),
+            ],
         })))),
     );
     screen.get_by_label("Sign out").click();
@@ -937,14 +1019,16 @@ fn save_and_sign_in() -> (Harness<'static, Screen>, OperationId, String) {
     (screen, save.operation_id, name)
 }
 
-fn answer_new_snapshot(screen: &mut Harness<'static, Screen>, name: &str) {
+/// Answers the settings read again after a save, and the credential status after the core read
+/// the providers again. Returns what else was asked (a sign-in start, for one).
+fn answer_new_snapshot(screen: &mut Harness<'static, Screen>, name: &str) -> Vec<FeatureAction> {
     let queries = asked(screen);
     let snapshot = queries
         .iter()
         .find(|a| {
             matches!(
-                query_of(a),
-                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+                &a.request,
+                FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {}))
             )
         })
         .expect("the settings are read again");
@@ -955,7 +1039,29 @@ fn answer_new_snapshot(screen: &mut Harness<'static, Screen>, name: &str) {
         keyring(name),
     ));
     answer(screen, snapshot.tag, snapshot_reply(all, 'b'));
+    for action in &queries {
+        if matches!(
+            &action.request,
+            FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {}))
+        ) {
+            answer(screen, action.tag, status_reply());
+        }
+        if let FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(refresh))) =
+            &action.request
+        {
+            answer(
+                screen,
+                action.tag,
+                operation_reply(op_view(
+                    &refresh.operation_id,
+                    AuthOperationKind::RefreshStatus,
+                    OperationState::Ready,
+                )),
+            );
+        }
+    }
     screen.run_steps(4);
+    settle(screen, &status_reply())
 }
 
 // Given: a new subscription provider that is not saved
@@ -974,8 +1080,10 @@ fn save_and_sign_in_starts_the_login_only_after_the_save_worked() {
         .feature
         .event(&settings_ended(&id, OperationState::Ready));
     screen.run_steps(4);
-    answer_new_snapshot(&mut screen, &name);
-    let sent = sent_commands(&mut screen);
+    let sent: Vec<_> = answer_new_snapshot(&mut screen, &name)
+        .into_iter()
+        .filter(|a| matches!(a.request, FeatureRequest::Command(_)))
+        .collect();
     let [AuthCommand::StartLogin(start)] = commands(&sent)[..] else {
         panic!("one login start was expected: {sent:?}");
     };
@@ -995,8 +1103,11 @@ fn a_refused_save_starts_no_login() {
         },
     ));
     screen.run_steps(4);
-    answer_new_snapshot(&mut screen, &name);
-    assert!(sent_commands(&mut screen).is_empty());
+    let sent = answer_new_snapshot(&mut screen, &name);
+    assert!(
+        sent.iter()
+            .all(|a| !matches!(a.request, FeatureRequest::Command(_)))
+    );
     screen.run_steps(4);
     assert!(sent_commands(&mut screen).is_empty());
 }
@@ -1025,8 +1136,11 @@ fn a_save_of_unknown_outcome_starts_no_login() {
         .feature
         .event(&settings_ended(&save.operation_id, OperationState::Ready));
     screen.run_steps(4);
-    answer_new_snapshot(&mut screen, &name);
-    assert!(sent_commands(&mut screen).is_empty());
+    let sent = answer_new_snapshot(&mut screen, &name);
+    assert!(
+        sent.iter()
+            .all(|a| !matches!(a.request, FeatureRequest::Command(_)))
+    );
 }
 
 // Given: Save & sign in whose save worked
@@ -1042,6 +1156,128 @@ fn choosing_another_provider_drops_the_login_that_waited_for_the_save() {
     screen.run_steps(4);
     screen.get_by_role_and_label(Role::Button, "key").click();
     screen.run_steps(4);
+    let sent = answer_new_snapshot(&mut screen, &name);
+    assert!(
+        sent.iter()
+            .all(|a| !matches!(a.request, FeatureRequest::Command(_)))
+    );
+}
+
+fn is_disabled(screen: &Harness<'static, Screen>, label: &str) -> bool {
+    screen.get_by_label(label).accesskit_node().is_disabled()
+}
+
+// Given: the Providers section just opened
+// When: the core is asked to read the providers again, and its answer and the status after it
+//       are not in yet
+// Then: the credential actions wait, and are offered once the status that follows the refresh
+//       has arrived (the first view of a freshly started core is not "Not checked" for good)
+#[test]
+fn opening_reads_the_providers_again_and_the_account_actions_wait_for_it() {
+    let mut screen = screen(Box::new(SettingsFeature::default()), None);
+    screen
+        .state_mut()
+        .feature
+        .as_settings_mut()
+        .expect("the settings feature")
+        .open_modal(SettingsTab::Providers);
+    screen.run();
+    let sent = asked(&mut screen);
+    let refresh = sent
+        .iter()
+        .filter_map(|a| match &a.request {
+            FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(r))) => {
+                Some((a.tag, r.operation_id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(refresh.len(), 1, "one refresh on opening: {sent:?}");
+    for action in &sent {
+        match &action.request {
+            FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {})) => {
+                answer(&mut screen, action.tag, snapshot_reply(providers(), 'a'));
+            }
+            FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {})) => {
+                answer(&mut screen, action.tag, status_reply());
+            }
+            _ => {}
+        }
+    }
+    screen.run_steps(4);
+    assert!(
+        is_disabled(&screen, "Sign in to Claude"),
+        "what the core has not read again yet is not offered"
+    );
+    answer(
+        &mut screen,
+        refresh[0].0,
+        operation_reply(op_view(
+            &refresh[0].1,
+            AuthOperationKind::RefreshStatus,
+            OperationState::Ready,
+        )),
+    );
+    assert!(
+        is_disabled(&screen, "Sign in to Claude"),
+        "the status after it is not in"
+    );
+    settle(&mut screen, &status_reply());
+    assert!(!is_disabled(&screen, "Sign in to Claude"));
+}
+
+// Given: a provider saved while another one is selected
+// When: the save has worked and the core has not yet read the providers again
+// Then: the Account actions of the selected one wait, so a deletion is never confirmed against
+//       credentials the core no longer has
+#[test]
+fn a_saved_provider_holds_the_account_actions_until_the_core_read_it() {
+    let (mut screen, id, name) = save_and_sign_in();
+    screen
+        .state_mut()
+        .feature
+        .event(&settings_ended(&id, OperationState::Ready));
+    screen.run_steps(4);
+    screen.get_by_role_and_label(Role::Button, "key").click();
+    screen.run_steps(4);
+    assert!(is_disabled(&screen, "Remove key"));
     answer_new_snapshot(&mut screen, &name);
-    assert!(sent_commands(&mut screen).is_empty());
+    assert!(!is_disabled(&screen, "Remove key"));
+}
+
+// Given: a provider with unsaved edits
+// When: the form is shown
+// Then: Duplicate is not offered over them (it would drop the edits), and is back once they
+//       are saved or discarded
+#[test]
+fn duplicate_waits_for_the_edits_to_be_saved_or_discarded() {
+    let mut screen = loaded_key();
+    assert!(!is_disabled(&screen, "Duplicate provider"));
+    let url = screen.get_by_role_and_label(Role::TextInput, "Base URL");
+    url.focus();
+    screen.run_steps(4);
+    screen
+        .get_by_role_and_label(Role::TextInput, "Base URL")
+        .type_text("x");
+    screen.run_steps(4);
+    assert!(is_disabled(&screen, "Duplicate provider"));
+    screen.get_by_label("Discard").click();
+    screen.run_steps(4);
+    assert!(!is_disabled(&screen, "Duplicate provider"));
+}
+
+// Given: a provider that is signing in
+// When: its form is shown
+// Then: it cannot be deleted or renamed meanwhile: its Cancel stays reachable
+#[test]
+fn a_provider_that_is_signing_in_is_neither_deleted_nor_renamed() {
+    let (screen, _) = waiting_login(true);
+    assert!(is_disabled(&screen, "Delete provider"));
+    assert!(
+        screen
+            .get_by_role_and_label(Role::TextInput, "Name")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.get_by_label("Cancel sign-in");
 }
