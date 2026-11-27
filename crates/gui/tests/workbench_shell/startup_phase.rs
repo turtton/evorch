@@ -85,6 +85,96 @@ impl Fixture {
     }
 }
 
+fn storage_config(plan: &StartupPlan) -> storage::StorageConfig {
+    storage::StorageConfig {
+        db_path: plan.db_path.clone(),
+        ..Default::default()
+    }
+}
+
+/// Threads known to the database, as `(id, parent)`; a parent makes the thread a fork.
+fn seed_threads(config: &storage::StorageConfig, threads: &[(&str, Option<&str>)]) {
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let upserts: Vec<_> = threads
+        .iter()
+        .map(|&(id, parent)| storage::threads::ThreadUpsert {
+            thread_id: id.into(),
+            parent_thread_id: parent.map(str::to_owned),
+            lineage_kind: parent.map(|_| storage::threads::ThreadLineageKind::Fork),
+            root_run_id: Some(format!("run-{id}")),
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            ..Default::default()
+        })
+        .collect();
+    storage.handle().upsert_threads_host(&upserts).unwrap();
+}
+
+/// The retention input the GUI would hand over for the saved sidebar, far in the future
+/// so that every archived family is due.
+fn retention_input(plan: &StartupPlan, now_ns: i64) -> storage::thread_retention::RetentionInput {
+    let sidebar_path = plan.sidebar_path.clone().unwrap();
+    let sidebar = workspace_ui::load_sidebar(&sidebar_path).unwrap();
+    storage::thread_retention::RetentionInput {
+        threads: gui::startup::sidebar_threads(&sidebar),
+        sidebar_path: sidebar_path.display().to_string(),
+        ownership_root: plan.ownership_root.display().to_string(),
+        now_ns,
+    }
+}
+
+/// Explore every candidate family on the real database until none is still exploring.
+fn explore(
+    database: &storage::Database,
+    input: &storage::thread_retention::RetentionInput,
+    policy: &ThreadRetentionPolicy,
+) {
+    use storage::thread_retention::{ExploreBudget, FamilyState};
+    loop {
+        let states = database
+            .retention_explore(input, policy, ExploreBudget { max_edges: 100_000 })
+            .unwrap();
+        if !states
+            .iter()
+            .any(|(_, state)| matches!(state, FamilyState::Exploring { .. }))
+        {
+            break;
+        }
+    }
+}
+
+/// Confirm the family of `seed` on the real database, standing in for the active core's
+/// online engine: the start-up itself no longer confirms anything.
+fn confirm_family(plan: &StartupPlan, seed: &str) {
+    use storage::thread_retention::{BindingInput, FinalizeBudget, FinalizeOutcome};
+    let policy = ThreadRetentionPolicy {
+        archived_delete_after_days: 30,
+        legacy: LegacyArchivedPolicy::Immediate,
+    };
+    let input = retention_input(plan, i64::MAX / 2);
+    let database = storage::Database::open(&storage_config(plan)).unwrap();
+    explore(&database, &input, &policy);
+    let outcome = database
+        .retention_finalize(
+            seed,
+            &input,
+            &policy,
+            &Default::default(),
+            &BindingInput {
+                ownership_root: input.ownership_root.clone(),
+                sidebar_path: input.sidebar_path.clone(),
+            },
+            FinalizeBudget {
+                max_edges: 1_000_000,
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, FinalizeOutcome::Confirmed(_)),
+        "{outcome:?}"
+    );
+}
+
 fn policy(days: u32) -> impl FnOnce(&SidebarState) -> ThreadRetentionPolicy {
     move |_| ThreadRetentionPolicy {
         archived_delete_after_days: days,
@@ -130,8 +220,6 @@ fn the_start_takes_exclusive_locks_reads_the_sidebar_runs_the_phase_and_shares_t
         stages,
         [
             Stage::Backfill,
-            Stage::Explore,
-            Stage::Finalize,
             Stage::Owners,
             Stage::Scratch,
             Stage::Oversized,
@@ -148,17 +236,13 @@ fn the_start_takes_exclusive_locks_reads_the_sidebar_runs_the_phase_and_shares_t
         .unwrap();
     assert!(2 < first_phase && last_phase < events.len() - 1);
 
-    // And: the archived legacy thread was confirmed, so the re-read tombstones hold it.
+    // And: the start-up confirmed nothing. New confirmations belong to the active
+    // core's bounded engine, so the archived legacy thread is neither confirmed nor
+    // tombstoned here.
     assert!(matches!(prelude.report.outcome, StartupOutcome::Ran { .. }));
-    assert_eq!(
-        gui::app::confirmed_threads(&prelude.report)
-            .into_iter()
-            .collect::<Vec<_>>(),
-        ["old"]
-    );
-    assert!(prelude.tombstones.contains_thread("old"));
-    assert!(!prelude.tombstones.contains_thread("live"));
-    assert!(events.iter().any(|event| matches!(
+    assert!(gui::app::confirmed_threads(&prelude.report).is_empty());
+    assert!(prelude.tombstones.is_empty());
+    assert!(!events.iter().any(|event| matches!(
         event,
         StartupEvent::Phase(StartupProgress::FamilyConfirmed { .. })
     )));
@@ -237,20 +321,29 @@ fn a_failing_start_releases_the_locks() {
 }
 
 #[test]
-fn a_restart_keeps_the_tombstone_and_confirms_nothing_twice() {
-    // Given: a first start that deleted the archived thread.
+fn a_restart_keeps_a_tombstone_confirmed_elsewhere_and_confirms_nothing_itself() {
+    // Given: a first start (which confirms nothing), then the archived thread's family
+    // confirmed by someone else, as the active core's engine does while the app runs.
     let fixture = Fixture::new();
     fixture.write_sidebar();
     let plan = fixture.plan(true);
+    let config = storage_config(&plan);
+    seed_threads(&config, &[("old", None)]);
     let (_, first) = collect(&plan, 30);
+    assert!(first.tombstones.is_empty());
     drop(first);
+    confirm_family(&plan, "old");
 
-    // When: the same sidebar is used for a second start.
+    // When: the same sidebar is used for a second and a third start.
     let (_, second) = collect(&plan, 30);
+    let (_, third) = collect(&plan, 30);
 
-    // Then: the tombstone is still there and nothing is confirmed twice.
-    assert!(second.tombstones.contains_thread("old"));
-    assert!(gui::app::confirmed_threads(&second.report).is_empty());
+    // Then: the tombstone is still there and the start-ups confirm nothing themselves.
+    for prelude in [&second, &third] {
+        assert!(prelude.tombstones.contains_thread("old"));
+        assert!(!prelude.tombstones.contains_thread("live"));
+        assert!(gui::app::confirmed_threads(&prelude.report).is_empty());
+    }
 }
 
 #[test]
@@ -293,26 +386,8 @@ fn held_family(
 ) {
     let fixture = Fixture::new();
     let plan = fixture.plan(true);
-    let config = storage::StorageConfig {
-        db_path: plan.db_path.clone(),
-        ..Default::default()
-    };
-    {
-        let storage = storage::Storage::open(config.clone()).unwrap();
-        let thread = |id: &str, parent: Option<&str>| storage::threads::ThreadUpsert {
-            thread_id: id.into(),
-            parent_thread_id: parent.map(str::to_owned),
-            lineage_kind: parent.map(|_| storage::threads::ThreadLineageKind::Fork),
-            root_run_id: Some(format!("run-{id}")),
-            created_at_ns: 1,
-            updated_at_ns: 1,
-            ..Default::default()
-        };
-        storage
-            .handle()
-            .upsert_threads_host(&[thread("parent", None), thread("child", Some("parent"))])
-            .unwrap();
-    }
+    let config = storage_config(&plan);
+    seed_threads(&config, &[("parent", None), ("child", Some("parent"))]);
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("p");
     sidebar
@@ -332,6 +407,16 @@ fn held_family(
     workspace_ui::save_sidebar(&sidebar, plan.sidebar_path.as_ref().unwrap()).unwrap();
 
     let (_, prelude) = collect(&plan, 30);
+    // The start-up explores nothing; the stored exploration the scheduler reads comes
+    // from the retention engine, here the storage exploration on the same database.
+    explore(
+        &storage::Database::open(&config).unwrap(),
+        &retention_input(&plan, i64::MAX / 2),
+        &ThreadRetentionPolicy {
+            archived_delete_after_days: 30,
+            legacy: LegacyArchivedPolicy::Immediate,
+        },
+    );
     let scheduler = gui::app::StorageRetentionScheduler {
         storage_config: config,
         ownership_root: plan.ownership_root.clone(),
@@ -352,7 +437,7 @@ fn held_family(
 #[test]
 fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
     // Given: an archived family is pinned (from its child: the pin is the family's).
-    // When: the start-up runs (it explores the family but cannot confirm it) and the
+    // When: the start-up runs, the family is explored (it cannot be confirmed) and the
     // GUI's scheduler computes the statuses.
     let (prelude, statuses) = held_family(|sidebar| {
         sidebar
@@ -377,7 +462,7 @@ fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
 fn a_family_with_a_member_whose_family_cannot_be_found_is_not_deleted_and_reads_as_held() {
     // Given: the child names a parent the sidebar does not have (the database knows it
     // under "parent"), so the sidebar cannot say whether it is archived.
-    // When: the start-up runs and the statuses are computed.
+    // When: the start-up runs, the family is explored and the statuses are computed.
     let (prelude, statuses) = held_family(|sidebar| {
         sidebar.threads[1].parent_thread_id = Some(ThreadId::new("gone"));
     });
