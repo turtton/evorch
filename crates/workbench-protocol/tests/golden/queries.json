@@ -67,6 +67,19 @@
     },
     "type": "execution"
   },
+  "execution/read_shell_output": {
+    "payload": {
+      "payload": {
+        "job_uid": "shell-uid",
+        "max_bytes": 65536,
+        "offset": 0,
+        "run": "run-1",
+        "thread": "thr-1"
+      },
+      "type": "read_shell_output"
+    },
+    "type": "execution"
+  },
   "lanes/get_lane_management": {
     "payload": {
       "payload": {

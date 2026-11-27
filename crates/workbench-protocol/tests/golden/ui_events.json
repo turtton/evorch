@@ -81,6 +81,37 @@
     },
     "type": "execution"
   },
+  "execution/shell_job_changed": {
+    "payload": {
+      "payload": {
+        "job": {
+          "command": "cargo check",
+          "exit_code": null,
+          "handle": "job-1",
+          "job_uid": "shell-uid",
+          "run": "run-1",
+          "source_call_id": "call-1",
+          "state": "running",
+          "thread": "thr-1"
+        }
+      },
+      "type": "shell_job_changed"
+    },
+    "type": "execution"
+  },
+  "execution/shell_job_output": {
+    "payload": {
+      "payload": {
+        "chunk": "tail\n",
+        "job_uid": "shell-uid",
+        "offset": 7,
+        "run": "run-1",
+        "thread": "thr-1"
+      },
+      "type": "shell_job_output"
+    },
+    "type": "execution"
+  },
   "execution/tool_finished": {
     "payload": {
       "payload": {

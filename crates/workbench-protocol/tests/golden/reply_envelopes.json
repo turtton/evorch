@@ -128,6 +128,19 @@
                 "tool_name": "shell"
               },
               "type": "tool_activity"
+            },
+            {
+              "payload": {
+                "command": "cargo check",
+                "exit_code": null,
+                "handle": "job-1",
+                "job_uid": "shell-uid",
+                "run": "run-1",
+                "source_call_id": "call-1",
+                "state": "running",
+                "thread": "thr-1"
+              },
+              "type": "shell_job"
             }
           ],
           "snapshot_revision": "99"

@@ -336,6 +336,15 @@ pub fn queries() -> Vec<Query> {
             page: page_req(),
         })),
     ];
+    values.push(Query::Execution(ExecutionQuery::ReadShellOutput(
+        workbench_protocol::namespaces::execution::shell::ReadShellOutput {
+            thread: thread(),
+            run: run(),
+            job_uid: "shell-uid".into(),
+            offset: 0,
+            max_bytes: 65536,
+        },
+    )));
     values.push(Query::Lanes(LanesQuery::GetLaneManagement {
         lane_id: workbench_protocol::lane_attention::LaneId::new("lane-1").unwrap(),
     }));
@@ -465,6 +474,14 @@ pub fn ui_events() -> Vec<UiEvent> {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged {
             thread: thread_summary(),
         }),
+        UiEvent::Execution(ExecutionEvent::ShellJobChanged { job: shell_job() }),
+        UiEvent::Execution(ExecutionEvent::ShellJobOutput {
+            thread: thread(),
+            run: run(),
+            job_uid: "shell-uid".into(),
+            offset: 7,
+            chunk: "tail\n".into(),
+        }),
         UiEvent::Execution(ExecutionEvent::RunChanged { run: run_summary() }),
         UiEvent::Execution(ExecutionEvent::ToolStarted {
             tool: tool_activity(),
@@ -541,6 +558,17 @@ pub fn query_replies() -> Vec<QueryReply> {
             queued_follow_ups: 2,
         })),
         QueryReply::Execution(ExecutionReply::Runs(page(vec![run_summary()]))),
+        QueryReply::Execution(ExecutionReply::ShellOutput(
+            workbench_protocol::namespaces::execution::shell::ShellOutput {
+                thread: thread(),
+                run: run(),
+                job_uid: "shell-uid".into(),
+                available_from: 7,
+                offset: 7,
+                chunk: "tail\n".into(),
+                output_end: 12,
+            },
+        )),
         QueryReply::Questions(QuestionsReply::Questions(page(vec![question(
             QuestionTarget::User,
         )]))),
@@ -593,6 +621,7 @@ pub fn reply_payloads() -> Vec<ReplyPayload> {
                     SnapshotItem::CoreStatus(status()),
                     SnapshotItem::Thread(thread_summary()),
                     SnapshotItem::ToolActivity(tool_activity()),
+                    SnapshotItem::ShellJob(shell_job()),
                 ],
                 next_cursor: None,
                 snapshot_revision: Revision(99),
@@ -671,5 +700,19 @@ pub fn tool_message() -> CommittedMessage {
         ..message(MessageContent::Inline {
             text: "exit code 1".into(),
         })
+    }
+}
+
+pub fn shell_job() -> workbench_protocol::namespaces::execution::shell::ShellJobView {
+    use workbench_protocol::namespaces::execution::shell::*;
+    ShellJobView {
+        thread: thread(),
+        run: run(),
+        job_uid: "shell-uid".into(),
+        handle: "job-1".into(),
+        source_call_id: Some("call-1".into()),
+        command: Some("cargo check".into()),
+        state: ShellJobState::Running,
+        exit_code: None,
     }
 }

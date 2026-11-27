@@ -16,6 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 pub mod invocation;
 pub mod plan;
+pub mod shell;
 pub use invocation::{
     EndInvocation, GetInvocation, InvocationEnded, InvocationStarted, InvocationView,
     StartInvocation,
@@ -41,11 +42,14 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "get_conversation_plan_task",
     "read_conversation_plan_history",
     "get_invocation",
+    "read_shell_output",
 ];
 pub const EVENT_TYPES: &[&str] = &[
     "run_changed",
     "tool_started",
     "tool_finished",
+    "shell_job_changed",
+    "shell_job_output",
     "thread_execution_changed",
     "conversation_plan_changed",
 ];
@@ -330,6 +334,7 @@ pub enum ExecutionQuery {
     GetConversationPlanTask(plan::PlanTaskQuery),
     ReadConversationPlanHistory(plan::PlanHistoryQuery),
     GetInvocation(GetInvocation),
+    ReadShellOutput(shell::ReadShellOutput),
 }
 
 impl ExecutionQuery {
@@ -343,6 +348,7 @@ impl ExecutionQuery {
             Self::ListRunDetails(q) => q.page.validate(),
             Self::GetRun(_) | Self::GetThreadExecution(_) | Self::GetConversationPlan(_) => Ok(()),
             Self::GetInvocation(_) => Ok(()),
+            Self::ReadShellOutput(q) => q.validate(),
             Self::ReadConversationPlanTree(q) => {
                 plan::limit(q.limit, 100)?;
                 q.cursor
@@ -372,6 +378,7 @@ pub enum ExecutionReply {
     ConversationPlanTask(Box<plan::PlanTaskRead>),
     ConversationPlanHistory(Box<plan::PlanHistoryPage>),
     Invocation(Box<InvocationView>),
+    ShellOutput(shell::ShellOutput),
 }
 
 impl ExecutionReply {
@@ -386,6 +393,7 @@ impl ExecutionReply {
             Self::ConversationPlanTask(v) => v.validate(),
             Self::ConversationPlanHistory(v) => v.validate(),
             Self::Invocation(v) => v.validate(),
+            Self::ShellOutput(v) => v.validate(),
         }
     }
 }
@@ -398,6 +406,16 @@ impl ExecutionReply {
     deny_unknown_fields
 )]
 pub enum ExecutionEvent {
+    ShellJobChanged {
+        job: shell::ShellJobView,
+    },
+    ShellJobOutput {
+        thread: ThreadId,
+        run: RunId,
+        job_uid: String,
+        offset: u64,
+        chunk: String,
+    },
     ToolStarted {
         tool: ToolActivityView,
     },
@@ -467,6 +485,22 @@ pub enum ToolActivityStatus {
 impl ExecutionEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::ShellJobChanged { job } => job.validate(),
+            Self::ShellJobOutput {
+                job_uid,
+                offset,
+                chunk,
+                ..
+            } => {
+                shell::identity(job_uid)?;
+                if offset.checked_add(chunk.len() as u64).is_none() {
+                    return Err(ValidationError::OutOfRange {
+                        field: "offset",
+                        reason: "output range overflow",
+                    });
+                }
+                check_bytes("chunk", chunk, shell::MAX_SHELL_OUTPUT_EVENT_BYTES, true)
+            }
             Self::ToolStarted { tool } => tool.validate(),
             Self::ToolFinished { call_id, .. } => {
                 check_bytes("call_id", call_id, MAX_NAME_BYTES, false)
