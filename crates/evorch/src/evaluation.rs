@@ -34,7 +34,7 @@ use workbench_protocol::{
 
 use crate::cli::core_client::{self, CliError, Rendered, Step};
 
-pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <name>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
+pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--common <overlay.toml>] [--approved-digest <hex>] [--repeat <n>] [--output <name>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
        evorch eval clean [--output <dir> ...] [--user-config <dir>] [--dry-run] [--include-unfinished]
        evorch eval report --output <name> [--output <name> ...] [--user-config <dir>] [--rejudge|--checks-only]
 `eval run` and `eval report` run in the evorch core, which is started when none is running; they
@@ -42,7 +42,13 @@ do not work without it. `eval run` replays the thread <n> times (default eval.re
 the user's configuration, then <n> times with the candidate overlay merged over it. The overlay is a
 config file fragment (the CLI reads the file and sends its text); when a role_profile is active,
 change role_profiles.<name> rather than agents or routing. It cannot change eval, tools or
-comment_checker. --problem describes what went wrong in the thread and is judged as its own aspect.
+comment_checker. --common is an overlay of only agents, routing, role_profile and role_profiles that both the
+baseline and the candidate run under (the baseline is the user's configuration with it; the candidate
+is that with the candidate overlay merged over it): use it to fix the model under evaluation on both
+sides. A candidate must change something the baseline does not have; it cannot change a role's model
+together with a tool description, and one that changes a tool description is not accepted yet.
+--approved-digest is set by eval_start: the run is refused if the sample, overlays, configuration or
+prompt presets no longer hash to the approved digest. --problem describes what went wrong in the thread and is judged as its own aspect.
 --verify runs a command in each replay's final workspace, without network, failing after
 --verify-timeout (default 600) s. The core reads its own database; there is no --db.
 The output is a directory of <user-config-dir>/eval, named by --output (a bare name, or an
@@ -81,6 +87,8 @@ pub enum Command {
 pub struct RunRequest {
     pub thread: String,
     pub candidate: Option<PathBuf>,
+    pub common: Option<PathBuf>,
+    pub approved_digest: Option<String>,
     pub repeat: Option<u32>,
     pub output: Option<PathBuf>,
     pub user_config_dir: Option<PathBuf>,
@@ -233,6 +241,8 @@ fn parse_run(mut argv: impl Iterator<Item = String>) -> Result<Command, String> 
         match flag.as_str() {
             "--thread" => thread = Some(value),
             "--candidate" => request.candidate = Some(PathBuf::from(value)),
+            "--common" => request.common = Some(PathBuf::from(value)),
+            "--approved-digest" => request.approved_digest = Some(value),
             "--repeat" => request.repeat = Some(positive("--repeat", &value)?),
             "--output" => request.output = Some(PathBuf::from(value)),
             "--db" => {
@@ -561,12 +571,23 @@ async fn run_job(request: RunRequest, root: &Path) -> Result<Rendered, CliError>
         })
         .transpose()
         .map_err(failed)?;
+    let common = request
+        .common
+        .as_deref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read common overlay {}: {error}", path.display()))
+        })
+        .transpose()
+        .map_err(failed)?;
     let operation_id = core_client::operation_id("cli-eval")?;
     let start = StartEvaluationRun {
         operation_id: operation_id.clone(),
         thread: ThreadId::new(request.thread)
             .map_err(|error| CliError::Failed(format!("--thread: {error}")))?,
         candidate,
+        common,
+        approved_digest: request.approved_digest,
         repeat: request.repeat,
         output,
         problem: request.problem,
@@ -664,6 +685,10 @@ mod tests {
             "thread-1",
             "--candidate",
             "c.toml",
+            "--common",
+            "common.toml",
+            "--approved-digest",
+            "abcdef0123456789",
             "--repeat",
             "3",
             "--output",
@@ -689,6 +714,8 @@ mod tests {
             Command::Run(RunRequest {
                 thread: "thread-1".into(),
                 candidate: Some("c.toml".into()),
+                common: Some("common.toml".into()),
+                approved_digest: Some("abcdef0123456789".into()),
                 repeat: Some(3),
                 output: Some("out".into()),
                 user_config_dir: Some("config".into()),

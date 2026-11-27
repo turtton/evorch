@@ -253,6 +253,39 @@ impl Cost {
     }
 }
 
+/// The dearest per-million price among every token kind and every input-size
+/// tier of the price set `speed` selects, or `None` when any price a request of
+/// any size could be charged at is unknown. The standard price never stands in
+/// for a missing fast one: that fallback gives a lower bound, which is no ceiling.
+fn schedule_ceiling(
+    schedule: &config::types::provider::PriceSchedule,
+    speed: config::types::provider::ModelSpeed,
+) -> Option<f64> {
+    let set = match speed {
+        config::types::provider::ModelSpeed::Fast => schedule.fast.as_ref()?,
+        config::types::provider::ModelSpeed::Standard => &schedule.standard,
+    };
+    let thresholds = std::iter::once(0_u64).chain(
+        set.tiers
+            .iter()
+            .map(|tier| tier.above_input_tokens.saturating_add(1)),
+    );
+    let mut dearest = 0.0_f64;
+    for input_tokens in thresholds {
+        let rates = set.rates_for(input_tokens);
+        for price in [
+            rates.input,
+            rates.output,
+            rates.cache_read,
+            rates.cache_write,
+        ] {
+            let price = price.filter(|price| price.is_finite())?;
+            dearest = dearest.max(price);
+        }
+    }
+    Some(dearest)
+}
+
 /// The prices of one report: the user's provider settings over models.dev.
 pub struct PriceTable {
     pricing: UsagePricing,
@@ -272,6 +305,22 @@ impl PriceTable {
 
     pub fn catalog(&self) -> Option<&ModelCatalog> {
         self.catalog.as_deref()
+    }
+
+    /// What one million tokens of `model` can cost at most, in USD: the dearest
+    /// price of any token kind (uncached input, output, cache read, cache write)
+    /// under any input-size tier that can apply, at the speed its id names.
+    /// `None` when any of those prices is unknown, so an unknown price is never
+    /// read as a cheap one.
+    pub fn ceiling_per_million(&self, model: &crate::roles::ModelRef) -> Option<f64> {
+        let provider = model
+            .provider_type
+            .map_or_else(|| model.profile.clone(), |kind| kind.as_str().to_owned());
+        let (base, speed) = config::types::provider::parse_model_speed(&model.model);
+        let (schedule, _) =
+            self.pricing
+                .comparable_pricing(&provider, Some(&model.profile), base)?;
+        schedule_ceiling(&schedule, speed)
     }
 
     /// Price every request with tokens at its own speed and input-size tier.

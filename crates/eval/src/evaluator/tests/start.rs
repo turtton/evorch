@@ -171,7 +171,7 @@ async fn unpinned_threads_and_unusable_overlays_are_refused_without_asking() {
         forbidden.content
     );
     assert!(
-        unchanged.is_error && unchanged.content.contains("changes no role"),
+        unchanged.is_error && unchanged.content.contains("changes nothing"),
         "{}",
         unchanged.content
     );
@@ -191,6 +191,8 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
         repeat,
         cost,
         project_root: PathBuf::from("/project"),
+        _probe: None,
+        sample_hash: "0123456789abcdef".into(),
     };
     let plan = [
         planned(
@@ -253,6 +255,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
 async fn a_declined_evaluation_starts_nothing() {
     // Given: a pinned sample whose original cost $2.
     let fixture = Fixture::new();
+    fixture.with_routes();
     fixture.thread("thread-1").await;
     fixture.pin("thread-1", "skipped the failing test").await;
 
@@ -276,12 +279,172 @@ async fn a_declined_evaluation_starts_nothing() {
         "Estimated total: $8.0000",
         "  worker: ",
         "temperature = 0.2",
+        "Cost and limits:",
+        "Runs: 4 replays (1 threads × baseline and candidate × repeat)",
+        "2 judged pairs",
+        "Models the agents run on: main/gpt-test",
+        "Budget per replay, over its whole delegation tree: 5000000 tokens, 500 tool calls, 20 user turns, 3600 s",
+        "up to $50.00 per replay, $200.00 for all 4 replays",
+        "not a spending limit",
+        "Billed separately, in neither figure above: the simulated user",
+        "the judge (main/gpt-test; about 3 requests per pair, so about 6 in all",
+        "Stops: a replay ends as incomplete when it reaches any budget limit",
+        "pinned: sample ",
     ] {
         assert!(summary.contains(expected), "{expected:?} in {summary}");
     }
     assert!(result.is_error && result.content.contains("nothing was started"));
     assert!(!fixture.user.path().join("eval").exists());
     assert_eq!(fixture.pending_notices(), 0);
+}
+
+#[tokio::test]
+async fn a_common_overlay_reaches_both_sides_and_is_shown_before_approval() {
+    // Given: a pinned sample, a common overlay that fixes the worker's effort and a candidate.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let common = "[agents.worker.generation]\nmax_tokens = 4000\n";
+    let approval = fixture.answer_approval(true);
+
+    // When: the evaluation is approved.
+    let result = fixture
+        .call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": CANDIDATE, "common": common, "repeat": 1}),
+        )
+        .await;
+    let shown = approval.await.unwrap();
+    let value = started(&result);
+
+    // Then: the user saw the common overlay, and the process got it as a file next to the candidate.
+    let summary = shown["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("Common overlay (both baseline and candidate):"),
+        "{summary}"
+    );
+    assert!(summary.contains("max_tokens = 4000"), "{summary}");
+    let [target] = value["evaluations"].as_array().unwrap().as_slice() else {
+        panic!("one evaluation: {value}");
+    };
+    let _ = fixture.notice().await;
+    let args = args_of(&target["dir"]);
+    let at = args.iter().position(|arg| arg == "--common").unwrap();
+    assert_eq!(std::fs::read_to_string(&args[at + 1]).unwrap(), common);
+}
+
+#[tokio::test]
+async fn a_common_overlay_may_set_only_models_and_roles() {
+    // Given: a pinned sample.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+
+    // When: the common overlay tries to change the sandbox or the budget.
+    let refused = |common: &str| {
+        fixture.call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": CANDIDATE, "common": common}),
+        )
+    };
+    let sandbox = refused("[sandbox]\nweb_tools_enabled = false\n").await;
+    let eval = refused("[eval.budget]\nmax_tokens = 1\n").await;
+
+    // Then: both are refused without asking.
+    for result in [sandbox, eval] {
+        assert!(
+            result.is_error && result.content.contains("cannot be set by a common overlay"),
+            "{}",
+            result.content
+        );
+    }
+    assert_eq!(approvals_requested(&mut events).await, 0);
+}
+
+#[tokio::test]
+async fn a_tool_description_candidate_and_a_candidate_with_no_effect_are_refused_before_asking() {
+    // Given: a pinned sample, and a candidate that rewrites a description, one that
+    // sets a description for a tool that is not a fixed builtin, and one that only
+    // restates what the baseline already has.
+    let fixture = Fixture::new();
+    fixture.with_routes();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+    let candidate =
+        |tool: &str| format!("[model_tool_descriptions.main.gpt-test]\n{tool} = \"Read files.\"\n");
+
+    // When: each is started.
+    let start = |candidate: String| {
+        fixture.call_in_run(
+            "eval_start",
+            json!({"thread_id": "thread-1", "candidate": candidate}),
+        )
+    };
+    let description = start(candidate("read")).await;
+    let run_js = start(candidate("run_js")).await;
+    let restated = start("[agents.worker]\n".into()).await;
+
+    // Then: the first waits for the judge to learn about descriptions, the others are invalid
+    // comparisons, and none reached the user.
+    assert!(
+        description.is_error && description.content.contains("judge is not yet told"),
+        "{}",
+        description.content
+    );
+    assert!(
+        run_js.is_error && run_js.content.contains("not a fixed builtin"),
+        "{}",
+        run_js.content
+    );
+    assert!(
+        restated.is_error && restated.content.contains("changes nothing"),
+        "{}",
+        restated.content
+    );
+    assert_eq!(approvals_requested(&mut events).await, 0);
+    assert!(!fixture.user.path().join("eval").exists());
+}
+
+#[tokio::test]
+async fn a_sample_changed_while_the_approval_was_pending_starts_nothing() {
+    // Given: a pinned sample, and an approval that is being answered.
+    let fixture = Fixture::new();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let mut events = fixture.bus.subscribe();
+    let bus = Arc::clone(&fixture.bus);
+
+    // When: the sample's problem is rewritten after the user was shown it, and then approved.
+    let start = fixture.call_in_run(
+        "eval_start",
+        json!({"thread_id": "thread-1", "candidate": CANDIDATE, "repeat": 1}),
+    );
+    let answer = async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                fixture.pin("thread-1", "a different problem").await;
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&call_id, true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
+                return;
+            }
+        }
+    };
+    let (result, ()) = tokio::join!(start, answer);
+
+    // Then: what was approved is not what is there, so nothing was started.
+    assert!(
+        result.is_error
+            && result
+                .content
+                .contains("changed while the approval was pending"),
+        "{}",
+        result.content
+    );
+    assert!(!fixture.user.path().join("eval").exists());
 }
 
 #[tokio::test]
@@ -325,7 +488,7 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
     assert_eq!(std::fs::read_to_string(&candidate).unwrap(), CANDIDATE);
     let dir = target["dir"].as_str().unwrap();
     assert!(Path::new(dir).starts_with(&eval), "{dir}");
-    let expected = |thread_id: &str, problem: &str, repeat: &str, dir: &str| {
+    let expected = |thread_id: &str, problem: &str, repeat: &str, dir: &str, digest: &str| {
         [
             "eval",
             "run",
@@ -333,6 +496,8 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
             thread_id,
             "--candidate",
             &candidate.display().to_string(),
+            "--approved-digest",
+            digest,
             "--problem",
             problem,
             "--repeat",
@@ -345,13 +510,45 @@ async fn an_approved_evaluation_runs_every_sample_and_reports_once() {
         .map(str::to_owned)
         .to_vec()
     };
+    let digest_of = |value: &Value| {
+        let args = args_of(value);
+        let at = args
+            .iter()
+            .position(|arg| arg == "--approved-digest")
+            .unwrap();
+        args[at + 1].clone()
+    };
+    let (target_digest, regression_digest) =
+        (digest_of(&target["dir"]), digest_of(&regression["dir"]));
+    for digest in [&target_digest, &regression_digest] {
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{digest}"
+        );
+    }
+    assert_ne!(
+        target_digest, regression_digest,
+        "each sample is approved on its own inputs"
+    );
     assert_eq!(
         args_of(&target["dir"]),
-        expected("thread-1", "skipped the failing test", "3", dir)
+        expected(
+            "thread-1",
+            "skipped the failing test",
+            "3",
+            dir,
+            &target_digest
+        )
     );
     assert_eq!(
         args_of(&regression["dir"]),
-        expected("fail-2", "slow", "1", regression["dir"].as_str().unwrap())
+        expected(
+            "fail-2",
+            "slow",
+            "1",
+            regression["dir"].as_str().unwrap(),
+            &regression_digest
+        )
     );
 
     // Then: exactly one notice reached the starting run with each evaluation's outcome,
@@ -610,4 +807,99 @@ async fn an_abandoned_launch_keeps_its_producer_permit_until_it_returns() {
     release_tx.send(()).unwrap();
     drained.await;
     assert_eq!(gate.active(), 0);
+}
+
+const TWO_PROVIDERS: &str = r#"version = 3
+
+[providers.main]
+provider_type = "openai"
+default_model = "gpt-test"
+models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0, cache_read_price = 0.2, cache_write_price = 2.5 }]
+
+[providers.child]
+provider_type = "openai"
+default_model = "gpt-child"
+models = [{ id = "gpt-child", enabled = true, input_price = 3.0, output_price = 15.0, cache_read_price = 0.3, cache_write_price = 3.5 }]
+
+[routing.routes]
+worker = [{ profile = "main", model = "gpt-test" }]
+orchestrator = [{ profile = "main", model = "gpt-test" }]
+explorer = [{ profile = "child", model = "gpt-child" }]
+
+[role_profiles.post_capture.agents.worker.generation]
+max_tokens = 123
+"#;
+
+/// What `eval_start` showed for a declined evaluation.
+async fn shown_summary(fixture: &Fixture, common: Option<&str>) -> String {
+    let approval = fixture.answer_approval(false);
+    let mut args = json!({"thread_id": "thread-1", "candidate": CANDIDATE, "repeat": 1});
+    if let Some(common) = common {
+        args["common"] = json!(common);
+    }
+    let result = fixture.call_in_run("eval_start", args).await;
+    let shown = approval.await.unwrap();
+    assert!(result.content.contains("nothing was started"));
+    shown["summary"].as_str().unwrap().to_owned()
+}
+
+fn pinned_inputs(summary: &str) -> String {
+    let at = summary.find("inputs ").expect("pinned inputs shown");
+    summary[at..].lines().next().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn the_shown_models_and_the_approved_digest_follow_the_rebuilt_start_and_every_role() {
+    // Given: a pinned sample, and an explorer that runs on a model no change touches.
+    let fixture = Fixture::new();
+    std::fs::write(fixture.user.path().join("config.toml"), TWO_PROVIDERS).unwrap();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let before = shown_summary(&fixture, None).await;
+
+    // When: the live checkout selects a role profile after the thread's start was recorded.
+    let live = fixture.project().join(".evorch");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("config.toml"), "role_profile = 'post_capture'\n").unwrap();
+    let after = shown_summary(&fixture, None).await;
+
+    // Then: the replays would not see it, so neither the digest the approval binds nor
+    // the shown models change, and the unchanged child role's model is shown and priced.
+    assert_eq!(pinned_inputs(&before), pinned_inputs(&after));
+    assert!(
+        before.contains("Models the agents run on: child/gpt-child, main/gpt-test"),
+        "{before}"
+    );
+    assert!(
+        before.contains("priced at the dearest of those models ($15.00/M tokens)"),
+        "{before}"
+    );
+}
+
+#[tokio::test]
+async fn the_simulator_and_the_judge_shown_are_the_users_not_the_common_overlays() {
+    // Given: a common overlay that moves the worker to another model for both groups.
+    let fixture = Fixture::new();
+    std::fs::write(fixture.user.path().join("config.toml"), TWO_PROVIDERS).unwrap();
+    fixture.thread("thread-1").await;
+    fixture.pin("thread-1", "skipped the failing test").await;
+    let common = "[routing.routes]\nworker = [{ profile = \"child\", model = \"gpt-child\" }]\n\
+                  orchestrator = [{ profile = \"child\", model = \"gpt-child\" }]\n";
+
+    // When: the evaluation is shown.
+    let summary = shown_summary(&fixture, Some(common)).await;
+
+    // Then: the agents run on the common overlay's model, while the simulated user and the
+    // judge, which the runner and the report resolve from the user's configuration alone,
+    // are shown on the user's models.
+    assert!(
+        summary.contains("the simulated user (main/gpt-test;"),
+        "{summary}"
+    );
+    assert!(summary.contains("the judge (main/gpt-test;"), "{summary}");
+    assert!(
+        summary.contains("Models the agents run on: child/gpt-child, main/gpt-test")
+            || summary.contains("Models the agents run on: child/gpt-child"),
+        "{summary}"
+    );
 }

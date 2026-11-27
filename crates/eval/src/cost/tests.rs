@@ -244,3 +244,111 @@ fn request_usage_serde_keeps_the_gap_and_defaults_old_data_to_reported() {
             .usage_reported
     );
 }
+
+fn manual_table(entry: config::ModelEntryConfig) -> PriceTable {
+    PriceTable::new(
+        BTreeMap::from([(
+            "manual".into(),
+            ProviderProfileConfig {
+                provider_type: ProviderTypeConfig::OpenAiCompatible,
+                models: vec![entry],
+                ..ProviderProfileConfig::default()
+            },
+        )]),
+        None,
+    )
+}
+
+fn manual_model(id: &str) -> crate::roles::ModelRef {
+    crate::roles::ModelRef {
+        profile: "manual".into(),
+        provider_type: Some(ProviderTypeConfig::OpenAiCompatible),
+        model: id.into(),
+    }
+}
+
+fn manual_entry() -> config::ModelEntryConfig {
+    config::ModelEntryConfig {
+        input_price: Some(1.0),
+        output_price: Some(10.0),
+        cache_read_price: Some(0.1),
+        cache_write_price: Some(12.0),
+        ..config::ModelEntryConfig::enabled("m")
+    }
+}
+
+#[test]
+fn the_ceiling_is_the_dearest_price_of_any_token_kind_under_any_tier() {
+    // Given: a model whose cache write costs more than its output, with a long-input tier
+    // that raises only the output price.
+    let mut entry = manual_entry();
+    entry.price_tiers = Some(vec![config::types::provider::PriceTier {
+        above_input_tokens: 200_000,
+        input: None,
+        output: Some(40.0),
+        cache_read: None,
+        cache_write: None,
+    }]);
+    let tiered = manual_table(entry);
+    let flat = manual_table(manual_entry());
+
+    // When / Then: the ceiling is the single highest price that can apply: the long-input
+    // output price, not the output price of a request with no input.
+    assert_eq!(tiered.ceiling_per_million(&manual_model("m")), Some(40.0));
+    assert_eq!(flat.ceiling_per_million(&manual_model("m")), Some(12.0));
+}
+
+#[test]
+fn a_fast_model_is_priced_at_its_fast_rates_and_an_unknown_price_makes_the_ceiling_unknown() {
+    // Given: a model with fast prices dearer than its standard ones.
+    let mut entry = manual_entry();
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(2.0),
+        output: Some(20.0),
+        cache_read: Some(0.2),
+        cache_write: Some(25.0),
+    });
+    let table = manual_table(entry);
+
+    // When / Then: the fast id uses the fast set, and a model missing any needed price
+    // (here the cache write) has no ceiling rather than a lower one.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(
+        table.ceiling_per_million(&manual_model("m+fast")),
+        Some(25.0)
+    );
+    let mut missing = manual_entry();
+    missing.cache_write_price = None;
+    let missing = manual_table(missing);
+    assert_eq!(missing.ceiling_per_million(&manual_model("m")), None);
+    assert_eq!(missing.ceiling_per_million(&manual_model("other")), None);
+}
+
+#[test]
+fn a_fast_model_without_any_fast_prices_has_no_ceiling_instead_of_the_standard_one() {
+    // Given: a model with standard prices only, so a fast request would be charged
+    // at a rate the table does not know (the standard rate is merely a lower bound).
+    let table = manual_table(manual_entry());
+
+    // When / Then: the standard id has its ceiling, the fast id has none.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(table.ceiling_per_million(&manual_model("m+fast")), None);
+}
+
+#[test]
+fn a_fast_model_missing_part_of_its_fast_prices_has_no_ceiling() {
+    // Given: fast prices that omit the cache write, which the standard set does have.
+    let mut entry = manual_entry();
+    entry.fast_price = Some(config::types::provider::ModelPricing {
+        input: Some(2.0),
+        output: Some(20.0),
+        cache_read: Some(0.2),
+        cache_write: None,
+    });
+    let table = manual_table(entry);
+
+    // When / Then: the standard set's cache write is not borrowed, so the fast id has no
+    // ceiling, while the standard id keeps its own.
+    assert_eq!(table.ceiling_per_million(&manual_model("m")), Some(12.0));
+    assert_eq!(table.ceiling_per_million(&manual_model("m+fast")), None);
+}

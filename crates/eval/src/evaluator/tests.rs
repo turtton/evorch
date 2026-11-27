@@ -21,7 +21,7 @@ const CONFIG: &str = r#"version = 3
 [providers.main]
 provider_type = "openai"
 default_model = "gpt-test"
-models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0 }]
+models = [{ id = "gpt-test", enabled = true, input_price = 2.0, output_price = 10.0, cache_read_price = 0.2, cache_write_price = 2.5 }]
 "#;
 
 /// Records notices and reloads, and answers every notice as the run's root.
@@ -84,6 +84,13 @@ impl Fixture {
             tools,
             service,
         }
+    }
+
+    /// Route the worker and the judge to the configured model, as a real configuration does.
+    fn with_routes(&self) {
+        let path = self.user.path().join("config.toml");
+        let routes = "\n[routing.routes]\nworker = [{ profile = \"main\", model = \"gpt-test\" }]\norchestrator = [{ profile = \"main\", model = \"gpt-test\" }]\n";
+        std::fs::write(&path, format!("{CONFIG}{routes}")).unwrap();
     }
 
     async fn call_in_run(&self, name: &str, args: Value) -> ToolResult {
@@ -448,6 +455,9 @@ fn manifest(finished: bool) -> Manifest {
         verify: None,
         candidate_overlay: None,
         swapped_roles: Vec::new(),
+        common_overlay: None,
+        changes: Default::default(),
+        pins: None,
         configurations: vec!["baseline".into(), "candidate".into()],
         repeat: 1,
         simulator: BindingSummary {
@@ -462,6 +472,7 @@ fn manifest(finished: bool) -> Manifest {
             index: 1,
             dir: "runs/baseline-1".into(),
             nonce: "nonce".into(),
+            observed: None,
             started_at: "2026-10-20T00:00:00.000Z".into(),
             finished_at: finished.then(|| "2026-10-20T00:10:00.000Z".into()),
             status: None,

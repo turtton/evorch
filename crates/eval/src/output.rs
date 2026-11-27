@@ -10,8 +10,11 @@ use chrono::{DateTime, Utc};
 use config::{EvalBudgetConfig, RoleBindingConfig};
 use serde::{Deserialize, Serialize};
 
+use crate::changes::Changes;
 use crate::conversation::Entry;
 use crate::driver::{DeniedRequest, Status};
+use crate::metrics::ModelUse;
+use crate::pins::Pins;
 use crate::roles::SwappedRole;
 use crate::source::{OriginalThread, UserTurn};
 use crate::verify::Verification;
@@ -113,6 +116,29 @@ pub struct RunEntry {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub status: Option<Status>,
+    /// What the replay actually used, read from its database when it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Observed>,
+}
+
+/// The models and frozen tool descriptions a replay's runs really used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Observed {
+    pub models: Vec<ModelUse>,
+    /// Only runs that froze a tool description snapshot are listed.
+    pub tool_descriptions: Vec<AppliedDescriptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedDescriptions {
+    pub run_id: String,
+    pub role: String,
+    pub profile: Option<String>,
+    pub route_model_id: Option<String>,
+    /// The snapshot's own hash, as the runtime froze it.
+    pub hash: String,
+    /// The tools the snapshot overrides; empty when it is the empty snapshot.
+    pub tools: Vec<String>,
 }
 
 /// The sample an evaluation was started for, as it was when the evaluation
@@ -154,9 +180,20 @@ pub struct Manifest {
     pub verify: Option<String>,
     /// The candidate overlay as given, or `None` when only the baseline runs.
     pub candidate_overlay: Option<String>,
+    /// The overlay both configurations run under, as given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_overlay: Option<String>,
     /// Roles the overlay changes, with the models each side resolves them to.
+    /// Role binding differences only: see `changes` for the rest.
     #[serde(default)]
     pub swapped_roles: Vec<SwappedRole>,
+    /// Everything the candidate changes: bindings, tool descriptions and the
+    /// roles they can reach.
+    #[serde(default)]
+    pub changes: Changes,
+    /// The hashes, build and model identity the evaluation was started on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins: Option<Pins>,
     pub configurations: Vec<String>,
     pub repeat: u32,
     pub simulator: BindingSummary,
