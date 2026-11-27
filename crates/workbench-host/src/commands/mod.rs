@@ -434,9 +434,9 @@ impl CommandService {
         self.poll_compactions()
     }
 
-    /// The permit for `thread` (none without an ownership host or a thread): the same
-    /// lookup every command starts with, for the desktop operations that are not host
-    /// commands.
+    /// Read-only permit lookup for desktop operations that are not host commands
+    /// (none without an ownership host or a thread). Execution
+    /// authorization separately permits reclaiming abandoned ownership.
     pub fn permit_for_thread(
         &self,
         thread: Option<&str>,
@@ -457,7 +457,13 @@ impl CommandService {
         &self,
         command: &HostCommand,
     ) -> Result<Option<runtime::ownership::OwnerPermit>, HostEvent> {
-        self.permit_for_thread(command.thread())
+        let Some(host) = &self.ownership else {
+            return Ok(None);
+        };
+        command
+            .thread()
+            .map(|thread| host.owned_or_claim_abandoned(thread))
+            .transpose()
             .map_err(|error| HostEvent::rejected(RejectKind::Fenced, error.to_string()))
     }
 
