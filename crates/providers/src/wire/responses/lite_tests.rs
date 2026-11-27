@@ -305,7 +305,6 @@ fn openai_dialect_ignores_codex_capabilities() {
     };
     assert_eq!(build(None), build(Some(astra())));
 }
-
 fn schema_request(schema: Value) -> ChatRequest {
     serde_json::from_value(json!({
         "model": "gpt-6.2-astra",
@@ -323,15 +322,18 @@ fn has_key(value: &Value, key: &str) -> bool {
     }
 }
 
-// Given: a tool schema that uses keywords strict structured outputs does not implement
-// (nested in properties, items and anyOf) next to ones it accepts, plus a property that is
-// merely named `uniqueItems`
-// When: serialized for Codex, with a Lite model, a non-Lite model, and without a catalog
-// Then: no unsupported keyword is left, accepted keywords and the property survive,
-// and the canonical tool definition is untouched
-#[test]
-fn codex_tool_schemas_drop_keywords_strict_mode_rejects() {
-    let schema = json!({
+/// The first function tool of a serialized request, wherever the shape puts it.
+fn first_tool_parameters(request: &Value) -> Value {
+    let tool = if request.get("tools").is_some() {
+        &request["tools"][0]
+    } else {
+        &request["input"][0]["tools"][0]["tools"][0]
+    };
+    tool["parameters"].clone()
+}
+
+fn mixed_schema() -> Value {
+    json!({
         "type": "object",
         "properties": {
             "ids": {"type": "array", "uniqueItems": true, "minItems": 1, "maxItems": 8,
@@ -342,53 +344,73 @@ fn codex_tool_schemas_drop_keywords_strict_mode_rejects() {
             "uniqueItems": {"type": "boolean", "default": {"uniqueItems": true}}
         },
         "required": ["ids"],
-        "additionalProperties": false
-    });
-    let request = schema_request(schema.clone());
-    for model in [Some(astra()), Some(CodexModelCapabilities::default()), None] {
-        let value = wire_with(&request, model);
-        let tool = if value.get("tools").is_some() {
-            value["tools"][0].clone()
-        } else {
-            value["input"][0]["tools"][0]["tools"][0].clone()
-        };
-        let parameters = &tool["parameters"];
-        assert!(!has_key(&parameters["properties"]["ids"], "uniqueItems"));
-        assert!(!has_key(&parameters["properties"]["nested"], "uniqueItems"));
-        assert!(!has_key(
-            &parameters["properties"]["nested"],
-            "minProperties"
-        ));
-        let ids = &parameters["properties"]["ids"];
-        assert_eq!(ids["minItems"], 1);
-        assert_eq!(ids["maxItems"], 8);
-        assert_eq!(
-            ids["items"],
-            json!({"type": "string", "minLength": 1, "pattern": "^a"})
-        );
-        assert_eq!(
-            parameters["properties"]["uniqueItems"],
-            json!({"type": "boolean", "default": {"uniqueItems": true}})
-        );
-        assert_eq!(parameters["required"], json!(["ids"]));
-    }
-    assert_eq!(request.tools[0].input_schema, schema);
+        "additionalProperties": false,
+        "allOf": [{
+            "if": {"properties": {"ids": {"minItems": 2}}},
+            "then": {"required": ["nested"], "not": {"required": ["uniqueItems"]}},
+            "else": {"required": ["uniqueItems"]}
+        }],
+        "oneOf": [{"required": ["ids"]}, {"not": {"required": ["ids"]}}]
+    })
 }
 
-// Given: the same schema / When: serialized for the official OpenAI dialect
-// Then: it is sent as is (the tool is not strict there, so every keyword is accepted)
+// Given: a schema with keywords the Lite strict check rejects (uniqueItems, if/then/else,
+// minProperties), nested in properties, items, anyOf and allOf, next to keywords it accepted
+// (allOf, anyOf, oneOf, not, min/max items and length, pattern), plus a property that is
+// merely named `uniqueItems`
+// When: serialized for a Lite Codex model
+// Then: the rejected keywords are gone everywhere, the accepted ones and the property
+// survive, and the canonical tool definition is untouched
 #[test]
-fn openai_dialect_keeps_tool_schemas_untouched() {
-    let schema = json!({"type": "object", "properties": {
-        "ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}}});
-    let value = serde_json::to_value(to_wire_request(
-        &schema_request(schema.clone()),
+fn lite_tool_schemas_drop_only_the_keywords_the_backend_rejects() {
+    let request = schema_request(mixed_schema());
+    let parameters = first_tool_parameters(&wire_with(&request, Some(astra())));
+
+    for key in ["if", "then", "else", "minProperties"] {
+        assert!(!has_key(&parameters["allOf"], key), "{key}");
+    }
+    assert!(!has_key(&parameters["properties"]["ids"], "uniqueItems"));
+    assert!(!has_key(&parameters["properties"]["nested"], "uniqueItems"));
+    assert!(!has_key(
+        &parameters["properties"]["nested"],
+        "minProperties"
+    ));
+    let ids = &parameters["properties"]["ids"];
+    assert_eq!(ids["minItems"], 1);
+    assert_eq!(ids["maxItems"], 8);
+    assert_eq!(
+        ids["items"],
+        json!({"type": "string", "minLength": 1, "pattern": "^a"})
+    );
+    assert_eq!(
+        parameters["properties"]["uniqueItems"],
+        json!({"type": "boolean", "default": {"uniqueItems": true}})
+    );
+    assert!(parameters["properties"]["nested"]["properties"]["tags"]["items"]["anyOf"].is_array());
+    assert_eq!(parameters["oneOf"], mixed_schema()["oneOf"]);
+    assert!(parameters["allOf"].is_array());
+    assert_eq!(parameters["required"], json!(["ids"]));
+    assert_eq!(request.tools[0].input_schema, mixed_schema());
+}
+
+// Given: the same schema / When: serialized without Lite (a non-Lite model or no catalog)
+// or with the official OpenAI dialect
+// Then: it is sent as is, so established conversations keep their cached tool prefix
+#[test]
+fn non_lite_and_openai_tool_schemas_are_untouched() {
+    let request = schema_request(mixed_schema());
+    for model in [Some(CodexModelCapabilities::default()), None] {
+        let parameters = first_tool_parameters(&wire_with(&request, model));
+        assert_eq!(parameters, mixed_schema());
+    }
+    let openai = serde_json::to_value(to_wire_request(
+        &request,
         &ResponsesRequestOptions {
             dialect: ResponsesDialect::OpenAi,
             prompt_cache_key: None,
-            codex_model: None,
+            codex_model: Some(astra()),
         },
     ))
     .unwrap();
-    assert_eq!(value["tools"][0]["parameters"], schema);
+    assert_eq!(first_tool_parameters(&openai), mixed_schema());
 }

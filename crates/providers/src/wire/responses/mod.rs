@@ -431,13 +431,15 @@ impl ResponsesDialect {
         }
     }
 
-    /// function tool の `parameters`。Codex backend は tool の schema を strict structured
-    /// outputs の subset として検査し、未実装の keyword (`uniqueItems` など) を
-    /// `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は検証用の完全な schema を
-    /// 持つため、Codex には送信直前に非対応 keyword を除いた写しを送ります。
-    fn tool_parameters(self, schema: &serde_json::Value) -> serde_json::Value {
+    /// function tool の `parameters`。Responses Lite (`additional_tools` の namespace) では
+    /// Codex backend が tool の schema を strict 検査し、未実装の keyword (`uniqueItems`、
+    /// `if` / `then` / `else`) を `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は
+    /// 検証用の完全な schema を持つため、送信直前に非対応 keyword を除いた写しを送ります。
+    /// この拒否は Lite の namespace tool でしか観測されていないため、top-level `tools` を使う
+    /// 要求と他 dialect の schema は変えません (送信済みの cache prefix を保つ)。
+    fn tool_parameters(self, schema: &serde_json::Value, lite: bool) -> serde_json::Value {
         let mut parameters = schema.clone();
-        if self == Self::Codex {
+        if self == Self::Codex && lite {
             strip_unsupported_keywords(&mut parameters);
         }
         parameters
@@ -542,7 +544,7 @@ fn convert_request(
     sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
     let tools: Vec<_> = sorted_tools
         .into_iter()
-        .map(|tool| to_wire_tool(tool, dialect))
+        .map(|tool| to_wire_tool(tool, dialect, lite))
         .collect();
     let (mut tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty(), lite);
     if tool_choice.is_some() && request.tool_choice == Some(crate::message::ToolChoice::None) {
@@ -656,7 +658,7 @@ fn instructions(request: &ChatRequest) -> String {
 }
 
 /// canonical tool を wire tool へ変換する唯一の地点。
-fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
+fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect, lite: bool) -> Tool {
     if tool.name == NAME && tool.input_schema == json_schema() {
         return Tool::Custom(CustomTool {
             name: NAME,
@@ -671,17 +673,27 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
     Tool::Function(FunctionTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
-        parameters: dialect.tool_parameters(&tool.input_schema),
+        parameters: dialect.tool_parameters(&tool.input_schema, lite),
         strict: dialect.function_strict(),
     })
 }
 
-/// strict structured outputs が実装していない JSON Schema keyword。`uniqueItems` は
-/// Codex backend が実際に拒否した keyword で、残りは OpenAI の structured outputs
-/// 文書が「未対応」とする配列・object 向けの keyword。`minItems` / `maxItems` /
-/// `minLength` / `maxLength` / `pattern` などは受理されるため、ここには含めません。
+/// Lite の strict 検査が実装していない JSON Schema keyword。
+///
+/// `uniqueItems` と `if` / `then` / `else` は backend が `Unimplemented keys` として実際に
+/// 報告したもの。残りは現在の tool に現れず、OpenAI の structured outputs 文書が未対応とする
+/// keyword (MCP tool などが持ち込みうる)。
+///
+/// `allOf` / `anyOf` / `oneOf` / `not` / `minItems` / `maxItems` / `minLength` / `maxLength` /
+/// `pattern` は、現行 tool が `uniqueItems` や `if` と同時に持っていても backend の報告に
+/// 含まれなかった (受理されている) ため、送信済みの schema を変えないよう残します。
 const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &[
     "uniqueItems",
+    "if",
+    "then",
+    "else",
+    "dependentRequired",
+    "dependentSchemas",
     "contains",
     "minContains",
     "maxContains",
