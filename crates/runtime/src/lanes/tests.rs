@@ -952,3 +952,67 @@ async fn lane_model_switch_keeps_fixed_schema_and_rejects_nested_open() {
         f.cancel(id).await;
     }
 }
+#[tokio::test]
+async fn a_lane_is_titled_from_its_objective_and_neither_a_retry_nor_a_rename_changes_it() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let mut titled = brief();
+    titled.objective = "  調べて   報告する\nsecond line is not the title".into();
+    let lane = f.runtime.open_lane(lead, "titled", titled.clone()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let title = |f: &Fixture| {
+        f.runtime
+            .with_storage_reader(|db| db.thread(&lane.thread_id))
+            .unwrap()
+            .flatten()
+            .and_then(|row| row.title)
+    };
+    assert_eq!(title(&f).as_deref(), Some("調べて 報告する"));
+
+    let retry = f.runtime.open_lane(lead, "titled", titled.clone()).unwrap();
+    assert!(!retry.created);
+    assert_eq!(title(&f).as_deref(), Some("調べて 報告する"));
+
+    f.storage
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: lane.thread_id.clone(),
+            title: Some("Renamed by the user".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    f.runtime.open_lane(lead, "titled", titled).unwrap();
+    assert_eq!(title(&f).as_deref(), Some("Renamed by the user"));
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+
+#[tokio::test]
+async fn a_lane_thread_continues_at_the_ledgers_root_and_any_other_thread_has_none() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let lane = f.runtime.open_lane(lead, "continued", brief()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    assert_eq!(
+        f.runtime.lane_continuation_root(&lane.thread_id).unwrap(),
+        Some(lane.root_run_id)
+    );
+    assert_eq!(f.runtime.lane_continuation_root("lead").unwrap(), None);
+    let worker = f.runtime.delegate_chat(
+        &lane.thread_id,
+        Role::Worker,
+        "take over".into(),
+        RunConfig {
+            conversation: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        worker.is_err(),
+        "a lane thread never gets a root that cannot report"
+    );
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}

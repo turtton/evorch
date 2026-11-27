@@ -78,6 +78,14 @@ struct Service {
     scratch_hint: Option<ScratchHint>,
 }
 
+/// What the ledger and the `threads` table already hold of a lane whose thread the sidebar
+/// is about to list.
+struct LaneMaterial {
+    title: String,
+    /// Seconds since the epoch.
+    created_at: i64,
+}
+
 /// A conversation the core created, to be listed in the sidebar.
 pub struct NewThread<'a> {
     pub project: &'a WireProject,
@@ -414,6 +422,41 @@ fn not_found(text: &str) -> WorkbenchError {
 }
 
 impl Service {
+    /// What listing an existing lane's thread needs from the ledger, or `None` for a thread
+    /// that is not a lane (or when no ledger is wired).
+    fn lane_materialization(&self, thread: &str) -> Result<Option<LaneMaterial>, String> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(None);
+        };
+        runtime
+            .with_storage_reader(|db| {
+                let Some(lane) = db.lane_by_thread(thread)? else {
+                    return Ok(None);
+                };
+                let row = db.thread(thread)?;
+                let title = row
+                    .as_ref()
+                    .and_then(|row| row.title.as_deref())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map_or_else(
+                        || runtime::thread_title::fallback_title(&lane.brief.objective),
+                        str::to_owned,
+                    );
+                let created_ns = row
+                    .as_ref()
+                    .map(|row| row.created_at_ns)
+                    .filter(|at| *at > 0)
+                    .unwrap_or(lane.created_at_ns);
+                Ok(Some(LaneMaterial {
+                    title,
+                    created_at: created_ns.max(0) / 1_000_000_000,
+                }))
+            })
+            .map(Option::flatten)
+            .map_err(|error| format!("the lane ledger could not be read: {error}"))
+    }
+
     fn register_thread(&self, new: &NewThread<'_>) -> Result<(), String> {
         let id = ThreadId::new(new.thread.as_str());
         if self
@@ -453,8 +496,16 @@ impl Service {
                 .add_project(project.clone(), &name, root)
                 .map_err(|e| e.to_string())?;
         }
-        let title = new.title_hint.lines().next().unwrap_or("").trim();
-        let title: String = title.chars().take(80).collect();
+        // An existing lane is listed as it already is (its stored title, creation time and
+        // Orchestrator root); the message that happened to reach it first is no title.
+        let lane = self.lane_materialization(new.thread.as_str())?;
+        let title = match &lane {
+            Some(lane) => lane.title.clone(),
+            None => {
+                let first = new.title_hint.lines().next().unwrap_or("").trim();
+                first.chars().take(80).collect()
+            }
+        };
         document
             .sidebar
             .create_thread(
@@ -467,19 +518,25 @@ impl Service {
                 },
             )
             .map_err(|e| e.to_string())?;
-        let parent = new.fork.as_ref().and_then(|(run, _)| {
-            self.runtime
-                .as_ref()?
-                .with_storage_reader(|db| db.thread_of_run(run))
-                .ok()
-                .flatten()
-                .and_then(|row| row.map(|row| row.thread_id))
-        });
-        let now = now_seconds();
+        let parent = new
+            .fork
+            .as_ref()
+            .filter(|_| lane.is_none())
+            .and_then(|(run, _)| {
+                self.runtime
+                    .as_ref()?
+                    .with_storage_reader(|db| db.thread_of_run(run))
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.map(|row| row.thread_id))
+            });
+        let now = lane
+            .as_ref()
+            .map_or_else(now_seconds, |lane| lane.created_at);
         if let Some(record) = document.sidebar.threads.iter_mut().find(|t| t.id == id) {
             record.title_is_placeholder = title.is_empty();
             record.created_at = now;
-            record.chat_role = Some(if new.orchestrator {
+            record.chat_role = Some(if lane.is_some() || new.orchestrator {
                 ThreadChatRole::Orchestrator
             } else {
                 ThreadChatRole::Worker

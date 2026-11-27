@@ -300,6 +300,9 @@ impl AgentRuntime {
             project_root: config.project_root.clone(),
             requires_ownership: config.ownership.is_some(),
         };
+        // Only a new lane stores this; a creation-key retry returns the stored lane
+        // and its title (a user rename included) unchanged.
+        let title = crate::thread_title::fallback_title(&brief.objective);
         let creation = store.handle.create_lane(NewLane {
             lane_id: format!("lane-{run_id}"),
             thread_id: format!("lane-thread-{run_id}"),
@@ -314,7 +317,7 @@ impl AgentRuntime {
                 .project_root
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
-            title: None,
+            title: Some(title),
             at_ns: self.lane_activity_time(),
         })?;
         let (run_id, scheduled) = self.start_lane_intent(&creation.lane, &config)?;
@@ -326,6 +329,34 @@ impl AgentRuntime {
             policy: creation.lane.policy,
             created: creation.created,
             started,
+        })
+    }
+
+    /// The root that a message sent to `thread` continues, when `thread` is a lane's: the lane
+    /// ledger's current root, whatever a host binding or a saved chat name says. A lane has one
+    /// conversation root, an Orchestrator under the lane scope, and report and close are
+    /// authorized against exactly that run; a message must never start another root.
+    /// `None` for a thread that is not a lane.
+    ///
+    /// # Errors
+    /// `lane_starting` while the lane has no root yet, `lane_unavailable` when the ledger names
+    /// no usable root, and a storage failure. A caller refuses the message on any of them
+    /// rather than starting a conversation of its own.
+    pub fn lane_continuation_root(&self, thread: &str) -> Result<Option<RunId>, LaneError> {
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(None);
+        };
+        let Some(lane) = store.handle.lane_by_thread(thread)? else {
+            return Ok(None);
+        };
+        let root = lane.root_run_id.as_deref().ok_or_else(|| {
+            LaneError::new("lane_starting", "the lane has not started its root yet")
+        })?;
+        root.parse().map(Some).map_err(|error| {
+            LaneError::new(
+                "lane_unavailable",
+                format!("the lane ledger names an unusable root: {error}"),
+            )
         })
     }
 

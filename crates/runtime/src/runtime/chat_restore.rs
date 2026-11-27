@@ -828,6 +828,16 @@ impl AgentRuntime {
                 }
             })?;
             if lane.is_some() {
+                // A lane's conversation root is an Orchestrator: report and close are
+                // authorized against that role, so a Worker root here could never report.
+                if role != Role::Orchestrator {
+                    return Err(RuntimeError::RunRestoreFailed {
+                        run_id: format!("chat:{thread_id}"),
+                        reason: RunRestoreFailure::UnsupportedConfig(
+                            "a lane thread can only be continued by its Orchestrator root".into(),
+                        ),
+                    });
+                }
                 config.lane_scope = Some(event_bus::LaneScope::Lane);
             }
         }

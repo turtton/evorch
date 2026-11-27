@@ -106,6 +106,27 @@ impl CommandService {
             initial.project_root = self.bindings.thread_roots.get(&thread_id).cloned();
         }
         initial.memory = self.capture_memory(initial.project_root.as_deref());
+        // A lane thread has one conversation root, the lane ledger's, which report and close
+        // are authorized against. Resolve it ahead of every binding and saved-chat lookup, and
+        // never answer a failure here by starting another root.
+        let lane_thread = match self.runtime.lane_continuation_root(&thread_id) {
+            Ok(None) => false,
+            Ok(Some(root)) => {
+                self.bindings.chat_runs.insert(thread_id.clone(), root);
+                true
+            }
+            Err(error) => {
+                return vec![HostEvent::ChatRejected {
+                    kind: if error.code == "lane_starting" {
+                        RejectKind::Busy
+                    } else {
+                        RejectKind::Failed
+                    },
+                    thread_id,
+                    reason: error.to_string(),
+                }];
+            }
+        };
         let mut resume_observation = None;
         if resume_only {
             if !self.bindings.chat_runs.contains_key(&thread_id)
@@ -248,7 +269,11 @@ impl CommandService {
                         text: "Automatic continuation was not applied: the conversation is stopped or its pending report/question was already handled. Continue explicitly if needed.".into(),
                     }];
                 }
-                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
+                Err(error)
+                    if !resume_only
+                        && !lane_thread
+                        && self.can_restart_stopped(&thread_id, &error) =>
+                {
                     self.bindings.stop_marked.remove(&thread_id);
                     self.bindings.stopped_by_us.remove(&thread_id);
                     self.bindings.chat_runs.remove(&thread_id);
@@ -264,6 +289,7 @@ impl CommandService {
         }
         if let Some(permit) = &permit {
             if !resume_only
+                && !lane_thread
                 && self
                     .bindings
                     .chat_permits
@@ -335,7 +361,11 @@ impl CommandService {
                         text: "Automatic continuation was not applied: the conversation is stopped or its pending report/question was already handled. Continue explicitly if needed.".into(),
                     }];
                 }
-                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
+                Err(error)
+                    if !resume_only
+                        && !lane_thread
+                        && self.can_restart_stopped(&thread_id, &error) =>
+                {
                     self.bindings.stop_marked.remove(&thread_id);
                     self.bindings.stopped_by_us.remove(&thread_id);
                     self.bindings.chat_runs.remove(&thread_id);
