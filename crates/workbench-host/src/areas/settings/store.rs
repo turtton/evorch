@@ -677,6 +677,29 @@ mod tests {
     const WITH_TARGET: &str = "version = 2\n[core.restart.targets.web]\npath = \"/usr/bin/true\"\n";
 
     #[test]
+    fn the_wire_inference_of_a_model_kind_is_the_one_of_the_configuration() {
+        for id in [
+            "gpt-image-2",
+            "GPT-IMAGE-1",
+            " dall-e-3",
+            "chatgpt-image-latest",
+            "gpt-5",
+            "image-gpt",
+            "",
+        ] {
+            let wire = match config::ModelKind::infer(id) {
+                config::ModelKind::Chat => ModelKind::Chat,
+                config::ModelKind::ImageGeneration => ModelKind::ImageGeneration,
+            };
+            assert_eq!(ModelKind::infer(id), wire, "{id:?}");
+        }
+        assert_eq!(
+            workbench_protocol::namespaces::settings::IMAGE_GENERATION_MODEL_PREFIXES,
+            config::types::provider::IMAGE_GENERATION_MODEL_PREFIXES
+        );
+    }
+
+    #[test]
     fn the_local_view_never_reads_a_neighbour_of_the_real_directory() {
         let a = local_view("[core]\nidle_grace_secs = 7\n").unwrap();
         assert_eq!(a.core.idle_grace_secs, 7);

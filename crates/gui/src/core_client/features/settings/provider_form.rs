@@ -100,10 +100,7 @@ pub(super) struct ModelRow {
 }
 
 fn inferred_kind(id: &str) -> ModelKind {
-    match config::ModelKind::infer(id) {
-        config::ModelKind::Chat => ModelKind::Chat,
-        config::ModelKind::ImageGeneration => ModelKind::ImageGeneration,
-    }
+    ModelKind::infer(id)
 }
 
 /// A context window as the table shows it: `400k` when it is a whole number of thousands.

@@ -187,6 +187,27 @@ pub enum ModelKind {
     ImageGeneration,
 }
 
+/// Ids that start with one of these (case-insensitively) are image models when no kind is
+/// written. The core's own inference (`config::ModelKind::infer`) is the truth; a test of the
+/// host keeps the two equal.
+pub const IMAGE_GENERATION_MODEL_PREFIXES: &[&str] = &["gpt-image-", "chatgpt-image-", "dall-e-"];
+
+impl ModelKind {
+    /// The kind the core gives a model whose kind is not written.
+    pub fn infer(model_id: &str) -> Self {
+        let id = model_id.trim();
+        let image = IMAGE_GENERATION_MODEL_PREFIXES.iter().any(|prefix| {
+            id.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        });
+        if image {
+            Self::ImageGeneration
+        } else {
+            Self::Chat
+        }
+    }
+}
+
 /// Largest context override a model may carry, in tokens.
 pub const MAX_CONTEXT_OVERRIDE: u64 = 100_000_000;
 
