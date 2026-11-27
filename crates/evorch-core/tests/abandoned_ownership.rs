@@ -25,6 +25,7 @@ const TEXT: &str = "abandoned-owner durable supplement";
 #[derive(Default)]
 struct Model {
     source: bool,
+    source_lead: Mutex<Option<String>>,
     scripted: Mutex<HashMap<String, Value>>,
     seen: Mutex<HashMap<String, String>>,
     received: tokio::sync::Notify,
@@ -56,18 +57,25 @@ impl AgentModel for Model {
             .lock()
             .unwrap()
             .insert(invocation.run_id.clone(), body.clone());
-        if body.contains(TEXT) {
-            self.received.notify_one();
-        }
+        self.received.notify_one();
         let script = self.scripted.lock().unwrap().remove(&invocation.run_id);
+        // Both the lead and an independent lane root are Orchestrators. Identify
+        // the fixture lane by run identity, never by text or role alone.
+        let source_lane = self.source
+            && self
+                .source_lead
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|lead| lead != invocation.run_id);
         let tool = if let Some(input) = script {
             Some(("lane_send", input))
-        } else if self.source && body.contains("abandoned-Done") {
+        } else if source_lane && body.contains("abandoned-Done") {
             Some(("finish", json!({"result":"complete"})))
         } else {
             None
         };
-        if self.source && body.contains("abandoned-Error") {
+        if source_lane && body.contains("abandoned-Error") {
             return Err(RuntimeError::Model {
                 reason: "saved lane error fixture".into(),
             });
@@ -130,10 +138,9 @@ async fn phase(runtime: &runtime::AgentRuntime, run: RunId, wanted: AgentRunPhas
             if agent.phase == wanted {
                 return;
             }
-            assert_ne!(
-                agent.phase,
-                AgentRunPhase::Error,
-                "unexpected error: {agent:?}"
+            assert!(
+                !matches!(agent.phase, AgentRunPhase::Done | AgentRunPhase::Error),
+                "unexpected terminal phase while awaiting {wanted:?}: {agent:?}"
             );
         }
         events.recv().await.unwrap();
@@ -163,21 +170,17 @@ fn expire(registry: &mut Registry, thread: &str) -> ThreadOwner {
         })
         .unwrap()
 }
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "private subprocess entry point"]
 async fn abandoned_subprocess_worker() {
     let root = std::path::PathBuf::from(std::env::var_os("ABANDONED_ROOT").unwrap());
     let sockets = std::path::PathBuf::from(std::env::var_os("ABANDONED_SOCKETS").unwrap());
     let saved = std::env::var("ABANDONED_PHASE").unwrap();
-    let host = open(
-        &root,
-        &sockets,
-        Arc::new(Model {
-            source: true,
-            ..Default::default()
-        }),
-    )
-    .await;
+    let model = Arc::new(Model {
+        source: true,
+        ..Default::default()
+    });
+    let host = open(&root, &sockets, model.clone()).await;
     let permit = host.owner.start("lead").unwrap();
     let lead = host
         .runtime
@@ -195,6 +198,7 @@ async fn abandoned_subprocess_worker() {
             },
         )
         .unwrap();
+    *model.source_lead.lock().unwrap() = Some(lead.to_string());
     phase(&host.runtime, lead, AgentRunPhase::Waiting).await;
     let lane = host.runtime.open_lane(lead, "lane-key", serde_json::from_value(json!({
         "objective":format!("abandoned-{saved}"), "inputs":[], "deliverables":["patch"],
@@ -212,6 +216,25 @@ async fn abandoned_subprocess_worker() {
         "Checkpoint" => phase(&host.runtime, lane.root_run_id, AgentRunPhase::Waiting).await,
         _ => panic!("unknown phase"),
     }
+    // Force the lead to observe the lane outcome before SIGKILL too. The fixture
+    // must not interpret a lane marker in the lead history as a command to finish
+    // or fail the lead; report delivery can otherwise race the checkpoint.
+    let report = format!("lane outcome mentions abandoned-{saved}");
+    host.runtime.send_message(lead, report.clone()).unwrap();
+    loop {
+        let notified = model.received.notified();
+        if model
+            .seen
+            .lock()
+            .unwrap()
+            .get(&lead.to_string())
+            .is_some_and(|body| body.contains(&report))
+        {
+            break;
+        }
+        notified.await;
+    }
+    phase(&host.runtime, lead, AgentRunPhase::Waiting).await;
     assert_eq!(
         host.runtime
             .restore_diagnostics(lane.root_run_id)
@@ -267,6 +290,7 @@ async fn killed_lane(saved: &str) {
             break serde_json::from_str(json).unwrap();
         }
     };
+    eprintln!("{saved}: source checkpoint {checkpoint}");
     child.start_kill().unwrap();
     assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
     let thread = checkpoint["thread"].as_str().unwrap();
@@ -300,6 +324,7 @@ async fn killed_lane(saved: &str) {
     };
     let model = Arc::new(Model::default());
     let mut host = open(dir.path(), dir.sockets(), model.clone()).await;
+    eprintln!("{saved}: successor opened");
     // No committed manifest exists. Startup must NOT be the path that claims either row.
     assert_eq!(registry.attach(thread).unwrap(), before);
     assert_eq!(
@@ -310,6 +335,7 @@ async fn killed_lane(saved: &str) {
     expire(&mut registry, "lead");
     continue_thread(&host, "lead", lead);
     phase(&host.runtime, lead, AgentRunPhase::Waiting).await;
+    eprintln!("{saved}: lead continued");
     let writer = host.composition.storage_writer.clone();
     let record = writer.lane(lane).unwrap().unwrap();
     let request = json!({"operation_id":"supplement", "lane_id":lane,
@@ -365,6 +391,7 @@ async fn killed_lane(saved: &str) {
             .send_message(lead, "send the supplement".into())
             .unwrap();
     }
+    eprintln!("{saved}: delivery requested");
     loop {
         let notified = model.received.notified();
         if model
@@ -378,7 +405,9 @@ async fn killed_lane(saved: &str) {
         }
         notified.await;
     }
+    eprintln!("{saved}: supplement observed");
     phase(&host.runtime, run, AgentRunPhase::Waiting).await;
+    eprintln!("{saved}: receiver waiting");
     let claimed = registry.attach(thread).unwrap();
     assert_eq!(claimed.lease.owner_id, host.owner.owner_id());
     assert_eq!(claimed.lease.generation, killed.lease.generation + 1);
@@ -427,15 +456,15 @@ async fn killed_lane(saved: &str) {
         "successor must not unlink predecessor socket"
     );
 }
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn sigkill_done_lane_is_claimed_and_receives_lane_send() {
     killed_lane("Done").await;
 }
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn sigkill_error_lane_is_claimed_and_receives_lane_send() {
     killed_lane("Error").await;
 }
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn sigkill_checkpoint_lane_continue_claims_and_delivers_pending_instruction() {
     killed_lane("Checkpoint").await;
 }

@@ -36,6 +36,10 @@ fn table() -> BTreeMap<&'static str, Guard> {
             Guarded { via: &["attach"] },
         ),
         (
+            "ownership/host.rs::owned_or_claim_abandoned",
+            Guarded { via: &["attach"] },
+        ),
+        (
             "ownership/registry.rs::start",
             Exempt("low-level registry write; OwnerHost is the entry and guards"),
         ),
@@ -427,6 +431,10 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
         (
             "ownership/host.rs::owned_permit",
             "delegates to owner registry attach; not execution",
+        ),
+        (
+            "ownership/host.rs::owned_or_claim_abandoned",
+            "owner registry adoption only; runtime restore admission is separately registered",
         ),
         (
             "ownership/registry.rs::start",
