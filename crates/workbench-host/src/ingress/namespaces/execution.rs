@@ -159,11 +159,18 @@ impl CommandHost {
             None => ThreadId::new(format!("cli-{}", uuid::Uuid::new_v4()))
                 .map_err(|_| reject_error(RejectKind::Failed, "thread id"))?,
         };
+        // A lane's thread has one root, the ledger's: an invocation aimed at it is input to
+        // that root whatever the role asked for, never a run of its own.
         let input_mode = start.thread.is_some()
-            && matches!(
+            && (matches!(
                 self.chat_access(thread.as_str()),
                 CommandAccess::ExistingInput
-            );
+            ) || !matches!(
+                self.service
+                    .runtime()
+                    .lane_continuation_root(thread.as_str()),
+                Ok(None)
+            ));
         let (run, owned, input) = if input_mode {
             let project = self.project_for_root(&root).ok_or_else(|| {
                 reject_error(

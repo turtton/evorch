@@ -53,16 +53,7 @@ impl Job {
 }
 
 fn fallback(text: &str) -> String {
-    text.trim()
-        .lines()
-        .next()
-        .unwrap_or("Image attachment")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(100)
-        .collect()
+    runtime::thread_title::fallback_title(text)
 }
 
 fn generated_title(result: Result<String, String>, local: &str) -> String {

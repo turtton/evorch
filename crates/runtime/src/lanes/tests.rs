@@ -517,7 +517,7 @@ async fn preview_questions_belong_to_lane_user_not_lead_under_every_policy() {
 }
 
 #[tokio::test]
-async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
+async fn a_fork_keeps_the_lane_scope_and_a_lane_thread_takes_no_second_root() {
     let mut f = Fixture::new();
     let lead = f.lead().await;
     let lane = f.runtime.open_lane(lead, "fork-source", brief()).unwrap();
@@ -565,18 +565,14 @@ async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
         .stop(lane.root_run_id, crate::StopScope::Subtree)
         .unwrap();
     f.runtime.wait(lane.root_run_id).await.unwrap();
-    let rewind = f
-        .runtime
-        .delegate_chat(
-            &lane.thread_id,
-            Role::Orchestrator,
-            "rewind follow-up".into(),
-            config(),
-        )
-        .unwrap();
-    f.phase(rewind, AgentRunPhase::Waiting).await;
-    assert_ne!(rewind, lane.root_run_id);
-    assert_eq!(f.config(rewind).lane_scope, Some(LaneScope::Lane));
+    // A new chat of the lane's thread would be a second root: refused whatever the role, with
+    // the ledger and the original root untouched.
+    for role in [Role::Orchestrator, Role::Worker] {
+        let refused =
+            f.runtime
+                .delegate_chat(&lane.thread_id, role, "rewind follow-up".into(), config());
+        assert!(refused.is_err(), "{role:?} started a second lane root");
+    }
     assert_eq!(
         f.storage
             .handle()
@@ -584,9 +580,9 @@ async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
             .unwrap()
             .unwrap()
             .root_run_id,
-        Some(rewind.to_string())
+        Some(lane.root_run_id.to_string())
     );
-    for id in [fork, rewind, lead] {
+    for id in [fork, lead] {
         f.cancel(id).await;
     }
 }
@@ -948,6 +944,57 @@ async fn lane_model_switch_keeps_fixed_schema_and_rejects_nested_open() {
             .iter()
             .all(|(_, _, tools)| !tools.iter().any(|t| t.name == "lane_open"))
     );
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+#[tokio::test]
+async fn a_lane_is_titled_from_its_objective_and_neither_a_retry_nor_a_rename_changes_it() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let mut titled = brief();
+    titled.objective = "  調べて   報告する\nsecond line is not the title".into();
+    let lane = f.runtime.open_lane(lead, "titled", titled.clone()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let title = |f: &Fixture| {
+        f.runtime
+            .with_storage_reader(|db| db.thread(&lane.thread_id))
+            .unwrap()
+            .flatten()
+            .and_then(|row| row.title)
+    };
+    assert_eq!(title(&f).as_deref(), Some("調べて 報告する"));
+
+    let retry = f.runtime.open_lane(lead, "titled", titled.clone()).unwrap();
+    assert!(!retry.created);
+    assert_eq!(title(&f).as_deref(), Some("調べて 報告する"));
+
+    f.storage
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: lane.thread_id.clone(),
+            title: Some("Renamed by the user".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    f.runtime.open_lane(lead, "titled", titled).unwrap();
+    assert_eq!(title(&f).as_deref(), Some("Renamed by the user"));
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+
+#[tokio::test]
+async fn a_lane_thread_continues_at_the_ledgers_root_and_any_other_thread_has_none() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let lane = f.runtime.open_lane(lead, "continued", brief()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    assert_eq!(
+        f.runtime.lane_continuation_root(&lane.thread_id).unwrap(),
+        Some(lane.root_run_id)
+    );
+    assert_eq!(f.runtime.lane_continuation_root("lead").unwrap(), None);
     for id in [lane.root_run_id, lead] {
         f.cancel(id).await;
     }

@@ -394,28 +394,21 @@ async fn run_scale() {
         .stop(lane.root_run_id, crate::StopScope::SelfOnly)
         .unwrap();
     f.runtime.wait(lane.root_run_id).await.unwrap();
-    let rewind = f
-        .runtime
-        .delegate_chat(
-            &lane.thread_id,
-            Role::Orchestrator,
-            "rewind".into(),
-            old.target.authority.clone(),
-        )
-        .unwrap();
-    f.phase(rewind, AgentRunPhase::Waiting).await;
-    assert_eq!(
-        f.runtime
-            .shared
-            .runs
-            .lock()
-            .unwrap()
-            .get(&rewind)
-            .unwrap()
-            .config
-            .lane_scope,
-        Some(event_bus::LaneScope::Lane)
-    );
+    // A new chat of the stopped lane's thread would be a second root: refused whatever the
+    // role, and the ledger keeps the original root.
+    for role in [Role::Orchestrator, Role::Worker] {
+        assert!(
+            f.runtime
+                .delegate_chat(
+                    &lane.thread_id,
+                    role,
+                    "rewind".into(),
+                    old.target.authority.clone(),
+                )
+                .is_err(),
+            "{role:?} started a second lane root"
+        );
+    }
     assert_eq!(
         f.storage
             .handle()
@@ -423,7 +416,7 @@ async fn run_scale() {
             .unwrap()
             .unwrap()
             .root_run_id,
-        Some(rewind.to_string())
+        Some(lane.root_run_id.to_string())
     );
     let plain = f
         .runtime
@@ -465,7 +458,7 @@ async fn run_scale() {
         .iter()
         .take(11)
         .map(|l| l.root_run_id)
-        .chain([fork, rewind, plain])
+        .chain([fork, plain])
     {
         f.runtime.cancel(run).unwrap();
         f.runtime.wait(run).await.unwrap();

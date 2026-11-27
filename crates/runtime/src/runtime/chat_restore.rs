@@ -828,7 +828,16 @@ impl AgentRuntime {
                 }
             })?;
             if lane.is_some() {
-                config.lane_scope = Some(event_bus::LaneScope::Lane);
+                // A lane has one conversation root, the ledger's: report and close are
+                // authorized against it. Input continues that root (`continue_goal`); no
+                // role may start a second one here.
+                return Err(RuntimeError::RunRestoreFailed {
+                    run_id: format!("chat:{thread_id}"),
+                    reason: RunRestoreFailure::UnsupportedConfig(
+                        "a lane thread is continued at its ledger root, not restarted as a new chat"
+                            .into(),
+                    ),
+                });
             }
         }
         let mentions = std::mem::take(&mut config.skill_mentions);
