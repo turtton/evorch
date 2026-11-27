@@ -28,6 +28,10 @@ pub struct Cache {
     pub run_older: BTreeMap<String, Option<PageCursor>>,
     /// The wanted runs whose first page could not be read ([`Self::run_failed`]).
     run_failed: std::collections::BTreeSet<String>,
+    /// The threads and runs (by id) whose next older page was asked for and is not
+    /// answered yet, and those whose ask failed ([`Self::older_asked`]).
+    older_loading: std::collections::BTreeSet<String>,
+    older_failed: std::collections::BTreeSet<String>,
     /// The older page of each thread read for the thread view ([`Self::read_older_for_roots`]).
     older_for_roots: BTreeMap<String, PageCursor>,
     pub bodies: BTreeMap<String, String>,
@@ -142,6 +146,37 @@ impl Cache {
         self.run_history.remove(run);
         self.run_older.remove(run);
         self.run_failed.remove(run);
+        self.older_loading.remove(run);
+        self.older_failed.remove(run);
+    }
+
+    /// The next older page of a thread, or of a run when `id` is one, was asked for.
+    /// Until it is answered or fails, no second ask is made.
+    pub fn older_asked(&mut self, id: &str) {
+        self.older_failed.remove(id);
+        self.older_loading.insert(id.into());
+    }
+
+    pub fn older_loading(&self, id: &str) -> bool {
+        self.older_loading.contains(id)
+    }
+
+    /// The ask was not sent after all, so the next frame may make it again.
+    pub fn older_not_asked(&mut self, id: &str) {
+        self.older_loading.remove(id);
+    }
+
+    /// The ask failed. It is made again when the person retries, not every frame. The
+    /// answer of a run that was forgotten meanwhile is dropped.
+    pub fn older_failed(&mut self, id: &str) {
+        self.older_loading.remove(id);
+        if self.history.contains_key(id) || self.run_history.contains_key(id) {
+            self.older_failed.insert(id.into());
+        }
+    }
+
+    pub fn older_read_failed(&self, id: &str) -> bool {
+        self.older_failed.contains(id)
     }
 
     /// The first page of a wanted `run` could not be read. Its tab offers to read it
@@ -186,8 +221,11 @@ impl Cache {
     }
 
     pub fn history_page(&mut self, thread: &str, page: Page<CommittedMessage>, older: bool) {
-        if !older {
+        if older {
+            self.older_loading.remove(thread);
+        } else {
             self.older_for_roots.remove(thread);
+            self.older_failed.remove(thread);
         }
         merge(
             self.history.entry(thread.into()).or_default(),
@@ -204,8 +242,11 @@ impl Cache {
         };
         merge(existing, page.items, older);
         self.run_older.insert(run.into(), page.next_cursor);
-        if !older {
+        if older {
+            self.older_loading.remove(run);
+        } else {
             self.run_failed.remove(run);
+            self.older_failed.remove(run);
         }
     }
 }
@@ -388,5 +429,25 @@ mod tests {
         assert!(cache.read_older_for_roots("thr"));
         cache.history_page("thr", page(vec![message("run-c", 9)], None), false);
         assert!(!cache.read_older_for_roots("thr"), "the history begins");
+    }
+
+    // Given: a run whose older read was asked for, then forgotten with its tab
+    // When: the read fails late, the tab opens again, and a failure of the new tab is
+    //       followed by its first page
+    // Then: the late failure leaves nothing to retry, and the first page clears a failure
+    #[test]
+    fn an_older_read_failure_does_not_outlive_its_run_tab() {
+        let mut cache = Cache::default();
+        assert!(cache.want_run("run-b"));
+        cache.older_asked("run-b");
+        cache.forget_run("run-b");
+        cache.older_failed("run-b");
+        assert!(!cache.older_read_failed("run-b"));
+
+        assert!(cache.want_run("run-b"));
+        cache.older_failed("run-b");
+        assert!(cache.older_read_failed("run-b"));
+        cache.run_history_page("run-b", page(vec![message("run-b", 1)], Some("c1")), false);
+        assert!(!cache.older_read_failed("run-b"));
     }
 }

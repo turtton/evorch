@@ -402,7 +402,8 @@ pub async fn serve(
                                     Ok(QueryReply::Conversation(ConversationReply::CommittedHistory(page))) => update(&shared, &ctx, |s| match &run { None => s.cache.history_page(thread.as_str(), page, older), Some(run) => s.cache.run_history_page(run.as_str(), page, older) }),
                                     other => update(&shared, &ctx, |s| {
                                         s.status = format!("Could not read the history: {}", failure_reason(&other));
-                                        if let (Some(run), false) = (&run, older) { s.cache.run_failed(run.as_str()); }
+                                        if older { s.cache.older_failed(run.as_ref().map_or(thread.as_str(), |run| run.as_str())); }
+                                        else if let Some(run) = &run { s.cache.run_failed(run.as_str()); }
                                     }),
                                 }
                                 // Receipts belong to the thread, not to one run of it.

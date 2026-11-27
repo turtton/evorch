@@ -1521,6 +1521,7 @@ mod run_tabs {
             let newest = page(child_message(), Some("c1"));
             shared.cache.history_page("thr-1", newest, false);
         }
+        let spinners_before = spinners(&screen);
         let sent = screen.settle_runs();
         assert_eq!(older_reads(&sent), 1);
         assert!(
@@ -1529,9 +1530,22 @@ mod run_tabs {
                 .query_by_label("Start the conversation")
                 .is_none()
         );
-        screen
-            .harness
-            .get_by_label_contains("Load earlier messages");
+        assert_eq!(
+            spinners(&screen),
+            spinners_before + 1,
+            "the page is being read"
+        );
+        assert!(
+            screen
+                .harness
+                .query_by_label_contains("Load earlier messages")
+                .is_none()
+        );
+        assert_eq!(
+            older_reads(&screen.settle_runs()),
+            0,
+            "not asked while it is"
+        );
 
         let mut earlier = child_message();
         earlier.index = view(json!("1"));
@@ -1545,11 +1559,636 @@ mod run_tabs {
 
         let root = message(0, "user", "Where does the redirect go?");
         history(&mut screen, page(root, Some("c3")), true);
-        assert_eq!(older_reads(&screen.settle_runs()), 0);
+        // The roots' message shows now; the row above it is in view and reads on.
+        assert_eq!(older_reads(&screen.settle_runs()), 1);
         screen
             .harness
             .get_by_label("You: Where does the redirect go?");
         assert!(screen.harness.query_by_label(CHILD_TEXT).is_none());
+
+        let first = view(json!({
+            "thread": "thr-1", "run": "run-0", "index": "0", "role": "user",
+            "content": {"type": "inline", "payload": {"text": "Start from the login page"}},
+        }));
+        history(&mut screen, page(first, None), true);
+        assert_eq!(older_reads(&screen.settle_runs()), 0, "the history begins");
+        assert_eq!(spinners(&screen), spinners_before);
+        screen
+            .harness
+            .get_by_label("You: Start from the login page");
+    }
+
+    fn spinners(screen: &Screen) -> usize {
+        screen
+            .harness
+            .query_all_by_role(egui::accesskit::Role::ProgressIndicator)
+            .count()
+    }
+
+    /// Frames until the window is quiet, then the actions sent meanwhile.
+    fn frames(screen: &mut Screen) -> Vec<Action> {
+        screen.harness.run_steps(4);
+        screen.settle()
+    }
+
+    fn older_reads_of_thr_1(sent: &[Action]) -> usize {
+        sent.iter()
+            .filter(|action| {
+                matches!(action, Action::History(thread, None, true) if thread.as_str() == "thr-1")
+            })
+            .count()
+    }
+
+    fn older_page(run: &str, from: u64, count: u64, next: Option<&str>) -> Page<CommittedMessage> {
+        let items = (from..from + count)
+            .map(|index| {
+                view(json!({
+                    "thread": "thr-1", "run": run, "index": index.to_string(), "role": "user",
+                    "content": {"type": "inline", "payload": {"text": format!("Question {run}/{index}")}},
+                }))
+            })
+            .collect();
+        Page {
+            items,
+            next_cursor: next.map(|cursor| PageCursor::new(cursor).unwrap()),
+            snapshot_revision: Revision(1),
+        }
+    }
+
+    /// thr-1 with one message and nothing waiting on the person, so all of it fits the window.
+    fn short_thread() -> Screen {
+        let local = super::super::local::LocalPanes::new(
+            Arc::new(crate::diff::FixtureDiffSource::empty()),
+            None,
+        );
+        screen_from(egui::vec2(1440.0, 900.0), local, |shared| {
+            shared.cache.questions.clear();
+            shared.cache.approvals.clear();
+            shared.cache.history.get_mut("thr-1").unwrap().truncate(1);
+        })
+    }
+
+    // Given: thr-1's newest page is short, so the row for older messages is in view, and
+    //        an older page exists
+    // When: the window is drawn and keeps being drawn while the page is awaited, then the
+    //       page, the last one, arrives
+    // Then: the page is asked for once, without a button, with a spinner meanwhile; once
+    //       the history begins no spinner is left and nothing more is asked
+    #[test]
+    fn an_older_page_is_read_once_when_its_row_comes_into_view() {
+        let mut screen = short_thread();
+        frames(&mut screen);
+        let spinners_before = spinners(&screen);
+        let cursor = Some(PageCursor::new("c1").unwrap());
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .older
+            .insert("thr-1".into(), cursor);
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        assert_eq!(spinners(&screen), spinners_before + 1);
+        assert!(
+            screen
+                .harness
+                .query_by_label_contains("Load earlier messages")
+                .is_none()
+        );
+        assert_eq!(
+            older_reads_of_thr_1(&frames(&mut screen)),
+            0,
+            "still being read"
+        );
+        assert_eq!(spinners(&screen), spinners_before + 1);
+
+        let page = older_page("run-0", 0, 1, None);
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        assert_eq!(
+            older_reads_of_thr_1(&frames(&mut screen)),
+            0,
+            "the history begins"
+        );
+        assert_eq!(spinners(&screen), spinners_before);
+        screen.harness.get_by_label("You: Question run-0/0");
+    }
+
+    // Given: the ask for an older page failed
+    // When: frames are drawn, then Retry is pressed
+    // Then: nothing is asked by itself, and Retry asks once
+    #[test]
+    fn a_failed_older_page_is_asked_again_only_on_retry() {
+        let mut screen = short_thread();
+        frames(&mut screen);
+        let spinners_before = spinners(&screen);
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            let cursor = Some(PageCursor::new("c1").unwrap());
+            shared.cache.older.insert("thr-1".into(), cursor);
+            shared.cache.older_failed("thr-1");
+        }
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 0);
+        screen
+            .harness
+            .get_by_label("Could not read earlier messages");
+        screen.harness.get_by_label("Retry").click();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        assert_eq!(spinners(&screen), spinners_before + 1);
+    }
+
+    // Given: thr-1 scrolled to its first message, and an older page of messages whose
+    //        bodies are sent apart from the page
+    // When: the page arrives, and the bodies arrive in a later frame
+    // Then: the message stays where it was on screen after each, not only after the page
+    #[test]
+    fn the_view_stays_in_place_when_a_body_of_an_older_page_arrives_later() {
+        use workbench_protocol::views::{BodyRef, MessageContent};
+        use workbench_protocol::{ids::BodyId, wire::ByteOffset};
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                let history = (0..60)
+                    .map(|index| message(index, "user", &format!("Question {index}")))
+                    .collect();
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label("You: Question 0")
+            .scroll_to_me();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        let before = screen.harness.get_by_label("You: Question 0").rect();
+
+        let mut page = older_page("run-0", 0, 20, Some("c2"));
+        for (index, message) in page.items.iter_mut().enumerate() {
+            message.content = MessageContent::Body(BodyRef {
+                body_id: BodyId::new(format!("body-{index}")).unwrap(),
+                total_bytes: ByteOffset(2048),
+            });
+        }
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        let after_page = screen.harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_page.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_page:?} with the page"
+        );
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            for index in 0..20 {
+                let text = (0..12)
+                    .map(|line| format!("line {line} of body {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                shared.cache.bodies.insert(format!("body-{index}"), text);
+            }
+        }
+        frames(&mut screen);
+        let after_bodies = screen.harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_bodies.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_bodies:?} with the bodies"
+        );
+    }
+
+    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled to its
+    //        header, which is the first thing in view
+    // When: the header is pressed to open the group, and pressed again
+    // Then: the header stays where it was on screen
+    #[test]
+    fn opening_a_group_of_tool_outputs_leaves_its_header_in_place() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (0..20)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(20, "assistant", "Done.".into()));
+                history.extend((21..61).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let header = |screen: &Screen| {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .rect()
+        };
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        let before = header(&screen);
+        for what in ["opened", "closed"] {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .click();
+            frames(&mut screen);
+            let after = header(&screen);
+            assert!(
+                (after.min.y - before.min.y).abs() < 1.0,
+                "the header moved from {before:?} to {after:?} once {what}"
+            );
+        }
+    }
+
+    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled so that
+    //        the header's top edge is just out of view, and a reply after the group
+    // When: the header is pressed to open the group
+    // Then: the header stays where it was on screen; the reply moves down with the cards
+    #[test]
+    fn opening_a_group_whose_header_is_partly_out_of_view_leaves_it_in_place() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (0..20)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(20, "assistant", "Done.".into()));
+                history.extend((21..61).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let header = |screen: &Screen| {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .rect()
+        };
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        let at_top = header(&screen);
+        screen.harness.hover_at(at_top.center());
+        screen.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -12.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        frames(&mut screen);
+        let before = header(&screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .click();
+        frames(&mut screen);
+        let after = header(&screen);
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the header moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: thr-1 with more messages than the window shows, followed to the newest
+    // When: a message is added at the end, then the view is scrolled up and another is added
+    // Then: the new message is in view while following; scrolled up, what is read stays put
+    #[test]
+    fn a_new_message_follows_the_end_and_leaves_a_scrolled_up_view_alone() {
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let history = (0..60)
+                    .map(|index| message(index, "user", &format!("Question {index}")))
+                    .collect();
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let push = |screen: &Screen, index: u64| {
+            let mut shared = screen.shared.lock().unwrap();
+            let text = format!("Question {index}");
+            let history = shared.cache.history.get_mut("thr-1").unwrap();
+            history.push(message(index, "user", &text));
+        };
+        push(&screen, 60);
+        frames(&mut screen);
+        screen.harness.get_by_label("You: Question 60");
+
+        screen
+            .harness
+            .get_by_label("You: Question 30")
+            .scroll_to_me();
+        frames(&mut screen);
+        let before = screen.harness.get_by_label("You: Question 30").rect();
+        push(&screen, 61);
+        frames(&mut screen);
+        let after = screen.harness.get_by_label("You: Question 30").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: a folded group of tool outputs that was opened, with older outputs of its run
+    // When: the older page arrives and joins the group
+    // Then: the group stays open, its header and the output below it stay where they were
+    #[test]
+    fn an_open_group_stays_open_when_older_tool_outputs_join_it() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (100..120)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(120, "assistant", "Done.".into()));
+                history
+                    .extend((121..161).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .click();
+        frames(&mut screen);
+        let before = screen.harness.get_by_label("output 105").rect();
+
+        let page = Page {
+            items: (80..100)
+                .map(|index| message(index, "tool", format!("output {index}")))
+                .collect(),
+            next_cursor: Some(PageCursor::new("c2").unwrap()),
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        screen.harness.get_by_label_contains("40 tool outputs");
+        let after = screen.harness.get_by_label("output 105").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the output moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: thr-1 whose newest page is a run of one run's tool outputs, longer than the
+    //        window, scrolled to its first output, and older outputs of the same run
+    // When: the older page arrives, so the run of outputs begins earlier
+    // Then: the output in view stays where it was on screen
+    #[test]
+    fn the_view_stays_in_place_when_older_tool_outputs_join_a_run_of_them() {
+        let tool = |index: u64| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": "tool",
+                "content": {"type": "inline", "payload": {"text": format!("output {index}")}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                shared
+                    .cache
+                    .history
+                    .insert("thr-1".into(), (100..160).map(tool).collect());
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen.harness.get_by_label("output 100").scroll_to_me();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        let before = screen.harness.get_by_label("output 100").rect();
+
+        let page = Page {
+            items: (80..100).map(tool).collect(),
+            next_cursor: Some(PageCursor::new("c2").unwrap()),
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        let after = screen.harness.get_by_label("output 100").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the output moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: thr-1 whose last message is longer than the window, scrolled to the middle of
+    //        it so that no message starts in view, and older pages exist
+    // When: an older page arrives, then another whose bodies are sent apart from it, then
+    //       the bodies
+    // Then: the line in view stays where it was on screen after each
+    #[test]
+    fn the_view_stays_in_place_in_the_middle_of_a_long_message() {
+        use workbench_protocol::views::{BodyRef, MessageContent};
+        use workbench_protocol::{ids::BodyId, wire::ByteOffset};
+        let long = (0..120)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let history = vec![message(0, "assistant", &long)];
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen.harness.get_by_label("line 60").scroll_to_me();
+        assert_eq!(
+            older_reads_of_thr_1(&frames(&mut screen)),
+            0,
+            "the row is out of view"
+        );
+        let line_y = |screen: &Screen| screen.harness.get_by_label("line 60").rect().min.y;
+        let before = line_y(&screen);
+        let moved = |screen: &Screen, what: &str| {
+            let now = line_y(screen);
+            assert!(
+                (now - before).abs() < 1.0,
+                "the line moved from {before} to {now} with {what}"
+            );
+        };
+
+        let page = older_page("run-0", 0, 20, Some("c2"));
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        moved(&screen, "the page");
+
+        let mut page = older_page("run-9", 0, 20, Some("c3"));
+        for (index, message) in page.items.iter_mut().enumerate() {
+            message.content = MessageContent::Body(BodyRef {
+                body_id: BodyId::new(format!("body-{index}")).unwrap(),
+                total_bytes: ByteOffset(2048),
+            });
+        }
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        moved(&screen, "the page of bodies");
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            for index in 0..20 {
+                let text = (0..12)
+                    .map(|line| format!("body line {line} of {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                shared.cache.bodies.insert(format!("body-{index}"), text);
+            }
+        }
+        frames(&mut screen);
+        moved(&screen, "the bodies");
+    }
+
+    // Given: thr-1 has more messages than the window shows, followed to the newest, and an
+    //        older page exists
+    // When: the first message is scrolled into view, and the older page arrives
+    // Then: the page is asked for only then, and the message stays where it was on screen
+    //       instead of moving down by the height of the page put in front of it
+    #[test]
+    fn the_view_stays_in_place_when_an_older_page_is_put_in_front() {
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                let history = (0..60)
+                    .map(|index| message(index, "user", &format!("Question {index}")))
+                    .collect();
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        assert_eq!(
+            older_reads_of_thr_1(&frames(&mut screen)),
+            0,
+            "the row is out of view"
+        );
+        let spinners_before = spinners(&screen);
+
+        screen
+            .harness
+            .get_by_label("You: Question 0")
+            .scroll_to_me();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        assert_eq!(spinners(&screen), spinners_before + 1);
+        let before = screen.harness.get_by_label("You: Question 0").rect();
+
+        let page = older_page("run-0", 0, 20, Some("c2"));
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        screen.harness.run_steps(4);
+        let after = screen.harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after:?}"
+        );
     }
 
     // Given: thr-1's root was stopped while run-1a still runs

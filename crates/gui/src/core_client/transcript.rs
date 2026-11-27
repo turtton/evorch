@@ -34,9 +34,13 @@ pub(super) struct TranscriptView<'a> {
     pub base: Option<&'a Path>,
 }
 
-/// Draws the messages of `scope` in a scroll area that follows the newest one, with
-/// "Load earlier messages" while older ones exist. `empty` is drawn when no message is
-/// shown, and `cards` after the messages.
+/// Height of the row above the first message that stands for the older ones.
+const OLDER_ROW_HEIGHT: f32 = 28.0;
+
+/// Draws the messages of `scope` in a scroll area that follows the newest one. While
+/// older ones exist, the row above the first message reads the next older page once it
+/// scrolls into view, with a spinner while that page is read. `empty` is drawn when no
+/// message is shown, and `cards` after the messages.
 pub(super) fn transcript(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
@@ -47,7 +51,7 @@ pub(super) fn transcript(
 ) {
     let TranscriptView { cache, scope, base } = view;
     let mut failed = None;
-    let (salt, messages, older, load_earlier): (_, Vec<_>, _, _) = match scope {
+    let (salt, messages, older, earlier): (_, Vec<_>, _, _) = match scope {
         Scope::Thread(thread) => (
             ("core-transcript", thread.as_str()),
             cache
@@ -58,7 +62,7 @@ pub(super) fn transcript(
                 .filter(|m| cache.shows_in_thread(m))
                 .collect(),
             cache.older.get(thread.as_str()),
-            Action::History(thread.clone(), None, true),
+            (thread.clone(), None),
         ),
         Scope::Run { thread, run } => {
             failed = cache
@@ -74,28 +78,65 @@ pub(super) fn transcript(
                     .filter(|m| &m.run == run)
                     .collect(),
                 cache.run_older.get(run.as_str()),
-                Action::History(thread.clone(), Some(run.clone()), true),
+                (thread.clone(), Some(run.clone())),
             )
         }
     };
-    egui::ScrollArea::vertical()
+    let load_earlier = || Effect::send(Action::History(earlier.0.clone(), earlier.1.clone(), true));
+    let older_id = match scope {
+        Scope::Thread(thread) => thread.as_str(),
+        Scope::Run { run, .. } => run.as_str(),
+    };
+    let loading = cache.older_loading(older_id);
+    let older_failed = cache.older_read_failed(older_id);
+    // The first message that starts in view last frame (else the one that spans the top
+    // of the view) and where it started in the content. When the data shown changed
+    // since then (older messages put in front, a body that arrives for a message above)
+    // the content above it may have changed height and moved it, and the offset takes
+    // that up so the messages in view stay where they are. A frame that changed nothing
+    // but the view (a group opened, a scroll, a resize) is left to egui. A message that
+    // spans the top is the second choice: it may grow itself.
+    let memory = ui.make_persistent_id(salt).with("view-anchor");
+    let before: Option<(Option<(String, f32)>, u64)> = ui.data(|data| data.get_temp(memory));
+    let shown = data_fingerprint(
+        cache,
+        &messages,
+        (older.is_some_and(Option::is_some), older_failed),
+    );
+    let mut view = ViewAnchor {
+        previous: before.clone().and_then(|(anchor, _)| anchor),
+        ..ViewAnchor::default()
+    };
+    let data_changed = before.as_ref().is_some_and(|(_, was)| *was != shown);
+    let mut near_top = false;
+    let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            view.origin = ui.cursor().min.y;
+            view.top = ui.clip_rect().min.y;
             ui.add_space(SP_2);
             if older.is_some_and(Option::is_some) {
-                ui.vertical_centered(|ui| {
-                    if ui
-                        .add(ghost(icons::with_icon(
-                            icons::ARROW_UP,
-                            "Load earlier messages",
-                        )))
-                        .clicked()
-                    {
-                        effects.push(Effect::send(load_earlier));
+                if older_failed {
+                    ui.horizontal(|ui| {
+                        ui.label(muted("Could not read earlier messages"));
+                        if ui.add(ghost("Retry")).clicked() {
+                            effects.push(load_earlier());
+                        }
+                    });
+                } else {
+                    let (row, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), OLDER_ROW_HEIGHT),
+                        egui::Sense::hover(),
+                    );
+                    near_top = ui.is_rect_visible(row);
+                    if loading {
+                        let spinner =
+                            egui::Rect::from_center_size(row.center(), egui::vec2(16.0, 16.0));
+                        ui.put(spinner, egui::Spinner::new().size(16.0));
                     }
-                });
+                }
             }
             if let Some(retry) = failed {
                 ui.horizontal(|ui| {
@@ -111,24 +152,46 @@ pub(super) fn transcript(
             for item in items(&messages) {
                 match item {
                     Item::Message(message) => {
+                        let top = ui.cursor().min.y;
                         message_row(ui, requested_bodies, cache, base, message, effects);
+                        view.visit(message_key(message), top, ui.cursor().min.y, true);
                     }
                     Item::Tools {
                         tools,
                         folded: true,
                     } => {
-                        tool_group(ui, requested_bodies, cache, &tools, effects);
+                        tool_group(ui, requested_bodies, cache, &tools, &mut view, effects);
                     }
                     Item::Tools {
                         tools,
                         folded: false,
-                    } => tool_cards(ui, requested_bodies, cache, &tools, effects),
+                    } => tool_cards(ui, requested_bodies, cache, &tools, &mut view, effects),
                 }
                 ui.add_space(SP_2);
             }
             cards(ui, effects);
             ui.add_space(SP_2);
         });
+    let shift = match (&view.previous, view.moved_to) {
+        (Some((_, was)), Some(now)) if data_changed && (now - was).abs() > 0.5 => now - was,
+        _ => 0.0,
+    };
+    let shifted = shift != 0.0;
+    if shifted {
+        let mut state = output.state;
+        state.offset.y = (state.offset.y + shift).max(0.0);
+        state.store(ui.ctx(), output.id);
+        ui.ctx()
+            .request_discard("keep the messages in view in place");
+    }
+    ui.data_mut(|data| data.insert_temp(memory, (view.first.or(view.spanning), shown)));
+    // The first frame of an area is laid out at the top before it follows the newest
+    // message, so it only measures; a page is read from the next frame on.
+    if before.is_none() || shifted {
+        ui.ctx().request_repaint();
+    } else if near_top && !loading && !older_failed {
+        effects.push(load_earlier());
+    }
 }
 
 /// A run of one run's tool outputs folds under one header once the run's next message
@@ -141,6 +204,63 @@ enum Item<'a> {
         tools: Vec<&'a CommittedMessage>,
         folded: bool,
     },
+}
+
+/// What the messages shown and the row above them are made of: it differs between two
+/// frames when messages came or went, or a body was read.
+fn data_fingerprint(cache: &Cache, messages: &[&CommittedMessage], older_row: (bool, bool)) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    older_row.hash(&mut hasher);
+    for message in messages {
+        message.run.as_str().hash(&mut hasher);
+        message.index.get().hash(&mut hasher);
+        match &message.content {
+            MessageContent::Inline { text } => text.len().hash(&mut hasher),
+            MessageContent::Body(body) => cache
+                .bodies
+                .get(body.body_id.as_str())
+                .map(String::len)
+                .hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
+fn message_key(message: &CommittedMessage) -> String {
+    format!("{}/{:?}", message.run, message.index)
+}
+
+/// Finds, frame by frame, the message the view is anchored on: where the one anchored
+/// last frame sits in the content now, and which one to anchor on next.
+#[derive(Default)]
+struct ViewAnchor {
+    /// The content's top, and the top of the view, in screen coordinates.
+    origin: f32,
+    top: f32,
+    previous: Option<(String, f32)>,
+    moved_to: Option<f32>,
+    first: Option<(String, f32)>,
+    spanning: Option<(String, f32)>,
+}
+
+impl ViewAnchor {
+    /// A message drawn from `top` to `bottom`, or the header of a group of tool outputs.
+    /// An open group's header is only looked for, not chosen: what is read is below it.
+    fn visit(&mut self, key: String, top: f32, bottom: f32, chosen: bool) {
+        let y = top - self.origin;
+        if self.previous.as_ref().is_some_and(|(was, _)| *was == key) {
+            self.moved_to = Some(y);
+        }
+        if !chosen {
+            return;
+        }
+        if self.first.is_none() && top >= self.top {
+            self.first = Some((key, y));
+        } else if top < self.top && bottom > self.top {
+            self.spanning = Some((key, y));
+        }
+    }
 }
 
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
@@ -248,10 +368,12 @@ fn tool_group(
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
     tools: &[&CommittedMessage],
+    view: &mut ViewAnchor,
     effects: &mut Vec<Effect>,
 ) {
-    let first = tools[0];
-    let id = ui.make_persistent_id(("tools", first.run.as_str(), first.index.get()));
+    // Keyed by the last one: older outputs put in front do not change it.
+    let last = tools[tools.len() - 1];
+    let id = ui.make_persistent_id(("tools", last.run.as_str(), last.index.get()));
     let failed = tools.iter().any(|tool| match &tool.content {
         MessageContent::Inline { text } => ToolOutput::parse(text).failed(),
         MessageContent::Body(_) => false,
@@ -271,11 +393,15 @@ fn tool_group(
     } else {
         icons::CARET_RIGHT
     };
+    let top = ui.cursor().min.y;
     if ghost_icon_button(ui, icon, &title).clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
     }
+    // The header is not the card of the last output: opening the group must not move it.
+    let header = format!("tools {}", message_key(last));
+    view.visit(header, top, ui.cursor().min.y, !open);
     if open {
-        tool_cards(ui, requested_bodies, cache, tools, effects);
+        tool_cards(ui, requested_bodies, cache, tools, view, effects);
     }
 }
 
@@ -284,14 +410,17 @@ fn tool_cards(
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
     tools: &[&CommittedMessage],
+    view: &mut ViewAnchor,
     effects: &mut Vec<Effect>,
 ) {
     for tool in tools {
+        let top = ui.cursor().min.y;
         // The same id folded or not, so a card opened while the agent worked stays open.
         let id = ui.make_persistent_id(("tool-card", tool.run.as_str(), tool.index.get()));
         if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
             tool_card(ui, id, text);
         }
+        view.visit(message_key(tool), top, ui.cursor().min.y, true);
         ui.add_space(SP_1);
     }
 }
