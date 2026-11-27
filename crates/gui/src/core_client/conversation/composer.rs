@@ -92,6 +92,11 @@ impl ConversationPane {
         self.mentions.wait();
     }
 
+    /// Puts the cursor in the composer the next time it is drawn.
+    pub(in crate::core_client) fn request_composer_focus(&mut self) {
+        self.completion.focus_requested = true;
+    }
+
     /// A selection change a slash command asked for, for the dock pass to apply.
     pub fn take_navigation(&mut self) -> Option<Navigation> {
         self.navigation.take()

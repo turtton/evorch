@@ -866,6 +866,9 @@ async fn accepted(
         };
         if let Some((thread, _)) = &draft {
             s.sending.remove(thread);
+            // The thread exists in the core now: its screen is the thread's own from here,
+            // wherever the person is. A refusal never gets here, so its draft stays a new one.
+            s.new_conversations.retain(|_, new| new.as_str() != thread);
         }
         if let Some((thread, _)) = &draft
             && takes_files
@@ -1130,6 +1133,76 @@ mod tests {
         );
         let state = shared.lock().unwrap();
         assert_eq!(state.drafts["t"].text, "");
+        assert!(!state.sending.contains("t"));
+        assert_eq!(state.attachment_drafts["t"].len(), 1);
+    }
+
+    // Given: new conversations of two projects, the first one's goal being created, and
+    //          its text edited and a file added while the core had not answered
+    // When: the core accepts the goal
+    // Then: only that conversation stops being new, and the edit, the file and the other
+    //       project's draft stay
+    #[tokio::test]
+    async fn an_accepted_first_goal_ends_only_its_own_new_conversation() {
+        use workbench_protocol::envelope::{ReplyPayload, ReplyResult};
+        let (project, thread) = (ProjectId::new("p").unwrap(), ThreadId::new("t").unwrap());
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        {
+            let mut state = shared.lock().unwrap();
+            state
+                .new_conversations
+                .insert(project.clone(), thread.clone());
+            state
+                .new_conversations
+                .insert(ProjectId::new("q").unwrap(), ThreadId::new("u").unwrap());
+            state.drafts.insert(
+                "t".into(),
+                super::super::Draft {
+                    text: "/goal ship it, and more".into(),
+                    revision: 3,
+                },
+            );
+            state.sending.insert("t".into());
+            state.attachment_draft(
+                project.clone(),
+                "t",
+                crate::fixture::attachment_draft().file,
+            );
+        }
+        let command = Command::Conversation(ConversationCommand::CreateGoal(
+            workbench_protocol::commands::SubmitGoal {
+                project,
+                thread,
+                objective: "ship it".into(),
+                references: vec![],
+                constraints: vec![],
+                delegation: None,
+            },
+        ));
+        let pending = Pending::Command {
+            draft: Some(("t".into(), 2)),
+            takes_files: takes_files(&command),
+        };
+        let (client, mut core) = connect().await;
+        let (ctx, mut uncertain) = (egui::Context::default(), Vec::new());
+        tokio::join!(
+            send_command(&client, &shared, &ctx, &mut uncertain, command, pending),
+            async {
+                let request = core.recv_request().await.unwrap();
+                core.reply(
+                    &request.request_id,
+                    ReplyResult::Success(ReplyPayload::Command(CommandReply::accepted())),
+                );
+            },
+        );
+        let state = shared.lock().unwrap();
+        let still_new: Vec<_> = state
+            .new_conversations
+            .keys()
+            .map(ProjectId::as_str)
+            .collect();
+        assert_eq!(still_new, ["q"]);
+        assert_eq!(state.drafts["t"].text, "/goal ship it, and more");
         assert!(!state.sending.contains("t"));
         assert_eq!(state.attachment_drafts["t"].len(), 1);
     }
