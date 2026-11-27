@@ -107,16 +107,6 @@ impl DataReaders {
                     );
                     return;
                 }
-                if let DataSource::Frames { tab, .. } = &source
-                    && tab.core_epoch != client.server_hello().instance_epoch.0
-                {
-                    s.features.data_notice(
-                        action.feature,
-                        action.tag,
-                        DataNotice::Failed(FeatureError::new("stale renderer epoch")),
-                    );
-                    return;
-                }
                 if let DataSource::AgentFrames { scope, .. } = &source
                     && scope.core_epoch != client.server_hello().instance_epoch.0
                 {
@@ -244,7 +234,9 @@ async fn receive(
             let mut frames = channel.bind_frames(client, subscription, token).await?;
             finish(shared, ctx, key, DataNotice::Started, false);
             while let Some(frame) = frames.next_frame().await? {
-                if frame.start.core_epoch != epoch
+                // Hello's projection epoch can advance on resync without restarting
+                // the renderer. Its frames must match the tab, not that projection.
+                if frame.start.core_epoch != tab.core_epoch
                     || frame.start.tab != tab.id
                     || frame.start.generation != tab.generation
                 {

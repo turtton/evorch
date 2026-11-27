@@ -239,7 +239,7 @@ async fn reset_discards_a_frame_that_finishes_late_and_never_signals_ready() {
 }
 
 #[tokio::test]
-async fn data_epoch_must_match_control_and_latest_frames_do_not_accumulate() {
+async fn data_epoch_must_match_tab_and_latest_frames_do_not_accumulate() {
     let (_dir, listener, path) = setup_listener();
     let (client, mut core) = crate::core_client::connection::tests::connect().await;
     let (shared, mut notices) = shared();
@@ -369,8 +369,9 @@ async fn blob_completes_in_a_slot_and_old_epoch_header_is_rejected_without_readi
 }
 
 #[tokio::test]
-async fn new_control_epoch_refuses_old_tab_and_requires_an_explicit_new_request() {
+async fn projection_epoch_change_accepts_current_renderer_request_but_not_pre_reset_request() {
     let (_dir, listener, path) = setup_listener();
+    // A projection resync advances hello's epoch, not the renderer service's epoch.
     let (client, mut core) = crate::core_client::connection::tests::connect_epoch(8).await;
     let (shared, mut notices) = shared();
     let ctx = egui::Context::default();
@@ -382,46 +383,68 @@ async fn new_control_epoch_refuses_old_tab_and_requires_an_explicit_new_request(
         .begin_session(Cache::default(), vec![], &[], vec![]);
     readers.handle(old, &path, &client, &shared, &ctx).await;
     assert!(readers.jobs.is_empty());
+    assert!(notices.try_recv().is_err());
+
     readers
         .handle(action(&shared, source()), &path, &client, &shared, &ctx)
         .await;
-    assert!(readers.jobs.is_empty());
+    assert_eq!(
+        readers.jobs.len(),
+        1,
+        "a current renderer tab must be bindable after resync"
+    );
+    let mut peer = offer(&listener).await;
+    bound(&mut core).await;
+    frame(&mut peer, 1, 7).await;
+    notice(&mut notices, DataNotice::Ready).await;
+    let Some(DataPayload::Frame(frame)) = shared
+        .lock()
+        .unwrap()
+        .features
+        .data
+        .take(FeatureId::Browser, 1)
+    else {
+        panic!("the renderer frame must reach the preview slot");
+    };
+    assert_eq!(frame.start.core_epoch, 7);
+    assert_eq!(frame.bgra, [1, 2, 3, 4]);
+    readers.stop(&shared, &ctx).await;
+    eof(&mut peer).await;
+    assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn first_frame_must_match_tab_epoch_even_when_it_matches_hello() {
+    let (_dir, listener, path) = setup_listener();
+    let (client, mut core) = crate::core_client::connection::tests::connect_epoch(8).await;
+    let (shared, mut notices) = shared();
+    let ctx = egui::Context::default();
+    let mut readers = DataReaders::default();
+    readers
+        .handle(action(&shared, source()), &path, &client, &shared, &ctx)
+        .await;
+    assert_eq!(readers.jobs.len(), 1);
+    let mut peer = offer(&listener).await;
+    bound(&mut core).await;
+    notice(&mut notices, DataNotice::Started).await;
+    frame(&mut peer, 1, 8).await;
+    readers
+        .jobs
+        .remove(&(FeatureId::Browser, 1))
+        .unwrap()
+        .task
+        .await
+        .unwrap();
     assert!(matches!(
         notices.recv().await.unwrap(),
         DataNotice::Failed(_)
     ));
-    let DataSource::Frames {
-        mut tab,
-        subscription,
-        token,
-    } = source()
-    else {
-        unreachable!()
-    };
-    tab.core_epoch = 8;
-    readers
-        .handle(
-            action(
-                &shared,
-                DataSource::Frames {
-                    tab,
-                    subscription,
-                    token,
-                },
-            ),
-            &path,
-            &client,
-            &shared,
-            &ctx,
-        )
-        .await;
-    let mut peer = offer(&listener).await;
-    bound(&mut core).await;
-    frame(&mut peer, 1, 8).await;
-    notice(&mut notices, DataNotice::Ready).await;
-    readers.stop(&shared, &ctx).await;
-    eof(&mut peer).await;
+    assert!(
+        notices.try_recv().is_err(),
+        "a mismatched frame must never be published"
+    );
     assert_eq!(shared.lock().unwrap().features.data.usage(), (0, 0, 0));
+    eof(&mut peer).await;
 }
 
 #[tokio::test]
