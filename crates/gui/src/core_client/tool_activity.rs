@@ -66,7 +66,8 @@ pub struct LiveTool {
 #[derive(Clone, Copy)]
 struct End {
     status: ToolActivityStatus,
-    duration_ms: u64,
+    /// The core's word, or none when it measured none (an interrupted call): never a guess.
+    duration_ms: Option<u64>,
 }
 
 impl LiveTool {
@@ -80,12 +81,16 @@ impl LiveTool {
     }
 
     /// The call's time: while it runs, what the core reported plus the time since it was
-    /// received; after, the core's duration. `None` for a tool whose time is not shown.
+    /// received; after, the core's duration. `None` for a tool whose time is not shown, and
+    /// for a finished call the core gave no duration for.
     pub fn time(&self, now: Instant) -> Option<Duration> {
-        is_timed(&self.tool.tool_name).then(|| match self.end {
-            Some(end) => Duration::from_millis(end.duration_ms),
-            None => self.elapsed(now),
-        })
+        if !is_timed(&self.tool.tool_name) {
+            return None;
+        }
+        match self.end {
+            Some(end) => end.duration_ms.map(Duration::from_millis),
+            None => Some(self.elapsed(now)),
+        }
     }
 
     fn elapsed(&self, now: Instant) -> Duration {
@@ -93,20 +98,35 @@ impl LiveTool {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LiveTools {
     clock: Clock,
+    /// When this was made: a snapshot is made as its cut is read, and its pages arrive after.
+    created: Instant,
     calls: BTreeMap<(String, String), LiveTool>,
     next_seq: u64,
 }
 
+impl Default for LiveTools {
+    fn default() -> Self {
+        Self::with_clock(Clock::default())
+    }
+}
+
 impl LiveTools {
-    #[cfg(test)]
     pub fn with_clock(clock: Clock) -> Self {
         Self {
+            created: clock.now(),
             clock,
-            ..Self::default()
+            calls: BTreeMap::new(),
+            next_seq: 0,
         }
+    }
+
+    /// A call a snapshot holds. Its elapsed time was read at the cut, which is when this was
+    /// made, not when the page that holds the call arrived.
+    pub fn start_from_snapshot(&mut self, tool: ToolActivityView) {
+        self.start_at(tool, self.created);
     }
 
     pub fn now(&self) -> Instant {
@@ -116,6 +136,11 @@ impl LiveTools {
     /// A call the core says is running. One already kept is left as it is: the first word
     /// about a call stands.
     pub fn start(&mut self, tool: ToolActivityView) {
+        let received = self.clock.now();
+        self.start_at(tool, received);
+    }
+
+    fn start_at(&mut self, tool: ToolActivityView, received: Instant) {
         let key = (tool.run.to_string(), tool.call_id.clone());
         if self.calls.contains_key(&key) {
             return;
@@ -124,7 +149,7 @@ impl LiveTools {
         let live = LiveTool {
             tool,
             seq: self.next_seq,
-            received: self.clock.now(),
+            received,
             end: None,
         };
         self.calls.insert(key, live);
@@ -137,14 +162,10 @@ impl LiveTools {
         status: ToolActivityStatus,
         duration_ms: Option<u64>,
     ) {
-        let now = self.clock.now();
         let Some(live) = self.calls.get_mut(&(run.to_owned(), call_id.to_owned())) else {
             return;
         };
         if live.end.is_none() {
-            let duration_ms = duration_ms.unwrap_or_else(|| {
-                u64::try_from(live.elapsed(now).as_millis()).unwrap_or(u64::MAX)
-            });
             live.end = Some(End {
                 status,
                 duration_ms,
@@ -247,6 +268,40 @@ mod tests {
         live.finish("r", "c", ToolActivityStatus::Succeeded, Some(3_400));
         move_clock(9_000);
         assert_eq!(time(&live), Some(Duration::from_millis(3_400)));
+    }
+
+    // Given: calls finished with a duration and without one (the core measured none)
+    // Then: the first shows the core's; the second shows nothing, not an estimate
+    #[test]
+    fn a_finished_call_without_a_duration_shows_none() {
+        let mut live = LiveTools::default();
+        live.start(tool("known", "shell", 1_200));
+        live.start(tool("unknown", "shell", 1_200));
+        live.finish("r", "known", ToolActivityStatus::Succeeded, Some(2_000));
+        live.finish("r", "unknown", ToolActivityStatus::Interrupted, None);
+        let now = live.now();
+        let times: Vec<_> = live.shown(|_| true).iter().map(|l| l.time(now)).collect();
+        assert_eq!(times, [Some(Duration::from_millis(2_000)), None]);
+    }
+
+    // Given: a snapshot made at one moment whose calls are read some time later
+    // Then: their time counts from the moment it was made
+    #[test]
+    fn a_snapshot_call_counts_from_the_cut() {
+        let base = Instant::now();
+        let offset = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = Clock::from_fn({
+            let offset = offset.clone();
+            move || base + Duration::from_millis(offset.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        let mut live = LiveTools::with_clock(clock);
+        offset.store(700, std::sync::atomic::Ordering::SeqCst);
+        live.start_from_snapshot(tool("c", "shell", 1_000));
+        offset.store(1_000, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            live.shown(|_| true)[0].time(live.now()),
+            Some(Duration::from_millis(2_000))
+        );
     }
 
     // Given: a tool outside the list

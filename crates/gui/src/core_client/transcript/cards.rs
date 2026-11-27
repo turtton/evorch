@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use egui::{Align, Label, Layout, RichText, Sense, Ui, UiBuilder, WidgetInfo, WidgetType};
 use workbench_protocol::{ids::RunId, namespaces::execution::ToolActivityStatus, views::*};
 
-use super::{Cache, Effect, PullRequestChips, ViewAnchor, content_text, message_key};
+use super::{
+    Cache, Effect, PullRequestChips, ViewAnchor, content_text, content_text_when, message_key,
+};
 use crate::core_client::tool_activity::{LiveTool, Outcome, format_time, is_timed};
 use crate::panes::pull_request_widgets::candidate_offer;
 use crate::panes::transcript_widgets::{code_block, diff_block};
@@ -67,9 +69,19 @@ pub(super) fn rows(
         } else {
             aside(ui, env, row);
         }
-        view.visit(message_key(row), top, ui.cursor().min.y, true);
+        visit_row(view, row, top, ui.cursor().min.y);
         ui.add_space(SP_1);
     }
+}
+
+/// A row drawn from `top` to `bottom`. A call's row answers to the key of the live card it
+/// replaces, so a view anchored on that card stays on the call when it is committed.
+fn visit_row(view: &mut ViewAnchor, row: &CommittedMessage, top: f32, bottom: f32) {
+    let live = row
+        .tool
+        .as_ref()
+        .map(|tool| live_key_of(&row.run, &tool.call_id));
+    view.visit_replacing(message_key(row), live, top, bottom, true);
 }
 
 /// Which calls of a group a call made, by position.
@@ -221,7 +233,11 @@ pub(super) fn live(
 }
 
 pub(super) fn live_key(live: &LiveTool) -> String {
-    format!("live {}/{}", live.tool.run, live.tool.call_id)
+    live_key_of(&live.tool.run, &live.tool.call_id)
+}
+
+fn live_key_of(run: &RunId, call_id: &str) -> String {
+    format!("live {run}/{call_id}")
 }
 
 fn live_card(ui: &mut Ui, env: &mut Env<'_, '_>, live: &LiveTool, now: Instant) -> bool {
@@ -243,7 +259,12 @@ fn live_card(ui: &mut Ui, env: &mut Env<'_, '_>, live: &LiveTool, now: Instant) 
                 header(ui, open, &head);
                 if open && let Some(input) = &tool.input {
                     ui.add_space(SP_1);
-                    section(ui, env, "Input", input, false);
+                    // The input of a running call is read only while it can be in view: the
+                    // section shows at most `SECTION_MAX_HEIGHT` of it below its title.
+                    let clip = ui.clip_rect();
+                    let top = ui.cursor().min.y;
+                    let near = top <= clip.max.y && top + SECTION_MAX_HEIGHT + 32.0 >= clip.min.y;
+                    section(ui, env, "Input", input, false, near);
                 }
             });
         });
@@ -285,16 +306,16 @@ fn body(
     let message = tree.rows[at];
     ui.add_space(SP_1);
     if let Some(input) = &tool.input {
-        section(ui, env, "Input", input, false);
+        section(ui, env, "Input", input, false, true);
     }
     match &message.content {
         MessageContent::Inline { text } if text.is_empty() => {
             ui.add(Label::new(muted("No output").size(FONT_SMALL)).selectable(false));
         }
-        output => section(ui, env, "Output", output, true),
+        output => section(ui, env, "Output", output, true, true),
     }
     if let Some(detail) = &tool.detail {
-        section(ui, env, "Details", detail, false);
+        section(ui, env, "Details", detail, false, true);
     }
     if !tree.children[at].is_empty() {
         ui.indent("calls", |ui| {
@@ -302,7 +323,7 @@ fn body(
                 let top = ui.cursor().min.y;
                 card(ui, env, view, tree, child);
                 // A call inside a call is an anchor too: its own body may arrive later.
-                view.visit(message_key(tree.rows[child]), top, ui.cursor().min.y, true);
+                visit_row(view, tree.rows[child], top, ui.cursor().min.y);
                 ui.add_space(SP_1);
             }
         });
@@ -317,9 +338,17 @@ fn section(
     title: &str,
     content: &MessageContent,
     result: bool,
+    fetch: bool,
 ) {
     ui.add(Label::new(muted(title).size(FONT_SMALL)).selectable(false));
-    let Some(text) = content_text(ui, env.requested_bodies, env.cache, content, env.effects) else {
+    let Some(text) = content_text_when(
+        ui,
+        env.requested_bodies,
+        env.cache,
+        content,
+        env.effects,
+        fetch,
+    ) else {
         return;
     };
     egui::ScrollArea::vertical()

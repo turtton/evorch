@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use egui_kittest::{Harness, kittest::Queryable};
 use workbench_protocol::namespaces::execution::ToolActivityStatus;
 
-use super::tests::{State, history, inline, tool_row};
+use super::tests::{State, body, history, inline, tool_row};
 use super::*;
 use crate::core_client::tool_activity::{Clock, LiveTools};
 
@@ -302,4 +302,102 @@ fn a_card_folding_above_the_view_keeps_the_view_in_place() {
         (after.min.y - folded.min.y).abs() < 1.0,
         "the card moved from {folded:?} to {after:?} as its neighbour was recorded"
     );
+}
+
+fn label_top(harness: &Harness<'_, State>, call: u64) -> f32 {
+    harness
+        .get_by_label(&format!("summary {call}"))
+        .rect()
+        .min
+        .y
+}
+
+// Given: twenty running cards with tall inputs, scrolled so that a card sits at the top of the
+//        view, where the view is anchored on it, below committed calls
+// When: that very call is committed, after its finish was told and before it
+// Then: the call stays where it was on screen, though its row goes in front of the live cards
+#[test]
+fn the_card_the_view_is_anchored_on_keeps_its_place_when_it_is_committed() {
+    for finished_first in [true, false] {
+        // Committed calls above, so that the row of the call lands well below the top of the
+        // transcript and the view can follow it there.
+        let earlier = (100..130)
+            .map(|index| tool_row("r", index, serde_json::json!({}), inline("done")))
+            .collect();
+        let mut cache = history(earlier);
+        for call in 0..20 {
+            start(&mut cache, call, "shell", Some(&lines(14)), 0);
+        }
+        let mut harness = harness(cache);
+        harness.run_steps(4);
+        harness.get_by_label("summary 8").scroll_to_me();
+        harness.run_steps(12);
+        // The first card that starts in view is the anchor.
+        let anchor = (0..20)
+            .filter(|&call| label_top(&harness, call) >= 20.0)
+            .min_by(|&a, &b| label_top(&harness, a).total_cmp(&label_top(&harness, b)))
+            .unwrap();
+        let before = label_top(&harness, anchor);
+        if finished_first {
+            finish(&mut harness.state_mut().cache, anchor, 100);
+            harness.run_steps(4);
+            let folded = label_top(&harness, anchor);
+            assert!((folded - before).abs() < 1.0, "{before} to {folded}");
+        }
+        let row = tool_row("r", anchor, serde_json::json!({}), inline("done"));
+        let state = harness.state_mut();
+        state.cache.history.get_mut("thr").unwrap().push(row);
+        state
+            .cache
+            .live_tools
+            .committed("r", &format!("call-{anchor}"));
+        harness.run_steps(4);
+        let after = label_top(&harness, anchor);
+        assert!(
+            (after - before).abs() < 1.0,
+            "call {anchor} moved from {before} to {after} (finish told first: {finished_first})"
+        );
+    }
+}
+
+// Given: twenty running cards whose inputs are bodies not read yet, the view at the newest
+// When: it is scrolled to the first card
+// Then: only the cards that can be in view ask for their body, each with its place kept, and
+//       the first asks once it comes into view
+#[test]
+fn a_running_cards_input_is_read_only_while_it_can_be_in_view() {
+    // A transcript already at its newest, as one being read while the agent works is.
+    let earlier = (100..130)
+        .map(|index| tool_row("r", index, serde_json::json!({}), inline("done")))
+        .collect();
+    let mut harness = harness(history(earlier));
+    harness.run_steps(6);
+    let cache = &mut harness.state_mut().cache;
+    for call in 0..20 {
+        let mut tool = serde_json::json!({
+            "thread": "thr", "run": "r", "call_id": format!("call-{call}"),
+            "tool_name": "shell", "input_summary": format!("summary {call}"),
+            "elapsed_ms": 0,
+        });
+        tool["input"] = body(&format!("in-{call}"));
+        cache
+            .live_tools
+            .start(serde_json::from_value(tool).unwrap());
+    }
+    harness.run_steps(6);
+    let requested = harness.state().requested.clone();
+    assert!(requested.contains("in-19"), "the newest is in view");
+    assert!(!requested.contains("in-0"), "{requested:?}");
+    assert!(requested.len() < 15, "{requested:?}");
+    assert_eq!(
+        harness
+            .query_all_by_label_contains("Loading message")
+            .count(),
+        20,
+        "each keeps its line"
+    );
+
+    harness.get_by_label("summary 0").scroll_to_me();
+    harness.run_steps(12);
+    assert!(harness.state().requested.contains("in-0"));
 }

@@ -48,7 +48,7 @@ impl Cache {
     pub fn snapshot(&mut self, item: SnapshotItem) {
         match item {
             SnapshotItem::CoreStatus(_) => (),
-            SnapshotItem::ToolActivity(tool) => self.live_tools.start(tool),
+            SnapshotItem::ToolActivity(tool) => self.live_tools.start_from_snapshot(tool),
             SnapshotItem::ShellJob(job) => self.shell_jobs.insert(job),
             SnapshotItem::Project(p) => {
                 self.projects.insert(p.id.to_string(), p);

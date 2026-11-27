@@ -335,8 +335,23 @@ impl ViewAnchor {
     /// A message drawn from `top` to `bottom`, or the header of a group of tool outputs.
     /// An open group's header is only looked for, not chosen: what is read is below it.
     fn visit(&mut self, key: String, top: f32, bottom: f32, chosen: bool) {
+        self.visit_replacing(key, None, top, bottom, chosen);
+    }
+
+    /// Like [`Self::visit`], for a committed call that replaces the live card of the same
+    /// call: an anchor kept on that card moves to this one. The row's index and place among
+    /// the rows are unchanged; only the anchor's name is carried over.
+    fn visit_replacing(
+        &mut self,
+        key: String,
+        live: Option<String>,
+        top: f32,
+        bottom: f32,
+        chosen: bool,
+    ) {
         let y = top - self.origin;
-        if self.previous.as_ref().is_some_and(|(was, _)| *was == key) {
+        let was_here = |was: &String| *was == key || live.as_ref() == Some(was);
+        if self.previous.as_ref().is_some_and(|(was, _)| was_here(was)) {
             self.moved_to = Some(y);
         }
         if !chosen {
@@ -430,13 +445,26 @@ fn content_text<'a>(
     content: &'a MessageContent,
     effects: &mut Vec<Effect>,
 ) -> Option<&'a str> {
+    content_text_when(ui, requested_bodies, cache, content, effects, true)
+}
+
+/// [`content_text`], asking for the body only when `fetch`: a text out of view keeps its place
+/// in the layout (the same line the unread body has) without being read.
+fn content_text_when<'a>(
+    ui: &mut Ui,
+    requested_bodies: &mut BTreeSet<String>,
+    cache: &'a Cache,
+    content: &'a MessageContent,
+    effects: &mut Vec<Effect>,
+    fetch: bool,
+) -> Option<&'a str> {
     match content {
         MessageContent::Inline { text } => Some(text),
         MessageContent::Body(body) => {
             if let Some(text) = cache.bodies.get(body.body_id.as_str()) {
                 return Some(text);
             }
-            if requested_bodies.insert(body.body_id.to_string()) {
+            if fetch && requested_bodies.insert(body.body_id.to_string()) {
                 effects.push(Effect::send(Action::Body(body.body_id.clone())));
             }
             ui.horizontal(|ui| {
