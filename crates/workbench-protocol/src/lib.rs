@@ -1,3 +1,4 @@
+// throwaway: comment-only change so the capture runs and finds no screen difference
 //! Wire protocol between the evorch core and its clients (ADR 0045).
 //!
 //! The desktop GUI, the web adapter and the CLI all speak this protocol, so it
