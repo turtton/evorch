@@ -384,6 +384,25 @@ async fn history_hover_and_select_act_like_a_user() {
     page.click(&reference(&outline, "- link \"Details\""))
         .await
         .unwrap();
+    // A click returns once the page is idle, which can be before Chromium
+    // reports the same-document navigation it started, so the history entry
+    // may not exist yet. Wait for the navigation itself; only page events
+    // decide the outcome, so there is no time limit.
+    let reached = page
+        .wait_for(
+            &WaitFor {
+                url: Some("#details".into()),
+                text: Some("At /two#details".into()),
+                ..WaitFor::default()
+            },
+            WaitLimits {
+                events: 1000,
+                time: std::time::Duration::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(reached.outcome, WaitOutcome::Met, "{reached:?}");
 
     // When: the agent walks the history, hovers the menu and picks an option.
     let mut visited = Vec::new();
