@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use egui::{Key, Modifiers};
+use workbench_protocol::namespaces::ExecutionQuery;
 
 use super::*;
 use crate::core_client::persistence::{ClientStateStore, SavedSelection, SavedState};
@@ -399,4 +400,92 @@ fn folding_and_unfolding_a_thread_is_kept_across_windows() {
     second.settle();
     second.harness.state().save_state();
     assert!(store.load().unwrap().folded_threads.is_empty());
+}
+
+// Given: a session file that kept a named subagent tab of thr-1 while a file tab hid the
+//        Subagents tab, and the core lists that run as live with a model
+// When: the window connects
+// Then: the run is read once although the tab has its name, and the answer's model is the
+//       tab's, shown under its title
+#[test]
+fn a_restored_named_subagent_tab_reads_its_model_while_subagents_stays_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("NOTES.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    let mut dock = shell::default_dock();
+    let mut files = super::super::local::files::FileTabs::default();
+    let file = CoreTab::File(files.open(notes));
+    shell::place_beside(&mut dock, file, CoreTab::Feature(FeatureId::Execution));
+    shell::focus(&mut dock, file);
+    let pane = crate::core_client::run_tabs::RunPane {
+        thread: ThreadId::new("thr-1").unwrap(),
+        run: RunId::new("run-9").unwrap(),
+        name: "tester".into(),
+        child: true,
+    };
+    let store = ClientStateStore::in_config_dir(&dir.path().join("config"));
+    store
+        .save(&SavedState {
+            layout: crate::core_client::persistence::extract(
+                &dock,
+                &files,
+                &crate::core_client::persistence::WindowRects::default(),
+            ),
+            run_tabs: vec![pane],
+            selection: Some(selection("proj-1", Some("thr-1"))),
+            ..SavedState::default()
+        })
+        .unwrap();
+    let mut screen = restored(store, false);
+    let run: RunSummary = view(json!({
+        "id": "run-9", "thread": "thr-1", "parent_run": "run-1",
+        "role": "worker", "phase": "running", "revision": "4",
+    }));
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .cache
+        .runs
+        .insert("run-9".into(), run.clone());
+    screen.harness.run_steps(1);
+    let mut asked = connect(&mut screen);
+
+    let mut reads = Vec::new();
+    for _ in 0..4 {
+        screen.harness.run_steps(2);
+        asked.extend(screen.settle());
+        for action in std::mem::take(&mut asked) {
+            if let Action::Feature(FeatureAction {
+                feature: FeatureId::Execution,
+                tag,
+                request: FeatureRequest::Query(Query::Execution(ExecutionQuery::GetRun(target))),
+            }) = action
+            {
+                let detail = json!({"summary": serde_json::to_value(&run).unwrap(),
+                    "name": "tester", "lifecycle": "active", "source": "live",
+                    "model": "work/gpt-5", "child_count": 0, "revision": "4"});
+                let reply = FeatureReply::Query(Ok(view(
+                    json!({"type": "execution", "payload": {"type": "run", "payload": detail}}),
+                )));
+                screen
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .features
+                    .reply(FeatureId::Execution, tag, reply);
+                reads.push(target.run.as_str().to_owned());
+            }
+        }
+    }
+    screen.harness.run_steps(2);
+
+    assert_eq!(reads, ["run-9"]);
+    let state = screen.harness.state();
+    let tab = state
+        .run_tabs
+        .iter()
+        .find(|(_, tab)| tab.run.as_str() == "run-9")
+        .map(|(_, tab)| tab.model.clone());
+    assert_eq!(tab, Some(Some("work/gpt-5".to_owned())));
 }

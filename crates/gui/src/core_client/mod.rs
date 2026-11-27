@@ -472,14 +472,17 @@ impl CoreClientScreen {
                 run_tabs.set_model(id, model);
             }
         }
-        let unnamed: Vec<_> = run_tabs
+        // A tab without a name or a model asks the core for its run once, whatever the
+        // Subagents tab shows: a restored tab keeps its name but not the model.
+        let wanted: Vec<_> = run_tabs
             .shown_tabs()
-            .filter(|(_, tab)| tab.name.is_none())
-            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone()))
+            .filter(|(_, tab)| tab.name.is_none() || tab.model.is_none())
+            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone(), tab.name.is_none()))
             .collect();
-        for (id, thread, run) in unnamed {
+        for (id, thread, run, unnamed) in wanted {
             match execution.run_name(&run) {
-                Some(name) => run_tabs.set_name(id, name),
+                Some(name) if unnamed => run_tabs.set_name(id, name),
+                Some(_) => {}
                 None => execution.want_name(thread, run),
             }
         }
