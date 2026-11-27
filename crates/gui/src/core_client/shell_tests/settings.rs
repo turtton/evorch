@@ -443,3 +443,127 @@ fn model_settings_keeps_its_controls_in_a_minimum_window() {
         }
     }
 }
+
+// Given: a signed-in Codex provider in Model Settings → Providers
+// When: Fetch models is pressed and the core finishes the fetch
+// Then: the panel lists what was found over the models table, models already added are marked,
+//       the quota switch says what its default is, and the list marks quota-showing providers
+#[test]
+fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default() {
+    use workbench_protocol::{
+        commands::{CommandReply, CommandResult},
+        events::UiEvent,
+        namespaces::settings::{
+            ProviderModelCandidates, SettingsCommand, SettingsEvent, SettingsOperationKind,
+            SettingsOperationView, SettingsResult,
+        },
+        operation::{OperationState, OperationView},
+        wire::Revision,
+    };
+    let (mut screen, before) = settings("Providers");
+    screen
+        .harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "codex")
+        .click();
+    screen.harness.run_steps(8);
+    screen.harness.get_by_label("Fetch models").click();
+    let sent = screen.settle();
+    let (tag, operation_id) = sent
+        .iter()
+        .find_map(|action| match action {
+            Action::Feature(FeatureAction {
+                tag,
+                request:
+                    FeatureRequest::Command(workbench_protocol::commands::Command::Settings(
+                        SettingsCommand::FetchProviderModels(fetch),
+                    )),
+                ..
+            }) => {
+                assert_eq!(fetch.provider, "codex");
+                Some((*tag, fetch.operation_id.clone()))
+            }
+            _ => None,
+        })
+        .expect("Fetch models sent a fetch command");
+    let view = |state| SettingsOperationView {
+        operation: OperationView {
+            operation_id: operation_id.clone(),
+            state,
+            revision: Revision(1),
+            result: None,
+        },
+        kind: SettingsOperationKind::FetchProviderModels,
+        revision: None,
+        message: None,
+    };
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        shared.features.reply(
+            FeatureId::Settings,
+            tag,
+            FeatureReply::Command(Ok(CommandReply::with_result(CommandResult::Settings(
+                SettingsResult::Operation(view(OperationState::Pending)),
+            )))),
+        );
+        shared.features.event(&UiEvent::Settings(
+            SettingsEvent::SettingsOperationCompleted {
+                operation: view(OperationState::Ready),
+            },
+        ));
+    }
+    let read = screen.settle();
+    let tag = read
+        .iter()
+        .find_map(|action| match action {
+            Action::Feature(FeatureAction {
+                tag,
+                request:
+                    FeatureRequest::Query(Query::Settings(SettingsQuery::GetProviderModels { .. })),
+                ..
+            }) => Some(*tag),
+            _ => None,
+        })
+        .expect("the finished fetch is read");
+    screen.shared.lock().unwrap().features.reply(
+        FeatureId::Settings,
+        tag,
+        FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ProviderModels(
+            ProviderModelCandidates {
+                operation_id,
+                provider: "codex".into(),
+                models: [
+                    "gpt-5.2",
+                    "gpt-5.3-codex",
+                    "gpt-5.4",
+                    "gpt-5.4-mini",
+                    "gpt-5.5",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                truncated: false,
+            },
+        )))),
+    );
+    screen.harness.run_steps(8);
+    for label in ["Fetched · 5 available", "Filter"] {
+        screen.harness.get_by_label_contains(label);
+    }
+    for id in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5"] {
+        screen.harness.get_by_label(id);
+    }
+    assert_english(&screen, &before);
+    screen.capture("fetch-models");
+
+    screen
+        .harness
+        .get_by_role_and_label(
+            egui::accesskit::Role::CheckBox,
+            "Show quota in the status bar",
+        )
+        .scroll_to_me();
+    screen.harness.run_steps(8);
+    screen
+        .harness
+        .get_by_label("Default: on for subscription providers");
+    screen.capture("quota-switch");
+}
