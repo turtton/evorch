@@ -6,11 +6,13 @@
 //! card opens or closes it, except where something else takes the press: a button, a link,
 //! text being selected, a card inside it or a scrolled area.
 use std::collections::{BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 
 use egui::{Align, Label, Layout, RichText, Sense, Ui, UiBuilder, WidgetInfo, WidgetType};
-use workbench_protocol::{ids::RunId, views::*};
+use workbench_protocol::{ids::RunId, namespaces::execution::ToolActivityStatus, views::*};
 
 use super::{Cache, Effect, PullRequestChips, ViewAnchor, content_text, message_key};
+use crate::core_client::tool_activity::{LiveTool, Outcome, format_time, is_timed};
 use crate::panes::pull_request_widgets::candidate_offer;
 use crate::panes::transcript_widgets::{code_block, diff_block};
 use crate::theme::icons;
@@ -22,6 +24,15 @@ use crate::theme::widgets::soft_frame;
 /// state wherever it is drawn (on its own until its caller is committed, then inside it).
 pub(super) fn open_id(run: &RunId, call_id: &str) -> egui::Id {
     egui::Id::new(("tool-card-open", run.as_str(), call_id))
+}
+
+/// What a card's header says, whichever record the card is drawn from.
+struct Head<'a> {
+    name: &'a str,
+    summary: Option<&'a str>,
+    outcome: Outcome,
+    /// Shown only for the tools whose time is shown at all.
+    time: Option<Duration>,
 }
 
 /// An input, a result or details taller than this scroll inside their card.
@@ -118,7 +129,20 @@ fn card(ui: &mut Ui, env: &mut Env<'_, '_>, view: &mut ViewAnchor, tree: &Tree<'
         let scope = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
             soft_frame(palette().SURFACE).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                header(ui, open, tool);
+                let outcome = Outcome::Finished(match tool.status {
+                    ToolCallStatus::Succeeded => ToolActivityStatus::Succeeded,
+                    ToolCallStatus::Failed => ToolActivityStatus::Failed,
+                });
+                let head = Head {
+                    name: &tool.tool_name,
+                    summary: tool.input_summary.as_deref(),
+                    outcome,
+                    time: tool
+                        .duration_ms
+                        .filter(|_| is_timed(&tool.tool_name))
+                        .map(Duration::from_millis),
+                };
+                header(ui, open, &head);
                 offers(ui, env, message, tool);
                 if open {
                     body(ui, env, view, tree, at, tool);
@@ -131,8 +155,8 @@ fn card(ui: &mut Ui, env: &mut Env<'_, '_>, view: &mut ViewAnchor, tree: &Tree<'
     });
 }
 
-fn header(ui: &mut Ui, open: bool, tool: &ToolCallView) {
-    let failed = tool.status == ToolCallStatus::Failed;
+fn header(ui: &mut Ui, open: bool, head: &Head<'_>) {
+    let failed = head.outcome == Outcome::Finished(ToolActivityStatus::Failed);
     ui.horizontal(|ui| {
         let caret = if open {
             icons::CARET_DOWN
@@ -145,22 +169,90 @@ fn header(ui: &mut Ui, open: bool, tool: &ToolCallView) {
         } else {
             palette().TEXT
         };
-        let name = RichText::new(icons::with_icon(icons::WRENCH, &tool.tool_name)).color(color);
+        let name = RichText::new(icons::with_icon(icons::WRENCH, head.name)).color(color);
         ui.add(Label::new(name).selectable(false));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (glyph, color, name) = if failed {
-                (icons::X, palette().ERROR_FG, "Failed")
-            } else {
-                (icons::CHECK, palette().SUCCESS, "Succeeded")
+            let (glyph, color, name) = match head.outcome {
+                Outcome::Running => (icons::CIRCLE_NOTCH, palette().TEXT_MUTED, "Running"),
+                Outcome::Finished(ToolActivityStatus::Succeeded) => {
+                    (icons::CHECK, palette().SUCCESS, "Succeeded")
+                }
+                Outcome::Finished(ToolActivityStatus::Failed) => {
+                    (icons::X, palette().ERROR_FG, "Failed")
+                }
+                Outcome::Finished(ToolActivityStatus::Interrupted) => {
+                    (icons::WARNING, palette().WARNING_FG, "Interrupted")
+                }
             };
             let status = ui.add(Label::new(RichText::new(glyph).color(color)).selectable(false));
             status.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, name));
-            if let Some(summary) = &tool.input_summary {
+            if let Some(time) = head.time {
+                let time = muted(format_time(time)).size(FONT_SMALL);
+                ui.add(Label::new(time).selectable(false));
+            }
+            if let Some(summary) = head.summary {
                 let summary = muted(summary).size(FONT_SMALL).monospace();
                 ui.add(Label::new(summary).truncate().selectable(false));
             }
         });
     });
+}
+
+/// Draws the calls the core says are running (and those just finished whose rows are not
+/// here yet), after the committed ones. A running card is open until it is pressed, a
+/// finished one closed; a card the person pressed keeps its state either way, and the same
+/// state carries over to the committed card that replaces it. True while a running call's
+/// time is in view and has to be redrawn as it advances.
+pub(super) fn live(
+    ui: &mut Ui,
+    env: &mut Env<'_, '_>,
+    tools: &[&LiveTool],
+    now: Instant,
+    view: &mut ViewAnchor,
+) -> bool {
+    let mut ticking = false;
+    for live in tools {
+        let top = ui.cursor().min.y;
+        ticking |= live_card(ui, env, live, now);
+        view.visit(live_key(live), top, ui.cursor().min.y, true);
+        ui.add_space(SP_1);
+    }
+    ticking
+}
+
+pub(super) fn live_key(live: &LiveTool) -> String {
+    format!("live {}/{}", live.tool.run, live.tool.call_id)
+}
+
+fn live_card(ui: &mut Ui, env: &mut Env<'_, '_>, live: &LiveTool, now: Instant) -> bool {
+    let tool = &live.tool;
+    let time = live.time(now);
+    let mut ticking = false;
+    ui.push_id(("tool-card", tool.run.as_str(), &tool.call_id), |ui| {
+        let id = open_id(&tool.run, &tool.call_id);
+        let open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(live.running()));
+        let scope = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
+            soft_frame(palette().SURFACE).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let head = Head {
+                    name: &tool.tool_name,
+                    summary: tool.input_summary.as_deref(),
+                    outcome: live.outcome(),
+                    time,
+                };
+                header(ui, open, &head);
+                if open && let Some(input) = &tool.input {
+                    ui.add_space(SP_1);
+                    section(ui, env, "Input", input, false);
+                }
+            });
+        });
+        if scope.response.clicked() {
+            ui.data_mut(|data| data.insert_temp(id, !open));
+        }
+        ticking = live.running() && time.is_some() && ui.is_rect_visible(scope.response.rect);
+    });
+    ticking
 }
 
 /// The pull requests this call suggested, while they are open.

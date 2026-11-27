@@ -20,6 +20,7 @@ mod shell_jobs;
 mod subagent_panes;
 pub mod theme;
 mod thread_search;
+pub mod tool_activity;
 mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 

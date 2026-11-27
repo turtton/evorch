@@ -11,6 +11,7 @@ use super::cache::Cache;
 use super::connection::Action;
 use super::features::pull_requests::PullRequestChips;
 use super::shell::Effect;
+use super::tool_activity::LiveTool;
 use crate::panes::markdown_render::render_markdown_in_workspace;
 use crate::panes::transcript_widgets::user_bubble;
 use crate::theme::icons;
@@ -38,6 +39,9 @@ pub(super) struct TranscriptView<'a> {
     /// The open pull request suggestions, offered on the cards of the calls that made them.
     pub chips: Option<&'a PullRequestChips<'a>>,
 }
+
+/// How often a running call's time is redrawn while it is in view.
+const LIVE_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Height of the row above the first message that stands for the older ones.
 const OLDER_ROW_HEIGHT: f32 = 28.0;
@@ -114,9 +118,30 @@ pub(super) fn transcript(
     // spans the top is the second choice: it may grow itself.
     let memory = ui.make_persistent_id(salt).with("view-anchor");
     let before: Option<(Option<(String, f32)>, u64)> = ui.data(|data| data.get_temp(memory));
+    // The calls running, unless their committed rows are among the messages: the row is the
+    // record, and a card that outlived it would be drawn twice.
+    let recorded: std::collections::HashSet<_> = messages
+        .iter()
+        .filter_map(|m| Some((m.run.as_str(), m.tool.as_ref()?.call_id.as_str())))
+        .collect();
+    let live = cache.live_tools.shown(|live| {
+        let tool = &live.tool;
+        let in_scope = match scope {
+            Scope::Thread(thread) => {
+                &tool.thread == thread
+                    && cache
+                        .runs
+                        .get(tool.run.as_str())
+                        .is_none_or(|run| run.parent_run.is_none())
+            }
+            Scope::Run { run, .. } => &tool.run == run,
+        };
+        in_scope && !recorded.contains(&(tool.run.as_str(), tool.call_id.as_str()))
+    });
     let shown = data_fingerprint(
         cache,
         &messages,
+        &live,
         (older.is_some_and(Option::is_some), older_failed),
     );
     let mut view = ViewAnchor {
@@ -125,6 +150,7 @@ pub(super) fn transcript(
     };
     let data_changed = before.as_ref().is_some_and(|(_, was)| *was != shown);
     let mut near_top = false;
+    let mut ticking = false;
     let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .stick_to_bottom(true)
@@ -189,9 +215,23 @@ pub(super) fn transcript(
                 }
                 ui.add_space(SP_2);
             }
+            if !live.is_empty() {
+                let mut env = cards::Env {
+                    requested_bodies,
+                    cache,
+                    chips,
+                    effects,
+                };
+                let now = cache.live_tools.now();
+                ticking = cards::live(ui, &mut env, &live, now, &mut view);
+                ui.add_space(SP_2);
+            }
             cards(ui, effects);
             ui.add_space(SP_2);
         });
+    if ticking {
+        ui.ctx().request_repaint_after(LIVE_TICK);
+    }
     let shift = match (&view.previous, view.moved_to) {
         (Some((_, was)), Some(now)) if data_changed && (now - was).abs() > 0.5 => now - was,
         _ => 0.0,
@@ -230,10 +270,27 @@ enum Item<'a> {
 
 /// What the messages shown and the row above them are made of: it differs between two
 /// frames when messages came or went, or a body was read.
-fn data_fingerprint(cache: &Cache, messages: &[&CommittedMessage], older_row: (bool, bool)) -> u64 {
+fn data_fingerprint(
+    cache: &Cache,
+    messages: &[&CommittedMessage],
+    live: &[&LiveTool],
+    older_row: (bool, bool),
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     older_row.hash(&mut hasher);
+    // A call that finishes closes and one that is recorded is replaced: both change heights.
+    for live in live {
+        cards::live_key(live).hash(&mut hasher);
+        live.running().hash(&mut hasher);
+        if let Some(MessageContent::Body(body)) = &live.tool.input {
+            cache
+                .bodies
+                .get(body.body_id.as_str())
+                .map(String::len)
+                .hash(&mut hasher);
+        }
+    }
     for message in messages {
         message.run.as_str().hash(&mut hasher);
         message.index.get().hash(&mut hasher);
@@ -494,6 +551,9 @@ fn tool_group(
 }
 
 #[cfg(test)]
+mod live_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -530,16 +590,16 @@ mod tests {
         .unwrap()
     }
 
-    fn body(id: &str) -> serde_json::Value {
+    pub(super) fn body(id: &str) -> serde_json::Value {
         serde_json::json!({"type": "body", "payload": {"body_id": id, "total_bytes": "2048"}})
     }
 
-    fn inline(text: &str) -> serde_json::Value {
+    pub(super) fn inline(text: &str) -> serde_json::Value {
         serde_json::json!({"type": "inline", "payload": {"text": text}})
     }
 
     /// A tool row with the given call fields on top of a successful `run_js` call.
-    fn tool_row(
+    pub(super) fn tool_row(
         run: &str,
         index: u64,
         call: serde_json::Value,
@@ -632,10 +692,10 @@ mod tests {
         assert!(items(&[&committed("r", 0, "notice", "")][..]).is_empty());
     }
 
-    struct State {
-        cache: Cache,
-        requested: BTreeSet<String>,
-        effects: Vec<Effect>,
+    pub(super) struct State {
+        pub(super) cache: Cache,
+        pub(super) requested: BTreeSet<String>,
+        pub(super) effects: Vec<Effect>,
     }
 
     fn harness(cache: Cache) -> egui_kittest::Harness<'static, State> {
@@ -665,7 +725,7 @@ mod tests {
         )
     }
 
-    fn history(rows: Vec<CommittedMessage>) -> Cache {
+    pub(super) fn history(rows: Vec<CommittedMessage>) -> Cache {
         let mut cache = Cache::default();
         cache.history.insert("thr".into(), rows);
         cache
@@ -1128,7 +1188,7 @@ mod tests {
             inline("out"),
         );
         let mut cache = Cache::default();
-        let fingerprint = |cache: &Cache| data_fingerprint(cache, &[&row], (false, false));
+        let fingerprint = |cache: &Cache| data_fingerprint(cache, &[&row], &[], (false, false));
         let unread = fingerprint(&cache);
         cache.bodies.insert("in".into(), "code".into());
         let input_read = fingerprint(&cache);
