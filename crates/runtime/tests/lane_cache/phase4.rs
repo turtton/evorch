@@ -44,12 +44,20 @@ fn instruction(
     extra: Value,
 ) -> ScriptedResponse {
     let lane = store.handle().lane(id).unwrap().unwrap();
-    let mut args = json!({
-        "operation_id": key,
+    let revisions = json!({
         "lane_id": id,
         "expected_management_revision": lane.management_revision,
         "expected_brief_revision": lane.brief_revision,
     });
+    let mut args = if name == "lane_send" {
+        json!({"operation_id": key, "targets": [revisions]})
+    } else {
+        let mut args = json!({"operation_id": key});
+        args.as_object_mut()
+            .unwrap()
+            .extend(revisions.as_object().unwrap().clone());
+        args
+    };
     args.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
@@ -153,7 +161,7 @@ async fn hold_supplement_revision_close_and_release_preserve_wire_prefix() {
     .await;
     assert_eq!(result(&h, "refused-1")["code"], "lane_creation_suppressed");
     assert_eq!(result(&h, "refused-1")["uncollected_lane_open_count"], 2);
-    assert_eq!(result(&h, "send-0")["status"], "accepted");
+    assert_eq!(result(&h, "send-0")["results"][0]["status"], "accepted");
     lead_turn(&mut h, lead, vec![refused("refused-2")], &mut events).await;
     assert_eq!(result(&h, "refused-2")["code"], "lane_creation_suppressed");
 
@@ -199,7 +207,7 @@ async fn hold_supplement_revision_close_and_release_preserve_wire_prefix() {
     lead_turn(&mut h, lead, vec![send], &mut events).await;
     let close_done = close(&store, &done, "close-done");
     lead_turn(&mut h, lead, vec![close_done], &mut events).await;
-    assert_eq!(result(&h, "send-done")["status"], "accepted");
+    assert_eq!(result(&h, "send-done")["results"][0]["status"], "accepted");
     assert_eq!(result(&h, "close-done")["outcome"], "closed");
 
     // A read, then another creation: more history, nothing rewritten.

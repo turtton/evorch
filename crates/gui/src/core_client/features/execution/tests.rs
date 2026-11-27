@@ -51,6 +51,7 @@ pub(crate) fn screen(feature: Box<dyn Feature>, thread: Option<&str>) -> Harness
             };
             screen.feature.maintain(&mut ctx, visibility);
             screen.feature.render(ui, &mut ctx);
+            screen.feature.render_overlay(&ui.ctx().clone(), &mut ctx);
         },
         state,
     )

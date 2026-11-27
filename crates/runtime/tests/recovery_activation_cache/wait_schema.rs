@@ -17,6 +17,7 @@ pub(super) struct PredecessorCatalog {
     pub plan: bool,
     pub output_attachments: bool,
     pub question_listing: bool,
+    pub lane_send: bool,
     pub wait_liveness: bool,
 }
 impl PredecessorCatalog {
@@ -24,6 +25,9 @@ impl PredecessorCatalog {
         *self.successor_tools.lock().unwrap() = successor.to_vec();
         if self.wait_liveness {
             return super::wait_liveness::old_tools(successor);
+        }
+        if self.lane_send {
+            return super::lane_send_schema::old_tools(successor);
         }
         if self.question_listing {
             return super::question_listing_schema::old_tools(successor);

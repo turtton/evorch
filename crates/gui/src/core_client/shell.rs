@@ -11,6 +11,7 @@ use workbench_protocol::ids::{ProjectId, ThreadId};
 use super::attention::TabAttention;
 use super::connection::Action;
 use super::conversation::{self, ConversationIo, ConversationPane};
+use super::features::settings::SettingsIntent;
 use super::features::{DockPass, FeatureId, Navigation, Selection};
 use super::local::{self, LocalPanes, files::FileTabId};
 use super::notifications::{self, NotificationLog};
@@ -20,9 +21,11 @@ use crate::panes::goal_widgets::GoalAction;
 use crate::panes::sidebar_widgets::{INDENT, ProjectRowView, project_row};
 use crate::panes::tab_attention::{self, PaneAttention};
 use crate::theme::icons;
-use crate::theme::text::muted;
+use crate::theme::text::{muted, section};
 use crate::theme::tokens::*;
-use crate::theme::widgets::{compact_row, empty_state, ghost_icon_button, row_title, status_dot};
+use crate::theme::widgets::{
+    accessible, compact_row, empty_state, ghost_icon_button, row_title, status_dot,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreTab {
@@ -62,8 +65,8 @@ pub enum Effect {
     PullRequestChip(super::features::pull_requests::PullRequestChipAction),
     ResetLayout,
     ThemeSettings,
-    /// ⚙ → Providers, Routing or Agent roles: the Settings tab with its modal on that tab.
-    Settings(crate::panes::settings::SettingsTab),
+    /// ⚙ → Model Settings or Config file.
+    Settings(SettingsIntent),
     Status(String),
     AttachRequested {
         request: String,
@@ -91,16 +94,6 @@ const LEFT: [FeatureId; 3] = [FeatureId::Lanes, FeatureId::Memory, FeatureId::Im
 const CENTRE: [FeatureId; 1] = [FeatureId::Browser];
 const RIGHT_TOP: [FeatureId; 2] = [FeatureId::Execution, FeatureId::Teams];
 const RIGHT_BOTTOM: [FeatureId; 2] = [FeatureId::Artifacts, FeatureId::PullRequests];
-
-pub const ON_DEMAND: [FeatureId; 7] = [
-    FeatureId::Settings,
-    FeatureId::Auth,
-    FeatureId::Mcp,
-    FeatureId::Diagnostics,
-    FeatureId::Evaluation,
-    FeatureId::Restart,
-    FeatureId::Maintenance,
-];
 
 const SIDEBAR_FRACTION: f32 = 0.30;
 /// The conversation's share of the centre column above the Terminal, as in the
@@ -275,7 +268,7 @@ pub fn feature_icon(feature: FeatureId) -> &'static str {
         FeatureId::Execution => icons::ROBOT,
         FeatureId::Teams => icons::USERS_THREE,
         FeatureId::Lanes => icons::STACK,
-        FeatureId::Settings => icons::GEAR,
+        FeatureId::Settings => icons::FILE_TEXT,
         FeatureId::Auth => icons::KEY,
         FeatureId::Diagnostics => icons::CHART_BAR,
         FeatureId::Memory => icons::BRAIN,
@@ -675,80 +668,152 @@ pub fn footer(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
     });
 }
 
-fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
-    let title = |feature: FeatureId| {
-        state
-            .titles
-            .iter()
-            .find(|(id, _)| *id == feature)
-            .map_or(feature.namespace(), |(_, title)| *title)
+/// One entry of the ⚙ menu: an icon before its name, which is also its accessible name and its
+/// tooltip, and an optional hint at the right.
+fn menu_item(ui: &mut Ui, icon: &str, name: &str, hint: Option<&str>) -> bool {
+    let mut button = egui::Button::new(icons::with_icon(icon, name));
+    if let Some(hint) = hint {
+        button = button.right_text(muted(hint).size(FONT_SMALL));
+    }
+    let response = ui.add(button);
+    accessible(&response, name);
+    let clicked = response.clicked();
+    response.on_hover_text(hint.map_or_else(|| name.to_owned(), |hint| format!("{name} ({hint})")));
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
+fn menu_heading(ui: &mut Ui, title: &str) {
+    ui.label(section(title.to_uppercase()));
+}
+
+/// The ⚙ menu: Configure, Core and View, each entry with its icon. Model Settings is the one way
+/// into Providers, Routing and Agent Roles.
+fn settings_menu(ui: &mut Ui, state: &FooterState<'_>, effects: &mut Vec<Effect>) {
+    let shown = |feature: FeatureId| !state.placeholders.contains(&feature);
+    let open = |effects: &mut Vec<Effect>, feature: FeatureId| {
+        effects.push(Effect::Open(CoreTab::Feature(feature)));
     };
+    menu_heading(ui, "Configure");
+    if shown(FeatureId::Settings)
+        && menu_item(
+            ui,
+            icons::STACK_SIMPLE,
+            "Model Settings",
+            Some("Providers \u{b7} Routing \u{b7} Agent Roles"),
+        )
+    {
+        effects.push(Effect::Settings(SettingsIntent::ModelSettings(
+            crate::panes::settings::SettingsTab::Providers,
+        )));
+    }
+    // Until Providers takes sign-in over, credentials are managed in their own tab.
+    if shown(FeatureId::Auth)
+        && menu_item(ui, feature_icon(FeatureId::Auth), "Authentication", None)
+    {
+        open(effects, FeatureId::Auth);
+    }
+    if shown(FeatureId::Mcp) && menu_item(ui, feature_icon(FeatureId::Mcp), "MCP servers", None) {
+        open(effects, FeatureId::Mcp);
+    }
+    if menu_item(ui, icons::PALETTE, "Appearance", None) {
+        effects.push(Effect::ThemeSettings);
+    }
+    ui.separator();
+    menu_heading(ui, "Core");
+    if shown(FeatureId::Settings)
+        && menu_item(
+            ui,
+            feature_icon(FeatureId::Settings),
+            "Config file",
+            Some("config.toml"),
+        )
+    {
+        effects.push(Effect::Settings(SettingsIntent::ConfigFile));
+    }
+    if shown(FeatureId::Restart)
+        && menu_item(ui, feature_icon(FeatureId::Restart), "Restart core", None)
+    {
+        open(effects, FeatureId::Restart);
+    }
+    if shown(FeatureId::Maintenance)
+        && menu_item(
+            ui,
+            feature_icon(FeatureId::Maintenance),
+            "Maintenance",
+            None,
+        )
+    {
+        open(effects, FeatureId::Maintenance);
+    }
+    ui.separator();
+    menu_heading(ui, "View");
+    if shown(FeatureId::Diagnostics)
+        && menu_item(ui, feature_icon(FeatureId::Diagnostics), "Usage", None)
+    {
+        open(effects, FeatureId::Diagnostics);
+    }
+    if shown(FeatureId::Evaluation)
+        && menu_item(ui, feature_icon(FeatureId::Evaluation), "Evaluations", None)
+    {
+        open(effects, FeatureId::Evaluation);
+    }
+    panels_menu(ui, state, effects);
+    if menu_item(ui, icons::ARROW_COUNTER_CLOCKWISE, "Reset layout", None) {
+        effects.push(Effect::ResetLayout);
+    }
+}
+
+fn panels_menu(ui: &mut Ui, state: &FooterState<'_>, effects: &mut Vec<Effect>) {
+    let response = ui.menu_button(icons::with_icon(icons::LAYOUT, "Panels"), |ui| {
+        for tab in [
+            CoreTab::Projects,
+            CoreTab::Conversation,
+            CoreTab::Notifications,
+            CoreTab::Plan,
+            CoreTab::Diff,
+            CoreTab::Terminal,
+        ] {
+            let label = match tab {
+                CoreTab::Projects => "Projects",
+                CoreTab::Notifications => "Notifications",
+                CoreTab::Plan => "Plan",
+                CoreTab::Diff => "Diff",
+                CoreTab::Terminal => "Terminal",
+                _ => "Conversation",
+            };
+            if ui.button(label).clicked() {
+                effects.push(Effect::Open(tab));
+                ui.close();
+            }
+        }
+        for (feature, name) in state.titles {
+            // Config file and Authentication have their own entries in the menu above.
+            if matches!(
+                feature,
+                FeatureId::Workspace | FeatureId::Settings | FeatureId::Auth
+            ) || state.placeholders.contains(feature)
+            {
+                continue;
+            }
+            if ui
+                .button(icons::with_icon(feature_icon(*feature), *name))
+                .clicked()
+            {
+                effects.push(Effect::Open(CoreTab::Feature(*feature)));
+                ui.close();
+            }
+        }
+    });
+    accessible(&response.response, "Panels");
+}
+
+fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>) {
     ui.horizontal_wrapped(|ui| {
         ui.menu_button("⚙", |ui| {
-            if ui.button("Theme").clicked() {
-                effects.push(Effect::ThemeSettings);
-                ui.close();
-            }
-            if !state.placeholders.contains(&FeatureId::Settings) {
-                for tab in crate::panes::settings::SettingsTab::ALL {
-                    if ui.button(tab.label()).clicked() {
-                        effects.push(Effect::Settings(tab));
-                        ui.close();
-                    }
-                }
-            }
-            for feature in ON_DEMAND {
-                if state.placeholders.contains(&feature) {
-                    continue;
-                }
-                if ui
-                    .button(icons::with_icon(feature_icon(feature), title(feature)))
-                    .clicked()
-                {
-                    effects.push(Effect::Open(CoreTab::Feature(feature)));
-                    ui.close();
-                }
-            }
-            ui.separator();
-            ui.menu_button("Panels", |ui| {
-                for tab in [
-                    CoreTab::Projects,
-                    CoreTab::Conversation,
-                    CoreTab::Notifications,
-                    CoreTab::Plan,
-                    CoreTab::Diff,
-                    CoreTab::Terminal,
-                ] {
-                    let label = match tab {
-                        CoreTab::Projects => "Projects",
-                        CoreTab::Notifications => "Notifications",
-                        CoreTab::Plan => "Plan",
-                        CoreTab::Diff => "Diff",
-                        CoreTab::Terminal => "Terminal",
-                        _ => "Conversation",
-                    };
-                    if ui.button(label).clicked() {
-                        effects.push(Effect::Open(tab));
-                        ui.close();
-                    }
-                }
-                for (feature, name) in state.titles {
-                    if *feature == FeatureId::Workspace || state.placeholders.contains(feature) {
-                        continue;
-                    }
-                    if ui
-                        .button(icons::with_icon(feature_icon(*feature), *name))
-                        .clicked()
-                    {
-                        effects.push(Effect::Open(CoreTab::Feature(*feature)));
-                        ui.close();
-                    }
-                }
-            });
-            if ui.button("Reset layout").clicked() {
-                effects.push(Effect::ResetLayout);
-                ui.close();
-            }
+            settings_menu(ui, &state, effects);
         })
         .response
         .on_hover_text("Workbench settings");

@@ -1458,3 +1458,149 @@ fn optional_activity_cannot_overflow_an_almost_full_workspace_snapshot() {
     assert_eq!(state.activities.len(), activity::MAX_LIVE_TOOLS);
     assert!(serde_json::to_vec(items).unwrap().len() <= MAX_SNAPSHOT_BYTES);
 }
+
+fn shell_output_event(offset: u64, chunk: &str, status: &str) -> Event {
+    Event::new(event_bus::ToolEvent::ShellJobOutput {
+        run_id: Some("run".into()),
+        job_uid: Some("uid".into()),
+        job_id: "job-1".into(),
+        call_id: Some("start".into()),
+        offset,
+        chunk: chunk.into(),
+        status: status.into(),
+        exit_code: (status == "completed").then_some(0),
+    })
+}
+#[test]
+fn shell_snapshot_query_scope_masking_and_lag_share_the_publication_boundary() {
+    use workbench_protocol::namespaces::execution::shell::*;
+    let (_rt, _dir, _store, p, _now, _bus) = activity_fixture();
+    let now = tokio::time::Instant::now();
+    let secret = format!("sk-{}", "a".repeat(32));
+    p.observe_shell(
+        activity_start(
+            "start",
+            "shell",
+            serde_json::json!({"command": format!("echo {secret}")}),
+        ),
+        now,
+    );
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    p.observe_shell(shell_output_event(0, "a tail", "running"), now);
+    let job = sub.started.initial_page.take().unwrap().items;
+    assert!(!job.iter().any(|i| matches!(i, SnapshotItem::ShellJob(_)))); // frozen pre-start cut
+    let cut = p
+        .subscribe_with_snapshot(&all(None))
+        .unwrap()
+        .started
+        .initial_page
+        .unwrap();
+    let jobs: Vec<_> = cut
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let SnapshotItem::ShellJob(j) = i {
+                Some(j)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(jobs.len(), 1);
+    assert!(!jobs[0].command.as_ref().unwrap().contains(&secret));
+    assert!(
+        jobs[0]
+            .command
+            .as_ref()
+            .unwrap()
+            .contains("[REDACTED:openai-style-key]")
+    );
+    assert!(!serde_json::to_string(&cut).unwrap().contains("a tail"));
+    let scoped = p
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::Thread {
+                thread: ThreadId::new("other-thread").unwrap(),
+            },
+            after: None,
+        })
+        .unwrap();
+    assert!(
+        !scoped
+            .started
+            .initial_page
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| matches!(i, SnapshotItem::ShellJob(_)))
+    );
+    let query = Query::Execution(ExecutionQuery::ReadShellOutput(ReadShellOutput {
+        thread: ThreadId::new("thread").unwrap(),
+        run: RunId::new("run").unwrap(),
+        job_uid: "uid".into(),
+        offset: 0,
+        max_bytes: 65536,
+    }));
+    assert!(
+        matches!(p.query(&query).unwrap(), QueryReply::Execution(ExecutionReply::ShellOutput(output)) if output.chunk == "a tail")
+    );
+    p.invalidate(); // same clearing path used for bus lag
+    assert_eq!(p.query(&query).unwrap_err().code, ErrorCode::NotFound);
+    assert!(
+        !p.subscribe_with_snapshot(&all(None))
+            .unwrap()
+            .started
+            .initial_page
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| matches!(i, SnapshotItem::ShellJob(_)))
+    );
+}
+#[tokio::test(start_paused = true)]
+async fn shell_output_timer_delivers_a_terminal_tail_without_another_bus_event() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 128, Default::default());
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = refreshes.clone();
+    p.state.lock().unwrap().refresh_hook = Some(Arc::new(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    }));
+    p.state.lock().unwrap().models.runs.insert(
+        "run".into(),
+        RunSummary {
+            id: RunId::new("run").unwrap(),
+            thread: ThreadId::new("thread").unwrap(),
+            parent_run: None,
+            role: RunRole::Worker,
+            phase: RunPhase::Running,
+            revision: Revision(1),
+        },
+    );
+    bus.emit(shell_output_event(0, "first", "running"));
+    loop {
+        if matches!(sub.recv().await.unwrap().event, UiEvent::Execution(ExecutionEvent::ShellJobOutput { chunk, .. }) if chunk == "first")
+        {
+            break;
+        }
+    }
+    bus.emit(shell_output_event(5, "last", "completed"));
+    loop {
+        if matches!(sub.recv().await.unwrap().event, UiEvent::Execution(ExecutionEvent::ShellJobChanged { job }) if job.state == workbench_protocol::namespaces::execution::shell::ShellJobState::Completed)
+        {
+            break;
+        }
+    }
+    // Only the production flush timer can now wake this receiver. Tokio advances
+    // virtual time; no wall-clock deadline/sleep is part of correctness.
+    loop {
+        if matches!(sub.recv().await.unwrap().event, UiEvent::Execution(ExecutionEvent::ShellJobOutput { offset: 5, chunk, .. }) if chunk == "last")
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        refreshes.load(Ordering::Relaxed),
+        0,
+        "output never reloads storage models"
+    );
+}

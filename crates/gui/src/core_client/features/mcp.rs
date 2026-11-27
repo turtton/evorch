@@ -17,9 +17,10 @@ use super::{Availability, Feature, FeatureContext, FeatureError, FeatureId, Feat
 use crate::mcp_settings::{
     DraftTransport, DraftValue, DraftValueKind, McpServerDraft, SecretTarget,
 };
-use crate::theme::text::muted;
+use crate::theme::icons;
+use crate::theme::text::{muted, section};
 use crate::theme::tokens::palette;
-use crate::theme::widgets::{badge, spinner};
+use crate::theme::widgets::{accessible, icon_button, primary_button, spinner, status_dot};
 use config::mcp::{MCP_ROLE_KEYS, McpServerEntry, McpSource};
 use egui::{Color32, RichText, Ui};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -978,6 +979,22 @@ fn secret_state_label(state: McpSecretState) -> &'static str {
     }
 }
 
+/// One entry of a row's `…` menu: an icon before its name, which is also its accessible
+/// name; a destructive one is drawn in the error colour.
+fn menu_action(ui: &mut Ui, icon: &str, name: &str, destructive: bool) -> bool {
+    let mut text = RichText::new(icons::with_icon(icon, name));
+    if destructive {
+        text = text.color(palette().ERROR_FG);
+    }
+    let response = ui.button(text);
+    accessible(&response, name);
+    let clicked = response.clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
 fn row_note(ui: &mut Ui, note: &RowNote) {
     match note {
         RowNote::Working(kind) => {
@@ -1048,16 +1065,25 @@ impl McpFeature {
             return;
         };
         ui.horizontal(|ui| {
-            if ui.button("Reload").clicked() {
-                self.refresh(project);
-            }
-            if ui.button("Add MCP server").clicked() {
-                self.editor = Some(Editor::new(
-                    project.clone(),
-                    settings.revision.clone(),
-                    McpServerDraft::new_server(),
-                ));
-            }
+            let count = settings.servers.len();
+            ui.label(section(format!(
+                "{count} SERVER{}",
+                if count == 1 { "" } else { "S" }
+            )));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let add = primary_button(ui, icons::with_icon(icons::PLUS, "Add server"));
+                accessible(&add, "Add MCP server");
+                if add.clicked() {
+                    self.editor = Some(Editor::new(
+                        project.clone(),
+                        settings.revision.clone(),
+                        McpServerDraft::new_server(),
+                    ));
+                }
+                if icon_button(ui, icons::ARROWS_CLOCKWISE, "Reload").clicked() {
+                    self.refresh(project);
+                }
+            });
         });
         if settings.preparation_blocked {
             ui.colored_label(
@@ -1088,9 +1114,14 @@ impl McpFeature {
         let busy = matches!(note, Some(RowNote::Working(_)));
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&id).strong());
                 let (label, color) = status_badge(server.state.status);
-                badge(ui, label, color, palette().SURFACE);
+                status_dot(ui, color);
+                ui.label(RichText::new(&id).strong());
+                ui.label(muted("\u{b7}"));
+                ui.label(RichText::new(label).color(color));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.row_icons(ui, project, settings, server, &actions, busy);
+                });
             });
             let note_cause = match &note {
                 Some(RowNote::Failed(code)) => Some(*code),
@@ -1112,13 +1143,6 @@ impl McpFeature {
                 row_note(ui, note);
             }
             ui.horizontal_wrapped(|ui| {
-                if actions.edit && ui.button("Edit").clicked() {
-                    self.editor = Some(Editor::new(
-                        project.clone(),
-                        settings.revision.clone(),
-                        McpServerDraft::from_entry(&id, &entry_of(server)),
-                    ));
-                }
                 if let Some(enabled) = actions.set_enabled
                     && ui
                         .add_enabled(
@@ -1139,36 +1163,73 @@ impl McpFeature {
                     );
                     self.working(project, &id, McpOperationKind::SetEnabled);
                 }
-                if actions.disable && ui.button("Hide (tombstone)").clicked() {
-                    self.save_mutation(
-                        project,
-                        settings,
-                        McpMutation::Disable {
-                            server_id: id.clone(),
-                        },
-                    );
-                }
-                if actions.remove_override && ui.button("Remove override").clicked() {
-                    self.save_mutation(
-                        project,
-                        settings,
-                        McpMutation::RemoveOverride {
-                            server_id: id.clone(),
-                        },
-                    );
-                }
-                if actions.delete && ui.button("Delete").clicked() {
-                    self.save_mutation(
-                        project,
-                        settings,
-                        McpMutation::RemoveOverride {
-                            server_id: id.clone(),
-                        },
-                    );
-                }
                 self.approval_buttons(ui, project, settings, server, busy);
             });
         });
+    }
+
+    /// The icons at the right of a row: the frequent operations (a connection test, editing) as
+    /// icons, and the rare, heavier ones (hide, remove the override, delete) in a `…` menu.
+    /// Laid out right to left, so the menu comes first.
+    fn row_icons(
+        &mut self,
+        ui: &mut Ui,
+        project: &ProjectId,
+        settings: &McpSettings,
+        server: &McpServerView,
+        actions: &RowActions,
+        busy: bool,
+    ) {
+        let id = server.server_id.clone();
+        if actions.disable || actions.remove_override || actions.delete {
+            let mut mutation = None;
+            let menu = ui.menu_button(icons::DOTS_THREE, |ui| {
+                if actions.disable && menu_action(ui, icons::EYE_SLASH, "Hide (tombstone)", false) {
+                    mutation = Some(McpMutation::Disable {
+                        server_id: id.clone(),
+                    });
+                }
+                if actions.remove_override
+                    && menu_action(ui, icons::ARROW_COUNTER_CLOCKWISE, "Remove override", false)
+                {
+                    mutation = Some(McpMutation::RemoveOverride {
+                        server_id: id.clone(),
+                    });
+                }
+                if actions.delete {
+                    ui.separator();
+                    if menu_action(ui, icons::TRASH, "Delete", true) {
+                        mutation = Some(McpMutation::RemoveOverride {
+                            server_id: id.clone(),
+                        });
+                    }
+                }
+            });
+            accessible(&menu.response, "More actions");
+            menu.response.on_hover_text("More actions");
+            if let Some(mutation) = mutation {
+                self.save_mutation(project, settings, mutation);
+            }
+        }
+        if actions.edit && icon_button(ui, icons::PENCIL_SIMPLE, "Edit").clicked() {
+            self.editor = Some(Editor::new(
+                project.clone(),
+                settings.revision.clone(),
+                McpServerDraft::from_entry(&id, &entry_of(server)),
+            ));
+        }
+        if server.definition.is_some() {
+            let testing = self
+                .tests
+                .contains_key(&(project.as_str().to_owned(), id.clone()));
+            if busy {
+                if testing && icon_button(ui, icons::X, "Cancel test").clicked() {
+                    self.cancel_test(project, &id);
+                }
+            } else if icon_button(ui, icons::PLAY, "Test connection").clicked() {
+                self.start_test(project, &settings.revision, &id);
+            }
+        }
     }
 
     fn approval_buttons(
@@ -1213,17 +1274,6 @@ impl McpFeature {
                 operation,
             );
             self.working(project, id, McpOperationKind::RevokeApproval);
-        }
-        if busy {
-            if self
-                .tests
-                .contains_key(&(project.as_str().to_owned(), id.clone()))
-                && ui.button("Cancel test").clicked()
-            {
-                self.cancel_test(project, id);
-            }
-        } else if ui.button("Test connection").clicked() {
-            self.start_test(project, &settings.revision, id);
         }
     }
 
@@ -2505,6 +2555,87 @@ mod tests {
         assert!(window.query_by_label("Connection test: ready.").is_some());
         assert!(window.query_by_label_contains("NeedsApproval").is_none());
         assert!(window.query_by_label_contains("ApprovalRevoked").is_none());
+    }
+
+    fn project_server(id: &str, overridden: bool) -> McpServerView {
+        McpServerView {
+            server_id: id.into(),
+            origin: McpOrigin::ProjectToml,
+            imported_exists: overridden,
+            tombstone: false,
+            definition: None,
+            diagnostics: vec![],
+            state: McpServerState {
+                status: McpServerStatus::Ready,
+                reason: None,
+            },
+            secret_references: vec![],
+            secret_states: BTreeMap::new(),
+        }
+    }
+
+    // Given: a server overriding an imported one, and one defined only in the project
+    // When: their rows are drawn and the `…` menus are opened
+    // Then: editing is an icon on the row, the heavier operations are only in the menu, and
+    //       each menu entry queues the same override mutation as the text buttons did
+    #[test]
+    fn a_rows_rare_operations_live_in_its_menu_and_queue_the_same_mutations() {
+        use egui_kittest::kittest::Queryable;
+        let mut feature = McpFeature::default();
+        let mut settings = settings_of("p", revision('a'));
+        settings.servers.push(project_server("over", true));
+        settings.servers.push(project_server("own", false));
+        feature.projects.entry("p".into()).or_default().settings = Some(settings);
+        let mut window = window(feature);
+        window.run_steps(2);
+        window.get_by_label("2 SERVERS");
+        assert_eq!(window.get_all_by_label("Edit").count(), 2);
+        for hidden in ["Hide (tombstone)", "Remove override", "Delete"] {
+            assert!(window.query_by_label(hidden).is_none(), "{hidden}");
+        }
+
+        window
+            .get_all_by_label("More actions")
+            .next()
+            .unwrap()
+            .click();
+        window.run_steps(2);
+        window.get_by_label("Hide (tombstone)");
+        window.get_by_label("Remove override").click();
+        window.run_steps(2);
+        window
+            .get_all_by_label("More actions")
+            .nth(1)
+            .unwrap()
+            .click();
+        window.run_steps(2);
+        window.get_by_label("Delete").click();
+        window.run_steps(2);
+
+        // Each frame sends what the click queued.
+        let mutations: Vec<_> = window
+            .state()
+            .frame
+            .actions
+            .iter()
+            .filter_map(|action| match &action.request {
+                crate::core_client::features::FeatureRequest::Command(Command::Mcp(
+                    McpCommand::SaveOverride(save),
+                )) => Some(save.mutation.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mutations,
+            [
+                McpMutation::RemoveOverride {
+                    server_id: "over".into()
+                },
+                McpMutation::RemoveOverride {
+                    server_id: "own".into()
+                },
+            ]
+        );
     }
 
     #[test]

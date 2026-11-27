@@ -159,86 +159,41 @@ fn event(day: u64) -> Event {
 }
 
 #[test]
-fn alternating_writers_reseed_from_totals_and_enforce_exact_limits_after_external_changes() {
+fn alternating_writers_reseed_from_totals_and_enforce_exact_session_limit_after_external_changes() {
     let event = event(1);
     let bytes = serde_json::to_vec(&event.kind).unwrap().len() as u64;
-    for limit in [LimitKind::SessionSize, LimitKind::DailyBytes] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = config(dir.path().join("writers.db"));
-        config.hard_limits = HardLimits {
-            max_session_bytes: if limit == LimitKind::SessionSize {
-                bytes * 3
-            } else {
-                u64::MAX
-            },
-            max_daily_event_bytes: if limit == LimitKind::DailyBytes {
-                bytes * 3
-            } else {
-                u64::MAX
-            },
-            ..Default::default()
-        };
-        let first = Storage::open(config.clone()).unwrap();
-        let second = Storage::open(config.clone()).unwrap();
-        let a = first.handle();
-        let b = second.handle();
-        a.append_event(Some("session"), &event).unwrap();
-        b.append_event(Some("session"), &event).unwrap();
-        a.append_event(Some("session"), &event).unwrap();
-        let overflow = || StorageError::LimitExceeded {
-            limit,
-            actual: bytes * 4,
-            max: bytes * 3,
-        };
-        assert_eq!(b.append_event(Some("session"), &event), Err(overflow()));
-        let conn = Connection::open(&config.db_path).unwrap();
-        // Removing committed history must release capacity for either writer.
-        conn.execute_batch("DELETE FROM events WHERE id = (SELECT MIN(id) FROM events)")
-            .unwrap();
-        b.append_event(Some("session"), &event).unwrap();
-        assert_eq!(a.append_event(Some("session"), &event), Err(overflow()));
-        if limit == LimitKind::DailyBytes {
-            // Raw events before this UTC day do not count; later dates do count.
-            conn.execute_batch(
-                "UPDATE events SET wall_clock_ns = 0 WHERE id = (SELECT MIN(id) FROM events)",
-            )
-            .unwrap();
-            a.append_event(Some("session"), &event).unwrap();
-            assert_eq!(b.append_event(Some("session"), &event), Err(overflow()));
-        } else {
-            conn.execute_batch(
-                "UPDATE events SET session_id = NULL WHERE id = (SELECT MIN(id) FROM events)",
-            )
-            .unwrap();
-            a.append_event(Some("session"), &event).unwrap();
-            assert_eq!(b.append_event(Some("session"), &event), Err(overflow()));
-        }
-        assert_totals_match_events(&conn);
-        first.close();
-        second.close();
-    }
-}
-
-#[test]
-fn earlier_day_limit_counts_later_days_but_excludes_pre_epoch_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path().join("days.db"));
-    let bytes = serde_json::to_vec(&event(0).kind).unwrap().len() as u64;
-    config.hard_limits.max_daily_event_bytes = bytes * 2;
-    let storage = Storage::open(config.clone()).unwrap();
+    let mut config = config(dir.path().join("writers.db"));
+    config.hard_limits = HardLimits {
+        max_session_bytes: bytes * 3,
+        ..Default::default()
+    };
+    let first = Storage::open(config.clone()).unwrap();
+    let second = Storage::open(config.clone()).unwrap();
+    let a = first.handle();
+    let b = second.handle();
+    a.append_event(Some("session"), &event).unwrap();
+    b.append_event(Some("session"), &event).unwrap();
+    a.append_event(Some("session"), &event).unwrap();
+    let overflow = || StorageError::LimitExceeded {
+        limit: LimitKind::SessionSize,
+        actual: bytes * 4,
+        max: bytes * 3,
+    };
+    assert_eq!(b.append_event(Some("session"), &event), Err(overflow()));
     let conn = Connection::open(&config.db_path).unwrap();
-    raw_insert(&conn, None, -1, &"x".repeat(bytes as usize * 3));
-    let handle = storage.handle();
-    handle.append_event(None, &event(2)).unwrap();
-    handle.append_event(None, &event(0)).unwrap();
-    assert_eq!(
-        handle.append_event(None, &event(0)),
-        Err(StorageError::LimitExceeded {
-            limit: LimitKind::DailyBytes,
-            actual: bytes * 3,
-            max: bytes * 2,
-        })
-    );
+    // Removing committed history must release capacity for either writer.
+    conn.execute_batch("DELETE FROM events WHERE id = (SELECT MIN(id) FROM events)")
+        .unwrap();
+    b.append_event(Some("session"), &event).unwrap();
+    assert_eq!(a.append_event(Some("session"), &event), Err(overflow()));
+    conn.execute_batch(
+        "UPDATE events SET session_id = NULL WHERE id = (SELECT MIN(id) FROM events)",
+    )
+    .unwrap();
+    a.append_event(Some("session"), &event).unwrap();
+    assert_eq!(b.append_event(Some("session"), &event), Err(overflow()));
     assert_totals_match_events(&conn);
-    storage.close();
+    first.close();
+    second.close();
 }

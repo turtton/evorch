@@ -18,11 +18,14 @@ use runtime::{
     AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RuntimeError,
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 const SUPPRESSED: &str = event_bus::event::diagnostic_codes::LANE_UNCOLLECTED_CREATION_SUPPRESSED;
 const LEAD_THREAD: &str = "lead-thread";
+
+#[path = "lane_phase4_e2e/lane_send.rs"]
+mod lane_send;
 
 /// Answers a user message `calls:<json array of {id,name,input}>` with those tool calls
 /// and anything else with an idle text. Records every tool result by call ID and counts
@@ -31,6 +34,7 @@ const LEAD_THREAD: &str = "lead-thread";
 struct Model {
     results: Mutex<Vec<(String, Value)>>,
     requests: Mutex<HashMap<String, usize>>,
+    errors: Mutex<HashSet<String>>,
 }
 
 #[async_trait::async_trait]
@@ -80,8 +84,11 @@ impl AgentModel for Model {
                 ContentBlock::ToolResult {
                     tool_call_id,
                     content,
-                    ..
+                    is_error,
                 } => {
+                    if *is_error {
+                        self.errors.lock().unwrap().insert(tool_call_id.clone());
+                    }
                     for part in content {
                         if let providers::ToolResultContent::Text { text } = part
                             && let Ok(value) = serde_json::from_str(text)
@@ -339,17 +346,26 @@ impl Fixture {
     }
 
     fn send_call(&self, id: &str, lane_id: &str, message: &str) -> Value {
-        let lane = self.store.handle().lane(lane_id).unwrap().unwrap();
+        self.send_many(id, &[lane_id], message)
+    }
+
+    /// One `lane_send` to several lanes, each at the revisions the ledger holds now.
+    fn send_many(&self, id: &str, lane_ids: &[&str], message: &str) -> Value {
+        let targets: Vec<Value> = lane_ids
+            .iter()
+            .map(|lane_id| {
+                let lane = self.store.handle().lane(lane_id).unwrap().unwrap();
+                json!({
+                    "lane_id": lane_id,
+                    "expected_management_revision": lane.management_revision,
+                    "expected_brief_revision": lane.brief_revision,
+                })
+            })
+            .collect();
         call(
             id,
             "lane_send",
-            json!({
-                "operation_id": id,
-                "lane_id": lane_id,
-                "expected_management_revision": lane.management_revision,
-                "expected_brief_revision": lane.brief_revision,
-                "message": message,
-            }),
+            json!({"operation_id": id, "message": message, "targets": targets}),
         )
     }
 
@@ -618,11 +634,11 @@ async fn supplements_revisions_and_closes_compose_with_a_suppressed_creation() {
     // is read, so creation stays held. An identical retry replays the first answer.
     let send = fx.send_call("send-0", &l0, "prefer the small fix");
     let sent = fx.turn(vec![send.clone(), send]).await;
-    assert_eq!(sent[0]["status"], "accepted", "{}", sent[0]);
-    assert_eq!(sent[0]["operation"]["instruction_seq"], 1);
-    assert_eq!(sent[0]["operation"]["brief_revision"], 1);
-    assert_eq!(sent[1]["operation"]["instruction_seq"], 1);
-    assert_eq!(sent[1]["operation"]["replayed"], true);
+    assert_eq!(sent[0]["results"][0]["status"], "accepted", "{}", sent[0]);
+    assert_eq!(sent[0]["results"][0]["operation"]["instruction_seq"], 1);
+    assert_eq!(sent[0]["results"][0]["operation"]["brief_revision"], 1);
+    assert_eq!(sent[1]["results"][0]["operation"]["instruction_seq"], 1);
+    assert_eq!(sent[1]["results"][0]["operation"]["replayed"], true);
     assert_refusal(&fx.open("refused-2").await, 3);
 
     // A revision that changes the brief makes that lane's Ready stale. One stale Ready of
@@ -661,7 +677,10 @@ async fn supplements_revisions_and_closes_compose_with_a_suppressed_creation() {
     fx.ready(&done);
     let send = fx.send_call("send-done", &done, "last check before closing");
     let sent = fx.turn(vec![send]).await.remove(0);
-    assert_eq!(sent["operation"]["brief_revision"], 1, "{sent}");
+    assert_eq!(
+        sent["results"][0]["operation"]["brief_revision"], 1,
+        "{sent}"
+    );
     let close = fx.close_call("close-done", &done);
     let closed = fx.turn(vec![close]).await.remove(0);
     assert_eq!(closed["outcome"], "closed", "{closed}");
@@ -787,7 +806,11 @@ async fn fourteen_lanes_are_coordinated_through_paging_instructions_and_closes()
     let supplement = fx.send_call("supplement-0", &lanes[0], "mind the edge case");
     let revision = fx.revise_call("revision-1", &lanes[1], "lane 1, reworked");
     let instructed = fx.turn(vec![supplement, revision]).await;
-    assert_eq!(instructed[0]["status"], "accepted", "{}", instructed[0]);
+    assert_eq!(
+        instructed[0]["results"][0]["status"], "accepted",
+        "{}",
+        instructed[0]
+    );
     assert_eq!(instructed[1]["operation"]["brief_revision"], 2);
 
     // #559: the lead closes the finished lanes on its own judgement, no review or evidence.

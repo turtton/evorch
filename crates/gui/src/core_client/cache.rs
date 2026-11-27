@@ -17,6 +17,7 @@ pub struct Cache {
     pub projects: BTreeMap<String, ProjectSummary>,
     pub threads: BTreeMap<String, ThreadSummary>,
     pub runs: BTreeMap<String, RunSummary>,
+    pub shell_jobs: super::shell_jobs::JobCatalog,
     pub questions: BTreeMap<String, QuestionView>,
     pub approvals: BTreeMap<String, ApprovalView>,
     pub receipts: BTreeMap<String, InputReceipt>,
@@ -43,6 +44,7 @@ impl Cache {
     pub fn snapshot(&mut self, item: SnapshotItem) {
         match item {
             SnapshotItem::CoreStatus(_) | SnapshotItem::ToolActivity(_) => (),
+            SnapshotItem::ShellJob(job) => self.shell_jobs.insert(job),
             SnapshotItem::Project(p) => {
                 self.projects.insert(p.id.to_string(), p);
             }
@@ -97,6 +99,9 @@ impl Cache {
             UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged { .. }) => (),
             UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => {
                 self.threads.insert(thread.id.to_string(), thread);
+            }
+            UiEvent::Execution(ExecutionEvent::ShellJobChanged { job }) => {
+                self.shell_jobs.insert(job)
             }
             UiEvent::Execution(ExecutionEvent::RunChanged { run }) => {
                 self.runs.insert(run.id.to_string(), run);

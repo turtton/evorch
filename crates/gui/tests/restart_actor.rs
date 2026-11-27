@@ -428,3 +428,96 @@ async fn a_core_that_said_goodbye_is_not_started_again() {
     .await
     .expect("the scenario finishes");
 }
+
+/// The core's own notice that this subscriber fell behind: the end of the
+/// subscription, with a new snapshot as the way on.
+fn slow_subscriber() -> workbench_protocol::events::UiEvent {
+    workbench_protocol::events::UiEvent::Projection(
+        workbench_protocol::namespaces::ProjectionEvent::ResyncRequired {
+            reason: workbench_protocol::events::ResyncReason::SlowSubscriber,
+        },
+    )
+}
+
+fn read_a_snapshot_page(state: &fake_core::State) -> bool {
+    state.seen.iter().any(|seen| {
+        matches!(
+            seen.body,
+            workbench_protocol::envelope::RequestBody::Query(
+                workbench_protocol::queries::Query::Projection(
+                    workbench_protocol::namespaces::projection::ProjectionQuery::ReadSnapshot(_)
+                )
+            )
+        )
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_subscription_read_while_the_snapshot_is_paged_is_reconnected() {
+    // No `orderly`, no closed connection: the core only ended the subscription
+    // while the snapshot was being read. It must not be left disconnected.
+    let world = world();
+    let core = world.core(7);
+    core.state().hold_snapshot_page = true;
+    let gui = Gui::start(world.launcher());
+    // The actor asked for the second page, so it is inside the snapshot paging.
+    core.wait_for(read_a_snapshot_page).await;
+    core.state().hold_snapshot_page = false;
+    core.push(slow_subscriber());
+    // A second connection subscribing is the reconnect; the session it reads
+    // is the one the window shows.
+    core.wait_for(|s| s.subscribes.iter().any(|(conn, ..)| *conn >= 2))
+        .await;
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    assert_eq!(starts(&world), 0, "joining the running core starts nothing");
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    assert!(
+        core.state().subscribes.iter().all(|(conn, ..)| *conn <= 2),
+        "ending the window does not reconnect: {:?}",
+        core.state().subscribes
+    );
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_subscription_read_during_the_session_is_read_again() {
+    let world = world();
+    let core = world.core(7);
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    core.push(slow_subscriber());
+    // A resync on this connection or a reconnect both subscribe again.
+    core.wait_for(|s| s.subscribes.len() >= 2).await;
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    assert_eq!(starts(&world), 0, "the core never went away");
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_goodbye_read_while_paging_from_a_core_that_stays_up_is_not_reconnected() {
+    let world = world();
+    let core = world.core(7);
+    core.state().hold_snapshot_page = true;
+    let gui = Gui::start(world.launcher());
+    core.wait_for(read_a_snapshot_page).await;
+    core.push(workbench_protocol::events::UiEvent::Projection(
+        workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
+            reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
+        },
+    ));
+    // The actor decided once it says so, and it says so after deciding.
+    gui.until(|s| s.status.contains("announced its shutdown"))
+        .await;
+    assert_eq!(
+        core.state().subscribes.len(),
+        1,
+        "a core that announced its shutdown is not connected to again"
+    );
+    assert_eq!(starts(&world), 0);
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}

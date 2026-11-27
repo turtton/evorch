@@ -288,6 +288,14 @@ struct Screen {
     actions: tokio::sync::mpsc::Receiver<Action>,
 }
 
+thread_local! {
+    /// Lanes queries a settle saw and did not answer, for the screen the test thread built
+    /// last: the sidebar's rows look their lanes up by themselves, and
+    /// [`Screen::settle_lanes_with`] answers them.
+    static HELD_LANE_QUERIES: std::cell::RefCell<Vec<(u64, Query)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The window at `size`, whose Diff never runs git and whose Terminal starts no shell.
 fn screen(size: egui::Vec2) -> Screen {
     screen_with(
@@ -317,6 +325,7 @@ fn screen_from_outbox(
     patch: impl FnOnce(&mut Shared),
 ) -> Screen {
     let (tx, actions) = tokio::sync::mpsc::channel(capacity);
+    HELD_LANE_QUERIES.with_borrow_mut(Vec::clear);
     let mut populated = populated();
     patch(&mut populated);
     let shared = Arc::new(Mutex::new(populated));
@@ -376,6 +385,11 @@ impl Screen {
                         self.shared.lock().unwrap().features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;
                     }
+                    Action::Feature(FeatureAction {
+                        feature: FeatureId::Lanes,
+                        tag,
+                        request: FeatureRequest::Query(query),
+                    }) => HELD_LANE_QUERIES.with_borrow_mut(|held| held.push((tag, query))),
                     other => others.push(other),
                 }
             }
@@ -992,7 +1006,7 @@ mod progress_band {
 
         screen.harness.get_by_label("⚙").click();
         screen.harness.run_steps(2);
-        screen.harness.get_by_label("Panels ⏵").click();
+        screen.harness.get_by_label("Panels").click();
         screen.harness.run_steps(2);
         screen.harness.get_by_label("Plan").click();
         screen.settle_band();
@@ -2696,7 +2710,7 @@ mod local_panes {
         fn open_panel(&mut self, label: &str) {
             self.harness.get_by_label("⚙").click();
             self.harness.run_steps(2);
-            self.harness.get_by_label("Panels ⏵").click();
+            self.harness.get_by_label("Panels").click();
             self.harness.run_steps(2);
             self.harness.get_by_label(label).click();
             self.harness.run_steps(2);

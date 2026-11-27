@@ -74,6 +74,7 @@ pub enum SnapshotItem {
     Thread(ThreadSummary),
     Run(RunSummary),
     ToolActivity(crate::namespaces::execution::ToolActivityView),
+    ShellJob(crate::namespaces::execution::shell::ShellJobView),
     Question(QuestionView),
     Approval(ApprovalView),
 }
@@ -261,6 +262,7 @@ impl SnapshotItem {
             Self::Thread(thread) => thread.validate(),
             Self::Run(_) => Ok(()),
             Self::ToolActivity(tool) => tool.validate(),
+            Self::ShellJob(job) => job.validate(),
             Self::Question(question) => question.validate(),
             Self::Approval(approval) => approval.validate(),
         }

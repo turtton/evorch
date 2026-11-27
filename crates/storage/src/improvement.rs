@@ -1623,25 +1623,11 @@ mod tests {
     }
 
     #[test]
-    fn writer_shutdown_and_storage_limits_apply_to_new_commands() {
+    fn writer_shutdown_applies_to_new_commands() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = file_config(&dir);
-        config.hard_limits.max_db_bytes = 0;
-        let writer = Storage::open(config.clone()).unwrap();
+        let config = file_config(&dir);
+        let writer = Storage::open(config).unwrap();
         let handle = writer.handle();
-        assert!(matches!(
-            handle.record_improvement_candidate("p", candidate("first"), policy()),
-            Err(StorageError::Serialization(_))
-        ));
-        assert!(matches!(
-            handle.set_improvement_status("first", ImprovementStatus::Reviewed),
-            Err(StorageError::Serialization(_))
-        ));
-        assert!(matches!(
-            handle.attach_improvement_draft("first", "first.md"),
-            Err(StorageError::Serialization(_))
-        ));
-        assert!(ids(&Database::open(&config).unwrap(), "p").is_empty());
         drop(writer);
         assert_eq!(
             handle

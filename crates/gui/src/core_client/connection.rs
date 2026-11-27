@@ -324,6 +324,9 @@ pub async fn serve(
         let mut resync = true;
         let mut reconnect_requested = false;
         let mut orderly = false;
+        // The core's own notice that ended the subscription, for the log and
+        // for the loss it is when it is not a goodbye.
+        let mut ended_by: Option<String> = None;
         'session: while resync {
             data.stop(&shared, &ctx).await;
             resync = false;
@@ -342,6 +345,7 @@ pub async fn serve(
                         s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
                     });
                     episode.recovered(std::time::Instant::now());
+                    ended_by = None;
                     stream
                 }
                 Err(OpenFailed::Subscribe(error)) => {
@@ -352,8 +356,13 @@ pub async fn serve(
                 Err(OpenFailed::Ended(events)) => {
                     // The core spoke while the snapshot was paged: its goodbye
                     // and the evidence of a restart count as if they had come
-                    // through the session loop, and the session is over.
+                    // through the session loop, and the session is over. Any
+                    // other ending (a resync notice, a slow subscriber) is not
+                    // the person's doing: it is a loss, reconnected below.
                     for event in events {
+                        if event.event.ends_subscription() {
+                            ended_by = Some(format!("{:?}", event.event));
+                        }
                         orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
                         update(&shared, &ctx, |s| {
                             let _ = s.cache.event_delivering(event, |e| s.features.event(e));
@@ -385,9 +394,17 @@ pub async fn serve(
                     event = stream.next() => {
                         let Some(event) = event else { break };
                         orderly |= auto_reconnect::is_orderly_shutdown(&event.event);
+                        let ending = event.event.ends_subscription().then(|| format!("{:?}", event.event));
                         let mut valid = false;
                         update(&shared, &ctx, |s| valid = s.cache.event_delivering(event, |e| s.features.event(e)));
-                        if !valid { resync = true; break; }
+                        if !valid {
+                            if let Some(ending) = ending {
+                                tracing::info!(stage = "session", ended_by = %ending, "the core ended the subscription; reading the session again");
+                                ended_by = Some(ending);
+                            }
+                            resync = true;
+                            break;
+                        }
                     }
                     action = actions.recv() => {
                         let Some(action) = action else { data.stop(&shared, &ctx).await; discard_unused(&client, &shared).await; release_own(&client, &shared).await; return };
@@ -499,14 +516,17 @@ pub async fn serve(
         #[cfg(not(target_os = "linux"))]
         let planned = false;
         // Lost for real, with neither the core's goodbye nor restart evidence:
-        // EOF alone is not a restart, but it is not an orderly stop either.
+        // EOF alone is not a restart, but it is not an orderly stop either. A
+        // subscription the core ended without a goodbye is the same loss even
+        // while the connection still stands: nothing else will read the session.
         let abnormal = !reconnect_requested
             && !planned
             && !orderly
-            && matches!(
-                client.connection_state(),
-                workbench_client::ConnectionState::Closed(_)
-            );
+            && (ended_by.is_some()
+                || matches!(
+                    client.connection_state(),
+                    workbench_client::ConnectionState::Closed(_)
+                ));
         let closed = match client.connection_state() {
             workbench_client::ConnectionState::Closed(error) => Some(error),
             workbench_client::ConnectionState::Connected => None,
@@ -522,6 +542,7 @@ pub async fn serve(
                 reconnect_requested,
                 resync,
                 abnormal,
+                ended_by: ended_by.as_deref(),
             },
         );
         data.stop(&shared, &ctx).await;

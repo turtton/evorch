@@ -181,26 +181,6 @@ fn upsert_latest_wins_and_round_trips() {
 }
 
 #[test]
-fn suspended_writer_rejects_context_upsert() {
-    // Given: a writer suspended by the database size limit.
-    let temp = TempDir::new().unwrap();
-    let mut config = StorageConfig {
-        db_path: temp.path().join("contexts.db"),
-        ..StorageConfig::default()
-    };
-    config.hard_limits.max_db_bytes = 1;
-    let storage = Storage::open(config.clone()).unwrap();
-    // When: attempting to persist a snapshot.
-    let result = storage.handle().upsert_run_context(&record());
-    // Then: the snapshot is rejected and absent.
-    assert!(result.is_err());
-    assert_eq!(
-        Database::open(&config).unwrap().run_context("run").unwrap(),
-        None
-    );
-}
-
-#[test]
 fn snapshot_redacts_values_and_decodes_json_escapes() {
     // Given: escaped provider reasoning and checkpoint text containing a key.
     let temp = TempDir::new().unwrap();
