@@ -324,7 +324,7 @@ pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
 }
 
 fn list(conn: &Connection, sql: &str, arg: &str) -> Result<Vec<UserQuestion>, StorageError> {
-    let mut statement = conn.prepare(sql)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let rows = statement.query_map([arg], |row| row.get::<_, String>(0))?;
     rows.map(|s| hydrate(conn, &s?)).collect()
 }

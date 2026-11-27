@@ -153,6 +153,10 @@ struct BodyCursor {
     scanner: queries::CommitScanner,
     reader: Option<storage::Database>,
 }
+#[derive(Default)]
+struct ModelRefresh {
+    reader: Option<storage::Database>,
+}
 /// Transport-independent host read service. All adapters may share this instance.
 pub struct Projection {
     activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
@@ -162,6 +166,11 @@ pub struct Projection {
     runtime: AgentRuntime,
     registry: Arc<ApprovalRegistry>,
     state: Mutex<State>,
+    /// Lock order: model_refresh -> state. Serializes collect through publish,
+    /// including project reconfiguration, without blocking readers of State.
+    model_refresh: Mutex<ModelRefresh>,
+    #[cfg(test)]
+    model_refreshes: tokio::sync::watch::Sender<usize>,
     epoch: Arc<tokio::sync::watch::Sender<u64>>,
     status: Mutex<CoreStatus>,
     pager: Pager,
@@ -175,6 +184,7 @@ pub struct Projection {
 }
 // Bound work per wakeup, not time: a continuously busy producer must still let runs advance.
 const MAX_REFRESH_WAKEUPS: usize = 64;
+const MIN_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Default, Debug, PartialEq)]
 struct RefreshWakeups {
@@ -299,6 +309,9 @@ impl Projection {
             bodies_wake: bodies_wake.clone(),
             cut_taken: AtomicBool::new(false),
             limits,
+            model_refresh: Mutex::default(),
+            #[cfg(test)]
+            model_refreshes: tokio::sync::watch::Sender::new(0),
             state: Mutex::new(State {
                 #[cfg(test)]
                 snapshot_hook: None,
@@ -323,10 +336,16 @@ impl Projection {
         });
         let weak = Arc::downgrade(&this);
         let models = handle.spawn(async move {
+            let mut ready_at = tokio::time::Instant::now();
             loop {
+                // A completion-based throttle, not a debounce: queued dirty
+                // events always cause a trailing refresh even if input stops.
+                // Keep only Weak across this wait (also on failed bootstrap).
+                tokio::time::sleep_until(ready_at).await;
                 enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>) }
                 let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a) };
                 let Some(this) = weak.upgrade() else { break };
+                let mut refreshed = false;
                 // Never retain the projection (and its runtime) across a scheduler wait:
                 // failed bootstrap must be able to drop both without another task poll.
                 let closed = match (this, change) {
@@ -335,21 +354,29 @@ impl Projection {
                         // and share the snapshot / cursor publication boundary.
                         let wakeups = RefreshWakeups::drain(&mut events, event).await;
                         if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty { Self::in_background(this, move |p| {
+                        if wakeups.dirty { refreshed = true; Self::in_background(this, move |p| {
                             if p.refresh_models().is_err() { p.invalidate(); return; }
                             for event in wakeups.activities { p.observe_activity(event); }
                         }).await; }
                         wakeups.closed
                     }
-                    (this, Change::Approval(Ok(approval))) => { Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
+                    (this, Change::Approval(Ok(approval))) => { refreshed = true; Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
                     (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
                         // Lost input means the projection cannot vouch for ANY old cursor.
                         this.invalidate();
+                        refreshed = true;
                         Self::in_background(this, |p| { let _ = p.refresh_models(); }).await;
                         false
                     }
                     (_, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => true,
                 };
+                if refreshed {
+                    ready_at = tokio::time::Instant::now() + MIN_REFRESH_INTERVAL;
+                    #[cfg(test)]
+                    if let Some(this) = weak.upgrade() {
+                        this.model_refreshes.send_modify(|count| *count += 1);
+                    }
+                }
                 if closed { break; }
                 tokio::task::yield_now().await;
             }
@@ -372,6 +399,7 @@ impl Projection {
         let _ = tokio::task::spawn_blocking(move || work(&this)).await;
     }
     pub(crate) fn configure(&self, projects: Vec<(ProjectId, PathBuf)>) {
+        let _refresh = self.model_refresh.lock().unwrap();
         self.state.lock().unwrap().projects = projects;
     }
     /// Sets the project directory and the names shown for it, and reads the
@@ -382,10 +410,12 @@ impl Projection {
         names: std::collections::BTreeMap<String, String>,
     ) -> Result<(), WorkbenchError> {
         {
+            let mut refresh = self.model_refresh.lock().unwrap();
             let mut state = self.state.lock().unwrap();
             state.projects = projects;
             state.project_names = names;
-            self.refresh_models_locked(&mut state, None)?;
+            drop(state);
+            self.refresh_models_serialized(&mut refresh, None)?;
         }
         self.models_changed();
         Ok(())
@@ -442,11 +472,11 @@ impl Projection {
     }
     /// Reads the models and publishes every committed message before returning.
     pub fn refresh(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), None)?;
         self.advance_bodies()
     }
     pub(crate) fn refresh_models(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), None)?;
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), None)?;
         self.models_changed();
         Ok(())
     }
@@ -454,7 +484,7 @@ impl Projection {
         &self,
         id: &sandbox::approval::ApprovalId,
     ) -> Result<(), WorkbenchError> {
-        self.refresh_models_locked(&mut self.state.lock().unwrap(), Some(id))?;
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), Some(id))?;
         self.models_changed();
         Ok(())
     }
@@ -518,17 +548,32 @@ impl Projection {
         }
         result.map(drop)
     }
-    fn refresh_models_locked(
+    fn refresh_models_serialized(
         &self,
-        state: &mut State,
+        refresh: &mut ModelRefresh,
         observed: Option<&sandbox::approval::ApprovalId>,
     ) -> Result<(), WorkbenchError> {
-        let mut next = queries::collect(&self.runtime, &state.projects, &state.project_names)
+        let (projects, names) = {
+            let state = self.state.lock().unwrap();
+            (state.projects.clone(), state.project_names.clone())
+        };
+        if refresh.reader.is_none() {
+            refresh.reader = self
+                .runtime
+                .open_storage_reader()
+                .transpose()
+                .map_err(queries::storage_error)?;
+        }
+        let mut next = queries::collect(&self.runtime, refresh.reader.as_ref(), &projects, &names)
             .map_err(queries::storage_error)?;
         #[cfg(test)]
-        if let Some(hook) = state.refresh_hook.take() {
-            hook();
+        {
+            let hook = self.state.lock().unwrap().refresh_hook.take();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
+        let mut state = self.state.lock().unwrap();
         for (id, provenance) in &state.answer_provenance {
             if let Some(answer) = next.questions.get_mut(id).and_then(|q| q.answer.as_mut()) {
                 answer.answered_by = Some(provenance.clone());
@@ -674,6 +719,25 @@ impl Projection {
         }
         Ok(())
     }
+    /// An in-flight refresh will publish after the snapshot's high-water cut.
+    /// Use the last complete models instead of waiting for its database work;
+    /// bootstrap still needs an initial model set.
+    fn refresh_for_snapshot(&self) -> Result<(), WorkbenchError> {
+        let ready = self.state.lock().unwrap().models_ready;
+        let refresh = if ready {
+            match self.model_refresh.try_lock() {
+                Ok(refresh) => Some(refresh),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(error)) => panic!("{error}"),
+            }
+        } else {
+            Some(self.model_refresh.lock().unwrap())
+        };
+        if let Some(mut refresh) = refresh {
+            self.refresh_models_serialized(&mut refresh, None)?;
+        }
+        Ok(())
+    }
     pub(crate) fn note_answer(&self, id: &str, provenance: &Provenance) {
         let mut state = self.state.lock().unwrap();
         // Bounded bookkeeping, not prompt content.
@@ -725,8 +789,9 @@ impl Projection {
         read: impl FnOnce(&Models) -> Result<T, WorkbenchError>,
     ) -> Result<T, WorkbenchError> {
         let read = {
-            let mut state = self.state.lock().unwrap();
-            self.refresh_models_locked(&mut state, None)?;
+            let mut refresh = self.model_refresh.lock().unwrap();
+            self.refresh_models_serialized(&mut refresh, None)?;
+            let state = self.state.lock().unwrap();
             read(&state.models)
         };
         self.models_changed();
@@ -934,8 +999,8 @@ impl Projection {
         subscription
     }
     fn subscribe_after_refresh(&self, request: &Subscribe) -> Result<Subscription, WorkbenchError> {
+        self.refresh_for_snapshot()?;
         let mut state = self.state.lock().unwrap();
-        self.refresh_models_locked(&mut state, None)?;
         match &request.scope {
             SubscriptionScope::Project { project }
                 if !state.models.projects.contains_key(project.as_str()) =>
@@ -1095,8 +1160,8 @@ impl Projection {
         &self,
         request: &ReadSnapshot,
     ) -> Result<SnapshotPage, WorkbenchError> {
+        self.refresh_for_snapshot()?;
         let mut state = self.state.lock().unwrap();
-        self.refresh_models_locked(&mut state, None)?;
         state.expire_snapshots();
         let snapshot = state
             .snapshots
