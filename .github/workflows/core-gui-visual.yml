@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
     # The same job-level env as the other cargo jobs: rust-cache hashes CARGO_* and
     # RUSTFLAGS into its key, so a different set restores nothing.
     env:
@@ -63,7 +65,9 @@ jobs:
           echo "No screen diff: the PR changes only files the new GUI does not depend on." >> "$GITHUB_STEP_SUMMARY"
       - name: Tooling tests
         if: steps.scope.outputs.relevant == 'true'
-        run: scripts/core-gui-visual/tests/test_changed_paths.sh
+        run: |
+          scripts/core-gui-visual/tests/test_changed_paths.sh
+          node --test scripts/core-gui-visual/tests/*.test.mjs
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: steps.scope.outputs.relevant == 'true'
         with:
@@ -106,24 +110,46 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/core-gui-visual/capture.sh "${{ steps.sides.outputs.before }}" "${{ steps.sides.outputs.after }}" "$RUNNER_TEMP/gui-visual"
-      - name: Summary
-        if: always() && steps.scope.outputs.relevant == 'true'
-        run: |
-          {
-            echo "rust-cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
-            echo
-            scripts/core-gui-visual/summary.sh "$RUNNER_TEMP/gui-visual/out"
-          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
         if: always() && steps.scope.outputs.relevant == 'true'
         with:
           name: core-gui-visual
           path: ${{ runner.temp }}/gui-visual/out
           if-no-files-found: warn
           retention-days: 30
+      - name: Summary
+        if: always() && steps.scope.outputs.relevant == 'true'
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          {
+            echo "rust-cache hit: $RUST_CACHE_HIT"
+            echo
+            scripts/core-gui-visual/summary.sh "$RUNNER_TEMP/gui-visual/out"
+            echo
+            echo "Artifact (all captures, the comparison and its images): $ARTIFACT_URL"
+            if [[ "$FORK" == true ]]; then
+              echo
+              echo "This pull request comes from a fork: no comment is posted and nothing is published, only this summary and the artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  api-selftest:
-    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+  # Publishes the images of the changed screens to the evidence branch and keeps the PR's
+  # one comment up to date; on `closed` it removes the PR's images. The only job with write
+  # permission, and only for a pull request from this repository (a fork's token cannot
+  # write, and it must not get a comment path). It runs no cargo and nothing the capture
+  # built: it reads the artifact's JSON and PNG bytes as data. Its own scripts come from
+  # the PR head (same repository, so the author could run that code anyway); the head
+  # commit exists even when the PR is closed and its merge ref is gone.
+  publish:
+    needs: capture
+    if: >-
+      always()
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (github.event.action == 'closed' || needs.capture.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -132,8 +158,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: scripts/core-gui-visual
           persist-credentials: false
-      - name: Exercise the evidence branch writer with the job token
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: github.event.action != 'closed' && needs.capture.outputs.relevant == 'true'
+        with:
+          name: core-gui-visual
+          path: ${{ runner.temp }}/capture-artifact
+      - name: Publish or clean up
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/core-gui-visual/api-selftest.mjs
+          RELEVANT: ${{ needs.capture.outputs.relevant }}
+        run: node scripts/core-gui-visual/publish.mjs --relevant "$RELEVANT" --artifact "$RUNNER_TEMP/capture-artifact"
