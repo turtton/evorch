@@ -22,7 +22,7 @@ fn the_core_saves_connection_diagnostics_and_nothing_a_tool_logged() {
         "external checker failed"
     );
     tracing::error!(target: "providers::wire", "Authorization: Bearer sk-live-0123456789");
-    evorch_core::logging::flush();
+    evorch_core::logging::flush_unbounded();
 
     let path = logs.join(format!("core-{}.log", std::process::id()));
     let text = std::fs::read_to_string(path).unwrap();

@@ -95,6 +95,14 @@ pub fn start() {
     }
 }
 
+/// [`flush`] without a bound, for tests that read the file afterwards.
+#[doc(hidden)]
+pub fn flush_unbounded() {
+    if let Some(logger) = LOGGER.get() {
+        logger.flush_unbounded();
+    }
+}
+
 /// Write what is queued, when the process is about to end. Bounded.
 pub fn flush() {
     if let Some(logger) = LOGGER.get() {

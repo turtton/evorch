@@ -189,11 +189,19 @@ fn process_exists(pid: u32) -> bool {
     }
 }
 
-/// How many lines the writing thread has written, for [`Logger::flush_within`].
+/// How many lines have been handled (written, or dropped on a full queue), for
+/// [`Logger::flush_within`].
 #[derive(Default)]
 struct Progress {
     written: Mutex<u64>,
     changed: Condvar,
+}
+
+impl Progress {
+    fn handled_one(&self) {
+        *self.written.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.changed.notify_all();
+    }
 }
 
 /// Where lines are queued. Cheap to clone; never blocks the caller.
@@ -237,13 +245,17 @@ impl Drop for LineWriter {
         if self.line.is_empty() {
             return;
         }
-        match self.sink.queue.try_send(std::mem::take(&mut self.line)) {
-            Ok(()) => {
-                self.sink.queued.fetch_add(1, Ordering::Release);
-            }
-            Err(_) => {
-                self.sink.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+        // Counted before it is queued, so a flush that starts while this line
+        // is on its way waits for it. A dropped line is accounted as handled.
+        self.sink.queued.fetch_add(1, Ordering::AcqRel);
+        if self
+            .sink
+            .queue
+            .try_send(std::mem::take(&mut self.line))
+            .is_err()
+        {
+            self.sink.dropped.fetch_add(1, Ordering::Relaxed);
+            self.sink.progress.handled_one();
         }
     }
 }
@@ -310,6 +322,21 @@ impl<W: Write + Send + 'static> Logger<W> {
     /// [`Logger::flush`] with its bound given; true when everything queued
     /// before the call was written. Nothing here waits for room in the queue:
     /// the wait is on a counter, so one deadline covers the whole call.
+    /// [`Logger::flush`] with no bound, for callers that must see everything
+    /// written (tests); a process that is ending uses [`Logger::flush`].
+    pub fn flush_unbounded(&self) {
+        self.start();
+        let target = self.sink.queued.load(Ordering::Acquire);
+        let progress = &self.sink.progress;
+        let written = progress.written.lock().unwrap_or_else(|e| e.into_inner());
+        drop(
+            progress
+                .changed
+                .wait_while(written, |written| *written < target)
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+    }
+
     pub fn flush_within(&self, bound: Duration) -> bool {
         self.start();
         let target = self.sink.queued.load(Ordering::Acquire);
@@ -337,9 +364,10 @@ fn write_lines<W: Write>(
                 "-- {lost} log lines were dropped: the log queue was full"
             );
         }
+        // Handled whether or not the disk took it: a flush says the writer has
+        // caught up, and must not wait for a line that can never be written.
         let _ = writer.write_all(&line);
-        *progress.written.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-        progress.changed.notify_all();
+        progress.handled_one();
     }
 }
 
@@ -457,10 +485,22 @@ mod tests {
         sink.make_writer().write_all(b"early\n").unwrap();
         logger.start();
         sink.make_writer().write_all(b"late\n").unwrap();
-        logger.flush();
+        wait_handled(&logger, 2);
         assert_eq!(
             fs::read(temp.path().join("t.log")).unwrap(),
             b"early\nlate\n"
+        );
+    }
+
+    /// Wait, with no deadline, until the writer has handled `n` lines.
+    fn wait_handled<W: Write + Send + 'static>(logger: &Logger<W>, n: u64) {
+        let progress = &logger.sink.progress;
+        let written = progress.written.lock().unwrap();
+        drop(
+            progress
+                .changed
+                .wait_while(written, |written| *written < n)
+                .unwrap(),
         );
     }
 
@@ -504,9 +544,11 @@ mod tests {
         sink.make_writer().write_all(b"queued\n").unwrap();
         // The queue is full and the writer is stuck: waiting for room in the
         // queue here had no bound. The flush now reports "not written" instead.
-        assert!(!logger.flush_within(Duration::from_millis(20)));
+        assert!(!logger.flush_within(Duration::ZERO));
         release_tx.send(()).unwrap();
-        assert!(logger.flush_within(Duration::from_secs(300)));
+        // Completion is the writer's own progress, awaited without a deadline.
+        wait_handled(&logger, 2);
+        assert!(logger.flush_within(Duration::ZERO));
         let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
         assert_eq!(text, "hold\nqueued\n");
     }
@@ -535,7 +577,7 @@ mod tests {
             sink.make_writer().write_all(line.as_bytes()).unwrap();
         }
         release_tx.send(()).unwrap();
-        logger.flush();
+        wait_handled(&logger, 5);
         let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
         assert!(text.contains("one\n") && text.contains("two\n"), "{text}");
         assert!(!text.contains("lost"), "{text}");
