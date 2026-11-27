@@ -82,7 +82,14 @@ pub fn attachment_chips(ui: &mut egui::Ui, rows: &[AttachmentRowView<'_>]) -> Op
             ui.end_row();
         }
         let chip = ui.push_id(row.key, |ui| attachment_chip(ui, row)).inner;
-        ui.data_mut(|data| data.insert_temp(width_id, chip.response.rect.width()));
+        let measured = chip.response.rect.width();
+        if width.is_none_or(|width| (width - measured).abs() > 0.5) {
+            // A chip placed without its width may run past the row's end and push the
+            // composer wider, so the pass is redone with the width it now has.
+            ui.data_mut(|data| data.insert_temp(width_id, measured));
+            ui.ctx().request_discard("attachment chip width changed");
+            ui.ctx().request_repaint();
+        }
         if chip.inner {
             remove = Some(index);
         }

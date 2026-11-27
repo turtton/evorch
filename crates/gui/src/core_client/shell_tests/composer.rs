@@ -565,29 +565,70 @@ fn remove_drops_one_file_and_discards_its_upload() {
     assert_eq!(left, ["busy", "failed"]);
 }
 
-// Given: thr-1 with three files, one of them long-named, in a window whose composer has
-//        no room for all three chips in a row
-// Then: the chips wrap onto another row inside the composer, and each still has Remove
+// Given: a narrow window, thr-2 with one file whose chip is drawn, and thr-7 (idle as
+//        well, so its composer is laid out as thr-2's) with three files never drawn, one
+//        of them long-named; both with the same one-line draft
+// When: thr-7 is selected
+// Then: in the first frame that draws thr-7's composer, its chips already wrap inside it
+//       and Send is where it stays, instead of being pushed out of the pane for a frame
 #[test]
-fn attachment_chips_wrap_inside_a_narrow_composer() {
+fn attachment_chips_wrap_inside_a_narrow_composer_from_the_first_frame() {
     let mut screen = screen(egui::vec2(900.0, 600.0));
     screen.settle();
-    screen.shared.lock().unwrap().attachment_drafts.insert(
-        "thr-1".into(),
-        vec![
-            file("a-long-screenshot-name-from-the-clipboard", true, false),
-            file("busy", false, true),
-            file("failed", false, false),
-        ],
-    );
-    screen.harness.run_steps(4);
-    screen.capture("narrow-chips");
-    // The composer's Stop ends its input row; the header's Stop is further left.
-    let right = screen
+    screen
         .harness
-        .get_all_by_label("Stop")
-        .map(|node| node.rect().max.x)
-        .fold(f32::MIN, f32::max);
+        .get_by_label("Refactor storage writer")
+        .click();
+    screen.settle();
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        // A one-line draft, so the input is as tall at any width and only the chips
+        // could change the composer's layout.
+        for thread in ["thr-2", "thr-7"] {
+            shared.drafts.insert(
+                thread.into(),
+                crate::core_client::Draft {
+                    text: "see".into(),
+                    revision: 1,
+                },
+            );
+        }
+        shared
+            .attachment_drafts
+            .insert("thr-2".into(), vec![file("one", true, false)]);
+        shared.attachment_drafts.insert(
+            "thr-7".into(),
+            vec![
+                file("a-long-screenshot-name-from-the-clipboard", true, false),
+                file("two", true, false),
+                file("three", true, false),
+            ],
+        );
+    }
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("one.txt");
+    screen
+        .harness
+        .get_by_label("Migrate the lane table")
+        .click();
+    // Its first chip marks the first frame that draws thr-7's composer, whose Send ends
+    // the input row (with or without its icon in the name, as it can send or not).
+    let send = |screen: &Screen| {
+        screen
+            .harness
+            .get_all_by_label_contains("Send")
+            .map(|node| node.rect().max.x)
+            .fold(f32::MIN, f32::max)
+    };
+    let mut first = None;
+    for _ in 0..16 {
+        screen.harness.run_steps(1);
+        if screen.harness.query_by_label("two.txt").is_some() {
+            first = Some(send(&screen));
+            break;
+        }
+    }
+    let first = first.expect("thr-7's composer is drawn");
     let removes: Vec<_> = screen
         .harness
         .get_all_by_label("Remove")
@@ -595,10 +636,16 @@ fn attachment_chips_wrap_inside_a_narrow_composer() {
         .collect();
     assert_eq!(removes.len(), 3);
     assert!(
-        removes.iter().all(|r| r.max.x <= right),
-        "{removes:?} {right}"
+        removes.iter().all(|r| r.max.x <= first),
+        "{removes:?} {first}"
     );
     assert!(removes[2].min.y > removes[0].max.y, "{removes:?}");
+
+    screen.settle();
+    screen.harness.run_steps(4);
+    screen.capture("narrow-chips");
+    let settled = send(&screen);
+    assert!((first - settled).abs() < 0.5, "{first} {settled}");
 }
 
 #[derive(Debug)]
