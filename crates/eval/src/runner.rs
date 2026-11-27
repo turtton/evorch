@@ -502,6 +502,15 @@ fn observe(run_dir: &Path) -> Option<output::Observed> {
                     .and_then(serde_json::Value::as_object)
                     .map(|tools| tools.keys().cloned().collect())
                     .unwrap_or_default(),
+                offered: config
+                    .get("tool_names")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(|name| name.as_str().map(str::to_owned))
+                            .collect()
+                    }),
             })
         })
         .collect();

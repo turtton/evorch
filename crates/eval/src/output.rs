@@ -141,6 +141,11 @@ pub struct AppliedDescriptions {
     pub hash: String,
     /// The tools the snapshot overrides; empty when it is the empty snapshot.
     pub tools: Vec<String>,
+    /// The tools this run's runtime offered the model, from the run's own
+    /// persisted record; `None` when the record does not say, in which case
+    /// nothing can be said to have been offered.
+    #[serde(default)]
+    pub offered: Option<Vec<String>>,
 }
 
 /// The size of what a replay's root run starts with before any task text: its

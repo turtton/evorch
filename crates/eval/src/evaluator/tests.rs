@@ -508,12 +508,14 @@ fn evaluation_report() -> Report {
             note: "configured prices".into(),
         },
         runs: Vec::new(),
+        unfinished: Vec::new(),
         costs: vec![crate::report::ConfigurationCost {
             label: "candidate".into(),
             runs: 1,
             cost: Cost {
                 unreported: Vec::new(),
                 unrecorded: Vec::new(),
+                unfinished: Vec::new(),
                 usd: 1.5,
                 api_equivalent_usd: 1.5,
                 unpriced: Vec::new(),

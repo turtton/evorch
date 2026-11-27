@@ -11,7 +11,6 @@ use catalog::ModelCatalog;
 use config::{Config, EvalBudgetConfig};
 use event_bus::EventBus;
 use routing::EnvLookup;
-use runtime::tool_descriptions::BuiltinCatalog;
 use sandbox::credential::CredentialStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -193,6 +192,10 @@ pub struct Report {
     pub judge: BindingSummary,
     pub prices: PriceSource,
     pub runs: Vec<RunSummary>,
+    /// Replays started and not ended (`label-index`): they have no summary, and
+    /// their cost is unknown. Replays never started are not here.
+    #[serde(default)]
+    pub unfinished: Vec<String>,
     pub costs: Vec<ConfigurationCost>,
     pub overhead: Overhead,
     pub pairs: Vec<PairReport>,
@@ -532,6 +535,11 @@ async fn report_dir(
         });
         preflight_failure = Some(reason);
     }
+    let unfinished: Vec<&output::RunEntry> = manifest
+        .runs
+        .iter()
+        .filter(|entry| entry.status.is_none())
+        .collect();
     for entry in &manifest.runs {
         if entry.status.is_none() {
             continue;
@@ -552,6 +560,11 @@ async fn report_dir(
         tokens: Tokens::of(simulated.iter().copied()),
         cost: {
             let mut cost = context.table.cost(simulated.iter().copied());
+            cost.unfinished.extend(
+                unfinished
+                    .iter()
+                    .map(|entry| format!("{}-{}", entry.label, entry.index)),
+            );
             cost.unrecorded.extend(
                 runs.iter()
                     .filter(|run| run.evidence_missing)
@@ -566,8 +579,6 @@ async fn report_dir(
     };
     let aspects = judge::aspects(manifest.problem.is_some());
     let changes = manifest_changes(&manifest);
-    // Without the catalog, nothing can be shown to have been offered a changed tool.
-    let catalog = BuiltinCatalog::for_evaluation().ok();
     let mut judging = Vec::new();
     let mut pairs = Vec::new();
     for index in 1..=manifest.repeat {
@@ -581,7 +592,6 @@ async fn report_dir(
                 .runs
                 .iter()
                 .find(|entry| entry.label == CANDIDATE && entry.index == index),
-            catalog.as_ref(),
         );
         let pair = judge_pair(
             context,
@@ -638,6 +648,12 @@ async fn report_dir(
                 cost.add(&run.summary.cost);
                 count += 1;
             }
+            cost.unfinished.extend(
+                unfinished
+                    .iter()
+                    .filter(|entry| &entry.label == label)
+                    .map(|entry| format!("{}-{}", entry.label, entry.index)),
+            );
             ConfigurationCost {
                 label: label.clone(),
                 runs: count,
@@ -702,7 +718,6 @@ async fn report_dir(
 
     let breakdown = breakdown::build(&breakdown::Inputs {
         changes: &changes,
-        catalog: catalog.as_ref(),
         configurations: &manifest.configurations,
         repeat: manifest.repeat,
         preflight_failure: preflight_failure.as_deref(),
@@ -753,6 +768,10 @@ async fn report_dir(
             note: "models.dev with the configuration's price overrides; recorded costs are ignored"
                 .into(),
         },
+        unfinished: unfinished
+            .iter()
+            .map(|entry| format!("{}-{}", entry.label, entry.index))
+            .collect(),
         runs: runs.into_iter().map(|run| run.summary).collect(),
         costs,
         overhead,
@@ -859,6 +878,12 @@ pub(crate) fn incomplete_reason(cost: &Cost) -> String {
     }
     if !cost.unreported.is_empty() {
         reasons.push(format!("no reported usage for {}", unreported_list(cost)));
+    }
+    if !cost.unfinished.is_empty() {
+        reasons.push(format!(
+            "no recorded end, so an unknown cost, for {}",
+            cost.unfinished.join(", ")
+        ));
     }
     if !cost.unrecorded.is_empty() {
         reasons.push(format!(
@@ -1235,6 +1260,7 @@ pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
         "unpriced_models": unpriced_list(cost),
         "unreported_models": unreported_list(cost),
         "unrecorded_replays": cost.unrecorded,
+        "unfinished_replays": cost.unfinished,
     })
 }
 
@@ -1479,6 +1505,11 @@ pub fn markdown(report: &Report) -> String {
             metrics.elapsed_ms as f64 / 1_000.0,
             usd(&run.cost),
             verification
+        ));
+    }
+    for name in &report.unfinished {
+        out.push_str(&format!(
+            "| {name} | not finished | - | - | - | - | - | - | - | - | unknown (no recorded end) | - |\n"
         ));
     }
     out.push_str("\n| run | status reason |\n|---|---|\n");

@@ -291,6 +291,7 @@ fn report(runs: &[(&str, u32, f64)]) -> Report {
             note: "configured prices".into(),
         },
         runs: run_summaries,
+        unfinished: Vec::new(),
         costs: labels
             .iter()
             .map(|label| ConfigurationCost {

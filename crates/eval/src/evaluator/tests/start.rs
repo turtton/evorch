@@ -202,6 +202,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
             Cost {
                 unreported: Vec::new(),
                 unrecorded: Vec::new(),
+                unfinished: Vec::new(),
                 usd: 2.0,
                 api_equivalent_usd: 0.0,
                 unpriced: Vec::new(),
@@ -214,6 +215,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
             Cost {
                 unreported: Vec::new(),
                 unrecorded: Vec::new(),
+                unfinished: Vec::new(),
                 usd: 0.5,
                 api_equivalent_usd: 0.5,
                 unpriced: vec![Unpriced {

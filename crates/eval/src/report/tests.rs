@@ -1107,11 +1107,12 @@ fn model_use(profile: &str, model: &str) -> ModelUse {
 
 /// The candidate's worker run froze the changed description of `read` and used only its model.
 fn applied_read() -> Observed {
-    applied_by("read", "candidate-worker", "worker")
+    applied_by("read", "candidate-worker", "worker", &["read", "grep"])
 }
 
-/// A run `run_id` of `role` froze the description of `tool` for the described model.
-fn applied_by(tool: &str, run_id: &str, role: &str) -> Observed {
+/// A run `run_id` of `role` froze the description of `tool` for the described model, and
+/// its own record says its model was offered `offered`.
+fn applied_by(tool: &str, run_id: &str, role: &str, offered: &[&str]) -> Observed {
     Observed {
         models: vec![model_use("api", "gpt-9")],
         tool_descriptions: vec![AppliedDescriptions {
@@ -1121,6 +1122,7 @@ fn applied_by(tool: &str, run_id: &str, role: &str) -> Observed {
             route_model_id: Some("gpt-9".into()),
             hash: "snapshot".into(),
             tools: vec![tool.into()],
+            offered: Some(offered.iter().map(|name| (*name).to_owned()).collect()),
         }],
     }
 }
@@ -1467,7 +1469,12 @@ async fn a_description_frozen_only_by_a_role_that_cannot_see_the_tool_is_not_app
     describe_tool(
         &fixture,
         "write",
-        Some(applied_by("write", "candidate-root", "Orchestrator")),
+        Some(applied_by(
+            "write",
+            "candidate-root",
+            "Orchestrator",
+            &["delegate", "read"],
+        )),
     );
     let deps = fixture.deps(judge_answers_without_problem()).await;
 
@@ -1489,7 +1496,12 @@ async fn a_description_frozen_only_by_a_role_that_cannot_see_the_tool_is_not_app
     describe_tool(
         &fixture,
         "write",
-        Some(applied_by("write", "candidate-worker", "Worker")),
+        Some(applied_by(
+            "write",
+            "candidate-worker",
+            "Worker",
+            &["read", "write"],
+        )),
     );
     let deps = fixture.deps(judge_answers_without_problem()).await;
     let reports = report(fixture.args(false), &deps).await.unwrap();
@@ -1746,4 +1758,111 @@ async fn a_thread_without_checks_tells_the_judge_so_and_other_checks_are_judged_
     assert_eq!(fixture.judges.lock().unwrap().len(), judges + 1);
     let newest = fixture.judges.lock().unwrap().last().unwrap().requests();
     assert_eq!(newest.len(), 3);
+}
+
+#[tokio::test]
+async fn a_description_of_a_tool_a_child_worker_was_never_offered_is_not_applied() {
+    // Given: a changed `handoff_to_lane` description. A worker is the only run that started,
+    // and it is a child: its snapshot lists the tool, but its own record of the tools
+    // offered to the model leaves it out.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_tool(
+        &fixture,
+        "handoff_to_lane",
+        Some(applied_by(
+            "handoff_to_lane",
+            "candidate-child-worker",
+            "Worker",
+            &["read", "write", "send"],
+        )),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the description is not in force, however permissive the role's static catalog is.
+    assert!(pending_kinds(&reports[0]).contains(&PendingKind::NotApplied));
+    assert!(
+        reports[0].breakdown.effective_changes.tool_descriptions[0]
+            .applied_in
+            .is_empty()
+    );
+
+    // When: the record does not say what was offered at all.
+    let fixture = Fixture::new(None, CONFIG);
+    let mut unknown = applied_by("read", "candidate-worker", "Worker", &[]);
+    unknown.tool_descriptions[0].offered = None;
+    describe_read(&fixture, Some(unknown));
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: it is not assumed offered either.
+    assert!(pending_kinds(&reports[0]).contains(&PendingKind::NotApplied));
+}
+
+#[tokio::test]
+async fn a_replay_started_and_not_ended_makes_every_cost_view_unknown_apart_from_one_never_started()
+{
+    // Given: two repetitions of which the candidate's first was started and never ended,
+    // and whose second was never started at all.
+    let fixture = Fixture::new(None, CONFIG);
+    edit_manifest(&fixture, |manifest| {
+        manifest.repeat = 2;
+        for entry in &mut manifest.runs {
+            if entry.label == CANDIDATE {
+                entry.status = None;
+                entry.finished_at = None;
+            }
+        }
+    });
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the unfinished replay is named, not summed as nothing, in the candidate's cost,
+    // the simulator's and the markdown; the baseline's own cost is still known.
+    let report = &reports[0];
+    assert_eq!(report.unfinished, ["candidate-1"]);
+    let candidate = report.cost_of(CANDIDATE).unwrap();
+    assert!(!candidate.is_complete());
+    assert_eq!(candidate.unfinished, ["candidate-1"]);
+    assert!(candidate.unrecorded.is_empty());
+    assert!(report.cost_of(BASELINE).unwrap().is_complete());
+    assert!(!report.overhead.user_simulation.cost.is_complete());
+    let value = cost_value(candidate);
+    assert!(value["usd"].is_null(), "{value}");
+    assert_eq!(
+        value["unfinished_replays"],
+        serde_json::json!(["candidate-1"])
+    );
+    assert!(report.breakdown.cost.agent[1].cost.usd.is_none());
+    assert!(report.breakdown.cost.simulator.usd.is_none());
+    assert!(report.breakdown.cost.total.usd.is_none());
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(
+        markdown.contains("| candidate-1 | not finished |") && markdown.contains("no recorded end"),
+        "{markdown}"
+    );
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == WarningKind::CostIncomplete && warning.message.contains("candidate-1")
+    }));
+    // The replay that was never started is a missing replay, not an unknown cost.
+    assert!(
+        !candidate
+            .unfinished
+            .iter()
+            .any(|name| name == "candidate-2")
+    );
+    assert!(
+        report
+            .breakdown
+            .validity
+            .pending
+            .iter()
+            .any(|pending| pending.kind == PendingKind::ReplayMissing
+                && pending.subject == "candidate")
+    );
 }

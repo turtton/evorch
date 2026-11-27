@@ -1067,6 +1067,7 @@ fn summarize(dir: &Path, report: &Report) -> Value {
         .map(|cost| (cost.label.as_str(), report::cost_value(&cost.cost)))
         .collect();
     json!({
+        "unfinished_replays": report.unfinished,
         "dir": dir,
         "thread_id": report.thread_id,
         "problem": report.problem,

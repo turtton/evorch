@@ -26,6 +26,7 @@ pub fn cost(usd: f64) -> Cost {
         unpriced: Vec::new(),
         unreported: Vec::new(),
         unrecorded: Vec::new(),
+        unfinished: Vec::new(),
     }
 }
 

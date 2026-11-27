@@ -8,11 +8,10 @@
 
 use std::collections::BTreeSet;
 
-use runtime::tool_descriptions::BuiltinCatalog;
 use serde::{Deserialize, Serialize};
 
 use super::{AspectTally, ConfigurationCost, LoadedRun, Overhead, PairReport, incomplete_reason};
-use crate::changes::{self, Changes, ToolDescriptionChange};
+use crate::changes::{Changes, ToolDescriptionChange};
 use crate::cost::{Cost, RequestUsage};
 use crate::driver::Status;
 use crate::output::{BaseContextSummary, Observed, RunEntry};
@@ -254,14 +253,11 @@ fn base_model(id: &str) -> &str {
 /// What `entry`'s replay used of the description changes in `changes`.
 ///
 /// A description counts as used only by a run that froze it, whose role is one
-/// the change reaches and can be offered the tool: a snapshot lists every tool
-/// the model has an override for, including ones its role never sees. Without
-/// `catalog` that cannot be told, so nothing counts as used.
-pub fn effect_of(
-    changes: &Changes,
-    entry: Option<&RunEntry>,
-    catalog: Option<&BuiltinCatalog>,
-) -> RunEffect {
+/// the change reaches, and whose own persisted record lists the tool among those
+/// offered to the model: a snapshot lists every tool the model has an override
+/// for, including ones the run's role or its being a child never offers. When the
+/// record does not say what was offered, nothing counts as used.
+pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
     let observed: Option<&Observed> = entry.and_then(|entry| entry.observed.as_ref());
     let Some(observed) = observed else {
         return RunEffect {
@@ -274,8 +270,11 @@ pub fn effect_of(
         applied.profile.as_deref() == Some(change.profile.as_str())
             && applied.route_model_id.as_deref() == Some(change.route_model_id.as_str())
             && applied.tools.contains(&change.tool)
-            && catalog
-                .and_then(|catalog| changes::role_seeing(catalog, &applied.role, &change.tool))
+            && applied
+                .offered
+                .as_ref()
+                .is_some_and(|offered| offered.contains(&change.tool))
+            && roles::address(&applied.role)
                 .is_some_and(|address| changes.affected_roles.iter().any(|role| role == address))
     };
     let applied = changes
@@ -389,9 +388,6 @@ fn verification_text(run: &LoadedRun) -> Option<String> {
 /// What [`build`] reads from the evaluation.
 pub struct Inputs<'a> {
     pub changes: &'a Changes,
-    /// What tells which roles can be offered a tool; without it no changed
-    /// description can be shown to have been in force.
-    pub catalog: Option<&'a BuiltinCatalog>,
     /// The configurations the evaluation was to replay, `repeat` times each.
     pub configurations: &'a [String],
     pub repeat: u32,
@@ -407,7 +403,6 @@ pub struct Inputs<'a> {
 pub fn build(input: &Inputs<'_>) -> Breakdown {
     let Inputs {
         changes,
-        catalog,
         configurations,
         repeat,
         preflight_failure,
@@ -471,7 +466,7 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
             let entry = entries
                 .iter()
                 .find(|entry| entry.label == run.summary.label && entry.index == run.summary.index);
-            (run, effect_of(changes, entry, *catalog))
+            (run, effect_of(changes, entry))
         })
         .collect();
     let candidates: Vec<&(&LoadedRun, RunEffect)> = effects
@@ -626,7 +621,7 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
                             kind: PendingKind::NotApplied,
                             subject: name.clone(),
                             reason: format!(
-                                "no run of a role that can be offered `{}` froze the changed description for {}/{}; the comparison says nothing of it",
+                                "no run that was offered `{}` froze the changed description for {}/{}; the comparison says nothing of it",
                                 change.tool, change.profile, change.route_model_id
                             ),
                         });
