@@ -499,7 +499,7 @@ impl SettingsFeature {
             }
         });
         let provider = form.original.clone();
-        self.fetch_panel(ui, provider.as_deref(), Some(&mut form), &|_| false);
+        self.fetch_panel(ui, provider.as_deref(), Some(&mut form), &|_| false, busy);
         ui.add_enabled_ui(!busy, |ui| form.draw_models(ui));
         if form.kind.quota_supported() {
             ui.add_space(SP_2);
@@ -576,9 +576,13 @@ impl SettingsFeature {
                 action = Some(fetch);
             }
         });
-        self.fetch_panel(ui, Some(&view.name), None, &|id| {
-            view.models.iter().any(|model| model.id == id)
-        });
+        self.fetch_panel(
+            ui,
+            Some(&view.name),
+            None,
+            &|id| view.models.iter().any(|model| model.id == id),
+            busy,
+        );
         for model in &view.models {
             ui.horizontal(|ui| {
                 let (icon, color) = if model.enabled {

@@ -181,6 +181,7 @@ impl SettingsFeature {
         provider: Option<&str>,
         form: Option<&mut ProviderForm>,
         has: &dyn Fn(&str) -> bool,
+        busy: bool,
     ) {
         let Some(fetch) = self
             .fetch
@@ -228,7 +229,7 @@ impl SettingsFeature {
                         found,
                         picked,
                         filter,
-                    } => close = found_panel(ui, form, has, found, picked, filter),
+                    } => close = found_panel(ui, form, (has, busy), found, picked, filter),
                 }
             });
         if close {
@@ -242,7 +243,7 @@ impl SettingsFeature {
 fn found_panel(
     ui: &mut egui::Ui,
     form: Option<&mut ProviderForm>,
-    has: &dyn Fn(&str) -> bool,
+    (has, busy): (&dyn Fn(&str) -> bool, bool),
     found: &ProviderModelCandidates,
     picked: &mut BTreeSet<String>,
     filter: &mut String,
@@ -313,8 +314,10 @@ fn found_panel(
         return close;
     };
     let count = picked.len();
+    // Not while the provider is being saved: the save drops the form it was made from, and
+    // what was added meanwhile with it.
     let add = ui.add_enabled(
-        count > 0,
+        count > 0 && !busy,
         egui::Button::new(format!("Add selected ({count})")),
     );
     if add.clicked() {

@@ -1210,3 +1210,71 @@ fn a_context_window_override_is_saved_as_tokens_and_a_bad_one_is_refused_in_the_
     assert!(settings_asked(&mut screen).is_empty(), "nothing is sent");
     screen.get_by_label_contains("must be a number");
 }
+
+// Given: models picked from a fetch result and a provider save that is running
+// When: the save is pending
+// Then: the candidates cannot be added (the save would drop the form with them)
+#[test]
+fn candidates_are_not_added_while_the_provider_is_being_saved() {
+    let mut screen = loaded('a');
+    screen.set_size(egui::vec2(1100.0, 1700.0));
+    open_modal(&mut screen, "Providers");
+    let fetch = start_fetch(&mut screen);
+    screen.state_mut().feature.event(&completed(view(
+        &fetch.operation_id,
+        SettingsOperationKind::FetchProviderModels,
+        OperationState::Ready,
+    )));
+    let read = settings_asked(&mut screen);
+    let read = read
+        .iter()
+        .find(|a| {
+            matches!(
+                query_of_or_none(a),
+                Some(Query::Settings(SettingsQuery::GetProviderModels { .. }))
+            )
+        })
+        .expect("the result is read");
+    answer(
+        &mut screen,
+        read.tag,
+        FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ProviderModels(
+            candidates(&fetch.operation_id, &["alpha", "beta"], false),
+        )))),
+    );
+    screen.get_by_label("alpha").scroll_to_me();
+    screen.run_steps(4);
+    screen.get_by_label("alpha").click();
+    screen.run_steps(2);
+    edit_provider(&mut screen);
+    screen.get_by_label("Add selected (1)").scroll_to_me();
+    screen.run_steps(4);
+    assert!(
+        !screen
+            .get_by_label("Add selected (1)")
+            .accesskit_node()
+            .is_disabled(),
+        "nothing is running"
+    );
+
+    screen.get_by_label("Save").click();
+    let sent = settings_asked(&mut screen);
+    let save = provider_save(&sent[0]);
+    answer(
+        &mut screen,
+        sent[0].tag,
+        command_reply(view(
+            &save.operation_id,
+            SettingsOperationKind::SaveProvider,
+            OperationState::Pending,
+        )),
+    );
+    screen.run_steps(4);
+    assert!(
+        screen
+            .get_by_label("Add selected (1)")
+            .accesskit_node()
+            .is_disabled(),
+        "the save is running"
+    );
+}
