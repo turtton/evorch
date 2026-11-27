@@ -191,21 +191,20 @@ pub(crate) fn meta(
     run_id: &str,
 ) -> Result<Option<crate::RunContextMeta>, StorageError> {
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT name, role, parent_run_id, terminal_phase, updated_at_ns \
              FROM run_contexts WHERE run_id = ?1 \
              AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
-            [run_id],
-            |row| {
-                Ok(crate::RunContextMeta {
-                    name: row.get(0)?,
-                    role: row.get(1)?,
-                    parent_run_id: row.get(2)?,
-                    terminal_phase: row.get(3)?,
-                    updated_at_ns: row.get(4)?,
-                })
-            },
-        )
+        )?
+        .query_row([run_id], |row| {
+            Ok(crate::RunContextMeta {
+                name: row.get(0)?,
+                role: row.get(1)?,
+                parent_run_id: row.get(2)?,
+                terminal_phase: row.get(3)?,
+                updated_at_ns: row.get(4)?,
+            })
+        })
         .optional()?)
 }
 
