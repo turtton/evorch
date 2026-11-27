@@ -134,3 +134,48 @@ async fn a_finished_call_is_recorded_once_with_its_outcome_and_the_program_gets_
     assert_eq!(reply["detail"]["exit_code"], 3);
     assert_eq!(reply["text"], "done\n");
 }
+
+#[derive(Debug, Default)]
+struct Observed(Mutex<Vec<String>>);
+
+impl tools::FileAccessObserver for Observed {
+    fn observe(&self, access: tools::FileAccess<'_>) {
+        let (kind, path) = match access {
+            tools::FileAccess::Read(path) => ("read", path),
+            tools::FileAccess::Written(path) => ("written", path),
+            tools::FileAccess::Removed(path) => ("removed", path),
+        };
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{kind} {}", path.display()));
+    }
+}
+
+#[tokio::test]
+async fn file_touch_calls_made_by_run_js_are_observed_once_each() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("a.txt");
+    std::fs::write(&file, "text\n").unwrap();
+    let (mut host, _receiver) = host();
+    host.tools.push("edit".into());
+    let observed = Arc::new(Observed::default());
+    host.base.file_access_observer = Some(observed.clone());
+
+    let read = host
+        .call(call("read", json!({"path": file.to_string_lossy()})))
+        .await;
+    let edit = host
+        .call(call(
+            "edit",
+            json!({"path": file.to_string_lossy(), "old_string": "text", "new_string": "done"}),
+        ))
+        .await;
+
+    assert!(!read.is_error && !edit.is_error);
+    let path = file.display();
+    assert_eq!(
+        *observed.0.lock().unwrap(),
+        [format!("read {path}"), format!("written {path}")]
+    );
+}

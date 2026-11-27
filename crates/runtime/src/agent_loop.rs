@@ -10,6 +10,7 @@ mod continuity_tests;
 #[cfg(test)]
 pub(crate) mod delegate_cleanup_tests;
 mod durable;
+mod file_touch;
 mod finalization;
 mod host_inputs;
 mod identical_calls;
@@ -197,6 +198,9 @@ pub(crate) struct LoopState {
     /// One harness episode per execution incarnation, never per model report.
     lane_failure_episode: String,
     pub(crate) thread_id: Option<String>,
+    /// Registration of this run's files with the core's file-touch registry; dropping it
+    /// unregisters the run and discards its pending notices.
+    file_touch: Option<crate::file_touch::FileTouchHandle>,
     pub(crate) turn: providers::RequestTurnContext,
     pub(crate) boundary_pending: bool,
     pub(crate) continuity: crate::continuity::Continuity,
@@ -308,6 +312,7 @@ impl LoopState {
             wake_adoption: None,
             lane_failure_episode: providers::RequestTurnContext::unattributed(false).prompt_id,
             thread_id: None,
+            file_touch: None,
             turn: task.turn.clone(),
             boundary_pending: false,
             continuity: Default::default(),
@@ -862,6 +867,9 @@ pub(crate) async fn run_agent(
         if let Some(source) = state.shared.rules.as_ref() {
             state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
         }
+        if !benchmark_mode {
+            state.track_file_touches(active_root.as_deref());
+        }
         // Runs without a sandbox are told the same list (ADR 0032); only mounts need one.
         if state.allowed_directories.is_none()
             && !benchmark_mode
@@ -1171,6 +1179,7 @@ impl LoopState {
                 self.context.push_user(&notice);
                 self.publish_message_count();
             }
+            self.flush_file_touches();
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,

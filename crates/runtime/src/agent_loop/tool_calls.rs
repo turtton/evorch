@@ -740,6 +740,7 @@ impl LoopState {
             })),
             parent_call_id: None,
             run_js_host: None,
+            file_access_observer: self.file_touch.as_ref().map(|tracking| tracking.observer()),
         };
         if self.stop_for_run_js_unconfirmed() {
             return false;
