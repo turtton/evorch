@@ -130,10 +130,7 @@ fn role_table(ui: &mut egui::Ui, model: &mut RoleSettingsModel, context: &Contex
     ui.spacing_mut().item_spacing = vec2(SP_2, SP_1);
     ui.horizontal(|ui| {
         ui.add_space(SP_2);
-        ui.add_sized(
-            vec2(ROLE_COLUMN, ROW_DENSE - SP_2),
-            egui::Label::new(muted("Role")),
-        );
+        role_column(ui, ROW_DENSE - SP_2, muted("Role"));
         ui.label(muted("Model chain"));
     });
     for group in RoleGroup::ALL {
@@ -147,10 +144,7 @@ fn role_table(ui: &mut egui::Ui, model: &mut RoleSettingsModel, context: &Contex
                 ROW_DENSE + SP_2,
                 selected,
                 |ui| {
-                    ui.add_sized(
-                        vec2(ROLE_COLUMN, ROW_DENSE),
-                        egui::Label::new(medium(role.label).color(palette().TEXT)).truncate(),
-                    );
+                    role_column(ui, ROW_DENSE, medium(role.label).color(palette().TEXT));
                     chain_summary(ui, model, context, role);
                 },
                 |ui| {
@@ -195,6 +189,15 @@ fn role_table(ui: &mut egui::Ui, model: &mut RoleSettingsModel, context: &Contex
 }
 
 const ROLE_COLUMN: f32 = 132.0;
+
+/// The first column of a row: a name, left aligned in a fixed width.
+fn role_column(ui: &mut egui::Ui, height: f32, text: egui::RichText) {
+    ui.allocate_ui_with_layout(
+        vec2(ROLE_COLUMN, height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| ui.add(egui::Label::new(text).truncate()),
+    );
+}
 
 /// The chain of a role on one line: its routes and what the first resolves to, or why it has
 /// none. A compactor that inherits is not a problem; an image generator without a chain is off.
@@ -621,10 +624,7 @@ fn category_overrides(
             ROW_DENSE,
             editing,
             |ui| {
-                ui.add_sized(
-                    vec2(ROLE_COLUMN, ROW_DENSE),
-                    egui::Label::new(medium(id).color(palette().TEXT)).truncate(),
-                );
+                role_column(ui, ROW_DENSE, medium(id).color(palette().TEXT));
                 if overridden {
                     override_summary(ui, &binding, context);
                 } else {

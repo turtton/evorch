@@ -34,6 +34,8 @@ pub(super) fn click_row(
     );
     right_ui.set_clip_rect(clip);
     right_ui.spacing_mut().item_spacing = vec2(SP_1, 0.0);
+    // Text in a row does not take the click that selects the row.
+    right_ui.style_mut().interaction.selectable_labels = false;
     right(&mut right_ui);
     let used = right_ui.min_rect();
     let edge = if used.width() > 0.0 {
@@ -49,6 +51,7 @@ pub(super) fn click_row(
     );
     left_ui.set_clip_rect(left_rect.intersect(clip));
     left_ui.spacing_mut().item_spacing = vec2(SP_2, 0.0);
+    left_ui.style_mut().interaction.selectable_labels = false;
     left(&mut left_ui);
     response
 }

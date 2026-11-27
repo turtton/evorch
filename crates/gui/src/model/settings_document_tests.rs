@@ -201,6 +201,21 @@ fn a_role_text_writes_the_selected_role_with_its_categories_only() {
     assert!(roles.conflicted.is_empty());
 }
 
+// Given: an image generator chain that names a route of chat models
+// When: the role's text is made
+// Then: it is refused, and a chain the file already had is not reported against another role
+#[test]
+fn the_image_generator_takes_image_routes_only() {
+    let document = SettingsDocument::parse(TWO_ROUTES).unwrap();
+    let mut roles = document.seed_roles(None);
+    let image = ROLES.iter().find(|role| role.is_image_generator()).unwrap();
+    roles.agents.roles.image_generator.models = vec![config::ChainEntryConfig::route("fast")];
+    assert!(document.role_text(&roles, image).is_err());
+    let explorer = ROLES.iter().find(|role| role.key == "explorer").unwrap();
+    roles.agents.explorer.generation.max_tokens = Some(9);
+    assert!(document.role_text(&roles, explorer).is_ok());
+}
+
 // Given: a saved route
 // When: its removal text is made
 // Then: only that route is gone, and the binding that named it is kept

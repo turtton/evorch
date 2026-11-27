@@ -41,6 +41,26 @@ impl RoutingUi {
         self.focus_name = true;
     }
 
+    /// Takes the name typed for `key` into the draft when its field is still open, so a save
+    /// does not leave the placeholder behind.
+    ///
+    /// # Errors
+    /// The typed name is blank or taken.
+    pub(super) fn commit_name(
+        &mut self,
+        model: &mut RoutingSettingsModel,
+        key: &str,
+    ) -> Result<(), String> {
+        if self.renaming.as_deref() != Some(key) {
+            return Ok(());
+        }
+        model
+            .set_route_name(key, &self.name_text)
+            .map_err(|error| error.to_string())?;
+        self.renaming = None;
+        Ok(())
+    }
+
     pub(super) fn stop_editing(&mut self, key: &str) {
         if self.renaming.as_deref() == Some(key) {
             self.renaming = None;

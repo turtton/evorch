@@ -559,10 +559,14 @@ impl Modal {
     fn save_route(&mut self) -> Option<ModalSave> {
         let routing = self.routing.as_mut()?;
         let key = routing.model.selected.clone()?;
-        if routing.model.conflict.is_some()
-            || routing.model.conflicted.contains(&key)
-            || !routing.model.route_is_dirty(&key)
-        {
+        if routing.model.conflict.is_some() || routing.model.conflicted.contains(&key) {
+            return None;
+        }
+        if let Err(error) = self.routing_ui.commit_name(&mut routing.model, &key) {
+            routing.model.validation_error = Some(error);
+            return None;
+        }
+        if !routing.model.route_is_dirty(&key) {
             return None;
         }
         match routing.document.route_text(&routing.model, &key) {

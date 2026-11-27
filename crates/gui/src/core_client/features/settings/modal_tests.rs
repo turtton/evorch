@@ -6,8 +6,12 @@ use super::tests::{open_modal, provider, provider_save, revision, settings_comma
 use super::*;
 use crate::core_client::features::FeatureRequest;
 use crate::core_client::features::execution::tests::{Screen, answer, asked, query_of, screen};
+use crate::model::settings_document::SettingsDocument;
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use workbench_protocol::namespaces::settings::{
     CredentialRef, OpenaiCompatibleKind, ProviderInput, ProviderKind,
 };
@@ -144,6 +148,10 @@ fn open_route(screen: &mut Harness<'static, Screen>, name: &str) {
 
 /// Picks the role named `label` in the table (its row is a button).
 fn pick_role(screen: &mut Harness<'static, Screen>, label: &str) {
+    screen
+        .get_by_role_and_label(Role::Button, label)
+        .scroll_to_me();
+    screen.run();
     screen.get_by_role_and_label(Role::Button, label).click();
     screen.run();
 }
@@ -412,6 +420,21 @@ fn a_route_changed_elsewhere_under_unsaved_edits_is_not_saved_over() {
     assert_eq!(save.expected_revision, revision('c'));
     assert!(save.text.contains("slow"));
     assert!(save.text.contains("model = \"m\""), "{}", save.text);
+}
+
+// Given: a new route whose name was typed but not accepted
+// When: Save routing is pressed
+// Then: the typed name is what is saved, not the placeholder
+#[test]
+fn save_takes_the_name_still_being_typed() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    click(&mut screen, "Add route");
+    type_into(&mut screen, "Logical model name", "typed-name");
+    click(&mut screen, "Save routing");
+    let save = document_save(&mut screen);
+    assert!(save.text.contains("typed-name"), "{}", save.text);
+    assert!(!save.text.contains("new-route"), "{}", save.text);
 }
 
 // Given: unsaved drafts of two routes
@@ -791,3 +814,102 @@ fn the_snapshot_is_asked_for_by_maintain_once_while_the_modal_is_open() {
         "nothing is asked again while it waits"
     );
 }
+
+fn disabled(screen: &Harness<'static, Screen>, label: &str) -> bool {
+    screen.get_by_label(label).accesskit_node().is_disabled()
+}
+
+// Given: unsaved edits in two roles (Orchestrator, then Explorer)
+// When: the Explorer is saved and its end seen
+// Then: only the Explorer is written, the Orchestrator is still unsaved and says so in the
+//       footer, the profile control stays locked until it is discarded, and Discard of the
+//       selected role leaves nothing else changed
+#[test]
+fn saving_one_role_leaves_the_other_edit_and_the_profile_waits_for_it() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    pick_role(&mut screen, "Explorer");
+    edit_selected_role(&mut screen);
+    screen.get_by_label("● Unsaved changes: Explorer (+1 other role)");
+    assert!(disabled(&screen, "Profile menu"));
+
+    click(&mut screen, "Save role");
+    let explorer = document_save(&mut screen);
+    let saved = SettingsDocument::parse(&explorer.text)
+        .unwrap()
+        .seed_roles(None);
+    assert_eq!(saved.agents.explorer.generation.temperature, Some(0.0));
+    assert_eq!(saved.agents.orchestrator.generation.temperature, None);
+    end(&mut screen, &explorer, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &explorer.text);
+    screen.get_by_label("● 1 other role unsaved");
+    assert!(disabled(&screen, "Profile menu"));
+
+    pick_role(&mut screen, "Orchestrator");
+    click(&mut screen, "Discard");
+    assert!(screen.query_by_label_contains("unsaved").is_none());
+    assert!(!disabled(&screen, "Profile menu"));
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: the Agent roles of a file where only the Orchestrator and Explorer have routes
+// When: the Compactor, the Image generator and the Planner are picked
+// Then: the Compactor and the Image generator say what an empty chain means and are not
+//       reported as having no route; the Planner is, and offers to create its route
+#[test]
+fn an_inheriting_compactor_and_an_image_generator_without_a_chain_are_not_errors() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    pick_role(&mut screen, "Compactor");
+    screen.get_by_label_contains("Uses the running role's chain");
+    assert!(
+        screen
+            .query_by_label_contains("Undefined (no route)")
+            .is_none()
+    );
+    pick_role(&mut screen, "Image generator");
+    screen.get_by_label_contains("Disabled (generate_image unavailable)");
+    assert!(
+        screen
+            .query_by_label_contains("Undefined (no route)")
+            .is_none()
+    );
+    assert!(screen.query_by_label("Create route").is_none());
+    pick_role(&mut screen, "Planner");
+    screen.get_by_label_contains("Undefined (no route)");
+    screen.get_by_label("Create route");
+}
+
+// Given: Routing and Agent Roles at the smallest window the app supports
+// When: a route is added (Routing) and a role is edited (Agent Roles)
+// Then: the footer's Discard and Save, the pinned bar and the open card (or the table and
+//       the pane) are all inside the window
+#[test]
+fn routing_and_roles_fit_the_smallest_window() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    screen.set_size(egui::vec2(960.0, 600.0));
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 600.0));
+    open_modal(&mut screen, "Routing");
+    click(&mut screen, "Add route");
+    for label in ["Add route", "Save routing", "Discard", "Logical model name"] {
+        let rect = screen.get_by_label(label).rect();
+        assert!(window.contains_rect(rect), "{label} at {rect:?}");
+    }
+    screen.get_by_label("Discard").click();
+    screen.run();
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    for label in ["Save role", "Discard", "Role route", "Temperature"] {
+        let rect = screen.get_by_label(label).rect();
+        assert!(window.contains_rect(rect), "{label} at {rect:?}");
+    }
+    for role in ["Orchestrator", "Explorer"] {
+        let rect = screen.get_by_role_and_label(Role::Button, role).rect();
+        assert!(window.contains_rect(rect), "{role} at {rect:?}");
+    }
+}
+
+#[cfg(test)]
+#[path = "modal_evidence.rs"]
+mod evidence;
