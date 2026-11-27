@@ -1,7 +1,7 @@
 //! Native Cursor subscription provider. No Cursor executable or filesystem tools
 //! run here: MCP calls are handed to the canonical evorch tool loop.
 //!
-//! Protocol adapted from can1357/oh-my-pi at 602b6c8. See OMP-LICENSE.
+//! Protocol adapted from can1357/oh-my-pi at 1263bcd. See OMP-LICENSE.
 mod connect_error;
 mod history;
 mod models;

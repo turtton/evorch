@@ -228,7 +228,7 @@ for supported events and signature replay boundaries. Cursor does not expose
 temperature, output-token limits, or service-tier controls.
 
 The protocol implementation was informed by
-[oh-my-pi](https://github.com/can1357/oh-my-pi/tree/602b6c812fa9ef774f359f1e399a09d30ee2eaca),
+[oh-my-pi](https://github.com/can1357/oh-my-pi/tree/1263bcd83293946b445e0561fc49a464366f0ead),
 including its OAuth, native Cursor transport, and quota parsers. Offline mock
 tests verify authentication, token rotation, tool continuations, and prompt
 prefix preservation. Unknown top-level protobuf server fields are skipped for

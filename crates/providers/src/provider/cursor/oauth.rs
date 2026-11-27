@@ -1,4 +1,4 @@
-//! Cursor PKCE browser login. Protocol reference: oh-my-pi 602b6c8, OMP-LICENSE.
+//! Cursor PKCE browser login. Protocol reference: oh-my-pi 1263bcd, OMP-LICENSE.
 use super::{CursorTokenBundle, unix_now};
 use crate::{ProviderError, http::map_request_error};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -22,7 +22,7 @@ impl Default for CursorOAuthConfig {
             poll_url: "https://api2.cursor.sh/auth/poll".into(),
             token_url: "https://api2.cursor.sh/oauth/token".into(),
             api_key_url: "https://api2.cursor.sh/auth/exchange_user_api_key".into(),
-            profile_url: "https://cursor.com/api/auth/me".into(),
+            profile_url: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe".into(),
         }
     }
 }
@@ -189,16 +189,18 @@ impl CursorOAuthClient {
         Ok(renewed)
     }
     async fn attach_email(&self, bundle: &mut CursorTokenBundle) {
-        let Some(id) = bundle.account_id.as_deref() else {
+        // cursor.com/api/auth/me resolves only WorkOS ids and answers 404 for GitHub or
+        // Google logins, so the profile is read over Connect RPC and matched on the full sub.
+        let Some(subject) = token_claims(&bundle.access_token)
+            .and_then(|claims| nonempty(&claims, "sub").map(str::to_owned))
+        else {
             return;
         };
-        let Ok(response) = self
-            .http
-            .get(&self.config.profile_url)
-            .header("cookie", session_cookie(id, &bundle.access_token))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
+        let Ok(response) =
+            connect_request(&self.http, &self.config.profile_url, &bundle.access_token)
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
         else {
             return;
         };
@@ -208,10 +210,23 @@ impl CursorOAuthClient {
         let Ok(payload) = auth_json(response).await else {
             return;
         };
-        if payload.get("sub").and_then(Value::as_str) == Some(id) {
+        if payload.get("authId").and_then(Value::as_str) == Some(subject.as_str()) {
             bundle.email = nonempty(&payload, "email").map(str::to_owned);
         }
     }
+}
+/// Unary Connect RPC call with an empty message, authenticated by a bearer token.
+pub(super) fn connect_request(
+    http: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    http.post(url)
+        .bearer_auth(access_token)
+        .header("accept", "application/json")
+        .header("connect-protocol-version", "1")
+        .header("content-type", "application/json")
+        .body("{}")
 }
 fn nonempty<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value

@@ -1,7 +1,7 @@
-//! Account usage normalisation, based on oh-my-pi 602b6c8 (OMP-LICENSE).
+//! Account usage normalisation, based on oh-my-pi 1263bcd (OMP-LICENSE).
 use super::{
     CursorTokenBundle,
-    oauth::{account_id, session_cookie},
+    oauth::{account_id, connect_request, session_cookie},
 };
 use crate::{ProviderError, http::map_request_error};
 use serde::{Deserialize, Serialize};
@@ -103,9 +103,14 @@ impl CursorQuotaClient {
         if legacy.is_err() && summary.is_err() {
             return Err(legacy.expect_err("checked"));
         }
+        // The X Subscription's weekly pool reset is not in the summary; GetPlanInfo carries it.
+        let weekly_resets_at = match &summary {
+            Ok(summary) if is_unified(summary) => self.weekly_resets_at(bundle).await,
+            _ => None,
+        };
         let mut snapshot = summary
             .as_ref()
-            .map(parse_summary)
+            .map(|summary| parse_summary(summary, weekly_resets_at))
             .unwrap_or(CursorQuotaSnapshot {
                 windows: Vec::new(),
                 plan_type: None,
@@ -125,6 +130,17 @@ impl CursorQuotaClient {
             });
         }
         Ok(snapshot)
+    }
+    /// Next reset of the X Subscription's weekly pool, when Cursor reports one.
+    async fn weekly_resets_at(&self, bundle: &CursorTokenBundle) -> Option<u64> {
+        let url = format!(
+            "{}/aiserver.v1.DashboardService/GetPlanInfo",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let plan = fetch_json(connect_request(&self.http, &url, &bundle.access_token))
+            .await
+            .ok()?;
+        timestamp(plan.get("planInfo")?.get("includedUsageResetsAt")?)
     }
 }
 async fn fetch_json(request: reqwest::RequestBuilder) -> Result<Value, ProviderError> {
@@ -216,7 +232,70 @@ fn percent(
         unit: if limit.is_some() { "usd" } else { "percent" }.into(),
     }
 }
-fn parse_summary(value: &Value) -> CursorQuotaSnapshot {
+fn is_unified(value: &Value) -> bool {
+    value
+        .get("membershipType")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("unified_"))
+}
+/// The X Subscription (`unified_*`) bills differently from legacy plans: `plan` is one
+/// weekly pool shared by Cursor models, and third-party models are paid from prepaid
+/// credit (`onDemand`) from the first request, so its `apiPercentUsed` says nothing.
+fn parse_unified(individual: &Value, weekly_resets_at: Option<u64>) -> Vec<CursorQuotaWindow> {
+    let mut windows = Vec::new();
+    let plan = &individual["plan"];
+    if plan.get("enabled").and_then(Value::as_bool) != Some(false) {
+        let limit_cents = plan.get("limit").and_then(number).filter(|v| *v > 0.0);
+        let total_percent = plan.get("totalPercentUsed").and_then(number);
+        if let Some(limit_cents) = limit_cents {
+            let used_cents = plan.get("used").and_then(number);
+            let fraction = total_percent
+                .map_or(0.0, |p| p / 100.0)
+                .max(used_cents.map_or(0.0, |used| used / limit_cents));
+            let limit = limit_cents / 100.0;
+            windows.push(CursorQuotaWindow {
+                label: "Cursor Models".into(),
+                used_percent: Some(fraction * 100.0),
+                resets_at: weekly_resets_at,
+                used: Some((limit * fraction).min(limit)),
+                limit: Some(limit),
+                unit: "usd".into(),
+            });
+        } else if let Some(total) = total_percent {
+            windows.push(percent(total, "Cursor Models", None, weekly_resets_at));
+        }
+    }
+    // Prepaid credit has no calendar reset, so these windows carry none.
+    let on_demand = &individual["onDemand"];
+    if on_demand.is_object() {
+        let credit_off = on_demand.get("enabled").and_then(Value::as_bool) == Some(false)
+            || on_demand.get("limit").and_then(number) == Some(0.0);
+        let label = "Other Models (prepaid credit)";
+        if credit_off {
+            windows.push(CursorQuotaWindow {
+                label: label.into(),
+                used_percent: Some(100.0),
+                resets_at: None,
+                used: Some(0.0),
+                limit: Some(0.0),
+                unit: "usd".into(),
+            });
+        } else if let Some(window) = cents(on_demand, label, None) {
+            windows.push(window);
+        }
+    }
+    windows
+}
+fn parse_summary(value: &Value, weekly_resets_at: Option<u64>) -> CursorQuotaSnapshot {
+    let plan_type = ["membershipType", "planType"]
+        .iter()
+        .find_map(|key| value.get(key)?.as_str().map(str::to_owned));
+    if is_unified(value) {
+        return CursorQuotaSnapshot {
+            windows: parse_unified(&value["individualUsage"], weekly_resets_at),
+            plan_type,
+        };
+    }
     let resets_at = reset(value);
     let mut windows = Vec::new();
     let individual = &value["individualUsage"];
@@ -234,7 +313,8 @@ fn parse_summary(value: &Value) -> CursorQuotaSnapshot {
                 windows.push(percent(auto, "Cursor Models", None, resets_at));
             }
             if let Some(api) = plan.get("apiPercentUsed").and_then(number) {
-                windows.push(percent(api, "Other Models", limit, resets_at));
+                // plan.limit is not the Other Models pool, so this stays a percentage.
+                windows.push(percent(api, "Other Models", None, resets_at));
             }
             if windows.is_empty() {
                 if let Some(total) = plan.get("totalPercentUsed").and_then(number) {
@@ -248,9 +328,6 @@ fn parse_summary(value: &Value) -> CursorQuotaSnapshot {
     if let Some(window) = cents(&individual["onDemand"], "On-Demand Usage", resets_at) {
         windows.push(window);
     }
-    let plan_type = ["membershipType", "planType"]
-        .iter()
-        .find_map(|key| value.get(key)?.as_str().map(str::to_owned));
     CursorQuotaSnapshot { windows, plan_type }
 }
 fn parse_legacy(value: &Value) -> Vec<CursorQuotaWindow> {

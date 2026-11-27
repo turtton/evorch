@@ -158,8 +158,9 @@ async fn discovery_uses_account_models_and_falls_back_to_rich_catalog() {
             .await
             .unwrap()
             .unwrap(),
-        ["model-max"]
+        ["model-max", "picker-label"]
     );
+    // GetUsableModels failing leaves the rich roster alone.
     assert_eq!(
         client
             .list_models(&ProviderAuth::new(""))
