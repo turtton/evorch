@@ -1770,6 +1770,91 @@ mod run_tabs {
         );
     }
 
+    // Given: thr-1 whose last message is longer than the window, scrolled to the middle of
+    //        it so that no message starts in view, and older pages exist
+    // When: an older page arrives, then another whose bodies are sent apart from it, then
+    //       the bodies
+    // Then: the line in view stays where it was on screen after each
+    #[test]
+    fn the_view_stays_in_place_in_the_middle_of_a_long_message() {
+        use workbench_protocol::views::{BodyRef, MessageContent};
+        use workbench_protocol::{ids::BodyId, wire::ByteOffset};
+        let long = (0..120)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let history = vec![message(0, "assistant", &long)];
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen.harness.get_by_label("line 60").scroll_to_me();
+        assert_eq!(
+            older_reads_of_thr_1(&frames(&mut screen)),
+            0,
+            "the row is out of view"
+        );
+        let line_y = |screen: &Screen| screen.harness.get_by_label("line 60").rect().min.y;
+        let before = line_y(&screen);
+        let moved = |screen: &Screen, what: &str| {
+            let now = line_y(screen);
+            assert!(
+                (now - before).abs() < 1.0,
+                "the line moved from {before} to {now} with {what}"
+            );
+        };
+
+        let page = older_page("run-0", 0, 20, Some("c2"));
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        moved(&screen, "the page");
+
+        let mut page = older_page("run-9", 0, 20, Some("c3"));
+        for (index, message) in page.items.iter_mut().enumerate() {
+            message.content = MessageContent::Body(BodyRef {
+                body_id: BodyId::new(format!("body-{index}")).unwrap(),
+                total_bytes: ByteOffset(2048),
+            });
+        }
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        moved(&screen, "the page of bodies");
+
+        {
+            let mut shared = screen.shared.lock().unwrap();
+            for index in 0..20 {
+                let text = (0..12)
+                    .map(|line| format!("body line {line} of {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                shared.cache.bodies.insert(format!("body-{index}"), text);
+            }
+        }
+        frames(&mut screen);
+        moved(&screen, "the bodies");
+    }
+
     // Given: thr-1 has more messages than the window shows, followed to the newest, and an
     //        older page exists
     // When: the first message is scrolled into view, and the older page arrives

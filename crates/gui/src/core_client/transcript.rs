@@ -89,14 +89,16 @@ pub(super) fn transcript(
     };
     let loading = cache.older_loading(older_id);
     let older_failed = cache.older_read_failed(older_id);
-    // The first message that starts in view last frame and where it sat in the content.
-    // Whatever changes the height above it (older messages put in front, a body that
-    // arrives for a message above) moves it, and the offset takes that up so the
-    // messages in view stay where they are.
+    // The first message that starts in view last frame (else the one that spans the top
+    // of the view) and where it started in the content. Whatever changes the height
+    // above it (older messages put in front, a body that arrives for a message above)
+    // moves it, and the offset takes that up so the messages in view stay where they
+    // are. A message that spans the top is the second choice: it may grow itself.
     let memory = ui.make_persistent_id(salt).with("view-anchor");
     let before: Option<Option<(String, f32)>> = ui.data(|data| data.get_temp(memory));
     let previous = before.clone().flatten();
     let mut anchor: Option<(String, f32)> = None;
+    let mut spanning: Option<(String, f32)> = None;
     let mut moved_to = None;
     let mut near_top = false;
     let output = egui::ScrollArea::vertical()
@@ -162,6 +164,8 @@ pub(super) fn transcript(
                 }
                 if anchor.is_none() && top >= view_top {
                     anchor = Some((key, top - origin));
+                } else if top < view_top && ui.cursor().min.y > view_top {
+                    spanning = Some((key, top - origin));
                 }
                 ui.add_space(SP_2);
             }
@@ -180,7 +184,7 @@ pub(super) fn transcript(
         ui.ctx()
             .request_discard("keep the messages in view in place");
     }
-    ui.data_mut(|data| data.insert_temp(memory, anchor));
+    ui.data_mut(|data| data.insert_temp(memory, anchor.or(spanning)));
     // The first frame of an area is laid out at the top before it follows the newest
     // message, so it only measures; a page is read from the next frame on.
     if before.is_none() || shifted {
