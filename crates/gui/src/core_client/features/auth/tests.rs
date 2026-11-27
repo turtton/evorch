@@ -1361,3 +1361,188 @@ fn a_manual_refresh_holds_the_account_actions_until_the_status_after_it_is_in() 
     screen.run_steps(2);
     screen.get_by_label("Also used by claude: they lose it too.");
 }
+
+/// Two Claude providers on the same keychain account; the second names another service.
+fn shared_account_screen(service: &str) -> Harness<'static, Screen> {
+    let mut shared = providers();
+    shared.push(provider(
+        "claude-2",
+        ProviderKind::AnthropicSubscription,
+        keyring("claude-acct"),
+    ));
+    let present = CredentialState::Present {
+        expires_at_unix: None,
+    };
+    let other = CredentialRef::Keyring {
+        service: service.into(),
+        account: "claude-acct".into(),
+    };
+    opened(
+        SettingsFeature::default(),
+        shared,
+        FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(AuthStatus {
+            revision: Revision(1),
+            slots: vec![
+                slot(
+                    "claude",
+                    keyring("claude-acct"),
+                    present,
+                    Some(LoginMethod::Claude),
+                ),
+                slot("claude-2", other, present, Some(LoginMethod::Claude)),
+            ],
+        })))),
+    )
+}
+
+// Given: two providers on one keychain account, with the same service or another
+// When: Sign out is confirmed
+// Then: the command carries the account and the providers the question named, as it named
+//       them: the credential store keys on the account alone
+#[test]
+fn the_delete_command_carries_what_the_question_said() {
+    for service in ["evorch", "another-service"] {
+        let mut screen = shared_account_screen(service);
+        screen.get_by_label("Sign out").click();
+        screen.run_steps(2);
+        screen.get_by_label("Also used by claude-2: they lose it too.");
+        screen.get_by_label_contains("credential store account claude-acct");
+        screen.get_by_label("Confirm sign out").click();
+        let sent = asked(&mut screen);
+        let sent = commands(&sent);
+        assert_eq!(sent.len(), 1, "{service}");
+        let AuthCommand::DeleteCredential(delete) = sent[0] else {
+            panic!("a deletion was expected");
+        };
+        assert_eq!(delete.profile, "claude", "{service}");
+        assert_eq!(delete.account, "claude-acct", "{service}");
+        assert_eq!(delete.shared_with, ["claude-2"], "{service}");
+    }
+}
+
+// Given: a deletion the core refuses because the account or its users changed
+// When: the refusal arrives
+// Then: the screen says nothing was deleted and reads the status again; the deletion is not sent
+//       again
+#[test]
+fn a_deletion_the_core_does_not_match_says_so_and_reads_the_status_without_resending() {
+    let mut screen = shared_account_screen("evorch");
+    screen.get_by_label("Sign out").click();
+    screen.run_steps(2);
+    screen.get_by_label("Confirm sign out").click();
+    let sent = asked(&mut screen);
+    let sent_delete = sent
+        .iter()
+        .find(|a| matches!(a.request, FeatureRequest::Command(_)))
+        .expect("the deletion is sent");
+    let AuthCommand::DeleteCredential(delete) = auth_command(sent_delete).clone() else {
+        panic!("a deletion was expected");
+    };
+    answer(
+        &mut screen,
+        sent_delete.tag,
+        operation_reply(op_view(
+            &delete.operation_id,
+            AuthOperationKind::DeleteCredential,
+            OperationState::Pending,
+        )),
+    );
+    screen
+        .state_mut()
+        .feature
+        .event(&UiEvent::Auth(AuthEvent::AuthOperationCompleted {
+            operation: op_view(
+                &delete.operation_id,
+                AuthOperationKind::DeleteCredential,
+                OperationState::Failed {
+                    code: ErrorCode::StaleRevision,
+                },
+            ),
+        }));
+    screen.run_steps(4);
+    screen.get_by_label_contains("nothing was deleted");
+    let again = asked(&mut screen);
+    assert!(
+        again.iter().any(|a| matches!(
+            a.request,
+            FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {}))
+        )),
+        "the status is read again"
+    );
+    screen.run_steps(6);
+    let later = asked(&mut screen);
+    assert!(
+        again
+            .iter()
+            .chain(later.iter())
+            .all(|a| !matches!(a.request, FeatureRequest::Command(_))),
+        "no deletion is sent again"
+    );
+}
+
+// Given: a Refresh whose follow-up status read is still on its way
+// When: another Refresh begins and the earlier read is answered
+// Then: Remove key stays off until the status read after the latest Refresh is in
+#[test]
+fn a_status_asked_before_the_latest_refresh_does_not_allow_a_deletion() {
+    fn press(screen: &mut Harness<'static, Screen>) -> Vec<FeatureAction> {
+        screen.get_by_label("Refresh credentials").click();
+        screen.run_steps(2);
+        asked(screen)
+    }
+    fn refresh_of(actions: &[FeatureAction]) -> (u64, OperationId) {
+        actions
+            .iter()
+            .find_map(|a| match &a.request {
+                FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(r))) => {
+                    Some((a.tag, r.operation_id.clone()))
+                }
+                _ => None,
+            })
+            .expect("a refresh is sent")
+    }
+    fn ready(screen: &mut Harness<'static, Screen>, (tag, id): (u64, OperationId)) {
+        answer(
+            screen,
+            tag,
+            operation_reply(op_view(
+                &id,
+                AuthOperationKind::RefreshStatus,
+                OperationState::Ready,
+            )),
+        );
+    }
+    let mut screen = loaded_key();
+    let first = press(&mut screen);
+    for action in &first {
+        if matches!(
+            action.request,
+            FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {}))
+        ) {
+            answer(&mut screen, action.tag, status_reply());
+        }
+    }
+    ready(&mut screen, refresh_of(&first));
+    let after_first = asked(&mut screen);
+    let early = after_first
+        .iter()
+        .find(|a| {
+            matches!(
+                a.request,
+                FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {}))
+            )
+        })
+        .expect("the status is read after the first refresh");
+
+    // A second Refresh begins while that read is on its way.
+    let second = press(&mut screen);
+    ready(&mut screen, refresh_of(&second));
+    // The earlier read is answered after the latest refresh is done, before the read after it.
+    answer(&mut screen, early.tag, status_reply());
+    assert!(
+        is_disabled(&screen, "Remove key"),
+        "the earlier read proves nothing about the latest refresh"
+    );
+    settle(&mut screen, &status_reply());
+    assert!(!is_disabled(&screen, "Remove key"));
+}

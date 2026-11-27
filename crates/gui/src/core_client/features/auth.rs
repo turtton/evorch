@@ -45,9 +45,13 @@ use workbench_protocol::{
 
 #[derive(Debug, Clone)]
 enum Pending {
-    /// `true`: asked after a refresh that made the core read the settings again, so the answer
-    /// is what the next account action may rely on.
-    Status(bool),
+    /// `after_refresh`: asked after a refresh that made the core read the settings again, so the
+    /// answer is what the next account action may rely on, if no newer refresh began since
+    /// (`generation` is the one it was asked in).
+    Status {
+        after_refresh: bool,
+        generation: u64,
+    },
     Operation(OperationId),
     Login(OperationId),
     Command(Sent),
@@ -98,6 +102,8 @@ pub struct AuthFeature {
     /// The refresh that is to make the status trusted.
     trusting: Option<OperationId>,
     awaiting_status: bool,
+    /// Counts the refreshes that began: a status asked in an older one is no proof.
+    generation: u64,
     now: fn() -> u64,
 }
 
@@ -122,6 +128,7 @@ impl Default for AuthFeature {
             trusted: false,
             trusting: None,
             awaiting_status: false,
+            generation: 0,
             now: unix_now,
         }
     }
@@ -175,6 +182,9 @@ fn failure_label(code: ErrorCode) -> &'static str {
             "This is not possible (authorization was refused or the profile does not support it)."
         }
         ErrorCode::NotFound => "The profile was not found.",
+        ErrorCode::StaleRevision => {
+            "The account or the providers sharing it changed since the question was shown; nothing was deleted. Check it and try again."
+        }
         ErrorCode::StorageUnavailable => "The credential could not be saved or deleted.",
         _ => "The operation failed.",
     }
@@ -254,8 +264,10 @@ impl AuthFeature {
                 AuthOperationKind::RefreshStatus => String::new(),
             },
             OperationState::Failed { code } => match detail {
-                Some(detail) => format!("{} {detail}", failure_label(code)),
-                None => failure_label(code).to_owned(),
+                Some(detail) if code != ErrorCode::StaleRevision => {
+                    format!("{} {detail}", failure_label(code))
+                }
+                _ => failure_label(code).to_owned(),
             },
             OperationState::Cancelled { reason } => match reason {
                 CancelReason::Requested => "Sign-in cancelled.".into(),
@@ -322,6 +334,7 @@ impl AuthFeature {
         self.trusted = false;
         self.trusting = None;
         self.awaiting_status = false;
+        self.generation += 1;
         self.status_stale = true;
     }
 
@@ -336,16 +349,20 @@ impl AuthFeature {
             })
     }
 
-    /// The other providers whose credential is the very entry `slot` names.
+    /// The other providers that use the keychain account `slot` names. The credential store
+    /// keys on the account alone, so the service is no part of it.
     fn shared_with(&self, name: &str, slot: &CredentialSlot) -> Vec<String> {
-        if !matches!(slot.storage, CredentialRef::Keyring { .. }) {
+        let CredentialRef::Keyring { account, .. } = &slot.storage else {
             return Vec::new();
-        }
+        };
         self.status.as_ref().map_or_else(Vec::new, |status| {
             status
                 .slots
                 .iter()
-                .filter(|other| other.profile != name && other.storage == slot.storage)
+                .filter(|other| {
+                    other.profile != name
+                        && matches!(&other.storage, CredentialRef::Keyring { account: a, .. } if a == account)
+                })
                 .map(|other| other.profile.clone())
                 .collect()
         })
@@ -620,12 +637,11 @@ impl AuthFeature {
     ) {
         let busy = self.held();
         let name = account.name;
-        let entry = match &slot.storage {
-            CredentialRef::Keyring { service, account } => {
-                format!("service \"{service}\", account {account}")
-            }
-            CredentialRef::Env { var } => format!("environment variable {var}"),
+        let CredentialRef::Keyring { account: key, .. } = &slot.storage else {
+            self.confirm_delete = None;
+            return;
         };
+        let entry = format!("credential store account {key}");
         let (question, confirm) = if sign_in {
             (format!("Sign out of {name}?"), "Confirm sign out")
         } else {
@@ -675,9 +691,12 @@ impl AuthFeature {
                 id.clone(),
                 AuthOperationKind::DeleteCredential,
                 Some(name.to_owned()),
+                // What the question said, as it said it: the core deletes only if it still holds.
                 AuthCommand::DeleteCredential(DeleteCredential {
                     operation_id: id,
                     profile: name.to_owned(),
+                    account: key.clone(),
+                    shared_with: shared.to_vec(),
                 }),
             );
         }
@@ -919,12 +938,20 @@ impl AuthFeature {
             return;
         };
         match (pending, reply) {
-            (Pending::Status(after_refresh), FeatureReply::Query(result)) => {
+            (
+                Pending::Status {
+                    after_refresh,
+                    generation,
+                },
+                FeatureReply::Query(result),
+            ) => {
                 self.status_in_flight = false;
+                // Only a status asked after the latest refresh finished proves anything.
+                let current = after_refresh && generation == self.generation;
                 match result {
                     Ok(QueryReply::Auth(AuthReply::Status(status))) => {
                         self.status = Some(status);
-                        if after_refresh {
+                        if current {
                             self.trusted = true;
                         }
                     }
@@ -932,7 +959,7 @@ impl AuthFeature {
                     Err(error) => {
                         self.message = error.message;
                         self.status_stale = true;
-                        self.awaiting_status |= after_refresh;
+                        self.awaiting_status |= current;
                     }
                 }
             }
@@ -1042,7 +1069,11 @@ impl AuthFeature {
             self.status_stale = false;
             self.status_in_flight = true;
             let after_refresh = std::mem::take(&mut self.awaiting_status);
-            let tag = self.tag(Pending::Status(after_refresh));
+            let generation = self.generation;
+            let tag = self.tag(Pending::Status {
+                after_refresh,
+                generation,
+            });
             ctx.query(tag, Query::Auth(AuthQuery::GetCredentialStatus {}));
         }
         if self.login_stale && !self.login_in_flight {
