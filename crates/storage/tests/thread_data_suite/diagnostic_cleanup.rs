@@ -186,6 +186,47 @@ fn cleanup_reseeds_warm_session_quota() {
 }
 
 #[test]
+fn a_database_over_its_size_limit_is_not_reported_as_suspended() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path().join("over.db"));
+    config.hard_limits.max_db_bytes = 1;
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let event = diagnostic(1, "lsp", "large", &"x".repeat(1_024));
+    handle.append_event(None, &event).unwrap();
+    // Writes continue past the limit, so neither the preview nor the cleanup claims otherwise.
+    let preview = handle.preview_diagnostic_cleanup(Scope::All).unwrap();
+    assert_eq!(preview.event_count, 1);
+    assert!(!preview.writes_suspended, "{preview:?}");
+    let result = handle.cleanup_diagnostics(Scope::All).unwrap();
+    assert_eq!(result.event_count, 1);
+    assert!(!result.writes_suspended, "{result:?}");
+    handle.upsert_run_context(&context()).unwrap();
+}
+
+#[test]
+fn maintenance_cleans_expired_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path().join("automatic.db"));
+    let storage = Storage::open(config).unwrap();
+    let handle = storage.handle();
+    let expired = diagnostic(1, "lsp", "large", &"x".repeat(32_768));
+    for _ in 0..32 {
+        handle.append_event(None, &expired).unwrap();
+    }
+    // Drive and await the same maintenance operation used by periodic ticks.
+    handle.checkpoint_now().unwrap();
+    assert_eq!(
+        handle
+            .preview_diagnostic_cleanup(Scope::All)
+            .unwrap()
+            .event_count,
+        0
+    );
+    handle.upsert_run_context(&context()).unwrap();
+}
+
+#[test]
 fn legacy_database_reports_deletion_without_claiming_file_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path().join("legacy.db"));

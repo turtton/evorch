@@ -319,3 +319,21 @@ fn stream_and_normal_commands_share_daily_totals_and_restore_session_limits() {
     }
     assert_eq!(logs.matches(DAILY_WARNING).count(), 1, "{logs}");
 }
+
+#[test]
+fn invalidating_the_accounting_cache_does_not_repeat_the_daily_warning() {
+    let mut state = fixture();
+    let event = event_at(1, "delta");
+    state.config.hard_limits.max_daily_event_bytes = payload_bytes(&event);
+    let logs = capture_logs(|| {
+        append(&mut state, None, &event).unwrap();
+        append(&mut state, None, &event).unwrap();
+    });
+    assert_eq!(logs.matches(DAILY_WARNING).count(), 1, "{logs}");
+
+    // Cleanup and retention drop the cache; the same UTC day must not warn again.
+    state.accounting = state.accounting.invalidated();
+    let logs = capture_logs(|| append(&mut state, None, &event).unwrap());
+    assert!(!logs.contains(DAILY_WARNING), "{logs}");
+    assert_eq!(event_count(&state.conn), 3);
+}

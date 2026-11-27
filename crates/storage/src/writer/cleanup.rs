@@ -34,8 +34,6 @@ impl StorageHandle {
         let mut summary = diagnostic::preview(&conn, scope)?;
         summary.requires_full_vacuum =
             conn.pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))? == 0;
-        summary.writes_suspended =
-            crate::db::file_sizes(&self.2.db_path)?.total() >= self.2.hard_limits.max_db_bytes;
         Ok(summary)
     }
 

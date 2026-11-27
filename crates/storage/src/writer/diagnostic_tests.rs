@@ -4,6 +4,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventMeta, MessageEvent};
 
 use super::*;
+use crate::repo::event;
 use crate::{Database, StorageConfig};
 
 fn fixture() -> WriterState {

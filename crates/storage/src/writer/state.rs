@@ -873,7 +873,7 @@ pub(super) fn run_writer_with_index(
                     })
                 };
                 // Deleted rows invalidate the cached event totals.
-                state.accounting = event::EventAccounting::default();
+                state.accounting = state.accounting.invalidated();
                 let _ = reply.send(result);
             }
             Ok(Command::ReclaimMarkFiles(family, outcome, reply)) => {
@@ -942,7 +942,7 @@ pub(super) fn run_writer_with_index(
             }
             Ok(Command::RetentionBackfillStep(rows, reply)) => {
                 let result = crate::migrations::backfill::backfill_step(&state.conn, rows);
-                state.accounting = event::EventAccounting::default();
+                state.accounting = state.accounting.invalidated();
                 let _ = reply.send(result);
             }
             Ok(Command::DiagnosticCleanupStatus(scope, reply)) => {
@@ -1066,7 +1066,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         let summary =
             crate::maintenance::retention::tick(&state.conn, &mut state.task_progress_cursor)?;
         if summary.event_count > 0 {
-            state.accounting = event::EventAccounting::default();
+            state.accounting = state.accounting.invalidated();
             removed += summary.event_count;
             tracing::info!(
                 events_removed = summary.event_count,
@@ -1135,7 +1135,7 @@ fn retain_observation_events(
         crate::maintenance::retention_events::TIME_BUDGET,
     )?;
     if summary.event_count > 0 {
-        state.accounting = event::EventAccounting::default();
+        state.accounting = state.accounting.invalidated();
         tracing::info!(
             events_removed = summary.event_count,
             bytes_removed = summary.payload_bytes,

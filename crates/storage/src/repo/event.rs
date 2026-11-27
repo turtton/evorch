@@ -53,6 +53,17 @@ pub struct EventAccounting {
     tombstones: Option<Arc<crate::thread_retention::TombstoneSet>>,
 }
 
+impl EventAccounting {
+    /// An empty cache that is reseeded from the database on the next append. The
+    /// daily-limit warning marker is kept, so invalidating does not repeat the warning.
+    pub(crate) fn invalidated(&self) -> Self {
+        Self {
+            daily_warned_day_ns: self.daily_warned_day_ns,
+            ..Self::default()
+        }
+    }
+}
+
 /// 容量上限を検査してイベントを一件追記します。
 pub fn append_event(
     conn: &Connection,
@@ -107,10 +118,7 @@ pub(crate) fn append_event_in_transaction(
     let mut next_accounting = if accounting.data_version == Some(data_version) {
         accounting.clone()
     } else {
-        EventAccounting {
-            daily_warned_day_ns: accounting.daily_warned_day_ns,
-            ..EventAccounting::default()
-        }
+        accounting.invalidated()
     };
     next_accounting.data_version = Some(data_version);
     let tombstones = match &next_accounting.tombstones {
