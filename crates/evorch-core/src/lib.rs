@@ -2,6 +2,7 @@
 pub mod admin_composition;
 pub mod allocator;
 pub mod backend;
+mod blocking;
 pub(crate) mod connection_log;
 #[cfg(target_os = "linux")]
 pub mod handoff_description;
