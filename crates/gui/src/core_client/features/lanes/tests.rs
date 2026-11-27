@@ -1280,3 +1280,181 @@ fn a_close_chosen_from_a_menu_opens_the_confirmation_and_reads_the_preview() {
     );
     screen.get_by_label("Latest Ready (#4)");
 }
+
+/// A lane thread's lane as the core lists or announces it, with the close that stands.
+fn lane_with_close(id: &str, thread: &str, close: Option<&str>) -> Value {
+    let mut lane = lane_on_thread(id, thread, 3);
+    if let Some(kind) = close {
+        lane["current_close"] = json!({"close_id": "close-1", "kind": kind});
+    }
+    lane
+}
+
+fn lane_changed(lane: Value) -> UiEvent {
+    UiEvent::Lanes(LanesEvent::LaneChanged {
+        lane: serde_json::from_value(lane).unwrap(),
+        also_for: vec![],
+    })
+}
+
+// Given: a lane thread whose lookup was asked for by its row
+// When: the row's ask is queued, sent, answered with a standing close, and then announced
+//       with each kind of close and with none
+// Then: the menu counts the thread as asked for from the moment it is queued, without a
+//       close until the lane is read; afterwards it carries the close the ledger last
+//       announced, and no more reads are made
+#[test]
+fn a_lane_threads_close_is_read_by_its_row_and_follows_the_lane_events() {
+    use workbench_protocol::lane_management::LaneCloseRecordKind::{
+        Discarded, HumanClosed, LeadClosed,
+    };
+    let mut screen = docked(None, None);
+    let thread = ThreadId::new("thread-l9").unwrap();
+    let lead = ThreadId::new("lead").unwrap();
+    assert!(!screen.state().feature.menu().is_known(&thread));
+    screen
+        .state_mut()
+        .feature
+        .enqueue_sidebar(LaneIntent::Lookup {
+            thread: thread.clone(),
+            lead,
+        });
+    assert!(
+        screen.state().feature.menu().is_known(&thread),
+        "queued, not yet sent: the row must not ask again"
+    );
+    let first = docked_asked(&mut screen);
+    assert_eq!(lookups_of(&first), [("lead".to_owned(), None)]);
+    let menu = screen.state().feature.menu();
+    assert!(menu.is_known(&thread), "sent, not yet answered");
+    assert_eq!(menu.entry(&thread), None);
+    assert_eq!(menu.current_close(&thread), None);
+
+    docked_answer(
+        &mut screen,
+        first[0].tag,
+        lanes(vec![lane_with_close(
+            "l9",
+            "thread-l9",
+            Some("lead_closed"),
+        )]),
+    );
+    assert_eq!(
+        screen.state().feature.menu().current_close(&thread),
+        Some(LeadClosed)
+    );
+
+    for (close, expected) in [
+        (Some("human_closed"), Some(HumanClosed)),
+        (Some("discarded"), Some(Discarded)),
+        (None, None),
+        (Some("lead_closed"), Some(LeadClosed)),
+        (None, None),
+    ] {
+        screen
+            .state_mut()
+            .feature
+            .event(&lane_changed(lane_with_close("l9", "thread-l9", close)));
+        let menu = screen.state().feature.menu();
+        assert_eq!(menu.current_close(&thread), expected);
+        assert!(matches!(
+            menu.entry(&thread),
+            Some(LaneMenuEntry::Managed { .. })
+        ));
+    }
+    assert!(docked_asked(&mut screen).is_empty());
+}
+
+// Given: a lane thread read with a standing close, its lane then detached
+// When: the detach is announced, and later the connection is reset
+// Then: a detached lane has no close badge, and a reset forgets the read so the row asks
+//       for the lane again
+#[test]
+fn a_detach_and_a_reset_take_the_close_off_the_menu() {
+    let mut screen = docked(None, None);
+    let thread = ThreadId::new("thread-l9").unwrap();
+    screen
+        .state_mut()
+        .feature
+        .event(&lane_changed(lane_with_close(
+            "l9",
+            "thread-l9",
+            Some("human_closed"),
+        )));
+    assert!(
+        screen
+            .state()
+            .feature
+            .menu()
+            .current_close(&thread)
+            .is_some()
+    );
+
+    let mut detached = lane_with_close("l9", "thread-l9", Some("human_closed"));
+    detached["policy"] = json!("detached");
+    detached.as_object_mut().unwrap().remove("lead_thread_id");
+    screen.state_mut().feature.event(&lane_changed(detached));
+    let menu = screen.state().feature.menu();
+    assert_eq!(menu.current_close(&thread), None);
+    assert_eq!(menu.entry(&thread), Some(&LaneMenuEntry::NotManaged));
+
+    screen
+        .state_mut()
+        .feature
+        .event(&lane_changed(lane_with_close(
+            "l9",
+            "thread-l9",
+            Some("discarded"),
+        )));
+    assert!(
+        screen
+            .state()
+            .feature
+            .menu()
+            .current_close(&thread)
+            .is_some()
+    );
+    screen.state_mut().feature.reset();
+    let menu = screen.state().feature.menu();
+    assert_eq!(menu.current_close(&thread), None);
+    assert!(!menu.is_known(&thread));
+}
+
+// Given: a lane thread whose lookup the core refuses, or whose lane the lead does not list
+// When: the menu is read
+// Then: both count as read, so a row asks no more, and neither shows a close
+#[test]
+fn a_refused_or_missing_lane_is_known_without_a_close() {
+    let mut screen = docked(None, None);
+    let lead = ThreadId::new("lead").unwrap();
+    let refused = ThreadId::new("thread-refused").unwrap();
+    screen
+        .state_mut()
+        .feature
+        .enqueue_sidebar(LaneIntent::Lookup {
+            thread: refused.clone(),
+            lead: lead.clone(),
+        });
+    let first = docked_asked(&mut screen);
+    docked_answer(
+        &mut screen,
+        first[0].tag,
+        FeatureReply::Query(Err(FeatureError::new("busy"))),
+    );
+    let gone = ThreadId::new("thread-gone").unwrap();
+    screen
+        .state_mut()
+        .feature
+        .enqueue_sidebar(LaneIntent::Lookup {
+            thread: gone.clone(),
+            lead,
+        });
+    let second = docked_asked(&mut screen);
+    docked_answer(&mut screen, second[0].tag, lanes(vec![]));
+    let menu = screen.state().feature.menu();
+    for thread in [&refused, &gone] {
+        assert!(menu.is_known(thread));
+        assert_eq!(menu.current_close(thread), None);
+    }
+    assert!(docked_asked(&mut screen).is_empty());
+}

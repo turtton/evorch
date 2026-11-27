@@ -44,8 +44,9 @@ use workbench_protocol::{
     ids::{PageCursor, RunId, ThreadId},
     lane_attention::LaneId,
     lane_management::{
-        LaneFamilyRevision, LaneManagementAction, LaneManagementOperationId, LaneManagementPolicy,
-        LaneManagementRequest, LaneManagementState, ManageLane, ManagedLanePolicy,
+        LaneCloseRecordKind, LaneFamilyRevision, LaneManagementAction, LaneManagementOperationId,
+        LaneManagementPolicy, LaneManagementRequest, LaneManagementState, ManageLane,
+        ManagedLanePolicy,
     },
     namespaces::{
         ExecutionQuery, ExecutionReply, LanesCommand, LanesEvent, LanesQuery, LanesReply,
@@ -198,7 +199,8 @@ impl Card {
 /// What the Projects tab's thread menu asked of the lanes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaneIntent {
-    /// The menu of `thread`, a lane of `lead`, is open: find its lane.
+    /// Find the lane of `thread`, a lane of `lead`: its menu is open, or its row is on screen
+    /// (for the badge of a lane whose close stands).
     Lookup { thread: ThreadId, lead: ThreadId },
     /// The core refused to read the lane of `thread`; the user asked to read it again.
     Retry { thread: ThreadId, lead: ThreadId },
@@ -237,6 +239,10 @@ pub enum LaneMenuEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaneMenu {
     entries: BTreeMap<ThreadId, LaneMenuEntry>,
+    /// How the close of each managed lane that has one stands.
+    closes: BTreeMap<ThreadId, LaneCloseRecordKind>,
+    /// Lane threads whose lookup was asked for and is not answered yet.
+    requested: BTreeSet<ThreadId>,
     /// Why the last lane operation chosen from a menu was not applied.
     notice: Option<String>,
 }
@@ -244,6 +250,16 @@ pub struct LaneMenu {
 impl LaneMenu {
     pub fn entry(&self, thread: &ThreadId) -> Option<&LaneMenuEntry> {
         self.entries.get(thread)
+    }
+
+    /// How the ledger's close of the thread's lane stands, if the lane was read and it has one.
+    pub fn current_close(&self, thread: &ThreadId) -> Option<LaneCloseRecordKind> {
+        self.closes.get(thread).copied()
+    }
+
+    /// Whether the thread's lane was read, or is being read: nothing more is to be asked.
+    pub fn is_known(&self, thread: &ThreadId) -> bool {
+        self.entries.contains_key(thread) || self.requested.contains(thread)
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -392,11 +408,15 @@ impl LanesFeature {
                     .map(|thread| (thread.clone(), LaneMenuEntry::Unreadable)),
             )
             .collect();
+        let mut closes = BTreeMap::new();
         for (thread, lane) in &self.directory {
             let entry =
                 if lane.policy == LaneManagementPolicy::Detached || lane.lead_thread_id.is_none() {
                     LaneMenuEntry::NotManaged
                 } else {
+                    if let Some(close) = &lane.current_close {
+                        closes.insert(thread.clone(), close.kind);
+                    }
                     LaneMenuEntry::Managed {
                         lane: lane.lane_id.clone(),
                         revision: lane.management_revision,
@@ -404,8 +424,23 @@ impl LanesFeature {
                 };
             entries.insert(thread.clone(), entry);
         }
+        // What was asked for waits in a lookup or, until the next pass, in the queue: a row
+        // must not ask again meanwhile.
+        let requested = self
+            .lookups
+            .values()
+            .flat_map(|lookup| lookup.wanted.iter().cloned())
+            .chain(self.intents.iter().filter_map(|intent| match intent {
+                LaneIntent::Lookup { thread, .. } | LaneIntent::Retry { thread, .. } => {
+                    Some(thread.clone())
+                }
+                _ => None,
+            }))
+            .collect();
         LaneMenu {
             entries,
+            closes,
+            requested,
             notice: self.sidebar_notice.clone(),
         }
     }
@@ -413,6 +448,12 @@ impl LanesFeature {
     /// Queue what a thread menu asked for; it is applied at the next pass.
     pub fn enqueue_sidebar(&mut self, intent: LaneIntent) {
         self.intents.push(intent);
+    }
+
+    /// How many asks of the menu wait for the next pass.
+    #[cfg(test)]
+    pub(crate) fn queued_sidebar_intents(&self) -> usize {
+        self.intents.len()
     }
 
     /// Queue what was pressed on the lane card; it is sent at the next pass.
