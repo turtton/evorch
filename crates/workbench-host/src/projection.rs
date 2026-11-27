@@ -381,8 +381,8 @@ impl Projection {
                 };
                 // Never retain the projection/runtime across a scheduler wait.
                 let Some(this) = weak.upgrade() else { break };
-                match change {
-                    Change::Event(event) => {
+                match (this, change) {
+                    (this, Change::Event(event)) => {
                         let wakeups = RefreshWakeups::drain(&mut events, event).await;
                         if wakeups.lagged {
                             pending.activities.clear();
@@ -405,20 +405,20 @@ impl Projection {
                             }).await;
                         }
                     }
-                    Change::Approval(Ok(approval)) => {
+                    (_this, Change::Approval(Ok(approval))) => {
                         pending.dirty = true;
                         observed.push(approval.id);
                     }
-                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
                         pending.activities.clear();
                         pending.dirty = true;
                         this.invalidate();
                     }
-                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    (_this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => {
                         approvals_closed = true;
                     }
-                    Change::ShellFlush => this.flush_shell(tokio::time::Instant::now()),
-                    Change::Refresh => {
+                    (this, Change::ShellFlush) => this.flush_shell(tokio::time::Instant::now()),
+                    (this, Change::Refresh) => {
                         pending.dirty = false;
                         let activities = std::mem::take(&mut pending.activities);
                         let approvals = std::mem::take(&mut observed);

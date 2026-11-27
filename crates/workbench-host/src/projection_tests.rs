@@ -343,6 +343,22 @@ async fn refresh_cooldown_keeps_draining_fragments_without_lag_or_extra_collects
 }
 
 #[tokio::test]
+async fn refresh_receiver_releases_projection_before_yielding() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let weak = Arc::downgrade(&p);
+    let mut drained = p.model_event_batches.subscribe();
+    bus.emit(Event::new(event_bus::MessageEvent::ReasoningDelta {
+        run_id: None,
+        delta: "fragment".into(),
+    }));
+    drained.changed().await.unwrap();
+    // The receiver signals progress before yielding. Dropping the last client
+    // must not require another poll of that receiver to release the runtime.
+    drop(p);
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
 async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
     use event_bus::MessageEvent;
     let bus = EventBus::new(8);
