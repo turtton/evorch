@@ -1281,3 +1281,83 @@ fn a_provider_that_is_signing_in_is_neither_deleted_nor_renamed() {
     );
     screen.get_by_label("Cancel sign-in");
 }
+
+// Given: a screen whose status is read, and a provider whose credential another client changed
+// When: Refresh is pressed, the core read the providers again, and the status after it has not
+//       arrived
+// Then: Remove key waits (it would be confirmed against the old credential), and once the new
+//       status is in, the question names who shares the credential the core will delete
+#[test]
+fn a_manual_refresh_holds_the_account_actions_until_the_status_after_it_is_in() {
+    let mut screen = loaded_key();
+    assert!(!is_disabled(&screen, "Remove key"));
+    screen.get_by_label("Refresh credentials").click();
+    screen.run_steps(2);
+    let sent = asked(&mut screen);
+    for action in &sent {
+        match &action.request {
+            FeatureRequest::Command(Command::Auth(AuthCommand::RefreshCredentials(refresh))) => {
+                answer(
+                    &mut screen,
+                    action.tag,
+                    operation_reply(op_view(
+                        &refresh.operation_id,
+                        AuthOperationKind::RefreshStatus,
+                        OperationState::Ready,
+                    )),
+                );
+            }
+            FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {})) => {
+                // The status read that was already on its way: the old one.
+                answer(&mut screen, action.tag, status_reply());
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+    let after = asked(&mut screen);
+    let status = after
+        .iter()
+        .find(|a| {
+            matches!(
+                a.request,
+                FeatureRequest::Query(Query::Auth(AuthQuery::GetCredentialStatus {}))
+            )
+        })
+        .expect("the status is read after the refresh");
+    assert!(
+        is_disabled(&screen, "Remove key"),
+        "the refresh is done but the status after it is not in"
+    );
+    // Another client moved `key` onto the account `claude` uses.
+    let moved = AuthStatus {
+        revision: Revision(2),
+        slots: vec![
+            slot(
+                "claude",
+                keyring("key-acct"),
+                CredentialState::Present {
+                    expires_at_unix: None,
+                },
+                Some(LoginMethod::Claude),
+            ),
+            slot(
+                "key",
+                keyring("key-acct"),
+                CredentialState::Present {
+                    expires_at_unix: None,
+                },
+                None,
+            ),
+        ],
+    };
+    answer(
+        &mut screen,
+        status.tag,
+        FeatureReply::Query(Ok(QueryReply::Auth(AuthReply::Status(moved)))),
+    );
+    screen.run_steps(4);
+    assert!(!is_disabled(&screen, "Remove key"));
+    screen.get_by_label("Remove key").click();
+    screen.run_steps(2);
+    screen.get_by_label("Also used by claude: they lose it too.");
+}

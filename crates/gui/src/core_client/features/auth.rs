@@ -388,9 +388,10 @@ impl AuthFeature {
             return;
         }
         let id = new_operation();
-        if !self.trusted {
-            self.trusting = Some(id.clone());
-        }
+        // Whatever started it (opening, a save, the icon): the status is not relied on until the
+        // core has read again and the status after that has arrived.
+        self.distrust();
+        self.trusting = Some(id.clone());
         self.send(
             ctx,
             id.clone(),
