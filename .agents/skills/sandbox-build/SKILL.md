@@ -50,6 +50,12 @@ wrapper は `nix print-dev-env --offline` で flake の default dev shell 環境
 store のパスは flake が決めるので、固定ハッシュを書かない。
 初回は約 15 秒かかる。シェル呼び出しごとに環境は消えるので、毎回 wrapper を付ける。
 
+- `EVORCH_PROCESS_GUARD_BUNDLE` (process-guard の helper bundle。CI と flake.nix が設定する変数) が未設定なら、
+  wrapper が `scripts/guard-artifact.sh prepare --profile release` で `$TMPDIR/evorch-guard-<key>/` に一度だけ用意して設定する。
+  `<key>` は `crates/process-guard`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml`・`scripts/guard-artifact.sh` の内容のハッシュで、
+  helper のソースが変わると新しい bundle を作る。既存の bundle は毎回 `verify` し、壊れていれば作り直す。
+  既に設定済みの値は上書きしない。用意に失敗しても警告だけで続行する (未設定だと providers の `codex_quota` など
+  guard 経由で子プロセスを起動するテストが `NotFound` で落ちる)。
 - 失敗する場合: `nix` が store に無い、flake の入力が store に無い (`--offline` のため)。
   その場合は推測せず、エラーをそのまま報告する。
 - `Unable to find libclang` はこの環境が無いことの症状。wrapper を付け直す。
