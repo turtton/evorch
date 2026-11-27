@@ -17,10 +17,12 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = test_socket_dir::SocketDir::new();
-        let host = OwnerHost::open(
+        let host = OwnerHost::open_with_scratch(
             dir.path(),
             Default::default(),
             Arc::new(event_bus::EventBus::new(32)),
+            true,
+            Some(ThreadScratch::at(dir.path().join("scratch"))),
         )
         .unwrap();
         host.start("thread").unwrap();
@@ -50,7 +52,8 @@ impl Fixture {
             self.host.owner_id(),
             &self.scratch,
             "thread",
-            &checker,
+            Some(&checker),
+            None,
         )
     }
 }
@@ -364,4 +367,103 @@ fn epoch_only_hook_wakes_archive_after_a_competing_observation() {
     assert_eq!(observations.recv().unwrap(), 1);
     f.host.scratch_archive_barrier().recv().unwrap();
     assert!(!f.scratch.dir(&f.key).exists());
+}
+
+fn deleted_guard(thread: &str) -> crate::thread_retention::TombstoneGuard {
+    crate::thread_retention::TombstoneGuard::new(storage::thread_retention::TombstoneSet {
+        threads: HashSet::from([thread.into()]),
+        ..Default::default()
+    })
+}
+#[test]
+fn tombstoned_scratch_is_reclaimed_after_sidebar_prune_without_an_archive_checker() {
+    let f = Fixture::new();
+    f.host.set_tombstone_guard(deleted_guard("thread")).unwrap();
+    // The sidebar no longer contains the thread, and no checker is installed.
+    f.host.hint_scratch_archive("thread");
+    f.host.scratch_archive_barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+}
+#[test]
+fn tombstoned_scratch_unknown_guard_and_missing_sidebar_are_not_deletion_authority() {
+    let f = Fixture::new();
+    f.host
+        .set_tombstone_guard(deleted_guard("different-thread"))
+        .unwrap();
+    f.host.set_scratch_archive_checker(Arc::new(|_| Ok(false)));
+    f.host.hint_scratch_archive("thread");
+    f.host.scratch_archive_barrier().recv().unwrap();
+    f.present();
+}
+#[test]
+fn tombstoned_scratch_busy_run_and_shell_are_retained_until_the_next_cursor_hint() {
+    let f = Fixture::new();
+    let guard = deleted_guard("thread");
+    let id = run(42);
+    let shell = ScratchUser::Shell {
+        run: id,
+        id: "still-tearing-down".into(),
+    };
+    f.scratch
+        .register_execution(&f.key, id, "incarnation")
+        .unwrap();
+    f.scratch.register_user(&f.key, shell.clone()).unwrap();
+    f.host.set_tombstone_guard(guard).unwrap();
+    f.host.hint_scratch_archive("thread");
+    f.host.scratch_archive_barrier().recv().unwrap();
+    f.present();
+    f.scratch.release_execution(id, "incarnation");
+    f.host.hint_scratch_archive("thread");
+    f.host.scratch_archive_barrier().recv().unwrap();
+    f.present();
+    f.scratch.release_user(&f.key, &shell);
+    f.host.hint_scratch_archive("thread");
+    f.host.scratch_archive_barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+}
+#[test]
+fn tombstoned_scratch_without_a_local_lease_consumes_the_hint_instead_of_accumulating() {
+    let f = Fixture::new();
+    assert!(
+        attempt(
+            &f.db(),
+            f.host.owner_id(),
+            &f.scratch,
+            "not-owned",
+            None,
+            Some(&deleted_guard("not-owned"))
+        )
+        .unwrap()
+    );
+    f.present();
+}
+
+#[test]
+fn tombstoned_scratch_stale_ownership_and_protective_holds_keep_data_without_retaining_hints() {
+    for condition in ["foreign", "generation", "hold"] {
+        let f = Fixture::new();
+        Registry::open_existing(&f.db())
+            .unwrap()
+            .update("thread", |owner| {
+                match condition {
+                    "foreign" => owner.lease.owner_id = "foreign".into(),
+                    "generation" => owner.lease.generation += 1,
+                    _ => owner.install_hold("tx", "capture", &Default::default())?,
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            attempt(
+                &f.db(),
+                f.host.owner_id(),
+                &f.scratch,
+                "thread",
+                None,
+                Some(&deleted_guard("thread"))
+            )
+            .unwrap()
+        );
+        f.present();
+    }
 }

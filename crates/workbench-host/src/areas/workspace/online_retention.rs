@@ -8,6 +8,7 @@ pub(crate) struct OnlineSnapshot {
     pub before: Vec<(String, GateStamp)>,
     pub runtime: AgentRuntime,
     pub writer: storage::StorageHandle,
+    pub scratch_hint: Option<ScratchHint>,
 }
 impl WorkspaceArea {
     pub(crate) fn online_retention_snapshot(
@@ -78,6 +79,7 @@ impl WorkspaceArea {
             before,
             runtime: runtime.clone(),
             writer,
+            scratch_hint: service.scratch_hint.clone(),
         })
     }
 }

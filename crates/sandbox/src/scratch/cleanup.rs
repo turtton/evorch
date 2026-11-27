@@ -25,7 +25,7 @@ const DELAY: Duration = Duration::from_millis(2);
 pub(super) type Identity = (u64, u64);
 // Darwin's dev_t differs from Linux's; normalize the cross-platform identity.
 #[allow(clippy::unnecessary_cast)]
-fn identity(s: &Stat) -> Identity {
+pub(super) fn identity(s: &Stat) -> Identity {
     (s.st_dev as u64, s.st_ino as u64)
 }
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -79,6 +79,8 @@ struct Work {
     roots: HashMap<PathBuf, (Root, bool)>,
     exact: HashMap<PathBuf, Identity>,
     exact_dirty: bool,
+    orphan_base: Option<(PathBuf, std::time::SystemTime)>,
+    orphan_dirty: bool,
     stop: bool,
     #[cfg(test)]
     completed: HashMap<PathBuf, Vec<std::sync::mpsc::Sender<()>>>,
@@ -146,6 +148,14 @@ impl CleanupService {
             tracing::warn!(%error, "scratch collector start failed");
         }
     }
+    fn request_orphans(&self, base: &Path, now: std::time::SystemTime) -> io::Result<()> {
+        {
+            let mut work = lock(&self.shared.work);
+            work.orphan_base = Some((base.into(), now));
+            work.orphan_dirty = true;
+        }
+        self.start()
+    }
     fn start(&self) -> io::Result<()> {
         let mut life = lock(&self.lifecycle);
         if life.stopped {
@@ -210,6 +220,7 @@ impl CleanupService {
                 *dirty = true;
             }
             work.exact_dirty = true;
+            work.orphan_dirty = work.orphan_base.is_some();
         }
         self.start()
     }
@@ -217,6 +228,11 @@ impl CleanupService {
 pub(super) fn service() -> &'static CleanupService {
     static SERVICE: OnceLock<CleanupService> = OnceLock::new();
     SERVICE.get_or_init(|| CleanupService::new(DELAY))
+}
+/// Request an asynchronous scan of marked, expired scratch roots at cold startup.
+/// No attachments or unmarked legacy directories are collected.
+pub fn request_orphan_scratch_cleanup() -> io::Result<()> {
+    service().request_orphans(Path::new("/var/tmp"), std::time::SystemTime::now())
 }
 /// Stop and join at the next entry boundary, without draining every tree.
 /// Producers must be stopped first. Pending trash remains discoverable on restart.
@@ -241,6 +257,8 @@ struct Pace<'a> {
     #[cfg(test)]
     enumeration_error: Option<Errno>,
     #[cfg(test)]
+    foreign_inode: Option<Identity>,
+    #[cfg(test)]
     throttle: Option<&'a std::sync::mpsc::Sender<TestEvent>>,
 }
 impl Pace<'_> {
@@ -250,6 +268,16 @@ impl Pace<'_> {
             return Some(Err(error));
         }
         dir.next()
+    }
+    fn check_owner(&self, stat: &Stat) -> io::Result<()> {
+        #[cfg(test)]
+        if self.foreign_inode == Some(identity(stat)) {
+            return Err(changed());
+        }
+        if stat.st_uid != euid() {
+            return Err(changed());
+        }
+        Ok(())
     }
     fn stopped(&self) -> bool {
         lock(&self.shared.work).stop
@@ -304,6 +332,15 @@ fn remove_tree(
     expected: Option<Identity>,
     pace: &mut Pace<'_>,
 ) -> io::Result<Outcome> {
+    remove_tree_managed(parent, name, expected, pace, None)
+}
+fn remove_tree_managed(
+    parent: &OwnedFd,
+    name: &CStr,
+    expected: Option<Identity>,
+    pace: &mut Pace<'_>,
+    managed: Option<&super::managed::Candidate>,
+) -> io::Result<Outcome> {
     if pace.stopped() {
         return Ok(Outcome::Stopped);
     }
@@ -324,13 +361,18 @@ fn remove_tree(
         }
         Err(error) => return Err(error.into()),
     };
+    if let Some(managed) = managed {
+        managed.validate(parent, name)?;
+    }
     let original = identity(&fstat(&root)?);
     if expected.is_some_and(|expected| expected != original) {
         return Err(changed());
     }
     let id = writable(&root)?;
     let mut stack = vec![(name.to_owned(), id, Dir::new(root)?)];
-    while let Some((_, _, entries)) = stack.last_mut() {
+    while !stack.is_empty() {
+        let top_level = stack.len() == 1;
+        let (_, _, entries) = stack.last_mut().expect("frame present");
         if pace.stopped() {
             return Ok(Outcome::Stopped);
         }
@@ -340,9 +382,19 @@ fn remove_tree(
                 if name == c"." || name == c".." {
                     continue;
                 }
+                if managed.is_some()
+                    && top_level
+                    && (name.to_bytes() == super::managed::MARKER.as_bytes()
+                        || name.to_bytes() == IDENTITY_MARKER.as_bytes())
+                {
+                    continue;
+                }
                 let fd = entries.fd()?;
                 match openat(fd, name, FLAGS, Mode::empty()) {
                     Ok(child) => {
+                        if managed.is_some() {
+                            pace.check_owner(&fstat(&child)?)?;
+                        }
                         let id = writable(&child)?;
                         stack.push((name.to_owned(), id, Dir::new(child)?));
                     }
@@ -353,6 +405,9 @@ fn remove_tree(
                             Err(Errno::NOENT) => continue,
                             Err(error) => return Err(error.into()),
                         };
+                        if managed.is_some() {
+                            pace.check_owner(&s)?;
+                        }
                         if FileType::from_raw_mode(s.st_mode) == FileType::Directory {
                             return Err(error.into());
                         }
@@ -374,6 +429,24 @@ fn remove_tree(
                     Some((_, _, dir)) => dir.fd()?,
                     None => parent.as_fd(),
                 };
+                if stack.is_empty()
+                    && let Some(managed) = managed
+                {
+                    // Keep the marker discoverable through interruptions and child failures.
+                    managed.validate(parent, &name)?;
+                    if pace.stopped() {
+                        return Ok(Outcome::Stopped);
+                    }
+                    match statat(&managed.fd, IDENTITY_MARKER, AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(s) if s.st_uid == euid() => {
+                            unlinkat(&managed.fd, IDENTITY_MARKER, AtFlags::empty())?
+                        }
+                        Ok(_) => return Err(changed()),
+                        Err(Errno::NOENT) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    unlinkat(&managed.fd, super::managed::MARKER, AtFlags::empty())?;
+                }
                 match same_entry(parent_fd, &name, id) {
                     Ok(()) => match unlinkat(parent_fd, &name, AtFlags::REMOVEDIR) {
                         Ok(()) | Err(Errno::NOENT) => {}
@@ -423,6 +496,49 @@ fn scan(root: &Root, pace: &mut Pace<'_>, failures: &mut HashSet<PathBuf>) -> io
     }
     Ok(Outcome::Complete)
 }
+fn scan_orphans(
+    base: &Path,
+    now: std::time::SystemTime,
+    pace: &mut Pace<'_>,
+    failures: &mut HashSet<PathBuf>,
+) -> io::Result<Outcome> {
+    let parent = open(base, FLAGS, Mode::empty())?;
+    let mut entries = Dir::read_from(&parent)?;
+    while let Some(entry) = pace.next(&mut entries) {
+        if pace.stopped() {
+            return Ok(Outcome::Stopped);
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let result = (|| {
+            if let Some(candidate) = super::managed::Candidate::open(&parent, name, now)? {
+                return remove_tree_managed(
+                    &parent,
+                    name,
+                    Some(candidate.inode()),
+                    pace,
+                    Some(&candidate),
+                );
+            }
+            Ok(Outcome::Complete)
+        })();
+        match result {
+            Ok(Outcome::Stopped) => return Ok(Outcome::Stopped),
+            // Missing markers, live locks and invalid formats are normal, conservative skips.
+            Err(error)
+                if error.kind() != io::ErrorKind::NotFound
+                    && failures.insert(base.join(name.to_string_lossy().as_ref())) =>
+            {
+                tracing::debug!(%error, root = ?name, "uncollectable scratch root retained");
+            }
+            _ => {}
+        }
+        if pace.entry() {
+            return Ok(Outcome::Stopped);
+        }
+    }
+    Ok(Outcome::Complete)
+}
 fn worker(
     shared: Arc<Shared>,
     delay: Duration,
@@ -431,9 +547,13 @@ fn worker(
 ) {
     let mut failures = HashSet::new();
     loop {
-        let (roots, exact) = {
+        let (roots, exact, orphan_base) = {
             let mut work = lock(&shared.work);
-            while !work.stop && !work.exact_dirty && !work.roots.values().any(|(_, dirty)| *dirty) {
+            while !work.stop
+                && !work.exact_dirty
+                && !work.orphan_dirty
+                && !work.roots.values().any(|(_, dirty)| *dirty)
+            {
                 work = shared
                     .changed
                     .wait(work)
@@ -453,7 +573,12 @@ fn worker(
             } else {
                 vec![]
             };
-            (roots, exact)
+            let orphan_base = if std::mem::take(&mut work.orphan_dirty) {
+                work.orphan_base.clone()
+            } else {
+                None
+            };
+            (roots, exact, orphan_base)
         };
         let mut pace = Pace {
             shared: &shared,
@@ -464,8 +589,15 @@ fn worker(
             #[cfg(test)]
             enumeration_error: None,
             #[cfg(test)]
+            foreign_inode: None,
+            #[cfg(test)]
             throttle: events.as_ref(),
         };
+        if let Some((base, now)) = orphan_base
+            && let Err(error) = scan_orphans(&base, now, &mut pace, &mut failures)
+        {
+            tracing::warn!(%error, "orphan scratch scan failed");
+        }
         for root in roots {
             if pace.stopped() {
                 break;
@@ -529,6 +661,9 @@ fn worker(
     }
 }
 #[cfg(test)]
+#[path = "managed_tests.rs"]
+mod managed_tests;
+#[cfg(test)]
 #[path = "cleanup_tests.rs"]
 mod tests;
 #[cfg(test)]
@@ -548,6 +683,8 @@ pub(super) fn remove_for_test(path: &Path) -> io::Result<()> {
         entries: 0,
         step: None,
         enumeration_error: None,
+        #[cfg(test)]
+        foreign_inode: None,
         throttle: None,
     };
     let parent = open(path.parent().unwrap(), FLAGS, Mode::empty())?;
