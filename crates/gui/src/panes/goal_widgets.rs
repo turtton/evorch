@@ -160,7 +160,7 @@ pub fn progress_band<Q>(
                         }
                     }
                     if let Some(goal) = goal {
-                        output.action = goal_row(ui, goal, &mut expanded);
+                        output.action = goal_row(ui, id_salt, goal, &mut expanded);
                     }
                     if let Some(plan) = plan {
                         output.open_plan = band_row(ui, plan);
@@ -215,6 +215,7 @@ fn details_button(ui: &mut egui::Ui, expanded: &mut Option<Detail>, detail: Deta
 
 fn goal_row(
     ui: &mut egui::Ui,
+    id_salt: &str,
     goal: &GoalBandView<'_>,
     expanded: &mut Option<Detail>,
 ) -> Option<GoalAction> {
@@ -247,7 +248,16 @@ fn goal_row(
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
             response.on_hover_text(label);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // The phase icon above appears/disappears while a click can be in flight.
+        // A positional child ID would then change every control's ID, losing the
+        // press that egui hit-tested against the previous frame.
+        let controls_id = ui
+            .id()
+            .with(("goal-controls", id_salt, goal.thread_id, goal.goal_id));
+        let controls = egui::UiBuilder::new()
+            .id(controls_id)
+            .layout(egui::Layout::right_to_left(egui::Align::Center));
+        ui.scope_builder(controls, |ui| {
             details_button(ui, expanded, Detail::Goal, "goal");
             ui.add_enabled_ui(goal.phase != GoalPhaseView::Complete, |ui| {
                 let label = if goal.checks_paused {
@@ -380,28 +390,32 @@ mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
 
+    fn view(goal_id: &'static str, phase: GoalPhaseView) -> GoalBandView<'static> {
+        GoalBandView {
+            thread_id: "A",
+            goal_id,
+            objective: "ship it",
+            phase,
+            review_enabled: false,
+            checks_paused: false,
+            work_stopped: false,
+            reason: None,
+            review_round: 1,
+            max_review_rounds: 3,
+            criteria: &[],
+            checks: Vec::new(),
+            findings: &[],
+            original_request: None,
+            usage: None,
+        }
+    }
+
     /// A band for conversation "A" showing the goal named in the state, or no
     /// goal at all while it is `None`.
     fn band() -> Harness<'static, Option<&'static str>> {
         Harness::new_ui_state(
             |ui, goal_id: &mut Option<&'static str>| {
-                let view = goal_id.map(|goal_id| GoalBandView {
-                    thread_id: "A",
-                    goal_id,
-                    objective: "ship it",
-                    phase: GoalPhaseView::Working,
-                    review_enabled: false,
-                    checks_paused: false,
-                    work_stopped: false,
-                    reason: None,
-                    review_round: 1,
-                    max_review_rounds: 3,
-                    criteria: &[],
-                    checks: Vec::new(),
-                    findings: &[],
-                    original_request: None,
-                    usage: None,
-                });
+                let view = goal_id.map(|id| view(id, GoalPhaseView::Working));
                 progress_band::<()>(
                     ui,
                     "A",
@@ -413,6 +427,122 @@ mod tests {
             },
             Some("goal-1"),
         )
+    }
+
+    struct ClickState {
+        goal: GoalBandView<'static>,
+        actions: Vec<GoalAction>,
+    }
+
+    fn click_harness(phase: GoalPhaseView) -> Harness<'static, ClickState> {
+        Harness::new_ui_state(
+            |ui, state: &mut ClickState| {
+                let output = progress_band::<()>(
+                    ui,
+                    "A",
+                    Some(&state.goal),
+                    None::<fn(&mut egui::Ui) -> Option<()>>,
+                    DETAILS_MAX_HEIGHT,
+                    None,
+                );
+                state.actions.extend(output.action);
+            },
+            ClickState {
+                goal: view("goal-1", phase),
+                actions: Vec::new(),
+            },
+        )
+    }
+
+    fn pointer(harness: &mut Harness<'_, ClickState>, pos: egui::Pos2, pressed: bool) {
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.step();
+    }
+
+    #[test]
+    fn controls_keep_a_single_click_when_the_phase_changes() {
+        for label in [
+            "Enable independent review before completion",
+            "Pause goal checks",
+            "Show goal details",
+        ] {
+            for (from, to) in [
+                (GoalPhaseView::Working, GoalPhaseView::Checking),
+                (GoalPhaseView::Checking, GoalPhaseView::Repairing),
+                (GoalPhaseView::Repairing, GoalPhaseView::Reviewing),
+                (GoalPhaseView::Reviewing, GoalPhaseView::Blocked),
+            ] {
+                for change_on_press in [true, false] {
+                    let mut harness = click_harness(from);
+                    harness.run();
+                    let pos = harness.get_by_label(label).rect().center();
+                    harness.hover_at(pos);
+                    harness.step();
+                    // A core update can arrive on either edge of a real click.
+                    // Keep press/release in separate frames, with no retry.
+                    for pressed in [true, false] {
+                        if pressed == change_on_press {
+                            harness.state_mut().goal.phase = to;
+                        }
+                        pointer(&mut harness, pos, pressed);
+                    }
+                    harness.run();
+                    let expected = match label {
+                        "Enable independent review before completion" => vec![GoalAction::Review {
+                            thread_id: "A".into(),
+                            goal_id: "goal-1".into(),
+                            enabled: true,
+                        }],
+                        "Pause goal checks" => vec![GoalAction::ChecksPaused {
+                            thread_id: "A".into(),
+                            goal_id: "goal-1".into(),
+                            paused: true,
+                        }],
+                        _ => {
+                            assert!(
+                                harness.query_by_label("Hide goal details").is_some(),
+                                "{label}: {from:?} -> {to:?}, change_on_press={change_on_press}"
+                            );
+                            vec![]
+                        }
+                    };
+                    assert_eq!(
+                        harness.state().actions,
+                        expected,
+                        "{label}: {from:?} -> {to:?}, change_on_press={change_on_press}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn completing_or_replacing_a_goal_does_not_inherit_a_press() {
+        for replacement in ["complete", "goal", "thread"] {
+            let mut harness = click_harness(GoalPhaseView::Working);
+            harness.run();
+            let pos = harness
+                .get_by_label("Enable independent review before completion")
+                .rect()
+                .center();
+            harness.hover_at(pos);
+            harness.step();
+            pointer(&mut harness, pos, true);
+            match replacement {
+                "complete" => harness.state_mut().goal.phase = GoalPhaseView::Complete,
+                "goal" => harness.state_mut().goal.goal_id = "goal-2",
+                "thread" => harness.state_mut().goal.thread_id = "B",
+                _ => unreachable!(),
+            }
+            pointer(&mut harness, pos, false);
+            harness.run();
+            assert!(harness.state().actions.is_empty(), "{replacement}");
+        }
     }
 
     // Given: a band with only a plan that was never written to

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use gui::core_client::{
     CoreClientScreen, Shared,
     connection::{Action, serve},
@@ -571,6 +571,12 @@ impl Desktop {
                         ..
                     } => self.commands.push("send"),
                     Action::Command { .. } => self.commands.push("other"),
+                    Action::Feature(feature) => {
+                        if let FeatureRequest::Command(command) = &feature.request {
+                            self.sent.push(command_name(command));
+                        }
+                        self.actions.send(action).await.unwrap();
+                    }
                     _ => self.actions.send(action).await.unwrap(),
                 }
             }
@@ -932,13 +938,29 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
         world.project.clone(),
         LEAD,
     );
-    page.until(|d| d.shows("Goal: ship it")).await;
+    page.until(|d| {
+        d.shows("Goal: ship it")
+            && d.harness
+                .query_by_label("Enable independent review before completion")
+                .is_some_and(|node| !node.accesskit_node().is_disabled())
+    })
+    .await;
     page.click("Enable independent review before completion")
         .await;
     page.until(|d| {
-        d.shows("Disable independent review before completion") && d.shows("Goal review: accepted")
+        d.sent.iter().any(|command| command == "SetGoalReview")
+            && d.shows("Disable independent review before completion")
+            && d.shows("Goal review: accepted")
     })
     .await;
+    assert_eq!(
+        page.sent
+            .iter()
+            .filter(|command| command.as_str() == "SetGoalReview")
+            .count(),
+        1,
+        "one click must send exactly one review command"
+    );
     let after = world.web_execution("goal-after").await.goal.unwrap();
     assert!(after.review_enabled);
 
