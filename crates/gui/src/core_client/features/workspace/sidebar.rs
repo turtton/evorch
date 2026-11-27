@@ -13,7 +13,9 @@ use crate::core_client::cache::Cache;
 use crate::core_client::features::lanes::{LaneIntent, LaneMenu, LaneMenuEntry};
 use crate::core_client::features::pull_requests::{PullRequestIntent, PullRequestMenu};
 use crate::core_client::features::{FeatureContext, Navigation, Selection};
-use crate::panes::lane_widgets::{LaneMenuChoice, lane_menu};
+use crate::panes::lane_widgets::{
+    LaneMenuChoice, close_badge, close_badge_text, close_kind_label, lane_menu,
+};
 use crate::panes::pull_request_widgets::pull_request_badge;
 use crate::panes::sidebar_widgets::{
     FAMILY_GAP, FAMILY_PAGE, Hidden, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
@@ -337,6 +339,9 @@ fn draw_tree(
                         }
                         attention_note(row.own, hidden.attention)
                     };
+                    if let Some(menu) = scope.lanes {
+                        lane_close_row(ui, menu, &row, requests);
+                    }
                     title(
                         ui,
                         (
@@ -463,6 +468,33 @@ fn pull_request_row(
     }
 }
 
+/// What a lane's close badge adds on hover to the kind of the close.
+const CLOSE_BADGE_HOVER: &str =
+    "Only the lane's ledger entry ended: its run was not stopped and nothing was deleted.";
+
+/// The badge of a lane thread's row whose close stands, once its lane was read. A row on
+/// screen whose lane was not asked for yet asks for it; the hidden pass that only collects
+/// requests asks for nothing. Nothing is drawn for a lane that is unread, refused or not closed.
+fn lane_close_row(ui: &mut Ui, menu: &LaneMenu, row: &ThreadRow<'_>, requests: &mut Requests) {
+    let Some(lead) = &row.summary.lead_thread else {
+        return;
+    };
+    let thread = &row.summary.id;
+    if let Some(kind) = menu.current_close(thread) {
+        close_badge(
+            ui,
+            close_badge_text(kind),
+            &format!("{}\n{CLOSE_BADGE_HOVER}", close_kind_label(kind)),
+        );
+    }
+    if !menu.is_known(thread) && ui.is_visible() && ui.is_rect_visible(ui.max_rect()) {
+        requests.lanes.push(LaneIntent::Lookup {
+            thread: thread.clone(),
+            lead: lead.clone(),
+        });
+    }
+}
+
 /// The lane items of a lane thread's menu: the operations its lead's lane offers, once the
 /// lanes feature found the lane; until then a disabled line, while the lane is looked up.
 fn lane_items(
@@ -509,10 +541,12 @@ fn lane_items(
         None => {
             ui.add_enabled(false, egui::Button::new("Reading lane…"));
             ui.separator();
-            requests.lanes.push(LaneIntent::Lookup {
-                thread: thread.clone(),
-                lead: lead.clone(),
-            });
+            if !lanes.is_known(thread) {
+                requests.lanes.push(LaneIntent::Lookup {
+                    thread: thread.clone(),
+                    lead: lead.clone(),
+                });
+            }
         }
     }
 }
