@@ -19,6 +19,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 struct State {
     pending: HashSet<String>,
     checker: Option<Checker>,
+    tombstones: Option<crate::thread_retention::TombstoneGuard>,
     stopped: bool,
     #[cfg(any(test, feature = "idle-test-support"))]
     barriers: Vec<mpsc::Sender<()>>,
@@ -49,6 +50,10 @@ impl ArchiveService {
     }
     pub(super) fn set_checker(&self, checker: Checker) {
         lock(&self.state).checker = Some(checker);
+        let _ = self.wake.try_send(());
+    }
+    pub(super) fn set_guard(&self, guard: crate::thread_retention::TombstoneGuard) {
+        lock(&self.state).tombstones = Some(guard);
         let _ = self.wake.try_send(());
     }
     pub(super) fn hint(&self, thread: &str) {
@@ -99,17 +104,26 @@ fn attempt(
     owner: &str,
     scratch: &ThreadScratch,
     thread: &str,
-    checker: &Checker,
+    checker: Option<&Checker>,
+    tombstones: Option<&crate::thread_retention::TombstoneGuard>,
 ) -> Result<bool, RegistryError> {
+    let deleted = tombstones.is_some_and(|guard| guard.check_thread(thread).is_err());
     // Busy users short-circuit BEFORE reading the sidebar. No await under either gate.
     let Some((epoch, lease)) = scratch.archive_snapshot(thread) else {
-        return Ok(false);
+        // Deleted hints have a durable cursor retry; do not retain every tombstone
+        // in this process when no lease exists (or while a user is still active).
+        return Ok(deleted);
     };
-    if !checker(thread)? {
-        return Ok(true);
+    if !deleted {
+        let Some(checker) = checker else {
+            return Ok(false);
+        };
+        if !checker(thread)? {
+            return Ok(true);
+        }
     }
     if lease.owner_id != owner {
-        return Ok(false);
+        return Ok(deleted);
     }
     let result = Registry::open_existing(db)?.archive_scratch(thread, &lease, || {
         scratch.detach_archived(thread, epoch, &lease)
@@ -118,7 +132,10 @@ fn attempt(
     if result == Some(true) {
         scratch.wake_trash()?;
     }
-    Ok(result.is_some())
+    // A tombstone cursor can resend every conservative skip, including foreign
+    // ownership, a protective hold or an epoch race. Only archive hints need
+    // in-memory retention until the last user releases its scratch.
+    Ok(result.is_some() || deleted)
 }
 fn serve(
     db: PathBuf,
@@ -143,7 +160,7 @@ fn serve(
         retry = false;
         #[cfg(any(test, feature = "idle-test-support"))]
         let barriers;
-        let (pending, checker) = {
+        let (pending, checker, tombstones) = {
             let mut s = lock(&state);
             if s.stopped {
                 return;
@@ -153,14 +170,25 @@ fn serve(
                 barriers = std::mem::take(&mut s.barriers);
             }
             // Move hints out before IO. A new concurrent hint must survive this pass.
-            (std::mem::take(&mut s.pending), s.checker.clone())
+            (
+                std::mem::take(&mut s.pending),
+                s.checker.clone(),
+                s.tombstones.clone(),
+            )
         };
-        if let Some(checker) = checker {
+        if checker.is_some() || tombstones.is_some() {
             for thread in pending {
                 if lock(&state).stopped {
                     return;
                 }
-                let retain = match attempt(&db, &owner, &scratch, &thread, &checker) {
+                let retain = match attempt(
+                    &db,
+                    &owner,
+                    &scratch,
+                    &thread,
+                    checker.as_ref(),
+                    tombstones.as_ref(),
+                ) {
                     Ok(done) => !done,
                     Err(error) if error.is_contention() => {
                         retry |= !backoff_attempt;

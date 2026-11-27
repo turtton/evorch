@@ -87,6 +87,17 @@ impl OwnerHost {
         bus: Arc<EventBus>,
         ordinary: bool,
     ) -> Result<Self, RegistryError> {
+        Self::open_with_scratch(root, settings, bus, ordinary, None)
+    }
+
+    // Isolates the fixtures that exercise scratch without changing production selection.
+    pub(crate) fn open_with_scratch(
+        root: &Path,
+        settings: config::OwnershipConfig,
+        bus: Arc<EventBus>,
+        ordinary: bool,
+        scratch: Option<ThreadScratch>,
+    ) -> Result<Self, RegistryError> {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(std::io::Error::other)?;
         let owner_id = random
@@ -105,7 +116,10 @@ impl OwnerHost {
         let socket_identity = (metadata.dev(), metadata.ino());
         let mut registry = Registry::open(&root.join("owners.db"))?;
         let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
-        let scratch = Arc::new(ThreadScratch::for_ownership_root(root)?);
+        let scratch = Arc::new(match scratch {
+            Some(scratch) => scratch,
+            None => ThreadScratch::for_ownership_root(root)?,
+        });
         if ordinary {
             sweep_scratch(&scratch, root, &owner_id, &mut registry);
         }
@@ -162,7 +176,9 @@ impl OwnerHost {
     /// Refuse to start, claim or attach the threads retention deleted. Installed once,
     /// after the startup phase; returns the guard when one is already installed.
     pub fn set_tombstone_guard(&self, guard: TombstoneGuard) -> Result<(), TombstoneGuard> {
-        self.tombstones.set(guard)
+        self.tombstones.set(guard.clone())?;
+        self.archive.set_guard(guard);
+        Ok(())
     }
 
     fn deny_deleted(&self, thread_id: &str) -> Result<(), RegistryError> {

@@ -149,6 +149,10 @@ async fn serve(
         &CoreGraphRecovery,
     )
     .await?;
+    // This serve path is cold-only; planned entry must not start collection before Ready.
+    if let Err(error) = sandbox::scratch::request_orphan_scratch_cleanup() {
+        tracing::warn!(%error, "orphan scratch collection request failed");
+    }
     let backend = Arc::new(HostBackend::new(
         host.host.clone(),
         instance.identity.clone(),
@@ -237,6 +241,22 @@ async fn serve(
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #[test]
+    fn orphan_scratch_collection_is_requested_only_after_cold_host_initialization() {
+        let source = include_str!("main.rs");
+        let (production, _) = source.split_once("#[cfg(all(test").unwrap();
+        let request = "sandbox::scratch::request_orphan_scratch_cleanup()";
+        assert_eq!(production.matches(request).count(), 1);
+        let (entry, cold) = production.split_once("async fn serve(").unwrap();
+        assert!(!entry.contains(request));
+        assert!(entry.contains("return planned_entry::run("));
+        assert!(
+            cold.find("BootstrappedHost::open_for_core(").unwrap() < cold.find(request).unwrap()
+        );
+        assert!(cold.find(".await?;").unwrap() < cold.find(request).unwrap());
+        assert!(!include_str!("planned_entry.rs").contains(request));
+    }
+
     #[test]
     fn the_arena_cap_is_set_once_right_after_the_signal_mask_and_before_any_entry_branch() {
         let source = include_str!("main.rs");
