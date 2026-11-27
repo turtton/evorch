@@ -2,7 +2,7 @@
 
 use crate::ConfigError;
 use crate::save::{
-    insert_profile, invalid_field, model_values, normalized_models, read_document,
+    ShowQuotaEdit, insert_profile, invalid_field, model_values, normalized_models, read_document,
     remove_original_profile,
 };
 use crate::save_context::SaveScope;
@@ -45,6 +45,7 @@ pub fn save_codex_provider_edit(
         } else {
             CodexModelIntent::ExplicitModels
         },
+        ShowQuotaEdit::Keep,
     )
 }
 
@@ -65,6 +66,7 @@ pub fn save_codex_provider_edit_with_options(
         original_name,
         SaveScope::Layered(options),
         CodexModelIntent::ExplicitModels,
+        ShowQuotaEdit::Keep,
     )
 }
 
@@ -81,6 +83,7 @@ pub(crate) fn save_codex_provider_edit_inner(
     original_name: Option<&str>,
     scope: SaveScope<'_>,
     intent: CodexModelIntent,
+    quota: ShowQuotaEdit,
 ) -> Result<(), ConfigError> {
     if input.name.is_empty()
         || !input
@@ -160,7 +163,7 @@ pub(crate) fn save_codex_provider_edit_inner(
     if !input.default_model.is_empty() {
         profile.insert("default_model", value(input.default_model.as_str()));
     }
-    insert_profile(&mut doc, &input.name, original_name, profile)?;
+    insert_profile(&mut doc, &input.name, original_name, profile, quota)?;
     remove_original_profile(&mut doc, original_name, &input.name);
     crate::save::write_document_in_scope(path, &doc, scope)
 }

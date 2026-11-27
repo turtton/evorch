@@ -337,3 +337,80 @@ fn validation_reports_first_invalid_field_in_order() {
     }
     validate_openai_compatible_provider_input(&candidate).unwrap();
 }
+
+fn quota_of(dir: &Path, name: &str) -> Option<bool> {
+    load(dir).providers[name].show_quota
+}
+
+#[test]
+fn show_quota_is_kept_by_a_plain_save_and_set_in_the_same_write_by_the_context() {
+    // Given: a profile whose show_quota was written by hand
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join(".evorch/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    save_openai_compatible_provider(&path, &input()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("[providers.local]", "[providers.local]\nshow_quota = false"),
+    )
+    .unwrap();
+    assert_eq!(quota_of(tmp.path(), "local"), Some(false));
+    // When: a plain save (the older callers) replaces the profile
+    save_openai_compatible_provider(&path, &input()).unwrap();
+    // Then: the hand-written value survives
+    assert_eq!(quota_of(tmp.path(), "local"), Some(false));
+    // When: the context sets it
+    let options = LoadOptions {
+        user_config_dir: Some(tmp.path().join(".evorch")),
+        read_env: false,
+        ..Default::default()
+    };
+    let context = config::LayeredSaveContext::new(&options).with_show_quota(Some(true));
+    context
+        .save_openai_compatible_provider_edit(&path, &input(), None)
+        .unwrap();
+    assert_eq!(quota_of(tmp.path(), "local"), Some(true));
+    // And None goes back to the default by writing no key at all
+    config::LayeredSaveContext::new(&options)
+        .with_show_quota(None)
+        .save_openai_compatible_provider_edit(&path, &input(), None)
+        .unwrap();
+    assert_eq!(quota_of(tmp.path(), "local"), None);
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("show_quota")
+    );
+}
+
+#[test]
+fn show_quota_defaults_follow_the_provider_kind() {
+    let supported = |kind: ProviderTypeConfig, explicit: Option<bool>| {
+        let profile = config::ProviderProfileConfig {
+            provider_type: kind,
+            show_quota: explicit,
+            ..Default::default()
+        };
+        (profile.quota_supported(), profile.show_quota_enabled())
+    };
+    for kind in [
+        ProviderTypeConfig::OpenAiCodex,
+        ProviderTypeConfig::AnthropicSubscription,
+        ProviderTypeConfig::Cursor,
+        ProviderTypeConfig::KimiSubscription,
+    ] {
+        assert_eq!(supported(kind, None), (true, true), "{kind:?}");
+        assert_eq!(supported(kind, Some(false)), (true, false), "{kind:?}");
+    }
+    for kind in [
+        ProviderTypeConfig::Anthropic,
+        ProviderTypeConfig::OpenAi,
+        ProviderTypeConfig::OpenAiCompatible,
+        ProviderTypeConfig::Openrouter,
+        ProviderTypeConfig::GithubCopilot,
+    ] {
+        assert_eq!(supported(kind, None), (false, false), "{kind:?}");
+        assert_eq!(supported(kind, Some(true)), (false, false), "{kind:?}");
+    }
+}

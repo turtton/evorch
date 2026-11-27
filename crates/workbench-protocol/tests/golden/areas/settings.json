@@ -10,6 +10,17 @@
     },
     "type": "settings"
   },
+  "command/settings/fetch_provider_models": {
+    "payload": {
+      "payload": {
+        "expected_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "operation_id": "op-fetch",
+        "provider": "work"
+      },
+      "type": "fetch_provider_models"
+    },
+    "type": "settings"
+  },
   "command/settings/refresh_settings": {
     "payload": {
       "payload": {
@@ -88,8 +99,10 @@
           "kind": "openai_compatible",
           "models": [
             {
+              "context_override": 200000,
               "enabled": true,
-              "id": "model-a"
+              "id": "model-a",
+              "kind": "chat"
             },
             {
               "enabled": false,
@@ -97,6 +110,7 @@
             }
           ],
           "name": "work",
+          "show_quota": false,
           "type": "openai_compatible"
         }
       },
@@ -108,6 +122,15 @@
     "payload": {
       "payload": {},
       "type": "get_feature_settings"
+    },
+    "type": "settings"
+  },
+  "query/settings/get_provider_models": {
+    "payload": {
+      "payload": {
+        "operation_id": "op-fetch"
+      },
+      "type": "get_provider_models"
     },
     "type": "settings"
   },
@@ -266,6 +289,21 @@
     },
     "type": "settings"
   },
+  "query_reply/settings/provider_models": {
+    "payload": {
+      "payload": {
+        "models": [
+          "model-a",
+          "model-b"
+        ],
+        "operation_id": "op-fetch",
+        "provider": "work",
+        "truncated": true
+      },
+      "type": "provider_models"
+    },
+    "type": "settings"
+  },
   "query_reply/settings/settings": {
     "payload": {
       "payload": {
@@ -286,11 +324,15 @@
             "kind": "openai_compatible",
             "models": [
               {
+                "context_override": 200000,
                 "enabled": true,
-                "id": "model-a"
+                "id": "model-a",
+                "kind": "chat"
               }
             ],
-            "name": "work"
+            "name": "work",
+            "quota_supported": true,
+            "show_quota": false
           }
         ],
         "revision": "2222222222222222222222222222222222222222222222222222222222222222"

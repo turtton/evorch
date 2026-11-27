@@ -29,6 +29,7 @@ pub fn save_subscription_provider_edit(
         input,
         original_name,
         crate::save_context::SaveScope::Standalone,
+        crate::save::ShowQuotaEdit::Keep,
     )
 }
 
@@ -47,6 +48,7 @@ pub fn save_subscription_provider_edit_with_options(
         input,
         original_name,
         crate::save_context::SaveScope::Layered(options),
+        crate::save::ShowQuotaEdit::Keep,
     )
 }
 
@@ -55,6 +57,7 @@ pub(crate) fn save_subscription_provider_edit_inner(
     input: &SubscriptionProviderInput,
     original_name: Option<&str>,
     scope: crate::save_context::SaveScope<'_>,
+    quota: crate::save::ShowQuotaEdit,
 ) -> Result<(), ConfigError> {
     if !matches!(
         input.provider_type,
@@ -77,5 +80,11 @@ pub(crate) fn save_subscription_provider_edit_inner(
         excluded_models: input.excluded_models.clone(),
         default_model: input.default_model.clone(),
     };
-    crate::save::save_openai_compatible_provider_edit_inner(path, &validated, original_name, scope)
+    crate::save::save_openai_compatible_provider_edit_inner(
+        path,
+        &validated,
+        original_name,
+        scope,
+        quota,
+    )
 }

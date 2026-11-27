@@ -2,17 +2,34 @@
 
 use std::path::Path;
 
+use crate::save::ShowQuotaEdit;
 use crate::{Config, ConfigError, LoadOptions};
 
 /// A save must be validated in the layers used by its caller, not guessed from a path.
 #[derive(Clone, Copy)]
 pub struct LayeredSaveContext<'a> {
     options: &'a LoadOptions,
+    show_quota: ShowQuotaEdit,
 }
 
 impl<'a> LayeredSaveContext<'a> {
     pub const fn new(options: &'a LoadOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            show_quota: ShowQuotaEdit::Keep,
+        }
+    }
+
+    /// Provider saves of this context also set `show_quota` (`None`: the default) in the same
+    /// write. Without it a save keeps the value the profile had.
+    #[must_use]
+    pub const fn with_show_quota(mut self, show_quota: Option<bool>) -> Self {
+        self.show_quota = ShowQuotaEdit::Set(show_quota);
+        self
+    }
+
+    const fn show_quota_edit(&self) -> ShowQuotaEdit {
+        self.show_quota
     }
 
     /// Refresh the shared save checks after an approval wait without rebuilding
@@ -40,6 +57,10 @@ pub struct StandaloneSaveContext;
 impl StandaloneSaveContext {
     const fn scope(&self) -> SaveScope<'_> {
         SaveScope::Standalone
+    }
+
+    const fn show_quota_edit(&self) -> ShowQuotaEdit {
+        ShowQuotaEdit::Keep
     }
 }
 
@@ -73,6 +94,7 @@ macro_rules! save_methods {
                 input,
                 original_name,
                 self.scope(),
+                self.show_quota_edit(),
             )
         }
 
@@ -91,6 +113,7 @@ macro_rules! save_methods {
                 original_name,
                 self.scope(),
                 intent,
+                self.show_quota_edit(),
             )
         }
 
@@ -107,6 +130,7 @@ macro_rules! save_methods {
                 input,
                 original_name,
                 self.scope(),
+                self.show_quota_edit(),
             )
         }
 

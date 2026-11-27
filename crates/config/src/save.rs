@@ -141,7 +141,13 @@ pub fn save_openai_compatible_provider_edit(
     input: &OpenAiCompatibleProviderInput,
     original_name: Option<&str>,
 ) -> Result<(), ConfigError> {
-    save_openai_compatible_provider_edit_inner(path, input, original_name, SaveScope::Standalone)
+    save_openai_compatible_provider_edit_inner(
+        path,
+        input,
+        original_name,
+        SaveScope::Standalone,
+        ShowQuotaEdit::Keep,
+    )
 }
 
 /// Save after validating the candidate file in the caller's layered configuration.
@@ -159,6 +165,7 @@ pub fn save_openai_compatible_provider_edit_with_options(
         input,
         original_name,
         SaveScope::Layered(options),
+        ShowQuotaEdit::Keep,
     )
 }
 
@@ -167,6 +174,7 @@ pub(crate) fn save_openai_compatible_provider_edit_inner(
     input: &OpenAiCompatibleProviderInput,
     original_name: Option<&str>,
     scope: SaveScope<'_>,
+    quota: ShowQuotaEdit,
 ) -> Result<(), ConfigError> {
     validate_openai_compatible_provider_input(input)?;
     let mut doc = read_document(path)?;
@@ -195,7 +203,7 @@ pub(crate) fn save_openai_compatible_provider_edit_inner(
         );
     }
     profile.insert("default_model", value(input.default_model.as_str()));
-    insert_profile(&mut doc, &input.name, original_name, profile)?;
+    insert_profile(&mut doc, &input.name, original_name, profile, quota)?;
     remove_original_profile(&mut doc, original_name, &input.name);
     write_document_in_scope(path, &doc, scope)
 }
@@ -434,7 +442,17 @@ fn upgrade_v2_document(doc: &mut DocumentMut) -> Result<(), ConfigError> {
 }
 
 /// 保存入力に現れないため、置き換え前のプロファイルから引き継ぐ手書きのキー。
-const HAND_WRITTEN_PROFILE_KEYS: &[&str] = &["edit_tool"];
+const HAND_WRITTEN_PROFILE_KEYS: &[&str] = &["edit_tool", "show_quota"];
+
+/// 保存時の `show_quota` の扱い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShowQuotaEdit {
+    /// 置き換え前の値 (または未指定) を引き継ぐ。
+    #[default]
+    Keep,
+    /// この値にする。`None` は既定に戻す (キーを書かない)。
+    Set(Option<bool>),
+}
 
 /// `name` のプロファイルを `profile` で置き換える。
 ///
@@ -445,6 +463,7 @@ pub(crate) fn insert_profile(
     name: &str,
     original_name: Option<&str>,
     mut profile: Table,
+    quota: ShowQuotaEdit,
 ) -> Result<(), ConfigError> {
     if let Some(previous) = doc
         .get("providers")
@@ -456,6 +475,12 @@ pub(crate) fn insert_profile(
             if let Some(item) = previous.get(key) {
                 profile.insert(key, item.clone());
             }
+        }
+    }
+    if let ShowQuotaEdit::Set(quota) = quota {
+        profile.remove("show_quota");
+        if let Some(quota) = quota {
+            profile.insert("show_quota", value(quota));
         }
     }
     let providers = doc.entry("providers").or_insert_with(|| {

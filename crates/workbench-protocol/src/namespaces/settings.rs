@@ -49,6 +49,7 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "delete_provider",
     "reload_models",
     "save_feature_settings",
+    "fetch_provider_models",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
     "model_choices",
@@ -56,6 +57,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "get_feature_settings",
     "get_settings_operation",
     "list_settings_operations",
+    "get_provider_models",
 ];
 pub const EVENT_TYPES: &[&str] = &["settings_snapshot_changed", "settings_operation_completed"];
 /// The tagged choice inside `save_provider`'s payload that classification names.
@@ -68,6 +70,9 @@ pub const NESTED_COMMANDS: &[super::NestedOperation] = &[super::NestedOperation 
 
 /// Largest configuration text, in bytes. Larger files are not shown or saved
 /// through the wire (the frame budget doubles for JSON escaping).
+pub mod provider_models;
+pub use provider_models::{FetchProviderModels, ProviderModelCandidates};
+
 pub const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 pub const MAX_PROVIDERS: usize = 64;
 pub const MAX_MODELS: usize = 256;
@@ -172,11 +177,29 @@ impl CredentialRef {
     }
 }
 
+/// What a model is for. Spelled as the configuration spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelKind {
+    /// A conversation model.
+    Chat,
+    /// An image generator; it can never be a provider's default chat model.
+    ImageGeneration,
+}
+
+/// Largest context override a model may carry, in tokens.
+pub const MAX_CONTEXT_OVERRIDE: u64 = 100_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelView {
     pub id: String,
     pub enabled: bool,
+    /// The kind the model has now: the one written, else the one its id implies.
+    pub kind: ModelKind,
+    /// The context window written for this model, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_override: Option<u64>,
 }
 
 /// One provider profile as the effective configuration holds it.
@@ -190,6 +213,12 @@ pub struct ProviderView {
     pub models: Vec<ModelView>,
     pub excluded_models: Vec<String>,
     pub default_model: String,
+    /// Whether the footer shows this provider's quota: the value written, else
+    /// the default of its kind. Always `false` where `quota_supported` is.
+    pub show_quota: bool,
+    /// Whether the provider's kind has a quota to show (Codex, Claude
+    /// subscription, Cursor, Kimi).
+    pub quota_supported: bool,
 }
 
 /// Why a snapshot carries no usable document or providers.
@@ -246,6 +275,7 @@ pub enum SettingsOperationKind {
     DeleteProvider,
     ReloadModels,
     SaveFeatureSettings,
+    FetchProviderModels,
 }
 
 /// An operation with what a settings client needs to explain its end. The
@@ -298,10 +328,20 @@ pub struct SaveDocument {
 pub struct ModelInput {
     pub id: String,
     pub enabled: bool,
+    /// Set the kind. Without it a model the profile already has keeps its kind
+    /// and a new one gets the kind its id implies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ModelKind>,
+    /// The context window written for the model; without it none is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_override: Option<u64>,
 }
 
 /// The profile a `save_provider` writes. A model that the profile already has
-/// keeps its other settings (preset, prices); only `enabled` follows the input.
+/// keeps its other settings (preset, prices, effort levels, edit tool); only
+/// what the input names (`enabled`, `kind`, `context_override`) follows it.
+/// `show_quota` is written in the same save: `None` writes nothing, which is
+/// the default of the provider's kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderInput {
@@ -315,6 +355,8 @@ pub enum ProviderInput {
         models: Vec<ModelInput>,
         excluded_models: Vec<String>,
         default_model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show_quota: Option<bool>,
     },
     /// OpenAI Codex (ChatGPT subscription); the keychain account holds the login.
     Codex {
@@ -323,6 +365,8 @@ pub enum ProviderInput {
         base_url: String,
         models: Vec<ModelInput>,
         default_model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show_quota: Option<bool>,
     },
     /// Claude or Cursor subscription; the keychain account holds the login.
     Subscription {
@@ -333,6 +377,8 @@ pub enum ProviderInput {
         models: Vec<ModelInput>,
         excluded_models: Vec<String>,
         default_model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show_quota: Option<bool>,
     },
 }
 
@@ -386,6 +432,7 @@ impl ProviderInput {
                 base_url,
                 models,
                 default_model,
+                ..
             } => {
                 check_line("account", account, MAX_NAME_BYTES, false)?;
                 (name, base_url, models, &[][..], default_model)
@@ -415,6 +462,12 @@ impl ProviderInput {
         check_count("models", models.len(), MAX_MODELS)?;
         for model in models {
             check_line("model", &model.id, MAX_NAME_BYTES, false)?;
+            if model
+                .context_override
+                .is_some_and(|window| window == 0 || window > MAX_CONTEXT_OVERRIDE)
+            {
+                return Err(invalid("context_override", "out of range"));
+            }
         }
         check_count("excluded_models", excluded.len(), MAX_MODELS)?;
         for model in excluded {
@@ -467,6 +520,7 @@ pub enum SettingsCommand {
     DeleteProvider(DeleteProvider),
     ReloadModels(ReloadModels),
     SaveFeatureSettings(SaveFeatureSettings),
+    FetchProviderModels(FetchProviderModels),
 }
 
 impl SettingsCommand {
@@ -483,6 +537,7 @@ impl SettingsCommand {
             Self::DeleteProvider(c) => &c.operation_id,
             Self::ReloadModels(c) => &c.operation_id,
             Self::SaveFeatureSettings(c) => &c.operation_id,
+            Self::FetchProviderModels(c) => &c.operation_id,
         }
     }
 
@@ -494,6 +549,7 @@ impl SettingsCommand {
             Self::DeleteProvider(_) => SettingsOperationKind::DeleteProvider,
             Self::ReloadModels(_) => SettingsOperationKind::ReloadModels,
             Self::SaveFeatureSettings(_) => SettingsOperationKind::SaveFeatureSettings,
+            Self::FetchProviderModels(_) => SettingsOperationKind::FetchProviderModels,
         }
     }
 
@@ -513,6 +569,7 @@ impl SettingsCommand {
             }
             Self::DeleteProvider(c) => check_line("name", &c.name, MAX_NAME_BYTES, false),
             Self::SaveFeatureSettings(c) => c.changes.validate(),
+            Self::FetchProviderModels(c) => c.validate(),
         }
     }
 }
@@ -551,6 +608,11 @@ pub enum SettingsQuery {
     },
     /// The retained operations, newest first.
     ListSettingsOperations {},
+    /// What a finished `fetch_provider_models` found. It lives as long as the
+    /// operation does.
+    GetProviderModels {
+        operation_id: OperationId,
+    },
 }
 
 impl SettingsQuery {
@@ -578,6 +640,7 @@ pub enum SettingsReply {
     Operations {
         operations: Vec<SettingsOperationView>,
     },
+    ProviderModels(ProviderModelCandidates),
 }
 
 /// Credential-free metadata from one applied project-model snapshot.
@@ -649,6 +712,7 @@ impl SettingsReply {
                 view.restart_pending.len(),
                 MAX_FEATURE_SECTIONS,
             ),
+            Self::ProviderModels(found) => found.validate(),
             Self::Operation(operation) => operation.validate(),
             Self::Operations { operations } => {
                 check_count("operations", operations.len(), MAX_OPERATIONS)?;
@@ -706,6 +770,7 @@ mod tests {
                 models: vec![],
                 excluded_models: vec![],
                 default_model: "m".into(),
+                show_quota: None,
             },
             ProviderInput::Codex {
                 name: "c".into(),
@@ -713,6 +778,7 @@ mod tests {
                 base_url: "https://x.test".into(),
                 models: vec![],
                 default_model: String::new(),
+                show_quota: None,
             },
             ProviderInput::Subscription {
                 name: "s".into(),
@@ -722,6 +788,7 @@ mod tests {
                 models: vec![],
                 excluded_models: vec![],
                 default_model: "m".into(),
+                show_quota: None,
             },
         ] {
             let wire = serde_json::to_value(&input).unwrap();

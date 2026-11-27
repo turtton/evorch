@@ -13,8 +13,8 @@ use std::{
     sync::Arc,
 };
 use workbench_protocol::namespaces::settings::{
-    CredentialRef, MAX_DOCUMENT_BYTES, ModelInput, ModelView, OpenaiCompatibleKind, ProviderInput,
-    ProviderKind, ProviderView, SettingsProblem, SettingsRevision, SettingsSnapshot,
+    CredentialRef, MAX_DOCUMENT_BYTES, ModelInput, ModelKind, ModelView, OpenaiCompatibleKind,
+    ProviderInput, ProviderKind, ProviderView, SettingsProblem, SettingsRevision, SettingsSnapshot,
     SubscriptionKind,
 };
 
@@ -36,6 +36,8 @@ pub(super) enum SaveError {
     RestartTargets,
     /// The file could not be read or written.
     Io(String),
+    /// The file has no such provider.
+    NoSuchProvider,
 }
 
 impl From<ConfigError> for SaveError {
@@ -220,11 +222,31 @@ impl ConfigStore {
         expected: &SettingsRevision,
         original_name: Option<&str>,
         input: &ProviderInput,
-    ) -> Result<SettingsRevision, SaveError> {
+    ) -> Result<Saved, SaveError> {
         self.check_revision(expected)?;
         let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)))?;
+        let before = Config::load_unresolved(&self.options()).ok();
         self.typed_save(|| self.save_provider_unchecked(original_name, input, &existing))?;
-        self.revision()
+        let after = Config::load_unresolved(&self.options()).ok();
+        Ok(Saved {
+            revision: self.revision()?,
+            models_unchanged: before
+                .zip(after)
+                .is_some_and(|(before, after)| same_but_quota(before, after)),
+        })
+    }
+
+    /// The provider `name` of the file at `expected`, as the effective configuration holds it.
+    pub(super) fn provider_at(
+        &self,
+        expected: &SettingsRevision,
+        name: &str,
+    ) -> Result<ProviderProfileConfig, SaveError> {
+        self.check_revision(expected)?;
+        Config::load_unresolved(&self.options())?
+            .providers
+            .remove(name)
+            .ok_or(SaveError::NoSuchProvider)
     }
 
     fn save_provider_unchecked(
@@ -234,7 +256,11 @@ impl ConfigStore {
         existing: &[ModelEntryConfig],
     ) -> Result<(), ConfigError> {
         let options = self.options();
-        let context = config::LayeredSaveContext::new(&options);
+        let context = config::LayeredSaveContext::new(&options).with_show_quota(match input {
+            ProviderInput::OpenaiCompatible { show_quota, .. }
+            | ProviderInput::Codex { show_quota, .. }
+            | ProviderInput::Subscription { show_quota, .. } => *show_quota,
+        });
         let path = self.path();
         let model_entries = |models: &[ModelInput]| model_entries(models, existing);
         match input {
@@ -246,6 +272,7 @@ impl ConfigStore {
                 models,
                 excluded_models,
                 default_model,
+                ..
             } => context.save_openai_compatible_provider_edit(
                 &path,
                 &OpenAiCompatibleProviderInput {
@@ -282,6 +309,7 @@ impl ConfigStore {
                 base_url,
                 models,
                 default_model,
+                ..
             } => context.save_codex_provider_edit(
                 &path,
                 &CodexProviderInput {
@@ -306,6 +334,7 @@ impl ConfigStore {
                 models,
                 excluded_models,
                 default_model,
+                ..
             } => context.save_subscription_provider_edit(
                 &path,
                 &SubscriptionProviderInput {
@@ -548,6 +577,13 @@ fn model_entries(models: &[ModelInput], existing: &[ModelEntryConfig]) -> Vec<Mo
                 .cloned()
                 .unwrap_or_else(|| ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()));
             entry.enabled = model.enabled;
+            if let Some(kind) = model.kind {
+                entry.kind = Some(match kind {
+                    ModelKind::Chat => config::ModelKind::Chat,
+                    ModelKind::ImageGeneration => config::ModelKind::ImageGeneration,
+                });
+            }
+            entry.context_window = model.context_override;
             entry
         })
         .collect()
@@ -573,11 +609,37 @@ fn provider_view((name, profile): (&String, &ProviderProfileConfig)) -> Provider
             .map(|model| ModelView {
                 id: model.id.clone(),
                 enabled: model.enabled,
+                kind: match model.effective_kind() {
+                    config::ModelKind::Chat => ModelKind::Chat,
+                    config::ModelKind::ImageGeneration => ModelKind::ImageGeneration,
+                },
+                context_override: model.context_window,
             })
             .collect(),
         excluded_models: profile.excluded_models.clone(),
         default_model: profile.default_model.clone(),
+        show_quota: profile.show_quota_enabled(),
+        quota_supported: profile.quota_supported(),
     }
+}
+
+/// What a provider save wrote.
+pub(super) struct Saved {
+    pub revision: SettingsRevision,
+    /// The effective configuration is the same but for `show_quota`, so the
+    /// models the runs use do not differ from what the file now says.
+    pub models_unchanged: bool,
+}
+
+fn same_but_quota(mut before: Config, mut after: Config) -> bool {
+    for profile in before
+        .providers
+        .values_mut()
+        .chain(after.providers.values_mut())
+    {
+        profile.show_quota = None;
+    }
+    before == after
 }
 
 pub(in crate::areas) fn provider_kind(kind: ProviderTypeConfig) -> ProviderKind {
