@@ -205,6 +205,7 @@ fn manifest(configurations: &[&str], repeat: u32, runs: Vec<RunEntry>, finished:
         },
         original_turns: Vec::new(),
         problem: None,
+        sample: None,
         verify: None,
         candidate_overlay: None,
         swapped_roles: Vec::new(),
@@ -258,6 +259,7 @@ fn report(runs: &[(&str, u32, f64)]) -> Report {
             verification: None,
             external_dependencies: Vec::new(),
             pushed_refs: 0,
+            checks: None,
         })
         .collect();
     let mut labels: Vec<&str> = runs.iter().map(|(label, ..)| *label).collect();
@@ -265,6 +267,7 @@ fn report(runs: &[(&str, u32, f64)]) -> Report {
     Report {
         thread_id: "thread-1".into(),
         problem: None,
+        checks: None,
         verify: None,
         configurations: labels.iter().map(|l| (*l).to_owned()).collect(),
         candidate_overlay: None,

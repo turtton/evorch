@@ -106,6 +106,7 @@ fn report_of(id: &str, targets: &[&str], rejudge: bool) -> StartEvaluationReport
         operation_id: operation(id),
         targets: targets.iter().map(|name| (*name).to_owned()).collect(),
         rejudge,
+        checks_only: false,
     }
 }
 
@@ -437,4 +438,125 @@ fn a_catalog_that_could_not_be_loaded_is_found_by_the_next_job() {
         w.settle();
     }
     assert_eq!(*answers.lock().unwrap(), [false, true]);
+}
+
+fn checks_of(id: &str, targets: &[&str]) -> StartEvaluationReport {
+    StartEvaluationReport {
+        checks_only: true,
+        ..report_of(id, targets, false)
+    }
+}
+
+/// An evaluation directory whose manifest pinned a sample with one check and holds no replay.
+fn write_pinned_evaluation(w: &World, name: &str) {
+    use storage::eval_sample::{CallRange, Check, CheckScope, EvalSample};
+    let sample = EvalSample {
+        checks: vec![Check::ToolErrors {
+            tool: "shell".into(),
+            max: 0,
+            scope: CheckScope::Tree,
+            calls: CallRange::Direct,
+        }],
+        ..EvalSample::new("thread-1".into(), "the shell failed".into(), Vec::new(), 1)
+    };
+    let manifest = eval::output::Manifest {
+        thread_id: "thread-1".into(),
+        source_db: "events.db".into(),
+        start: eval::output::StartSummary {
+            project_root: "/project".into(),
+            repository: "/project".into(),
+            repo_prefix: String::new(),
+            head_commit: "abc".into(),
+            head_ref: None,
+            diff_bytes: 0,
+            untracked_entries: 0,
+            captured_at_ns: 1,
+        },
+        original_turns: Vec::new(),
+        problem: None,
+        sample: Some(eval::output::PinnedSample::of(sample)),
+        verify: None,
+        candidate_overlay: None,
+        swapped_roles: Vec::new(),
+        configurations: vec!["baseline".into()],
+        repeat: 1,
+        simulator: eval::output::BindingSummary {
+            source: "agents.worker".into(),
+            binding: config::RoleBindingConfig::default(),
+        },
+        budget: config::EvalBudgetConfig::default(),
+        started_at: "2026-10-20T00:00:00.000Z".into(),
+        finished_at: Some("2026-10-20T00:20:00.000Z".into()),
+        runs: Vec::new(),
+    };
+    let dir = root(w).join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    eval::output::write_json(&dir.join(eval::output::MANIFEST_FILE), &manifest).unwrap();
+}
+
+#[test]
+fn a_checks_only_job_grades_from_the_evidence_and_leaves_the_report_alone() {
+    // Given: an evaluation directory that pinned a sample with checks.
+    let mut w = setup(None);
+    write_pinned_evaluation(&w, "graded");
+    let mut events = subscribe(&w);
+
+    // When: it is graded with --checks-only.
+    let reply = start_report(&mut w, checks_of("checks", &["graded"])).unwrap();
+    let done = settled(&w, &mut events, "checks");
+
+    // Then: it is an ordinary report job that wrote its own result file and names the
+    // directory, and no report.json or judgment exists.
+    assert_eq!(view_of(&reply).kind, EvaluationJobKind::GenerateReport);
+    assert_eq!(done.operation.state, OperationState::Ready, "{done:?}");
+    assert_eq!(done.reports, ["graded"]);
+    let summary = done.cross_thread.as_ref().expect("summary").text.clone();
+    assert!(summary.contains("thread-1"), "{summary}");
+    let dir = root(&w).join("graded");
+    let written: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        written
+            .iter()
+            .any(|name| name.starts_with("checks-") && name.ends_with(".json")),
+        "{written:?}"
+    );
+    assert!(
+        !written.iter().any(|name| name == "report.json"),
+        "{written:?}"
+    );
+    assert_no_host_path(&done, w.dir.path());
+}
+
+#[test]
+fn a_checks_only_job_over_a_directory_without_a_manifest_fails_and_writes_nothing() {
+    let mut w = setup(None);
+    std::fs::create_dir_all(root(&w).join("empty")).unwrap();
+    let mut events = subscribe(&w);
+
+    start_report(&mut w, checks_of("no-manifest", &["empty"])).unwrap();
+    let done = settled(&w, &mut events, "no-manifest");
+
+    assert!(
+        matches!(done.operation.state, OperationState::Failed { .. }),
+        "{done:?}"
+    );
+    assert!(done.reports.is_empty());
+    assert_eq!(
+        std::fs::read_dir(root(&w).join("empty")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn checks_only_cannot_be_combined_with_a_rejudge() {
+    let mut w = setup(None);
+    let both = StartEvaluationReport {
+        rejudge: true,
+        ..checks_of("both", &["run-a"])
+    };
+
+    assert!(start_report(&mut w, both).is_err());
 }

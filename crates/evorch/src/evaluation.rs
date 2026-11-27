@@ -36,7 +36,7 @@ use crate::cli::core_client::{self, CliError, Rendered, Step};
 
 pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <name>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report] [--keep-workspace]
        evorch eval clean [--output <dir> ...] [--user-config <dir>] [--dry-run] [--include-unfinished]
-       evorch eval report --output <name> [--output <name> ...] [--user-config <dir>] [--rejudge]
+       evorch eval report --output <name> [--output <name> ...] [--user-config <dir>] [--rejudge|--checks-only]
 `eval run` and `eval report` run in the evorch core, which is started when none is running; they
 do not work without it. `eval run` replays the thread <n> times (default eval.repeat_target) under
 the user's configuration, then <n> times with the candidate overlay merged over it. The overlay is a
@@ -57,6 +57,11 @@ Unless --no-report is given, the directory is then reported as by `eval report`.
 `eval report` reprices every run from one price table, judges each baseline/candidate pair
 in both orders (cached in <dir>/judgments; --rejudge asks again), and writes
 <dir>/report.json and <dir>/report.md. Several directories are also tabulated side by side.
+`eval report --checks-only` grades the runs against the thread's sample checks from their recorded
+evidence alone: no judge, simulator, verification command or provider is used, and report.json
+is not touched. It writes <dir>/checks-<sample hash>.json and .md. An evaluation that pinned no
+sample is graded against the sample as it is now and is marked as a post-hoc analysis. It cannot
+be combined with --rejudge.
 `eval clean` removes only preflight-workspace and runs/<child>/workspace, never evidence.
 Without --output it scans immediate evaluations in <user-config-dir>/eval. --dry-run
 changes nothing. Busy locks are always skipped; unlocked interrupted evaluations are
@@ -92,6 +97,7 @@ pub struct ReportRequest {
     pub outputs: Vec<PathBuf>,
     pub user_config_dir: Option<PathBuf>,
     pub rejudge: bool,
+    pub checks_only: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -260,6 +266,10 @@ fn parse_report(mut argv: impl Iterator<Item = String>) -> Result<Command, Strin
             request.rejudge = true;
             continue;
         }
+        if flag == "--checks-only" {
+            request.checks_only = true;
+            continue;
+        }
         let value = argv.next().ok_or_else(|| USAGE.to_owned())?;
         match flag.as_str() {
             "--output" => request.outputs.push(PathBuf::from(value)),
@@ -267,7 +277,7 @@ fn parse_report(mut argv: impl Iterator<Item = String>) -> Result<Command, Strin
             _ => return Err(USAGE.into()),
         }
     }
-    if request.outputs.is_empty() {
+    if request.outputs.is_empty() || (request.rejudge && request.checks_only) {
         return Err(USAGE.into());
     }
     Ok(Command::Report(request))
@@ -499,8 +509,25 @@ fn render_run(view: &EvaluationJobView, root: &Path, report: bool) -> Rendered {
     Err(lines.join("\n"))
 }
 
-fn render_report(view: &EvaluationJobView, root: &Path) -> Rendered {
+/// The result of a checks-only job: where each result file is and the grading of every run.
+fn checks_lines(root: &Path, view: &EvaluationJobView, lines: &mut Vec<String>) {
+    lines.extend(
+        view.reports
+            .iter()
+            .map(|name| format!("Checks graded in {}", root.join(name).display())),
+    );
+    if let Some(summary) = &view.cross_thread {
+        lines.push(summary.text.clone());
+    }
+}
+
+fn render_report(view: &EvaluationJobView, root: &Path, checks_only: bool) -> Rendered {
     let mut lines = Vec::new();
+    let report_lines = if checks_only {
+        checks_lines
+    } else {
+        report_lines
+    };
     if view.operation.state == OperationState::Ready {
         report_lines(root, view, &mut lines);
         return Ok(lines.join("\n"));
@@ -573,7 +600,9 @@ async fn report_job(request: ReportRequest, root: &Path) -> Result<Rendered, Cli
         operation_id: operation_id.clone(),
         targets,
         rejudge: request.rejudge,
+        checks_only: request.checks_only,
     };
+    let checks_only = request.checks_only;
     let connected =
         core_client::connect(request.user_config_dir, &[Capability::SnapshotEvents]).await?;
     let view = follow(
@@ -583,7 +612,7 @@ async fn report_job(request: ReportRequest, root: &Path) -> Result<Rendered, Cli
         &|line| println!("{line}"),
     )
     .await?;
-    Ok(render_report(&view, root))
+    Ok(render_report(&view, root, checks_only))
 }
 
 /// Run the command; `clean` locally, the others in the core.
@@ -705,8 +734,32 @@ mod tests {
                 outputs: vec!["a".into(), "b".into()],
                 user_config_dir: Some("config".into()),
                 rejudge: true,
+                checks_only: false,
             })
         );
+    }
+
+    #[test]
+    fn checks_only_is_a_report_flag_that_cannot_rejudge() {
+        let command = parse(&["eval", "report", "--checks-only", "--output", "a"]).unwrap();
+        assert_eq!(
+            command,
+            Command::Report(ReportRequest {
+                outputs: vec!["a".into()],
+                checks_only: true,
+                ..ReportRequest::default()
+            })
+        );
+        let error = parse(&[
+            "eval",
+            "report",
+            "--output",
+            "a",
+            "--checks-only",
+            "--rejudge",
+        ])
+        .unwrap_err();
+        assert!(error.contains("usage: evorch eval run"), "{error}");
     }
 
     #[test]
@@ -874,10 +927,26 @@ mod tests {
             total_bytes: 19,
             truncated: false,
         });
-        let text = render_report(&view, Path::new("/cfg/eval")).unwrap();
+        let text = render_report(&view, Path::new("/cfg/eval"), false).unwrap();
         assert_eq!(
             text,
             "Report in /cfg/eval/a/report.md\nReport in /cfg/eval/b/report.md\n| thread | a | b |"
+        );
+    }
+
+    #[test]
+    fn a_checks_only_job_prints_the_grading_not_a_report_path() {
+        let mut view = job(OperationState::Ready, EvaluationJobKind::GenerateReport);
+        view.reports = vec!["a".into()];
+        view.cross_thread = Some(BoundedText {
+            text: "thread-1 (checks pinned at the start): checks-abc.md".into(),
+            total_bytes: 52,
+            truncated: false,
+        });
+        let text = render_report(&view, Path::new("/cfg/eval"), true).unwrap();
+        assert_eq!(
+            text,
+            "Checks graded in /cfg/eval/a\nthread-1 (checks pinned at the start): checks-abc.md"
         );
     }
 

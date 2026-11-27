@@ -14,11 +14,12 @@ use event_bus::EventBus;
 use sandbox::approval::{ApprovalGate, ApprovalOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use storage::eval_sample::EvalSample;
+use storage::eval_sample::{Check, CheckScope, EvalSample, SampleKind, SourceRef};
 use storage::thread_start::ThreadStartSummary;
 use storage::{Database, StorageHandle};
 use tools::{Permissions, Tool, ToolError, ToolExecutionContext, ToolExecutionMode, ToolResult};
 
+use crate::checks;
 use crate::conversation;
 use crate::cost::{Cost, PriceTable, RequestUsage};
 use crate::inspection::LaunchMonitor;
@@ -236,7 +237,73 @@ fn sample_value(sample: &EvalSample) -> Value {
     json!({
         "problem": metrics::clip(&sample.problem, REASON_CHARS),
         "focus_roles": sample.focus_roles,
+        "kind": sample.kind.as_str(),
+        "tags": sample.tags,
+        "source_refs": sample.source_refs,
+        "checks": sample.checks.iter().map(checks::describe).collect::<Vec<_>>(),
+        "check_version": sample.check_version,
+        "content_hash": sample.content_hash(),
         "updated_at": timestamp(sample.updated_at_ns),
+    })
+}
+
+/// What was recorded of a thread: its start, chat, runs and events.
+struct ThreadRecord {
+    start: storage::thread_start::ThreadStartState,
+    chat: ChatThread,
+    runs: Vec<String>,
+    record: RunRecord,
+    events_truncated: bool,
+}
+
+fn thread_record(database: &Database, thread_id: &str) -> Result<ThreadRecord, String> {
+    let start = database
+        .thread_start_state(thread_id)
+        .map_err(storage_error)?
+        .ok_or_else(|| format!("thread {thread_id} has no recorded start state"))?;
+    let chat = ChatThread::load(database, thread_id, &start.root_run_id)
+        .map_err(|error| error.to_string())?;
+    let runs = thread_runs(database, Some(&chat), &start.root_run_id)?;
+    let (record, events_truncated) =
+        RunRecord::of_runs(database, &runs, start.captured_at_ns, MAX_EVENTS)
+            .map_err(storage_error)?;
+    Ok(ThreadRecord {
+        start,
+        chat,
+        runs,
+        record,
+        events_truncated,
+    })
+}
+
+/// The sample's checks graded on the thread as it was recorded.
+///
+/// The events are read from the start of the runs, not from the capture of the
+/// thread's start state: a run announces itself (and its role, which role
+/// scoped checks need) before the capture is taken.
+fn grade_recorded(
+    database: &Database,
+    sample: &EvalSample,
+    recorded: &ThreadRecord,
+) -> Result<checks::Grading, String> {
+    let (record, truncated) = RunRecord::of_runs(database, &recorded.runs, i64::MIN, MAX_EVENTS)
+        .map_err(storage_error)?;
+    Ok(checks::grade(
+        sample,
+        &checks::Observation {
+            events: &record.events,
+            truncated,
+            status: None,
+            evidence_missing: false,
+        },
+    ))
+}
+
+fn grading_value(grading: &checks::Grading) -> Value {
+    json!({
+        "quality": grading.quality().label(),
+        "summary": grading.tally(),
+        "grading": grading,
     })
 }
 
@@ -420,23 +487,31 @@ fn bounded<T: serde::Serialize>(items: &[T], max: usize) -> Value {
 }
 
 fn inspect(database: &Database, thread_id: &str, prices: &PriceTable) -> Result<Value, String> {
-    let start = database
-        .thread_start_state(thread_id)
-        .map_err(storage_error)?
-        .ok_or_else(|| format!("thread {thread_id} has no recorded start state"))?;
-    let chat = ChatThread::load(database, thread_id, &start.root_run_id)
-        .map_err(|error| error.to_string())?;
-    let runs = thread_runs(database, Some(&chat), &start.root_run_id)?;
-    let (record, events_truncated) =
-        RunRecord::of_runs(database, &runs, start.captured_at_ns, MAX_EVENTS)
-            .map_err(storage_error)?;
-    let denied = metrics::denied_executions(&record);
+    let recorded = thread_record(database, thread_id)?;
+    let ThreadRecord {
+        start,
+        chat,
+        record,
+        events_truncated,
+        ..
+    } = &recorded;
+    let denied = metrics::denied_executions(record);
     let user_turns = u32::try_from(chat.turns.len()).unwrap_or(u32::MAX);
     let run_metrics =
-        RunMetrics::from_record(&record, denied.len(), record.elapsed_ms(), user_turns);
+        RunMetrics::from_record(record, denied.len(), record.elapsed_ms(), user_turns);
     let entries = conversation::recorded(&chat.turns, &record.events, &chat.lineage);
     let refusal = replay_refusal(database, thread_id);
     let sample = database.eval_sample(thread_id).map_err(storage_error)?;
+    let checks = sample
+        .as_ref()
+        .map(|sample| -> Result<Value, String> {
+            if sample.checks.is_empty() {
+                Ok(json!({"quality": checks::Quality::NoMachineJudgment.label(), "note": "the sample declares no checks"}))
+            } else {
+                Ok(grading_value(&grade_recorded(database, sample, &recorded)?))
+            }
+        })
+        .transpose()?;
     let mut value = json!({
         "thread_id": thread_id,
         "role": chat.role.name(),
@@ -444,6 +519,7 @@ fn inspect(database: &Database, thread_id: &str, prices: &PriceTable) -> Result<
         "captured_at": timestamp(start.captured_at_ns),
         "replayable": refusal.is_none(),
         "sample": sample.as_ref().map(sample_value),
+        "sample_checks": checks,
         "conversation": report::bounded_conversation(
             &entries,
             CONVERSATION_HEAD,
@@ -454,14 +530,14 @@ fn inspect(database: &Database, thread_id: &str, prices: &PriceTable) -> Result<
         "models": run_metrics.models,
         "delegations": bounded(&run_metrics.delegations, DELEGATIONS_MAX),
         "denied_executions": bounded(&denied, DENIED_MAX),
-        "timeline": metrics::timeline_within(&record, TIMELINE_HEAD, TIMELINE_TAIL),
+        "timeline": metrics::timeline_within(record, TIMELINE_HEAD, TIMELINE_TAIL),
         "cost": report::cost_value(&prices.cost(record.agent_requests())),
         "cost_note": COST_NOTE,
     });
     if let Some(refusal) = refusal {
         value["not_replayable"] = Value::String(refusal);
     }
-    if events_truncated {
+    if *events_truncated {
         value["events_note"] = Value::String(format!(
             "only the first {MAX_EVENTS} events were read; the timeline and metrics miss later ones"
         ));
@@ -517,6 +593,14 @@ struct SaveArgs {
     problem: String,
     #[serde(default)]
     focus_roles: Vec<String>,
+    #[serde(default)]
+    kind: SampleKind,
+    #[serde(default)]
+    source_refs: Vec<SourceRef>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    checks: Vec<Check>,
 }
 
 struct SaveSample(Arc<Shared>);
@@ -537,6 +621,86 @@ fn focus_roles(names: &[String]) -> Result<Vec<String>, String> {
     Ok(addresses)
 }
 
+/// The checks with their role names as config addresses, so that they are
+/// stored, hashed and compared in one form.
+fn canonical_checks(mut checks: Vec<Check>) -> Result<Vec<Check>, String> {
+    for check in &mut checks {
+        let scope = match check {
+            Check::SuccessfulCalls { scope, .. }
+            | Check::ToolErrors { scope, .. }
+            | Check::Diagnostics { scope, .. } => scope,
+        };
+        if let CheckScope::Roles(names) = scope {
+            *names = focus_roles(names)?;
+        }
+    }
+    Ok(checks)
+}
+
+const CHECKS_SCHEMA_NOTE: &str = "Typed conditions on the recorded thread; there is no expression language. Every check names scope ({\"roles\": [..]} or \"tree\") and tool checks name calls (\"direct\" or \"including_children\", the latter also counting calls made inside run_js).";
+
+fn checks_schema() -> Value {
+    let scope = json!({
+        "description": "The runs the check looks at.",
+        "oneOf": [
+            {"const": "tree"},
+            {
+                "type": "object",
+                "properties": {"roles": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}},
+                "required": ["roles"],
+                "additionalProperties": false,
+            },
+        ],
+    });
+    let calls = json!({"enum": ["direct", "including_children"]});
+    json!({
+        "type": "array",
+        "maxItems": storage::eval_sample::MAX_CHECKS,
+        "description": CHECKS_SCHEMA_NOTE,
+        "items": {"oneOf": [
+            {
+                "type": "object",
+                "description": "A tool succeeded at least min and/or at most max times.",
+                "properties": {
+                    "type": {"const": "successful_calls"},
+                    "tool": {"type": "string", "minLength": 1},
+                    "min": {"type": "integer", "minimum": 1},
+                    "max": {"type": "integer", "minimum": 0},
+                    "scope": scope,
+                    "calls": calls,
+                },
+                "required": ["type", "tool", "scope", "calls"],
+                "additionalProperties": false,
+            },
+            {
+                "type": "object",
+                "description": "A tool ended in an error at most max times.",
+                "properties": {
+                    "type": {"const": "tool_errors"},
+                    "tool": {"type": "string", "minLength": 1},
+                    "max": {"type": "integer", "minimum": 0},
+                    "scope": scope,
+                    "calls": calls,
+                },
+                "required": ["type", "tool", "max", "scope", "calls"],
+                "additionalProperties": false,
+            },
+            {
+                "type": "object",
+                "description": "A diagnostic code was raised at most max times.",
+                "properties": {
+                    "type": {"const": "diagnostics"},
+                    "code": {"type": "string", "minLength": 1},
+                    "max": {"type": "integer", "minimum": 0},
+                    "scope": scope,
+                },
+                "required": ["type", "code", "max", "scope"],
+                "additionalProperties": false,
+            },
+        ]},
+    })
+}
+
 #[async_trait::async_trait]
 impl Tool for SaveSample {
     fn name(&self) -> &'static str {
@@ -544,7 +708,7 @@ impl Tool for SaveSample {
     }
 
     fn description(&self) -> &'static str {
-        "Pin a thread as an evaluation sample with the problem observed in it and the roles the evaluation focuses on; saving again replaces both. Threads that cannot be replayed are refused with the reason. A pinned thread is kept past its retention until the sample is removed."
+        "Pin a thread as an evaluation sample with the problem observed in it and the roles the evaluation focuses on; saving again replaces everything. Optionally attach kind (failure, the default, or regression), source_refs (runs, events or improvement candidates of the thread the problem was seen in), tags and checks. Checks are graded on the thread's recording before anything is saved, at no provider cost: a failure sample is refused unless at least one check fails on the recording, and a regression sample unless every check passes on a complete recording. A sample without checks gets no machine judgment. Threads that cannot be replayed are refused with the reason. A pinned thread is kept past its retention until the sample is removed."
     }
 
     fn schema(&self) -> Value {
@@ -558,6 +722,18 @@ impl Tool for SaveSample {
                     "items": {"type": "string", "minLength": 1},
                     "description": "Role names or config addresses, such as Worker or roles.planner.",
                 },
+                "kind": {"enum": ["failure", "regression"], "description": "failure (default): a real failure the checks must detect. regression: a thread that went well, whose checks must pass."},
+                "source_refs": {
+                    "type": "array",
+                    "description": "Where the problem was seen. Each must exist and belong to this thread.",
+                    "items": {"oneOf": [
+                        {"type": "object", "properties": {"type": {"const": "run"}, "run_id": {"type": "string", "minLength": 1}}, "required": ["type", "run_id"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "event"}, "event_id": {"type": "integer", "minimum": 1}}, "required": ["type", "event_id"], "additionalProperties": false},
+                        {"type": "object", "properties": {"type": {"const": "improvement"}, "candidate_id": {"type": "string", "minLength": 1}}, "required": ["type", "candidate_id"], "additionalProperties": false},
+                    ]},
+                },
+                "tags": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Free classification; never changes what a check means."},
+                "checks": checks_schema(),
             },
             "required": ["thread_id", "problem"],
             "additionalProperties": false,
@@ -580,39 +756,68 @@ impl Tool for SaveSample {
             Ok(roles) => roles,
             Err(message) => return Ok(ToolResult::error(message)),
         };
-        let thread_id = args.thread_id;
-        let checked = {
-            let thread_id = thread_id.clone();
-            self.0
-                .read(move |database| {
-                    OriginalThread::load(database, &thread_id).map_err(|error| {
-                        format!("thread {thread_id} cannot be pinned as a sample: {error}")
-                    })?;
-                    Ok(())
-                })
-                .await
+        let checks = match canonical_checks(args.checks) {
+            Ok(checks) => checks,
+            Err(message) => return Ok(ToolResult::error(message)),
         };
-        if let Err(message) = checked {
-            return Ok(ToolResult::error(message));
-        }
+        let thread_id = args.thread_id;
         let now = now_ns();
         let sample = EvalSample {
-            thread_id: thread_id.clone(),
-            problem,
-            focus_roles,
-            created_at_ns: now,
-            updated_at_ns: now,
+            kind: args.kind,
+            source_refs: args.source_refs,
+            tags: args.tags,
+            checks,
+            ..EvalSample::new(thread_id.clone(), problem, focus_roles, now)
         };
-        let saved = sample_value(&sample);
+        if let Err(error) = sample.validate() {
+            return Ok(ToolResult::error(format!("the sample is invalid: {error}")));
+        }
+        let checked = {
+            let thread_id = thread_id.clone();
+            let sample = sample.clone();
+            self.0
+                .read(move |database| check_sample(database, &thread_id, &sample))
+                .await
+        };
+        let grading = match checked {
+            Ok(grading) => grading,
+            Err(message) => return Ok(ToolResult::error(message)),
+        };
+        let mut saved = sample_value(&sample);
+        saved["machine_judgment"] = Value::Bool(!sample.checks.is_empty());
+        let recording = (!sample.checks.is_empty()).then(|| grading_value(&grading));
         Ok(respond(
             self.0
                 .write(move |storage| {
                     storage.save_eval_sample(sample).map_err(storage_error)?;
-                    Ok(json!({"pinned": thread_id, "sample": saved}))
+                    Ok(json!({"pinned": thread_id, "sample": saved, "checks_on_recording": recording}))
                 })
                 .await,
         ))
     }
+}
+
+/// Everything that can be checked without a provider before `sample` is
+/// saved: the thread can be replayed, the references belong to it, and the
+/// checks tell the failure (or the regression baseline) on its recording.
+fn check_sample(
+    database: &Database,
+    thread_id: &str,
+    sample: &EvalSample,
+) -> Result<checks::Grading, String> {
+    OriginalThread::load(database, thread_id)
+        .map_err(|error| format!("thread {thread_id} cannot be pinned as a sample: {error}"))?;
+    let recorded = thread_record(database, thread_id)?;
+    checks::verify_sources(database, &recorded.runs, &sample.source_refs)
+        .map_err(|error| format!("source_refs: {error}"))?;
+    let grading = grade_recorded(database, sample, &recorded)?;
+    checks::accept(sample, &grading).map_err(|reason| {
+        format!(
+            "the sample was not saved: {reason}. Checks on the recording: {}",
+            grading_value(&grading)
+        )
+    })?;
+    Ok(grading)
 }
 
 struct RemoveSample(Arc<Shared>);

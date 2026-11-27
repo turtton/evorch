@@ -3,6 +3,7 @@
 //! keep each run's database, diff, conversation and outcome, then reprice,
 //! judge and report the runs.
 
+pub mod checks;
 pub mod cleanup;
 pub mod conversation;
 pub mod cost;

@@ -13,6 +13,7 @@ use crate::source::tests::Recorded;
 use crate::test_support::usage;
 
 mod apply;
+mod checks;
 mod start;
 
 const CONFIG: &str = r#"version = 3
@@ -443,6 +444,7 @@ fn manifest(finished: bool) -> Manifest {
         },
         original_turns: Vec::new(),
         problem: Some("skipped the failing test".into()),
+        sample: None,
         verify: None,
         candidate_overlay: None,
         swapped_roles: Vec::new(),
@@ -475,6 +477,7 @@ fn evaluation_report() -> Report {
     Report {
         thread_id: "thread-1".into(),
         problem: Some("skipped the failing test".into()),
+        checks: None,
         verify: None,
         configurations: vec!["baseline".into(), "candidate".into()],
         candidate_overlay: None,

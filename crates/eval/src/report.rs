@@ -15,6 +15,9 @@ use sandbox::credential::CredentialStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use storage::eval_sample::EvalSample;
+
+use crate::checks::{self, Grading};
 use crate::conversation::Entry;
 use crate::cost::{Cost, PriceTable, RequestUsage, Tokens};
 use crate::driver::Status;
@@ -26,6 +29,9 @@ use crate::output::{self, BindingSummary, Manifest, Outcome};
 use crate::roles::{self, SwappedRole};
 use crate::runner::{self, BASELINE, CANDIDATE, EvalError, ModelFactory};
 use crate::verify::Verification;
+
+mod checks_only;
+pub use checks_only::{Basis, ChecksReport, RunChecks, checks_only_pinned};
 
 const BUS_CAPACITY: usize = 4_096;
 const DIFF_BYTES: usize = 60_000;
@@ -75,6 +81,10 @@ pub struct RunSummary {
     /// Signs that the result depended on resources the replay could not reach.
     pub external_dependencies: Vec<String>,
     pub pushed_refs: usize,
+    /// The sample's checks graded on this replay's record; `None` when the
+    /// evaluation had no checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Grading>,
 }
 
 impl RunSummary {
@@ -143,10 +153,22 @@ pub struct Warning {
     pub message: String,
 }
 
+/// The sample whose checks the runs were graded on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecksSummary {
+    pub sample_hash: String,
+    pub kind: storage::eval_sample::SampleKind,
+    pub check_version: u32,
+    pub checks: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub thread_id: String,
     pub problem: Option<String>,
+    /// The checks the runs were graded on; `None` means no machine judgment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<ChecksSummary>,
     pub verify: Option<String>,
     pub configurations: Vec<String>,
     pub candidate_overlay: Option<String>,
@@ -346,6 +368,7 @@ fn load_run(
     dir: &output::PinnedDir,
     entry: &output::RunEntry,
     table: &PriceTable,
+    sample: Option<&EvalSample>,
 ) -> Result<LoadedRun, EvalError> {
     let run_dir = dir.open_below(&entry.dir)?;
     let outcome: Outcome =
@@ -356,7 +379,7 @@ fn load_run(
         .read(output::DIFF_FILE)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    let record = load_database(&run_dir)?;
+    let (record, evidence_missing) = load_record(&run_dir)?;
     let summary = RunSummary {
         label: entry.label.clone(),
         index: entry.index,
@@ -368,6 +391,9 @@ fn load_run(
         verification: outcome.verification.clone(),
         external_dependencies: metrics::external_dependencies(&record, &outcome),
         pushed_refs: outcome.pushed_refs.len(),
+        checks: sample
+            .filter(|sample| !sample.checks.is_empty())
+            .map(|sample| grade_run(sample, &record, outcome.status, evidence_missing)),
     };
     Ok(LoadedRun {
         summary,
@@ -383,16 +409,26 @@ fn load_run(
 /// from no-follow descriptors, and that copy is opened. A link in its place
 /// gives an empty record, and a directory replaced after it was pinned is not
 /// followed.
+#[cfg(test)]
 fn load_database(run_dir: &output::PinnedDir) -> Result<RunRecord, EvalError> {
+    load_record(run_dir).map(|(record, _)| record)
+}
+
+/// [`load_database`], and whether the database was not there: the empty record
+/// then stands for evidence that could not be read, which grading must not
+/// take for a run in which nothing happened.
+fn load_record(run_dir: &output::PinnedDir) -> Result<(RunRecord, bool), EvalError> {
     let database = run_dir.join(output::DATABASE_FILE);
     let fail = |source| EvalError::Database {
         path: database.clone(),
         source,
     };
     let Some(snapshot) = DatabaseSnapshot::copy(run_dir)? else {
-        return Ok(RunRecord::default());
+        return Ok((RunRecord::default(), true));
     };
-    RunRecord::load(&snapshot.database()).map_err(fail)
+    RunRecord::load(&snapshot.database())
+        .map(|record| (record, false))
+        .map_err(fail)
 }
 
 /// A private copy of a run's database, removed when dropped.
@@ -463,7 +499,12 @@ async fn report_dir(
         if entry.status.is_none() {
             continue;
         }
-        runs.push(load_run(dir, entry, &context.table)?);
+        runs.push(load_run(
+            dir,
+            entry,
+            &context.table,
+            manifest.sample.as_ref().map(|pinned| &pinned.sample),
+        )?);
     }
     let mut overhead = Overhead::default();
     let simulated: Vec<&RequestUsage> = runs
@@ -593,6 +634,16 @@ async fn report_dir(
     Ok(Report {
         thread_id: manifest.thread_id.clone(),
         problem: manifest.problem.clone(),
+        checks: manifest
+            .sample
+            .as_ref()
+            .filter(|pinned| !pinned.sample.checks.is_empty())
+            .map(|pinned| ChecksSummary {
+                sample_hash: pinned.hash.clone(),
+                kind: pinned.sample.kind,
+                check_version: pinned.sample.check_version,
+                checks: pinned.sample.checks.iter().map(checks::describe).collect(),
+            }),
         verify: manifest.verify.clone(),
         configurations: manifest.configurations.clone(),
         candidate_overlay: manifest.candidate_overlay.clone(),
@@ -617,6 +668,77 @@ async fn report_dir(
         warnings,
         generated_at: output::timestamp(SystemTime::now()),
     })
+}
+
+/// The grading of a replay's record against the sample's checks, which also
+/// asks whether the replay ended normally.
+pub(crate) fn grade_run(
+    sample: &EvalSample,
+    record: &RunRecord,
+    status: Status,
+    evidence_missing: bool,
+) -> Grading {
+    checks::grade(
+        sample,
+        &checks::Observation {
+            events: &record.events,
+            truncated: false,
+            status: Some(status),
+            evidence_missing,
+        },
+    )
+}
+
+/// The "Machine checks" section. An evaluation without checks says so, so
+/// that it is not read as a machine-verified one.
+fn checks_section(report: &Report) -> String {
+    let Some(summary) = &report.checks else {
+        return "\n## Machine checks\n\nNo checks are declared for this thread: **no machine judgment**. Only the verification command and the judge speak to quality.\n".to_owned();
+    };
+    let mut out = format!(
+        "\n## Machine checks\n\nSample {} ({}, grading version {}). A check result and the validity of the replay are reported separately: checks that pass on an unfinished replay are not a quality pass.\n\n",
+        summary.sample_hash.chars().take(12).collect::<String>(),
+        summary.kind.as_str(),
+        summary.check_version
+    );
+    for (index, check) in summary.checks.iter().enumerate() {
+        out.push_str(&format!("- check {index}: {check}\n"));
+    }
+    out.push_str("\n| run | quality | checks | replay record |\n|---|---|---|---|\n");
+    for run in &report.runs {
+        match &run.checks {
+            Some(grading) => out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                run.name(),
+                grading.quality().label(),
+                grading.tally(),
+                if grading.validity.valid {
+                    "complete".to_owned()
+                } else {
+                    cell(&grading.validity.issues.join("; "))
+                }
+            )),
+            None => out.push_str(&format!("| {} | not graded | - | - |\n", run.name())),
+        }
+    }
+    for run in &report.runs {
+        for result in run
+            .checks
+            .iter()
+            .flat_map(|grading| &grading.results)
+            .filter(|result| result.verdict != checks::Verdict::Pass)
+        {
+            out.push_str(&format!(
+                "\n- {} check {} {:?}: {}",
+                run.name(),
+                result.index,
+                result.verdict,
+                cell(&result.reason)
+            ));
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// Why a cost is incomplete: models without a price and models whose requests reported no usage.
@@ -1065,6 +1187,7 @@ pub fn markdown(report: &Report) -> String {
         ));
     }
 
+    out.push_str(&checks_section(report));
     out.push_str("\n## Runs\n\n| run | status | input (cached) | output | cache hit | tool calls (errors) | delegations | denied | user turns | time | cost | verification |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for run in &report.runs {
         let metrics = &run.metrics;
