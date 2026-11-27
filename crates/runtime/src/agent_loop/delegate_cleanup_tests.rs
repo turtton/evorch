@@ -129,6 +129,7 @@ fn fixture_for_runtime(
         lane_failure_episode: "test-execution".into(),
         meta_call_id: None,
         thread_id: None,
+        file_touch: None,
         turn: providers::RequestTurnContext::unattributed(false),
         boundary_pending: false,
         continuity: Default::default(),

@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod executor;
+pub mod file_observation;
 pub mod image;
 pub mod lsp;
 pub mod mcp;
@@ -30,6 +31,7 @@ pub mod tools;
 
 pub use error::ToolError;
 pub use executor::{ToolExecutionContext, ToolExecutor};
+pub use file_observation::{FileAccess, FileAccessObserver};
 pub use network_guard::{
     DnsResolver, GuardedResponse, MAX_REDIRECTS, MAX_RESPONSE_BYTES, NetworkGuard,
     NetworkGuardError,

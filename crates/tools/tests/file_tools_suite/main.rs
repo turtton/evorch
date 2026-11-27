@@ -9,6 +9,7 @@ mod apply_patch_reserved_name;
 mod apply_patch_tool;
 mod edit_aliases;
 mod edit_tool;
+mod file_touch_observer;
 mod grep_tool;
 mod post_edit;
 mod post_edit_executor;

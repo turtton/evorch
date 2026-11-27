@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 use super::file_diff;
 use crate::error::ToolError;
+use crate::executor::ToolExecutionContext;
+use crate::file_observation::{FileAccess, FileAccessObserver, report};
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
@@ -127,6 +129,24 @@ impl Tool for Edit {
     /// [`ToolError::EditTargetNotFound`]、`replace_all` なしで複数箇所に一致すれば
     /// [`ToolError::EditTargetNotUnique`]、入出力に失敗すれば [`ToolError::Io`] を返す。
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.run(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.run(args, ctx.file_access_observer.as_deref()).await
+    }
+}
+
+impl Edit {
+    async fn run(
+        &self,
+        args: serde_json::Value,
+        observer: Option<&dyn FileAccessObserver>,
+    ) -> Result<ToolResult, ToolError> {
         let path_text = required_str(&args, "path")?;
         let Replacements {
             replacements,
@@ -185,6 +205,8 @@ impl Tool for Edit {
             return Ok(result);
         }
         write_atomically(path, &next_content)?;
+        // Reported before the checker runs, which may wait: the file is already changed.
+        report(observer, FileAccess::Written(path));
         if let Some(hook) = &self.post_edit {
             check_changed_pairs(hook.as_ref(), path, &targets, &mut result).await;
         }

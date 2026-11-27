@@ -117,6 +117,9 @@ pub struct ToolExecutionContext {
     pub shell_input: Option<Arc<dyn ShellInputControl>>,
     /// Runs the tool calls a `run_js` program makes. Set by the runtime for `run_js` only.
     pub run_js_host: Option<Arc<dyn crate::tools::run_js::RunJsHost>>,
+    /// Told which files the built-in file tools read and changed. Internal to the
+    /// runtime: it never changes a tool's schema, arguments or result.
+    pub file_access_observer: Option<Arc<dyn crate::file_observation::FileAccessObserver>>,
 }
 
 impl PartialEq for ToolExecutionContext {

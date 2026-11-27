@@ -244,6 +244,8 @@ pub(crate) struct Shared {
     pub(crate) escalation_denials: crate::escalation_review::DenialStreaks,
     pub(crate) sandbox_factory: Option<Arc<dyn SandboxFactory>>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
+    /// Files runs know the contents of, to report another thread's changes to them.
+    pub(crate) file_touch: Arc<crate::file_touch::FileTouchRegistry>,
     pub(crate) run_ids: crate::run_ids::RunIds,
     /// Project that root runs bind to when their config names none.
     pub(crate) active_project_root: Mutex<Option<PathBuf>>,
@@ -908,6 +910,7 @@ impl AgentRuntime {
                 escalation_denials: crate::escalation_review::DenialStreaks::default(),
                 sandbox_factory: None,
                 workspaces: Mutex::new(HashMap::new()),
+                file_touch: Arc::default(),
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
@@ -1363,6 +1366,7 @@ impl AgentRuntime {
                 artifacts: OnceLock::new(),
                 artifact_pages: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
+                file_touch: Arc::default(),
                 run_ids: crate::run_ids::RunIds::default(),
                 active_project_root: Mutex::new(None),
                 projects: Mutex::new(HashMap::new()),
@@ -4315,6 +4319,13 @@ impl AgentRuntime {
             .map_err(|_| RuntimeError::Model {
                 reason: "message ID allocator exhausted".into(),
             })
+    }
+
+    /// An ID for a file-touch notice, from the same allocator as other messages so it
+    /// never repeats within a conversation, including after a restart.
+    pub(crate) fn allocate_file_touch_message_id(&self) -> Result<String, RuntimeError> {
+        self.allocate_message_id()
+            .map(|id| id.replacen("msg-", "file-touch-", 1))
     }
 }
 

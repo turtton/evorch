@@ -10,6 +10,8 @@ use std::path::Path;
 
 use super::edit::{required_str, write_atomically};
 use super::file_diff;
+use crate::executor::ToolExecutionContext;
+use crate::file_observation::{FileAccess, FileAccessObserver, report};
 use crate::{Permissions, Tool, ToolError, ToolExecutionMode, ToolResult};
 
 /// UTF-8 ファイルを原子的に作成・上書きするツール。
@@ -69,10 +71,29 @@ impl Tool for Write {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.run(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.run(args, ctx.file_access_observer.as_deref()).await
+    }
+}
+
+impl Write {
+    async fn run(
+        &self,
+        args: serde_json::Value,
+        observer: Option<&dyn FileAccessObserver>,
+    ) -> Result<ToolResult, ToolError> {
         let path = required_str(&args, "path")?;
         let content = required_str(&args, "content")?;
         let before = file_diff::read_previous(Path::new(path));
         write_atomically(Path::new(path), content)?;
+        report(observer, FileAccess::Written(Path::new(path)));
         let output = match &before {
             Ok(previous) => file_diff::changed_file(path, previous.as_deref(), content),
             Err(reason) => format!("Wrote {path}; diff unavailable: {reason}"),

@@ -33,6 +33,7 @@ pub mod entry_routing;
 pub mod error;
 pub mod escalation;
 pub mod escalation_review;
+pub(crate) mod file_touch;
 pub(crate) mod git_read;
 pub mod image_generation;
 pub mod lane_close;

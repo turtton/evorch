@@ -19,6 +19,8 @@ use apply_patch::{
 use serde_json::json;
 
 use super::edit::required_str;
+use crate::executor::ToolExecutionContext;
+use crate::file_observation::{FileAccess, FileAccessObserver, report};
 use crate::post_edit::{PostEditHook, PostEditInput, WarningPlacement, apply_post_edit_many};
 use crate::tool::BuiltinTool;
 use crate::{Permissions, Tool, ToolError, ToolExecutionMode, ToolResult};
@@ -119,6 +121,24 @@ impl Tool for ApplyPatch {
     /// # Errors
     /// [`ToolError::InvalidArgs`] when `input` is not a string.
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.run(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.run(args, ctx.file_access_observer.as_deref()).await
+    }
+}
+
+impl ApplyPatch {
+    async fn run(
+        &self,
+        args: serde_json::Value,
+        observer: Option<&dyn FileAccessObserver>,
+    ) -> Result<ToolResult, ToolError> {
         let patch = required_str(&args, "input")?;
         let root = self.default_cwd();
         // The executor's file boundary skips a patch that does not parse, so the
@@ -143,6 +163,8 @@ impl Tool for ApplyPatch {
         let applied = match plan.commit() {
             Ok(applied) => applied,
             Err(error) => {
+                // Writing is not a transaction: what was committed before the failure changed.
+                report_changes(observer, &error.committed);
                 let mut result = failure(error.to_string(), error.class());
                 if let Some(detail) = result.detail.as_mut() {
                     detail["apply_patch"]["committed"] =
@@ -151,6 +173,7 @@ impl Tool for ApplyPatch {
                 return Ok(result);
             }
         };
+        report_changes(observer, &applied.changes);
         let mut result = ToolResult::success(applied.summary).with_detail(json!({
             "apply_patch": {"files": targets.iter().map(target_json).collect::<Vec<_>>()}
         }));
@@ -165,6 +188,26 @@ impl Tool for ApplyPatch {
             .await;
         }
         Ok(result)
+    }
+}
+
+/// Reports the paths a commit really changed. A completed move removed `from` and wrote its
+/// destination; an update that left the contents identical changed nothing.
+fn report_changes(observer: Option<&dyn FileAccessObserver>, changes: &[AppliedChange]) {
+    for change in changes {
+        match &change.change {
+            ChangeKind::Added { .. } => report(observer, FileAccess::Written(&change.path)),
+            ChangeKind::Updated { old, new } => {
+                if old != new {
+                    report(observer, FileAccess::Written(&change.path));
+                }
+            }
+            ChangeKind::Moved { from, .. } => {
+                report(observer, FileAccess::Removed(from));
+                report(observer, FileAccess::Written(&change.path));
+            }
+            ChangeKind::Deleted { .. } => report(observer, FileAccess::Removed(&change.path)),
+        }
     }
 }
 

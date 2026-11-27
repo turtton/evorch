@@ -3,6 +3,8 @@
 use std::io::{BufRead, BufReader, ErrorKind, Read as IoRead};
 
 use crate::error::ToolError;
+use crate::executor::ToolExecutionContext;
+use crate::file_observation::{FileAccess, FileAccessObserver, report};
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
@@ -45,6 +47,25 @@ impl Tool for Read {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.run(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.run(args, ctx.file_access_observer.as_deref()).await
+    }
+}
+
+impl Read {
+    /// Reads a range, then tells `observer` the file was read when the read succeeded.
+    async fn run(
+        &self,
+        args: serde_json::Value,
+        observer: Option<&dyn FileAccessObserver>,
+    ) -> Result<ToolResult, ToolError> {
         // 直接呼び出しでも別名は executor と同じ規則で path に畳む（異なる値は拒否）。
         let mut args = args;
         crate::path_args::canonicalize_path_aliases(self.name(), &mut args)?;
@@ -58,17 +79,22 @@ impl Tool for Read {
         let limit = unsigned_arg(&args, "limit", MAX_READ_LINES, 1)?.min(MAX_READ_LINES);
         let byte_offset = unsigned_arg(&args, "byte_offset", 0, 0)?;
         let path = path.to_owned();
+        let read_path = path.clone();
         // 大きなファイルの offset 探索は async executor を塞がない。
-        tokio::task::spawn_blocking(move || {
-            match crate::image::ImageFormat::from_extension(std::path::Path::new(&path)) {
-                Some(format) => read_image(&path, format),
-                None => read_range(&path, offset, limit, byte_offset),
+        let result = tokio::task::spawn_blocking(move || {
+            match crate::image::ImageFormat::from_extension(std::path::Path::new(&read_path)) {
+                Some(format) => read_image(&read_path, format),
+                None => read_range(&read_path, offset, limit, byte_offset),
             }
         })
         .await
         .map_err(|error| ToolError::Io {
             detail: format!("read task failed: {error}"),
-        })?
+        })??;
+        if !result.is_error {
+            report(observer, FileAccess::Read(std::path::Path::new(&path)));
+        }
+        Ok(result)
     }
 }
 
