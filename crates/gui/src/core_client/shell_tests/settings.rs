@@ -444,12 +444,9 @@ fn model_settings_keeps_its_controls_in_a_minimum_window() {
     }
 }
 
-// Given: a signed-in Codex provider in Model Settings → Providers
-// When: Fetch models is pressed and the core finishes the fetch
-// Then: the panel lists what was found over the models table, models already added are marked,
-//       the quota switch says what its default is, and the list marks quota-showing providers
-#[test]
-fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default() {
+/// Presses Fetch models of the open provider `provider`, finishes the operation, and answers the
+/// read of its result with `models`.
+fn fetch_models_of(screen: &mut Screen, provider: &str, models: &[&str]) {
     use workbench_protocol::{
         commands::{CommandReply, CommandResult},
         events::UiEvent,
@@ -460,12 +457,6 @@ fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default
         operation::{OperationState, OperationView},
         wire::Revision,
     };
-    let (mut screen, before) = settings("Providers");
-    screen
-        .harness
-        .get_by_role_and_label(egui::accesskit::Role::Button, "codex")
-        .click();
-    screen.harness.run_steps(8);
     screen.harness.get_by_label("Fetch models").click();
     let sent = screen.settle();
     let (tag, operation_id) = sent
@@ -479,7 +470,7 @@ fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default
                     )),
                 ..
             }) => {
-                assert_eq!(fetch.provider, "codex");
+                assert_eq!(fetch.provider, provider);
                 Some((*tag, fetch.operation_id.clone()))
             }
             _ => None,
@@ -530,21 +521,38 @@ fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default
         FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ProviderModels(
             ProviderModelCandidates {
                 operation_id,
-                provider: "codex".into(),
-                models: [
-                    "gpt-5.2",
-                    "gpt-5.3-codex",
-                    "gpt-5.4",
-                    "gpt-5.4-mini",
-                    "gpt-5.5",
-                ]
-                .map(str::to_owned)
-                .to_vec(),
+                provider: provider.into(),
+                models: models.iter().map(|id| (*id).to_owned()).collect(),
                 truncated: false,
             },
         )))),
     );
     screen.harness.run_steps(8);
+}
+
+// Given: a signed-in Codex provider in Model Settings → Providers
+// When: Fetch models is pressed and the core finishes the fetch
+// Then: the panel lists what was found over the models table, models already added are marked,
+//       the quota switch says what its default is, and the list marks quota-showing providers
+#[test]
+fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default() {
+    let (mut screen, before) = settings("Providers");
+    screen
+        .harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "codex")
+        .click();
+    screen.harness.run_steps(8);
+    fetch_models_of(
+        &mut screen,
+        "codex",
+        &[
+            "gpt-5.2",
+            "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.5",
+        ],
+    );
     for label in ["Fetched · 5 available", "Filter"] {
         screen.harness.get_by_label_contains(label);
     }
@@ -566,4 +574,35 @@ fn fetch_models_lists_what_the_core_found_and_the_quota_switch_names_its_default
         .harness
         .get_by_label("Default: on for subscription providers");
     screen.capture("quota-switch");
+}
+
+// Given: a provider of a type the form cannot write (read-only here)
+// When: Fetch models is pressed and the core answers
+// Then: the offered ids are listed, with no way to add them from here: the Config file is
+//       where they go
+#[test]
+fn a_read_only_provider_can_fetch_models_and_only_lists_them() {
+    let (mut screen, before) = settings("Providers");
+    screen
+        .harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "api")
+        .click();
+    screen.harness.run_steps(8);
+    screen.harness.get_by_label("Open Config file");
+    fetch_models_of(&mut screen, "api", &["claude-x", "claude-y"]);
+    for id in ["claude-x", "claude-y"] {
+        screen.harness.get_by_label(id);
+    }
+    screen
+        .harness
+        .get_by_label_contains("add the model IDs there");
+    assert!(
+        screen
+            .harness
+            .query_by_label_contains("Add selected")
+            .is_none(),
+        "nothing is added to a form that does not exist"
+    );
+    assert_english(&screen, &before);
+    screen.capture("fetch-models-read-only");
 }

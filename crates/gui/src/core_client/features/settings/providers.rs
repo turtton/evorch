@@ -494,11 +494,12 @@ impl SettingsFeature {
         ui.add_space(SP_2);
         ui.horizontal(|ui| {
             ui.label(section(format!("MODELS ({})", form.models.len())));
-            if let Some(fetch) = self.fetch_header(ui, &form, busy) {
+            if let Some(fetch) = self.fetch_header(ui, form.original.as_deref(), busy) {
                 action = Some(fetch);
             }
         });
-        self.fetch_panel(ui, &mut form);
+        let provider = form.original.clone();
+        self.fetch_panel(ui, provider.as_deref(), Some(&mut form), &|_| false);
         ui.add_enabled_ui(!busy, |ui| form.draw_models(ui));
         if form.kind.quota_supported() {
             ui.add_space(SP_2);
@@ -569,7 +570,15 @@ impl SettingsFeature {
         };
         ui.label(format!("Credential: {credential}"));
         ui.add_space(SP_2);
-        ui.label(section(format!("MODELS ({})", view.models.len())));
+        ui.horizontal(|ui| {
+            ui.label(section(format!("MODELS ({})", view.models.len())));
+            if let Some(fetch) = self.fetch_header(ui, Some(&view.name), busy) {
+                action = Some(fetch);
+            }
+        });
+        self.fetch_panel(ui, Some(&view.name), None, &|id| {
+            view.models.iter().any(|model| model.id == id)
+        });
         for model in &view.models {
             ui.horizontal(|ui| {
                 let (icon, color) = if model.enabled {

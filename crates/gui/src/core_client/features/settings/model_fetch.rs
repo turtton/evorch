@@ -130,11 +130,10 @@ impl SettingsFeature {
     pub(super) fn fetch_header(
         &self,
         ui: &mut egui::Ui,
-        form: &ProviderForm,
+        name: Option<&str>,
         busy: bool,
     ) -> Option<ProviderAction> {
         let mut action = None;
-        let name = form.original.as_deref();
         let running = matches!(
             self.fetch.as_ref().map(|fetch| &fetch.phase),
             Some(FetchPhase::Running)
@@ -173,12 +172,20 @@ impl SettingsFeature {
         action
     }
 
-    /// The panel of what the fetch found, over the models table.
-    pub(super) fn fetch_panel(&mut self, ui: &mut egui::Ui, form: &mut ProviderForm) {
+    /// The panel of what the fetch of `provider` found, over the models table. With a form the
+    /// checked ids can be added to it; without one (a kind the form cannot write back) it only
+    /// lists them, and `has` says which the provider already has.
+    pub(super) fn fetch_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: Option<&str>,
+        form: Option<&mut ProviderForm>,
+        has: &dyn Fn(&str) -> bool,
+    ) {
         let Some(fetch) = self
             .fetch
             .as_mut()
-            .filter(|fetch| Some(fetch.provider.as_str()) == form.original.as_deref())
+            .filter(|fetch| Some(fetch.provider.as_str()) == provider)
         else {
             return;
         };
@@ -221,7 +228,7 @@ impl SettingsFeature {
                         found,
                         picked,
                         filter,
-                    } => close = found_panel(ui, form, found, picked, filter),
+                    } => close = found_panel(ui, form, has, found, picked, filter),
                 }
             });
         if close {
@@ -234,7 +241,8 @@ impl SettingsFeature {
 /// ones to the form. Returns whether to close the panel.
 fn found_panel(
     ui: &mut egui::Ui,
-    form: &mut ProviderForm,
+    form: Option<&mut ProviderForm>,
+    has: &dyn Fn(&str) -> bool,
     found: &ProviderModelCandidates,
     picked: &mut BTreeSet<String>,
     filter: &mut String,
@@ -268,8 +276,18 @@ fn found_panel(
                 .iter()
                 .filter(|id| needle.is_empty() || id.to_lowercase().contains(&needle))
             {
-                let added = form.models.iter().any(|model| &model.id == id);
+                let added = match form.as_deref() {
+                    Some(form) => form.models.iter().any(|model| &model.id == id),
+                    None => has(id),
+                };
                 ui.horizontal(|ui| {
+                    let Some(_) = form else {
+                        ui.label(egui::RichText::new(id).monospace());
+                        if added {
+                            ui.label(muted("Added"));
+                        }
+                        return;
+                    };
                     let mut checked = picked.contains(id);
                     let check = ui.add_enabled(
                         !added,
@@ -288,6 +306,12 @@ fn found_panel(
                 });
             }
         });
+    let Some(form) = form else {
+        ui.label(muted(
+            "This type is edited in the Config file: add the model IDs there.",
+        ));
+        return close;
+    };
     let count = picked.len();
     let add = ui.add_enabled(
         count > 0,

@@ -1194,7 +1194,7 @@ mod fetch {
         let signal = entered.clone();
         let mut f = Fixture::with_fetch(
             &format!("version = 3\n{PROVIDER}"),
-            fetching(Duration::from_millis(400), move |_, _| {
+            fetching(Duration::from_millis(1500), move |_, _| {
                 signal.notify_one();
                 Box::pin(std::future::pending())
             }),
@@ -1214,13 +1214,20 @@ mod fetch {
             OperationState::Ready,
             "the save did not wait for the fetch"
         );
-        let state = f
-            .settings
-            .wait_operation(&op("hang"))
-            .await
-            .unwrap()
-            .operation
-            .state;
+        assert_eq!(
+            f.settings.operation(&op("hang")).unwrap().operation.state,
+            OperationState::Pending,
+            "the fetch is still waiting for the provider when the save is done"
+        );
+        let state = tokio::time::timeout(
+            Duration::from_secs(20),
+            f.settings.wait_operation(&op("hang")),
+        )
+        .await
+        .expect("the fetch ended within its deadline")
+        .unwrap()
+        .operation
+        .state;
         assert_eq!(
             state,
             OperationState::Failed {
@@ -1236,4 +1243,134 @@ mod fetch {
             Some("the provider did not answer in time")
         );
     }
+}
+
+/// What the client reads of a provider, sent back as it is: the models it shows, nothing edited.
+fn unedited_codex(view: &ProviderView, show_quota: Option<bool>) -> ProviderInput {
+    ProviderInput::Codex {
+        name: view.name.clone(),
+        account: "codex".into(),
+        base_url: view.base_url.clone(),
+        models: view
+            .models
+            .iter()
+            .map(|m| ModelInput {
+                id: m.id.clone(),
+                enabled: m.enabled,
+                kind: None,
+                context_override: m.context_override,
+            })
+            .collect(),
+        default_model: view.default_model.clone(),
+        show_quota,
+    }
+}
+
+/// A provider that leaves its models to the defaults is not given explicit ones by a save of
+/// the quota switch: the models stay what they were, so nothing waits for a reload.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quota_save_of_a_provider_with_default_models_writes_no_kind_and_waits_for_nothing() {
+    let without_models = QUOTA_FILE.replace("models = ['gpt-6-astra']\n", "");
+    let mut f = Fixture::new(&without_models);
+    let view = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "codex")
+        .unwrap();
+    assert!(!view.models.is_empty(), "the defaults are the models");
+    let reload = f
+        .finish(
+            "reload-0",
+            SettingsCommand::ReloadModels(ReloadModels {
+                operation_id: op("reload-0"),
+            }),
+        )
+        .await;
+    assert_eq!(reload, OperationState::Ready);
+
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish(
+            "quota-defaults",
+            save_provider(
+                "quota-defaults",
+                revision,
+                unedited_codex(&view, Some(false)),
+            ),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.file().contains("show_quota = false"), "{}", f.file());
+    assert!(
+        !f.file().contains("kind"),
+        "no kind is written for a model nobody edited: {}",
+        f.file()
+    );
+    assert!(applied(&f), "a quota-only save leaves nothing to reload");
+}
+
+/// A context window that a drop-in overrides is shown as the drop-in has it; saving something
+/// else does not write that value over the one of the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_does_not_write_a_drop_in_context_window_into_the_file() {
+    let initial = format!(
+        "version = 3\n{}",
+        QUOTA_FILE.trim_start_matches("version = 3\n").replace(
+            "models = ['gpt-6-astra']",
+            "models = [{ id = 'gpt-6-astra', enabled = true, context_window = 100000 }]"
+        )
+    );
+    let mut f = Fixture::new(&initial);
+    let drop_ins = f.dir.path().join("config.d");
+    std::fs::create_dir(&drop_ins).unwrap();
+    std::fs::write(
+        drop_ins.join("ctx.toml"),
+        "[providers.codex]\ntype = 'openai-codex'\napi_protocol = 'openai-codex-responses'\nbase_url = 'https://chatgpt.example.invalid/backend-api'\ncredential = { type = 'keyring', service = 'evorch', account = 'codex' }\nmodels = [{ id = 'gpt-6-astra', enabled = true, context_window = 200000 }]\ndefault_model = 'gpt-6-astra'\n",
+    )
+    .unwrap();
+    let state = f
+        .finish(
+            "refresh-ctx",
+            SettingsCommand::RefreshSettings(RefreshSettings {
+                operation_id: op("refresh-ctx"),
+            }),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    let view = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "codex")
+        .unwrap();
+    assert_eq!(
+        view.models[0].context_override,
+        Some(200_000),
+        "the drop-in wins"
+    );
+
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish(
+            "quota-ctx",
+            save_provider("quota-ctx", revision, unedited_codex(&view, Some(false))),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    let file = f.file();
+    assert!(file.contains("context_window = 100000"), "{file}");
+    assert!(!file.contains("200000"), "{file}");
+
+    // An edit of it is written.
+    let revision = f.snapshot().revision;
+    let mut edited = unedited_codex(&view, Some(false));
+    if let ProviderInput::Codex { models, .. } = &mut edited {
+        models[0].context_override = Some(300_000);
+    }
+    let state = f
+        .finish("edit-ctx", save_provider("edit-ctx", revision, edited))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.file().contains("context_window = 300000"), "{}", f.file());
 }

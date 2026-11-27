@@ -226,7 +226,18 @@ impl ConfigStore {
         self.check_revision(expected)?;
         let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)))?;
         let before = Config::load_unresolved(&self.options()).ok();
-        self.typed_save(|| self.save_provider_unchecked(original_name, input, &existing))?;
+        let effective = before
+            .as_ref()
+            .and_then(|config| {
+                config
+                    .providers
+                    .get(original_name.unwrap_or_else(|| input_name(input)))
+            })
+            .map(|profile| profile.models.clone())
+            .unwrap_or_default();
+        self.typed_save(|| {
+            self.save_provider_unchecked(original_name, input, &existing, &effective)
+        })?;
         let after = Config::load_unresolved(&self.options()).ok();
         Ok(Saved {
             revision: self.revision()?,
@@ -254,6 +265,7 @@ impl ConfigStore {
         original_name: Option<&str>,
         input: &ProviderInput,
         existing: &[ModelEntryConfig],
+        effective: &[ModelEntryConfig],
     ) -> Result<(), ConfigError> {
         let options = self.options();
         let context = config::LayeredSaveContext::new(&options).with_show_quota(match input {
@@ -262,7 +274,7 @@ impl ConfigStore {
             | ProviderInput::Subscription { show_quota, .. } => *show_quota,
         });
         let path = self.path();
-        let model_entries = |models: &[ModelInput]| model_entries(models, existing);
+        let model_entries = |models: &[ModelInput]| model_entries(models, existing, effective);
         match input {
             ProviderInput::OpenaiCompatible {
                 name,
@@ -563,27 +575,44 @@ impl Drop for Scratch {
     }
 }
 
-/// The entries a client's model list stands for. A client names a model by id and
-/// whether it is enabled; whatever else the file already says about that id (preset,
-/// context window, prices, effort levels, edit tool, kind) is kept, so a save that
-/// carries only those two fields does not erase it.
-fn model_entries(models: &[ModelInput], existing: &[ModelEntryConfig]) -> Vec<ModelEntryConfig> {
+/// The entries a client's model list stands for. A client names a model by id and says
+/// whether it is enabled, its kind and its context override; whatever else the file already
+/// says about that id (preset, prices, effort levels, edit tool) is kept.
+///
+/// What the client left as the effective configuration (`effective`: the file with its
+/// drop-ins and the provider's defaults) already has it is not written over what the file
+/// says: a context window that a drop-in overrides stays as the file has it, and a model that
+/// only the defaults list is not given an explicit kind, so a save that edits nothing of the
+/// models writes the same models back.
+fn model_entries(
+    models: &[ModelInput],
+    existing: &[ModelEntryConfig],
+    effective: &[ModelEntryConfig],
+) -> Vec<ModelEntryConfig> {
     models
         .iter()
         .map(|model| {
-            let mut entry = existing
-                .iter()
-                .find(|entry| entry.id == model.id)
-                .cloned()
-                .unwrap_or_else(|| ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()));
+            let in_file = existing.iter().find(|entry| entry.id == model.id);
+            let was = effective.iter().find(|entry| entry.id == model.id);
+            let mut entry = match (in_file, was) {
+                (Some(entry), _) => entry.clone(),
+                (None, Some(_)) => ModelEntryConfig::enabled(model.id.clone()),
+                (None, None) => ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()),
+            };
             entry.enabled = model.enabled;
             if let Some(kind) = model.kind {
-                entry.kind = Some(match kind {
+                let kind = match kind {
                     ModelKind::Chat => config::ModelKind::Chat,
                     ModelKind::ImageGeneration => config::ModelKind::ImageGeneration,
-                });
+                };
+                if was.is_none_or(|was| was.effective_kind() != kind) {
+                    entry.kind = Some(kind);
+                }
             }
-            entry.context_window = model.context_override;
+            match was {
+                Some(was) if was.context_window == model.context_override => {}
+                _ => entry.context_window = model.context_override,
+            }
             entry
         })
         .collect()

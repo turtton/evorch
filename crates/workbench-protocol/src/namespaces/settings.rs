@@ -235,7 +235,7 @@ pub struct ProviderView {
     pub excluded_models: Vec<String>,
     pub default_model: String,
     /// Whether the footer shows this provider's quota: the value written, else
-    /// the default of its kind. Always `false` where `quota_supported` is.
+    /// the default of its kind. Always `false` when `quota_supported` is `false`.
     pub show_quota: bool,
     /// Whether the provider's kind has a quota to show (Codex, Claude
     /// subscription, Cursor, Kimi).
