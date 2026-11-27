@@ -305,3 +305,198 @@ fn openai_dialect_ignores_codex_capabilities() {
     };
     assert_eq!(build(None), build(Some(astra())));
 }
+fn schema_request(schema: Value) -> ChatRequest {
+    serde_json::from_value(json!({
+        "model": "gpt-6.2-astra",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "present", "description": "d", "input_schema": schema}]
+    }))
+    .unwrap()
+}
+
+fn has_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(map) => map.contains_key(key) || map.values().any(|v| has_key(v, key)),
+        Value::Array(items) => items.iter().any(|v| has_key(v, key)),
+        _ => false,
+    }
+}
+
+/// The first function tool of a serialized request, wherever the shape puts it.
+fn first_tool_parameters(request: &Value) -> Value {
+    let tool = if request.get("tools").is_some() {
+        &request["tools"][0]
+    } else {
+        &request["input"][0]["tools"][0]["tools"][0]
+    };
+    tool["parameters"].clone()
+}
+
+fn mixed_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ids": {"type": "array", "uniqueItems": true, "minItems": 1, "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "pattern": "^a"}},
+            "nested": {"type": "object", "minProperties": 1,
+                "properties": {"tags": {"type": "array", "uniqueItems": true,
+                    "items": {"anyOf": [{"type": "array", "uniqueItems": true}]}}}},
+            "uniqueItems": {"type": "boolean", "default": {"uniqueItems": true}}
+        },
+        "required": ["ids"],
+        "additionalProperties": false,
+        "allOf": [{
+            "if": {"properties": {"ids": {"minItems": 2}}},
+            "then": {"required": ["nested"], "not": {"required": ["uniqueItems"]}},
+            "else": {"required": ["uniqueItems"]}
+        }],
+        "oneOf": [{"required": ["ids"]}, {"not": {"required": ["ids"]}}]
+    })
+}
+
+// Given: a schema with the keywords the backend reported as unimplemented (uniqueItems,
+// if/then/else), nested in properties, items, anyOf and allOf, next to keywords it accepted
+// (allOf, anyOf, oneOf, not, min/max items and length, pattern) and one never observed
+// (minProperties), plus a property that is merely named `uniqueItems`
+// When: serialized for a Lite Codex model
+// Then: the rejected keywords are gone everywhere, the accepted ones and the property
+// survive, and the canonical tool definition is untouched
+#[test]
+fn lite_tool_schemas_drop_only_the_keywords_the_backend_rejects() {
+    let request = schema_request(mixed_schema());
+    let parameters = first_tool_parameters(&wire_with(&request, Some(astra())));
+
+    for key in ["if", "then", "else"] {
+        assert!(!has_key(&parameters["allOf"], key), "{key}");
+    }
+    assert!(!has_key(&parameters["properties"]["ids"], "uniqueItems"));
+    assert!(!has_key(&parameters["properties"]["nested"], "uniqueItems"));
+    assert_eq!(parameters["properties"]["nested"]["minProperties"], 1);
+    let ids = &parameters["properties"]["ids"];
+    assert_eq!(ids["minItems"], 1);
+    assert_eq!(ids["maxItems"], 8);
+    assert_eq!(
+        ids["items"],
+        json!({"type": "string", "minLength": 1, "pattern": "^a"})
+    );
+    assert_eq!(
+        parameters["properties"]["uniqueItems"],
+        json!({"type": "boolean", "default": {"uniqueItems": true}})
+    );
+    assert!(parameters["properties"]["nested"]["properties"]["tags"]["items"]["anyOf"].is_array());
+    assert_eq!(parameters["oneOf"], mixed_schema()["oneOf"]);
+    assert!(parameters["allOf"].is_array());
+    assert_eq!(parameters["required"], json!(["ids"]));
+    assert_eq!(request.tools[0].input_schema, mixed_schema());
+}
+
+// Given: the same schema / When: serialized without Lite (a non-Lite model or no catalog)
+// or with the official OpenAI dialect
+// Then: it is sent as is, so established conversations keep their cached tool prefix
+#[test]
+fn non_lite_and_openai_tool_schemas_are_untouched() {
+    let request = schema_request(mixed_schema());
+    for model in [Some(CodexModelCapabilities::default()), None] {
+        let parameters = first_tool_parameters(&wire_with(&request, model));
+        assert_eq!(parameters, mixed_schema());
+    }
+    let openai = serde_json::to_value(to_wire_request(
+        &request,
+        &ResponsesRequestOptions {
+            dialect: ResponsesDialect::OpenAi,
+            prompt_cache_key: None,
+            codex_model: Some(astra()),
+        },
+    ))
+    .unwrap();
+    assert_eq!(first_tool_parameters(&openai), mixed_schema());
+}
+
+// Given: a Lite tool schema with none of the observed-rejected keywords, but with keywords
+// that were never observed being rejected (minProperties, contains, dependentRequired, ...)
+// When: serialized for a Lite Codex model
+// Then: the schema is sent byte for byte as it is
+#[test]
+fn lite_schemas_without_rejected_keywords_are_unchanged() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "minItems": 1, "contains": {"type": "string"},
+                "minContains": 1, "maxContains": 2, "unevaluatedItems": false,
+                "items": {"type": "string"}},
+            "meta": {"type": "object", "minProperties": 1, "maxProperties": 4,
+                "propertyNames": {"pattern": "^a"}, "patternProperties": {"^x": {"type": "string"}},
+                "unevaluatedProperties": false}
+        },
+        "dependentRequired": {"tags": ["meta"]},
+        "dependentSchemas": {"meta": {"required": ["tags"]}},
+        "allOf": [{"not": {"required": ["meta"]}}],
+        "oneOf": [{"required": ["tags"]}, {"required": ["meta"]}]
+    });
+    let parameters =
+        first_tool_parameters(&wire_with(&schema_request(schema.clone()), Some(astra())));
+    assert_eq!(
+        serde_json::to_string(&parameters).unwrap(),
+        serde_json::to_string(&schema).unwrap()
+    );
+}
+
+// Given: a Lite tool schema that uses the rejected keywords' names as data (property names,
+// patternProperties and dependentRequired/dependentSchemas keys, required entries, enum, const
+// and default values) but has none of them as keywords
+// When: serialized for a Lite Codex model
+// Then: the schema is sent byte for byte as it is
+#[test]
+fn lite_schemas_keep_rejected_keyword_names_used_as_data() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "if": {"type": "string", "enum": ["then", "else"], "default": "uniqueItems"},
+            "then": {"type": "object", "properties": {"else": {"const": "if"}}},
+            "uniqueItems": {"type": "array", "items": {"type": "string"}}
+        },
+        "patternProperties": {"^if$": {"type": "string"}, "else": {"type": "integer"}},
+        "dependentRequired": {"if": ["then", "uniqueItems"]},
+        "dependentSchemas": {"else": {"properties": {"then": {"type": "string"}}}},
+        "required": ["if", "then"],
+        "$defs": {"uniqueItems": {"type": "string"}},
+        "examples": [{"if": 1, "uniqueItems": true}]
+    });
+    let parameters =
+        first_tool_parameters(&wire_with(&schema_request(schema.clone()), Some(astra())));
+    assert_eq!(parameters, schema);
+}
+
+// Given: rejected keywords at every schema position (items, additionalProperties, not, the
+// branches of anyOf, dependentSchemas and patternProperties values, $defs)
+// When: serialized for a Lite Codex model
+// Then: they are all removed, and the names around them are kept
+#[test]
+fn lite_schemas_lose_rejected_keywords_at_every_schema_position() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"a": {"type": "array", "items": {"type": "array", "uniqueItems": true}}},
+        "additionalProperties": {"type": "array", "uniqueItems": true},
+        "not": {"if": {"required": ["a"]}, "then": {"required": ["b"]}},
+        "anyOf": [{"type": "array", "uniqueItems": true}],
+        "dependentSchemas": {"a": {"if": {}, "else": {}}},
+        "patternProperties": {"^x": {"uniqueItems": true}},
+        "$defs": {"d": {"uniqueItems": true}},
+        "dependentRequired": {"a": ["b"]}
+    });
+    let parameters = first_tool_parameters(&wire_with(&schema_request(schema), Some(astra())));
+    assert_eq!(
+        parameters,
+        json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {"type": "array"}}},
+            "additionalProperties": {"type": "array"},
+            "not": {},
+            "anyOf": [{"type": "array"}],
+            "dependentSchemas": {"a": {}},
+            "patternProperties": {"^x": {}},
+            "$defs": {"d": {}},
+            "dependentRequired": {"a": ["b"]}
+        })
+    );
+}

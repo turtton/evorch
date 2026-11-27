@@ -32,9 +32,9 @@ fn maps_all_configured_budgets_without_changing_other_limits() {
 fn default_config_maps_to_the_runtime_defaults() {
     // Given/When: the untouched config schema defaults become runtime settings.
     let settings = BudgetSettings::from(&BudgetConfig::default());
-    // Then: 400 calls, 2 hours and no token cap are preserved, none of them lifted.
+    // Then: 1000 calls, 2 hours and no token cap are preserved, none of them lifted.
     assert_eq!(settings, BudgetSettings::default());
-    assert_eq!(settings.max_tool_calls, ResourceLimit::Bounded(400));
+    assert_eq!(settings.max_tool_calls, ResourceLimit::Bounded(1000));
     assert_eq!(
         settings.max_elapsed,
         ResourceLimit::Bounded(std::time::Duration::from_secs(7_200))

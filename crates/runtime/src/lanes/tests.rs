@@ -750,7 +750,7 @@ async fn lane_unlimited_quantities_preserve_configured_runtime_runaway_threshold
     );
     assert_eq!(
         f.config(lead).budget.max_tool_calls,
-        ResourceLimit::Bounded(400)
+        ResourceLimit::Bounded(1000)
     );
     for id in [lane.root_run_id, lead] {
         f.cancel(id).await;

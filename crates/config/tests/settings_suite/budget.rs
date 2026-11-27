@@ -11,7 +11,7 @@ fn defaults_when_budget_is_missing() {
     assert_eq!(
         value["budget"],
         serde_json::json!({
-            "max_tool_calls": 400, "max_no_progress_rounds": 100,
+            "max_tool_calls": 1000, "max_no_progress_rounds": 100,
             "max_file_rereads": 20, "max_identical_tool_call_repeats": 10,
             "max_elapsed_secs": 7_200
         })

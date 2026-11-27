@@ -135,6 +135,25 @@ async fn codex_catalog_refresh_keeps_the_established_wire_prefix_and_cache_affin
     // Independent wire checks protect instructions and tool order, not only cached usage.
     assert_eq!(first["input"][0], next["input"][0]);
     assert_eq!(first["input"][1], next["input"][1]);
+    // The runtime's own tool schemas carry keywords the Lite strict check rejects with an
+    // HTTP 400; none may reach the wire.
+    fn keys(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    out.push(key.clone());
+                    keys(child, out);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| keys(item, out)),
+            _ => {}
+        }
+    }
+    let mut sent_keys = Vec::new();
+    keys(&first["input"][0]["tools"], &mut sent_keys);
+    for rejected in ["uniqueItems", "if", "then", "else"] {
+        assert!(!sent_keys.iter().any(|key| key == rejected), "{rejected}");
+    }
     assert_eq!(first["prompt_cache_key"], next["prompt_cache_key"]);
     assert_append_only(Wire::Codex.protocol(), first, next).unwrap();
     let mut settings = first.clone();

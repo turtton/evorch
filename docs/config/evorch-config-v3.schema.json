@@ -55,7 +55,7 @@
         "max_file_rereads": 20,
         "max_identical_tool_call_repeats": 10,
         "max_no_progress_rounds": 100,
-        "max_tool_calls": 400
+        "max_tool_calls": 1000
       }
     },
     "comment_checker": {
@@ -525,10 +525,10 @@
           "minimum": 0
         },
         "max_tool_calls": {
-          "description": "1 run あたりのツール実行回数の上限 (既定: 400)。",
+          "description": "1 run あたりのツール実行回数の上限 (既定: 1000)。",
           "type": "integer",
           "format": "uint32",
-          "default": 400,
+          "default": 1000,
           "minimum": 0
         }
       },

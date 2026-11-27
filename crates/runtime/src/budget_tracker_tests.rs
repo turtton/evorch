@@ -44,9 +44,9 @@ async fn reset_elapsed_preserves_non_time_budgets_and_latched_breaches() {
     assert_eq!(counters.spawn_credits, credits);
     assert!(counters.lane_observations.contains(&[1; 32]));
     // Tool usage is supplied by the escalation detector, not reset by the clock.
-    let breach = counters.publish(400, &context);
+    let breach = counters.publish(1000, &context);
     assert!(
-        matches!(&breach, BudgetDecision::Exhausted(b) if b.detail.contains("max_tool_calls=400"))
+        matches!(&breach, BudgetDecision::Exhausted(b) if b.detail.contains("max_tool_calls=1000"))
     );
     counters.reset_elapsed();
     assert_eq!(counters.publish(0, &context), breach);
@@ -219,7 +219,7 @@ async fn token_warning_is_latched_without_stopping_execution() {
     assert!(matches!(event.kind, event_bus::EventKind::Diagnostic(d)
         if d.code == diagnostic_codes::BUDGET_WARNING
             && d.severity == DiagnosticSeverity::Warning
-            && d.detail.contains("remaining_tool_calls=400")
+            && d.detail.contains("remaining_tool_calls=1000")
             && d.detail.contains("remaining_tokens=20")));
     assert_no_event(&mut receiver);
 }
@@ -530,16 +530,16 @@ async fn unlimited_resources_never_stop_on_volume_alone() {
 
 #[tokio::test(start_paused = true)]
 async fn default_settings_still_stop_at_the_existing_caps() {
-    // Given: the unchanged default settings (400 calls, 2 hours, no token cap).
+    // Given: the unchanged default settings (1000 calls, 2 hours, no token cap).
     let bus = EventBus::new(16);
     let settings = BudgetSettings::default();
     let context = context(&bus, &settings);
     let mut counters = BudgetCounters::default();
-    // Then: 399 calls continue and the 400th stops.
-    assert_eq!(counters.publish(399, &context), BudgetDecision::Continue);
+    // Then: 999 calls continue and the 1000th stops.
+    assert_eq!(counters.publish(999, &context), BudgetDecision::Continue);
     assert!(matches!(
-        counters.publish(400, &context),
-        BudgetDecision::Exhausted(breach) if breach.detail.contains("max_tool_calls=400")
+        counters.publish(1000, &context),
+        BudgetDecision::Exhausted(breach) if breach.detail.contains("max_tool_calls=1000")
     ));
     // Given: a fresh run that has used exactly two hours, then a bit more.
     let mut counters = BudgetCounters::default();

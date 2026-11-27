@@ -431,6 +431,20 @@ impl ResponsesDialect {
         }
     }
 
+    /// function tool の `parameters`。Responses Lite (`additional_tools` の namespace) では
+    /// Codex backend が tool の schema を strict 検査し、未実装の keyword (`uniqueItems`、
+    /// `if` / `then` / `else`) を `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は
+    /// 検証用の完全な schema を持つため、送信直前に非対応 keyword を除いた写しを送ります。
+    /// この拒否は Lite の namespace tool でしか観測されていないため、top-level `tools` を使う
+    /// 要求と他 dialect の schema は変えません (送信済みの cache prefix を保つ)。
+    fn tool_parameters(self, schema: &serde_json::Value, lite: bool) -> serde_json::Value {
+        let mut parameters = schema.clone();
+        if self == Self::Codex && lite {
+            strip_unsupported_keywords(&mut parameters);
+        }
+        parameters
+    }
+
     /// 公式 compaction の暗号化状態を再送できるか。暗号文は Codex backend が発行したものです。
     fn replays_compaction(self) -> bool {
         match self {
@@ -530,7 +544,7 @@ fn convert_request(
     sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
     let tools: Vec<_> = sorted_tools
         .into_iter()
-        .map(|tool| to_wire_tool(tool, dialect))
+        .map(|tool| to_wire_tool(tool, dialect, lite))
         .collect();
     let (mut tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty(), lite);
     if tool_choice.is_some() && request.tool_choice == Some(crate::message::ToolChoice::None) {
@@ -644,7 +658,7 @@ fn instructions(request: &ChatRequest) -> String {
 }
 
 /// canonical tool を wire tool へ変換する唯一の地点。
-fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
+fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect, lite: bool) -> Tool {
     if tool.name == NAME && tool.input_schema == json_schema() {
         return Tool::Custom(CustomTool {
             name: NAME,
@@ -659,9 +673,56 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect) -> Tool {
     Tool::Function(FunctionTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
-        parameters: tool.input_schema.clone(),
+        parameters: dialect.tool_parameters(&tool.input_schema, lite),
         strict: dialect.function_strict(),
     })
+}
+
+/// Lite の strict 検査が実装していないと backend が `Unimplemented keys` で実際に報告した
+/// JSON Schema keyword。観測していない keyword は、拒否の有無が不明なため除きません。
+///
+/// `allOf` / `anyOf` / `oneOf` / `not` / `minItems` / `maxItems` / `minLength` / `maxLength` /
+/// `pattern` は、現行 tool が `if` と同時に持っていても backend の報告に含まれなかった
+/// (受理されている) ため、送信済みの schema を変えないよう残します。
+const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "else"];
+
+/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を取り除きます。
+///
+/// schema を値に取る JSON Schema の位置だけを辿ります。`properties` などの名前付きマップは
+/// key (利用者の名前) を保ったまま値を schema として辿り、`dependentRequired` / `required` /
+/// `enum` / `const` / `default` / `examples` などのデータは触りません。
+fn strip_unsupported_keywords(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Value::Object(map) = schema else { return };
+    for keyword in STRICT_UNSUPPORTED_KEYWORDS {
+        map.remove(*keyword);
+    }
+    for (key, child) in map.iter_mut() {
+        match (key.as_str(), child) {
+            (
+                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas",
+                Value::Object(named),
+            ) => named.values_mut().for_each(strip_unsupported_keywords),
+            (
+                "items"
+                | "additionalItems"
+                | "additionalProperties"
+                | "unevaluatedItems"
+                | "unevaluatedProperties"
+                | "contains"
+                | "propertyNames"
+                | "not",
+                child,
+            ) => match child {
+                Value::Array(tuple) => tuple.iter_mut().for_each(strip_unsupported_keywords),
+                child => strip_unsupported_keywords(child),
+            },
+            ("allOf" | "anyOf" | "oneOf" | "prefixItems", Value::Array(branches)) => {
+                branches.iter_mut().for_each(strip_unsupported_keywords);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn image_url(media_type: &str, data: &str) -> InputContent {
