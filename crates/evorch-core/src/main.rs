@@ -64,6 +64,7 @@ fn run() -> Result<(), BootstrapError> {
         if args.mode != args::Mode::Serve || args.launch_fd.is_some() {
             return Err("invalid planned handoff mode".into());
         }
+        evorch_core::logging::init();
         return planned_entry::run(args, mask, inherited);
     }
     if args.mode == args::Mode::Help {
@@ -87,6 +88,7 @@ fn run() -> Result<(), BootstrapError> {
     )? {
         return Ok(());
     }
+    evorch_core::logging::init();
     let config_dir = args
         .config_dir
         .or_else(config::user_config_dir)

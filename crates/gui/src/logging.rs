@@ -13,10 +13,29 @@ pub fn env_filter() -> EnvFilter {
     log_filter_from_env(std::env::var("RUST_LOG").ok().as_deref())
 }
 
+/// stderr, and `gui.log` next to the core's `core.log` (see `core_instance::log_file`):
+/// a window opened from a launcher has no terminal, and the line that explains a
+/// lost core connection must still be readable afterwards. A log file that cannot
+/// be opened leaves stderr only.
 pub fn init() {
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter())
-        .with_writer(std::io::stderr)
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    let file = core_instance::log_file::log_dir().and_then(|dir| {
+        core_instance::log_file::RotatingLog::open(
+            &dir,
+            "gui",
+            core_instance::log_file::MAX_LOG_BYTES,
+        )
+        .ok()
+    });
+    let file_layer = file.map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+    });
+    tracing_subscriber::registry()
+        .with(env_filter())
+        .with(file_layer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 }
 

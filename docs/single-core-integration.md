@@ -629,6 +629,36 @@ serialized; the management CLI connection itself is not an active invocation.
 This is the provisional behavior selected in
 `question-0d0be08211df9f38f725636e5a62affa`.
 
+
+### Reading a lost GUI-core connection
+
+A lost connection is explained in two log files, side by side, in
+`$XDG_STATE_HOME/evorch/logs/` (`~/.local/state/evorch/logs/` without
+`XDG_STATE_HOME`). Each is capped at 8 MiB and rotates to `<name>.log.1`.
+`RUST_LOG` changes the filter (default `info`). They are not part of the event
+store, so `evorch inspect` does not show them; they are written with no store
+access, which matters exactly when the store is what is slow.
+
+- `gui.log`: `lost the connection to the core` (a `WARN` with the client's
+  `TransportError`, the length of the session, and how often the connection was
+  lost in this episode); the stage the recovery reached (`stage=` `session`,
+  `live-core`, `auto-reconnect`, `connect-or-start`, `subscribe`, `snapshot`,
+  `session-open`) with `since_loss_ms`; and, from the client library, the
+  socket error (`core socket I/O failed`, with the `io::ErrorKind` and OS error)
+  or `the peer ended the stream (end of file)`.
+- `core.log`: per connection (`conn=N`), `connection accepted`,
+  `handshake accepted` (the client instance), and the end: the task that ended
+  first (`role="reader"` / `"writer"`) with its I/O error, `connection closed`
+  with `elapsed_ms` and `core_stopping`, `connection limit reached` when a 64th
+  connection is dropped, and handler panics.
+
+Reconnect pacing: when the connection broke but the core still answers a
+connect-only probe, the GUI reconnects without spending the 3-in-5-minutes
+allowance (that allowance guards starts of a core that keeps dying; the shared
+crash budget is untouched because nothing is started). It reconnects at once after
+a session that lasted a minute, and otherwise waits 1, 2, 4, … up to 30 seconds.
+When no core answers, the previous behaviour applies unchanged.
+
 Current migration status and 19a boundary:
 
 | Work | Status / 19a handling |

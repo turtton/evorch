@@ -373,11 +373,23 @@ impl LifecycleDriver {
                 },
                 event = events.recv() => { if let Ok(event) = event { self.idle.reset(); host.get().host.lock().unwrap().service_mut().observe_lifecycle(&event); } },
                 joined = clients.join_next(), if !clients.is_empty() => {
-                    if let Some(Err(error)) = joined { client_failure = Some(error.to_string()); }
+                    if let Some(Err(error)) = joined {
+                        tracing::error!(%error, panicked = error.is_panic(), "a connection handler panicked or was lost");
+                        client_failure = Some(error.to_string());
+                    }
                 },
                 accepted = async { listener.as_ref().unwrap().accept().await }, if listener.is_some() => match accepted {
-                    Ok((stream, _)) => { if clients.len() < 64 { clients.spawn(crate::unix::connection(stream, backend.clone(), shutdown.subscribe())); } },
-                    Err(error) => break Err(error),
+                    Ok((stream, _)) => {
+                        if clients.len() < 64 {
+                            clients.spawn(crate::unix::connection(stream, backend.clone(), shutdown.subscribe()));
+                        } else {
+                            tracing::warn!(open = clients.len(), "connection limit reached; the new connection is dropped");
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(%error, "accepting connections failed; the core stops");
+                        break Err(error);
+                    },
                 },
             }
         };

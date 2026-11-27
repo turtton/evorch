@@ -184,6 +184,19 @@ impl Launcher {
             .await
             .map(|connected| connected.client)
     }
+    /// Connect to a core that is already running; never start one. `Ok(None)`
+    /// means none answered (nothing listens, or it went away during the
+    /// handshake). Takes no launch guard and touches no crash budget, so it can
+    /// tell a lost connection to a live core from a dead core without risking a
+    /// start.
+    pub async fn connect_existing(
+        &self,
+        within: Duration,
+    ) -> Result<Option<ConnectedCore>, LaunchError> {
+        tokio::time::timeout(within, self.connect())
+            .await
+            .map_err(|_| LaunchError::NotReady)?
+    }
     /// Connect once, retaining the selected endpoint for subordinate data readers.
     pub async fn connect_or_start_with_endpoint(&self) -> Result<ConnectedCore, LaunchError> {
         self.connect_or_start_with_endpoint_observed(|_| ()).await

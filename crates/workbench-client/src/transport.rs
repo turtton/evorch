@@ -49,6 +49,18 @@ pub(crate) fn framing_error(error: FramingError) -> TransportError {
     }
 }
 
+/// The socket error is not part of [`TransportError`] (every one is `Disconnected`),
+/// so it is recorded here, where it is still known: it is the only trace of why
+/// the core connection was lost.
+fn io_failure(operation: &str, error: &std::io::Error, level: tracing::Level) -> TransportError {
+    if level == tracing::Level::DEBUG {
+        tracing::debug!(operation, kind = ?error.kind(), os_error = ?error.raw_os_error(), %error, "core socket I/O failed");
+    } else {
+        tracing::warn!(operation, kind = ?error.kind(), os_error = ?error.raw_os_error(), %error, "core socket I/O failed");
+    }
+    TransportError::Disconnected
+}
+
 /// Frames over a Unix domain socket (desktop GUI and CLI to the core).
 #[derive(Debug)]
 pub struct UnixTransport {
@@ -66,7 +78,7 @@ impl UnixTransport {
         UnixStream::connect(path)
             .await
             .map(Self::new)
-            .map_err(|_| TransportError::Disconnected)
+            .map_err(|error| io_failure("connect", &error, tracing::Level::DEBUG))
     }
 }
 
@@ -102,11 +114,11 @@ impl FrameSink for UnixSink {
         self.write
             .write_all(frame)
             .await
-            .map_err(|_| TransportError::Disconnected)?;
+            .map_err(|error| io_failure("write", &error, tracing::Level::WARN))?;
         self.write
             .flush()
             .await
-            .map_err(|_| TransportError::Disconnected)
+            .map_err(|error| io_failure("flush", &error, tracing::Level::WARN))
     }
 }
 
@@ -121,7 +133,7 @@ impl FrameSource for UnixSource {
                 .read
                 .read(&mut chunk)
                 .await
-                .map_err(|_| TransportError::Disconnected)?;
+                .map_err(|error| io_failure("read", &error, tracing::Level::WARN))?;
             if read == 0 {
                 return if self.decoder.buffered() == 0 {
                     Ok(None)
