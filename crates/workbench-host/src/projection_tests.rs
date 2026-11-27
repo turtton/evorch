@@ -308,6 +308,40 @@ async fn refresh_interval_starts_at_completion_not_at_collect_start() {
     assert_eq!(*completed.borrow_and_update(), 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn refresh_cooldown_keeps_draining_fragments_without_lag_or_extra_collects() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let epoch = p.instance_epoch();
+    let mut completed = p.model_refreshes.subscribe();
+    let mut drained = p.model_event_batches.subscribe();
+    bus.emit(wakeup(0));
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    drained.borrow_and_update();
+    let cooldown_started = tokio::time::Instant::now();
+    // Pace batches on receiver progress, not a clock or scheduler guess. The
+    // total exceeds the bus capacity while refresh remains in its cooldown.
+    for _ in 0..16 {
+        for _ in 0..8 {
+            bus.emit(Event::new(event_bus::MessageEvent::ReasoningDelta {
+                run_id: None,
+                delta: "fragment".into(),
+            }));
+        }
+        drained.changed().await.unwrap();
+        drained.borrow_and_update();
+        assert_eq!(tokio::time::Instant::now(), cooldown_started);
+        assert_eq!(p.instance_epoch(), epoch);
+        assert_eq!(*completed.borrow(), 1);
+    }
+    bus.emit(wakeup(1));
+    drained.changed().await.unwrap();
+    tokio::time::advance(MIN_REFRESH_INTERVAL).await;
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 2);
+    assert_eq!(p.instance_epoch(), epoch);
+}
+
 #[tokio::test]
 async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
     use event_bus::MessageEvent;

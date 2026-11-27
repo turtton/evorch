@@ -171,6 +171,8 @@ pub struct Projection {
     model_refresh: Mutex<ModelRefresh>,
     #[cfg(test)]
     model_refreshes: tokio::sync::watch::Sender<usize>,
+    #[cfg(test)]
+    model_event_batches: tokio::sync::watch::Sender<usize>,
     epoch: Arc<tokio::sync::watch::Sender<u64>>,
     status: Mutex<CoreStatus>,
     pager: Pager,
@@ -312,6 +314,8 @@ impl Projection {
             model_refresh: Mutex::default(),
             #[cfg(test)]
             model_refreshes: tokio::sync::watch::Sender::new(0),
+            #[cfg(test)]
+            model_event_batches: tokio::sync::watch::Sender::new(0),
             state: Mutex::new(State {
                 #[cfg(test)]
                 snapshot_hook: None,
@@ -337,47 +341,79 @@ impl Projection {
         let weak = Arc::downgrade(&this);
         let models = handle.spawn(async move {
             let mut ready_at = tokio::time::Instant::now();
+            let mut pending = RefreshWakeups::default();
+            let mut observed = Vec::new();
+            let mut approvals_closed = false;
             loop {
-                // A completion-based throttle, not a debounce: queued dirty
-                // events always cause a trailing refresh even if input stops.
-                // Keep only Weak across this wait (also on failed bootstrap).
-                tokio::time::sleep_until(ready_at).await;
-                enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>) }
-                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a) };
-                let Some(this) = weak.upgrade() else { break };
-                let mut refreshed = false;
-                // Never retain the projection (and its runtime) across a scheduler wait:
-                // failed bootstrap must be able to drop both without another task poll.
-                let closed = match (this, change) {
-                    (this, Change::Event(event)) => {
-                        // Durable model notifications coalesce; live tools retain bus order
-                        // and share the snapshot / cursor publication boundary.
-                        let wakeups = RefreshWakeups::drain(&mut events, event).await;
-                        if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty { refreshed = true; Self::in_background(this, move |p| {
-                            if p.refresh_models().is_err() { p.invalidate(); return; }
-                            for event in wakeups.activities { p.observe_activity(event); }
-                        }).await; }
-                        wakeups.closed
-                    }
-                    (this, Change::Approval(Ok(approval))) => { refreshed = true; Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
-                    (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
-                        // Lost input means the projection cannot vouch for ANY old cursor.
-                        this.invalidate();
-                        refreshed = true;
-                        Self::in_background(this, |p| { let _ = p.refresh_models(); }).await;
-                        false
-                    }
-                    (_, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed))) => true,
+                enum Change {
+                    Event(Result<event_bus::Event, RecvError>),
+                    Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>),
+                    Refresh,
+                }
+                // Keep draining fragments/dirty notifications during cooldown.
+                // Sleeping the receiver itself can overflow the bus and change
+                // the epoch under an in-flight core restart. Only activity and
+                // approval identities need buffering; bound both before reading
+                // more, retaining the bus's existing lag/resync behavior.
+                let change = tokio::select! {
+                    biased;
+                    () = tokio::time::sleep_until(ready_at), if pending.dirty => Change::Refresh,
+                    change = async {
+                        tokio::select! {
+                            e = events.recv(), if !pending.closed && pending.activities.len() < MAX_REFRESH_WAKEUPS => Change::Event(e),
+                            a = approvals.recv(), if !approvals_closed && observed.len() < MAX_REFRESH_WAKEUPS => Change::Approval(a),
+                            else => std::future::pending().await,
+                        }
+                    } => change,
                 };
-                if refreshed {
-                    ready_at = tokio::time::Instant::now() + MIN_REFRESH_INTERVAL;
-                    #[cfg(test)]
-                    if let Some(this) = weak.upgrade() {
-                        this.model_refreshes.send_modify(|count| *count += 1);
+                // Never retain the projection/runtime across a scheduler wait.
+                let Some(this) = weak.upgrade() else { break };
+                match change {
+                    Change::Event(event) => {
+                        let wakeups = RefreshWakeups::drain(&mut events, event).await;
+                        if wakeups.lagged {
+                            pending.activities.clear();
+                            this.invalidate();
+                        }
+                        pending.dirty |= wakeups.dirty;
+                        pending.closed |= wakeups.closed;
+                        pending.activities.extend(wakeups.activities);
+                        #[cfg(test)]
+                        this.model_event_batches.send_modify(|count| *count += 1);
+                    }
+                    Change::Approval(Ok(approval)) => {
+                        pending.dirty = true;
+                        observed.push(approval.id);
+                    }
+                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        pending.activities.clear();
+                        pending.dirty = true;
+                        this.invalidate();
+                    }
+                    Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        approvals_closed = true;
+                    }
+                    Change::Refresh => {
+                        pending.dirty = false;
+                        let activities = std::mem::take(&mut pending.activities);
+                        let approvals = std::mem::take(&mut observed);
+                        Self::in_background(this, move |p| {
+                            if p.refresh_models_observed(&approvals).is_err() {
+                                p.invalidate();
+                                return;
+                            }
+                            for event in activities { p.observe_activity(event); }
+                        }).await;
+                        // Completion-based throttle, not debounce: even the
+                        // last dirty schedules a trailing pass if input stops.
+                        ready_at = tokio::time::Instant::now() + MIN_REFRESH_INTERVAL;
+                        #[cfg(test)]
+                        if let Some(this) = weak.upgrade() {
+                            this.model_refreshes.send_modify(|count| *count += 1);
+                        }
                     }
                 }
-                if closed { break; }
+                if (pending.closed || approvals_closed) && !pending.dirty { break; }
                 tokio::task::yield_now().await;
             }
         });
@@ -415,7 +451,7 @@ impl Projection {
             state.projects = projects;
             state.project_names = names;
             drop(state);
-            self.refresh_models_serialized(&mut refresh, None)?;
+            self.refresh_models_serialized(&mut refresh, &[])?;
         }
         self.models_changed();
         Ok(())
@@ -472,19 +508,23 @@ impl Projection {
     }
     /// Reads the models and publishes every committed message before returning.
     pub fn refresh(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), None)?;
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), &[])?;
         self.advance_bodies()
     }
     pub(crate) fn refresh_models(&self) -> Result<(), WorkbenchError> {
-        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), None)?;
-        self.models_changed();
-        Ok(())
+        self.refresh_models_observed(&[])
     }
     pub(crate) fn approval_changed(
         &self,
         id: &sandbox::approval::ApprovalId,
     ) -> Result<(), WorkbenchError> {
-        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), Some(id))?;
+        self.refresh_models_observed(std::slice::from_ref(id))
+    }
+    fn refresh_models_observed(
+        &self,
+        observed: &[sandbox::approval::ApprovalId],
+    ) -> Result<(), WorkbenchError> {
+        self.refresh_models_serialized(&mut self.model_refresh.lock().unwrap(), observed)?;
         self.models_changed();
         Ok(())
     }
@@ -551,7 +591,7 @@ impl Projection {
     fn refresh_models_serialized(
         &self,
         refresh: &mut ModelRefresh,
-        observed: Option<&sandbox::approval::ApprovalId>,
+        observed: &[sandbox::approval::ApprovalId],
     ) -> Result<(), WorkbenchError> {
         let (projects, names) = {
             let state = self.state.lock().unwrap();
@@ -605,7 +645,7 @@ impl Projection {
                 core_epoch: old.core_epoch.get(),
                 value: old.id.as_str().to_owned(),
             })
-            .chain(observed.cloned())
+            .chain(observed.iter().cloned())
         {
             if let Some(a) = self
                 .registry
@@ -734,7 +774,7 @@ impl Projection {
             Some(self.model_refresh.lock().unwrap())
         };
         if let Some(mut refresh) = refresh {
-            self.refresh_models_serialized(&mut refresh, None)?;
+            self.refresh_models_serialized(&mut refresh, &[])?;
         }
         Ok(())
     }
@@ -790,7 +830,7 @@ impl Projection {
     ) -> Result<T, WorkbenchError> {
         let read = {
             let mut refresh = self.model_refresh.lock().unwrap();
-            self.refresh_models_serialized(&mut refresh, None)?;
+            self.refresh_models_serialized(&mut refresh, &[])?;
             let state = self.state.lock().unwrap();
             read(&state.models)
         };
