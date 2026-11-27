@@ -312,11 +312,12 @@ Failures are classified for routing as follows:
 | HTTP 429 / rate-limit response | rate limited | that profile and model | `Retry-After`, else `rate_limit_secs` |
 | HTTP 5xx, timeout, other | — | none | — |
 
-While a profile or model is cooling down, routing skips it for every run, not
-only the run that saw the failure. A `CooldownStarted` event records the
+Cooldown health is kept per run ID, so a failure skips the affected candidate
+only within that run. Cooldowns are not carried to other runs, including new
+and continued runs; a continued run inherits only the root route pin.
+Reconfiguring the model resets health. A `CooldownStarted` event records the
 target, cause, and duration; there is no matching end event. A cooldown is
-never shortened by a later, shorter failure. Reloading settings recomposes the
-routed model and clears every cooldown.
+never shortened by a later, shorter failure.
 
 The default periods can be changed under `[routing]`; a role profile's
 `routing` table accepts the same keys:
