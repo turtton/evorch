@@ -517,7 +517,7 @@ async fn preview_questions_belong_to_lane_user_not_lead_under_every_policy() {
 }
 
 #[tokio::test]
-async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
+async fn a_fork_keeps_the_lane_scope_and_a_lane_thread_takes_no_second_root() {
     let mut f = Fixture::new();
     let lead = f.lead().await;
     let lane = f.runtime.open_lane(lead, "fork-source", brief()).unwrap();
@@ -565,18 +565,14 @@ async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
         .stop(lane.root_run_id, crate::StopScope::Subtree)
         .unwrap();
     f.runtime.wait(lane.root_run_id).await.unwrap();
-    let rewind = f
-        .runtime
-        .delegate_chat(
-            &lane.thread_id,
-            Role::Orchestrator,
-            "rewind follow-up".into(),
-            config(),
-        )
-        .unwrap();
-    f.phase(rewind, AgentRunPhase::Waiting).await;
-    assert_ne!(rewind, lane.root_run_id);
-    assert_eq!(f.config(rewind).lane_scope, Some(LaneScope::Lane));
+    // A new chat of the lane's thread would be a second root: refused whatever the role, with
+    // the ledger and the original root untouched.
+    for role in [Role::Orchestrator, Role::Worker] {
+        let refused =
+            f.runtime
+                .delegate_chat(&lane.thread_id, role, "rewind follow-up".into(), config());
+        assert!(refused.is_err(), "{role:?} started a second lane root");
+    }
     assert_eq!(
         f.storage
             .handle()
@@ -584,9 +580,9 @@ async fn fork_and_new_root_rewind_cannot_drop_inherited_lane_scope() {
             .unwrap()
             .unwrap()
             .root_run_id,
-        Some(rewind.to_string())
+        Some(lane.root_run_id.to_string())
     );
-    for id in [fork, rewind, lead] {
+    for id in [fork, lead] {
         f.cancel(id).await;
     }
 }
@@ -999,19 +995,6 @@ async fn a_lane_thread_continues_at_the_ledgers_root_and_any_other_thread_has_no
         Some(lane.root_run_id)
     );
     assert_eq!(f.runtime.lane_continuation_root("lead").unwrap(), None);
-    let worker = f.runtime.delegate_chat(
-        &lane.thread_id,
-        Role::Worker,
-        "take over".into(),
-        RunConfig {
-            conversation: true,
-            ..Default::default()
-        },
-    );
-    assert!(
-        worker.is_err(),
-        "a lane thread never gets a root that cannot report"
-    );
     for id in [lane.root_run_id, lead] {
         f.cancel(id).await;
     }

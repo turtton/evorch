@@ -12,10 +12,18 @@ use evorch_core::backend::HostBackend;
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
 use runtime::{AgentInvocationContext, AgentModel, Role, RunId, RuntimeError};
 use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost, TestSeams};
-use workbench_protocol::commands::{Command, ComposerRole, SendChat};
+use workbench_protocol::commands::CommandResult;
+use workbench_protocol::commands::{Command, ComposerRole, SendChat, ThreadTarget};
 use workbench_protocol::envelope::*;
 use workbench_protocol::ids::*;
-use workbench_protocol::namespaces::{ConversationCommand, WorkspaceQuery, WorkspaceReply};
+use workbench_protocol::namespaces::execution::invocation::{
+    EndInvocation, EndReason, InvocationOwnership, InvocationRole, InvocationStarted,
+    StartInvocation,
+};
+use workbench_protocol::namespaces::workspace::{RenameThread, WorkspaceCommand};
+use workbench_protocol::namespaces::{
+    ConversationCommand, ExecutionCommand, ExecutionResult, WorkspaceQuery, WorkspaceReply,
+};
 use workbench_protocol::queries::{Query, QueryReply};
 
 const LEAD: &str = "lead";
@@ -23,19 +31,15 @@ const OBJECTIVE_LINE: &str = "Investigate the flaky   build";
 const TITLE: &str = "Investigate the flaky build";
 const FOLLOW_UP: &str = "please also check the second target";
 
-/// A run with a scripted tool call makes it once; every other turn only says it is idle and
-/// waits.
+/// A run with a scripted tool call makes it once, a run listed in `finishing` ends its turn
+/// with `finish`, and every other turn only says it is idle and waits. The prefix of the
+/// provider requests is asserted on the production wire in `core_workspace_cache`.
 #[derive(Default)]
 struct Model {
     scripted: Mutex<HashMap<String, ContentBlock>>,
-    /// What each run's provider requests carried, in request order.
-    requests: Mutex<HashMap<String, Vec<Request>>>,
-}
-
-/// The wire-relevant parts of one provider request: the messages and the tool schemas.
-struct Request {
-    messages: Vec<serde_json::Value>,
-    tools: String,
+    finishing: Mutex<std::collections::HashSet<String>>,
+    /// The messages each run was sent, in request order.
+    requests: Mutex<HashMap<String, Vec<Vec<serde_json::Value>>>>,
 }
 
 #[async_trait::async_trait]
@@ -45,21 +49,28 @@ impl AgentModel for Model {
         invocation: &AgentInvocationContext,
         _: Role,
         messages: &[Message],
-        tools: &[ToolSpec],
+        _: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         self.requests
             .lock()
             .unwrap()
             .entry(invocation.run_id.clone())
             .or_default()
-            .push(Request {
-                messages: messages
+            .push(
+                messages
                     .iter()
                     .map(|message| serde_json::to_value(message).unwrap())
                     .collect(),
-                tools: serde_json::to_string(tools).unwrap(),
-            });
-        let tool = self.scripted.lock().unwrap().remove(&invocation.run_id);
+            );
+        let scripted = self.scripted.lock().unwrap().remove(&invocation.run_id);
+        let finish = self.finishing.lock().unwrap().contains(&invocation.run_id);
+        let tool = scripted.or_else(|| {
+            finish.then(|| ContentBlock::ToolUse {
+                id: format!("finish-{}", messages.len()),
+                name: "finish".into(),
+                input: serde_json::json!({"result":"complete"}),
+            })
+        });
         let tool_use = tool.is_some();
         Ok(ChatResponse {
             usage_reported: true,
@@ -183,6 +194,71 @@ impl Core {
         reply.run_id.unwrap().as_str().parse().unwrap()
     }
 
+    fn rename(&self, thread: &str, title: &str) {
+        let ReplyPayload::Query(QueryReply::Workspace(WorkspaceReply::ThreadDetail(detail))) = self
+            .request(
+                "thread-detail",
+                RequestBody::Query(Query::Workspace(WorkspaceQuery::GetThreadDetail(
+                    ThreadTarget {
+                        thread: ThreadId::new(thread).unwrap(),
+                    },
+                ))),
+            )
+        else {
+            panic!("expected a thread detail");
+        };
+        self.request(
+            "rename",
+            RequestBody::Command(Command::Workspace(WorkspaceCommand::RenameThread(
+                RenameThread {
+                    thread: ThreadId::new(thread).unwrap(),
+                    title: title.into(),
+                    expected_revision: detail.revision,
+                },
+            ))),
+        );
+    }
+
+    /// What `evorch run --thread <thread> --role <role> <prompt>` sends.
+    fn start_invocation(
+        &self,
+        id: &str,
+        thread: &str,
+        role: InvocationRole,
+        prompt: &str,
+    ) -> InvocationStarted {
+        let ReplyPayload::Command(reply) = self.request(
+            id,
+            RequestBody::Command(Command::Execution(ExecutionCommand::StartInvocation(
+                StartInvocation {
+                    invocation: InvocationId::new(id).unwrap(),
+                    project_root: self.config_dir.to_string_lossy().into_owned(),
+                    role,
+                    prompt: prompt.into(),
+                    thread: Some(ThreadId::new(thread).unwrap()),
+                },
+            ))),
+        ) else {
+            panic!("expected a command reply");
+        };
+        match reply.result.map(|result| *result) {
+            Some(CommandResult::Execution(ExecutionResult::InvocationStarted(started))) => started,
+            other => panic!("not an invocation start: {other:?}"),
+        }
+    }
+
+    fn end_invocation(&self, id: &str) {
+        self.request(
+            &format!("end-{id}"),
+            RequestBody::Command(Command::Execution(ExecutionCommand::EndInvocation(
+                EndInvocation {
+                    invocation: InvocationId::new(id).unwrap(),
+                    reason: EndReason::Interrupted,
+                },
+            ))),
+        );
+    }
+
     /// Receives events until every run in `runs` has reached `wanted`, in any order.
     async fn phase(&mut self, runs: &[RunId], wanted: AgentRunPhase) {
         let mut pending: std::collections::HashSet<String> =
@@ -236,29 +312,12 @@ impl Core {
             .filter(|(_, requests)| {
                 requests.iter().any(|request| {
                     request
-                        .messages
                         .iter()
                         .any(|message| message.to_string().contains(needle))
                 })
             })
             .map(|(run, _)| run.clone())
             .collect()
-    }
-
-    /// Every request of `run` extends the previous one: the history that was already sent and
-    /// the tool schemas are unchanged, so the provider's cached prefix is reused.
-    fn assert_prefix_preserved(&self, run: RunId) {
-        let all = self.model.requests.lock().unwrap();
-        let requests = &all[&run.to_string()];
-        assert!(requests.len() >= 4, "the run was asked on every turn");
-        for pair in requests.windows(2) {
-            assert_eq!(pair[0].tools, pair[1].tools, "tool schemas changed");
-            assert!(
-                pair[1].messages.len() > pair[0].messages.len()
-                    && pair[1].messages[..pair[0].messages.len()] == pair[0].messages[..],
-                "a request did not extend the history already sent"
-            );
-        }
     }
 
     fn stored_title(&self, thread: &str) -> Option<String> {
@@ -414,6 +473,152 @@ async fn a_worker_message_to_an_unbound_lane_continues_its_root_so_it_can_report
         )
         .unwrap();
     assert_eq!(closed.lane_id, lane.lane_id);
-    core.assert_prefix_preserved(root);
+    core.boot.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cli_invocation_aimed_at_a_lane_thread_is_input_to_its_root_whatever_the_role() {
+    let mut core = Core::open().await;
+    let lead = core.send("lead", LEAD, ComposerRole::Orchestrator, "coordinate");
+    core.phase(&[lead], AgentRunPhase::Waiting).await;
+    let lane = core
+        .boot
+        .runtime
+        .open_lane(lead, "invoked-lane", brief())
+        .unwrap();
+    let root = lane.root_run_id;
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+    let _connection = core
+        .boot
+        .host
+        .lock()
+        .unwrap()
+        .connections()
+        .open(ClientId::new("client").unwrap());
+
+    for (name, role) in [
+        ("inv-orchestrator", InvocationRole::Orchestrator),
+        ("inv-worker", InvocationRole::Worker),
+    ] {
+        let prompt = format!("input from {name}");
+        let started = core.start_invocation(name, &lane.thread_id, role, &prompt);
+        assert_eq!(started.run.as_str(), root.to_string());
+        assert_eq!(started.ownership, InvocationOwnership::InputOnly);
+        core.phase(&[root], AgentRunPhase::Waiting).await;
+        assert_eq!(core.runs_that_saw(&prompt), vec![root.to_string()]);
+        assert_eq!(core.ledger_root(&lane.lane_id), root.to_string());
+        core.end_invocation(name);
+    }
+    assert_eq!(core.stored_title(&lane.thread_id).as_deref(), Some(TITLE));
+    assert_eq!(
+        core.boot.runtime.inspect_agent(root).unwrap().phase,
+        AgentRunPhase::Waiting,
+        "ending an input-only invocation leaves the lane's run alone"
+    );
+
+    // The root that took the input is still the one that reports and is closed.
+    core.report_ready(root, "result after the invocations");
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+    let now = core
+        .boot
+        .storage_writer()
+        .lane_close_context(lane.lane_id.clone())
+        .unwrap();
+    core.boot
+        .runtime
+        .close_lane(
+            lead,
+            close_request(
+                &lane.lane_id,
+                now.latest_ready_seq.expect("the lane reported Ready"),
+                now.management_revision,
+                now.request_revision,
+            ),
+        )
+        .unwrap();
+    core.boot.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_to_a_finished_lane_restores_its_own_root_and_a_rename_survives_the_next_message()
+{
+    let mut core = Core::open().await;
+    let lead = core.send("lead", LEAD, ComposerRole::Orchestrator, "coordinate");
+    core.phase(&[lead], AgentRunPhase::Waiting).await;
+    let lane = core
+        .boot
+        .runtime
+        .open_lane(lead, "finished-lane", brief())
+        .unwrap();
+    let root = lane.root_run_id;
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+
+    // The lane ends its own turn for good: nothing is live, nothing is bound by the host.
+    core.model
+        .finishing
+        .lock()
+        .unwrap()
+        .insert(root.to_string());
+    core.boot
+        .runtime
+        .send_message(root, "wrap up".into())
+        .unwrap();
+    core.boot.runtime.wait(root).await.unwrap();
+    core.model
+        .finishing
+        .lock()
+        .unwrap()
+        .remove(&root.to_string());
+    assert_eq!(
+        core.boot.runtime.inspect_agent(root).unwrap().phase,
+        AgentRunPhase::Done
+    );
+
+    let first = core.send(
+        "after-done",
+        &lane.thread_id,
+        ComposerRole::Worker,
+        FOLLOW_UP,
+    );
+    assert_eq!(first, root, "the finished root is restored, not replaced");
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+    core.rename(&lane.thread_id, "Renamed by the user");
+    let second = core.send(
+        "after-rename",
+        &lane.thread_id,
+        ComposerRole::Orchestrator,
+        "one more thing",
+    );
+    assert_eq!(second, root);
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+    assert_eq!(core.ledger_root(&lane.lane_id), root.to_string());
+    assert_eq!(
+        core.stored_title(&lane.thread_id).as_deref(),
+        Some("Renamed by the user")
+    );
+    assert_eq!(
+        core.sidebar_entry(&lane.thread_id).unwrap()["title"],
+        "Renamed by the user"
+    );
+
+    core.report_ready(root, "result after a restore");
+    core.phase(&[root], AgentRunPhase::Waiting).await;
+    let now = core
+        .boot
+        .storage_writer()
+        .lane_close_context(lane.lane_id.clone())
+        .unwrap();
+    core.boot
+        .runtime
+        .close_lane(
+            lead,
+            close_request(
+                &lane.lane_id,
+                now.latest_ready_seq.expect("the lane reported Ready"),
+                now.management_revision,
+                now.request_revision,
+            ),
+        )
+        .unwrap();
     core.boot.shutdown().await.unwrap();
 }

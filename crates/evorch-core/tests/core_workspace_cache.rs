@@ -338,3 +338,229 @@ async fn wire_workflow(restart: bool) {
         core.shutdown().await.unwrap();
     }
 }
+
+/// A message typed into a lane's thread, which the host never bound and the sidebar never listed,
+/// continues the lane's own root: that root's requests stay append-only on the production wire
+/// (model, settings, tools, history), reuse the provider's input-derived cache on the turn after
+/// it, and no other run asks the provider anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_an_unbound_lane_keeps_the_lane_roots_sent_prefix_on_the_production_wire() {
+    for subscription in [false, true] {
+        let project = cache::Project::new();
+        let provider = cache::Provider::new(subscription).await;
+        let mut config = cache::configuration(&provider);
+        let route = config.routing.routes["worker"].clone();
+        config.routing.routes.insert("orchestrator".into(), route);
+        let root = project.root().canonicalize().unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(&user).unwrap();
+        let store = SidebarStore::new(user.join("sidebar.json"));
+        let mut document = SidebarDocument::default();
+        document
+            .sidebar
+            .add_project(StateProject::new("p"), "repo", &root)
+            .unwrap();
+        document.sidebar.refresh_derived();
+        {
+            let lock = store.lock().unwrap();
+            store.write(&lock, &document).unwrap();
+        }
+        project
+            .secrets
+            .set(
+                "claude",
+                &sandbox::Secret::from(
+                    serde_json::json!({
+                        "access_token": "fixture-mcp-token",
+                        "refresh_token": "fixture-refresh",
+                        "expires_at": 4_102_444_800u64
+                    })
+                    .to_string(),
+                ),
+            )
+            .unwrap();
+        let provider_bus = Arc::new(event_bus::EventBus::new(4096));
+        let mut provider_events = provider_bus.subscribe();
+        let model = workbench_host::bootstrap::models::compose_production_model(
+            &config,
+            &workbench_host::bootstrap::models::ProductionModel {
+                load_options: config::LoadOptions {
+                    user_config_dir: Some(user.clone()),
+                    ..Default::default()
+                },
+                credential_store: project.secrets.clone(),
+                bus: provider_bus.clone(),
+                env: Arc::new(routing::MapEnv::from_iter([(
+                    "MCP_CACHE_KEY",
+                    "fixture-key",
+                )])),
+                model_catalog_dir: Some(test_support::model_catalog_dir()),
+            },
+        )
+        .unwrap();
+        let mut core = BootstrappedHost::open_with_test_seams(
+            BootstrapOptions {
+                config_dir: user.clone(),
+                project_root: root.clone(),
+                ownership_root: project.sockets().to_path_buf(),
+            },
+            TestSeams {
+                model,
+                sandbox: Arc::new(Unisolated),
+            },
+        )
+        .await
+        .unwrap();
+        let mut h = cache::Harness {
+            runtime: core.runtime.clone(),
+            receiver: core.runtime.event_bus().subscribe(),
+        };
+        let send = |thread: &str, submission: &str, role: ComposerRole, text: &str| {
+            let send = SendChat {
+                project: ProjectId::new("p").unwrap(),
+                thread: ThreadId::new(thread).unwrap(),
+                // The production Claude transport requires a UUID prompt identity.
+                submission_id: SubmissionId::new(submission).unwrap(),
+                composer_role: role,
+                text: text.into(),
+                skills: vec![],
+                attachments: vec![],
+                model_preference: None,
+                fork_seed: None,
+            };
+            let mut host = core.host.lock().unwrap();
+            host.reserve_new_chat_thread(&send).unwrap();
+            let run: runtime::RunId = host
+                .handle_command(
+                    Command::Conversation(
+                        workbench_protocol::namespaces::ConversationCommand::SendChat(send),
+                    ),
+                    local_desktop(),
+                )
+                .unwrap()
+                .run_id
+                .unwrap()
+                .as_str()
+                .parse()
+                .unwrap();
+            run
+        };
+
+        provider.enqueue(vec![cache::answer()]);
+        let lead = send(
+            "lead",
+            "00000000-0000-4000-8000-000000000021",
+            ComposerRole::Orchestrator,
+            cache::GOAL,
+        );
+        cache::through(&mut h.receiver, lead, AgentRunPhase::Waiting).await;
+        provider.enqueue(vec![cache::answer()]);
+        let lane = core
+            .runtime
+            .open_lane(
+                lead,
+                "cache-lane",
+                serde_json::from_value(serde_json::json!({
+                    "objective": "Keep the sent prefix", "inputs": [], "deliverables": ["patch"],
+                    "acceptance_criteria": ["review"], "constraints": [], "workspace": {},
+                    "report_policy": "attached"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        cache::through(&mut h.receiver, lane.root_run_id, AgentRunPhase::Waiting).await;
+
+        // The lane's input is also an intervention notice to its lead, which wakes the lead for
+        // a request of its own: scripts are queued for it too, and only the lane's turns are
+        // awaited.
+        provider.enqueue(vec![cache::answer(), cache::answer()]);
+        let accepted = send(
+            &lane.thread_id,
+            "00000000-0000-4000-8000-000000000022",
+            ComposerRole::Worker,
+            "an individual message to the lane",
+        );
+        assert_eq!(accepted, lane.root_run_id);
+        cache::through(&mut h.receiver, lane.root_run_id, AgentRunPhase::Waiting).await;
+        provider.enqueue(vec![cache::answer(), cache::answer()]);
+        core.runtime
+            .send_message(lane.root_run_id, "and a next turn".into())
+            .unwrap();
+        cache::through(&mut h.receiver, lane.root_run_id, AgentRunPhase::Waiting).await;
+        let lane_run = lane.root_run_id.to_string();
+        let mut completions = Vec::new();
+        completed(&mut provider_events, &mut completions, &lane_run, 3).await;
+
+        // Every request that carries the lane's brief belongs to the lane root: its own turns.
+        let lane_requests: Vec<_> = provider
+            .requests()
+            .into_iter()
+            .filter(|request| {
+                request["messages"]
+                    .to_string()
+                    .contains("Agent-authored lane brief from")
+            })
+            .collect();
+        assert_eq!(lane_requests.len(), 3);
+        cache::assert_frozen(&provider, &lane_requests);
+        // The cache affinity of the Claude wire is the run identity in the request metadata:
+        // every request of the lane root names the same run.
+        for request in &lane_requests {
+            assert_eq!(request["metadata"], lane_requests[0]["metadata"]);
+        }
+        assert_ne!(
+            lane_requests[0]["messages"].as_array().map(Vec::len),
+            lane_requests[2]["messages"].as_array().map(Vec::len),
+            "the later request carries the appended input"
+        );
+        let lane_usage: Vec<_> = completions
+            .iter()
+            .filter(|(run, ..)| run.as_deref() == Some(lane_run.as_str()))
+            .collect();
+        assert_eq!(lane_usage.len(), 3);
+        for pair in lane_usage.windows(2) {
+            assert!(
+                pair[1].2 >= pair[0].1,
+                "the lane root's whole prior input must be cached: {pair:?}"
+            );
+        }
+        for run in [lane.root_run_id, lead] {
+            core.runtime
+                .stop(run, runtime::StopScope::SelfOnly)
+                .unwrap();
+            core.runtime.wait(run).await.unwrap();
+        }
+        core.shutdown().await.unwrap();
+    }
+}
+
+/// Reads provider events until `run` has `total` finished requests among `completions`
+/// (`(run, input tokens, cache read tokens)` of every request seen); a cache regression
+/// diagnostic fails the test.
+async fn completed(
+    events: &mut event_bus::EventReceiver,
+    completions: &mut Vec<(Option<String>, u64, u64)>,
+    run: &str,
+    total: usize,
+) {
+    while completions
+        .iter()
+        .filter(|(id, ..)| id.as_deref() == Some(run))
+        .count()
+        < total
+    {
+        let event = events.recv().await.unwrap();
+        match &event.kind {
+            event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestCompleted {
+                run_id,
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => completions.push((run_id.clone(), *input_tokens, *cache_read_tokens)),
+            event_bus::EventKind::Diagnostic(d) => {
+                assert_ne!(d.code, "CacheRegression", "{d:?}");
+            }
+            _ => (),
+        }
+    }
+}
