@@ -1367,3 +1367,253 @@ fn socket_path_limit_is_exclusive_and_matches_what_bind_accepts() {
     assert_eq!(overflow.as_os_str().len(), host::SOCKET_PATH_LIMIT);
     assert!(host::check_socket_path(overflow.parent().unwrap(), &overflow).is_err());
 }
+
+// Explicit clocks exercise lease boundaries without waiting for wall time.
+#[test]
+fn automatic_claim_requires_the_rows_grace_absence_and_no_effective_hold() {
+    let directory = test_socket_dir::SocketDir::new();
+    let socket = directory.path().join("old.sock");
+    let mut registry = Registry::open(&directory.path().join("owners.db")).unwrap();
+    let mut original = owner();
+    original.settings.grace_ms = std::num::NonZeroU64::new(50).unwrap();
+    registry.start(&original).unwrap();
+    let successor = config::OwnershipConfig::default();
+    let attempt = |registry: &mut Registry, original: &ThreadOwner, now| {
+        ipc::claim_abandoned(
+            registry,
+            ipc::ClaimRequest {
+                thread_id: &original.thread_id,
+                expected: &original.lease,
+                previous_socket: &socket,
+                owner_id: "b",
+                now_ms: now,
+                grace_ms: 0,
+            },
+            &successor,
+        )
+    };
+    for state in [OwnerState::Running, OwnerState::Released] {
+        original.state = state;
+        registry
+            .update("thread-1", |row| {
+                *row = original.clone();
+                Ok(())
+            })
+            .unwrap();
+        for now in [99, 100, 149] {
+            assert!(matches!(
+                attempt(&mut registry, &original, now),
+                Err(RegistryError::Ownership(OwnershipError::NotClaimable))
+            ));
+            assert_eq!(registry.attach("thread-1").unwrap(), original);
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(matches!(
+            attempt(&mut registry, &original, 150),
+            Err(RegistryError::Ownership(OwnershipError::OwnerResponsive))
+        ));
+        assert_eq!(registry.attach("thread-1").unwrap(), original);
+        drop(listener);
+        let claimed = attempt(&mut registry, &original, 150).unwrap();
+        assert_eq!(claimed.lease.generation, original.lease.generation + 1);
+        assert_eq!(claimed.state, OwnerState::Running);
+        std::fs::remove_file(&socket).unwrap();
+    }
+    original.state = OwnerState::Running;
+    original
+        .install_hold("tx", "capture", &Default::default())
+        .unwrap();
+    registry
+        .update("thread-1", |row| {
+            *row = original.clone();
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        attempt(&mut registry, &original, 150),
+        Err(RegistryError::Ownership(OwnershipError::PlannedHeld))
+    ));
+    assert_eq!(registry.attach("thread-1").unwrap(), original);
+    original.handoff_hold.as_mut().unwrap().orphaned = true;
+    registry
+        .update("thread-1", |row| {
+            *row = original.clone();
+            Ok(())
+        })
+        .unwrap();
+    let claimed = attempt(&mut registry, &original, 150).unwrap();
+    assert_eq!(claimed.lease.generation, 2);
+    assert_eq!(claimed.settings, successor);
+    assert!(claimed.handoff_hold.unwrap().orphaned);
+}
+
+#[tokio::test]
+async fn automatic_claim_clears_active_state_fences_old_permit_and_emits_claimed() {
+    let directory = test_socket_dir::SocketDir::new();
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
+    let host = OwnerHost::open(directory.path(), Default::default(), bus.clone()).unwrap();
+    let mut registry = Registry::open(&directory.path().join("owners.db")).unwrap();
+    let mut original = owner();
+    original.lease.owner_id = "a".repeat(32);
+    original.lease.expires_at = 0;
+    original.active_turn = true;
+    original.active_runs.insert("old-run".into());
+    registry.start(&original).unwrap();
+    let old = OwnerPermit {
+        registry_path: directory.path().join("owners.db"),
+        thread_id: original.thread_id.clone(),
+        lease: original.lease.clone(),
+        run_id: None,
+    };
+    let mut events = bus.subscribe();
+    let permit = host.owned_or_claim_abandoned("thread-1").unwrap();
+    let claimed = registry.attach("thread-1").unwrap();
+    assert_eq!(permit.lease.generation, 2);
+    assert_eq!(claimed.lease.owner_id, host.owner_id());
+    assert!(!claimed.active_turn);
+    assert!(claimed.active_runs.is_empty());
+    assert!(old.begin_turn().is_err());
+    assert!(matches!(
+        events.recv().await.unwrap().kind,
+        event_bus::EventKind::Ownership(event_bus::OwnershipEvent {
+            action: event_bus::OwnershipAction::Claimed,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn automatic_permit_never_creates_missing_or_reanimates_own_rows() {
+    let directory = test_socket_dir::SocketDir::new();
+    // Keep unrelated heartbeat writes out of the data_version assertion.
+    let settings = config::OwnershipConfig {
+        heartbeat_ms: std::num::NonZeroU64::new(86_400_000).unwrap(),
+        lease_ms: std::num::NonZeroU64::new(172_800_000).unwrap(),
+        ..Default::default()
+    };
+    let host = OwnerHost::open(
+        directory.path(),
+        settings,
+        std::sync::Arc::new(event_bus::EventBus::new(32)),
+    )
+    .unwrap();
+    assert!(matches!(
+        host.owned_or_claim_abandoned("absent"),
+        Err(RegistryError::Absent)
+    ));
+    let permit = host.start("thread").unwrap();
+    let mut registry = Registry::open(&permit.registry_path).unwrap();
+    let observer = rusqlite::Connection::open(&permit.registry_path).unwrap();
+    for state in [
+        OwnerState::Running,
+        OwnerState::Quiescing,
+        OwnerState::Released,
+    ] {
+        let row = registry
+            .update("thread", |row| {
+                row.state = state;
+                Ok(())
+            })
+            .unwrap();
+        let version: u64 = observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        let result = host.owned_or_claim_abandoned("thread");
+        assert_eq!(result.is_ok(), state == OwnerState::Running);
+        assert_eq!(registry.attach("thread").unwrap(), row);
+        let after: u64 = observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, version);
+    }
+}
+
+#[test]
+fn competing_automatic_claims_commit_exactly_one_generation() {
+    let directory = test_socket_dir::SocketDir::new();
+    let db = directory.path().join("owners.db");
+    let mut original = owner();
+    original.settings.grace_ms = std::num::NonZeroU64::new(50).unwrap();
+    Registry::open(&db).unwrap().start(&original).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = ["b", "c"]
+            .into_iter()
+            .map(|id| {
+                let original = &original;
+                let barrier = &barrier;
+                let db = &db;
+                let socket = directory.path().join("absent.sock");
+                scope.spawn(move || {
+                    let mut registry = Registry::open(db).unwrap();
+                    let expected = registry.attach("thread-1").unwrap();
+                    assert_eq!(&expected, original);
+                    barrier.wait();
+                    ipc::claim_abandoned(
+                        &mut registry,
+                        ipc::ClaimRequest {
+                            thread_id: "thread-1",
+                            expected: &expected.lease,
+                            previous_socket: &socket,
+                            owner_id: id,
+                            now_ms: 150,
+                            grace_ms: 0,
+                        },
+                        &Default::default(),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(RegistryError::Ownership(OwnershipError::Fenced))))
+                .count(),
+            1
+        );
+    });
+    assert_eq!(
+        Registry::open(&db)
+            .unwrap()
+            .attach("thread-1")
+            .unwrap()
+            .lease
+            .generation,
+        2
+    );
+}
+
+#[test]
+fn automatic_claim_refuses_generation_overflow_and_deleted_threads() {
+    let directory = test_socket_dir::SocketDir::new();
+    let host = OwnerHost::open(
+        directory.path(),
+        Default::default(),
+        std::sync::Arc::new(event_bus::EventBus::new(32)),
+    )
+    .unwrap();
+    let mut registry = Registry::open(&directory.path().join("owners.db")).unwrap();
+    let mut original = owner();
+    original.lease.owner_id = "a".repeat(32);
+    original.lease.generation = u64::MAX;
+    original.lease.expires_at = 0;
+    registry.start(&original).unwrap();
+    assert!(matches!(
+        host.owned_or_claim_abandoned("thread-1"),
+        Err(RegistryError::Ownership(
+            OwnershipError::GenerationExhausted
+        ))
+    ));
+    assert_eq!(registry.attach("thread-1").unwrap(), original);
+    let mut set = storage::thread_retention::TombstoneSet::default();
+    set.threads.insert("thread-1".into());
+    host.set_tombstone_guard(crate::thread_retention::TombstoneGuard::new(set))
+        .unwrap();
+    assert!(matches!(
+        host.owned_or_claim_abandoned("thread-1"),
+        Err(RegistryError::ThreadDeleted(_))
+    ));
+    assert_eq!(registry.attach("thread-1").unwrap(), original);
+}

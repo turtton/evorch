@@ -82,6 +82,9 @@ impl CommandHost {
             SettingsQuery::GetSettingsSnapshot {} => {
                 SettingsReply::Settings(Box::new(settings.snapshot()?))
             }
+            SettingsQuery::GetFeatureSettings {} => {
+                SettingsReply::FeatureSettings(Box::new(settings.feature_settings()?))
+            }
             SettingsQuery::GetSettingsOperation { operation_id } => {
                 SettingsReply::Operation(settings.operation(operation_id)?)
             }

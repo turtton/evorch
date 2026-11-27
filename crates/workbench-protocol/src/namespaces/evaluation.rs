@@ -122,6 +122,15 @@ pub struct StartEvaluationRun {
     /// The text of the candidate overlay (a configuration fragment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<String>,
+    /// The text of the overlay both configurations run under (agents,
+    /// routing and role profiles only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common: Option<String>,
+    /// The digest of the sample, overlays, configuration and presets the
+    /// evaluation was approved on; the run is refused when they no longer
+    /// hash to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_digest: Option<String>,
     /// Replays per configuration; the configured `eval.repeat_target` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<u32>,
@@ -147,6 +156,16 @@ impl StartEvaluationRun {
     pub fn validate(&self) -> Result<(), ValidationError> {
         if let Some(candidate) = &self.candidate {
             check_text("candidate", candidate, MAX_CANDIDATE_BYTES, false)?;
+        }
+        if let Some(common) = &self.common {
+            check_text("common", common, MAX_CANDIDATE_BYTES, false)?;
+        }
+        if let Some(digest) = &self.approved_digest
+            && (digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(ValidationError::InvalidChars {
+                field: "approved_digest",
+            });
         }
         if let Some(repeat) = self.repeat
             && !(1..=MAX_EVALUATION_REPEAT).contains(&repeat)
@@ -740,5 +759,35 @@ impl EvaluationEvent {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod start_run_tests {
+    use super::*;
+
+    fn run() -> StartEvaluationRun {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "op-1", "thread": "thread-1", "report": true,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_approved_digest_is_a_sha256_in_hex_and_the_common_overlay_is_bounded() {
+        // Given: a run with a well-formed digest and a common overlay.
+        let mut start = run();
+        start.approved_digest = Some("0123456789abcdef".repeat(4));
+        start.common = Some("[agents.worker]\n".into());
+        assert!(start.validate().is_ok());
+
+        // When / Then: a short or non-hex digest and an oversized overlay are refused.
+        start.approved_digest = Some("abc".into());
+        assert!(start.validate().is_err());
+        start.approved_digest = Some("g".repeat(64));
+        assert!(start.validate().is_err());
+        start.approved_digest = None;
+        start.common = Some("x".repeat(MAX_CANDIDATE_BYTES + 1));
+        assert!(start.validate().is_err());
     }
 }

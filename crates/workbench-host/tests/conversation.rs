@@ -279,3 +279,56 @@ fn conversation_result(reply: workbench_protocol::commands::CommandReply) -> Con
         other => panic!("expected a conversation result, got {other:?}"),
     }
 }
+
+#[test]
+fn ordinary_continue_claims_abandoned_running_thread_without_prepare_existing() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = test_socket_dir::SplitDir::new();
+    let owners = test_socket_dir::SocketDir::new();
+    let (_, store) = runtime_with_store(dir.path());
+    let question = offline_question(&rt, dir.path(), &store);
+    let successor = Arc::new(
+        runtime::ownership::OwnerHost::open(
+            owners.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    );
+    let original = runtime::ownership::ThreadOwner::new(
+        "thread-1".into(),
+        runtime::ownership::Lease {
+            owner_id: "a".repeat(32),
+            generation: 4,
+            expires_at: 0,
+        },
+    );
+    let mut registry =
+        runtime::ownership::Registry::open(&owners.path().join("owners.db")).unwrap();
+    registry.start(&original).unwrap();
+    let runtime = runtime_on_store(dir.path(), &store);
+    let mut host = host_with_project(&rt, runtime.clone(), dir.path());
+    host.service_mut().set_ownership(Some(successor.clone()));
+    // Read-only permit lookup remains read-only; execution authorization may claim.
+    assert!(host.service().permit_for_thread(Some("thread-1")).is_err());
+    assert_eq!(registry.attach("thread-1").unwrap(), original);
+    let reply = host
+        .handle_command(
+            Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
+                project: project(),
+                thread: thread("thread-1"),
+                composer_role: ComposerRole::Worker,
+                model_preference: None,
+            })),
+            web(),
+        )
+        .unwrap();
+    assert_eq!(reply.run_id.unwrap().as_str(), question.run_id);
+    assert_eq!(
+        successor.owned_permit("thread-1").unwrap().lease.generation,
+        5
+    );
+    let run = question.run_id.parse().unwrap();
+    runtime.cancel(run).unwrap();
+    rt.block_on(runtime.wait(run)).unwrap();
+}

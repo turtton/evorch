@@ -28,12 +28,11 @@ use crate::theme::{
     widgets::{accessible, primary_button, soft_frame},
 };
 use workbench_protocol::{
-    commands::{Command, CommandResult, SetAgentWebToolsEnabled},
+    commands::{Command, CommandResult},
     errors::ErrorCode,
     events::UiEvent,
     handshake::Capability,
     ids::OperationId,
-    namespaces::ExecutionCommand,
     namespaces::settings::{
         DeleteProvider, ProviderView, RefreshSettings, ReloadModels, SaveDocument, SaveProvider,
         SettingsCommand, SettingsEvent, SettingsOperationKind, SettingsOperationView,
@@ -45,9 +44,14 @@ use workbench_protocol::{
 };
 
 mod config_file;
+mod feature_options;
 mod modal;
 mod model_shell;
 mod provider_form;
+mod roles;
+mod routing;
+mod rows;
+use feature_options::FeatureOptions;
 use modal::{Modal, ModalSave};
 use provider_form::{FormAction, FormKind, ProviderForm};
 
@@ -59,6 +63,10 @@ pub enum SettingsIntent {
     ModelSettings(SettingsTab),
     /// Bring the Config file tab forward.
     ConfigFile,
+    /// Open the Features modal.
+    Features,
+    /// Bring the Restart tab forward (from the Features modal's band).
+    RestartCore,
 }
 
 #[derive(Debug, Clone)]
@@ -66,11 +74,8 @@ enum Pending {
     Snapshot,
     Operation(OperationId),
     Command(OperationId),
-    /// A change of the Agent web tools of the running core (an execution command).
-    WebTools(bool),
-    /// The same change after its reply was lost: kept for the result the core recorded for it,
-    /// which is shown when it arrives; it no longer disables the buttons (nothing is resent).
-    WebToolsUnknown(bool),
+    /// The Features modal's view of the settings.
+    FeatureView,
 }
 
 /// The document being edited and what it was made from.
@@ -120,7 +125,8 @@ pub struct SettingsFeature {
     /// The form the running provider save was made from: only that form is closed when it ends.
     saving_form: Option<u64>,
     form_serial: u64,
-    web_tools_status: String,
+    /// The Features modal (its own draft, view and save).
+    features: FeatureOptions,
     modal: Option<Modal>,
     modal_saves: BTreeMap<OperationId, ModalSave>,
     confirm_delete: Option<String>,
@@ -151,7 +157,7 @@ impl Default for SettingsFeature {
             provider_saving: None,
             saving_form: None,
             form_serial: 0,
-            web_tools_status: String::new(),
+            features: FeatureOptions::default(),
             modal: None,
             modal_saves: BTreeMap::new(),
             confirm_delete: None,
@@ -293,6 +299,10 @@ impl SettingsFeature {
             return;
         }
         self.lost.insert(id.clone());
+        self.feature_save_dropped(
+            id,
+            Some("The result of the save could not be confirmed (the core may have restarted). Check what was saved.".into()),
+        );
         self.saving.remove(id);
         self.quiet_refreshes.remove(id);
         self.provider_quoted.remove(id);
@@ -344,6 +354,12 @@ impl SettingsFeature {
         let revision = view.revision.clone();
         self.operations.insert(id.clone(), view);
         self.lost.remove(&id);
+        if kind == SettingsOperationKind::SaveFeatureSettings {
+            if state.is_final() {
+                self.feature_save_ended(&id, state, message);
+            }
+            return;
+        }
         if state.is_final() && !matches!(state, OperationState::Ready) {
             self.saving.remove(&id);
         }
@@ -699,14 +715,9 @@ impl Feature for SettingsFeature {
         self.stale = true;
         // What was asked before the snapshot is answered, if at all, by a reply
         // that is no longer wanted; the operations are asked for again.
-        // A web tools change whose reply was lost is kept: the resolved reply for its tag
-        // follows the reconnect, and is shown.
-        self.pending.retain(|_, pending| {
-            matches!(
-                pending,
-                Pending::Command(_) | Pending::WebTools(_) | Pending::WebToolsUnknown(_)
-            )
-        });
+        self.pending
+            .retain(|_, pending| matches!(pending, Pending::Command(_)));
+        self.features.reset();
         for (id, view) in &self.operations {
             if !view.operation.state.is_final() && !self.lost.contains(id) {
                 self.to_check.insert(id.clone());
@@ -718,6 +729,7 @@ impl Feature for SettingsFeature {
         match event {
             UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged { .. }) => {
                 self.stale = true;
+                self.features.changed_elsewhere();
             }
             UiEvent::Settings(SettingsEvent::SettingsOperationCompleted { operation }) => {
                 self.operation_update(operation.clone());
@@ -744,6 +756,7 @@ impl Feature for SettingsFeature {
                     }
                 }
             }
+            (Pending::FeatureView, FeatureReply::Query(result)) => self.features_reply(result),
             (Pending::Operation(id), FeatureReply::Query(result)) => match result {
                 Ok(QueryReply::Settings(SettingsReply::Operation(view))) => {
                     self.operation_update(view);
@@ -772,6 +785,7 @@ impl Feature for SettingsFeature {
                         // asked for, not sent again.
                         self.to_check.insert(id);
                     } else {
+                        self.feature_save_dropped(&id, Some(error.message.clone()));
                         self.operations.remove(&id);
                         self.saving.remove(&id);
                         self.quiet_refreshes.remove(&id);
@@ -783,28 +797,6 @@ impl Feature for SettingsFeature {
                     }
                 }
             },
-            (
-                Pending::WebTools(enabled) | Pending::WebToolsUnknown(enabled),
-                FeatureReply::Command(result),
-            ) => {
-                let word = if enabled { "enable" } else { "disable" };
-                self.web_tools_status = match result {
-                    Ok(_) => format!(
-                        "Agent web tools {word}d on the running core (tool definitions a started run already sent do not change)."
-                    ),
-                    Err(error) if error.outcome_unknown => {
-                        // The core's recorded result for this tag follows after a reconnect, if it
-                        // has one; until then the buttons work again and the
-                        // command is not sent again by this screen.
-                        self.pending.insert(tag, Pending::WebToolsUnknown(enabled));
-                        format!(
-                            "The result of switching Agent web tools is unknown (not resent). Choose again if needed — {}",
-                            error.message
-                        )
-                    }
-                    Err(error) => format!("Could not {word} Agent web tools: {}", error.message),
-                };
-            }
             _ => {}
         }
     }
@@ -837,6 +829,7 @@ impl Feature for SettingsFeature {
                 Query::Settings(SettingsQuery::GetSettingsOperation { operation_id: id }),
             );
         }
+        self.features_maintain(ctx);
     }
 
     fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
@@ -845,6 +838,7 @@ impl Feature for SettingsFeature {
 
     fn render_overlay(&mut self, egui_ctx: &egui::Context, ctx: &mut FeatureContext<'_>) {
         self.render_model_settings(egui_ctx, ctx);
+        self.render_features(egui_ctx, ctx);
     }
 
     fn as_settings_mut(&mut self) -> Option<&mut SettingsFeature> {

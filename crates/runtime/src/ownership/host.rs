@@ -30,6 +30,8 @@ pub struct OwnerHost {
     bus: Arc<EventBus>,
     // Reuse SQLite's page/statement caches for GUI probes, never ownership state.
     reader: Mutex<Registry>,
+    // Keep automatic permit readers behind claim commit AND scratch cleanup.
+    claim_completion: Mutex<()>,
     // A GUI drain keeps generation guards valid until its queued writes finish.
     release_deferred: Arc<AtomicBool>,
     release_on_drop: AtomicBool,
@@ -142,6 +144,7 @@ impl OwnerHost {
             settings,
             bus,
             reader,
+            claim_completion: Mutex::new(()),
             release_deferred,
             release_on_drop: AtomicBool::new(ordinary),
             scratch,
@@ -203,6 +206,10 @@ impl OwnerHost {
     }
 
     pub fn claim(&self, expected: &ThreadOwner) -> Result<OwnerPermit, RegistryError> {
+        let _completion = self
+            .claim_completion
+            .lock()
+            .map_err(|_| std::io::Error::other("ownership claim completion lock poisoned"))?;
         self.deny_deleted(&expected.thread_id)?;
         let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
         let socket = socket_path(&self.root, &expected.lease.owner_id)?;
@@ -218,6 +225,10 @@ impl OwnerHost {
             },
             &self.settings,
         )?;
+        Ok(self.finish_claim(expected, &owner))
+    }
+
+    fn finish_claim(&self, expected: &ThreadOwner, owner: &ThreadOwner) -> OwnerPermit {
         authority::record_fenced(&self.db(), &expected.thread_id, &expected.lease);
         clean_scratch(
             &self.db(),
@@ -226,8 +237,42 @@ impl OwnerHost {
             &self.scratch,
             true,
         );
-        emit(&self.bus, &owner, OwnershipAction::Claimed);
-        Ok(self.permit(&owner))
+        emit(&self.bus, owner, OwnershipAction::Claimed);
+        self.permit(owner)
+    }
+
+    /// Obtain execution authority, reclaiming only a stale, absent foreign owner
+    /// without an effective planned hold. Never starts a missing thread.
+    pub fn owned_or_claim_abandoned(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {
+        let _completion = self
+            .claim_completion
+            .lock()
+            .map_err(|_| std::io::Error::other("ownership claim completion lock poisoned"))?;
+        let expected = self.attach(thread_id)?;
+        if expected.lease.owner_id == self.owner_id {
+            return self.owned_permit(thread_id);
+        }
+        let socket = socket_path(&self.root, &expected.lease.owner_id)?;
+        let result = ipc::claim_abandoned(
+            &mut Registry::open_existing(&self.db())?,
+            ipc::ClaimRequest {
+                thread_id,
+                expected: &expected.lease,
+                previous_socket: &socket,
+                owner_id: &self.owner_id,
+                now_ms: now_ms(),
+                grace_ms: expected.settings.grace_ms.get(),
+            },
+            &self.settings,
+        );
+        match result {
+            Ok(owner) => Ok(self.finish_claim(&expected, &owner)),
+            // A same-core winner may have completed. Re-read once, never retry claim.
+            Err(RegistryError::Ownership(super::OwnershipError::Fenced)) => {
+                self.owned_permit(thread_id)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn owned_permit(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {

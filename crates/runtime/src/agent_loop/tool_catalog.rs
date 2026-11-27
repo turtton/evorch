@@ -40,6 +40,18 @@ pub(crate) fn description_registry(
     names.extend(crate::META_OPS.iter().map(|name| (*name).to_string()));
     names
 }
+/// Specs of every registered tool, meta operations included, unfiltered.
+pub(crate) fn raw_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
+    super::tool_calls::standard_tool_specs(executor)
+}
+/// Role filter under the most permissive per-run flags: skills and web
+/// configured, not a child.
+pub(crate) fn permissive_visible_specs(
+    specs: Vec<ToolSpec>,
+    policy: &crate::ExecutionPolicy,
+) -> Vec<ToolSpec> {
+    visible_tool_specs(specs, policy, true, false, true)
+}
 /// Full build-owned registry, not the role-visible subset. Base executors hold
 /// standard/host tools; MCP tools are registered only in disposable run forks.
 /// Preserve registry order and overlay exact provider-visible projections (run_js

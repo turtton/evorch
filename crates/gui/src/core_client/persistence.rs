@@ -42,6 +42,8 @@ const MAX_DEPTH: usize = 10;
 const MAX_TABS: usize = 256;
 /// The most folded threads a restored sidebar keeps.
 const MAX_FOLDED_THREADS: usize = 4096;
+/// The most threads with an open lane list a restored sidebar keeps.
+const MAX_OPENED_LANES: usize = 4096;
 /// Below this width or height a floating window shows no more than its tab bar (folded
 /// or minimized). Such a rect is neither kept nor restored.
 const MIN_WINDOW_EDGE: f32 = 64.0;
@@ -159,6 +161,8 @@ pub struct SavedState {
     pub selection: Option<SavedSelection>,
     /// The threads whose children the sidebar shows folded.
     pub folded_threads: Vec<ThreadId>,
+    /// The threads whose lane list the sidebar shows open; the others keep it collapsed.
+    pub opened_lanes: Vec<ThreadId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +273,8 @@ struct SavedFile {
     selection: Value,
     #[serde(default)]
     folded_threads: Value,
+    #[serde(default)]
+    opened_lanes: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -317,11 +323,18 @@ impl SavedState {
             .filter_map(|thread| serde_json::from_value::<ThreadId>(thread).ok())
             .take(MAX_FOLDED_THREADS)
             .collect();
+        let opened_lanes = serde_json::from_value::<Vec<Value>>(file.opened_lanes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|thread| serde_json::from_value::<ThreadId>(thread).ok())
+            .take(MAX_OPENED_LANES)
+            .collect();
         Ok(Self {
             layout,
             run_tabs,
             selection,
             folded_threads,
+            opened_lanes,
         })
     }
 
@@ -342,6 +355,7 @@ impl SavedState {
             run_tabs: serde_json::to_value(run_tabs)?,
             selection: serde_json::to_value(&self.selection)?,
             folded_threads: serde_json::to_value(&self.folded_threads)?,
+            opened_lanes: serde_json::to_value(&self.opened_lanes)?,
         })
     }
 }
@@ -788,6 +802,7 @@ mod tests {
                 run_tabs: vec![run.clone()],
                 selection: Some(selection.clone()),
                 folded_threads: vec![ThreadId::new("thr-2").unwrap()],
+                opened_lanes: vec![ThreadId::new("thr-3").unwrap()],
             })
             .unwrap();
 
@@ -797,11 +812,17 @@ mod tests {
 
         assert_eq!(extract(&restored, &fresh, &no_rects()), Some(layout));
         assert_eq!(
-            (loaded.run_tabs, loaded.selection, loaded.folded_threads),
+            (
+                loaded.run_tabs,
+                loaded.selection,
+                loaded.folded_threads,
+                loaded.opened_lanes
+            ),
             (
                 vec![run],
                 Some(selection),
-                vec![ThreadId::new("thr-2").unwrap()]
+                vec![ThreadId::new("thr-2").unwrap()],
+                vec![ThreadId::new("thr-3").unwrap()]
             )
         );
         let (_, file) = restored

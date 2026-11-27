@@ -44,7 +44,7 @@ pub fn claim(
     registry: &mut Registry,
     request: ClaimRequest<'_>,
 ) -> Result<ThreadOwner, RegistryError> {
-    claim_inner(registry, request, None)
+    claim_inner(registry, request, None, false)
 }
 
 pub(super) fn claim_configured(
@@ -52,19 +52,42 @@ pub(super) fn claim_configured(
     request: ClaimRequest<'_>,
     settings: &config::OwnershipConfig,
 ) -> Result<ThreadOwner, RegistryError> {
-    claim_inner(registry, request, Some(settings))
+    claim_inner(registry, request, Some(settings), false)
+}
+
+/// Automatic cold claim: all eligibility checks use the row re-read under the
+/// IMMEDIATE transaction. Unlike explicit claim, Released is not an exception.
+pub(super) fn claim_abandoned(
+    registry: &mut Registry,
+    request: ClaimRequest<'_>,
+    settings: &config::OwnershipConfig,
+) -> Result<ThreadOwner, RegistryError> {
+    claim_inner(registry, request, Some(settings), true)
 }
 
 fn claim_inner(
     registry: &mut Registry,
     request: ClaimRequest<'_>,
     settings: Option<&config::OwnershipConfig>,
+    abandoned: bool,
 ) -> Result<ThreadOwner, RegistryError> {
     // Recorded as a claim, not a generic update. Like every callback-driven
     // update, a claim is never retried.
     registry.update_as(super::DbOperation::Claim, request.thread_id, |owner| {
         owner.validate(request.expected)?;
-        if owner.state != super::OwnerState::Released
+        if abandoned {
+            if owner.has_planned_hold() {
+                return Err(super::OwnershipError::PlannedHeld);
+            }
+            if owner
+                .lease
+                .observe(request.now_ms, owner.settings.grace_ms.get())
+                != super::OwnerState::Stale
+            {
+                return Err(super::OwnershipError::NotClaimable);
+            }
+        }
+        if (abandoned || owner.state != super::OwnerState::Released)
             && endpoint_may_be_live(request.previous_socket)
         {
             return Err(super::OwnershipError::OwnerResponsive);

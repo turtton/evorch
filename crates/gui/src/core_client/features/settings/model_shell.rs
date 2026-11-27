@@ -8,12 +8,20 @@
 use super::config_file::reload_models_button;
 use super::*;
 use crate::panes::model_settings::{ModalPart, SettingsModalAction, settings_modal};
+use crate::theme::widgets::{ghost_icon_button, primary_icon_button};
 
 /// What the footer's confirmation to close asked for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloseAnswer {
     Discard,
     KeepEditing,
+}
+
+/// What the footer's Save and Discard asked for: the selected route or role.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FooterAction {
+    Save,
+    Discard,
 }
 
 /// The applied state of the saved settings, at the bottom of the navigation. Returns whether
@@ -53,6 +61,7 @@ impl SettingsFeature {
         let mut save: Option<ModalSave> = None;
         let mut reload = false;
         let mut answer = None;
+        let mut footer_action = None;
         let action = settings_modal(egui_ctx, tab, busy, |ui, part| match part {
             ModalPart::HeaderRight => {
                 if let Some(modal) = &mut self.modal {
@@ -69,12 +78,19 @@ impl SettingsFeature {
                 }
                 _ => {
                     if let Some(modal) = &mut self.modal {
-                        save = modal.body(ui, snapshot.as_ref(), busy).or(save.take());
+                        save = modal
+                            .body(ui, snapshot.as_ref(), busy, height)
+                            .or(save.take());
                     }
                 }
             },
-            ModalPart::Footer => answer = self.footer(ui, busy),
+            ModalPart::Footer => (answer, footer_action) = self.footer(ui, busy),
         });
+        match (footer_action, &mut self.modal) {
+            (Some(FooterAction::Save), Some(modal)) => save = modal.save_selected().or(save),
+            (Some(FooterAction::Discard), Some(modal)) => modal.discard_selected(),
+            _ => {}
+        }
         if reload {
             self.reload_models(ctx);
         }
@@ -102,8 +118,9 @@ impl SettingsFeature {
         }
     }
 
-    /// The status of the last operation, or the question whether to discard what was edited.
-    fn footer(&self, ui: &mut egui::Ui, busy: bool) -> Option<CloseAnswer> {
+    /// The status of the last operation, or the question whether to discard what was edited;
+    /// in Routing and Agent Roles also Discard and Save for the selected route or role.
+    fn footer(&self, ui: &mut egui::Ui, busy: bool) -> (Option<CloseAnswer>, Option<FooterAction>) {
         if self.confirm_close {
             ui.colored_label(palette().WARNING_FG, "Discard unsaved changes and close?");
             let mut answer = None;
@@ -115,16 +132,21 @@ impl SettingsFeature {
                     answer = Some(CloseAnswer::KeepEditing);
                 }
             });
-            return answer;
+            return (answer, None);
         }
+        let section = self.modal.as_ref().and_then(Modal::footer_state);
+        let summary = section.as_ref().and_then(|state| state.summary.clone());
         let state = if busy {
-            Some(("Working…", palette().TEXT_MUTED))
+            Some(("Working…".to_owned(), palette().TEXT_MUTED))
+        } else if let Some(summary) = summary {
+            Some((format!("● {summary}"), palette().WARNING_FG))
         } else if self.modal_dirty() {
-            Some(("● Unsaved changes", palette().WARNING_FG))
+            Some(("● Unsaved changes".to_owned(), palette().WARNING_FG))
         } else {
             None
         };
-        let reserved = if state.is_some() { 150.0 } else { 0.0 };
+        let buttons = if section.is_some() { 210.0 } else { 0.0 };
+        let reserved = buttons + if state.is_some() { 150.0 } else { 0.0 };
         ui.scope(|ui| {
             ui.set_max_width((ui.available_width() - reserved).max(0.0));
             if !self.status.is_empty() {
@@ -132,11 +154,33 @@ impl SettingsFeature {
                     .on_hover_text(&self.status);
             }
         });
-        if let Some((text, color)) = state {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(text).color(color));
-            });
-        }
-        None
+        let mut chosen = None;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(section) = &section {
+                let save = ui
+                    .add_enabled_ui(!busy && section.can_save, |ui| {
+                        primary_icon_button(ui, icons::FLOPPY_DISK, section.save_label)
+                    })
+                    .inner;
+                if let Some(why) = section.why_not {
+                    save.clone().on_disabled_hover_text(why);
+                }
+                if save.clicked() {
+                    chosen = Some(FooterAction::Save);
+                }
+                let discard = ui
+                    .add_enabled_ui(!busy && section.can_discard, |ui| {
+                        ghost_icon_button(ui, icons::ARROW_COUNTER_CLOCKWISE, "Discard")
+                    })
+                    .inner;
+                if discard.clicked() {
+                    chosen = Some(FooterAction::Discard);
+                }
+            }
+            if let Some((text, color)) = state {
+                ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
+            }
+        });
+        (None, chosen)
     }
 }

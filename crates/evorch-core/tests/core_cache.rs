@@ -1,5 +1,7 @@
 //! Real Unix client -> host -> routing -> HTTP provider. Cache usage comes from
 //! the fixture's input-derived cache, and wire prefix assertions are independent.
+#[path = "../shared-test-support/tool_body_retention_cache.rs"]
+mod tool_body_retention;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use workbench_protocol::namespaces::{

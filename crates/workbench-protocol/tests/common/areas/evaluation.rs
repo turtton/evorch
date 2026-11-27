@@ -57,6 +57,7 @@ pub fn samples() -> AreaSamples {
             command(
                 "start_evaluation_run",
                 json!({"operation_id": "op-1", "thread": "thread-1", "candidate": "[agents.worker]\n",
+                       "common": "[routing]\n", "approved_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                        "repeat": 2, "output": "run-1", "problem": "it looped", "verify": "cargo test",
                        "verify_timeout_secs": 600, "keep_workspace": false, "report": true}),
             ),

@@ -218,6 +218,11 @@ enum Command {
     RecordArtifactRef(crate::artifact_refs::ArtifactRef, ReplyTx),
     RemoveArtifactRefs(Vec<String>, ReplyTx<usize>),
     RetentionBackfillStep(usize, ReplyTx<crate::BackfillProgress>),
+    RetainToolBodies(
+        Arc<crate::WriterLeases>,
+        crate::thread_retention::tool_bodies::Request,
+        ReplyTx<crate::thread_retention::tool_bodies::Progress>,
+    ),
     ConfirmRetentionOnline(
         Arc<crate::WriterLeases>,
         crate::thread_retention::online::OnlineRequest,
@@ -511,6 +516,20 @@ impl StorageHandle {
     ) -> Result<crate::thread_retention::online::OnlineOutcome, StorageError> {
         let leases = authority.owned_leases();
         self.request(|reply| Command::ConfirmRetentionOnline(leases, request, budget, fence, reply))
+    }
+
+    /// One bounded display-body unit, without foreground admission or a commit fence.
+    pub fn retain_tool_bodies(
+        &self,
+        authority: &crate::thread_retention::AutoArchiveAuthority<'_>,
+        request: crate::thread_retention::tool_bodies::Request,
+    ) -> Result<crate::thread_retention::tool_bodies::Progress, StorageError> {
+        let result = self
+            .request(|reply| Command::RetainToolBodies(authority.owned_leases(), request, reply))?;
+        if result.changed != 0 {
+            self.3.notify();
+        }
+        Ok(result)
     }
 
     /// Establish the DB half after the ownership-root binding is durable.

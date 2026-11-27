@@ -23,6 +23,7 @@ use crate::report::{self, Report};
 use crate::runner::{BASELINE, CANDIDATE};
 
 const CLI: &str = "evorch";
+const COMMON_FILE: &str = "common.toml";
 const TAIL_BYTES: u64 = 16 * 1024;
 const TAIL_CHARS: usize = 1_200;
 
@@ -66,6 +67,8 @@ pub(super) struct Launch {
     pub purpose: Purpose,
     pub repeat: u32,
     pub problem: String,
+    /// The inputs digest the user approved; the evaluation refuses to run on others.
+    pub approved_digest: String,
 }
 
 fn unused_dir(base: PathBuf) -> PathBuf {
@@ -117,15 +120,17 @@ pub(super) fn launch(
     shared: &Arc<Shared>,
     run_id: &str,
     overlay: &str,
+    common: Option<&str>,
     launches: Vec<Launch>,
 ) -> Result<GroupRecord, String> {
-    launch_with(shared, run_id, overlay, launches, spawn)
+    launch_with(shared, run_id, overlay, common, launches, spawn)
 }
 
 fn launch_with(
     shared: &Arc<Shared>,
     run_id: &str,
     overlay: &str,
+    common: Option<&str>,
     launches: Vec<Launch>,
     mut spawn_child: impl FnMut(
         &Path,
@@ -159,6 +164,14 @@ fn launch_with(
     let candidate = dir.join(OVERLAY_FILE);
     std::fs::write(&candidate, overlay)
         .map_err(|error| format!("{}: {error}", candidate.display()))?;
+    let common_file = match common {
+        Some(text) => {
+            let path = dir.join(COMMON_FILE);
+            std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
+            Some(path)
+        }
+        None => None,
+    };
     let mut members = Vec::new();
     let mut children = Vec::new();
     for (index, launch) in launches.into_iter().enumerate() {
@@ -176,13 +189,15 @@ fn launch_with(
             stderr: dir.join(format!("{index}.stderr.log")),
             exit: None,
         };
-        let args: Vec<OsString> = [
+        let mut args: Vec<OsString> = [
             OsString::from("eval"),
             "run".into(),
             "--thread".into(),
             member.thread_id.clone().into(),
             "--candidate".into(),
             candidate.clone().into(),
+            "--approved-digest".into(),
+            launch.approved_digest.into(),
             "--problem".into(),
             launch.problem.into(),
             "--repeat".into(),
@@ -193,6 +208,9 @@ fn launch_with(
             context.user_config_dir.clone().into(),
         ]
         .into();
+        if let Some(common) = &common_file {
+            args.extend(["--common".into(), common.clone().into()]);
+        }
         match spawn_child(&cli, &args, &member, ledger.as_ref()) {
             Ok(child) => {
                 member.pid = child.id();
@@ -645,6 +663,7 @@ mod lifecycle_tests {
                     purpose: Purpose::Target,
                     repeat: 1,
                     problem: "test".into(),
+                    approved_digest: "digest".into(),
                 })
                 .collect()
         };
@@ -653,6 +672,7 @@ mod lifecycle_tests {
             &shared,
             "run-1",
             "overlay",
+            None,
             launches(),
             |cli, _, member, ledger| {
                 count += 1;
@@ -682,7 +702,7 @@ mod lifecycle_tests {
             "no shutdown notice may start a new run"
         );
         assert!(
-            launch(&shared, "run-1", "overlay", launches())
+            launch(&shared, "run-1", "overlay", None, launches())
                 .unwrap_err()
                 .contains("stopping")
         );

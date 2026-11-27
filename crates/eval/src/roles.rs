@@ -139,6 +139,47 @@ fn to_json(value: &impl Serialize) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or_default()
 }
 
+/// Everything that decides which model a role talks to and how: its chains
+/// with their reasoning effort, generation overrides, routes and provider
+/// profiles. Presets are left out, so two configurations that differ only in
+/// a prompt preset have equal settings.
+pub fn model_settings(config: &Config, address: &str) -> serde_json::Value {
+    fn strip_presets(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.remove("preset");
+                map.values_mut().for_each(strip_presets);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip_presets),
+            _ => {}
+        }
+    }
+    let chains = chains(config, address);
+    let mut binding = chains.binding;
+    strip_presets(&mut binding);
+    let routes: BTreeMap<_, _> = chains
+        .routes
+        .iter()
+        .map(|route| (route, to_json(&config.routing.routes.get(route))))
+        .collect();
+    let models = role_models(config, address);
+    let providers: BTreeMap<_, _> = models
+        .iter()
+        .map(|model| {
+            (
+                &model.profile,
+                to_json(&config.providers.get(&model.profile)),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "binding": binding,
+        "routes": routes,
+        "providers": providers,
+        "models": models,
+    })
+}
+
 fn fingerprint(config: &Config, address: &str) -> serde_json::Value {
     let chains = chains(config, address);
     let routes: BTreeMap<_, _> = chains

@@ -183,6 +183,7 @@ fn run(label: &str, index: u32, status: Option<Status>) -> RunEntry {
         index,
         dir: format!("runs/{label}-{index}"),
         nonce: "nonce".into(),
+        observed: None,
         started_at: "2026-10-20T00:00:01.000Z".into(),
         finished_at: status.map(|_| "2026-10-20T00:01:00.000Z".into()),
         status,
@@ -209,6 +210,9 @@ fn manifest(configurations: &[&str], repeat: u32, runs: Vec<RunEntry>, finished:
         verify: None,
         candidate_overlay: None,
         swapped_roles: Vec::new(),
+        common_overlay: None,
+        changes: Default::default(),
+        pins: None,
         configurations: configurations.iter().map(|c| (*c).to_owned()).collect(),
         repeat,
         simulator: BindingSummary {

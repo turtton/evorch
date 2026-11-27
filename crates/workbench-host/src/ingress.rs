@@ -340,7 +340,8 @@ impl CommandHost {
     }
 
     /// Reserve an absent thread for a new chat, after resolving its project.
-    /// This never claims or hands off an existing owner row, even a released one.
+    /// Reservation never claims an existing row, even a released one. Later execution
+    /// authorization may reclaim an absent foreign owner after its lease and grace expire.
     pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
         let _permit = self
             .service
