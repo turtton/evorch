@@ -1062,7 +1062,7 @@ impl CoreClientScreen {
         self.local.begin_frame(ui.ctx(), roots, projects);
         self.conversation.begin_frame();
         let link_base = self.local.workspace().map(std::path::Path::to_path_buf);
-        let frame = {
+        let mut frame = {
             let s = &mut *shared;
             let view = FeatureView {
                 connected: s.connected,
@@ -1112,6 +1112,11 @@ impl CoreClientScreen {
             // What a lane menu chose is sent in the lanes feature's next pass.
             ui.ctx().request_repaint();
         }
+        effects.extend(
+            std::mem::take(&mut frame.settings)
+                .into_iter()
+                .map(shell::Effect::Settings),
+        );
         if apply_frame(
             &self.actions,
             &mut shared,
@@ -1320,6 +1325,14 @@ fn apply_effect(
                     settings.open_modal(tab);
                 }
             }
+            shell::Effect::Settings(features::settings::SettingsIntent::Features) => {
+                if let Some(settings) = shared.features.settings_mut() {
+                    settings.open_features();
+                }
+            }
+            shell::Effect::Settings(features::settings::SettingsIntent::RestartCore) => {
+                shell::focus(dock, shell::CoreTab::Feature(features::FeatureId::Restart));
+            }
             shell::Effect::Settings(features::settings::SettingsIntent::ConfigFile) => {
                 shell::focus(dock, shell::CoreTab::Feature(features::FeatureId::Settings));
             }
@@ -1470,6 +1483,7 @@ mod navigation_tests {
             observations: Vec::new(),
             lanes: Vec::new(),
             pull_requests: Vec::new(),
+            settings: Vec::new(),
             actions: vec![],
             navigation: vec![navigation],
         };

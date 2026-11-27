@@ -292,6 +292,8 @@ pub struct FeatureFrame {
     pub lanes: Vec<lanes::LaneIntent>,
     /// What a thread's row or menu asked of the pull requests feature.
     pub pull_requests: Vec<pull_requests::PullRequestIntent>,
+    /// What a feature asked of the settings screens (the window applies it like a ⚙ menu entry).
+    pub settings: Vec<settings::SettingsIntent>,
 }
 
 /// What asking the features for the selector came to.
@@ -382,6 +384,11 @@ impl FeatureContext<'_> {
     /// the frame.
     pub fn pull_request(&mut self, intent: pull_requests::PullRequestIntent) {
         self.frame.pull_requests.push(intent);
+    }
+
+    /// Ask the window to open a settings screen, applied after the frame.
+    pub fn settings(&mut self, intent: settings::SettingsIntent) {
+        self.frame.settings.push(intent);
     }
 
     /// Typed View-to-run intent, processed once after this composition pass.
