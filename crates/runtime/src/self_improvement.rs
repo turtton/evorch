@@ -149,6 +149,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // restore: a legacy child Orchestrator was refused (ADR 0044); a one-time
         // migration notice, not a harness fault.
         NESTED_ORCHESTRATOR_REJECTED => Ignored,
+        // A removed build-owned description target is expected catalog-change telemetry,
+        // not evidence of a model or harness failure.
+        SAVED_TOOL_DESCRIPTION_TARGET_REMOVED => Ignored,
         // admission: the provider refused or could not admit the handoff run (quota,
         // credentials, availability); user cancellation is not reported.
         ESCALATION_ADMISSION_FAILED => TransientOrExternal,

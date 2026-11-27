@@ -844,7 +844,7 @@ pub(crate) async fn run_agent(
                 .emit(Event::new(event_bus::DiagnosticEvent {
                     source: "tool_catalog".into(),
                     severity: event_bus::DiagnosticSeverity::Warning,
-                    code: "SAVED_TOOL_DESCRIPTION_TARGET_REMOVED".into(),
+                    code: diagnostic_codes::SAVED_TOOL_DESCRIPTION_TARGET_REMOVED.into(),
                     detail: format!(
                         "Saved description target is no longer a fixed builtin: {name}"
                     ),

@@ -113,6 +113,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("mcp.owner_drained", Ignored),
         ("EvaluationFinished", Ignored),
         ("NestedOrchestratorRejected", Ignored),
+        ("SAVED_TOOL_DESCRIPTION_TARGET_REMOVED", Ignored),
         ("conversation_plan_reconcile_failed", Ignored),
         ("chat_resume_failed", Ignored),
         ("escalation_review", Ignored),
