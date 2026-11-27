@@ -71,6 +71,7 @@ pub(super) fn notifications(
             LaneNotificationKind::Ready { .. }
             | LaneNotificationKind::Failed { .. }
             | LaneNotificationKind::Closed { .. }
+            | LaneNotificationKind::UserAnswered { .. }
             | LaneNotificationKind::Intervention { .. } => {
                 set_policy && Some(&n.destination_thread_id) == new.lead_thread_id.as_ref()
             }

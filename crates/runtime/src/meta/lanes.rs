@@ -192,6 +192,7 @@ fn notice_key(lead: &str, notice: &event_bus::lane::LaneNotification) -> Option<
     let identity = match &notice.kind {
         Kind::Question { question_id, .. } => json!(["question", question_id]),
         Kind::Answer { question_id, .. } => json!(["answer", question_id]),
+        Kind::UserAnswered { question_id, .. } => json!(["user_answered", question_id]),
         Kind::Ready { revision } => json!([
             "ready",
             revision.as_ref().and_then(ArtifactRevision::fingerprint)

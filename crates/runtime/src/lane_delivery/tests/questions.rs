@@ -446,3 +446,97 @@ async fn child_restore_storage_failure_after_receipt_keeps_ack_pending_and_retri
         f.runtime.wait(run).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn user_answer_reference_never_wakes_a_finished_lead_and_reaches_a_live_one_without_the_answer()
+ {
+    // Source commits do not schedule deliveries on their own; the test drives each.
+    super::integration::MANUAL_SOURCES
+        .scope((), user_answer_reference())
+        .await;
+}
+async fn user_answer_reference() {
+    let mut f = Fixture::new();
+    let (lead, host) = f.lead().await;
+    let lane = f.lane(lead, "user-answered").await;
+    f.question(&lane, 0);
+    let question_id = format!("question-{}-0", lane.lane_id);
+    let queued = f
+        .storage
+        .handle()
+        .lane_questions("delivery-lead".into(), None)
+        .unwrap()
+        .questions
+        .remove(0);
+    f.storage
+        .handle()
+        .mutate_lane_question(storage::lane_delivery::LaneQuestionMutation {
+            lane_id: lane.lane_id.clone(),
+            question_id: question_id.clone(),
+            lead_thread_id: "delivery-lead".into(),
+            expected_management_revision: queued.management_revision.unwrap(),
+            expected_routing_revision: queued.routing_revision,
+            operation_id: "to-user".into(),
+            action: storage::lane_delivery::LaneQuestionAction::RouteToUser,
+            at_ns: 100,
+        })
+        .unwrap();
+    f.finish(lead).await;
+    f.runtime
+        .answer_user_question(&question_id, "private human words")
+        .unwrap();
+    // A finished lead is not woken by an informational reference alone.
+    assert_eq!(f.drive().await, LaneDeliveryOutcome::Empty);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+    assert_eq!(f.receipts(), 0);
+    assert!(f.runtime.user_answers(lead).unwrap().is_empty());
+    // The next regular turn of the lead receives it once.
+    f.model.finish.store(false, Ordering::SeqCst);
+    f.runtime
+        .continue_goal(lead, "next user turn".into(), host.target.authority.clone())
+        .unwrap();
+    f.phase(lead, AgentRunPhase::Waiting).await;
+    assert_eq!(
+        f.drive().await,
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    f.phase(lead, AgentRunPhase::Waiting).await;
+    assert_eq!(f.drive().await, LaneDeliveryOutcome::Empty);
+    assert_eq!(f.receipts(), 1);
+    let requests = f.model.requests.lock().unwrap().clone();
+    let lead_notices = requests
+        .iter()
+        .flatten()
+        .filter(|m| m.role == providers::Role::User)
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text }
+                if text.starts_with("[Agent-authored lane notifications;") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .filter(|text| text.contains("user_answered"))
+        .collect::<Vec<_>>();
+    assert!(!lead_notices.is_empty());
+    assert!(
+        lead_notices
+            .iter()
+            .flat_map(|text| text.lines())
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(
+                |v| v["kind"]["kind"] == "user_answered" && v["kind"]["question_id"] == question_id
+            )
+    );
+    assert!(
+        !serde_json::to_string(&lead_notices)
+            .unwrap()
+            .contains("private human words"),
+        "the lead is told by reference only"
+    );
+    f.runtime.cancel(lead).unwrap();
+    f.runtime.wait(lead).await.unwrap();
+    f.runtime.cancel(lane.root_run_id).unwrap();
+    f.runtime.wait(lane.root_run_id).await.unwrap();
+}

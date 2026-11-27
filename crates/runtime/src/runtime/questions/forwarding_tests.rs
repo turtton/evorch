@@ -219,6 +219,49 @@ async fn host_reroute_race_is_storage_ordered_and_preserves_provenance() {
             .len(),
         1
     );
+    // The lead is only told by reference: no body, no answer of its own and no
+    // recipient link on the question.
+    let lead_thread =
+        f.db.handle()
+            .lane(&lane.lane_id)
+            .unwrap()
+            .unwrap()
+            .lead_thread_id
+            .unwrap();
+    let notices =
+        f.db.handle()
+            .lane_inbox(lead_thread, String::new())
+            .unwrap()
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    event_bus::lane::LaneNotificationKind::UserAnswered { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    assert!(matches!(
+        &notices[0].kind,
+        event_bus::lane::LaneNotificationKind::UserAnswered { question_id, routing_revision }
+            if question_id == &q.id && *routing_revision == answer.routing_revision
+    ));
+    assert!(
+        !serde_json::to_string(&notices[0])
+            .unwrap()
+            .contains("human")
+    );
+    assert!(f.runtime.user_answers(lead).unwrap().is_empty());
+    assert!(
+        !f.runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .user_question_recipients(&q.id)
+            .unwrap()
+            .contains(&lead.to_string())
+    );
     f.stop(lane.root_run_id).await;
     f.stop(lead).await;
 }

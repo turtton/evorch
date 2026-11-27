@@ -75,6 +75,10 @@ fn semantic(kind: &LaneNotificationKind) -> Result<(&'static str, String), Stora
             question_id,
             routing_revision,
         } => ("answer", json(&(question_id, routing_revision))?),
+        LaneNotificationKind::UserAnswered {
+            question_id,
+            routing_revision,
+        } => ("user_answered", json(&(question_id, routing_revision))?),
         LaneNotificationKind::Ready { revision } => (
             "ready",
             revision
@@ -175,6 +179,66 @@ pub(super) fn enqueue(
     conn.execute("INSERT OR IGNORE INTO lane_delivery_keys(lane_id,management_revision,event_kind,dedupe_key,ledger_revision,created_at_ns) VALUES (?1,?2,?3,?4,0,?5)", params![notice.lane_id, notice.management_revision, event_kind, key, notice.created_at_ns])?;
     conn.execute("INSERT INTO lane_notifications(notification_id,lane_id,management_revision,event_kind,semantic_key,source_thread_id,destination_thread_id,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![notice.notification_id,notice.lane_id,notice.management_revision,event_kind,key,notice.source_thread_id,notice.destination_thread_id,payload])?;
     Ok(notice.notification_id)
+}
+
+/// Within the transaction that stores a user's answer to a question the lead routed to
+/// the user, queues one body-less reference for the lane's current lead.
+///
+/// Only an explicit `RouteToUser` operation qualifies; a question that merely fell back
+/// to the user (unbound delivery, detach) was never the lead's to hand over. A detached
+/// lane and a lead whose thread is gone have no such notice. The lead is never made a
+/// recipient of the question.
+pub(crate) fn notify_lead_of_user_answer(
+    conn: &Connection,
+    route: &QuestionRouting,
+    at_ns: i64,
+) -> Result<Option<String>, StorageError> {
+    let operation: Option<String> = conn.query_row(
+        "SELECT operation_json FROM lane_question_routes WHERE question_id=?1",
+        [&route.question_id],
+        |r| r.get(0),
+    )?;
+    let routed_to_user = operation
+        .as_deref()
+        .map(parse::<(String, u64, u64, LaneQuestionAction)>)
+        .transpose()?
+        .is_some_and(|(.., action)| matches!(action, LaneQuestionAction::RouteToUser));
+    if !routed_to_user {
+        return Ok(None);
+    }
+    let current = lane(conn, &route.lane_id)?;
+    let Some(lead) = current
+        .lead_thread_id
+        .as_deref()
+        .filter(|_| current.policy.is_managed())
+    else {
+        return Ok(None);
+    };
+    let lead_deleted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id=?1)",
+        [lead],
+        |r| r.get(0),
+    )?;
+    if lead_deleted {
+        return Ok(None);
+    }
+    enqueue(
+        conn,
+        LaneNotification {
+            notification_id: String::new(),
+            lane_id: route.lane_id.clone(),
+            management_revision: current.management_revision,
+            source_thread_id: route.requester.thread_id.clone(),
+            destination_thread_id: lead.into(),
+            kind: LaneNotificationKind::UserAnswered {
+                question_id: route.question_id.clone(),
+                routing_revision: route.routing_revision,
+            },
+            report_seq: None,
+            created_at_ns: at_ns,
+        },
+    )
+    .map(Some)
 }
 
 pub(crate) fn routing(
