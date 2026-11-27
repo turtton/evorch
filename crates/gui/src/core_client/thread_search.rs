@@ -133,22 +133,7 @@ impl ThreadSearch {
         if !self.open {
             return;
         }
-        let mut ime_event = false;
-        let mut composing = self.composing;
-        ctx.input(|input| {
-            for event in &input.events {
-                if let egui::Event::Ime(ime) = event {
-                    ime_event = true;
-                    match ime {
-                        egui::ImeEvent::Preedit { text, .. } => composing = !text.is_empty(),
-                        egui::ImeEvent::Commit(_) => composing = false,
-                        _ => {}
-                    }
-                }
-            }
-        });
-        // The key that confirms or cancels a conversion is not a search command.
-        let for_ime = self.composing || ime_event;
+        let (for_ime, composing) = ctx.input(|input| ime_keys(&input.events, self.composing));
         self.composing = composing;
         let none = egui::Modifiers::NONE;
         ctx.input_mut(|input| {
@@ -252,6 +237,32 @@ impl ThreadSearch {
     }
 }
 
+/// Whether this frame's Enter, Esc and arrows belong to an IME conversion, and whether one
+/// is still open after the frame. They do while a conversion was open or is being edited,
+/// and in the frame that commits it. An empty preedit alone is no conversion: a conversion
+/// ends with one, and Fcitx5 repeats it after every commit until the field loses focus, so
+/// it must not hold the keys back.
+fn ime_keys(events: &[egui::Event], mut composing: bool) -> (bool, bool) {
+    let mut for_ime = composing;
+    for event in events {
+        if let egui::Event::Ime(ime) = event {
+            match ime {
+                egui::ImeEvent::Preedit { text, .. } if !text.is_empty() => {
+                    composing = true;
+                    for_ime = true;
+                }
+                egui::ImeEvent::Commit(_) => {
+                    composing = false;
+                    for_ime = true;
+                }
+                egui::ImeEvent::Preedit { .. } => composing = false,
+                _ => {}
+            }
+        }
+    }
+    (for_ime, composing)
+}
+
 /// The selection after Up or Down, kept within `rows` rows.
 fn step(selected: usize, rows: usize, up: bool, down: bool) -> usize {
     let last = rows.saturating_sub(1);
@@ -349,6 +360,70 @@ mod tests {
         assert_eq!(titles(&rows), ["Renamed spike"]);
         assert!(rows[0].archived);
         assert!(search_titles(&cache, Some(&model), None, "old").is_empty());
+    }
+
+    fn preedit(text: &str) -> egui::Event {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.into(),
+            active_range_chars: None,
+        })
+    }
+
+    // Given: no conversion open, or one open
+    // When: a frame carries an empty preedit alone, a non-empty one, or a commit
+    // Then: the keys are held back only for an open conversion, an edited one and the
+    //       committing frame; the empty preedit Fcitx5 repeats after a commit holds nothing
+    #[test]
+    fn only_a_conversion_holds_the_keys_back_not_an_empty_preedit() {
+        let commit = egui::Event::Ime(egui::ImeEvent::Commit("x".into()));
+        assert_eq!(ime_keys(&[], false), (false, false));
+        assert_eq!(ime_keys(&[preedit("")], false), (false, false));
+        assert_eq!(ime_keys(&[preedit("")], true), (true, false));
+        assert_eq!(ime_keys(&[preedit("に")], false), (true, true));
+        assert_eq!(ime_keys(&[], true), (true, true));
+        assert_eq!(
+            ime_keys(&[preedit(""), commit.clone()], true),
+            (true, false)
+        );
+        assert_eq!(ime_keys(&[commit], false), (true, false));
+    }
+
+    /// What `begin_frame` takes from one frame holding `events`, with the search open.
+    fn keys_of_frame(events: Vec<egui::Event>) -> Keys {
+        let ctx = egui::Context::default();
+        let mut search = ThreadSearch::default();
+        search.open(None);
+        let raw = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| search.begin_frame(ui.ctx(), None))
+            .drop_without_applying_deltas();
+        search.keys
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    // Given: the search open, and a frame in which Esc comes with the empty preedit that
+    //        Fcitx5 repeats after a commit
+    // When: the frame is taken
+    // Then: Esc acts on the search; with a non-empty preedit or a commit in the frame it
+    //       belongs to the conversion instead
+    #[test]
+    fn esc_acts_on_the_search_beside_an_empty_preedit_but_not_beside_a_conversion() {
+        let commit = egui::Event::Ime(egui::ImeEvent::Commit("に".into()));
+        assert!(keys_of_frame(vec![preedit(""), key(egui::Key::Escape)]).escape);
+        assert!(keys_of_frame(vec![key(egui::Key::Escape)]).escape);
+        assert!(!keys_of_frame(vec![preedit("に"), key(egui::Key::Escape)]).escape);
+        assert!(!keys_of_frame(vec![commit, key(egui::Key::Enter)]).enter);
     }
 
     // Given: three rows

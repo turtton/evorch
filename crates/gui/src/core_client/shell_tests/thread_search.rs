@@ -61,3 +61,59 @@ fn esc_and_ctrl_k_close_the_search_and_keep_the_selection() {
     assert!(!state.thread_search.is_open());
     assert_eq!(state.selected.as_ref().map(|t| t.as_str()), Some("thr-1"));
 }
+
+// Given: an IME conversion open in the search field
+// When: Esc, which cancels the conversion, is pressed
+// Then: the search stays open
+#[test]
+fn esc_that_cancels_a_conversion_does_not_close_the_search() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    open(&mut screen);
+    screen
+        .harness
+        .event(egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "に".into(),
+            active_range_chars: None,
+        }));
+    screen.harness.run_steps(1);
+    screen.harness.key_press(Key::Escape);
+    screen.harness.run_steps(2);
+    assert!(screen.harness.state().thread_search.is_open());
+}
+
+// Given: the composer focused, where Esc stops the running chat
+// When: the search is opened and closed with Esc
+// Then: no command was sent, and the search is closed
+#[test]
+fn esc_in_the_search_does_not_stop_the_chat_behind_it() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.harness.get_by_label("Message").focus();
+    screen.harness.run_steps(2);
+    open(&mut screen);
+    screen.harness.key_press(Key::Escape);
+    screen.harness.run_steps(2);
+    let others = screen.settle();
+    assert!(!screen.harness.state().thread_search.is_open());
+    assert!(
+        !others
+            .iter()
+            .any(|action| matches!(action, Action::Command { .. })),
+        "{}",
+        others.len()
+    );
+}
+
+// Given: another modal, the theme picker, open
+// When: Ctrl+K is pressed
+// Then: the search does not open over it
+#[test]
+fn ctrl_k_does_not_open_over_another_modal() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.harness.state_mut().theme.open = true;
+    screen.harness.run_steps(2);
+    open(&mut screen);
+    assert!(!screen.harness.state().thread_search.is_open());
+}
