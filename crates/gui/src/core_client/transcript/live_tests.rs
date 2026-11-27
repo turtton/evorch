@@ -385,16 +385,34 @@ fn a_running_cards_input_is_read_only_while_it_can_be_in_view() {
             .start(serde_json::from_value(tool).unwrap());
     }
     harness.run_steps(6);
-    let requested = harness.state().requested.clone();
-    assert!(requested.contains("in-19"), "the newest is in view");
-    assert!(!requested.contains("in-0"), "{requested:?}");
-    assert!(requested.len() < 15, "{requested:?}");
-    assert_eq!(
+    // The lines the unread inputs stand for, in the order of the calls.
+    let lines = |harness: &Harness<'_, State>| {
         harness
             .query_all_by_label_contains("Loading message")
-            .count(),
-        20,
-        "each keeps its line"
+            .map(|node| node.rect())
+            .collect::<Vec<_>>()
+    };
+    let lines_before = lines(&harness);
+    assert_eq!(lines_before.len(), 20, "each keeps its line");
+    let view = harness.ctx.content_rect();
+    let requested = harness.state().requested.clone();
+    let (mut above, mut inside, mut below) = (0, 0, 0);
+    for (call, line) in lines_before.iter().enumerate() {
+        let asked = requested.contains(&format!("in-{call}"));
+        if line.max.y < view.min.y {
+            above += 1;
+            assert!(!asked, "call {call} is above the view at {line:?}");
+        } else if line.min.y > view.max.y {
+            below += 1;
+            assert!(!asked, "call {call} is below the view at {line:?}");
+        } else if line.min.y >= view.min.y && line.max.y <= view.max.y {
+            inside += 1;
+            assert!(asked, "call {call} is in view at {line:?}");
+        }
+    }
+    assert!(
+        above > 0 && inside > 0,
+        "{above} above, {inside} in view, {below} below"
     );
 
     harness.get_by_label("summary 0").scroll_to_me();

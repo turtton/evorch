@@ -445,18 +445,19 @@ fn content_text<'a>(
     content: &'a MessageContent,
     effects: &mut Vec<Effect>,
 ) -> Option<&'a str> {
-    content_text_when(ui, requested_bodies, cache, content, effects, true)
+    content_text_when(ui, requested_bodies, cache, content, effects, false)
 }
 
-/// [`content_text`], asking for the body only when `fetch`: a text out of view keeps its place
-/// in the layout (the same line the unread body has) without being read.
+/// [`content_text`], and with `in_view_only` the body is asked for only once the line that
+/// stands for it (the one laid out while it is unread) is in view: a text out of view keeps
+/// that line without being read.
 fn content_text_when<'a>(
     ui: &mut Ui,
     requested_bodies: &mut BTreeSet<String>,
     cache: &'a Cache,
     content: &'a MessageContent,
     effects: &mut Vec<Effect>,
-    fetch: bool,
+    in_view_only: bool,
 ) -> Option<&'a str> {
     match content {
         MessageContent::Inline { text } => Some(text),
@@ -464,10 +465,7 @@ fn content_text_when<'a>(
             if let Some(text) = cache.bodies.get(body.body_id.as_str()) {
                 return Some(text);
             }
-            if fetch && requested_bodies.insert(body.body_id.to_string()) {
-                effects.push(Effect::send(Action::Body(body.body_id.clone())));
-            }
-            ui.horizontal(|ui| {
+            let line = ui.horizontal(|ui| {
                 ui.label(muted(format!(
                     "Loading message ({})",
                     byte_size(body.total_bytes.get())
@@ -476,6 +474,11 @@ fn content_text_when<'a>(
                     effects.push(Effect::send(Action::Body(body.body_id.clone())));
                 }
             });
+            if (!in_view_only || ui.is_rect_visible(line.response.rect))
+                && requested_bodies.insert(body.body_id.to_string())
+            {
+                effects.push(Effect::send(Action::Body(body.body_id.clone())));
+            }
             None
         }
     }

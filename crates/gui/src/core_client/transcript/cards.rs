@@ -259,12 +259,8 @@ fn live_card(ui: &mut Ui, env: &mut Env<'_, '_>, live: &LiveTool, now: Instant) 
                 header(ui, open, &head);
                 if open && let Some(input) = &tool.input {
                     ui.add_space(SP_1);
-                    // The input of a running call is read only while it can be in view: the
-                    // section shows at most `SECTION_MAX_HEIGHT` of it below its title.
-                    let clip = ui.clip_rect();
-                    let top = ui.cursor().min.y;
-                    let near = top <= clip.max.y && top + SECTION_MAX_HEIGHT + 32.0 >= clip.min.y;
-                    section(ui, env, "Input", input, false, near);
+                    // Read only once the line standing for the unread input is in view.
+                    section(ui, env, "Input", input, false, true);
                 }
             });
         });
@@ -306,16 +302,16 @@ fn body(
     let message = tree.rows[at];
     ui.add_space(SP_1);
     if let Some(input) = &tool.input {
-        section(ui, env, "Input", input, false, true);
+        section(ui, env, "Input", input, false, false);
     }
     match &message.content {
         MessageContent::Inline { text } if text.is_empty() => {
             ui.add(Label::new(muted("No output").size(FONT_SMALL)).selectable(false));
         }
-        output => section(ui, env, "Output", output, true, true),
+        output => section(ui, env, "Output", output, true, false),
     }
     if let Some(detail) = &tool.detail {
-        section(ui, env, "Details", detail, false, true);
+        section(ui, env, "Details", detail, false, false);
     }
     if !tree.children[at].is_empty() {
         ui.indent("calls", |ui| {
@@ -338,7 +334,7 @@ fn section(
     title: &str,
     content: &MessageContent,
     result: bool,
-    fetch: bool,
+    in_view_only: bool,
 ) {
     ui.add(Label::new(muted(title).size(FONT_SMALL)).selectable(false));
     let Some(text) = content_text_when(
@@ -347,7 +343,7 @@ fn section(
         env.cache,
         content,
         env.effects,
-        fetch,
+        in_view_only,
     ) else {
         return;
     };
