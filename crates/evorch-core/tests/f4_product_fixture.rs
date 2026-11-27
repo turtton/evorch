@@ -548,7 +548,12 @@ fn an_orphan_left_by_the_child_is_reported_then_killed() {
     let (mut family, grandchild) = spawn_family_of("parker");
     // SIGKILL of the leader alone leaves the grandchild behind.
     assert!(family.signal(rustix::process::Signal::KILL));
-    assert!(family.wait_exit(Duration::from_secs(60)).is_some());
+    // The descendant may still hold stdout open. Exit must wake this wait
+    // independently of stdout EOF.
+    assert!(matches!(
+        family.wait_for_event::<()>(|_| None),
+        Err(WaitError::Exited(_, _))
+    ));
     let report = family.join();
     assert!(
         report.orphans.iter().any(|p| p.pid == grandchild),
@@ -564,16 +569,20 @@ fn an_orphan_left_by_the_child_is_reported_then_killed() {
 #[test]
 fn exit_before_ready_is_an_event_with_the_childs_stderr() {
     let mut process = ManagedProcess::spawn(fake_spec("fail")).unwrap();
-    match process.wait_for(Duration::from_secs(60), |l| {
-        l.contains("ready").then_some(())
-    }) {
-        Err(WaitError::Exited(status, stderr)) => {
+    match process.wait_for_event(|l| l.contains("ready").then_some(())) {
+        Err(WaitError::Exited(status, _)) => {
             assert_eq!(status.code(), Some(7));
-            assert!(stderr.contains("failing before ready"), "{stderr}");
         }
         other => panic!("expected the exit event, got {other:?}"),
     }
     let report = process.join();
+    // Only join guarantees the stderr reader has drained, not the separate
+    // exit event. WaitError intentionally carries stderr received so far.
+    assert!(
+        report.stderr.contains("failing before ready"),
+        "{}",
+        report.stderr
+    );
     assert!(report.orphans.is_empty());
 }
 

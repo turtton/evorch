@@ -10,7 +10,7 @@ use mock_openai::{
 use product_exec::{
     artifact::ProductArtifact,
     env::IsolatedEnv,
-    launch::{KEY_ENV, ProductLaunch, READY_WATCHDOG},
+    launch::{KEY_ENV, ProductLaunch},
     observe,
     wire::MockProvider,
 };
@@ -239,7 +239,7 @@ pub fn drive(artifact: &ProductArtifact) {
     ));
     env.write_product_config(&router.base, KEY_ENV);
     let mut product = ProductLaunch::new(artifact, &env).start().unwrap();
-    let ready = product.wait_ready().unwrap();
+    let ready = product.wait_ready_event().unwrap();
     let pid = product.pid();
     let (root, lane_record, child, old_epoch, connections) = rt.block_on(async {
         let desktop = connect(&ready.socket, "lane-desktop", LocalSurface::Desktop).await;
@@ -323,25 +323,9 @@ pub fn drive(artifact: &ProductArtifact) {
         gate.release();
         (root, lane, child, old_epoch, (desktop, cli, events))
     });
-    // The external stdout source cannot publish an in-process Notify; reuse the
-    // product harness's supervised process/event watchdog for its Ready line.
-    let (line, _) = product
-        .process
-        .wait_for(READY_WATCHDOG, |line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .filter(|v| v["status"] == "ready")
-        })
-        .unwrap_or_else(|e| {
-            let status = rt.block_on(async {
-                let client = connect(&ready.socket, "lane-timeout-diag", LocalSurface::Cli).await;
-                RestartAdmin::new(&client).status().await
-            });
-            panic!(
-                "successor Ready: {e:?}\n{status:?}\n{}",
-                product.process.stderr()
-            )
-        });
+    let successor = product
+        .wait_ready_event()
+        .unwrap_or_else(|e| panic!("successor Ready: {e:?}\n{}", product.process.stderr()));
     drop(connections);
     assert_eq!(product.pid(), pid);
     assert!(observe::same_file(
@@ -349,7 +333,7 @@ pub fn drive(artifact: &ProductArtifact) {
         &artifact.path,
     ));
     rt.block_on(async {
-        let socket = std::path::PathBuf::from(line["socket"].as_str().unwrap());
+        let socket = successor.socket;
         let desktop = connect(&socket, "lane-successor", LocalSurface::Desktop).await;
         assert!(desktop.server_hello().instance_epoch > old_epoch);
         let lane_run = lane_record.root_run.as_ref().unwrap();
