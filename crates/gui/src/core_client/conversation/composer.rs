@@ -203,6 +203,16 @@ pub(super) fn composer(
                 let completing = !items.is_empty();
                 let can_stop = (activity.root_active && !completing) || activity.stopped;
                 selectors(ui, pane);
+                let can_choose = !pane.model_saving && !io.sending.contains(thread.as_str()) && io.connected;
+                if let Some(choice) = pane.model_picker.show(ui, pane.model_catalog.as_ref(), &pane.model_choice, pane.composer_role == ComposerRole::Orchestrator, can_choose) {
+                    if io.cache.threads.contains_key(thread.as_str()) {
+                        pane.model_saving = true;
+                        effects.push(Effect::ModelChoice(thread.clone(), choice));
+                    } else {
+                        pane.draft_model_choices.insert(thread.to_string(), choice.clone());
+                        pane.model_choice = choice;
+                    }
+                }
                 attachments(ui, io, project, thread, effects);
                 // As tall as the input, so the attach "+" on its left and the buttons on
                 // its right sit at its bottom.
@@ -219,7 +229,7 @@ pub(super) fn composer(
                             .attachment_drafts
                             .get(thread.as_str())
                             .is_some_and(|files| !files.is_empty());
-                        let can_send = io.can_send(thread.as_str())
+                        let can_send = !pane.model_saving && io.can_send(thread.as_str())
                             && (!draft_text.trim().is_empty() || has_attachments);
                         let mut send = false;
                         if can_stop
@@ -503,6 +513,9 @@ fn submit(
     thread: &ThreadId,
     effects: &mut Vec<Effect>,
 ) {
+    if pane.model_saving {
+        return;
+    }
     let exists = io.cache.threads.contains_key(thread.as_str());
     let Some(draft) = io.drafts.get_mut(thread.as_str()) else {
         return;
@@ -582,7 +595,14 @@ fn submit(
             text: draft.text.clone(),
             skills: vec![],
             attachments,
-            model_preference: None,
+            model_preference: if exists {
+                None
+            } else {
+                match &pane.model_choice {
+                    ModelChoice::RoleDefault => None,
+                    ModelChoice::Explicit(p) => Some(p.clone()),
+                }
+            },
             fork_seed: None,
         };
         if exists {

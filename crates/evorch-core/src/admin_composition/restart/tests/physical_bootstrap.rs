@@ -109,6 +109,7 @@ fn seed(root: &Path, sockets: &Path, identity: &ConfigIdentity) {
             id: "initial".into(),
             text: "physical fixture".into(),
             trusted_user: false,
+            model_preference_update: runtime::ModelPreferenceUpdate::Keep,
         }),
         inputs: vec![],
         active: true,

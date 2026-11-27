@@ -61,6 +61,7 @@ impl Fixture {
             .unwrap()
             .map_or(0, |bundle| bundle.snapshot_revision);
         let restored = RestoredState {
+            input_selection_transition: None,
             recovery_waits: Vec::new(),
             mcp_snapshot: None,
             harness_notice_pending: false,

@@ -353,6 +353,7 @@ mod tests {
             serde_json::from_value(json!({
                 "thread": "a", "project": "p1", "title": "Renamed spike",
                 "extra_read_dirs": [], "archived": true, "pinned": false, "revision": "2",
+                "model_choice": {"type": "role_default"},
             }))
             .unwrap(),
         );

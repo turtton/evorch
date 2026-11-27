@@ -159,7 +159,6 @@ impl CurrentAuthorityProvider<'_> {
             .map_err(|_| CurrentAuthorityProblem::CurrentSettingsRequired)?;
             let mut authority = RunConfig {
                 project_root: Some(project.clone()),
-                model_preference: binding.model_preference.clone(),
                 interactive: true,
                 keep_alive: true,
                 conversation: true,
@@ -247,6 +246,13 @@ impl CurrentAuthorityProvider<'_> {
                     .get(&record.root)
                     .cloned()
                     .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?;
+                current.model_preference = record
+                    .recipe
+                    .descriptor
+                    .as_ref()
+                    .ok_or(CurrentAuthorityProblem::CurrentBindingRequired)?
+                    .model_preference
+                    .clone();
                 if record.run_id != record.root {
                     current.interactive = false;
                     current.keep_alive = false;
@@ -284,7 +290,13 @@ mod tests {
                 goal_id: None,
                 team: None,
                 lane: None,
-                descriptor: None,
+                descriptor: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "role": "orchestrator", "interactive": true, "keep_alive": true,
+                        "load_skills": [], "restorable": true
+                    }))
+                    .unwrap(),
+                ),
             },
             waits: vec![],
             deliveries: vec![],
@@ -337,7 +349,6 @@ mod tests {
                 root: run,
                 project_root: record.project.clone(),
                 goal_project: None,
-                model_preference: None,
             },
         )]));
         record.recipe.settings_reference = "unknown".into();

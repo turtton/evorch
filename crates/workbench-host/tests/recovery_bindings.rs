@@ -27,7 +27,6 @@ fn bindings() -> Vec<(String, ThreadBinding)> {
             root: runtime::RunId::new(42),
             project_root: Some("/tmp".into()),
             goal_project: Some(project().to_string()),
-            model_preference: None,
         },
     )]
 }

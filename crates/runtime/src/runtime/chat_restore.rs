@@ -30,7 +30,7 @@ pub(super) enum RunContinuation {
 }
 
 enum ChatContinuation {
-    Followup(String),
+    Followup(String, crate::ModelPreferenceUpdate),
     Resume,
     /// A resume the runtime requested for held messages, not by the user.
     Wake,
@@ -50,7 +50,7 @@ struct SeededChat {
 impl ChatContinuation {
     fn prompt(&self) -> Option<&str> {
         match self {
-            Self::Followup(prompt) => Some(prompt),
+            Self::Followup(prompt, _) => Some(prompt),
             Self::Resume | Self::Wake => None,
         }
     }
@@ -170,6 +170,22 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        self.continue_goal_with_model_update(
+            run_id,
+            prompt,
+            authority,
+            crate::ModelPreferenceUpdate::Keep,
+        )
+    }
+
+    /// A normal host submission carries its resolved choice until adoption.
+    pub fn continue_goal_with_model_update(
+        &self,
+        run_id: RunId,
+        prompt: String,
+        authority: RunConfig,
+        update: crate::ModelPreferenceUpdate,
+    ) -> Result<RunId, RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
         let _manual = self
             .shared
@@ -184,7 +200,11 @@ impl AgentRuntime {
             self.require_manual_resume_open()?;
         }
         let _dispatch = self.dispatch_registration_guard()?;
-        self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
+        self.continue_chat(
+            run_id,
+            ChatContinuation::Followup(prompt, update),
+            authority,
+        )
     }
 
     fn continue_chat(
@@ -205,6 +225,10 @@ impl AgentRuntime {
     ) -> Result<RunId, RuntimeError> {
         let _dispatch = self.dispatch_registration_guard()?;
         let resume_ownership = authority.ownership.clone();
+        let update = match &continuation {
+            ChatContinuation::Followup(_, update) => update.clone(),
+            _ => crate::ModelPreferenceUpdate::Keep,
+        };
         let prompt = continuation.prompt();
         // Only a new prompt takes mentions; a resume attaches nothing.
         let mentions = std::mem::take(&mut authority.skill_mentions);
@@ -318,8 +342,14 @@ impl AgentRuntime {
                 .and_then(|entry| entry.config.project_root.clone());
             // Read the skills before anything is recorded: a failure refuses the whole message.
             let host = self.expand_host_prompt(prompt.into(), mentions, project_root.as_deref())?;
-            self.set_model_preference(run_id, authority.model_preference)?;
-            self.send_inbox_message(run_id, host, true, authority.initial_thread_goal, prompt_id)?;
+            self.send_inbox_message(
+                run_id,
+                host,
+                true,
+                authority.initial_thread_goal,
+                prompt_id,
+                update,
+            )?;
             if operator_resume {
                 self.commit_chat_resume(
                     run_id,
@@ -403,6 +433,7 @@ impl AgentRuntime {
                 id: prompt_id.clone().unwrap_or_else(|| "initial".into()),
                 text: sent.unwrap_or_default().into(),
                 trusted_user: true,
+                model_preference_update: update.clone(),
             }),
         )?;
         let abort_waits = operator_resume && !descriptor.recovery_waits.is_empty();
@@ -416,6 +447,24 @@ impl AgentRuntime {
             descriptor.recovery_boundary = None;
             record.messages_json =
                 serde_json::to_string(&restored.messages).expect("validated history serializes");
+        }
+        // Cold continuation adopts the persisted human input in the snapshot transaction.
+        authority.model_preference = descriptor.model_preference.clone();
+        if let Some(selection) = update.selection() {
+            if descriptor.model_preference != selection {
+                let transition = crate::restore::InputSelectionTransition {
+                    previous_preference: descriptor
+                        .input_selection_transition
+                        .as_ref()
+                        .map(|t| t.previous_preference.clone())
+                        .unwrap_or_else(|| descriptor.model_preference.clone()),
+                    prepared: false,
+                };
+                descriptor.input_selection_transition = Some(transition.clone());
+                restored.input_selection_transition = Some(transition);
+            }
+            authority.model_preference = selection.clone();
+            descriptor.model_preference = selection;
         }
         let mut host_input = storage::HostInputWrite {
             reconcile_reason: Some("restored".into()),

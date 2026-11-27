@@ -28,7 +28,10 @@ pub(super) fn chat_input(chat: ChatSubmission) -> ChatInput {
         thread_id: chat.thread_id,
         text: chat.text,
         skills: chat.skills,
-        model_preference: chat.model_preference,
+        model_preference: chat.model_preference.map_or(
+            runtime::ModelPreferenceUpdate::RoleDefault,
+            runtime::ModelPreferenceUpdate::explicit,
+        ),
         fork_seed: chat.fork_seed,
     }
 }
@@ -71,7 +74,6 @@ pub(super) fn host_command(command: WorkbenchCommand) -> HostCommand {
             project_root: continuation.project_root,
             thread_id: continuation.thread_id,
             composer_role: composer_role(continuation.composer_role),
-            model_preference: continuation.model_preference,
             automatic: continuation.automatic,
         }),
         WorkbenchCommand::CompactChat { thread_id } => HostCommand::CompactChat { thread_id },

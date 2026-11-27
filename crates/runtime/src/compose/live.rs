@@ -333,6 +333,13 @@ impl AgentModel for SwitchableModel {
         self.current().catalog_context_window(selected_model)
     }
 
+    fn validate_model_preference(
+        &self,
+        preference: &crate::ModelPreference,
+    ) -> Result<(), RuntimeError> {
+        self.current().validate_model_preference(preference)
+    }
+
     fn available_profiles(&self) -> Vec<super::ProfileSummary> {
         SwitchableModel::available_profiles(self)
     }

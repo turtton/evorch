@@ -124,7 +124,6 @@ mod tests {
             root,
             project_root: Some(PathBuf::from("/current")),
             goal_project: Some("project".into()),
-            model_preference: None,
         };
         let saved = TeamRestoreIdentity {
             team_id: "project:thread".into(),

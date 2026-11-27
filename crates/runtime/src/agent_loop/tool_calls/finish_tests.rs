@@ -140,6 +140,7 @@ impl tools::Tool for CompletedShellHandoff {
                     true,
                     Some("followup".into()),
                     seq,
+                    crate::ModelPreferenceUpdate::Keep,
                 ))
             })
             .unwrap();

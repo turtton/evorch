@@ -117,9 +117,6 @@ impl LaneDeliveryHost for HostLaneDeliveryHost {
                 project_root.as_deref(),
             ),
             project_root,
-            model_preference: binding
-                .as_ref()
-                .and_then(|binding| binding.model_preference.clone()),
             ..RunConfig::default()
         };
         TeamSource {

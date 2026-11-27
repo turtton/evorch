@@ -62,6 +62,7 @@ pub(crate) fn persist_escalation_seed(
         keep_alive: config.keep_alive,
         category: None,
         load_skills: vec![],
+        input_selection_transition: None,
         model_preference: None,
         restorable: true,
         non_restorable_reason: None,

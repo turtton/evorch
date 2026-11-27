@@ -53,6 +53,13 @@ pub fn samples() -> AreaSamples {
                     expected_revision: Revision(7),
                 },
             )),
+            ws(WorkspaceCommand::SetThreadModelChoice(
+                SetThreadModelChoice {
+                    thread: thread(),
+                    expected_revision: Revision(3),
+                    choice: workbench_protocol::commands::ModelChoice::RoleDefault,
+                },
+            )),
             ws(WorkspaceCommand::RenameThread(RenameThread {
                 thread: thread(),
                 title: "Plan".into(),
@@ -133,7 +140,13 @@ pub fn samples() -> AreaSamples {
                 lineage: Some(LineageType::Fork),
                 root_run: None,
                 active_root: Some("/work/evorch".into()),
-                model_profile: Some("default".into()),
+                model_choice: workbench_protocol::commands::ModelChoice::Explicit(
+                    workbench_protocol::commands::ModelPreference {
+                        profile: "default".into(),
+                        model: None,
+                        reasoning_effort: None,
+                    },
+                ),
                 chat_role: Some("worker".into()),
                 extra_read_dirs: vec![],
                 archived: false,

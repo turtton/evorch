@@ -88,16 +88,6 @@ impl CommandService {
             initial.skill_mentions.clone_from(&submission.skills);
         }
         let thread_id = submission.thread_id;
-        match &submission.model_preference {
-            Some(preference) => {
-                self.bindings
-                    .model_preferences
-                    .insert(thread_id.clone(), preference.clone());
-            }
-            None => {
-                self.bindings.model_preferences.remove(&thread_id);
-            }
-        }
         // New runs of a thread work in its project, even after the active project moved.
         if let Some(root) = submission.project_root {
             self.bindings.thread_roots.insert(thread_id.clone(), root);
@@ -207,7 +197,7 @@ impl CommandService {
                 .unwrap_or(run_id);
             let mut authority = RunConfig {
                 ownership: permit.clone(),
-                model_preference: submission.model_preference.clone(),
+                model_preference: submission.model_preference.selection().flatten(),
                 ..initial.clone()
             };
             if self
@@ -249,7 +239,12 @@ impl CommandService {
                 self.resume_chat(run_id, authority, resume_observation.clone())
             } else {
                 self.runtime
-                    .continue_goal(run_id, submission.text.clone(), authority)
+                    .continue_goal_with_model_update(
+                        run_id,
+                        submission.text.clone(),
+                        authority,
+                        submission.model_preference.clone(),
+                    )
                     .map(Some)
             };
             match continuation {
@@ -322,7 +317,7 @@ impl CommandService {
                 conversation,
                 category: worker.then(|| CategoryId::Conversation.to_string()),
                 ownership: permit.clone(),
-                model_preference: submission.model_preference.clone(),
+                model_preference: submission.model_preference.selection().flatten(),
                 ..initial.clone()
             };
             if let Err(reason) = self.renew_team_authority(
@@ -342,7 +337,12 @@ impl CommandService {
                 self.resume_chat(run_id, authority, resume_observation.clone())
             } else {
                 self.runtime
-                    .continue_goal(run_id, submission.text.clone(), authority)
+                    .continue_goal_with_model_update(
+                        run_id,
+                        submission.text.clone(),
+                        authority,
+                        submission.model_preference.clone(),
+                    )
                     .map(Some)
             };
             match continuation {
@@ -401,7 +401,7 @@ impl CommandService {
                 ownership: permit,
                 interactive: true,
                 keep_alive: true,
-                model_preference: submission.model_preference,
+                model_preference: submission.model_preference.selection().flatten(),
                 ..initial
             },
             submission.fork_seed,

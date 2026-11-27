@@ -44,7 +44,6 @@ fn continuation(automatic: bool) -> HostCommand {
         project_root: None,
         thread_id: "stop-pending".into(),
         composer_role: ComposerRole::Orchestrator,
-        model_preference: None,
         automatic,
     })
 }

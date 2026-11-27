@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use runtime::{ModelPreference, RunConfig, RunId};
+use runtime::{RunConfig, RunId};
 
 /// What the command sink knows of a thread's conversation, copied for the host.
 #[derive(Clone)]
@@ -17,7 +17,6 @@ pub struct ThreadBinding {
     pub root: RunId,
     pub project_root: Option<PathBuf>,
     pub goal_project: Option<String>,
-    pub model_preference: Option<ModelPreference>,
 }
 
 /// The sink's bindings as of its last change, shared with the host.

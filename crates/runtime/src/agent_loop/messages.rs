@@ -76,7 +76,7 @@ impl LoopState {
         self.pending_user_messages = later;
         // A trusted goal wake is a scheduling signal, not a new human request.
         // When already running, the normal Stop boundary will perform the check.
-        messages.retain(|(text, trusted_user, _, _)| {
+        messages.retain(|(text, trusted_user, _, _, _)| {
             if !trusted_user && text == crate::thread_goals::CHECKS_WAKE {
                 self.goal_wake_pending = true;
                 false
@@ -188,7 +188,13 @@ mod shell_handoff_tests {
         let parallel = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("before cut".into(), true, Some("one".into()), seq))
+                sender.try_send((
+                    "before cut".into(),
+                    true,
+                    Some("one".into()),
+                    seq,
+                    crate::ModelPreferenceUpdate::Keep,
+                ))
             })
             .unwrap();
         assert!(*first.borrow() && *parallel.borrow());
@@ -199,7 +205,13 @@ mod shell_handoff_tests {
         let _new_wait = inbox.begin_wait();
         inbox
             .enqueue(None, |seq| {
-                sender.try_send(("after cut".into(), true, Some("two".into()), seq))
+                sender.try_send((
+                    "after cut".into(),
+                    true,
+                    Some("two".into()),
+                    seq,
+                    crate::ModelPreferenceUpdate::Keep,
+                ))
             })
             .unwrap();
         assert!(state.flush_user_messages_through(cut));
@@ -228,7 +240,13 @@ mod shell_handoff_tests {
         for id in ["from-wait", "from-channel", "keep"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), true, Some(id.into()), seq))
+                    sender.try_send((
+                        id.into(),
+                        true,
+                        Some(id.into()),
+                        seq,
+                        crate::ModelPreferenceUpdate::Keep,
+                    ))
                 })
                 .unwrap();
         }
@@ -282,7 +300,13 @@ mod waiting_cut_tests {
         let inbox = state.channels.user_inbox.clone();
         inbox
             .enqueue(Some("withdraw"), |seq| {
-                sender.try_send(("never inject".into(), true, Some("withdraw".into()), seq))
+                sender.try_send((
+                    "never inject".into(),
+                    true,
+                    Some("withdraw".into()),
+                    seq,
+                    crate::ModelPreferenceUpdate::Keep,
+                ))
             })
             .unwrap();
         inbox.withdraw("withdraw", || Ok(())).unwrap();
@@ -321,7 +345,13 @@ mod waiting_cut_tests {
             pause.reached.recv().unwrap();
             inbox
                 .enqueue(None, |seq| {
-                    sender.try_send(("after last cut".into(), true, Some("late".into()), seq))
+                    sender.try_send((
+                        "after last cut".into(),
+                        true,
+                        Some("late".into()),
+                        seq,
+                        crate::ModelPreferenceUpdate::Keep,
+                    ))
                 })
                 .unwrap();
             pause.resume.send(()).unwrap();

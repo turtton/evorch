@@ -13,6 +13,7 @@ pub mod completion_widgets;
 pub mod composer;
 pub mod context_inspector;
 pub mod conversation_plan;
+pub mod core_model_picker;
 pub mod diff;
 pub mod evaluation_widgets;
 pub mod evaluations;

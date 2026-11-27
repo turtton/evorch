@@ -107,6 +107,9 @@ pub fn samples() -> AreaSamples {
             })),
         ],
         queries: vec![
+            Query::Settings(SettingsQuery::ModelChoices {
+                project: workbench_protocol::ids::ProjectId::new("project-1").unwrap(),
+            }),
             Query::Settings(SettingsQuery::GetSettingsSnapshot {}),
             Query::Settings(SettingsQuery::GetSettingsOperation {
                 operation_id: op("op-1"),
@@ -123,6 +126,18 @@ pub fn samples() -> AreaSamples {
             }),
         ],
         query_replies: vec![
+            QueryReply::Settings(SettingsReply::ModelChoices(ProjectModelChoices {
+                project: workbench_protocol::ids::ProjectId::new("project-1").unwrap(),
+                profiles: vec![],
+                worker: RoleModelChoice {
+                    model: "work/model-a".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                orchestrator: RoleModelChoice {
+                    model: "work/model-b".into(),
+                    reasoning_effort: None,
+                },
+            })),
             QueryReply::Settings(SettingsReply::Settings(Box::new(snapshot()))),
             QueryReply::Settings(SettingsReply::Operation(operation(
                 OperationState::Pending,

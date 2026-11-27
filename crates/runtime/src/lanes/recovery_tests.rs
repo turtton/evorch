@@ -233,6 +233,7 @@ async fn deleting_a_manifest_keeps_its_orphan_lane_recoverable() {
         id: "orphan".into(),
         text: "recover".into(),
         trusted_user: true,
+        model_preference_update: crate::ModelPreferenceUpdate::Keep,
     });
     db.execute(
         "INSERT INTO resume_intents(run_id,incarnation,payload) VALUES(?1,'old',?2)",

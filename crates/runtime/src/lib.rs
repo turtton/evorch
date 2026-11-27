@@ -126,7 +126,8 @@ pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
 pub use meta::{HOST_SEARCH_MAX_LIMIT, HostSearchIndex, HostThreadHit, HostThreadSearch};
 pub use model::{
-    AgentInvocationContext, AgentModel, ModelPreference, RecoveryModelSnapshot, RoutePinRecord,
+    AgentInvocationContext, AgentModel, ModelPreference, ModelPreferenceUpdate,
+    RecoveryModelSnapshot, RoutePinRecord,
 };
 pub use network::{NetworkAccessDecision, build_sandbox, judge_web_network_access};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};

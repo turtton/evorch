@@ -126,7 +126,7 @@ impl CommandService {
                 thread_id,
                 text,
                 attachments: Vec::new(),
-                model_preference: None,
+                model_preference: runtime::ModelPreferenceUpdate::Keep,
                 composer_role: if chat_role == Some(Role::Worker) {
                     ComposerRole::Worker
                 } else {

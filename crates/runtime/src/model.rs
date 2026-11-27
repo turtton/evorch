@@ -19,6 +19,31 @@ pub struct ModelPreference {
     pub reasoning_effort: Option<String>,
 }
 
+/// An input-scoped selection update. Keep never consults a thread's saved choice.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPreferenceUpdate {
+    #[default]
+    Keep,
+    RoleDefault,
+    Explicit(Box<ModelPreference>),
+}
+
+impl ModelPreferenceUpdate {
+    /// Keep inbox messages small; only explicit updates allocate a selection.
+    pub fn explicit(value: ModelPreference) -> Self {
+        Self::Explicit(Box::new(value))
+    }
+
+    pub fn selection(&self) -> Option<Option<ModelPreference>> {
+        match self {
+            Self::Keep => None,
+            Self::RoleDefault => Some(None),
+            Self::Explicit(value) => Some(Some((**value).clone())),
+        }
+    }
+}
+
 /// The member a run pinned in one role chain, kept in run snapshots (ADR 0030).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,6 +414,13 @@ pub trait AgentModel: Send + Sync {
     /// Catalog window for an identity returned by `selected_model`, if known.
     fn catalog_context_window(&self, _selected_model: &str) -> Option<u64> {
         None
+    }
+
+    /// Validate an authoritative explicit selection without provider calls or pin changes.
+    fn validate_model_preference(&self, _preference: &ModelPreference) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Model {
+            reason: "model selection is unavailable".into(),
+        })
     }
 
     /// Configured picker entries; fixed models expose no provider profiles.

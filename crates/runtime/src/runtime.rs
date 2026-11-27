@@ -2758,7 +2758,14 @@ impl AgentRuntime {
         submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
-        self.send_inbox_message(run_id, HostPrompt::plain(text), true, None, submission_id)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            true,
+            None,
+            submission_id,
+            crate::ModelPreferenceUpdate::Keep,
+        )
     }
 
     pub(crate) fn send_internal_message(
@@ -2767,7 +2774,14 @@ impl AgentRuntime {
         text: String,
     ) -> Result<(), RuntimeError> {
         let _retention_admission = self.retention_run_admission(run_id);
-        self.send_inbox_message(run_id, HostPrompt::plain(text), false, None, None)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            false,
+            None,
+            None,
+            crate::ModelPreferenceUpdate::Keep,
+        )
     }
 
     /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
@@ -2841,6 +2855,7 @@ impl AgentRuntime {
         trusted_user: bool,
         initial_goal: Option<(String, Vec<String>)>,
         submission_id: Option<String>,
+        model_preference_update: crate::ModelPreferenceUpdate,
     ) -> Result<(), RuntimeError> {
         self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
@@ -2936,6 +2951,7 @@ impl AgentRuntime {
                     id: input_id.clone(),
                     text: host.prompt.clone(),
                     trusted_user,
+                    model_preference_update: model_preference_update.clone(),
                 },
             )?;
             let enqueue = |seq| {
@@ -2944,6 +2960,7 @@ impl AgentRuntime {
                     trusted_user,
                     Some(input_id.clone()),
                     seq,
+                    model_preference_update.clone(),
                 ));
                 Ok::<_, RuntimeError>(())
             };
@@ -4667,7 +4684,7 @@ mod review_provenance_tests {
         }
         let mut delivered = Vec::new();
         for _ in 0..16 {
-            let (text, trusted, prompt_id, _) = receiver.recv().await.unwrap();
+            let (text, trusted, prompt_id, _, _) = receiver.recv().await.unwrap();
             assert!(trusted);
             assert!(prompt_id.is_some());
             delivered.push(text);

@@ -5,10 +5,7 @@
 //! lookup in host declarations, not a trust declaration or a request to add
 //! project settings.
 use crate::{
-    commands::{
-        AttachmentRef, ContinueChat, ModelPreference, SendChat, SubmitGoal, ThreadTarget,
-        WithdrawFollowUp,
-    },
+    commands::{AttachmentRef, ContinueChat, SendChat, SubmitGoal, ThreadTarget, WithdrawFollowUp},
     handshake::{Capability, WireLimits},
     ids::{AttachmentId, ProjectId, ThreadId},
     queries::{ReadCommittedHistory, ThreadQuery},
@@ -123,10 +120,16 @@ impl ConversationCommand {
             }
             Self::CreateExecution(chat) | Self::SendChat(chat) => chat.validate(),
             Self::CreateGoal(goal) => goal.validate(),
-            Self::ContinueChat(chat) => chat
-                .model_preference
-                .as_ref()
-                .map_or(Ok(()), ModelPreference::validate),
+            Self::ContinueChat(chat) => {
+                if chat.model_preference.is_some() {
+                    Err(ValidationError::OutOfRange {
+                        field: "model_preference",
+                        reason: "ContinueChat cannot change selection; use SetThreadModelChoice",
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             Self::BeginAttachment {
                 client_upload_id,
                 filename,

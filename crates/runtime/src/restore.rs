@@ -22,7 +22,16 @@ pub use escalation::PendingEscalation;
 pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
+/// Proof that an adopted selection has not yet produced a provider input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputSelectionTransition {
+    pub previous_preference: Option<ModelPreference>,
+    pub prepared: bool,
+}
+
 pub(crate) struct RestoredState {
+    pub(crate) input_selection_transition: Option<InputSelectionTransition>,
     pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
     pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     pub(crate) harness_notice_pending: bool,
@@ -116,6 +125,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            input_selection_transition: descriptor.input_selection_transition,
             recovery_waits: descriptor.recovery_waits,
             mcp_snapshot: descriptor.mcp_snapshot,
             harness_notice_pending: descriptor.harness_notice_pending,
@@ -216,6 +226,8 @@ pub struct RunRestoreDescriptor {
     pub category: Option<String>,
     pub load_skills: Vec<String>,
     pub model_preference: Option<ModelPreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_selection_transition: Option<InputSelectionTransition>,
     pub restorable: bool,
     pub non_restorable_reason: Option<String>,
     #[serde(default)]
@@ -668,6 +680,7 @@ fn write_snapshot_with_context(
         category: config.category.clone(),
         load_skills: config.load_skills.clone(),
         model_preference: state.channels.model_preference_rx.borrow().clone(),
+        input_selection_transition: state.input_selection_transition.clone(),
         restorable: non_restorable_reason.is_none(),
         non_restorable_reason,
         renewable_team,

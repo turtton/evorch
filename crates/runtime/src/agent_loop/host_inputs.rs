@@ -92,7 +92,8 @@ impl LoopState {
             self.consumed_intent_inputs.push(id.clone());
         }
         let tracked = crate::runtime::user_inbox::tracked_prompt_id(&input).map(String::from);
-        let (text, trusted_user, prompt_id, _) = input;
+        let (text, trusted_user, prompt_id, _, update) = input;
+        self.adopt_model_preference(update);
         self.accept_input_identity(trusted_user, prompt_id);
         self.append_user_message(&text, tracked);
         // Authenticated human input to a child is parent-equivalent involvement.
@@ -101,6 +102,32 @@ impl LoopState {
             self.budget.reset_elapsed();
         }
         true
+    }
+
+    fn adopt_model_preference(&mut self, update: crate::ModelPreferenceUpdate) {
+        let Some(selection) = update.selection() else {
+            return;
+        };
+        let previous = self.channels.model_preference_rx.borrow().clone();
+        if previous == selection {
+            return;
+        }
+        // Multiple inputs before a request keep the last sent selection as proof.
+        let previous_preference = self
+            .input_selection_transition
+            .as_ref()
+            .map(|t| t.previous_preference.clone())
+            .unwrap_or(previous);
+        self.input_selection_transition = Some(crate::restore::InputSelectionTransition {
+            previous_preference,
+            prepared: false,
+        });
+        if let Some(runtime) = self.runtime() {
+            // Only this successful adoption changes the live applied watch.
+            runtime
+                .set_model_preference(self.task.run_id, selection)
+                .expect("live adopted input");
+        }
     }
 
     /// Append a user message without changing the request turn.

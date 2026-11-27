@@ -345,7 +345,7 @@ impl AgentRuntime {
                         || config.purpose != crate::RunPurpose::General,
                     context_fingerprint: restart_digest(&(
                         &config.project_root,
-                        &config.model_preference,
+                        &*entry.model_preference_tx.borrow(),
                         config.interactive,
                         config.keep_alive,
                     ))

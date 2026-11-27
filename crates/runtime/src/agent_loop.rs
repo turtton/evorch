@@ -190,6 +190,7 @@ pub(crate) struct LoopState {
     pub(crate) recovery_waits: Vec<crate::quiesce::DurableWait>,
     pub(crate) delegate_wait_calls: Vec<crate::quiesce::DelegateWaitCall>,
     pub(crate) last_provider_input: Option<crate::quiesce::ProviderInput>,
+    pub(crate) input_selection_transition: Option<crate::restore::InputSelectionTransition>,
     pub(crate) provider_request_started: bool,
     pub(crate) consumed_intent_inputs: Vec<String>,
     /// Bridge inbox consumption to published execution, including unwinding.
@@ -306,6 +307,7 @@ impl LoopState {
             recovery_waits: Vec::new(),
             delegate_wait_calls: Vec::new(),
             last_provider_input: None,
+            input_selection_transition: None,
             provider_request_started: false,
             consumed_intent_inputs: Vec::new(),
             input_adoptions: Vec::new(),
@@ -437,6 +439,9 @@ pub(crate) async fn run_agent(
             .upgrade()
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
+    let input_selection_transition = restored
+        .as_ref()
+        .and_then(|s| s.input_selection_transition.clone());
     let mcp_snapshot = if benchmark_mode {
         None
     } else {
@@ -552,6 +557,23 @@ pub(crate) async fn run_agent(
             state.task.role,
             state.task.config.category.as_deref(),
             input,
+        );
+    }
+    state.input_selection_transition = input_selection_transition;
+    if state
+        .input_selection_transition
+        .as_ref()
+        .is_some_and(|t| t.prepared)
+    {
+        state.shared.model.model_switch_prepared(
+            &AgentInvocationContext {
+                run_id: state.task.run_id.to_string(),
+                category: state.task.config.category.clone(),
+                model_preference: state.channels.model_preference_rx.borrow().clone(),
+                ..Default::default()
+            },
+            state.task.role,
+            &compaction::selected_model(&state),
         );
     }
     state.inherited_mcp_snapshot = mcp_snapshot;
@@ -1218,6 +1240,29 @@ impl LoopState {
                 ) => result,
             };
             match preparation {
+                Ok(()) | Err(crate::RuntimeError::ResponsesScopeChanged { .. })
+                    if self
+                        .input_selection_transition
+                        .as_ref()
+                        .is_some_and(|t| !t.prepared) =>
+                {
+                    let selected = compaction::selected_model(self);
+                    if let Err(error) =
+                        compaction::prepare_model_switch(self, &selected, false).await
+                    {
+                        self.finish_error(error.to_string());
+                        return;
+                    }
+                    if let Some(transition) = &mut self.input_selection_transition {
+                        transition.prepared = true;
+                    }
+                    preparation_model.model_switch_prepared(
+                        &preparation_invocation,
+                        self.task.role,
+                        &selected,
+                    );
+                    continue;
+                }
                 Ok(()) => {}
                 Err(crate::RuntimeError::ModelSwitch {
                     selected,
@@ -1428,6 +1473,9 @@ impl LoopState {
             if let Some(input) =
                 invocation_model.checkpoint_provider_input(&self.task.run_id.to_string())
             {
+                if self.last_provider_input.as_ref() != Some(&input) {
+                    self.input_selection_transition = None;
+                }
                 self.last_provider_input = Some(input);
             }
             self.activity(event_bus::RunActivity::Idle);

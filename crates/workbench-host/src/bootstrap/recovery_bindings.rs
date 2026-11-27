@@ -38,7 +38,6 @@ pub fn load(
                         root: run,
                         project_root: Some(root.clone()),
                         goal_project: Some(project.as_str().to_owned()),
-                        model_preference: None,
                     },
                 );
             }

@@ -58,13 +58,18 @@ impl runtime::AgentModel for RecoveryModel {
     }
     fn validate_checkpoint_compatibility(
         &self,
-        _: &runtime::AgentInvocationContext,
+        invocation: &runtime::AgentInvocationContext,
         _: Role,
         pins: &[runtime::RoutePinRecord],
         input: Option<&runtime::quiesce::ProviderInput>,
     ) -> Result<(), runtime::RuntimeError> {
         assert!(pins.is_empty());
-        assert!(input.is_some_and(|input| input.request.model == "restart-fixture"));
+        let expected = invocation
+            .model_preference
+            .as_ref()
+            .and_then(|p| p.model.as_deref())
+            .unwrap_or("restart-fixture");
+        assert!(input.is_some_and(|input| input.request.model == expected));
         Ok(())
     }
     fn adopt_recovery_checkpoint(
@@ -98,6 +103,19 @@ impl runtime::AgentModel for RecoveryModel {
             .inner
             .complete(invocation, role, messages, tools)
             .await?;
+        if let Some(preference) = &invocation.model_preference {
+            let mut inputs = self.inner.1.lock().unwrap();
+            let input = inputs.get_mut(&invocation.run_id).unwrap();
+            input.profile.clone_from(&preference.profile);
+            input.request.model = preference
+                .model
+                .clone()
+                .unwrap_or_else(|| "restart-fixture".into());
+            input
+                .request
+                .reasoning_effort
+                .clone_from(&preference.reasoning_effort);
+        }
         if role == Role::Orchestrator && self.block_parent.load(std::sync::atomic::Ordering::SeqCst)
         {
             self.parent_entered.notify_one();
@@ -202,7 +220,7 @@ impl Fixture {
                 thread_id: "plain".into(),
                 text: "ordinary conversation".into(),
                 skills: Vec::new(),
-                model_preference: None,
+                model_preference: runtime::ModelPreferenceUpdate::Keep,
                 fork_seed: None,
             }),
             &Provenance::human(Surface::Desktop, ClientId::new("human").unwrap()),
@@ -355,15 +373,20 @@ impl Fixture {
 
 #[tokio::test]
 async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
-    ordinary_or_lane_graph(false).await;
+    ordinary_or_lane_graph(false, false).await;
 }
 
 #[tokio::test]
 async fn restored_lane_can_recollect_recipes_without_gui_permits_or_a_second_physical_restart() {
-    ordinary_or_lane_graph(true).await;
+    ordinary_or_lane_graph(true, false).await;
 }
 
-async fn ordinary_or_lane_graph(is_lane: bool) {
+#[tokio::test]
+async fn adopted_explicit_choice_is_accepted_by_host_recipe_source_and_restored() {
+    ordinary_or_lane_graph(false, true).await;
+}
+
+async fn ordinary_or_lane_graph(is_lane: bool, switch_choice: bool) {
     let mut f = Fixture::new().await;
     let lead = f.chat().await;
     let (root, thread) = if is_lane {
@@ -378,6 +401,23 @@ async fn ordinary_or_lane_graph(is_lane: bool) {
     } else {
         (lead, "plain".into())
     };
+    let selection = runtime::ModelPreference {
+        profile: "restart-fixture".into(),
+        model: Some("switched-fixture".into()),
+        reasoning_effort: Some("high".into()),
+    };
+    if switch_choice {
+        f.boot
+            .runtime
+            .continue_goal_with_model_update(
+                root,
+                "adopt explicit selection".into(),
+                RunConfig::default(),
+                runtime::ModelPreferenceUpdate::explicit(selection.clone()),
+            )
+            .unwrap();
+        f.waiting(root).await;
+    }
     let scope = is_lane.then_some(event_bus::LaneScope::Lane);
     std::fs::write(f._dir.path().join("child-input.txt"), "recoverable child").unwrap();
     f.model
@@ -424,6 +464,17 @@ async fn ordinary_or_lane_graph(is_lane: bool) {
         })
         .collect();
     let observed = f.source.collect().await.unwrap();
+    if switch_choice {
+        assert_eq!(
+            observed.recipes[&root]
+                .descriptor
+                .as_ref()
+                .unwrap()
+                .model_preference
+                .as_ref(),
+            Some(&selection)
+        );
+    }
     assert!(observed.bindings.is_current());
     assert_eq!(observed.recipes.len(), 2);
     f.boot
@@ -571,6 +622,28 @@ async fn ordinary_or_lane_graph(is_lane: bool) {
         }
     }
     assert!(f.calls() > calls);
+    if switch_choice {
+        restarted
+            .send_message(root, "internal wake keeps the applied model".into())
+            .unwrap();
+        loop {
+            if matches!(activation_events.recv().await.unwrap().kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == root.to_string())
+            {
+                break;
+            }
+        }
+        let input = f
+            .model
+            .inner
+            .1
+            .lock()
+            .unwrap()
+            .get(&root.to_string())
+            .unwrap()
+            .clone();
+        assert_eq!(input.request.model, "switched-fixture");
+        assert_eq!(input.request.reasoning_effort.as_deref(), Some("high"));
+    }
     if is_lane {
         // Child completion wakes the lane. Hold that actual provider turn so
         // recollection observes a stable live run, not an intermediate snapshot.

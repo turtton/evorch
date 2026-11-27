@@ -72,7 +72,7 @@ fn local_chat(root: &std::path::Path, submission: &str, text: &str) -> ChatInput
         thread_id: "thread-1".into(),
         text: text.into(),
         skills: Vec::new(),
-        model_preference: None,
+        model_preference: runtime::ModelPreferenceUpdate::RoleDefault,
         fork_seed: None,
     }
 }

@@ -95,6 +95,33 @@
     },
     "type": "settings"
   },
+  "query/settings/model_choices": {
+    "payload": {
+      "payload": {
+        "project": "project-1"
+      },
+      "type": "model_choices"
+    },
+    "type": "settings"
+  },
+  "query_reply/settings/model_choices": {
+    "payload": {
+      "payload": {
+        "orchestrator": {
+          "model": "work/model-b",
+          "reasoning_effort": null
+        },
+        "profiles": [],
+        "project": "project-1",
+        "worker": {
+          "model": "work/model-a",
+          "reasoning_effort": "high"
+        }
+      },
+      "type": "model_choices"
+    },
+    "type": "settings"
+  },
   "query_reply/settings/operation": {
     "payload": {
       "payload": {

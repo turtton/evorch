@@ -85,6 +85,19 @@
     },
     "type": "workspace"
   },
+  "command/workspace/set_thread_model_choice": {
+    "payload": {
+      "payload": {
+        "choice": {
+          "type": "role_default"
+        },
+        "expected_revision": "3",
+        "thread": "thr-1"
+      },
+      "type": "set_thread_model_choice"
+    },
+    "type": "workspace"
+  },
   "command/workspace/update_allowed_directory": {
     "payload": {
       "payload": {
@@ -222,7 +235,12 @@
         "extra_read_dirs": [],
         "family": "thr-1",
         "lineage": "fork",
-        "model_profile": "default",
+        "model_choice": {
+          "payload": {
+            "profile": "default"
+          },
+          "type": "explicit"
+        },
         "pinned": true,
         "project": "proj-1",
         "revision": "3",

@@ -39,6 +39,7 @@ pub struct DurableInput {
     pub id: String,
     pub text: String,
     pub trusted_user: bool,
+    pub model_preference_update: crate::ModelPreferenceUpdate,
 }
 
 /// Exact provider input, after route/tool/image selection. Request metadata skipped

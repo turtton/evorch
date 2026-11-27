@@ -192,6 +192,7 @@ async fn accepted_input_invalidates_the_current_ack_before_a_new_seal() {
                 id: "during-park".into(),
                 text: "new input".into(),
                 trusted_user: true,
+                model_preference_update: crate::ModelPreferenceUpdate::Keep,
             },
         )
         .unwrap();

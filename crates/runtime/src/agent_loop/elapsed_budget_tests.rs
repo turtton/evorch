@@ -181,13 +181,31 @@ async fn non_parent_messages_and_tool_results_do_not_renew_activity() {
 async fn trusted_child_input_is_parent_equivalent_but_internal_and_root_input_are_not() {
     let (_cancel, _runtime, mut state) = child_fixture().await;
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert!(state.take_user_input(("internal".into(), false, None, 0)));
+    assert!(state.take_user_input((
+        "internal".into(),
+        false,
+        None,
+        0,
+        crate::ModelPreferenceUpdate::Keep
+    )));
     assert_eq!(elapsed_ms(&mut state, 50), 10_000);
-    assert!(state.take_user_input(("human".into(), true, None, 0)));
+    assert!(state.take_user_input((
+        "human".into(),
+        true,
+        None,
+        0,
+        crate::ModelPreferenceUpdate::Keep
+    )));
     assert_eq!(elapsed_ms(&mut state, 100), 0);
     state.task.parent = None;
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert!(state.take_user_input(("root human".into(), true, None, 0)));
+    assert!(state.take_user_input((
+        "root human".into(),
+        true,
+        None,
+        0,
+        crate::ModelPreferenceUpdate::Keep
+    )));
     assert_eq!(elapsed_ms(&mut state, 150), 10_000);
 }
 

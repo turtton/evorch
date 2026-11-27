@@ -1668,6 +1668,21 @@ impl AgentModel for RoutedModel {
             .clone()
     }
 
+    fn validate_model_preference(
+        &self,
+        preference: &crate::ModelPreference,
+    ) -> Result<(), RuntimeError> {
+        self.resolve_invocation(
+            &AgentInvocationContext {
+                model_preference: Some(preference.clone()),
+                ..Default::default()
+            },
+            Role::Worker,
+            &[],
+        )
+        .map(|_| ())
+    }
+
     fn available_profiles(&self) -> Vec<ProfileSummary> {
         RoutedModel::available_profiles(self)
     }
