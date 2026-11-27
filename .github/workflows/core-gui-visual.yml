@@ -59,7 +59,8 @@ jobs:
         run: scripts/core-gui-visual/changed-paths.sh "${{ steps.sides.outputs.before }}" "${{ steps.sides.outputs.after }}" >> "$GITHUB_OUTPUT"
       - name: Not relevant
         if: steps.scope.outputs.relevant != 'true'
-        run: echo "No screen diff: the PR changes only files the new GUI does not depend on." >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "No screen diff: the PR changes only files the new GUI does not depend on." >> "$GITHUB_STEP_SUMMARY"
       - name: Tooling tests
         if: steps.scope.outputs.relevant == 'true'
         run: scripts/core-gui-visual/tests/test_changed_paths.sh
