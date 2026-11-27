@@ -20,6 +20,11 @@ use workbench_protocol::operation::OperationState;
 use workbench_protocol::queries::{PageRequest, Query, QueryReply};
 
 fn diagnostics_world() -> World {
+    diagnostics_world_keeping(90)
+}
+
+/// A host whose ledger keeps requests for `retention_days` (0: forever).
+fn diagnostics_world_keeping(retention_days: u32) -> World {
     world(|parts| Areas {
         diagnostics: DiagnosticsArea::from_parts(
             parts.tasks,
@@ -27,7 +32,7 @@ fn diagnostics_world() -> World {
             parts.database,
             parts.runtime,
             &parts.storage,
-            90,
+            retention_days,
         ),
         ..Default::default()
     })
@@ -352,7 +357,11 @@ fn run_row(run: &str, parent: Option<&str>, thread: &str) -> RunContextRecord {
 /// Thread `t` has a conversation root, a continued root and a child of the first;
 /// thread `other` has a root of its own; `stray` belongs to no thread.
 fn seeded_world(created_at_ns: i64) -> World {
-    let w = diagnostics_world();
+    seeded_world_keeping(created_at_ns, 90)
+}
+
+fn seeded_world_keeping(created_at_ns: i64, retention_days: u32) -> World {
+    let w = diagnostics_world_keeping(retention_days);
     let writer = w.store.handle();
     writer
         .upsert_thread_runtime(&thread_row("t", created_at_ns))
@@ -519,4 +528,32 @@ fn a_commit_is_announced_once_it_is_visible_and_a_refused_write_is_not() {
     // The announcement is a reason to ask: what it announced can already be read.
     let live = w.read(|| ask_live_usage(&w, "after")).data.unwrap();
     assert_eq!(live.today.requests, 1);
+}
+
+#[test]
+fn a_ledger_that_keeps_every_request_never_makes_usage_incomplete() {
+    let w = seeded_world_keeping(now_ns() - 4_000 * DAY_NS, 0);
+    let thread = w.read(|| ask_thread_usage(&w, "t", "t")).data.unwrap();
+    assert_eq!(thread.total.totals.requests, 4);
+    assert!(!thread.total.incomplete && !thread.conversation.incomplete);
+    let run = w.read(|| ask_run_usage(&w, "r", "root-1")).data.unwrap();
+    assert!(!run.total.incomplete);
+    let stray = w.read(|| ask_run_usage(&w, "s", "stray")).data.unwrap();
+    assert_eq!(stray.total.totals.requests, 1);
+    assert!(!stray.total.incomplete, "its start does not matter");
+}
+
+#[test]
+fn a_saved_run_without_a_thread_or_a_request_has_zero_usage_that_is_incomplete() {
+    let w = diagnostics_world();
+    w.store
+        .handle()
+        .upsert_run_context(&run_row("saved-orphan", Some("missing-parent"), "t"))
+        .unwrap();
+    let run = w
+        .read(|| ask_run_usage(&w, "r", "saved-orphan"))
+        .data
+        .unwrap();
+    assert_eq!(run.total.totals, Default::default());
+    assert!(run.total.incomplete);
 }

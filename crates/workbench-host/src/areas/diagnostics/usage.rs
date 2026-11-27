@@ -18,12 +18,16 @@ use workbench_protocol::{
 
 const DAY_NS: i64 = 86_400 * 1_000_000_000;
 
-/// Whether requests of something created at `created_at_ns` may have been rolled
-/// up into days by now. A rolled-up request keeps neither its run nor its
-/// thread, so the rows that are left are a lower bound.
-fn may_be_rolled_up(created_at_ns: i64, now_ns: i64, retention_days: u32) -> bool {
+/// Whether requests of something created at `created_at_ns` (`None` when that is
+/// unknown) may have been rolled up into days by now. A rolled-up request keeps
+/// neither its run nor its thread, so the rows that are left are a lower bound.
+/// A retention of 0 days turns the roll-up off: nothing leaves the ledger.
+fn may_be_rolled_up(created_at_ns: Option<i64>, now_ns: i64, retention_days: u32) -> bool {
+    if retention_days == 0 {
+        return false;
+    }
     let kept = i64::from(retention_days).saturating_mul(DAY_NS);
-    created_at_ns < now_ns.saturating_sub(kept)
+    created_at_ns.is_none_or(|created| created < now_ns.saturating_sub(kept))
 }
 
 fn totals_of<'a>(rows: impl IntoIterator<Item = &'a UsageRequestRow>) -> UsageTotals {
@@ -37,7 +41,8 @@ fn totals_of<'a>(rows: impl IntoIterator<Item = &'a UsageRequestRow>) -> UsageTo
 }
 
 /// The usage of `thread`. A thread without a row and without runs is unknown; one
-/// that has runs but no row cannot say when it began, so its usage is incomplete.
+/// that has runs but no row cannot say when it began, so its usage is incomplete
+/// (unless the ledger keeps every request).
 pub(super) fn thread_usage(
     database: &Database,
     thread: &ThreadId,
@@ -68,8 +73,7 @@ pub(super) fn thread_usage(
     if created_at_ns.is_none() && all.is_empty() {
         return Err(error(ErrorCode::NotFound, "unknown thread"));
     }
-    let incomplete =
-        created_at_ns.is_none_or(|created| may_be_rolled_up(created, now_ns, retention_days));
+    let incomplete = may_be_rolled_up(created_at_ns, now_ns, retention_days);
     let in_roots = |row: &&UsageRequestRow| {
         row.record
             .run_id
@@ -89,8 +93,9 @@ pub(super) fn thread_usage(
     })
 }
 
-/// The usage of `run` alone. A run with neither a request nor a thread is unknown;
-/// one whose thread is unknown cannot say when it began, so its usage is incomplete.
+/// The usage of `run` alone. A run with no request, no thread and no saved context
+/// is unknown; one whose thread is unknown cannot say when it began, so its usage
+/// is incomplete (unless the ledger keeps every request).
 pub(super) fn run_usage(
     database: &Database,
     run: &RunId,
@@ -111,11 +116,14 @@ pub(super) fn run_usage(
             .map(|thread| thread.created_at_ns),
         None => None,
     };
-    if rows.is_empty() && created_at_ns.is_none() {
+    let saved = database
+        .run_context_parent(run.as_str())
+        .map_err(storage_error)?
+        .is_some();
+    if rows.is_empty() && created_at_ns.is_none() && !saved {
         return Err(error(ErrorCode::NotFound, "unknown run"));
     }
-    let incomplete =
-        created_at_ns.is_none_or(|created| may_be_rolled_up(created, now_ns, retention_days));
+    let incomplete = may_be_rolled_up(created_at_ns, now_ns, retention_days);
     Ok(RunUsage {
         run: run.clone(),
         total: UsageValue {
