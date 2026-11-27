@@ -261,7 +261,8 @@
         },
         "thread_retention": {
           "archived_delete_after_days": 7,
-          "auto_archive_after_days": 7
+          "auto_archive_after_days": 7,
+          "tool_body_delete_after_days": 7
         }
       }
     },
@@ -1923,7 +1924,8 @@
           "$ref": "#/$defs/ThreadRetentionConfig",
           "default": {
             "archived_delete_after_days": 7,
-            "auto_archive_after_days": 7
+            "auto_archive_after_days": 7,
+            "tool_body_delete_after_days": 7
           }
         }
       },
@@ -1993,6 +1995,13 @@
         },
         "auto_archive_after_days": {
           "description": "最終活動から自動アーカイブするまでの日数。既定7、0で新規処理を無効化する。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 7,
+          "minimum": 0
+        },
+        "tool_body_delete_after_days": {
+          "description": "最終活動から Tool の長い表示用本文を除去する日数。既定7、0で本文除去だけを無効化。",
           "type": "integer",
           "format": "uint32",
           "default": 7,

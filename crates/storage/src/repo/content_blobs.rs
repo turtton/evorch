@@ -35,7 +35,7 @@ pub(crate) use check::{
 pub(crate) use check_runs::check_runs;
 
 /// Queue entries one step looks at.
-pub(crate) const GC_CANDIDATES_PER_STEP: usize = 64;
+pub(crate) const GC_CANDIDATES_PER_STEP: usize = 256;
 /// Stored bytes one step deletes, at most.
 pub(crate) const GC_STORED_BYTES_PER_STEP: u64 = 8 * 1024 * 1024;
 /// A blob with more stored bytes than this is never deleted by a tick.
@@ -114,6 +114,13 @@ fn is_unreferenced(conn: &Connection, tables: &[String], id: i64) -> Result<bool
 
 /// One bounded collection step. With nothing queued it only reads.
 pub(crate) fn gc_step(conn: &Connection) -> Result<GcProgress, StorageError> {
+    gc_step_with_limit(conn, GC_CANDIDATES_PER_STEP)
+}
+
+fn gc_step_with_limit(
+    conn: &Connection,
+    candidates_limit: usize,
+) -> Result<GcProgress, StorageError> {
     let queued = conn
         .prepare_cached("SELECT blob_id FROM content_blob_gc_queue LIMIT 1")?
         .query_row([], |_| Ok(()))
@@ -132,9 +139,7 @@ pub(crate) fn gc_step(conn: &Connection) -> Result<GcProgress, StorageError> {
              FROM content_blob_gc_queue q LEFT JOIN content_blobs b ON b.id = q.blob_id \
              ORDER BY q.blob_id LIMIT ?1",
         )?
-        .query_map([GC_CANDIDATES_PER_STEP], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
+        .query_map([candidates_limit], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?;
     let mut progress = GcProgress::default();
     for (id, stored) in candidates {
@@ -208,5 +213,7 @@ pub(crate) fn delete_oversized(conn: &Connection, key: &str) -> Result<(u64, u64
     Ok(work)
 }
 
+#[cfg(test)]
+mod measurements;
 #[cfg(test)]
 mod tests;

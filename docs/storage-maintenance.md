@@ -25,6 +25,78 @@
 - **GUI は本文を遅延して読み込む。** 保存済みの本文はペインに表示されるまで参照のまま保持する。読み込み中はスピナーとサイズ、失敗時は "Couldn't load content" と Retry / Copy details を出す。busy や一時的な失敗は自動で再試行する（最大 3 回。`AUTO_RETRIES`）。missing / corrupt の整合性エラーは自動では再試行せず、1 回だけ報告する。読めない stored event は transcript 上で前後の位置に gap として表示する。読み出しは専用スレッドで行い、1 バッチは最大 256 本・16 MiB、キャッシュ（LRU）は 64 MiB（`crates/gui/src/body/resolver.rs`）。
 - **旧形式は開かない。** schema 44 未満の DB は、`Database::open`・GUI の起動・`evorch inspect`・保守コマンドのいずれでも `ConversionRequired` で拒否され、DB は変更されない（[回復手順](#回復手順)）。
 
+## Tool 本文の保持期限とオンライン回収
+
+auto archive と同じ既定 7 日（設定 [storage.thread_retention] tool_body_delete_after_days、
+0 は本文除去だけを無効化）。1 週間以上更新のない本文の参照は少なく、必要な thread は
+pin / eval sample で守れるため、この分かりやすい値にそろえている。
+
+既存の 5 秒 retention tick に最大 1 unit を追加し、canonical thread の root・子 run
+全体の活動（入力・メッセージ・turn・Running 遷移）を再確認する。Tool イベント自身は
+活動に数えず、archive の有無を問わない。実行中、すべての入力待ち、未確定 admission、
+未回答質問（root / link 含む）、pin、eval sample、attached / summary の open lane は
+保護する。detached lane、未完了 goal、旧 family budget hold だけでは保護しない。
+所属不明・backfill 未完了・破損・1,024 run 超過は無変更で保留する。
+
+対象は body_format=1 の ToolStarted.input と ToolCompleted.output/detail
+内の、宣言長 2,048 UTF-8 bytes 以上の有効な blob token だけ。
+[removed by retention] と表示し、名前・ID・状態・成否、JSON 構造・短い値は残す。
+**run_messages、run_contexts、checkpoint（provider 履歴）は変わらず、再開・cache prefix は保持する。**
+他のイベントや provider 履歴等と共有される blob は消えず、完全な情報消去にはならない。
+
+1 unit は最大 256 event headers、保存時 / 展開後 skeleton 各 2 MiB、旧 / 新参照各 2,000 件。
+blob 本体は展開しない。payload と参照を同じ IMMEDIATE transaction で更新し、unit 間は
+writer queue を解放する。参照が外れた blob は既存 trigger から GC queue へ進む。
+既存 maintenance は既定 60 秒ごとに GC（256 候補・8 MiB / tick、単体 4 MiB 以下）と
+incremental vacuum（256 free-list pages / tick、開始閾値 1,024 pages）、checkpoint を行う。
+pointer-map の不要ページも同時に返る場合がある。自動 full VACUUM は行わず、閾値未満の
+残余を必ずゼロにするものでもない。NONE の DB は下記の一回限りの移行が必要。
+
+消化目安（連続稼働・4 KiB/page、上限の単純計算、保証ではない）:
+
+- GC 241,521 候補は約 944 tick / **15.7 時間**（64 候補なら約 62.9 時間）。共有・再投入・byte budget で延びる。
+- 既存 free-list 191,441 pages（約 748 MiB）は **12.5 時間**、新規約 279 MiB 相当を加えると **17.1 時間**。
+- 参照解除は変更 unit 数 × 5 秒に候補探索が加わる。仮に 4,229 unit なら約 5.9 時間。
+  3 段階は並行するが、完全直列なら約 38.7 時間の見積もり。履歴索引も変更 unit ごとに最大 1 再構築を要する。
+
+これらは診断で得た候補量（保護除外前）の上限側見積もりで、約 279 MiB の削減保証ではない。
+停止時間・長い reader・対象外 token・履歴索引の追加書込みも実際の消化時間に影響する。
+GC の合成 WAL DB 計測は 64 候補 2.415 ms / WAL +90,672 bytes、256 候補 3.795 ms /
++123,632 bytes（各 1 回、環境依存）。採用条件 50 ms / 64 MiB 以下を満たしたため 256 を採用。
+vacuum の予算・閾値は変更していない。
+
+### 既に INCREMENTAL の DB を停止中に full VACUUM する
+
+「evorch maintenance vacuum」は既に INCREMENTAL なら何もしないので、**full VACUUM の代用ではない**。
+必要な場合だけ以下を手動で行う。
+
+1. 全 core・GUI・reader と自動再起動を停止する。他プロセスが DB を開かないことを確認する。
+2. DB、バックアップ先、SQLite temp 領域（SQLITE_TMPDIR / TMPDIR）の空き容量を確認する。
+   同一 volume なら DB サイズの **4 倍以上**を保守的な目安にする。別 volume も個別に確認する。
+3. DB と **存在しない安全な絶対パス** BACKUP を指定する（例は単一引用符を含まないパス）。
+   元の本文を含むバックアップを安全に保管する。下記を一段ずつ実行し、各エラー、busy、
+   integrity の異常で止める。checkpoint の先頭列は 0、integrity は ok を確認する。
+
+~~~sh
+umask 077
+test ! -e "$BACKUP" || exit 1
+sqlite3 -bail "$DB" ".backup '$BACKUP'"
+sqlite3 -bail -readonly "$BACKUP" 'PRAGMA integrity_check;'
+
+sqlite3 -bail "$DB" 'PRAGMA busy_timeout=0; PRAGMA wal_checkpoint(TRUNCATE);'
+# checkpoint の結果の先頭列が 0 でなければ、ここで止める。
+sqlite3 -bail "$DB" 'PRAGMA busy_timeout=0; VACUUM;'
+sqlite3 -bail "$DB" 'PRAGMA busy_timeout=0; PRAGMA wal_checkpoint(TRUNCATE);'
+# 再び checkpoint の先頭列 0 を確認してから検査する。
+sqlite3 -bail "$DB" 'PRAGMA integrity_check; PRAGMA auto_vacuum;'
+~~~
+
+4. integrity が ok、auto_vacuum が 2（INCREMENTAL）、保持データが読めることとサイズを確認してから core を再開する。
+   WAL / SHM / maintenance lock を手で消さない。失敗時は再開せずバックアップを保持する。
+
+同梱 SQLite の合成 INCREMENTAL / WAL DB で、SQLite backup API（CLI の .backup と同じ経路）、
+上記 SQL、バックアップの free-list 保持、元 DB の縮小、保持データ・integrity・mode を試験している。
+
 ## 保守コマンドの早見表
 
 | 目的 | コマンド | 節 |
