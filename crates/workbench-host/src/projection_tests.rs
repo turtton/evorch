@@ -358,6 +358,25 @@ async fn refresh_receiver_releases_projection_before_yielding() {
     assert!(weak.upgrade().is_none());
 }
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_with_a_trailing_dirty_does_not_wait_for_the_refresh_timer() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let weak = Arc::downgrade(&p);
+    let mut completed = p.model_refreshes.subscribe();
+    bus.emit(wakeup(0));
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    let mut drained = p.model_event_batches.subscribe();
+    let now = tokio::time::Instant::now();
+    bus.emit(wakeup(1));
+    drained.changed().await.unwrap();
+    assert_eq!(*completed.borrow(), 1, "dirty is pending in the cooldown");
+    drop(p);
+    assert!(weak.upgrade().is_none());
+    assert!(completed.changed().await.is_err());
+    assert_eq!(tokio::time::Instant::now(), now);
+}
+
 #[tokio::test]
 async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
     use event_bus::MessageEvent;
@@ -554,6 +573,134 @@ fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
         }
     });
     assert_eq!(changed.id.as_str(), "thread");
+}
+
+#[test]
+fn a_project_rename_during_a_snapshot_cut_is_reannounced_after_publication() {
+    project_change_during_snapshot_cut(false);
+}
+
+#[test]
+fn a_project_registration_during_a_snapshot_cut_is_reannounced_after_publication() {
+    project_change_during_snapshot_cut(true);
+}
+
+fn project_change_during_snapshot_cut(register: bool) {
+    // Background actors are not polled until the cut and publication are fixed.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (p, _) = make(rt.handle(), 64, Default::default());
+    let project = ProjectId::new("project").unwrap();
+    let mut projects = vec![(project, PathBuf::from("/workspace/project"))];
+    p.configure_projects(
+        projects.clone(),
+        BTreeMap::from([("project".into(), "before".into())]),
+    )
+    .unwrap();
+    // The workspace area publishes before the host resynchronizes the project
+    // directory. A new subscriber can include this event in its high-water cut.
+    p.source("workspace")
+        .unwrap()
+        .publish(UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+            revision: Revision(1),
+        }))
+        .unwrap();
+    let announced = p.state.lock().unwrap().cursor();
+    let expected = if register {
+        projects.push((
+            ProjectId::new("new-project").unwrap(),
+            PathBuf::from("/workspace/new-project"),
+        ));
+        BTreeMap::from([
+            ("project".to_owned(), "before".to_owned()),
+            ("new-project".to_owned(), "registered".to_owned()),
+        ])
+    } else {
+        BTreeMap::from([("project".to_owned(), "renamed".to_owned())])
+    };
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let (entered, release) = (entered.clone(), release.clone());
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    let configuring = {
+        let p = p.clone();
+        let names = expected.clone();
+        std::thread::spawn(move || p.configure_projects(projects, names))
+    };
+    entered.wait(); // New models collected, but not published.
+    let subscription = p.subscribe_with_snapshot(&all(None));
+    release.wait();
+    configuring.join().unwrap().unwrap();
+    let mut sub = subscription.unwrap();
+    assert_eq!(sub.started.high_water, announced);
+    let snapshot: BTreeMap<_, _> = sub
+        .started
+        .initial_page
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Project(project) => {
+                Some((project.id.as_str(), project.display_name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshot, BTreeMap::from([("project", "before")]));
+    // A nonterminal marker bounds the receive loop even on the broken version.
+    // Unsubscribe would clear queued events, including the notification we need.
+    let marker = event(99);
+    p.source("lifecycle")
+        .unwrap()
+        .publish(marker.clone())
+        .unwrap();
+    let mut reannounced = false;
+    while let Some(envelope) = rt.block_on(sub.recv()) {
+        if envelope.event == marker {
+            break;
+        }
+        if matches!(
+            envelope.event,
+            UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged { .. })
+        ) {
+            assert!(envelope.cursor.sequence > sub.started.high_water.sequence);
+            let reply = p
+                .query(&Query::Workspace(WorkspaceQuery::ListProjects(
+                    Default::default(),
+                )))
+                .unwrap();
+            let QueryReply::Workspace(WorkspaceReply::Projects(page)) = reply else {
+                panic!("expected project listing");
+            };
+            let names: BTreeMap<_, _> = page
+                .items
+                .into_iter()
+                .map(|project| (project.id.as_str().to_owned(), project.display_name))
+                .collect();
+            assert_eq!(names, expected);
+            reannounced = true;
+        }
+    }
+    assert!(
+        reannounced,
+        "stale snapshot needs a new workspace notification"
+    );
+    p.unsubscribe(&sub.started.subscription_id);
+    let published = p.state.lock().unwrap().cursor();
+    p.refresh_models().unwrap();
+    assert_eq!(
+        p.state.lock().unwrap().cursor(),
+        published,
+        "unchanged projects do not create a refetch loop"
+    );
 }
 
 #[test]

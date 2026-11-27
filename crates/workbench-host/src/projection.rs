@@ -745,6 +745,13 @@ impl Projection {
                 ));
             }
         }
+        if state.models.projects != next.projects {
+            // The workspace area may have announced this before collect. A
+            // snapshot cut taken during collect still needs a later refetch.
+            changes.push(UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+                revision: queries::revision(&next.projects),
+            }));
+        }
         if state.models.status() != next.status() {
             changes.push(UiEvent::Lifecycle(LifecycleEvent::CoreStatusChanged {
                 status: next.status(),
