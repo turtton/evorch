@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use rusqlite::Connection;
 use storage::admin_audit::fault::{AuditFault, AuditFaultPoint};
 use storage::admin_audit::*;
-use storage::{Database, HardLimits, Storage, StorageConfig, StorageError, StorageHandle};
+use storage::{Database, Storage, StorageConfig, StorageError, StorageHandle};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -511,30 +511,6 @@ fn a_panicking_callback_does_not_stop_the_writer() {
             )))
             .unwrap(),
     );
-}
-
-#[test]
-fn a_database_at_its_size_limit_refuses_audit_writes_as_capacity_but_still_reads() {
-    let fixture = Fixture::with(|config| {
-        config.hard_limits = HardLimits {
-            max_db_bytes: 1,
-            ..HardLimits::default()
-        }
-    });
-    assert_eq!(
-        error_of(fixture.audit(AuditWrite::Accept(accepted(
-            "op-1",
-            1,
-            AuditOperation::Cancel,
-            3
-        )))),
-        AuditError::Capacity(AuditCapacity::WritesSuspended)
-    );
-    assert_eq!(read(&fixture, "op-1"), None);
-    assert!(matches!(
-        fixture.audit(AuditWrite::Stats).unwrap(),
-        AuditReply::Stats(_)
-    ));
 }
 
 #[test]

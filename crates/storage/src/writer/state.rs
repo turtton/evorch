@@ -9,7 +9,7 @@ use super::{Command, StorageStatistics};
 use crate::db::file_sizes;
 use crate::projection;
 use crate::repo::{catalog, event, metrics};
-use crate::{HardLimits, LimitKind, StorageConfig, StorageError};
+use crate::{HardLimits, StorageConfig, StorageError};
 
 #[path = "diagnostic.rs"]
 mod diagnostic;
@@ -24,9 +24,11 @@ struct WriterState {
     statistics: StorageStatistics,
     config: StorageConfig,
     pending: HashMap<BucketKey, UsageBucket>,
+    /// Size limits only warn; nothing sets this in production, so it stays `false`.
     writes_suspended: bool,
     soft_warned: bool,
-    suspend_logged: bool,
+    /// The database size is over `max_db_bytes` and has been logged, so it is not logged again.
+    over_limit_warned: bool,
     temp_warned: bool,
     next_flush_at: Instant,
     next_checkpoint_at: Instant,
@@ -104,7 +106,7 @@ fn snapshot_transaction<T>(
 pub(super) struct StartState {
     pub writes_suspended: bool,
     pub soft_warned: bool,
-    pub suspend_logged: bool,
+    pub over_limit_warned: bool,
     pub temp_warned: bool,
 }
 
@@ -116,7 +118,7 @@ pub(super) fn run_writer(
     config: StorageConfig,
     writes_suspended: bool,
     soft_warned: bool,
-    suspend_logged: bool,
+    over_limit_warned: bool,
     temp_warned: bool,
 ) {
     run_writer_with_index(
@@ -127,7 +129,7 @@ pub(super) fn run_writer(
         StartState {
             writes_suspended,
             soft_warned,
-            suspend_logged,
+            over_limit_warned,
             temp_warned,
         },
     );
@@ -143,7 +145,7 @@ pub(super) fn run_writer_with_index(
     let StartState {
         writes_suspended,
         soft_warned,
-        suspend_logged,
+        over_limit_warned,
         temp_warned,
     } = start;
     let now = Instant::now();
@@ -157,7 +159,7 @@ pub(super) fn run_writer_with_index(
         pending: HashMap::new(),
         writes_suspended,
         soft_warned,
-        suspend_logged,
+        over_limit_warned,
         temp_warned,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
@@ -241,11 +243,7 @@ pub(super) fn run_writer_with_index(
                 }
             }
             Ok(Command::AppendEvent(session_id, event, reply)) => {
-                let result = if state.writes_suspended {
-                    handle_suspended_append(&mut state, &session_id, &event)
-                } else {
-                    append_event_to_conn(&mut state, &session_id, &event)
-                };
+                let result = append_event_to_conn(&mut state, &session_id, &event);
                 record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
@@ -253,8 +251,6 @@ pub(super) fn run_writer_with_index(
                 let guards = validator.acquire(&event);
                 let result = if guards.is_none() {
                     Err(StorageError::StaleMutation)
-                } else if state.writes_suspended {
-                    handle_suspended_append(&mut state, &session_id, &event)
                 } else {
                     append_event_to_conn(&mut state, &session_id, &event)
                 };
@@ -337,11 +333,7 @@ pub(super) fn run_writer_with_index(
                 } else {
                     let session_limit = state.config.hard_limits.max_session_bytes;
                     state.config.hard_limits.max_session_bytes = u64::MAX;
-                    let result = if state.writes_suspended {
-                        handle_suspended_append(&mut state, &Some(stream_id), &event)
-                    } else {
-                        append_event_to_conn(&mut state, &Some(stream_id), &event)
-                    };
+                    let result = append_event_to_conn(&mut state, &Some(stream_id), &event);
                     state.config.hard_limits.max_session_bytes = session_limit;
                     result
                 };
@@ -1323,31 +1315,6 @@ fn record_event_failure<T>(state: &mut WriterState, result: &Result<T, StorageEr
     }
 }
 
-fn handle_suspended_append(
-    state: &mut WriterState,
-    session_id: &Option<String>,
-    event: &Event,
-) -> Result<(), StorageError> {
-    let sizes = file_sizes(&state.config.db_path)?;
-    if sizes.total() < state.config.hard_limits.max_db_bytes {
-        state.writes_suspended = false;
-        state.soft_warned = false;
-        state.suspend_logged = false;
-        tracing::info!(
-            total_bytes = sizes.total(),
-            max_bytes = state.config.hard_limits.max_db_bytes,
-            "event writes resumed"
-        );
-        append_event_to_conn(state, session_id, event)
-    } else {
-        Err(StorageError::LimitExceeded {
-            limit: LimitKind::DbSize,
-            actual: sizes.total(),
-            max: state.config.hard_limits.max_db_bytes,
-        })
-    }
-}
-
 fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
     state.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")?;
     let mut sizes = file_sizes(&state.config.db_path)?;
@@ -1365,21 +1332,21 @@ fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
 }
 
 fn refresh_size_state(state: &mut WriterState, total_bytes: u64) {
-    let suspended = total_bytes >= state.config.hard_limits.max_db_bytes;
+    let over_limit = total_bytes >= state.config.hard_limits.max_db_bytes;
     let threshold =
         state.config.hard_limits.max_db_bytes as f64 * state.config.hard_limits.soft_warn_ratio;
-    if suspended {
-        if !state.suspend_logged {
-            tracing::error!(
+    if over_limit {
+        if !state.over_limit_warned {
+            tracing::warn!(
                 total_bytes,
                 max_bytes = state.config.hard_limits.max_db_bytes,
-                "event writes suspended"
+                "database size limit exceeded; event writes continue"
             );
-            state.suspend_logged = true;
+            state.over_limit_warned = true;
         }
         state.soft_warned = false;
     } else {
-        state.suspend_logged = false;
+        state.over_limit_warned = false;
         if total_bytes as f64 >= threshold {
             if !state.soft_warned {
                 tracing::warn!(
@@ -1393,15 +1360,14 @@ fn refresh_size_state(state: &mut WriterState, total_bytes: u64) {
             state.soft_warned = false;
         }
     }
-    state.writes_suspended = suspended;
 }
 
-pub(super) fn log_size_state(total: u64, limits: &HardLimits, suspended: bool) {
-    if suspended {
-        tracing::error!(
+pub(super) fn log_size_state(total: u64, limits: &HardLimits, over_limit: bool) {
+    if over_limit {
+        tracing::warn!(
             total_bytes = total,
             max_bytes = limits.max_db_bytes,
-            "event writes suspended"
+            "database size limit exceeded; event writes continue"
         );
     } else if total as f64 >= limits.max_db_bytes as f64 * limits.soft_warn_ratio {
         tracing::warn!(
@@ -1445,7 +1411,7 @@ mod tests {
         }
     }
 
-    fn capture_logs(action: impl FnOnce()) -> String {
+    pub(super) fn capture_logs(action: impl FnOnce()) -> String {
         let buffer = LogBuffer::default();
         let writer = buffer.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -1560,7 +1526,7 @@ mod tests {
             pending: HashMap::new(),
             writes_suspended: false,
             soft_warned: false,
-            suspend_logged: false,
+            over_limit_warned: false,
             diagnostic_cursor: None,
             reclaim_wal_pending: false,
             reclaim_after: None,
@@ -1613,6 +1579,37 @@ mod tests {
         });
         // Then: 新しい遷移として 1 回だけ警告される
         assert_eq!(logs.matches("temp storage threshold exceeded").count(), 1);
+    }
+
+    #[test]
+    fn size_check_warns_once_per_transition_and_never_suspends_writes() {
+        // Given: a 1000-byte database limit
+        let mut state = temp_state(std::path::PathBuf::from("unused.db"), 0);
+        state.config.hard_limits.max_db_bytes = 1000;
+
+        // When: the size stays over the limit for two ticks
+        let logs = capture_logs(|| {
+            refresh_size_state(&mut state, 1500);
+            refresh_size_state(&mut state, 2000);
+        });
+        // Then: one warning is logged and writes are not suspended
+        assert_eq!(
+            logs.matches("database size limit exceeded").count(),
+            1,
+            "{logs}"
+        );
+        assert!(!state.writes_suspended);
+
+        // When: it drops below the limit and exceeds it again
+        refresh_size_state(&mut state, 100);
+        let logs = capture_logs(|| refresh_size_state(&mut state, 1500));
+        // Then: the new transition warns once more
+        assert_eq!(
+            logs.matches("database size limit exceeded").count(),
+            1,
+            "{logs}"
+        );
+        assert!(!state.writes_suspended);
     }
 
     #[test]

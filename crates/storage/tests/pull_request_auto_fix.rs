@@ -1064,38 +1064,6 @@ fn physical_reclaim_removes_delivery_and_payload_but_keeps_adopted_sha() {
     assert_eq!(f.count("pr_notices"), 1);
 }
 
-#[test]
-fn pr_storage_writes_obey_capacity_suspension_while_reads_remain_available() {
-    let f = Fixture::new();
-    let n = f.reserve(1, PrNoticeMode::Manual, 1);
-    let request = f.reservation(2, PrNoticeMode::Manual, 2);
-    let Fixture {
-        _dir,
-        mut config,
-        storage,
-    } = f;
-    storage.close();
-    config.hard_limits.max_db_bytes = 1;
-    let f = Fixture {
-        _dir,
-        storage: Storage::open(config.clone()).unwrap(),
-        config,
-    };
-    assert!(f.h().reserve_pr_notice(request).is_err());
-    assert!(
-        f.h()
-            .ready_pr_notice(n.notice_id.clone(), "facts".into())
-            .is_err()
-    );
-    assert!(f.h().cancel_pr_notice(n.notice_id.clone()).is_err());
-    assert_eq!(
-        f.h().pr_notice(n.notice_id).unwrap().unwrap().phase,
-        PrNoticePhase::Reserved
-    );
-    assert_eq!(f.count("pr_notices"), 1);
-    assert_eq!(f.count("lane_notifications"), 0);
-}
-
 #[path = "pull_request_auto_fix/lane_management.rs"]
 mod lane_management;
 

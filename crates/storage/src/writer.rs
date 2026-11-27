@@ -314,9 +314,9 @@ impl Storage {
         }
         let lease = (db_lease, writer_lease);
         let initial_size = file_sizes(&config.db_path)?.total();
-        let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;
-        log_size_state(initial_size, &config.hard_limits, writes_suspended);
-        let soft_warned = !writes_suspended
+        let over_limit = initial_size >= config.hard_limits.max_db_bytes;
+        log_size_state(initial_size, &config.hard_limits, over_limit);
+        let soft_warned = !over_limit
             && initial_size as f64
                 >= config.hard_limits.max_db_bytes as f64 * config.hard_limits.soft_warn_ratio;
         let temp_bytes = temp_files_bytes(&config.db_path)?;
@@ -326,7 +326,7 @@ impl Storage {
         let max_event_bytes = config.hard_limits.max_event_bytes;
         let reader_config = Arc::new(config.clone());
         // Settings are applied (and versions recorded) before any command runs.
-        let index = index::IndexJob::new(&database.conn, &config, writes_suspended);
+        let index = index::IndexJob::new(&database.conn, &config, false);
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
@@ -337,9 +337,9 @@ impl Storage {
                     config,
                     index,
                     StartState {
-                        writes_suspended,
+                        writes_suspended: false,
                         soft_warned,
-                        suspend_logged: writes_suspended,
+                        over_limit_warned: over_limit,
                         temp_warned,
                     },
                 )

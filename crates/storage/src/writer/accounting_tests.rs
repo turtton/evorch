@@ -6,8 +6,11 @@ use std::time::{Duration, UNIX_EPOCH};
 use event_bus::{EventMeta, MessageEvent};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
+use super::tests::capture_logs;
 use super::*;
-use crate::Database;
+use crate::{Database, LimitKind};
+
+const DAILY_WARNING: &str = "daily event byte limit exceeded";
 
 fn writer_state(conn: Connection, config: StorageConfig) -> WriterState {
     let now = Instant::now();
@@ -21,7 +24,7 @@ fn writer_state(conn: Connection, config: StorageConfig) -> WriterState {
         pending: HashMap::new(),
         writes_suspended: false,
         soft_warned: false,
-        suspend_logged: false,
+        over_limit_warned: false,
         temp_warned: false,
         diagnostic_cursor: None,
         reclaim_wal_pending: false,
@@ -160,14 +163,20 @@ fn utc_day_switch_and_out_of_order_events_reseed_daily_accounting() {
         append(&mut state, None, &event_at(seconds, "delta")).unwrap();
         assert_eq!(state.accounting.day_bytes, bytes * expected_total);
     }
-    assert_eq!(
-        append(&mut state, None, &event_at(2, "delta")),
-        Err(limit_error(LimitKind::DailyBytes, bytes * 5, bytes * 4))
-    );
-    // The rejected earlier-day append must not corrupt the current day's cache.
-    append(&mut state, None, &event_at(86_402, "delta")).unwrap();
+    // The daily limit only warns, once per UTC day: the overrun is written and logged.
+    let logs = capture_logs(|| {
+        append(&mut state, None, &event_at(2, "delta")).unwrap();
+        append(&mut state, None, &event_at(3, "delta")).unwrap();
+    });
+    assert_eq!(logs.matches(DAILY_WARNING).count(), 1, "{logs}");
+    assert_eq!(state.accounting.day_bytes, bytes * 6);
+    // The earlier-day overrun must not corrupt the current day's cache or warn for it.
+    let logs = capture_logs(|| {
+        append(&mut state, None, &event_at(86_402, "delta")).unwrap();
+    });
+    assert!(!logs.contains(DAILY_WARNING), "{logs}");
     assert_eq!(state.accounting.day_bytes, bytes * 3);
-    assert_eq!(event_count(&state.conn), 5);
+    assert_eq!(event_count(&state.conn), 7);
 }
 
 #[test]
@@ -233,37 +242,26 @@ fn rejected_event_and_rolled_back_insert_leave_capacity_available() {
 fn external_commits_and_reopen_reseed_session_and_daily_limits() {
     let event = event_at(1, "delta");
     let bytes = payload_bytes(&event);
-    for limit in [LimitKind::SessionSize, LimitKind::DailyBytes] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = StorageConfig {
-            db_path: dir.path().join("accounting.db"),
-            ..Default::default()
-        };
-        match limit {
-            LimitKind::SessionSize => config.hard_limits.max_session_bytes = bytes * 3,
-            LimitKind::DailyBytes => config.hard_limits.max_daily_event_bytes = bytes * 3,
-            _ => unreachable!(),
-        }
-        let mut first = writer_state(Database::open(&config).unwrap().conn, config.clone());
-        let mut external = writer_state(Database::open(&config).unwrap().conn, config.clone());
-        append(&mut first, Some("session"), &event).unwrap();
-        let external_session = if limit == LimitKind::SessionSize {
-            "session"
-        } else {
-            "other-session"
-        };
-        append(&mut external, Some(external_session), &event).unwrap();
-        append(&mut first, Some("session"), &event).unwrap();
-        let expected = Err(limit_error(limit, bytes * 4, bytes * 3));
-        assert_eq!(append(&mut first, Some("session"), &event), expected);
-        assert_eq!(event_count(&first.conn), 3);
-        drop(first);
-        drop(external);
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = StorageConfig {
+        db_path: dir.path().join("accounting.db"),
+        ..Default::default()
+    };
+    config.hard_limits.max_session_bytes = bytes * 3;
+    let mut first = writer_state(Database::open(&config).unwrap().conn, config.clone());
+    let mut external = writer_state(Database::open(&config).unwrap().conn, config.clone());
+    append(&mut first, Some("session"), &event).unwrap();
+    append(&mut external, Some("session"), &event).unwrap();
+    append(&mut first, Some("session"), &event).unwrap();
+    let expected = Err(limit_error(LimitKind::SessionSize, bytes * 4, bytes * 3));
+    assert_eq!(append(&mut first, Some("session"), &event), expected);
+    assert_eq!(event_count(&first.conn), 3);
+    drop(first);
+    drop(external);
 
-        let mut reopened = writer_state(Database::open(&config).unwrap().conn, config);
-        assert_eq!(append(&mut reopened, Some("session"), &event), expected);
-        assert_eq!(event_count(&reopened.conn), 3);
-    }
+    let mut reopened = writer_state(Database::open(&config).unwrap().conn, config);
+    assert_eq!(append(&mut reopened, Some("session"), &event), expected);
+    assert_eq!(event_count(&reopened.conn), 3);
 }
 
 #[test]
@@ -297,15 +295,17 @@ fn stream_and_normal_commands_share_daily_totals_and_restore_session_limits() {
     let stream_daily_overflow = queue(true, "gui");
     tx.send(Command::Shutdown).unwrap();
 
-    run_writer(
-        Database::open_in_memory().unwrap().conn,
-        rx,
-        config,
-        false,
-        false,
-        false,
-        false,
-    );
+    let logs = capture_logs(|| {
+        run_writer(
+            Database::open_in_memory().unwrap().conn,
+            rx,
+            config,
+            false,
+            false,
+            false,
+            false,
+        );
+    });
     assert_eq!(first.recv().unwrap(), Ok(()));
     assert_eq!(stream_first.recv().unwrap(), Ok(()));
     assert_eq!(
@@ -313,10 +313,9 @@ fn stream_and_normal_commands_share_daily_totals_and_restore_session_limits() {
         Err(limit_error(LimitKind::SessionSize, bytes * 2, bytes))
     );
     assert_eq!(stream_second.recv().unwrap(), Ok(()));
+    // The daily limit only warns: both paths keep writing and share one warning.
     for result in [normal_daily_overflow, stream_daily_overflow] {
-        assert_eq!(
-            result.recv().unwrap(),
-            Err(limit_error(LimitKind::DailyBytes, bytes * 4, bytes * 3))
-        );
+        assert_eq!(result.recv().unwrap(), Ok(()));
     }
+    assert_eq!(logs.matches(DAILY_WARNING).count(), 1, "{logs}");
 }

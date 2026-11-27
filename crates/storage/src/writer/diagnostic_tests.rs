@@ -15,7 +15,7 @@ fn fixture() -> WriterState {
         pending: HashMap::new(),
         writes_suspended: false,
         soft_warned: false,
-        suspend_logged: false,
+        over_limit_warned: false,
         temp_warned: false,
         next_flush_at: Instant::now(),
         next_checkpoint_at: Instant::now(),

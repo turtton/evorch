@@ -145,8 +145,8 @@ fn session_budget_rejects_only_the_overflowing_event() {
 }
 
 #[test]
-fn daily_budget_rejects_event_crossing_same_utc_day_limit() {
-    // Given: 同じ UTC 日に一件だけ収まる日次上限
+fn daily_budget_overrun_is_written_and_counted() {
+    // Given: 同じ UTC 日に一件だけ収まる日次上限（超過しても書き込みは続く）
     let temp_dir = TempDir::new().expect("temporary directory must be created");
     let connection = open_connection(&temp_dir);
     let day = 86_400_u64 * 1_000_000_000;
@@ -174,18 +174,11 @@ fn daily_budget_rejects_event_crossing_same_utc_day_limit() {
         .expect("first event must fit");
 
     // When: 同日の合計が上限を超える二件目を追記する
-    let error = append_event(&connection, None, &second, &limits, &mut accounting)
-        .expect_err("daily overflow must fail");
+    append_event(&connection, None, &second, &limits, &mut accounting)
+        .expect("the daily limit only warns");
 
-    // Then: DailyBytes 超過として拒否される
-    assert_eq!(
-        error,
-        StorageError::LimitExceeded {
-            limit: LimitKind::DailyBytes,
-            actual: total,
-            max: limits.max_daily_event_bytes,
-        }
-    );
+    // Then: 二件とも保存され、日次合計は上限を超えて数えられる
+    assert_eq!(accounting.day_bytes, total);
 }
 
 #[test]

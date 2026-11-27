@@ -299,66 +299,6 @@ fn closed_writer_rejects_acceptance_without_writing() {
 }
 
 #[test]
-fn suspended_writer_rejects_every_receipt_write_without_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = StorageConfig {
-        db_path: dir.path().join("suspended.db"),
-        ..Default::default()
-    };
-    let storage = Storage::open(config.clone()).unwrap();
-    storage
-        .handle()
-        .append_host_input_accepted(
-            &[],
-            &[],
-            None,
-            &receipt("p-1", "run-1", HostInputStatus::Accepted),
-        )
-        .unwrap();
-    storage.close();
-    config.hard_limits.max_db_bytes = 1;
-    let storage = Storage::open(config.clone()).unwrap();
-    let handle = storage.handle();
-    let delivered = HostInputWrite {
-        transitions: vec![HostInputTransition::new(
-            "p-1",
-            HostInputStatus::Delivered,
-            None,
-        )],
-        ..Default::default()
-    };
-    let results = [
-        handle
-            .append_host_input_accepted(
-                &[evidence("e-1", "run-1", "plain")],
-                &[],
-                None,
-                &receipt("p-2", "run-1", HostInputStatus::Accepted),
-            )
-            .map(drop),
-        handle
-            .upsert_run_context_with_receipts(&context("run-1", r#"["p-1"]"#), &delivered)
-            .map(drop),
-        handle
-            .transition_host_inputs(&delivered.transitions)
-            .map(drop),
-        handle.mark_host_inputs_unknown("run-1", "test").map(drop),
-    ];
-    for result in results {
-        assert!(
-            matches!(&result, Err(StorageError::Serialization(message)) if message.contains("writes suspended")),
-            "{result:?}"
-        );
-    }
-    let database = Database::open(&config).unwrap();
-    assert_eq!(
-        database.host_input_receipts_for_run("run-1").unwrap(),
-        vec![receipt("p-1", "run-1", HostInputStatus::Accepted)]
-    );
-    assert!(database.run_context("run-1").unwrap().is_none());
-}
-
-#[test]
 fn snapshot_moves_only_accepted_receipts_and_round_trips_host_inputs() {
     let (_dir, storage, database, _config) = fixture();
     let handle = storage.handle();
