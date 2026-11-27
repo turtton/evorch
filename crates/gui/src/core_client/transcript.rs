@@ -926,7 +926,7 @@ mod tests {
         assert!(harness.state().requested.contains("why"));
     }
 
-    // Given: thr's first messages, scrolled to the first, and an older page of tool calls
+    // Given: thr's first messages, scrolled to the first, and an older page of opened tool calls
     // When: the page arrives, and the bodies of its calls arrive in a later frame
     // Then: the message stays where it was on screen after each
     #[test]
@@ -941,6 +941,12 @@ mod tests {
             .older
             .insert("thr".into(), Some(PageCursor::new("c1").unwrap()));
         let mut harness = harness(cache);
+        let run = RunId::new("r").unwrap();
+        harness.ctx.data_mut(|data| {
+            for index in 0..20 {
+                data.insert_temp(cards::open_id(&run, &format!("call-{index}")), true);
+            }
+        });
         harness.run_steps(3);
         harness.get_by_label("You: Question 0").scroll_to_me();
         harness.run_steps(3);
@@ -993,6 +999,121 @@ mod tests {
             (after_bodies.min.y - before.min.y).abs() < 1.0,
             "the message moved from {before:?} to {after_bodies:?} with the bodies"
         );
+    }
+
+    // Given: a card opened while the call that made it was not committed yet
+    // When: that caller is committed, and opened
+    // Then: the card inside it is still open
+    #[test]
+    fn a_card_stays_open_when_its_caller_arrives_later() {
+        use egui_kittest::kittest::Queryable;
+        let child = tool_row(
+            "r",
+            0,
+            serde_json::json!({"parent_call_id": "call-1", "input": inline("child code")}),
+            inline("x"),
+        );
+        let mut harness = harness(history(vec![child]));
+        harness.run_steps(3);
+        harness.get_by_label("summary 0").click();
+        harness.run_steps(3);
+        harness.get_by_label("child code");
+
+        harness
+            .state_mut()
+            .cache
+            .history
+            .get_mut("thr")
+            .unwrap()
+            .push(call("r", 1));
+        harness.run_steps(3);
+        assert!(
+            harness.query_by_label("summary 0").is_none(),
+            "inside its caller now"
+        );
+        harness.get_by_label("summary 1").click();
+        harness.run_steps(3);
+        harness.get_by_label("summary 0");
+        harness.get_by_label("child code");
+    }
+
+    // Given: a caller with fourteen opened calls whose inputs are bodies not read yet, scrolled to
+    //        the seventh
+    // When: the bodies of the first three, out of view, arrive
+    // Then: the seventh stays where it was on screen
+    #[test]
+    fn a_body_arriving_inside_a_caller_keeps_the_view_in_place() {
+        use egui_kittest::kittest::Queryable;
+        let mut rows: Vec<_> = (0..14)
+            .map(|index| {
+                tool_row(
+                    "r",
+                    index,
+                    serde_json::json!({
+                        "parent_call_id": "call-14", "input": body(&format!("in-{index}")),
+                    }),
+                    inline("x"),
+                )
+            })
+            .collect();
+        rows.push(call("r", 14));
+        let mut harness = harness(history(rows));
+        let run = RunId::new("r").unwrap();
+        harness.ctx.data_mut(|data| {
+            for index in 0..=14 {
+                data.insert_temp(cards::open_id(&run, &format!("call-{index}")), true);
+            }
+        });
+        harness.run_steps(4);
+        harness.get_by_label("summary 6").scroll_to_me();
+        harness.run_steps(4);
+        let before = harness.get_by_label("summary 6").rect();
+
+        let long = (0..30)
+            .map(|l| format!("line {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for index in 0..3 {
+            harness
+                .state_mut()
+                .cache
+                .bodies
+                .insert(format!("in-{index}"), long.clone());
+        }
+        harness.run_steps(4);
+        let after = harness.get_by_label("summary 6").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the call moved from {before:?} to {after:?}"
+        );
+    }
+
+    // Given: an opened card whose input is text
+    // When: the text is dragged over to select it
+    // Then: the card stays open
+    #[test]
+    fn selecting_text_in_a_card_does_not_close_it() {
+        use egui_kittest::kittest::Queryable;
+        let row = tool_row(
+            "r",
+            0,
+            serde_json::json!({"input": inline("first line\nsecond line")}),
+            inline("done"),
+        );
+        let mut harness = harness(history(vec![row]));
+        harness.run_steps(3);
+        harness.get_by_label_contains("run_js").click();
+        harness.run_steps(3);
+        let text = harness.get_by_label("first line\nsecond line").rect();
+        harness.hover_at(text.left_top() + egui::vec2(2.0, 2.0));
+        harness.run_steps(2);
+        harness.drag_at(text.left_top() + egui::vec2(2.0, 2.0));
+        harness.run_steps(1);
+        harness.hover_at(text.right_bottom() - egui::vec2(2.0, 2.0));
+        harness.run_steps(1);
+        harness.drop_at(text.right_bottom() - egui::vec2(2.0, 2.0));
+        harness.run_steps(3);
+        harness.get_by_label("Input");
     }
 
     // Given: a call whose input and detail are bodies

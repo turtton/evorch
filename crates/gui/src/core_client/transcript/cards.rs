@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use egui::{Align, Label, Layout, RichText, Sense, Ui, UiBuilder, WidgetInfo, WidgetType};
-use workbench_protocol::views::*;
+use workbench_protocol::{ids::RunId, views::*};
 
 use super::{Cache, Effect, PullRequestChips, ViewAnchor, content_text, message_key};
 use crate::panes::pull_request_widgets::candidate_offer;
@@ -17,6 +17,12 @@ use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::*;
 use crate::theme::widgets::soft_frame;
+
+/// Where whether a call's card is open is kept: by the call alone, so that the card keeps its
+/// state wherever it is drawn (on its own until its caller is committed, then inside it).
+pub(super) fn open_id(run: &RunId, call_id: &str) -> egui::Id {
+    egui::Id::new(("tool-card-open", run.as_str(), call_id))
+}
 
 /// An input, a result or details taller than this scroll inside their card.
 const SECTION_MAX_HEIGHT: f32 = 320.0;
@@ -46,7 +52,7 @@ pub(super) fn rows(
         }
         let top = ui.cursor().min.y;
         if row.role == MessageRole::Tool {
-            card(ui, env, &tree, at);
+            card(ui, env, view, &tree, at);
         } else {
             aside(ui, env, row);
         }
@@ -99,13 +105,13 @@ impl<'a> Tree<'a> {
     }
 }
 
-fn card(ui: &mut Ui, env: &mut Env<'_, '_>, tree: &Tree<'_>, at: usize) {
+fn card(ui: &mut Ui, env: &mut Env<'_, '_>, view: &mut ViewAnchor, tree: &Tree<'_>, at: usize) {
     let message = tree.rows[at];
     let Some(tool) = &message.tool else {
         return;
     };
     ui.push_id(("tool-card", message.run.as_str(), &tool.call_id), |ui| {
-        let id = ui.id().with("open");
+        let id = open_id(&message.run, &tool.call_id);
         let open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
         // The scope senses presses below everything drawn in it, so buttons and the like
         // keep theirs.
@@ -115,7 +121,7 @@ fn card(ui: &mut Ui, env: &mut Env<'_, '_>, tree: &Tree<'_>, at: usize) {
                 header(ui, open, tool);
                 offers(ui, env, message, tool);
                 if open {
-                    body(ui, env, tree, at, tool);
+                    body(ui, env, view, tree, at, tool);
                 }
             });
         });
@@ -176,7 +182,14 @@ fn offers(ui: &mut Ui, env: &mut Env<'_, '_>, message: &CommittedMessage, tool: 
     }
 }
 
-fn body(ui: &mut Ui, env: &mut Env<'_, '_>, tree: &Tree<'_>, at: usize, tool: &ToolCallView) {
+fn body(
+    ui: &mut Ui,
+    env: &mut Env<'_, '_>,
+    view: &mut ViewAnchor,
+    tree: &Tree<'_>,
+    at: usize,
+    tool: &ToolCallView,
+) {
     let message = tree.rows[at];
     ui.add_space(SP_1);
     if let Some(input) = &tool.input {
@@ -194,7 +207,10 @@ fn body(ui: &mut Ui, env: &mut Env<'_, '_>, tree: &Tree<'_>, at: usize, tool: &T
     if !tree.children[at].is_empty() {
         ui.indent("calls", |ui| {
             for &child in &tree.children[at] {
-                card(ui, env, tree, child);
+                let top = ui.cursor().min.y;
+                card(ui, env, view, tree, child);
+                // A call inside a call is an anchor too: its own body may arrive later.
+                view.visit(message_key(tree.rows[child]), top, ui.cursor().min.y, true);
                 ui.add_space(SP_1);
             }
         });
@@ -244,7 +260,8 @@ pub(super) fn aside(ui: &mut Ui, env: &mut Env<'_, '_>, message: &CommittedMessa
 }
 
 fn reasoning(ui: &mut Ui, env: &mut Env<'_, '_>, message: &CommittedMessage) {
-    let id = ui.id().with("open");
+    // Keyed by the row, not by where it is drawn: it moves into a group when a call follows.
+    let id = egui::Id::new(("reasoning-open", message.run.as_str(), message.index.get()));
     let open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let scope = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
         let caret = if open {
