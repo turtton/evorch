@@ -69,6 +69,52 @@ pub fn snapshot() -> SettingsSnapshot {
     }
 }
 
+fn pull_requests() -> PullRequestFeature {
+    PullRequestFeature {
+        enabled: true,
+        auto_fix_enabled: true,
+        include_in_review: false,
+        pending_poll_seconds: 30,
+        stable_poll_seconds: 300,
+        timeout_seconds: 20,
+    }
+}
+
+fn browser() -> BrowserFeature {
+    BrowserFeature {
+        enabled: true,
+        executable: Some("/usr/bin/chromium".into()),
+        max_pages: 8,
+        max_tabs: 4,
+        coordinate_actions: false,
+    }
+}
+
+fn feature_values(browser_enabled: bool) -> FeatureValues {
+    FeatureValues {
+        pull_requests: pull_requests(),
+        agent_web_tools: true,
+        browser: BrowserFeature {
+            enabled: browser_enabled,
+            ..browser()
+        },
+        thread_cleanup: ThreadCleanupFeature {
+            auto_archive_after_days: 7,
+            archived_delete_after_days: 7,
+        },
+    }
+}
+
+pub fn feature_settings() -> FeatureSettingsView {
+    FeatureSettingsView {
+        revision: revision(0x22),
+        saved: feature_values(false),
+        running: feature_values(true),
+        restart_pending: vec![FeatureSection::Browser],
+        problem: None,
+    }
+}
+
 pub fn samples() -> AreaSamples {
     AreaSamples {
         name: "settings",
@@ -105,12 +151,26 @@ pub fn samples() -> AreaSamples {
             Command::Settings(SettingsCommand::ReloadModels(ReloadModels {
                 operation_id: op("op-reload"),
             })),
+            Command::Settings(SettingsCommand::SaveFeatureSettings(SaveFeatureSettings {
+                operation_id: op("op-features"),
+                expected_revision: revision(0x11),
+                changes: FeatureSettingsPatch {
+                    pull_requests: Some(pull_requests()),
+                    agent_web_tools: Some(false),
+                    browser: Some(browser()),
+                    thread_cleanup: Some(ThreadCleanupFeature {
+                        auto_archive_after_days: 0,
+                        archived_delete_after_days: 30,
+                    }),
+                },
+            })),
         ],
         queries: vec![
             Query::Settings(SettingsQuery::ModelChoices {
                 project: workbench_protocol::ids::ProjectId::new("project-1").unwrap(),
             }),
             Query::Settings(SettingsQuery::GetSettingsSnapshot {}),
+            Query::Settings(SettingsQuery::GetFeatureSettings {}),
             Query::Settings(SettingsQuery::GetSettingsOperation {
                 operation_id: op("op-1"),
             }),
@@ -139,6 +199,7 @@ pub fn samples() -> AreaSamples {
                 },
             })),
             QueryReply::Settings(SettingsReply::Settings(Box::new(snapshot()))),
+            QueryReply::Settings(SettingsReply::FeatureSettings(Box::new(feature_settings()))),
             QueryReply::Settings(SettingsReply::Operation(operation(
                 OperationState::Pending,
                 SettingsOperationKind::ReloadModels,

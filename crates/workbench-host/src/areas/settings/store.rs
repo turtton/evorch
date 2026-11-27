@@ -79,9 +79,9 @@ impl ConfigStore {
         Self { dir, startup }
     }
 
-    /// Saved effective configuration, not merely the startup snapshot.
-    pub(super) fn quota_configuration(&self) -> Option<Config> {
-        Config::load_unresolved(&self.options()).ok()
+    /// The configuration the core started with.
+    pub(super) fn startup(&self) -> &Config {
+        &self.startup
     }
 
     fn path(&self) -> PathBuf {
@@ -168,6 +168,49 @@ impl ConfigStore {
         // one would be saved and then not start.
         self.strict_check(text)?;
         self.write(text)?;
+        Ok(revision_of(text.as_bytes()))
+    }
+
+    /// The effective configuration the files hold now (every layer but the project's),
+    /// with the revision of the file it was read after.
+    pub(super) fn effective(&self) -> Result<(SettingsRevision, Config), SaveError> {
+        let revision = self.revision()?;
+        Ok((revision, Config::load_unresolved(&self.options())?))
+    }
+
+    /// The configuration as the core loads it at start, read again after a write.
+    pub(super) fn effective_strict(&self) -> Result<Config, SaveError> {
+        Ok(Config::load_strict(&self.options())?)
+    }
+
+    /// A typed save made by editing the text of the file.
+    ///
+    /// The caller holds the writer lock. `edit` gets the current text and the effective
+    /// configuration and returns the new text; `verify` judges the effective configuration
+    /// the new text composes (a key another layer overrides is refused here). The checks
+    /// are those of a whole-text save: the revision, the restart targets and the strict
+    /// load. Nothing is written when the text does not change.
+    pub(super) fn save_edited(
+        &self,
+        expected: &SettingsRevision,
+        edit: impl FnOnce(&str, &Config) -> Result<String, SaveError>,
+        verify: impl FnOnce(&Config) -> Result<(), SaveError>,
+    ) -> Result<SettingsRevision, SaveError> {
+        let current = self.read()?;
+        if &revision_of(&current) != expected {
+            return Err(SaveError::Stale);
+        }
+        let current_text = String::from_utf8(current)
+            .map_err(|_| SaveError::Io("the configuration file is not text".into()))?;
+        let baseline = Config::load_unresolved(&self.options())?;
+        let text = edit(&current_text, &baseline)?;
+        let effective = self.compose(&text)?;
+        verify(&effective)?;
+        self.guard_restart_targets(&current_text, &text, &effective)?;
+        self.strict_check(&text)?;
+        if text != current_text {
+            self.write(&text)?;
+        }
         Ok(revision_of(text.as_bytes()))
     }
 

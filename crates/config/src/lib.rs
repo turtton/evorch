@@ -20,6 +20,7 @@ mod save_agent_features;
 mod save_agents;
 mod save_codex;
 mod save_context;
+mod save_feature_settings;
 mod save_role_profiles;
 mod save_routing;
 mod save_sandbox;
@@ -47,6 +48,7 @@ pub use save_codex::{
     save_codex_provider_edit, save_codex_provider_edit_with_options,
 };
 pub use save_context::{LayeredSaveContext, StandaloneSaveContext};
+pub use save_feature_settings::{FeatureSettingsEdit, edit_feature_settings_text};
 pub use save_role_profiles::{
     RoleProfileBindings, delete_role_profile, preview_role_profiles_bindings, role_profile_text,
     role_profiles_bindings_text, save_project_role_profile, save_role_profile,

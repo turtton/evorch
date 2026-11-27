@@ -123,45 +123,5 @@ impl SettingsFeature {
             let id = self.send_document(ctx, expected_revision, text.clone());
             self.saving.insert(id, text);
         }
-        self.web_tools_section(ui, ctx);
-    }
-
-    /// The session-only switch of the Agent web tools, still here until the Features screen
-    /// takes it over.
-    fn web_tools_section(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        ui.separator();
-        ui.label(medium("Agent web tools"));
-        ui.label(muted("Applies to the running core only. The settings file is not changed, and a core restart goes back to the file's value. The current value cannot be read here."));
-        let web_waiting = self
-            .pending
-            .values()
-            .any(|pending| matches!(pending, Pending::WebTools(_)));
-        let mut web_tools = None;
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!web_waiting, egui::Button::new("Enable web tools"))
-                .clicked()
-            {
-                web_tools = Some(true);
-            }
-            if ui
-                .add_enabled(!web_waiting, egui::Button::new("Disable web tools"))
-                .clicked()
-            {
-                web_tools = Some(false);
-            }
-        });
-        if !self.web_tools_status.is_empty() {
-            ui.label(&self.web_tools_status);
-        }
-        if let Some(enabled) = web_tools {
-            let tag = self.tag(Pending::WebTools(enabled));
-            ctx.command(
-                tag,
-                Command::Execution(ExecutionCommand::SetAgentWebToolsEnabled(
-                    SetAgentWebToolsEnabled { enabled },
-                )),
-            );
-        }
     }
 }

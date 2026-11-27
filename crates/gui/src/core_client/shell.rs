@@ -65,7 +65,7 @@ pub enum Effect {
     PullRequestChip(super::features::pull_requests::PullRequestChipAction),
     ResetLayout,
     ThemeSettings,
-    /// ⚙ → Model Settings or Config file.
+    /// ⚙ → Model Settings, Features or Config file, and what a button elsewhere opens.
     Settings(SettingsIntent),
     Status(String),
     AttachRequested {
@@ -709,6 +709,16 @@ fn settings_menu(ui: &mut Ui, state: &FooterState<'_>, effects: &mut Vec<Effect>
         effects.push(Effect::Settings(SettingsIntent::ModelSettings(
             crate::panes::settings::SettingsTab::Providers,
         )));
+    }
+    if shown(FeatureId::Settings)
+        && menu_item(
+            ui,
+            icons::SLIDERS_HORIZONTAL,
+            "Features",
+            Some("PR view \u{b7} Web tools \u{b7} Browser \u{b7} Cleanup"),
+        )
+    {
+        effects.push(Effect::Settings(SettingsIntent::Features));
     }
     // Until Providers takes sign-in over, credentials are managed in their own tab.
     if shown(FeatureId::Auth)

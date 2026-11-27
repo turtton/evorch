@@ -97,6 +97,7 @@ impl Fixture {
             reload_models,
             tasks: AreaTasks::new(tokio::runtime::Handle::current()),
             source,
+            features: Arc::new(workbench_host::areas::settings::feature_options::Unwired),
         });
         let host = host.with_areas(Areas {
             settings: settings.clone(),
