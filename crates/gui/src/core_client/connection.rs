@@ -545,11 +545,25 @@ pub async fn serve(
             // A core that still answers lost only the connection: reconnecting
             // starts nothing and spends no crash budget, so it is not held to
             // the allowance meant for a core that keeps dying, only paced.
-            match launcher.connect_existing(LIVE_CORE_PROBE).await {
+            let probed = match await_probe(
+                launcher.connect_existing(LIVE_CORE_PROBE),
+                &mut actions,
+                &shared,
+                &ctx,
+            )
+            .await
+            {
+                Probed::Done(probed) => probed,
+                Probed::Reconnect => continue,
+                Probed::Stop => return,
+            };
+            match probed {
                 Ok(Some(core)) => {
                     let delay = live_backoff.next_delay(session);
                     tracing::info!(
                         stage = "live-core",
+                        live_attempt = live_backoff.attempts(),
+                        crash_budget_attempts_in_window = auto.used(),
                         delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                         since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
                         "the core is still running; reconnecting to it"
@@ -567,10 +581,12 @@ pub async fn serve(
                 }
                 Ok(None) => tracing::info!(
                     stage = "live-core",
+                    crash_budget_attempts_in_window = auto.used(),
                     "no running core answered; the start is left to the crash budget"
                 ),
                 Err(error) => tracing::info!(
                     stage = "live-core",
+                    crash_budget_attempts_in_window = auto.used(),
                     %error,
                     "the running core could not be probed; the start is left to the crash budget"
                 ),
@@ -1030,6 +1046,34 @@ fn next_upload(
 /// How long a running core has to answer the probe that tells it from a dead one.
 const LIVE_CORE_PROBE: std::time::Duration = std::time::Duration::from_secs(5);
 
+enum Probed<T> {
+    Done(T),
+    /// The person asked to reconnect by hand while the probe ran.
+    Reconnect,
+    Stop,
+}
+
+/// Ask whether a core still answers, without making the window wait for the
+/// answer: a person's reconnect or the window closing is taken at once.
+async fn await_probe<T>(
+    probe: impl std::future::Future<Output = T>,
+    actions: &mut mpsc::Receiver<Action>,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+) -> Probed<T> {
+    tokio::pin!(probe);
+    loop {
+        tokio::select! {
+            probed = &mut probe => return Probed::Done(probed),
+            action = actions.recv() => match action {
+                None | Some(Action::Shutdown) => return Probed::Stop,
+                Some(Action::Reconnect) => return Probed::Reconnect,
+                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+            },
+        }
+    }
+}
+
 enum Paused {
     Elapsed,
     /// The person asked to reconnect by hand: the pace does not apply.
@@ -1161,6 +1205,33 @@ async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn a_probe_of_the_core_does_not_hold_back_a_reconnect_or_the_window_closing() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let ctx = egui::Context::default();
+
+        // A probe that never answers: a person's reconnect and the close are taken at once.
+        tx.send(Action::Reconnect).await.unwrap();
+        assert!(matches!(
+            await_probe(std::future::pending::<u8>(), &mut rx, &shared, &ctx).await,
+            Probed::Reconnect
+        ));
+        tx.send(Action::Shutdown).await.unwrap();
+        assert!(matches!(
+            await_probe(std::future::pending::<u8>(), &mut rx, &shared, &ctx).await,
+            Probed::Stop
+        ));
+
+        // An answer that arrives is returned.
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        answer.send(7u8).unwrap();
+        match await_probe(async { answered.await.unwrap() }, &mut rx, &shared, &ctx).await {
+            Probed::Done(value) => assert_eq!(value, 7),
+            _ => panic!("the probe answered"),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_reconnect_pace_runs_out_with_time_and_a_manual_reconnect_ends_it_at_once() {
         let (tx, mut rx) = mpsc::channel(4);

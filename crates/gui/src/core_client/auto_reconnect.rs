@@ -39,6 +39,12 @@ pub struct LiveCoreBackoff {
 }
 
 impl LiveCoreBackoff {
+    /// Reconnects to a live core in the current run of trouble (reset by a
+    /// session that held).
+    pub fn attempts(&self) -> u32 {
+        self.short_sessions
+    }
+
     /// The wait before the next reconnect; `session` is how long the lost connection had lasted.
     pub fn next_delay(&mut self, session: Duration) -> Duration {
         if session >= STABLE_SESSION {
@@ -61,6 +67,11 @@ pub struct AutoReconnect {
 }
 
 impl AutoReconnect {
+    /// Automatic attempts of the allowance that are still inside the window.
+    pub fn used(&self) -> usize {
+        self.attempts.len()
+    }
+
     /// Take one automatic attempt, or refuse when the window is used up.
     /// Returns the number of this attempt within the window.
     pub fn attempt(&mut self, now: Instant) -> Option<usize> {
@@ -159,11 +170,18 @@ mod tests {
         let waits: Vec<_> = (0..8).map(|_| live.next_delay(short).as_secs()).collect();
         assert_eq!(waits, [0, 1, 2, 4, 8, 16, 30, 30]);
         assert_eq!(
+            live.attempts(),
+            8,
+            "every reconnect to a live core is counted"
+        );
+        assert_eq!(
             live.next_delay(STABLE_SESSION),
             Duration::ZERO,
             "a session that held starts over"
         );
+        assert_eq!(live.attempts(), 1);
         assert_eq!(live.next_delay(short), LIVE_FIRST_BACKOFF);
+        assert_eq!(live.attempts(), 2);
     }
 
     #[test]

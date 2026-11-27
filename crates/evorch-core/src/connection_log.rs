@@ -4,7 +4,7 @@
 use std::{
     future::Future,
     io,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Instant,
 };
 use tokio::sync::watch;
@@ -17,6 +17,7 @@ pub(crate) struct ConnectionLog {
     id: u64,
     started: Instant,
     shutdown: watch::Receiver<bool>,
+    finished: AtomicBool,
 }
 
 impl ConnectionLog {
@@ -27,6 +28,7 @@ impl ConnectionLog {
             id,
             started: Instant::now(),
             shutdown: shutdown.clone(),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -86,6 +88,7 @@ impl ConnectionLog {
     }
 
     pub(crate) fn finished(&self, result: &io::Result<()>) {
+        self.finished.store(true, Ordering::Relaxed);
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let core_stopping = *self.shutdown.borrow();
         match result {
@@ -104,5 +107,83 @@ impl ConnectionLog {
                 "connection closed with an error"
             ),
         }
+    }
+}
+
+impl Drop for ConnectionLog {
+    /// A connection whose handler panicked or was cancelled never reaches
+    /// `finished`; this is the record that still names it.
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::Relaxed) {
+            return;
+        }
+        tracing::error!(
+            conn = self.id,
+            elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            panicked = std::thread::panicking(),
+            "connection ended without a result: its handler panicked or was cancelled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured(run: impl FnOnce()) -> String {
+        let log = Captured::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(log.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_handler_that_panics_still_leaves_a_record_naming_its_connection() {
+        let (_stop, stopped) = watch::channel(false);
+        let text = captured(|| {
+            let log = ConnectionLog::new(&stopped);
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _log = log;
+                panic!("handler bug");
+            }));
+            assert!(panicked.is_err());
+        });
+        let ended = text
+            .lines()
+            .find(|line| line.contains("connection ended without a result"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            ended.contains("panicked=true") && ended.contains("conn="),
+            "{ended}"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_finished_is_recorded_once_and_not_as_lost() {
+        let (_stop, stopped) = watch::channel(false);
+        let text = captured(|| {
+            let log = ConnectionLog::new(&stopped);
+            log.finished(&Ok(()));
+        });
+        assert!(text.contains("connection closed"), "{text}");
+        assert!(!text.contains("without a result"), "{text}");
     }
 }

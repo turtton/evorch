@@ -12,7 +12,9 @@ mod args;
 #[cfg(target_os = "linux")]
 mod planned_entry;
 fn main() -> std::process::ExitCode {
-    match run() {
+    let result = run();
+    evorch_core::logging::flush();
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             let code = if e
@@ -126,6 +128,8 @@ async fn serve(
     #[cfg(target_os = "linux")] observer: evorch_core::lifecycle::shutdown_watchdog::Observer,
     #[cfg(target_os = "linux")] mask: Arc<core_instance::handoff::BlockedShutdownSignals>,
 ) -> Result<(), BootstrapError> {
+    // The runtime exists and the entry work that needs one thread is done.
+    evorch_core::logging::start();
     let instance = Arc::new(Instance::acquire_default(&launch)?);
     #[cfg(target_os = "linux")]
     let options =

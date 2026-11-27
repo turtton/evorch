@@ -39,6 +39,7 @@ pub fn run(
         inbox,
         |(boot, proof), runtime, inbox, observer| {
             runtime.block_on(async move {
+        evorch_core::logging::start();
         let mut pending = boot
             .bootstrap(
                 BootstrapOptions {

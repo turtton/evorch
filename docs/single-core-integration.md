@@ -632,25 +632,38 @@ This is the provisional behavior selected in
 
 ### Reading a lost GUI-core connection
 
-A lost connection is explained in two log files, side by side, in
+A lost connection is explained in two kinds of log file, side by side, in
 `$XDG_STATE_HOME/evorch/logs/` (`~/.local/state/evorch/logs/` without
-`XDG_STATE_HOME`). Each is capped at 8 MiB and rotates to `<name>.log.1`.
-`RUST_LOG` changes the filter (default `info`). They are not part of the event
-store, so `evorch inspect` does not show them; they are written with no store
-access, which matters exactly when the store is what is slow.
+`XDG_STATE_HOME`). Every process writes its own file, `gui-<pid>.log` and
+`core-<pid>.log`, so processes never rotate each other's file. A file is capped at
+8 MiB and rotates to `<name>-<pid>.log.1`; at start-up the files of exited
+processes are pruned to the newest eight per name. Lines are written by a thread
+of their own: logging queues a line without waiting for the disk, and a full queue
+(1024 lines) drops lines and says how many were dropped. They are not part of the
+event store, so `evorch inspect` does not show them; they are written with no
+store access, which matters exactly when the store is what is slow.
 
-- `gui.log`: `lost the connection to the core` (a `WARN` with the client's
+Only the targets that explain a connection are saved (a log file outlives the
+process, and other crates log what they were given, such as an external checker's
+stderr, which can hold credentials): the core's `evorch_core::connection_log`,
+`evorch_core::lifecycle`, and `evorch_core::logging`; the GUI's
+`gui::core_client::connection` and `gui::core_client::disconnect_log`; and
+`workbench_client`. `RUST_LOG` still controls the GUI's stderr, not the files.
+
+- `gui-<pid>.log`: `lost the connection to the core` (a `WARN` with the client's
   `TransportError`, the length of the session, and how often the connection was
   lost in this episode); the stage the recovery reached (`stage=` `session`,
   `live-core`, `auto-reconnect`, `connect-or-start`, `subscribe`, `snapshot`,
-  `session-open`) with `since_loss_ms`; and, from the client library, the
-  socket error (`core socket I/O failed`, with the `io::ErrorKind` and OS error)
-  or `the peer ended the stream (end of file)`.
-- `core.log`: per connection (`conn=N`), `connection accepted`,
+  `session-open`) with `since_loss_ms`, the reconnects to a live core
+  (`live_attempt`) and the crash-budget attempts in the window; and, from the
+  client library, the socket error (`core socket I/O failed`, with the
+  `io::ErrorKind` and OS error) or `the peer ended the stream (end of file)`.
+- `core-<pid>.log`: per connection (`conn=N`), `connection accepted`,
   `handshake accepted` (the client instance), and the end: the task that ended
   first (`role="reader"` / `"writer"`) with its I/O error, `connection closed`
-  with `elapsed_ms` and `core_stopping`, `connection limit reached` when a 64th
-  connection is dropped, and handler panics.
+  with `elapsed_ms` and `core_stopping`, `connection ended without a result` when
+  the handler panicked or was cancelled (same `conn=N`), `connection limit
+  reached` when a 64th connection is dropped, and handler panics.
 
 Reconnect pacing: when the connection broke but the core still answers a
 connect-only probe, the GUI reconnects without spending the 3-in-5-minutes

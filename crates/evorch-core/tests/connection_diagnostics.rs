@@ -55,6 +55,7 @@ struct Core {
     _dir: test_socket_dir::SplitDir,
     socket: std::path::PathBuf,
     ended: mpsc::UnboundedReceiver<io::Result<()>>,
+    handlers: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     _stop: watch::Sender<bool>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -75,19 +76,22 @@ impl Core {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (stop, stopped) = watch::channel(false);
         let (done, ended) = mpsc::unbounded_channel();
+        let (spawned, handlers) = mpsc::unbounded_channel();
         let server = tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let (backend, stopped, done) = (backend.clone(), stopped.clone(), done.clone());
-                tokio::spawn(async move {
+                let handler = tokio::spawn(async move {
                     let _ = done.send(unix::connection(stream, backend, stopped).await);
                 });
+                let _ = spawned.send(handler);
             }
         });
         Self {
             _dir: dir,
             socket,
             ended,
+            handlers,
             _stop: stop,
             server,
         }
@@ -167,4 +171,36 @@ async fn a_protocol_violation_is_recorded_with_its_io_error() {
         "{:?}",
         log.lines()
     );
+}
+
+fn conn_of(line: &str) -> &str {
+    let rest = &line[line.find("conn=").expect("a line of a connection") + 5..];
+    rest.split_whitespace().next().unwrap()
+}
+
+#[tokio::test]
+async fn a_handler_that_is_cancelled_is_recorded_under_its_connection_number() {
+    // Given: a connected client whose connection the core has numbered.
+    let (log, _guard) = capture();
+    let mut core = Core::start().await;
+    let _client = WorkbenchClient::connect(
+        UnixTransport::connect(&core.socket).await.unwrap(),
+        config("cli-cancelled"),
+    )
+    .await
+    .unwrap();
+    let handler = core.handlers.recv().await.unwrap();
+    let accepted = log
+        .line_with(&["connection accepted"])
+        .expect("the connection was numbered when it was accepted");
+
+    // When: the handler task is cancelled (or panics) instead of returning.
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+
+    // Then: the record that it ended without a result carries the same number.
+    let lost = log
+        .line_with(&["connection ended without a result"])
+        .expect("the lost handler was recorded");
+    assert_eq!(conn_of(&lost), conn_of(&accepted));
 }
