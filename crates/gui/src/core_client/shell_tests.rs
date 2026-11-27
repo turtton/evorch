@@ -143,6 +143,33 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
     }
 }
 
+/// A lane a test added to the cache: "thr-lane-3" is "Lane 3", a lane of thr-1; "thr-alane-3"
+/// is "Archived lane 3", a lane of the archived thr-5.
+fn extra_lane(id: &str) -> Option<Fixture> {
+    if id == "thr-sub-1" {
+        return Some(Fixture {
+            parent: Some(("thr-3", LineageType::Fork)),
+            family: "thr-1",
+            ..thread("thr-sub-1", "Sub thread", 0)
+        });
+    }
+    let (lead, archived, title) =
+        match (id.strip_prefix("thr-lane-"), id.strip_prefix("thr-alane-")) {
+            (Some(number), _) => ("thr-1", false, format!("Lane {number}")),
+            (_, Some(number)) => ("thr-5", true, format!("Archived lane {number}")),
+            _ => return None,
+        };
+    let title: &'static str = Box::leak(title.into_boxed_str());
+    let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+    Some(Fixture {
+        lead: Some(lead),
+        parent: Some((lead, LineageType::Fork)),
+        family: lead,
+        archived,
+        ..thread(id, title, 0)
+    })
+}
+
 fn project(id: &str, name: &str) -> ProjectSummary {
     view(json!({"id": id, "display_name": name, "thread_count": 1, "revision": "1"}))
 }
@@ -183,6 +210,7 @@ fn answer(query: &WorkspaceQuery) -> WorkspaceReply {
             let fixture = threads()
                 .into_iter()
                 .find(|t| t.id == target.thread.as_str())
+                .or_else(|| extra_lane(target.thread.as_str()))
                 .expect("a fixture thread");
             WorkspaceReply::ThreadDetail(Box::new(detail(&fixture)))
         }
@@ -278,6 +306,10 @@ fn populated() -> Shared {
             "input_bytes": "22", "state": "pending",
         }));
         cache.approvals.insert(id.into(), approval);
+    }
+    // Lanes are collapsed by default; the lane tests start from a lead whose list was opened.
+    if let Some(workspace) = shared.features.workspace_mut() {
+        workspace.restore_opened_lanes(["thr-1".to_owned()]);
     }
     shared
 }
@@ -3074,6 +3106,7 @@ mod footer;
 mod settings;
 
 mod lanes;
+mod sidebar_lanes;
 
 mod composer;
 mod english_panes;
