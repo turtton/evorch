@@ -222,9 +222,12 @@ fn provider_input(base_url: &str) -> ProviderInput {
         models: vec![ModelInput {
             id: cache::MODEL.into(),
             enabled: true,
+            kind: None,
+            context_override: None,
         }],
         excluded_models: vec![],
         default_model: cache::MODEL.into(),
+        show_quota: None,
     }
 }
 
