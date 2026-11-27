@@ -437,6 +437,107 @@ fn save_takes_the_name_still_being_typed() {
     assert!(!save.text.contains("new-route"), "{}", save.text);
 }
 
+// Given: edits of the saved route `fast` and of a new route, and `fast` changed elsewhere
+// When: the new route is saved and its end seen, then `fast` is opened and Save is pressed
+// Then: `fast` is still flagged as changed elsewhere and sends nothing, so the newer file is
+//       not overwritten with the old draft; only Discard resolves it
+#[test]
+fn saving_another_route_does_not_clear_a_conflict() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "slow");
+    open_route(&mut screen, "fast");
+    click(&mut screen, "Add candidate");
+    snapshot_changed(&mut screen, 'c');
+    let elsewhere = DOCUMENT.replace(
+        "fast = [{ profile = \"local\" }]",
+        "fast = [{ profile = \"local\", model = \"m\" }]",
+    );
+    answer_snapshot(&mut screen, 'c', &elsewhere);
+    screen.get_by_label("Changed elsewhere");
+
+    open_route(&mut screen, "slow");
+    click(&mut screen, "Save routing");
+    let slow = document_save(&mut screen);
+    end(&mut screen, &slow, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &slow.text);
+
+    open_route(&mut screen, "fast");
+    screen.get_by_label("Changed elsewhere");
+    click(&mut screen, "Save routing");
+    assert!(asked(&mut screen).is_empty());
+    click(&mut screen, "Discard");
+    assert!(screen.query_by_label("Changed elsewhere").is_none());
+}
+
+// Given: edits of two roles, and the Orchestrator changed elsewhere
+// When: the Explorer is saved and its end seen, then the Orchestrator is picked and saved
+// Then: the Orchestrator is still flagged as changed elsewhere and sends nothing
+#[test]
+fn saving_another_role_does_not_clear_a_conflict() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    pick_role(&mut screen, "Explorer");
+    edit_selected_role(&mut screen);
+    snapshot_changed(&mut screen, 'c');
+    let elsewhere =
+        format!("{DOCUMENT}\n[agents.orchestrator]\ngeneration = {{ temperature = 0.7 }}\n");
+    answer_snapshot(&mut screen, 'c', &elsewhere);
+
+    click(&mut screen, "Save role");
+    let explorer = document_save(&mut screen);
+    end(&mut screen, &explorer, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &explorer.text);
+
+    pick_role(&mut screen, "Orchestrator");
+    screen.get_by_label_contains("Changed elsewhere");
+    click(&mut screen, "Save role");
+    assert!(asked(&mut screen).is_empty());
+    click(&mut screen, "Discard");
+    assert!(
+        screen
+            .query_by_label_contains("Changed elsewhere")
+            .is_none()
+    );
+}
+
+// Given: the saved route `fast` whose new name is typed but not accepted
+// When: the footer and the profile control are looked at, then Discard is pressed
+// Then: the typed name counts as unsaved (the profile control is locked) until it is discarded
+#[test]
+fn a_name_typed_for_a_saved_route_is_an_unsaved_edit() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    open_route(&mut screen, "fast");
+    assert!(!disabled(&screen, "Profile menu"));
+    click(&mut screen, "Rename route fast");
+    type_into(&mut screen, "Logical model name", "quick");
+    screen.get_by_label_contains("Unsaved changes: fast");
+    assert!(disabled(&screen, "Profile menu"));
+
+    click(&mut screen, "Discard");
+    assert!(!disabled(&screen, "Profile menu"));
+    assert!(screen.query_by_label_contains("Unsaved changes").is_none());
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: two routes added one after the other
+// When: Routing is drawn
+// Then: the one added last is on top
+#[test]
+fn the_route_added_last_is_listed_first() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "first");
+    add_route(&mut screen, "second");
+    let top = |screen: &Harness<'static, Screen>, name: &str| {
+        screen.get_by_label(&format!("Route {name}")).rect().min.y
+    };
+    assert!(top(&screen, "second") < top(&screen, "first"));
+    assert!(top(&screen, "first") < top(&screen, "fast"));
+}
+
 // Given: unsaved drafts of two routes
 // When: the first is saved and its end seen
 // Then: the second is still unsaved, is not in conflict, and saves at the revision the first

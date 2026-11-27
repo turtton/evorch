@@ -32,6 +32,8 @@ pub struct RoutingSettingsModel {
     pub pending_new_route: Option<String>,
     pub origin_role_settings: bool,
     pub expanded: BTreeSet<String>,
+    /// The routes added in this session, in the order they were added (the last is the newest).
+    pub added: Vec<String>,
     /// The route whose card is open, which a save or discard is for (Model Settings shows one).
     pub selected: Option<String>,
     /// Routes whose saved candidates were changed elsewhere while they had unsaved edits:
@@ -319,6 +321,7 @@ impl RoutingSettingsModel {
             }],
         );
         self.expanded.insert(name.into());
+        self.added.push(name.into());
         Ok(())
     }
 

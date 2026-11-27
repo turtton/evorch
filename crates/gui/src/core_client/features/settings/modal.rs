@@ -143,6 +143,7 @@ impl Modal {
         self.routing
             .as_ref()
             .is_some_and(|routing| !routing.model.dirty_routes().is_empty())
+            || self.routing_ui.typed_rename().is_some()
             || self
                 .roles
                 .as_ref()
@@ -373,6 +374,7 @@ impl Modal {
             roles.document = document.clone();
             roles.based_on = revision.clone();
         }
+        self.routing_ui.reset_edits();
         self.roles_stale = None;
         self.origin = None;
     }
@@ -467,9 +469,17 @@ impl Modal {
             SettingsTab::Providers => None,
             SettingsTab::Routing => {
                 let model = &self.routing.as_ref()?.model;
-                let dirty = model.dirty_routes();
+                let mut dirty = model.dirty_routes();
                 let selected = model.selected.as_deref();
-                let selected_dirty = selected.is_some_and(|key| model.route_is_dirty(key));
+                // A name typed but not yet accepted is an unsaved edit of its route too.
+                let typing = self.routing_ui.typed_rename();
+                if let Some(key) = typing
+                    && !dirty.iter().any(|name| name == key)
+                {
+                    dirty.push(key.to_owned());
+                }
+                let selected_dirty =
+                    selected.is_some_and(|key| model.route_is_dirty(key) || typing == Some(key));
                 let blocked = model.conflict.is_some()
                     || selected.is_some_and(|key| model.conflicted.contains(key));
                 let others = dirty.len() - usize::from(selected_dirty);

@@ -60,6 +60,19 @@ impl RoutingUi {
         Ok(())
     }
 
+    /// The route whose name field holds a name other than the route's own: an edit that is not
+    /// in the draft until it is accepted, but is already unsaved.
+    pub(super) fn typed_rename(&self) -> Option<&str> {
+        let key = self.renaming.as_deref()?;
+        (self.name_text.trim() != key).then_some(key)
+    }
+
+    /// Forgets the open name field and delete confirmation, which belong to a profile's routes.
+    pub(super) fn reset_edits(&mut self) {
+        self.renaming = None;
+        self.confirm_delete = None;
+    }
+
     pub(super) fn stop_editing(&mut self, key: &str) {
         if self.renaming.as_deref() == Some(key) {
             self.renaming = None;
@@ -114,10 +127,16 @@ fn infos(model: &RoutingSettingsModel) -> Vec<RouteInfo> {
             _ => candidate.profile.clone(),
         }
     };
-    // A route that was never saved comes first, in the order it was added.
-    let new = model.routes.keys().filter(|key| model.route_is_new(key));
+    // Routes that were never saved come first, the one added last on top.
+    let mut new: Vec<&String> = model
+        .routes
+        .keys()
+        .filter(|key| model.route_is_new(key))
+        .collect();
+    new.sort_by_key(|key| std::cmp::Reverse(model.added.iter().rposition(|added| added == *key)));
     let saved = model.routes.keys().filter(|key| !model.route_is_new(key));
-    new.chain(saved)
+    new.into_iter()
+        .chain(saved)
         .map(|key| {
             let candidates = &model.routes[key];
             RouteInfo {

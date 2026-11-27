@@ -79,12 +79,15 @@ impl SettingsDocument {
             }
         }
         let drafted = model.dirty_routes();
+        // A conflict stays until the draft is discarded (or comes to equal the file): saving
+        // another route does not settle it, and the base below is overwritten by the file.
+        let held = std::mem::take(&mut model.conflicted);
         let mut conflicted = std::collections::BTreeSet::new();
         for (name, candidates) in &fresh {
             if drafted.contains(name) {
                 // A draft the file already holds (a save whose result was not seen) is no conflict.
-                if model.base_routes.get(name) != Some(candidates)
-                    && model.routes.get(name) != Some(candidates)
+                if model.routes.get(name) != Some(candidates)
+                    && (held.contains(name) || model.base_routes.get(name) != Some(candidates))
                 {
                     conflicted.insert(name.clone());
                 }
@@ -93,7 +96,9 @@ impl SettingsDocument {
             }
         }
         for name in &drafted {
-            if !fresh.contains_key(name) && model.base_routes.contains_key(name) {
+            if !fresh.contains_key(name)
+                && (model.base_routes.contains_key(name) || held.contains(name))
+            {
                 conflicted.insert(name.clone());
             }
         }
@@ -133,11 +138,14 @@ impl SettingsDocument {
             copy_role(&mut model.base_agents, &view.agents, address);
         }
         let dirty = model.dirty_roles();
+        // As for routes: a conflict is kept until the role is discarded or matches the file.
+        let held = std::mem::take(&mut model.conflicted);
         let mut conflicted = std::collections::BTreeSet::new();
         for role in ROLES.iter() {
             if dirty.contains(&role) {
-                if !role_eq(&model.base_agents, &view.agents, role.address)
-                    && !role_eq(&model.agents, &view.agents, role.address)
+                if !role_eq(&model.agents, &view.agents, role.address)
+                    && (held.contains(role.address)
+                        || !role_eq(&model.base_agents, &view.agents, role.address))
                 {
                     conflicted.insert(role.address);
                 }

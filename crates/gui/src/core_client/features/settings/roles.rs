@@ -117,7 +117,7 @@ pub(super) fn roles_body(
     let mut detail_ui = ui.new_child(UiBuilder::new().max_rect(detail_rect));
     detail_ui.set_clip_rect(detail_rect.intersect(ui.clip_rect()));
     egui::ScrollArea::vertical()
-        .id_salt("roles-detail")
+        .id_salt(("roles-detail", model.selected))
         .auto_shrink([false, false])
         .show(&mut detail_ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(SP_2, SP_2);
