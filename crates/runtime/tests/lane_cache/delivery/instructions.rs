@@ -19,8 +19,8 @@ fn send(id: &str, lane_id: &str, management: u64, brief: u64, message: &str) -> 
     call(
         id,
         "lane_send",
-        json!({"operation_id":id,"lane_id":lane_id,"expected_management_revision":management,
-            "expected_brief_revision":brief,"message":message}),
+        json!({"operation_id":id,"message":message,"targets":[{"lane_id":lane_id,
+            "expected_management_revision":management,"expected_brief_revision":brief}]}),
     )
 }
 fn revise(
@@ -81,6 +81,7 @@ async fn instructions_accepted_before_detach_arrive_in_order_once_and_keep_the_w
     )
     .await;
     let first = result(&n.f.h, "send-1");
+    let first = &first["results"][0];
     assert_eq!(first["status"], "accepted");
     assert_eq!(first["delivery"], "queued");
     assert_eq!(first["operation"]["instruction_seq"], 1);
@@ -93,7 +94,7 @@ async fn instructions_accepted_before_detach_arrive_in_order_once_and_keep_the_w
         "detached"
     );
     let late: Value = result(&n.f.h, "late-1");
-    assert_eq!(late["code"], "not_current_lead");
+    assert_eq!(late["results"][0]["error"]["code"], "not_current_lead");
     assert_eq!(n.receipts(), 0);
 
     n.f.host.checked.notified().await;
@@ -298,7 +299,10 @@ async fn an_instruction_held_by_a_suppressed_wake_guard_is_delivered_once_after_
             ],
         )
         .await;
-        assert_eq!(result(&n.f.h, "held-send")["delivery"], "queued");
+        assert_eq!(
+            result(&n.f.h, "held-send")["results"][0]["delivery"],
+            "queued"
+        );
         n.f.host.checked.notified().await;
         n.f.host.denied.store(false, Ordering::SeqCst);
         suppress_wake_guard(&n);
