@@ -104,7 +104,10 @@ export async function execute({ api, repo, branch = DEFAULT_BRANCH, pr, mode, lo
 
   const live = await api.getPull(pr.number);
   let effective = mode;
-  if (mode === 'publish' && live.state !== 'open') {
+  // `publish` and `irrelevant` both change the public images and the comment, so both are
+  // only for the head this run was started for. `cleanup` (a closed event) is not.
+  const changesState = mode === 'publish' || mode === 'irrelevant';
+  if (changesState && live.state !== 'open') {
     log(`#${pr.number} is ${live.state}: nothing is published`);
     effective = 'cleanup';
   }
@@ -112,7 +115,7 @@ export async function execute({ api, repo, branch = DEFAULT_BRANCH, pr, mode, lo
     log(`#${pr.number} was reopened: its images stay`);
     return { outcome: 'reopened', comment: null };
   }
-  if (mode === 'publish' && live.headSha !== pr.headSha) {
+  if (changesState && live.headSha !== pr.headSha) {
     log(`#${pr.number} head is ${live.headSha}, this run captured ${pr.headSha}: not published`);
     return { outcome: 'stale', comment: null };
   }

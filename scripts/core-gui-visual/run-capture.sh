@@ -32,8 +32,7 @@ sentinel="sentinel-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 # value in the private home. Nothing opens them; a leak would be a drawn text.
 printf 'secret = "%s"\n' "$sentinel" > "$work/home/.config/evorch/settings.toml"
 
-sed -e "s|@FONT_DIR@|$(dirname "$font")|" -e "s|@FONT_FILE@|$font|" \
-  "$here/fonts.conf.in" > "$work/fonts.conf"
+"$here/make-fonts-conf.sh" "$font" > "$work/fonts.conf"
 
 env_args=(
   "HOME=$work/home"

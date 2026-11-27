@@ -260,6 +260,39 @@ test('a stale or closed PR is not published', async () => {
   assert.equal(closed.calls.includes('createBlob'), false);
 });
 
+// Given: a rerun of an older head's "irrelevant" run, after a newer head published its images and comment
+// Then: neither the images nor the comment change (an irrelevant run is held to its head like a publish)
+test('a stale irrelevant run changes neither the images nor the comment', async () => {
+  const api = setup();
+  await run(api, 'publish', artifact([{ id: 'a', status: 'changed', text: 'x' }]));
+  const paths = await api.paths(BRANCH);
+  const body = api.comments[0].body;
+  const oldHead = 'c'.repeat(40);
+  const calls = api.calls.length;
+
+  const result = await run(api, 'irrelevant', null, { pr: { number: 5, headSha: oldHead, baseRef: 'main' } });
+  assert.equal(result.outcome, 'stale');
+  assert.deepEqual(await api.paths(BRANCH), paths);
+  assert.equal(api.comments.length, 1);
+  assert.equal(api.comments[0].body, body);
+  assert.equal(api.calls.slice(calls).some((name) => /^(createBlob|createTree|createCommit|updateRef|updateComment|createComment)/.test(name)), false);
+
+  // the same run for the current head does apply
+  const current = await run(api, 'irrelevant', null);
+  assert.equal(current.outcome, 'irrelevant');
+  assert.equal(await api.getRefOid(BRANCH), null);
+});
+
+// Given: an irrelevant run for a PR closed meanwhile / Then: it is a cleanup, not an "irrelevant" comment
+test('an irrelevant run for a closed PR cleans up instead', async () => {
+  const api = setup();
+  await run(api, 'publish', artifact([{ id: 'a', status: 'changed', text: 'x' }]));
+  api.setPull(5, { state: 'closed', headSha: HEAD });
+  const result = await run(api, 'irrelevant', null);
+  assert.equal(result.outcome, 'closed');
+  assert.equal(api.comments[0].body, renderClosed({ runUrl: RUN }));
+});
+
 // Given: comments by others, including a copy of the marker, and more than one page
 // Then: only the bot's marked comment is touched
 test('only the bot comment carrying the marker is ours', async () => {

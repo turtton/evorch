@@ -102,6 +102,9 @@ jobs:
             [[ "$attempt" != 3 ]] || exit 1
           done
           test -r "$FONT_FILE"
+      - name: The capture's fontconfig lists only that font
+        if: steps.scope.outputs.relevant == 'true'
+        run: scripts/core-gui-visual/tests/test_fonts_conf.sh
       # Only a libcef.so link: the distribution's Vulkan loader would shadow the system one.
       - uses: ./.github/actions/setup-cef
         if: steps.scope.outputs.relevant == 'true'
