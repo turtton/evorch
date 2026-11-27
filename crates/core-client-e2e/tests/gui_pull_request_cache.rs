@@ -48,7 +48,7 @@ use workbench_protocol::namespaces::ConversationCommand;
 use workbench_protocol::namespaces::pull_requests::{
     ChangeAutoFixDestination, LinkPullRequest, PullRequestOperationView, PullRequestsCommand,
     PullRequestsEvent, PullRequestsQuery, PullRequestsReply, RefreshPullRequest,
-    RequestManualNotice, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest,
+    RequestManualNotice, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest, UnlinkPullRequest,
 };
 use workbench_protocol::operation::OperationState;
 use workbench_protocol::queries::{Query, QueryReply};
@@ -271,6 +271,8 @@ impl Window {
 
     /// The committed history of the thread, as the window restores it from the core.
     async fn history(&self) -> Vec<String> {
+        // Forget what an earlier read left, so that only this read's answer satisfies the wait.
+        self.shared.lock().unwrap().cache.history.remove(THREAD);
         self.actions
             .send(Action::History(thread(), None, false))
             .await
@@ -626,9 +628,11 @@ auto_fix_enabled = {auto}
             "a notice shown in the history is shown once: {history:#?}"
         );
         assert_eq!(window.history().await, history, "a second read is the same");
+        let projections = window.shared.lock().unwrap().projection;
         window.actions.send(Action::Reconnect).await.unwrap();
-        window.until(|state| !state.connected).await;
-        window.until(|state| state.connected).await;
+        window
+            .until(|state| state.connected && state.projection > projections)
+            .await;
         assert_eq!(
             window.history().await,
             history,
@@ -723,6 +727,22 @@ auto_fix_enabled = {auto}
             "one manual notice made exactly one more request"
         );
     }
+
+    // The link is ended from the window: the operation succeeds, the thread has no link
+    // afterwards, and nothing is sent to the model for it.
+    let linked = read(&core);
+    assert!(linked.link.is_some());
+    let unlink = PullRequestsCommand::UnlinkPullRequest(UnlinkPullRequest {
+        operation_id: op("unlink"),
+        thread: thread(),
+        expected_revision: linked.lifecycle_revision,
+    });
+    assert_eq!(
+        settle(&window, &mut events, unlink).await.operation.state,
+        OperationState::Ready
+    );
+    assert!(read(&core).link.is_none(), "the link is gone");
+    assert_eq!(completions(&mock).len(), 2, "ending the link sends nothing");
 
     // Turn three is an ordinary one, typed in the window.
     window
