@@ -9,10 +9,6 @@
 //! * The follow-up's request extends the first one (same model, cache key, tool schema and
 //!   prefix): what the client sends, and the connection it uses, add nothing to what the
 //!   model is sent.
-//! * Pull request operations the window sends between turns (link, refresh, auto fix on)
-//!   add nothing to the next request, whether the core accepts or refuses them. The full
-//!   pull request contract (accepted operations, the one notice) is core_pr_cache, which
-//!   drives the same typed commands; this test is the path through the client actor.
 //! * A history read the window makes between two turns (what it does to restore a thread)
 //!   changes nothing in the next request.
 //! * Closing the window does not stop the core: a second window that connects afterwards
@@ -37,11 +33,8 @@ use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use workbench_host::areas::{Areas, execution::ExecutionArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
 use workbench_protocol::commands::{Command, ComposerRole, SendChat};
-use workbench_protocol::ids::{OperationId, ProjectId, SubmissionId, ThreadId};
+use workbench_protocol::ids::{ProjectId, SubmissionId, ThreadId};
 use workbench_protocol::namespaces::ConversationCommand;
-use workbench_protocol::namespaces::pull_requests::{
-    LinkPullRequest, PullRequestsCommand, RefreshPullRequest, SetAutoFix,
-};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -247,36 +240,6 @@ context_window_tokens = 1000000
         .unwrap();
     turn_completed(&mut turns).await;
 
-    // Pull request operations of the window's bar, between two turns.
-    let thread = ThreadId::new("thread").unwrap();
-    let pull_request_commands = [
-        PullRequestsCommand::LinkPullRequest(LinkPullRequest {
-            operation_id: OperationId::new("pr-link").unwrap(),
-            thread: thread.clone(),
-            locator: "https://github.com/example/repo/pull/1".into(),
-            expected_revision: Default::default(),
-        }),
-        PullRequestsCommand::RefreshPullRequest(RefreshPullRequest {
-            operation_id: OperationId::new("pr-refresh").unwrap(),
-            thread: thread.clone(),
-        }),
-        PullRequestsCommand::SetAutoFix(SetAutoFix {
-            operation_id: OperationId::new("pr-auto-fix").unwrap(),
-            thread: thread.clone(),
-            link_revision: Default::default(),
-            policy_revision: Default::default(),
-            enabled: true,
-        }),
-    ];
-    for command in pull_request_commands {
-        actions
-            .send(Action::Command {
-                command: Command::PullRequests(command),
-                draft: None,
-            })
-            .await
-            .unwrap();
-    }
     // What the window reads to restore a thread, between two turns.
     actions
         .send(Action::History(
@@ -301,7 +264,10 @@ context_window_tokens = 1000000
     // The window is closed. The core, its runtime and the conversation stay; a new window
     // connects and continues the same thread.
     actions.send(Action::Shutdown).await.unwrap();
-    let _ = tokio::time::timeout(WAIT, window).await;
+    tokio::time::timeout(WAIT, window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
     let (actions, rx) = tokio::sync::mpsc::channel(64);
     let shared = Arc::new(Mutex::new(Shared::default()));
     let window = tokio::spawn(serve(
@@ -337,7 +303,10 @@ context_window_tokens = 1000000
     }
 
     actions.send(Action::Shutdown).await.unwrap();
-    let _ = tokio::time::timeout(WAIT, window).await;
+    tokio::time::timeout(WAIT, window)
+        .await
+        .expect("the actor ends when the window is closed")
+        .expect("the actor does not panic");
     stop.send(true).unwrap();
     socket_task.abort();
 }

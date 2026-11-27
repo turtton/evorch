@@ -30,8 +30,10 @@
 # pull_requests_cache, pull_request_phase2_gui_cache, harness_notice_recovery, the
 # lane_delivery_host attention scenario, the evorch-gui bin tests and
 # ownership_close_headless) were replaced before they were deleted: the cache
-# contracts by core_renderer_cache and core-client-e2e's default_gui_cache, the
-# writer-drain contracts by recorder's storage_bridge and the host's flush test.
+# contracts by core_renderer_cache and core-client-e2e's default_gui_cache,
+# gui_pull_request_cache (pull request operations and notice through the window) and
+# execution_teams_lanes' pending-attention test, the writer-drain contracts by recorder's
+# storage_bridge and the host's flush test.
 # (No comments inside the filter itself: nextest does not parse them.)
 # scripts/tests/test_check_central_files.sh checks that every binary named in
 # CACHE_CONTRACT_FILTER has a test target.
@@ -88,7 +90,8 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_e2e)))
   | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_cli_run_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache) | binary(=recovery_disposal)))
   | (package(=tools) & binary(=bounded_output))
-  | (package(=core-client-e2e) & binary(=default_gui_cache))
+  | (package(=core-client-e2e) & (binary(=default_gui_cache) | binary(=gui_pull_request_cache)
+      | (binary(=execution_teams_lanes) & test(pending_lane_attention_read_and_shown))))
 '
 IO_CONTRACT_FILTER='
   (package(=storage) & (binary(=lane_delivery) | binary(=conversation_plan) | binary(=pull_request_auto_fix) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))

@@ -48,6 +48,14 @@ gui group のテストは、PR でも main push でも同じものを実行す�
   - `core-client-e2e::default_gui_cache`: 窓から送った会話が provider に届く wire の prefix を保つこと
     （窓の history 読み取り、窓を閉じて別の窓が同じ thread を続ける場合を含む）。
     窓を閉じても core の run が止まらないことの検証でもある。
+  - `core-client-e2e::gui_pull_request_cache`: 実 PR service を配線した core に対し、窓の client actor から
+    link / auto-fix 切替 / refresh（同一 operation id の再送を含む）/ budget reset / 送信先変更 / manual notice を
+    送り、受理を待ってから、notice が末尾に一度だけ追加され、余計な user request が無く、wire prefix が保たれること。
+    notice を窓が一つも開いていない間に commit し、後から開いた窓の履歴復元・再読込・再接続で履歴と保存済み入力が
+    変わらないことも含む（cache gate）。
+  - `core-client-e2e::execution_teams_lanes` の `pending_lane_attention_read_and_shown…`: 未解決の lane attention
+    （Ready のまま閉じられていない report）を画面と Web client が読み・表示しても、model 呼び出しと保存済み prefix が
+    変わらないこと（cache gate）。
   - `gui::default_core_client`: 起動と引数の契約（core が無い場合の報告、削除した引数の拒否）。
   - `core-client-e2e` の各テスト: 添付、conversation、renderer 経路。
 - コマンド: `cargo nextest run -p gui -p core-client-e2e`
