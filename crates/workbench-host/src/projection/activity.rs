@@ -1,7 +1,7 @@
 //! The bus is the only source of live activity. No commit-scanner reconciliation.
 use super::*;
 use event_bus::{AgentRunPhase, LifecycleEvent as BusLifecycle, ToolEvent};
-use std::time::SystemTime;
+use std::time::Duration;
 use storage::history::rows::{duration_ms, wall_clock_ns};
 use workbench_protocol::namespaces::execution::{ToolActivityStatus, ToolActivityView};
 
@@ -11,11 +11,13 @@ pub(super) const MAX_LIVE_TOOLS: usize = 16;
 pub(super) struct LiveTool {
     pub tool: ToolActivityView,
     pub started_ns: i64,
+    pub started_monotonic: Duration,
 }
 impl LiveTool {
-    pub fn at(&self, now: SystemTime) -> ToolActivityView {
+    pub fn at(&self, now: Duration) -> ToolActivityView {
         let mut tool = self.tool.clone();
-        tool.elapsed_ms = duration_ms(self.started_ns, wall_clock_ns(now)).unwrap_or(0);
+        tool.elapsed_ms = u64::try_from(now.saturating_sub(self.started_monotonic).as_millis())
+            .unwrap_or(u64::MAX);
         tool
     }
 }
@@ -91,6 +93,7 @@ impl Projection {
                         elapsed_ms: 0,
                     },
                     started_ns: wall_clock_ns(event.meta.wall_clock),
+                    started_monotonic: event.meta.monotonic,
                 };
                 let mut state = self.state.lock().unwrap();
                 // An invalidation while formatting cannot resurrect old activity.

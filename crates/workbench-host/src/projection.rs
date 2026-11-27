@@ -40,6 +40,7 @@ struct Replay {
 }
 /// Frozen cuts survive connection closure, but not epoch invalidation.
 const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SNAPSHOTS: usize = 4;
 struct Frozen {
     id: SnapshotId,
@@ -154,7 +155,7 @@ struct BodyCursor {
 }
 /// Transport-independent host read service. All adapters may share this instance.
 pub struct Projection {
-    activity_now: Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>,
+    activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
     activity_redactor: secret_guard::SecretRedactor,
     #[cfg(test)]
     activity_formats: std::sync::atomic::AtomicUsize,
@@ -256,7 +257,7 @@ impl Projection {
             handle,
             limits,
             epoch,
-            Arc::new(std::time::SystemTime::now),
+            Arc::new(|| event_bus::EventMeta::now().monotonic),
         )
     }
     fn with_activity_clock(
@@ -264,7 +265,7 @@ impl Projection {
         handle: &tokio::runtime::Handle,
         limits: SubscriptionLimits,
         epoch: Option<u64>,
-        activity_now: Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>,
+        activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
     ) -> Arc<Self> {
         assert!(
             epoch.is_none_or(|e| e != 0 && e != u64::MAX),
@@ -978,8 +979,15 @@ impl Projection {
                 hook();
             }
             let mut items = snapshot_items(&state.models, &request.scope);
+            let mut snapshot_bytes = serde_json::to_vec(&items).unwrap().len();
+            if snapshot_bytes > MAX_SNAPSHOT_BYTES {
+                return Err(queries::error(
+                    ErrorCode::Busy,
+                    "snapshot exceeds retention budget; use a narrower scope",
+                ));
+            }
             let now = (self.activity_now)();
-            items.extend(state.activities.values().filter_map(|live| {
+            for item in state.activities.values().filter_map(|live| {
                 let tool = live.at(now);
                 matches_scope(
                     &state.models,
@@ -987,12 +995,13 @@ impl Projection {
                     &UiEvent::Execution(ExecutionEvent::ToolStarted { tool: tool.clone() }),
                 )
                 .then_some(SnapshotItem::ToolActivity(tool))
-            }));
-            if serde_json::to_vec(&items).unwrap().len() > 8 * 1024 * 1024 {
-                return Err(queries::error(
-                    ErrorCode::Busy,
-                    "snapshot exceeds retention budget; use a narrower scope",
-                ));
+            }) {
+                // Optional live display must not turn an otherwise valid snapshot into Busy.
+                let bytes = serde_json::to_vec(&item).unwrap().len() + 1;
+                if snapshot_bytes + bytes <= MAX_SNAPSHOT_BYTES {
+                    snapshot_bytes += bytes;
+                    items.push(item);
+                }
             }
             let revision = Revision(cursor.sequence.get());
             let page = self

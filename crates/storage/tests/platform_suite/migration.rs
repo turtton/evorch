@@ -12,7 +12,7 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 79;
+const LATEST_SCHEMA: u32 = 80;
 
 const EXPECTED_TABLES: [&str; 137] = [
     "history_control",

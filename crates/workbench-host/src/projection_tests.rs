@@ -741,7 +741,7 @@ async fn an_area_source_publishes_only_its_own_namespace_through_the_one_boundar
     );
 }
 
-// Activity fixtures have a manual wall clock and no executing model.
+// Activity fixtures stamp both event clocks and inject a manual monotonic "now".
 fn activity_fixture() -> (
     tokio::runtime::Runtime,
     tempfile::TempDir,
@@ -790,9 +790,7 @@ fn activity_fixture() -> (
         rt.handle(),
         Default::default(),
         None,
-        Arc::new(move || {
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(clock.load(Ordering::Relaxed))
-        }),
+        Arc::new(move || std::time::Duration::from_millis(clock.load(Ordering::Relaxed))),
     );
     p.configure_projects(
         vec![(ProjectId::new("project").unwrap(), dir.path().to_path_buf())],
@@ -815,6 +813,7 @@ fn activity_start(call: &str, name: &str, input: serde_json::Value) -> Event {
 }
 fn activity_at(kind: impl Into<EventKind>, millis: u64) -> Event {
     let mut event = Event::new(kind);
+    event.meta.monotonic = std::time::Duration::from_millis(millis);
     event.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis);
     event
 }
@@ -1144,4 +1143,73 @@ fn a_new_projection_does_not_reconstruct_activity_from_saved_starts() {
         )
         .unwrap();
     assert!(activity_snapshot(&fresh).is_empty());
+}
+
+#[test]
+fn activity_elapsed_uses_monotonic_time_but_finishes_use_wall_clock_stamps() {
+    let (rt, _dir, _store, p, now, _bus) = activity_fixture();
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let mut start = activity_start("clock", "wait", serde_json::json!({}));
+    start.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(500_000);
+    p.observe_activity(start);
+    let _ = rt.block_on(sub.recv()).unwrap();
+    // The manual "now" is 2000ms and the start's monotonic stamp is 1000ms,
+    // despite the unrelated wall clock (which can jump while a call runs).
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 1000);
+    now.store(3500, Ordering::Relaxed);
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 2500);
+    let mut done = activity_done("clock", 2240, false);
+    done.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(500_125);
+    p.observe_activity(done);
+    assert!(matches!(
+        rt.block_on(sub.recv()).unwrap().event,
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            duration_ms: Some(125),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn optional_activity_cannot_overflow_an_almost_full_workspace_snapshot() {
+    let (_rt, dir, store, p, _now, _bus) = activity_fixture();
+    let mut template = p.state.lock().unwrap().models.threads["thread"]
+        .summary
+        .clone();
+    template.id = ThreadId::new("bulk-00000").unwrap();
+    template.title = "x".repeat(workbench_protocol::limits::MAX_TITLE_BYTES);
+    let item_bytes = serde_json::to_vec(&SnapshotItem::Thread(template.clone()))
+        .unwrap()
+        .len()
+        + 1;
+    // Leave less than the 16 inline activities, but enough for per-row revision
+    // digit differences and the fixture's other canonical snapshot items.
+    let count = (MAX_SNAPSHOT_BYTES - 128 * 1024) / item_bytes;
+    let threads: Vec<_> = (0..count)
+        .map(|n| storage::threads::ThreadUpsert {
+            thread_id: format!("bulk-{n:05}"),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: Some(template.title.clone()),
+            ..Default::default()
+        })
+        .collect();
+    store.handle().upsert_threads_host(&threads).unwrap();
+    for n in 0..activity::MAX_LIVE_TOOLS {
+        p.observe_activity(activity_start(
+            &format!("call-{n}"),
+            "run_js",
+            serde_json::json!({"code":"x".repeat(16 * 1024)}),
+        ));
+    }
+    p.subscribe_with_snapshot(&all(None)).unwrap();
+    let state = p.state.lock().unwrap();
+    let items = &state.snapshots.back().unwrap().items;
+    let shown = items
+        .iter()
+        .filter(|item| matches!(item, SnapshotItem::ToolActivity(_)))
+        .count();
+    assert!(shown < activity::MAX_LIVE_TOOLS);
+    assert_eq!(state.activities.len(), activity::MAX_LIVE_TOOLS);
+    assert!(serde_json::to_vec(items).unwrap().len() <= MAX_SNAPSHOT_BYTES);
 }
