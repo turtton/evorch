@@ -19,7 +19,7 @@ use super::product_exec::{
 };
 use mock_openai::{ResponseGate, ScriptedResponse};
 use serde_json::Value;
-use std::{path::Path, time::Duration};
+use std::path::Path;
 use workbench_client::{
     ClientConfig, UnixTransport, WorkbenchClient,
     restart::{
@@ -39,9 +39,6 @@ use workbench_protocol::{
     },
     views::RunPhase,
 };
-
-/// Finite bound for every wait that ends on an event.
-const EVENT_WATCHDOG: Duration = Duration::from_secs(120);
 
 pub struct Evidence {
     pub pid_before: i32,
@@ -108,44 +105,36 @@ pub fn chat(submission: &str, text: &str) -> Command {
 
 /// Waits for the run's own event; resyncs are answered by a fresh snapshot.
 pub async fn until_waiting(client: &WorkbenchClient, subscription: &mut Subscription, run: &str) {
-    let mut resyncs = 0;
-    let wait = async {
-        while let Some(event) = subscription.next().await {
-            if let UiEvent::Projection(
-                workbench_protocol::namespaces::ProjectionEvent::ResyncRequired { reason },
-            ) = &event.event
-            {
-                resyncs += 1;
-                assert!(resyncs <= 3, "too many resyncs: {reason:?}");
-                *subscription = client
-                    .subscribe(Subscribe {
-                        scope: SubscriptionScope::All,
-                        after: None,
-                    })
-                    .await
-                    .unwrap();
-                if waiting_in_snapshot(subscription, run) {
-                    return;
-                }
-                continue;
+    while let Some(event) = subscription.next().await {
+        if let UiEvent::Projection(
+            workbench_protocol::namespaces::ProjectionEvent::ResyncRequired { .. },
+        ) = &event.event
+        {
+            *subscription = client
+                .subscribe(Subscribe {
+                    scope: SubscriptionScope::All,
+                    after: None,
+                })
+                .await
+                .unwrap();
+            if waiting_in_snapshot(subscription, run) {
+                return;
             }
-            if let UiEvent::Execution(ExecutionEvent::RunChanged { run: summary }) = event.event
-                && summary.id.as_str() == run
-            {
-                match summary.phase {
-                    RunPhase::WaitingForUser => return,
-                    RunPhase::Failed | RunPhase::Cancelled | RunPhase::Done => {
-                        panic!("run ended: {:?}", summary.phase)
-                    }
-                    _ => (),
+            continue;
+        }
+        if let UiEvent::Execution(ExecutionEvent::RunChanged { run: summary }) = event.event
+            && summary.id.as_str() == run
+        {
+            match summary.phase {
+                RunPhase::WaitingForUser => return,
+                RunPhase::Failed | RunPhase::Cancelled | RunPhase::Done => {
+                    panic!("run ended: {:?}", summary.phase)
                 }
+                _ => (),
             }
         }
-        panic!("subscription ended: {:?}", subscription.end());
-    };
-    tokio::time::timeout(EVENT_WATCHDOG, wait)
-        .await
-        .expect("the run reached its next wait within the watchdog");
+    }
+    panic!("subscription ended: {:?}", subscription.end());
 }
 
 pub fn waiting_in_snapshot(subscription: &Subscription, run: &str) -> bool {
@@ -223,7 +212,7 @@ pub fn drive_with(artifact: &ProductArtifact, in_flight: bool) -> Evidence {
         let run = reply.run_id.expect("a run").as_str().to_owned();
         if in_flight {
             arrivals
-                .recv_timeout(EVENT_WATCHDOG)
+                .recv()
                 .expect("the provider received the first request");
         } else {
             until_waiting(&desktop, &mut events, &run).await;

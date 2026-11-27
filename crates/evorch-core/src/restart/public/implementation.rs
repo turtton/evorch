@@ -203,7 +203,12 @@ impl PublicRestartCoordinator {
         let (recipes, preflight) = tokio::task::spawn_blocking(move || {
             let proof = runtime
                 .prepare_restart_quiesce_observed(&recipes, recipe_observation)
-                .map_err(|_| conflict())?;
+                .map_err(|failure| match failure {
+                    runtime::RuntimeError::RestartRunUnavailable { .. } => {
+                        error(ErrorCode::UnsupportedCapability, &failure.to_string())
+                    }
+                    _ => conflict(),
+                })?;
             Ok::<_, AdminFailure>((recipes, proof))
         })
         .await

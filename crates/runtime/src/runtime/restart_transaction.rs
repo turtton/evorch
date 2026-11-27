@@ -129,56 +129,66 @@ impl AgentRuntime {
             .run_store
             .get()
             .ok_or_else(|| error("restart capture requires storage"))?;
-        if self
+        if let Some(run_id) = self
             .shared
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .any(|a| a.queued.is_some())
+            .iter()
+            .find_map(|(run, a)| a.queued.is_some().then_some(*run))
         {
-            return Err(error("Unsupported: RAM-only queued launch"));
+            return Err(RuntimeError::RestartRunUnavailable {
+                run_id,
+                reason: "RAM-only queued launch".into(),
+            });
         }
-        if !self.accepted_chat_resumes().is_empty() {
-            return Err(error(
-                "Unsupported: accepted resume authority is a seal blocker",
-            ));
+        if let Some(run_id) = self.accepted_chat_resumes().keys().next().copied() {
+            return Err(RuntimeError::RestartRunUnavailable {
+                run_id,
+                reason: "accepted resume authority is a seal blocker".into(),
+            });
         }
         let intents = self.shared.quiesce.live_capture_intents();
         for intent in intents.values().filter(|i| i.active) {
-            let root = super::recovery_graph::root_of(intent.run_id, &intents)?;
+            let refused = |reason: &str| RuntimeError::RestartRunUnavailable {
+                run_id: intent.run_id,
+                reason: reason.into(),
+            };
+            let root = super::recovery_graph::root_of(intent.run_id, &intents)
+                .map_err(|_| refused("invalid recovery parent graph"))?;
             let recipe = recipes
                 .get(&root)
-                .ok_or_else(|| error("Unsupported: missing root recipe"))?;
+                .ok_or_else(|| refused("missing root recipe"))?;
             if recipe.policy != ResumePolicy::CoreOwned {
-                return Err(error("Unsupported: recovery policy"));
+                return Err(refused("recovery policy"));
             }
             let snapshot = store
                 .with_database(|db| db.run_context(&intent.run_id.to_string()))
-                .map_err(error)?;
+                .map_err(|_| refused("snapshot unavailable"))?;
             let descriptor = snapshot
                 .as_ref()
                 .map(|s| {
                     serde_json::from_str::<crate::restore::RunRestoreDescriptor>(&s.config_json)
                 })
                 .transpose()
-                .map_err(error)?;
+                .map_err(|_| refused("corrupt descriptor"))?;
             let mut has_receipt = false;
-            for reference in intent
-                .checkpoint
+            // An adopted checkpoint describes the previous capture boundary.
+            // Ordinary turns may since have committed a newer snapshot. The
+            // latest receipt is preflight evidence; capture still parks and
+            // commits its own safe-point checkpoint before graph serialization.
+            if let Some(reference) = intent
+                .snapshot
                 .as_ref()
-                .map(|c| &c.snapshot)
-                .into_iter()
-                .chain(intent.snapshot.as_ref())
-            {
-                if matches!(
+                .or_else(|| intent.checkpoint.as_ref().map(|c| &c.snapshot))
+                && matches!(
                     reference,
                     crate::checkpoint::SnapshotReference::RunContext { .. }
-                ) {
-                    has_receipt = true;
-                    if !reference.available(snapshot.as_ref()) {
-                        return Err(error("Unsupported: missing or changed referenced snapshot"));
-                    }
+                )
+            {
+                has_receipt = true;
+                if !reference.available(snapshot.as_ref()) {
+                    return Err(refused("missing or changed referenced snapshot"));
                 }
             }
             if !has_receipt {
@@ -186,7 +196,7 @@ impl AgentRuntime {
                     && intent.initial_input.is_some()
                     && store
                         .with_database(|db| db.resume_intent(&intent.run_id.to_string()))
-                        .map_err(error)?
+                        .map_err(|_| refused("snapshot unavailable"))?
                         .and_then(|row| ResumeIntent::decode(row).ok())
                         .is_some_and(|saved| {
                             saved.incarnation == intent.incarnation
@@ -196,7 +206,7 @@ impl AgentRuntime {
                                 && saved.initial_input == intent.initial_input
                         });
                 if !durable_queued {
-                    return Err(error("Unsupported: missing safe snapshot"));
+                    return Err(refused("missing safe snapshot"));
                 }
             }
             if intent.run_id == root
@@ -210,7 +220,7 @@ impl AgentRuntime {
                     .is_none()
                 && self.goal_thread(root).is_none()
             {
-                return Err(error("Unsupported: root is not bound to a thread"));
+                return Err(refused("root is not bound to a thread"));
             }
         }
         Ok(())
@@ -285,14 +295,24 @@ impl AgentRuntime {
                 .lock()
                 .map_err(|_| error("recipe inventory unavailable"))?;
             for intent in observed.intents.values() {
-                let root = super::recovery_graph::root_of(intent.run_id, &observed.intents)?;
+                let root = super::recovery_graph::root_of(intent.run_id, &observed.intents)
+                    .map_err(|_| RuntimeError::RestartRunUnavailable {
+                        run_id: intent.run_id,
+                        reason: "invalid recovery parent graph".into(),
+                    })?;
                 // A missing live member is never silently filtered out. Queued
                 // launches without a registered config remain unsupported.
-                let entry = runs
-                    .get(&intent.run_id)
-                    .ok_or_else(|| error("recipe member unavailable"))?;
+                let entry = runs.get(&intent.run_id).ok_or_else(|| {
+                    RuntimeError::RestartRunUnavailable {
+                        run_id: intent.run_id,
+                        reason: "recipe member unavailable".into(),
+                    }
+                })?;
                 if entry.parent != intent.parent_run_id || entry.role.name() != intent.role {
-                    return Err(RuntimeError::RestartObservationChanged);
+                    return Err(RuntimeError::RestartRunUnavailable {
+                        run_id: intent.run_id,
+                        reason: "runtime metadata mismatch".into(),
+                    });
                 }
                 let config = &entry.config;
                 let permit_matches =
@@ -331,11 +351,10 @@ impl AgentRuntime {
                     ))
                     .map_err(error)?,
                     snapshots: intent
-                        .checkpoint
-                        .as_ref()
-                        .map(|c| c.snapshot.clone())
+                        .snapshot
+                        .clone()
+                        .or_else(|| intent.checkpoint.as_ref().map(|c| c.snapshot.clone()))
                         .into_iter()
-                        .chain(intent.snapshot.clone())
                         .collect(),
                 });
             }

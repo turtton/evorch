@@ -533,3 +533,47 @@ async fn a_snapshot_committed_but_not_yet_named_by_the_intent_is_an_observation_
         .unwrap();
     f.cleanup(run).await;
 }
+
+#[tokio::test]
+async fn recipe_inventory_missing_live_member_retains_its_run_id() {
+    let f = Fixture::new(0);
+    let run = chat(&f);
+    f.model.entered.notified().await;
+    let entry = f.runtime.shared.runs.lock().unwrap().remove(&run).unwrap();
+    let failure = f
+        .runtime
+        .restart_recipe_inventory(&BTreeMap::new())
+        .err()
+        .unwrap();
+    f.runtime.shared.runs.lock().unwrap().insert(run, entry);
+    assert!(matches!(failure, RuntimeError::RestartRunUnavailable { run_id, .. } if run_id == run));
+    assert!(failure.to_string().contains(&run.to_string()));
+    f.cleanup(run).await;
+}
+
+#[tokio::test]
+async fn recipe_inventory_inconsistent_live_member_retains_its_run_id() {
+    let f = Fixture::new(0);
+    let run = chat(&f);
+    f.model.entered.notified().await;
+    let role = {
+        let mut runs = f.runtime.shared.runs.lock().unwrap();
+        std::mem::replace(&mut runs.get_mut(&run).unwrap().role, Role::Reviewer)
+    };
+    let failure = f
+        .runtime
+        .restart_recipe_inventory(&BTreeMap::new())
+        .err()
+        .unwrap();
+    f.runtime
+        .shared
+        .runs
+        .lock()
+        .unwrap()
+        .get_mut(&run)
+        .unwrap()
+        .role = role;
+    assert!(matches!(failure, RuntimeError::RestartRunUnavailable { run_id, .. } if run_id == run));
+    assert!(failure.to_string().contains(&run.to_string()));
+    f.cleanup(run).await;
+}

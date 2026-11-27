@@ -26,6 +26,9 @@ use crate::restart::tests::restart_model as model;
 struct RecoveryModel {
     inner: model::Model,
     block_child: std::sync::atomic::AtomicBool,
+    block_parent: std::sync::atomic::AtomicBool,
+    parent_entered: tokio::sync::Notify,
+    parent_release: tokio::sync::Semaphore,
     entered: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
 }
@@ -34,6 +37,9 @@ impl Default for RecoveryModel {
         Self {
             inner: Default::default(),
             block_child: false.into(),
+            block_parent: false.into(),
+            parent_entered: Default::default(),
+            parent_release: tokio::sync::Semaphore::new(0),
             entered: Default::default(),
             release: tokio::sync::Semaphore::new(0),
         }
@@ -92,6 +98,11 @@ impl runtime::AgentModel for RecoveryModel {
             .inner
             .complete(invocation, role, messages, tools)
             .await?;
+        if role == Role::Orchestrator && self.block_parent.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.parent_entered.notify_one();
+            self.parent_release.acquire().await.unwrap().forget();
+        }
         if role == Role::Worker && self.block_child.load(std::sync::atomic::Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
@@ -259,13 +270,12 @@ impl Fixture {
         let binding_observation = self.source.bindings().unwrap().observed;
         let owner = self.boot.owner.owned_permit("plain").unwrap();
         let error = self.source.collect().await.err().expect("must reject");
-        assert_eq!(
-            error.code,
-            if kind == "source unavailable" {
-                ErrorCode::Busy
-            } else {
-                ErrorCode::UnsupportedCapability
-            }
+        assert_eq!(error.code, ErrorCode::UnsupportedCapability);
+        assert!(
+            self.inventory()
+                .iter()
+                .any(|member| error.message.contains(&member.run.to_string())),
+            "{error:?}"
         );
         assert!(error.message.contains(kind), "{error:?}");
         assert_eq!(self.calls(), calls, "collection must not invoke a provider");
@@ -325,6 +335,19 @@ impl Fixture {
             &self.boot.owner.owned_permit("plain").unwrap()
         ));
     }
+    async fn lane(
+        &mut self,
+        lead: RunId,
+        policy: event_bus::LanePolicy,
+    ) -> runtime::lanes::LaneOpened {
+        let lane = self
+            .boot
+            .runtime
+            .open_lane(lead, policy.as_str(), lane_brief(policy))
+            .unwrap();
+        self.waiting(lane.root_run_id).await;
+        lane
+    }
     async fn shutdown(mut self) {
         self.boot.shutdown().await.unwrap();
     }
@@ -332,8 +355,30 @@ impl Fixture {
 
 #[tokio::test]
 async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
+    ordinary_or_lane_graph(false).await;
+}
+
+#[tokio::test]
+async fn restored_lane_can_recollect_recipes_without_gui_permits_or_a_second_physical_restart() {
+    ordinary_or_lane_graph(true).await;
+}
+
+async fn ordinary_or_lane_graph(is_lane: bool) {
     let mut f = Fixture::new().await;
-    let root = f.chat().await;
+    let lead = f.chat().await;
+    let (root, thread) = if is_lane {
+        let lane = f.lane(lead, event_bus::LanePolicy::Attached).await;
+        // The lane is an independent root, not a descendant of its lead.
+        f.boot
+            .runtime
+            .stop(lead, runtime::StopScope::Subtree)
+            .unwrap();
+        f.boot.runtime.wait(lead).await.unwrap();
+        (lane.root_run_id, lane.thread_id)
+    } else {
+        (lead, "plain".into())
+    };
+    let scope = is_lane.then_some(event_bus::LaneScope::Lane);
     std::fs::write(f._dir.path().join("child-input.txt"), "recoverable child").unwrap();
     f.model
         .block_child
@@ -353,15 +398,20 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         )
         .unwrap();
     f.model.entered.notified().await;
-    let inventory = f.inventory();
+    let bindings = f.source.bindings().unwrap();
+    let initial = f.inventory();
+    let mut held = held_permits(&bindings, Some(&initial));
+    held.insert(root, f.boot.owner.owned_permit(&thread).unwrap());
+    let inventory = f.boot.runtime.restart_recipe_inventory(&held).unwrap();
     let child_metadata = inventory.iter().find(|m| m.run == child).unwrap();
     assert_eq!(child_metadata.root, root);
     assert_eq!(child_metadata.parent, Some(root));
-    assert_eq!(child_metadata.thread.as_deref(), Some("plain"));
+    assert_eq!(child_metadata.thread.as_deref(), Some(thread.as_str()));
     assert!(child_metadata.permit_matches);
     let root_metadata = inventory.iter().find(|m| m.run == root).unwrap();
     assert!(root_metadata.conversation);
-    assert!(!root_metadata.lane && !root_metadata.team && !root_metadata.goal);
+    assert_eq!(root_metadata.lane, is_lane);
+    assert!(!root_metadata.team && !root_metadata.goal);
     let calls = f.calls();
     let db = storage::Database::open(f.boot.storage_config()).unwrap();
     let before: BTreeMap<_, _> = inventory
@@ -391,7 +441,7 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         assert_eq!(record.checkpoints_json, saved.checkpoints_json);
         let original: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
         assert_eq!(recipe.descriptor.as_ref(), Some(&original));
-        assert_eq!(recipe.lane, None);
+        assert_eq!(recipe.lane, scope);
         assert_eq!(recipe.team, None);
         assert_eq!(recipe.goal_id, None);
     }
@@ -419,10 +469,10 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         .runtime
         .save_recovery_graph("ordinary", &records)
         .unwrap();
-    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests.len(), if is_lane { 2 } else { 1 });
     // Logical adoption does not perform the physical successor owner claim.
     // End the parked child's live turn with its current scoped permit first.
-    let mut predecessor = f.boot.owner.owned_permit("plain").unwrap();
+    let mut predecessor = f.boot.owner.owned_permit(&thread).unwrap();
     predecessor.run_id = Some(child.to_string());
     predecessor.checkpoint(&[]).unwrap();
     // Logical source and target coexist in this unit test. Take a consistent
@@ -460,46 +510,37 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         .unwrap();
     let plan = restarted.recovery_plan().unwrap();
     assert_eq!(plan.components.len(), 1, "{plan:?}");
+    let component = plan
+        .components
+        .iter()
+        .find(|c| c.runs.contains(&root))
+        .unwrap();
     let mut paused = restarted
-        .prepare_component(&plan.components[0], startup, ownership)
+        .prepare_component(component, startup, ownership)
         .unwrap();
     restarted
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let permit = f.boot.owner.owned_permit("plain").unwrap();
-    // Current authority scopes each live owner permit to its actual run.
-    let mut root_permit = permit.clone();
-    root_permit.run_id = Some(root.to_string());
-    let mut child_permit = permit;
-    child_permit.run_id = Some(child.to_string());
-    let authority = runtime::CurrentRecoveryAuthority {
-        members: BTreeMap::from([
-            (
-                root,
-                RunConfig {
-                    project_root: Some(f._dir.path().canonicalize().unwrap()),
-                    ownership: Some(root_permit),
-                    conversation: true,
-                    interactive: true,
-                    keep_alive: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                child,
-                RunConfig {
-                    project_root: Some(f._dir.path().canonicalize().unwrap()),
-                    ownership: Some(child_permit),
-                    interactive: false,
-                    keep_alive: false,
-                    ..Default::default()
-                },
-            ),
-        ]),
-    };
-    restarted.bind_thread_root("plain", root).unwrap();
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(
+        &workbench_protocol::ids::ProjectId::new("recipe-project").unwrap(),
+        f._dir.path().canonicalize().unwrap(),
+    );
+    let bindings =
+        workbench_host::bootstrap::recovery::bindings::load(&recovery_config, &projects).unwrap();
+    let authority = workbench_host::bootstrap::recovery::authority::CurrentAuthorityProvider {
+        runtime: &restarted,
+        owner: &f.boot.owner,
+        bindings: &bindings,
+        storage: &recovery_config,
+        writer: &recovered_storage.handle(),
+        config_dir: f._dir.path(),
+    }
+    .resolve_owned(&records, &std::collections::BTreeSet::from([root, child]))
+    .unwrap();
+    restarted.bind_thread_root(&thread, root).unwrap();
     let reservation = restarted
-        .reserve_automatic_activation(&manifests[0])
+        .reserve_automatic_activation(&component.manifest_id)
         .unwrap();
     assert_eq!(
         f.calls(),
@@ -516,6 +557,9 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         [root, child].into_iter().collect()
     );
     let mut activation_events = restarted.event_bus().subscribe();
+    f.model
+        .block_parent
+        .store(is_lane, std::sync::atomic::Ordering::SeqCst);
     publication.release();
     let phase = restarted.wait(child).await.unwrap();
     loop {
@@ -527,6 +571,40 @@ async fn plain_host_conversation_and_normal_child_keep_every_descriptor() {
         }
     }
     assert!(f.calls() > calls);
+    if is_lane {
+        // Child completion wakes the lane. Hold that actual provider turn so
+        // recollection observes a stable live run, not an intermediate snapshot.
+        f.model.parent_entered.notified().await;
+        // Startup also uses goal_projects as project metadata, not evidence of
+        // an actual goal. Neither this metadata nor missing GUI permits blocks
+        // a subsequent recipe collection.
+        f.boot
+            .host
+            .lock()
+            .unwrap()
+            .service_mut()
+            .bindings
+            .goal_projects
+            .insert(thread.clone(), "project".into());
+        let source = HostRecipeSource {
+            runtime: restarted.clone(),
+            host: f.boot.host.clone(),
+            owner: f.boot.owner.clone(),
+            storage: recovery_config.clone(),
+            reader: f.source.reader.clone(),
+        };
+        let recollected = source.collect().await.unwrap();
+        assert_eq!(recollected.recipes[&root].lane, scope);
+        // The fixture retains a separate stopped-lead manifest for disposal;
+        // check live-member preflight independently of that adopted-tx gate.
+        restarted
+            .preflight_restart_capture(&recollected.recipes)
+            .unwrap();
+        f.model
+            .block_parent
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        f.model.parent_release.add_permits(1);
+    }
     restarted.stop(root, runtime::StopScope::Subtree).unwrap();
     restarted.wait(root).await.unwrap();
     drop(restarted);
@@ -709,8 +787,11 @@ async fn lane_ledger_alone_rejects_a_plain_live_graph() {
 async fn storage_read_completes_without_reacquiring_command_host_mutex() {
     use std::{future::Future, task::Poll};
     let mut f = Fixture::new().await;
-    f.chat().await;
+    let lead = f.chat().await;
+    f.lane(lead, event_bus::LanePolicy::Attached).await;
     {
+        let barrier = queued_reader_barrier(f.source.reader.clone()).await;
+        barrier.entered.await.unwrap();
         let collection = f.source.collect();
         tokio::pin!(collection);
         std::future::poll_fn(|context| {
@@ -728,6 +809,8 @@ async fn storage_read_completes_without_reacquiring_command_host_mutex() {
             drop(guard);
         });
         ready.recv().unwrap();
+        barrier.release.send(()).unwrap();
+        barrier.job.await.unwrap();
         let result = collection.await;
         release.send(()).unwrap();
         holder.join().unwrap();
@@ -916,4 +999,211 @@ async fn one_special_child_rejects_the_whole_graph_without_partial_recipes() {
     assert!(f.inventory().iter().find(|m| m.run == child).unwrap().lane);
     f.rejected("lane").await;
     f.shutdown().await;
+}
+
+// Keep the reader blocked until the caller explicitly releases it. Therefore a
+// first poll cannot complete based on an OS thread winning a scheduling race.
+struct ReaderBarrier {
+    job: AdminIo<'static, ()>,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+async fn queued_reader_barrier(reader: Arc<AdminReader>) -> ReaderBarrier {
+    use std::task::Poll;
+    let (enter, entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let mut job: AdminIo<'static, ()> = Box::pin(async move {
+        reader
+            .read(move || {
+                enter.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    std::future::poll_fn(|cx| {
+        assert!(job.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    ReaderBarrier {
+        job,
+        entered,
+        release,
+    }
+}
+
+fn lane_brief(policy: event_bus::LanePolicy) -> event_bus::LaneBrief {
+    event_bus::LaneBrief {
+        objective: "restart a GUI-unopened lane".into(),
+        inputs: vec![],
+        deliverables: vec!["result".into()],
+        acceptance_criteria: vec!["checked".into()],
+        constraints: vec![],
+        workspace: Default::default(),
+        report_policy: policy,
+        verification_requirements: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn unopened_lanes_and_their_children_use_current_ledger_and_owner_not_chat_bindings() {
+    let mut f = Fixture::new().await;
+    let lead = f.chat().await;
+    let mut expected = vec![lead];
+    for policy in [
+        event_bus::LanePolicy::Attached,
+        event_bus::LanePolicy::Summary,
+        event_bus::LanePolicy::Detached,
+    ] {
+        let lane = f.lane(lead, policy).await;
+        let child = f
+            .boot
+            .runtime
+            .delegate_background_as_child(
+                lane.root_run_id,
+                Role::Worker,
+                "lane child",
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        f.waiting(child).await;
+        assert!(
+            !f.source
+                .bindings()
+                .unwrap()
+                .chats
+                .contains_key(&lane.thread_id)
+        );
+        assert!(
+            !f.source
+                .bindings()
+                .unwrap()
+                .permits
+                .contains_key(&lane.thread_id)
+        );
+        expected.extend([lane.root_run_id, child]);
+    }
+    let observed = f.source.collect().await.unwrap();
+    assert_eq!(
+        observed
+            .recipes
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected.iter().copied().collect()
+    );
+    for run in expected {
+        let recipe = &observed.recipes[&run];
+        assert_eq!(recipe.lane.is_some(), run != lead);
+        assert_eq!(recipe.descriptor.as_ref().unwrap().lane_scope, recipe.lane);
+    }
+    f.boot
+        .runtime
+        .prepare_restart_quiesce(&observed.recipes)
+        .unwrap();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn lane_ledger_scope_snapshot_and_foreign_owner_refusals_keep_the_cause_run() {
+    let mut f = Fixture::new().await;
+    let lead = f.chat().await;
+    let lane = f.lane(lead, event_bus::LanePolicy::Attached).await;
+    let conn = rusqlite::Connection::open(&f.boot.storage_config().db_path).unwrap();
+    conn.execute(
+        "UPDATE lanes SET root_run_id=?1 WHERE lane_id=?2",
+        rusqlite::params![lead.to_string(), &lane.lane_id],
+    )
+    .unwrap();
+    let failure = f.source.collect().await.err().unwrap();
+    assert!(
+        failure.message.contains(&lane.root_run_id.to_string()),
+        "{failure:?}"
+    );
+    assert!(failure.message.contains("ledger mismatch"), "{failure:?}");
+    conn.execute(
+        "UPDATE lanes SET root_run_id=?1 WHERE lane_id=?2",
+        rusqlite::params![lane.root_run_id.to_string(), &lane.lane_id],
+    )
+    .unwrap();
+    let permit = f.boot.owner.owned_permit(&lane.thread_id).unwrap();
+    let mut registry = runtime::ownership::Registry::open_existing(&permit.registry_path).unwrap();
+    let original = registry.attach(&lane.thread_id).unwrap();
+    registry
+        .update(&lane.thread_id, |o| {
+            o.lease.owner_id = "foreign".into();
+            Ok(())
+        })
+        .unwrap();
+    let failure = f.source.collect().await.err().unwrap();
+    assert!(
+        failure.message.contains(&lane.root_run_id.to_string())
+            && failure.message.contains("owner"),
+        "{failure:?}"
+    );
+    registry
+        .update(&lane.thread_id, |o| {
+            *o = original.clone();
+            Ok(())
+        })
+        .unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn.execute(
+        "DELETE FROM run_contexts WHERE run_id=?1",
+        [lane.root_run_id.to_string()],
+    )
+    .unwrap();
+    let failure = f.source.collect().await.err().unwrap();
+    assert!(
+        failure.message.contains(&lane.root_run_id.to_string())
+            && failure.message.contains("snapshot"),
+        "{failure:?}"
+    );
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn lane_ledger_change_between_discovery_and_snapshot_validation_is_a_conflict() {
+    use std::{future::Future, task::Poll};
+    let mut f = Fixture::new().await;
+    let lead = f.chat().await;
+    let lane = f.lane(lead, event_bus::LanePolicy::Attached).await;
+    let first = queued_reader_barrier(f.source.reader.clone()).await;
+    first.entered.await.unwrap();
+    let collection = f.source.collect();
+    tokio::pin!(collection);
+    std::future::poll_fn(|cx| {
+        assert!(collection.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    // FIFO: both discovery and this barrier are enqueued behind the first
+    // blocked job. Discovery cannot finish before the second barrier exists.
+    let barrier = queued_reader_barrier(f.source.reader.clone()).await;
+    first.release.send(()).unwrap();
+    first.job.await.unwrap();
+    barrier.entered.await.unwrap();
+    rusqlite::Connection::open(&f.boot.storage_config().db_path)
+        .unwrap()
+        .execute(
+            "UPDATE lanes SET root_run_id=?1 WHERE lane_id=?2",
+            rusqlite::params![lead.to_string(), &lane.lane_id],
+        )
+        .unwrap();
+    barrier.release.send(()).unwrap();
+    barrier.job.await.unwrap();
+    let failure = collection.await.err().unwrap();
+    assert_eq!(failure.code, ErrorCode::Conflict);
+    assert!(
+        failure.message.contains(&lane.root_run_id.to_string()),
+        "{failure:?}"
+    );
+    // The pinned futures borrow f until this scope ends; explicit shutdown is
+    // performed below by stopping the runs and joining the bootstrap services.
+    f.boot.shutdown().await.unwrap();
 }
