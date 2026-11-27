@@ -34,32 +34,3 @@ fn findings_are_append_only_and_do_not_become_lessons() {
         .is_err()
     );
 }
-
-#[test]
-fn finding_is_rejected_when_writer_is_suspended() {
-    // Given: an exhausted storage budget.
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = StorageConfig {
-        db_path: dir.path().join("limited.db"),
-        ..Default::default()
-    };
-    config.hard_limits.max_db_bytes = 0;
-    let writer = Storage::open(config.clone()).unwrap();
-    let finding = Lesson {
-        id: "f".into(),
-        project: "p".into(),
-        task_id: "t".into(),
-        content: "observed".into(),
-        evidence: "test:x".into(),
-        scope: storage::memory::LessonScope::Project,
-    };
-    // When / Then: findings obey the same suspension as lessons.
-    assert!(writer.handle().append_finding(&finding).is_err());
-    assert!(
-        Database::open(&config)
-            .unwrap()
-            .findings("p")
-            .unwrap()
-            .is_empty()
-    );
-}

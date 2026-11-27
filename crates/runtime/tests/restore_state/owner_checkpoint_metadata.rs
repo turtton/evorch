@@ -236,17 +236,11 @@ fn a_five_mb_body_never_enters_owner_db_or_journal_and_size_is_stable() {
 }
 
 #[tokio::test]
-async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
+async fn runtime_continues_with_none_for_missing_and_failed_stores() {
     use event_bus::{AgentRunPhase, EventBus};
     use runtime::{AgentRuntime, Role, RunConfig, RunStore};
     use std::sync::Arc;
-    for mode in [
-        "absent",
-        "trigger",
-        "suspended",
-        "written",
-        "terminal-owner-failure",
-    ] {
+    for mode in ["absent", "trigger", "written", "terminal-owner-failure"] {
         let (directory, mut permit) = fixture();
         permit.run_id = None;
         let bus = Arc::new(EventBus::new(128));
@@ -256,13 +250,10 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
         ))]));
         let executor = Arc::new(tools::ToolExecutor::new(bus.clone()));
         let mut runtime = AgentRuntime::new(bus, executor, model.clone());
-        let mut config = storage::StorageConfig {
+        let config = storage::StorageConfig {
             db_path: directory.path().join("events.db"),
             ..Default::default()
         };
-        if mode == "suspended" {
-            config.hard_limits.max_db_bytes = 1;
-        }
         let store = storage::Storage::open(config.clone()).unwrap();
         if mode == "trigger" {
             rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER fail_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(ABORT, 'test snapshot failure'); END;").unwrap();
@@ -284,7 +275,7 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
         let phase = runtime.wait(run).await.unwrap();
         assert_eq!(
             phase,
-            if mode == "terminal-owner-failure" || mode == "suspended" {
+            if mode == "terminal-owner-failure" {
                 AgentRunPhase::Error
             } else {
                 AgentRunPhase::Done
@@ -296,12 +287,6 @@ async fn runtime_continues_with_none_for_missing_failed_and_suspended_stores() {
         match mode {
             "absent" => assert_eq!(*snapshot, Reference::none(Reason::NoRunStore)),
             "trigger" => assert_eq!(*snapshot, Reference::none(Reason::WriteFailed)),
-            "suspended" => {
-                // Durable admission rejects a suspended writer before a model
-                // request or snapshot attempt, so no failed snapshot exists.
-                assert_eq!(*snapshot, Reference::none(Reason::Skipped));
-                assert!(model.observed().await.is_empty());
-            }
             "written" => {
                 let saved = storage::Database::open(&config)
                     .unwrap()

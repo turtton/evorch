@@ -72,7 +72,7 @@ fn statistics_count_committed_payloads_and_nonempty_usage_only() {
 }
 
 #[test]
-fn statistics_include_fence_and_suspended_write_rejections() {
+fn statistics_include_fence_write_rejections() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("fenced.db"),
@@ -93,21 +93,6 @@ fn statistics_include_fence_and_suspended_write_rejections() {
     );
     assert_eq!(
         storage.handle().statistics().unwrap().event_write_failures,
-        1
-    );
-    let mut config = StorageConfig {
-        db_path: dir.path().join("suspended.db"),
-        ..StorageConfig::default()
-    };
-    config.hard_limits.max_db_bytes = 0;
-    let suspended = Storage::open(config).unwrap();
-    assert!(suspended.handle().append_event(None, &event).is_err());
-    assert_eq!(
-        suspended
-            .handle()
-            .statistics()
-            .unwrap()
-            .event_write_failures,
         1
     );
 }

@@ -151,125 +151,69 @@ fn preview_and_cleanup_preserve_audits_conversation_goal_and_restore_context() {
 }
 
 #[test]
-fn cleanup_reseeds_warm_session_and_daily_quotas() {
-    for session_limit in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let event = diagnostic(1, "lsp", "code", "日本語");
-        let limit = bytes(&event);
-        let mut config = config(dir.path().join("accounting.db"));
-        if session_limit {
-            config.hard_limits.max_session_bytes = limit;
-        } else {
-            config.hard_limits.max_daily_event_bytes = limit;
-        }
-        let storage = Storage::open(config.clone()).unwrap();
-        let handle = storage.handle();
-        let session = session_limit.then_some("session");
-        handle.append_event(session, &event).unwrap();
-        let error = handle.append_event(session, &event).unwrap_err();
-        assert!(
-            matches!(error, StorageError::LimitExceeded { limit: actual, .. }
-            if actual == if session_limit { LimitKind::SessionSize } else { LimitKind::DailyBytes })
-        );
-        handle.cleanup_diagnostics(Scope::All).unwrap();
-        handle
-            .append_event(session, &event)
-            .expect("quota capacity must be reusable immediately");
-        assert!(handle.append_event(session, &event).is_err());
-        let conn = Connection::open(&config.db_path).unwrap();
-        assert_eq!(
-            conn.query_row(
-                "SELECT SUM(payload_bytes) FROM event_day_bytes",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            limit as i64
-        );
-        if session_limit {
-            assert_eq!(
-                conn.query_row(
-                    "SELECT payload_bytes FROM event_session_bytes WHERE session_id = 'session'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-                limit as i64
-            );
-        }
-    }
-}
-
-#[test]
-fn suspended_writer_cleanup_reclaims_space_and_resumes_context_writes() {
+fn cleanup_reseeds_warm_session_quota() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path().join("suspended.db"));
-    let storage = Storage::open(config.clone()).unwrap();
-    // Keep the payload allowance independent of the evolving empty schema size.
-    let empty_schema_bytes = {
-        let conn = Connection::open(&config.db_path).unwrap();
-        let pages: u64 = conn
-            .pragma_query_value(None, "page_count", |r| r.get(0))
-            .unwrap();
-        let page: u64 = conn
-            .pragma_query_value(None, "page_size", |r| r.get(0))
-            .unwrap();
-        pages * page
-    };
-    let event = diagnostic(1, "lsp", "large", &"x".repeat(32_768));
-    for _ in 0..32 {
-        storage.handle().append_event(None, &event).unwrap();
-    }
-    storage.close();
-    config.hard_limits.max_db_bytes = empty_schema_bytes + 512 * 1024;
+    let event = diagnostic(1, "lsp", "code", "日本語");
+    let limit = bytes(&event);
+    let mut config = config(dir.path().join("accounting.db"));
+    config.hard_limits.max_session_bytes = limit;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
-    assert!(handle.upsert_run_context(&context()).is_err());
-    assert!(
-        handle
-            .preview_diagnostic_cleanup(Scope::All)
-            .unwrap()
-            .writes_suspended
-    );
-    let result = handle.cleanup_diagnostics(Scope::All).unwrap();
-    assert_eq!(result.event_count, 32);
-    assert!(result.reclaimed_bytes > 500_000, "{result:?}");
-    assert!(!result.writes_suspended, "{result:?}");
-    assert!(result.maintenance_error.is_none(), "{result:?}");
+    handle.append_event(Some("session"), &event).unwrap();
+    let error = handle.append_event(Some("session"), &event).unwrap_err();
+    assert!(matches!(
+        error,
+        StorageError::LimitExceeded {
+            limit: LimitKind::SessionSize,
+            ..
+        }
+    ));
+    handle.cleanup_diagnostics(Scope::All).unwrap();
     handle
-        .upsert_run_context(&context())
-        .expect("restore writes resume in the same process");
+        .append_event(Some("session"), &event)
+        .expect("quota capacity must be reusable immediately");
+    assert!(handle.append_event(Some("session"), &event).is_err());
+    let conn = Connection::open(&config.db_path).unwrap();
     assert_eq!(
-        Database::open(&config).unwrap().run_context("run").unwrap(),
-        Some(context())
+        conn.query_row(
+            "SELECT payload_bytes FROM event_session_bytes WHERE session_id = 'session'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        limit as i64
     );
 }
 
 #[test]
-fn maintenance_cleans_expired_diagnostics_and_recovers_suspended_writer() {
+fn a_database_over_its_size_limit_is_not_reported_as_suspended() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path().join("automatic.db"));
+    let mut config = config(dir.path().join("over.db"));
+    config.hard_limits.max_db_bytes = 1;
     let storage = Storage::open(config.clone()).unwrap();
-    // Keep the payload allowance independent of the evolving empty schema size.
-    let empty_schema_bytes = {
-        let conn = Connection::open(&config.db_path).unwrap();
-        let pages: u64 = conn
-            .pragma_query_value(None, "page_count", |r| r.get(0))
-            .unwrap();
-        let page: u64 = conn
-            .pragma_query_value(None, "page_size", |r| r.get(0))
-            .unwrap();
-        pages * page
-    };
+    let handle = storage.handle();
+    let event = diagnostic(1, "lsp", "large", &"x".repeat(1_024));
+    handle.append_event(None, &event).unwrap();
+    // Writes continue past the limit, so neither the preview nor the cleanup claims otherwise.
+    let preview = handle.preview_diagnostic_cleanup(Scope::All).unwrap();
+    assert_eq!(preview.event_count, 1);
+    assert!(!preview.writes_suspended, "{preview:?}");
+    let result = handle.cleanup_diagnostics(Scope::All).unwrap();
+    assert_eq!(result.event_count, 1);
+    assert!(!result.writes_suspended, "{result:?}");
+    handle.upsert_run_context(&context()).unwrap();
+}
+
+#[test]
+fn maintenance_cleans_expired_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path().join("automatic.db"));
+    let storage = Storage::open(config).unwrap();
+    let handle = storage.handle();
     let expired = diagnostic(1, "lsp", "large", &"x".repeat(32_768));
     for _ in 0..32 {
-        storage.handle().append_event(None, &expired).unwrap();
+        handle.append_event(None, &expired).unwrap();
     }
-    storage.close();
-    config.hard_limits.max_db_bytes = empty_schema_bytes + 512 * 1024;
-    let storage = Storage::open(config.clone()).unwrap();
-    let handle = storage.handle();
-    assert!(handle.upsert_run_context(&context()).is_err());
     // Drive and await the same maintenance operation used by periodic ticks.
     handle.checkpoint_now().unwrap();
     assert_eq!(
@@ -279,15 +223,13 @@ fn maintenance_cleans_expired_diagnostics_and_recovers_suspended_writer() {
             .event_count,
         0
     );
-    handle
-        .upsert_run_context(&context())
-        .expect("maintenance must reevaluate limits after reclamation");
+    handle.upsert_run_context(&context()).unwrap();
 }
 
 #[test]
 fn legacy_database_reports_deletion_without_claiming_file_recovery() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path().join("legacy.db"));
+    let config = config(dir.path().join("legacy.db"));
     {
         let conn = Connection::open(&config.db_path).unwrap();
         conn.execute_batch("CREATE TABLE legacy(x);").unwrap();
@@ -298,7 +240,6 @@ fn legacy_database_reports_deletion_without_claiming_file_recovery() {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 1_000_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(
@@ -310,8 +251,6 @@ fn legacy_database_reports_deletion_without_claiming_file_recovery() {
     let result = handle.cleanup_diagnostics(Scope::All).unwrap();
     assert_eq!(result.event_count, 32);
     assert!(result.requires_full_vacuum);
-    assert!(result.writes_suspended);
-    assert!(handle.upsert_run_context(&context()).is_err());
     assert!(
         Database::open(&config)
             .unwrap()

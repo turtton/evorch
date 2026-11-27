@@ -505,11 +505,16 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
     write_config(root);
     let mut config = config::Config::default();
     config.self_improvement.enabled = true;
-    let mut db = components::storage_config(&config, root.join("evorch-events.db"));
-    // The actual writer starts suspended, not a mock persistence failure.
-    db.hard_limits.max_db_bytes = 0;
+    let db = components::storage_config(&config, root.join("evorch-events.db"));
     let model = Arc::new(Model::default());
     let (store, runtime, owner, mut services) = learning_factory(&dir, &config, model.clone(), db);
+    // The actual writer refuses candidate writes, not a mock persistence failure.
+    let raw = rusqlite::Connection::open(root.join("evorch-events.db")).unwrap();
+    raw.execute_batch(
+        "CREATE TRIGGER fail_candidate BEFORE INSERT ON improvement_candidates \
+         BEGIN SELECT RAISE(ABORT, 'test writer failure'); END;",
+    )
+    .unwrap();
     let spool = root.join("self-improvement/drafts/crash-spool");
     runtime::self_improvement::spool_fault(
         &spool,
@@ -531,6 +536,8 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
     );
     assert!(candidates(root).is_empty());
     drop((services, runtime, owner, store));
+    raw.execute_batch("DROP TRIGGER fail_candidate").unwrap();
+    drop(raw);
     let mut next = open(&dir, model).await;
     next.shutdown().await.unwrap();
     assert!(!file.exists(), "acknowledged spool must be removed");

@@ -640,59 +640,6 @@ fn edge_sql_failure_rolls_back_both_edge_batches_and_combined_context_writes() {
 }
 
 #[test]
-fn suspended_writer_rejects_all_review_commands_without_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = StorageConfig {
-        db_path: dir.path().join("suspended.db"),
-        ..Default::default()
-    };
-    let reference = assistant_reference("pending");
-    let storage = Storage::open(config.clone()).unwrap();
-    storage
-        .handle()
-        .save_assistant_reference(&reference)
-        .unwrap();
-    storage.close();
-    config.hard_limits.max_db_bytes = 1;
-    let storage = Storage::open(config.clone()).unwrap();
-    let handle = storage.handle();
-    let rows = [evidence("a", "child", "root", 1)];
-    let edges = [edge("child", "root")];
-    for result in [
-        handle.record_review_evidence(&rows),
-        handle.record_review_lineage_edge(&edges),
-        handle.upsert_run_context_with_evidence(&context(), &rows, &edges),
-        handle.save_assistant_reference(&assistant_reference("new")),
-        handle.append_review_evidence_with_reference_consumption(&rows, &edges, Some("pending")),
-        handle.upsert_run_context_with_evidence_and_reference_consumption(
-            &context(),
-            &rows,
-            &edges,
-            Some("pending"),
-        ),
-    ] {
-        assert!(
-            matches!(result, Err(StorageError::Serialization(message)) if message.contains("writes suspended"))
-        );
-    }
-    let database = Database::open(&config).unwrap();
-    assert_eq!(
-        database.assistant_reference("pending").unwrap(),
-        Some(reference)
-    );
-    assert_eq!(database.assistant_reference("new").unwrap(), None);
-    assert!(database.run_context("child").unwrap().is_none());
-    assert!(
-        database
-            .review_evidence_for_target("child")
-            .unwrap()
-            .is_empty()
-    );
-    assert!(database.review_lineage_edges("child").unwrap().is_empty());
-    assert_eq!(database.persisted_run_ids().unwrap(), vec!["source"]);
-}
-
-#[test]
 fn evidence_with_edges_rolls_back_both_when_evidence_is_rejected() {
     let (_dir, storage, database, _config) = fixture();
     for text in ["x".repeat(256 * 1024 + 1), format!("sk-{}", "a".repeat(32))] {
