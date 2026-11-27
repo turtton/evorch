@@ -23,6 +23,19 @@ async fn payload(read: &mut (impl AsyncRead + Unpin), max: u32) -> io::Result<Ve
     read.read_exact(&mut bytes).await?;
     Ok(bytes)
 }
+/// The text of serde's error quotes the input (an unknown field name, a wrong
+/// value), and this error is logged: keep only what kind of error and where.
+fn malformed_hello(e: serde_json::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "malformed client hello ({:?} error at line {} column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        ),
+    )
+}
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
@@ -94,7 +107,7 @@ async fn serve_connection(
     };
     let mut hello = backend.hello();
     let _connected = backend.connected();
-    let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
+    let client: ClientHello = serde_json::from_slice(&first).map_err(malformed_hello)?;
     let negotiated = negotiate(
         &client,
         &ServerOffer {
@@ -160,7 +173,7 @@ async fn serve_connection(
             }
         }
     }));
-    log.established(&client.client_instance_id);
+    log.established(client.client_instance_id.as_str());
     let _client_connection = backend.client_connection(client.client_instance_id.clone());
     let surface = match client.local_surface {
         Some(LocalSurface::Cli) => Surface::Cli,

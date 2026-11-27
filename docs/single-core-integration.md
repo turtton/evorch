@@ -659,7 +659,7 @@ stderr, which can hold credentials): the core's `evorch_core::connection_log`,
   client library, the socket error (`core socket I/O failed`, with the
   `io::ErrorKind` and OS error) or `the peer ended the stream (end of file)`.
 - `core-<pid>.log`: per connection (`conn=N`), `connection accepted`,
-  `handshake accepted` (the client instance), and the end: the task that ended
+  `handshake accepted` (a digest of the client instance id, never the id), and the end: the task that ended
   first (`role="reader"` / `"writer"`) with its I/O error, `connection closed`
   with `elapsed_ms` and `core_stopping`, `connection ended without a result` when
   the handler panicked or was cancelled (same `conn=N`), `connection limit

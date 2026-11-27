@@ -131,11 +131,9 @@ async fn a_peer_that_leaves_is_recorded_with_the_task_that_noticed_it() {
     drop(client);
     assert!(core.ended.recv().await.unwrap().is_ok());
 
-    // Then: the log names the client, the reader that saw the EOF, and the end.
-    assert!(
-        log.line_with(&["handshake accepted", "cli-leaving"])
-            .is_some()
-    );
+    // Then: the log shows the handshake without the id, the reader that saw the EOF, and the end.
+    assert!(log.line_with(&["handshake accepted", "client="]).is_some());
+    assert!(!log.lines().join("\n").contains("cli-leaving"));
     assert!(
         log.line_with(&["the peer closed the connection", "role=", "reader"])
             .is_some(),
@@ -203,4 +201,62 @@ async fn a_handler_that_is_cancelled_is_recorded_under_its_connection_number() {
         .line_with(&["connection ended without a result"])
         .expect("the lost handler was recorded");
     assert_eq!(conn_of(&lost), conn_of(&accepted));
+}
+
+#[tokio::test]
+async fn nothing_a_peer_sent_is_quoted_in_the_log() {
+    // Given: a socket whose first frame is a hello with an unknown field name
+    // and a wrong value, both carrying a marker, as a secret would.
+    let (log, _guard) = capture();
+    let mut core = Core::start().await;
+    let mut raw = tokio::net::UnixStream::connect(&core.socket).await.unwrap();
+    let hello = br#"{"supported_versions":"MARKER-value","MARKER-field":1}"#;
+    raw.write_all(&(hello.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    raw.write_all(hello).await.unwrap();
+
+    // When: the core has refused it.
+    let result = core.ended.recv().await.unwrap();
+
+    // Then: the refusal is recorded with its kind and place, and the marker is nowhere.
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert!(
+        log.line_with(&[
+            "connection closed with an error",
+            "malformed client hello",
+            "line 1 column"
+        ])
+        .is_some(),
+        "{:?}",
+        log.lines()
+    );
+    assert!(
+        !log.lines().join("\n").contains("MARKER"),
+        "{:?}",
+        log.lines()
+    );
+}
+
+#[tokio::test]
+async fn the_client_instance_id_is_kept_only_as_a_digest() {
+    // Given/When: a client whose self-chosen id carries a marker connects and leaves.
+    let (log, _guard) = capture();
+    let mut core = Core::start().await;
+    let client = WorkbenchClient::connect(
+        UnixTransport::connect(&core.socket).await.unwrap(),
+        config("MARKER-client-id"),
+    )
+    .await
+    .unwrap();
+    drop(client);
+    core.ended.recv().await.unwrap().unwrap();
+
+    // Then: the handshake is recorded, and the id is not.
+    assert!(log.line_with(&["handshake accepted", "client="]).is_some());
+    assert!(
+        !log.lines().join("\n").contains("MARKER"),
+        "{:?}",
+        log.lines()
+    );
 }

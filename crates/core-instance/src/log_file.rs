@@ -17,7 +17,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -156,11 +156,14 @@ fn prune_exited_where(dir: &Path, name: &str, keep: usize, running: impl Fn(u32)
             .metadata()
             .and_then(|meta| meta.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        exited.push((modified, entry.path()));
+        exited.push((modified, pid, entry.path()));
     }
-    exited.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    for (_, path) in exited.into_iter().skip(keep) {
-        let _ = fs::remove_file(path);
+    exited.sort_by_key(|(modified, ..)| std::cmp::Reverse(*modified));
+    for (_, pid, path) in exited.into_iter().skip(keep) {
+        // A pid can come back between the scan and here.
+        if !running(pid) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -186,16 +189,20 @@ fn process_exists(pid: u32) -> bool {
     }
 }
 
-enum Message {
-    Line(Vec<u8>),
-    Flush(SyncSender<()>),
+/// How many lines the writing thread has written, for [`Logger::flush_within`].
+#[derive(Default)]
+struct Progress {
+    written: Mutex<u64>,
+    changed: Condvar,
 }
 
 /// Where lines are queued. Cheap to clone; never blocks the caller.
 #[derive(Clone)]
 pub struct LogSink {
-    queue: SyncSender<Message>,
+    queue: SyncSender<Vec<u8>>,
     dropped: Arc<AtomicU64>,
+    queued: Arc<AtomicU64>,
+    progress: Arc<Progress>,
 }
 
 impl LogSink {
@@ -230,16 +237,20 @@ impl Drop for LineWriter {
         if self.line.is_empty() {
             return;
         }
-        let line = Message::Line(std::mem::take(&mut self.line));
-        if self.sink.queue.try_send(line).is_err() {
-            self.sink.dropped.fetch_add(1, Ordering::Relaxed);
+        match self.sink.queue.try_send(std::mem::take(&mut self.line)) {
+            Ok(()) => {
+                self.sink.queued.fetch_add(1, Ordering::Release);
+            }
+            Err(_) => {
+                self.sink.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
 
 enum State<W> {
     /// Lines queue up but nothing writes them yet.
-    Idle(W, Receiver<Message>),
+    Idle(W, Receiver<Vec<u8>>),
     Running,
     Stopped,
 }
@@ -260,6 +271,8 @@ impl<W: Write + Send + 'static> Logger<W> {
             sink: LogSink {
                 queue,
                 dropped: Arc::new(AtomicU64::new(0)),
+                queued: Arc::new(AtomicU64::new(0)),
+                progress: Arc::new(Progress::default()),
             },
             state: Arc::new(Mutex::new(State::Idle(writer, lines))),
         }
@@ -278,10 +291,10 @@ impl<W: Write + Send + 'static> Logger<W> {
         let State::Idle(writer, lines) = std::mem::replace(&mut *state, State::Stopped) else {
             return;
         };
-        let dropped = self.sink.dropped.clone();
+        let (dropped, progress) = (self.sink.dropped.clone(), self.sink.progress.clone());
         *state = match std::thread::Builder::new()
             .name("evorch-log".into())
-            .spawn(move || write_lines(writer, &lines, &dropped))
+            .spawn(move || write_lines(writer, &lines, &dropped, &progress))
         {
             Ok(_) => State::Running,
             Err(_) => State::Stopped,
@@ -291,32 +304,42 @@ impl<W: Write + Send + 'static> Logger<W> {
     /// Wait until what was queued so far is written (the end of the process).
     /// Bounded: a stuck disk must not hold the exit.
     pub fn flush(&self) {
+        self.flush_within(FLUSH_WAIT);
+    }
+
+    /// [`Logger::flush`] with its bound given; true when everything queued
+    /// before the call was written. Nothing here waits for room in the queue:
+    /// the wait is on a counter, so one deadline covers the whole call.
+    pub fn flush_within(&self, bound: Duration) -> bool {
         self.start();
-        let (done, written) = mpsc::sync_channel(1);
-        if self.sink.queue.send(Message::Flush(done)).is_ok() {
-            let _ = written.recv_timeout(FLUSH_WAIT);
-        }
+        let target = self.sink.queued.load(Ordering::Acquire);
+        let progress = &self.sink.progress;
+        let written = progress.written.lock().unwrap_or_else(|e| e.into_inner());
+        let (written, _) = progress
+            .changed
+            .wait_timeout_while(written, bound, |written| *written < target)
+            .unwrap_or_else(|e| e.into_inner());
+        *written >= target
     }
 }
 
-fn write_lines<W: Write>(mut writer: W, lines: &Receiver<Message>, dropped: &AtomicU64) {
-    for message in lines {
-        match message {
-            Message::Line(line) => {
-                let lost = dropped.swap(0, Ordering::Relaxed);
-                if lost > 0 {
-                    let _ = writeln!(
-                        writer,
-                        "-- {lost} log lines were dropped: the log queue was full"
-                    );
-                }
-                let _ = writer.write_all(&line);
-            }
-            Message::Flush(done) => {
-                let _ = writer.flush();
-                let _ = done.send(());
-            }
+fn write_lines<W: Write>(
+    mut writer: W,
+    lines: &Receiver<Vec<u8>>,
+    dropped: &AtomicU64,
+    progress: &Progress,
+) {
+    for line in lines {
+        let lost = dropped.swap(0, Ordering::Relaxed);
+        if lost > 0 {
+            let _ = writeln!(
+                writer,
+                "-- {lost} log lines were dropped: the log queue was full"
+            );
         }
+        let _ = writer.write_all(&line);
+        *progress.written.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        progress.changed.notify_all();
     }
 }
 
@@ -459,6 +482,33 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_flush_returns_within_its_bound_while_the_writer_is_stuck_and_the_queue_is_full() {
+        let (entered_tx, entered) = mpsc::sync_channel(1);
+        let (release_tx, release) = mpsc::sync_channel(1);
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let logger = Logger::new(
+            Gate {
+                entered: entered_tx,
+                release,
+                out: out.clone(),
+            },
+            1,
+        );
+        let sink = logger.sink();
+        logger.start();
+        sink.make_writer().write_all(b"hold\n").unwrap();
+        entered.recv().unwrap();
+        sink.make_writer().write_all(b"queued\n").unwrap();
+        // The queue is full and the writer is stuck: waiting for room in the
+        // queue here had no bound. The flush now reports "not written" instead.
+        assert!(!logger.flush_within(Duration::from_millis(20)));
+        release_tx.send(()).unwrap();
+        assert!(logger.flush_within(Duration::from_secs(300)));
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        assert_eq!(text, "hold\nqueued\n");
     }
 
     #[test]

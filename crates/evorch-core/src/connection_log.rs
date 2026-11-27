@@ -32,8 +32,17 @@ impl ConnectionLog {
         }
     }
 
-    pub(crate) fn established(&self, client_instance_id: impl std::fmt::Display) {
-        tracing::info!(conn = self.id, client = %client_instance_id, "handshake accepted");
+    /// The client instance id is text the client chose, and the log is a file
+    /// that outlives the connection: only a short digest is kept, which still
+    /// tells whether two connections came from the same client.
+    pub(crate) fn established(&self, client_instance_id: &str) {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(client_instance_id.as_bytes());
+        let client = format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            digest[0], digest[1], digest[2], digest[3]
+        );
+        tracing::info!(conn = self.id, client, "handshake accepted");
     }
 
     /// The connection is being closed by the core for a reason of its own.
@@ -54,7 +63,13 @@ impl ConnectionLog {
                 tracing::warn!(conn = self.id, kind = ?error.kind(), %error, "a connection task failed; closing");
             }
             Some(Err(error)) => {
-                tracing::error!(conn = self.id, panicked = error.is_panic(), %error, "a connection task panicked or was lost; closing");
+                // Not the error's text: it quotes the panic message.
+                tracing::error!(
+                    conn = self.id,
+                    panicked = error.is_panic(),
+                    cancelled = error.is_cancelled(),
+                    "a connection task panicked or was lost; closing"
+                );
             }
             None => {}
         }
@@ -144,7 +159,7 @@ mod tests {
         }
     }
 
-    fn captured(run: impl FnOnce()) -> String {
+    pub(super) fn captured(run: impl FnOnce()) -> String {
         let log = Captured::default();
         let writer = log.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -185,5 +200,27 @@ mod tests {
         });
         assert!(text.contains("connection closed"), "{text}");
         assert!(!text.contains("without a result"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod join_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panic_message_is_not_copied_into_the_log() {
+        let (_stop, stopped) = watch::channel(false);
+        let ended = tokio::spawn(async {
+            panic!("MARKER-panic-message");
+            #[allow(unreachable_code)]
+            Ok::<bool, io::Error>(true)
+        })
+        .await
+        .unwrap_err();
+        let log = ConnectionLog::new(&stopped);
+        let captured = super::tests::captured(|| log.task_ended(&Some(Err(ended))));
+        log.finished(&Ok(()));
+        assert!(captured.contains("panicked=true"), "{captured}");
+        assert!(!captured.contains("MARKER"), "{captured}");
     }
 }

@@ -563,7 +563,7 @@ pub async fn serve(
                     tracing::info!(
                         stage = "live-core",
                         live_attempt = live_backoff.attempts(),
-                        crash_budget_attempts_in_window = auto.used(),
+                        crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
                         delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                         since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
                         "the core is still running; reconnecting to it"
@@ -581,12 +581,12 @@ pub async fn serve(
                 }
                 Ok(None) => tracing::info!(
                     stage = "live-core",
-                    crash_budget_attempts_in_window = auto.used(),
+                    crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
                     "no running core answered; the start is left to the crash budget"
                 ),
                 Err(error) => tracing::info!(
                     stage = "live-core",
-                    crash_budget_attempts_in_window = auto.used(),
+                    crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
                     %error,
                     "the running core could not be probed; the start is left to the crash budget"
                 ),

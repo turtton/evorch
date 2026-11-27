@@ -68,8 +68,11 @@ pub struct AutoReconnect {
 
 impl AutoReconnect {
     /// Automatic attempts of the allowance that are still inside the window.
-    pub fn used(&self) -> usize {
-        self.attempts.len()
+    pub fn used(&self, now: Instant) -> usize {
+        self.attempts
+            .iter()
+            .filter(|at| now.saturating_duration_since(**at) < WINDOW)
+            .count()
     }
 
     /// Take one automatic attempt, or refuse when the window is used up.
@@ -190,6 +193,17 @@ mod tests {
         for _ in 0..1000 {
             assert!(live.next_delay(Duration::ZERO) <= LIVE_MAX_BACKOFF);
         }
+    }
+
+    #[test]
+    fn the_attempts_in_use_leave_with_their_window() {
+        let mut auto = AutoReconnect::default();
+        let t0 = Instant::now();
+        auto.attempt(t0);
+        auto.attempt(t0 + Duration::from_secs(60));
+        assert_eq!(auto.used(t0 + Duration::from_secs(61)), 2);
+        assert_eq!(auto.used(t0 + WINDOW), 1, "the first one has expired");
+        assert_eq!(auto.used(t0 + WINDOW + Duration::from_secs(60)), 0);
     }
 
     #[test]

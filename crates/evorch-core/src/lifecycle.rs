@@ -374,7 +374,7 @@ impl LifecycleDriver {
                 event = events.recv() => { if let Ok(event) = event { self.idle.reset(); host.get().host.lock().unwrap().service_mut().observe_lifecycle(&event); } },
                 joined = clients.join_next(), if !clients.is_empty() => {
                     if let Some(Err(error)) = joined {
-                        tracing::error!(%error, panicked = error.is_panic(), "a connection handler panicked or was lost");
+                        tracing::error!(panicked = error.is_panic(), cancelled = error.is_cancelled(), "a connection handler panicked or was lost");
                         client_failure = Some(error.to_string());
                     }
                 },

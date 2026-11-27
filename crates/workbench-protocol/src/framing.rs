@@ -18,7 +18,12 @@ pub enum FramingError {
     FrameTooLarge { len: u64, max: u32 },
     #[error("empty frame")]
     EmptyFrame,
-    #[error("frame is not valid JSON for the expected type: {0}")]
+    /// Where and what kind, not serde's text: that quotes the input, and this
+    /// error is logged by both ends.
+    #[error(
+        "frame is not valid JSON for the expected type ({:?} error at line {} column {})",
+        .0.classify(), .0.line(), .0.column()
+    )]
     Json(#[from] serde_json::Error),
 }
 
