@@ -48,6 +48,9 @@ mod config_file;
 mod modal;
 mod model_shell;
 mod provider_form;
+mod roles;
+mod routing;
+mod rows;
 use modal::{Modal, ModalSave};
 use provider_form::{FormAction, FormKind, ProviderForm};
 
