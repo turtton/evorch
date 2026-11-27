@@ -28,7 +28,7 @@ use crate::panes::goal_widgets::{GoalBandView, GoalCheckRow, GoalPhaseView, prog
 use crate::panes::phase_indicator::phase_circle;
 use crate::panes::pull_request_widgets;
 use crate::panes::transcript_widgets::{
-    event_line, full_input, request_card, run_transcript_empty, run_transcript_title,
+    event_line, full_input, request_card, run_transcript_empty, run_transcript_header,
 };
 use crate::theme::icons;
 use crate::theme::text::{h3, muted};
@@ -205,6 +205,13 @@ pub fn show(
     });
 }
 
+/// A run tab and the phase its badge follows with whether it is unread.
+#[derive(Clone, Copy)]
+pub struct RunTabView<'a> {
+    pub tab: Option<&'a RunTab>,
+    pub phase: Option<(ThreadRunPhase, bool)>,
+}
+
 /// One run tab: the committed messages of a single run, as the embedded workbench's
 /// transcript tab shows a subagent.
 pub fn run_tab(
@@ -213,9 +220,10 @@ pub fn run_tab(
     cache: &Cache,
     connected: bool,
     base: Option<&Path>,
-    tab: Option<&RunTab>,
+    view: RunTabView<'_>,
     effects: &mut Vec<Effect>,
 ) {
+    let RunTabView { tab, phase } = view;
     let Some(tab) = tab else {
         pane_root(ui, "Transcript", |ui| run_transcript_empty(ui, None));
         return;
@@ -229,7 +237,11 @@ pub fn run_tab(
         }
         ui.add_enabled_ui(connected, |ui| {
             let name = tab.name.as_deref();
-            run_transcript_title(ui, tab.run.as_str(), name);
+            run_transcript_header(ui, tab.run.as_str(), name, tab.model.as_deref(), |ui| {
+                if let Some((phase, unread)) = phase {
+                    crate::panes::phase_indicator::phase_indicator_with_ack(ui, phase, unread);
+                }
+            });
             transcript::transcript(
                 ui,
                 &mut pane.requested_bodies,

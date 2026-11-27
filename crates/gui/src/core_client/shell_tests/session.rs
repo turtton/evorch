@@ -342,3 +342,61 @@ fn a_floating_window_keeps_its_open_rect() {
     let diff = rect("diff");
     assert!(diff.width >= 64.0 && diff.height >= 64.0, "{diff:?}");
 }
+
+const LANE_ROW: &str = "↳ Auth regression tests";
+
+// Given: a session file that kept thr-1, the lane's lead, folded
+// When: the window opens and connects
+// Then: the lane stays hidden under it, while without the fold it is shown
+#[test]
+fn a_thread_folded_before_the_restart_stays_folded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ClientStateStore::in_config_dir(dir.path());
+    store
+        .save(&SavedState {
+            folded_threads: vec![ThreadId::new("thr-1").unwrap()],
+            ..SavedState::default()
+        })
+        .unwrap();
+    let mut folded = restored(store, true);
+    folded.settle();
+    folded.harness.get_by_label("Expand children of thr-1");
+    assert!(folded.harness.query_by_label(LANE_ROW).is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut open = restored(ClientStateStore::in_config_dir(dir.path()), true);
+    open.settle();
+    open.harness.get_by_label(LANE_ROW);
+}
+
+// Given: a window whose lead thread is shown unfolded
+// When: the person folds it and the state is saved, then a new window reads the file
+// Then: the new window shows the thread folded, and unfolding it there saves it unfolded
+#[test]
+fn folding_and_unfolding_a_thread_is_kept_across_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ClientStateStore::in_config_dir(dir.path());
+    store.save(&SavedState::default()).unwrap();
+    let mut first = restored(store.clone(), true);
+    first.settle();
+    first
+        .harness
+        .get_by_label("Collapse children of thr-1")
+        .click();
+    first.settle();
+    first.harness.state().save_state();
+    assert_eq!(
+        store.load().unwrap().folded_threads,
+        [ThreadId::new("thr-1").unwrap()]
+    );
+
+    let mut second = restored(store.clone(), true);
+    second.settle();
+    second
+        .harness
+        .get_by_label("Expand children of thr-1")
+        .click();
+    second.settle();
+    second.harness.state().save_state();
+    assert!(store.load().unwrap().folded_threads.is_empty());
+}

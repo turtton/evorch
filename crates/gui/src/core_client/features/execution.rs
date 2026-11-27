@@ -117,6 +117,8 @@ pub struct ExecutionFeature {
     open_pane: Option<RunPane>,
     /// The display name of each run read so far, kept across `reset`.
     names: BTreeMap<RunId, String>,
+    /// The model (`profile/model`) the core last reported for each live run read so far.
+    models: BTreeMap<RunId, String>,
     /// The runs whose names the shell wants and that were not asked for yet.
     wanted_names: BTreeMap<RunId, ThreadId>,
     /// The runs whose names were asked for, so each is asked once per session unless the
@@ -175,6 +177,12 @@ impl ExecutionFeature {
         self.names.get(run).map(String::as_str)
     }
 
+    /// The model of `run` as the last listing or run read of it said; a run that only
+    /// history remains of has none, and keeps what was read while it lived.
+    pub fn run_model(&self, run: &RunId) -> Option<&str> {
+        self.models.get(run).map(String::as_str)
+    }
+
     /// Ask the core for `run`'s name in a later `maintain`, once.
     pub fn want_name(&mut self, thread: ThreadId, run: RunId) {
         if !self.names.contains_key(&run) && !self.asked_names.contains(&run) {
@@ -222,6 +230,9 @@ impl ExecutionFeature {
         for run in runs {
             if !run.name.is_empty() {
                 self.names.insert(run.summary.id.clone(), run.name.clone());
+            }
+            if let Some(model) = run.model.as_ref().filter(|model| !model.is_empty()) {
+                self.models.insert(run.summary.id.clone(), model.clone());
             }
         }
     }

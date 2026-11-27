@@ -407,6 +407,14 @@ impl CoreClientScreen {
             layout: persistence::extract(&self.dock, &self.local.files, &self.window_rects),
             run_tabs: self.run_tabs.panes(),
             selection: self.saved_selection(shared),
+            folded_threads: shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.folded_threads())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
+                .collect(),
         };
         let saved = if explicit {
             store.save(&state).map(|()| true)
@@ -455,6 +463,15 @@ impl CoreClientScreen {
         let Some(execution) = shared.features.execution_mut() else {
             return;
         };
+        let shown: Vec<_> = run_tabs
+            .shown_tabs()
+            .map(|(id, tab)| (id, tab.run.clone()))
+            .collect();
+        for (id, run) in shown {
+            if let Some(model) = execution.run_model(&run) {
+                run_tabs.set_model(id, model);
+            }
+        }
         let unnamed: Vec<_> = run_tabs
             .shown_tabs()
             .filter(|(_, tab)| tab.name.is_none())
@@ -469,6 +486,20 @@ impl CoreClientScreen {
     }
 
     fn apply_restore(&mut self, state: persistence::SavedState) {
+        if let Some(workspace) = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .features
+            .workspace_mut()
+        {
+            workspace.restore_folded_threads(
+                state
+                    .folded_threads
+                    .iter()
+                    .map(|thread| thread.as_str().to_owned()),
+            );
+        }
         self.dock = persistence::restore_dock(state.layout.as_ref(), &mut self.local.files);
         self.window_rects = persistence::WindowRects::default();
         self.pending_run_tab_prune = !state.run_tabs.is_empty();

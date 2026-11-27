@@ -788,6 +788,10 @@ impl Features {
         self.features.iter().find_map(|f| f.as_workspace())
     }
 
+    pub fn workspace_mut(&mut self) -> Option<&mut workspace::WorkspaceFeature> {
+        self.features.iter_mut().find_map(|f| f.as_workspace_mut())
+    }
+
     pub fn diagnostics(&self) -> Option<&diagnostics::DiagnosticsFeature> {
         self.features.iter().find_map(|f| f.as_diagnostics())
     }

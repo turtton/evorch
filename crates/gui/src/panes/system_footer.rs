@@ -118,13 +118,14 @@ fn bars(snapshot: &SystemSnapshot) -> Vec<(&'static str, f64, Vec<String>)> {
 }
 
 fn show_bars(ui: &mut egui::Ui, snapshot: &SystemSnapshot) {
-    for (label, ratio, details) in bars(snapshot) {
+    // The row is laid out right to left, so the last bar is added first, and each
+    // bar before its label, which reads as "label: bar" in the order of `bars`.
+    for (label, ratio, details) in bars(snapshot).into_iter().rev() {
         let tooltip = |ui: &mut egui::Ui| {
             for line in &details {
                 ui.label(line);
             }
         };
-        ui.label(muted(label)).on_hover_ui(tooltip);
         // The ratio is clamped to 0..=1, which f32 represents.
         #[allow(clippy::cast_possible_truncation)]
         let fraction = ratio as f32;
@@ -135,6 +136,7 @@ fn show_bars(ui: &mut egui::Ui, snapshot: &SystemSnapshot) {
                 .desired_height(7.0),
         )
         .on_hover_ui(tooltip);
+        ui.label(muted(label)).on_hover_ui(tooltip);
     }
 }
 
@@ -218,6 +220,37 @@ mod tests {
                 .join("\n")
                 .contains("1.0 GiB of 4.0 GiB used (25%)")
         );
+    }
+
+    // Given: a footer row with the three bars
+    // When: it is laid out / Then: each label sits left of its own bar, reading "label: bar" in order
+    #[test]
+    fn each_label_precedes_its_bar() {
+        let reading = snapshot(true);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 100.0))
+            .build_ui(|ui| {
+                with_right_stats(ui, Some(&reading), |ui| {
+                    ui.label("left");
+                });
+            });
+        harness.run();
+        let labels: Vec<f32> = ["CPU", "Mem", "Disk"]
+            .into_iter()
+            .map(|label| harness.get_by_label(label).rect().left())
+            .collect();
+        let mut bars: Vec<f32> = harness
+            .query_all_by_role(egui::accesskit::Role::ProgressIndicator)
+            .map(|bar| bar.rect().left())
+            .collect();
+        bars.sort_by(f32::total_cmp);
+        assert_eq!(bars.len(), 3);
+        for index in 0..3 {
+            assert!(labels[index] < bars[index], "label {index} before its bar");
+            if let Some(next) = labels.get(index + 1) {
+                assert!(bars[index] < *next, "bar {index} before the next label");
+            }
+        }
     }
 
     // Given: busy and idle readings / When: filled / Then: the colour warns as the free share falls
