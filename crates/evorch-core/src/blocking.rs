@@ -47,6 +47,8 @@ pub(crate) mod testing {
     use super::Job;
     use tokio::sync::oneshot;
 
+    pub(crate) const PANIC_MARKER: &str = "injected blocking job panic";
+
     #[derive(Default)]
     pub(crate) struct Hooks(Vec<(Job, Hook)>);
     impl Hooks {
@@ -97,7 +99,7 @@ pub(crate) mod testing {
             let _ = self.started.send(());
             // A failed test drops the sender, so it cannot strand the runtime.
             let _ = self.release.recv();
-            assert!(!self.panic, "injected blocking job panic");
+            assert!(!self.panic, "{PANIC_MARKER}");
             completion
         }
     }

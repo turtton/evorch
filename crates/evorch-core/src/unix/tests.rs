@@ -286,6 +286,7 @@ fn capture() -> (Captured, tracing::subscriber::DefaultGuard) {
 
 #[tokio::test]
 async fn blocking_panics_close_the_connection_and_record_job_and_connection() {
+    const CLIENT_MARKER: &str = "untrusted-panic-client-marker";
     let (logs, _guard) = capture();
     let mut f = Fixture::new().await;
     for job in [Job::Subscribe, Job::Unsubscribe, Job::Goodbye] {
@@ -322,7 +323,7 @@ async fn blocking_panics_close_the_connection_and_record_job_and_connection() {
     let (_stop, stopped) = watch::channel(false);
     let server = tokio::spawn(connection(stream, f.backend.clone(), stopped));
     let mut config =
-        workbench_client::ClientConfig::new(ClientId::new("panic-client").unwrap(), build());
+        workbench_client::ClientConfig::new(ClientId::new(CLIENT_MARKER).unwrap(), build());
     config.optional_capabilities.push(Capability::Conversation);
     let client = workbench_client::WorkbenchClient::connect(transport, config)
         .await
@@ -343,6 +344,11 @@ async fn blocking_panics_close_the_connection_and_record_job_and_connection() {
     ));
     assert!(server.await.unwrap_err().is_panic());
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !text.contains(crate::blocking::testing::PANIC_MARKER),
+        "{text}"
+    );
+    assert!(!text.contains(CLIENT_MARKER), "{text}");
     for job in [Job::Request, Job::Subscribe, Job::Unsubscribe, Job::Goodbye] {
         let line = text
             .lines()
