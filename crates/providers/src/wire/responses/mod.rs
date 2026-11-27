@@ -678,32 +678,13 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect, lite: bool) -> Tool 
     })
 }
 
-/// Lite の strict 検査が実装していない JSON Schema keyword。
-///
-/// `uniqueItems` と `if` / `then` / `else` は backend が `Unimplemented keys` として実際に
-/// 報告したもの。残りは現在の tool に現れず、OpenAI の structured outputs 文書が未対応とする
-/// keyword (MCP tool などが持ち込みうる)。
+/// Lite の strict 検査が実装していないと backend が `Unimplemented keys` で実際に報告した
+/// JSON Schema keyword。観測していない keyword は、拒否の有無が不明なため除きません。
 ///
 /// `allOf` / `anyOf` / `oneOf` / `not` / `minItems` / `maxItems` / `minLength` / `maxLength` /
-/// `pattern` は、現行 tool が `uniqueItems` や `if` と同時に持っていても backend の報告に
-/// 含まれなかった (受理されている) ため、送信済みの schema を変えないよう残します。
-const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &[
-    "uniqueItems",
-    "if",
-    "then",
-    "else",
-    "dependentRequired",
-    "dependentSchemas",
-    "contains",
-    "minContains",
-    "maxContains",
-    "unevaluatedItems",
-    "unevaluatedProperties",
-    "patternProperties",
-    "propertyNames",
-    "minProperties",
-    "maxProperties",
-];
+/// `pattern` は、現行 tool が `if` と同時に持っていても backend の報告に含まれなかった
+/// (受理されている) ため、送信済みの schema を変えないよう残します。
+const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "else"];
 
 /// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を再帰的に取り除きます。
 ///

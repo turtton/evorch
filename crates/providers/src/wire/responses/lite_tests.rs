@@ -354,10 +354,10 @@ fn mixed_schema() -> Value {
     })
 }
 
-// Given: a schema with keywords the Lite strict check rejects (uniqueItems, if/then/else,
-// minProperties), nested in properties, items, anyOf and allOf, next to keywords it accepted
-// (allOf, anyOf, oneOf, not, min/max items and length, pattern), plus a property that is
-// merely named `uniqueItems`
+// Given: a schema with the keywords the backend reported as unimplemented (uniqueItems,
+// if/then/else), nested in properties, items, anyOf and allOf, next to keywords it accepted
+// (allOf, anyOf, oneOf, not, min/max items and length, pattern) and one never observed
+// (minProperties), plus a property that is merely named `uniqueItems`
 // When: serialized for a Lite Codex model
 // Then: the rejected keywords are gone everywhere, the accepted ones and the property
 // survive, and the canonical tool definition is untouched
@@ -366,15 +366,12 @@ fn lite_tool_schemas_drop_only_the_keywords_the_backend_rejects() {
     let request = schema_request(mixed_schema());
     let parameters = first_tool_parameters(&wire_with(&request, Some(astra())));
 
-    for key in ["if", "then", "else", "minProperties"] {
+    for key in ["if", "then", "else"] {
         assert!(!has_key(&parameters["allOf"], key), "{key}");
     }
     assert!(!has_key(&parameters["properties"]["ids"], "uniqueItems"));
     assert!(!has_key(&parameters["properties"]["nested"], "uniqueItems"));
-    assert!(!has_key(
-        &parameters["properties"]["nested"],
-        "minProperties"
-    ));
+    assert_eq!(parameters["properties"]["nested"]["minProperties"], 1);
     let ids = &parameters["properties"]["ids"];
     assert_eq!(ids["minItems"], 1);
     assert_eq!(ids["maxItems"], 8);
@@ -413,4 +410,33 @@ fn non_lite_and_openai_tool_schemas_are_untouched() {
     ))
     .unwrap();
     assert_eq!(first_tool_parameters(&openai), mixed_schema());
+}
+
+// Given: a Lite tool schema with none of the observed-rejected keywords, but with keywords
+// that were never observed being rejected (minProperties, contains, dependentRequired, ...)
+// When: serialized for a Lite Codex model
+// Then: the schema is sent byte for byte as it is
+#[test]
+fn lite_schemas_without_rejected_keywords_are_unchanged() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "minItems": 1, "contains": {"type": "string"},
+                "minContains": 1, "maxContains": 2, "unevaluatedItems": false,
+                "items": {"type": "string"}},
+            "meta": {"type": "object", "minProperties": 1, "maxProperties": 4,
+                "propertyNames": {"pattern": "^a"}, "patternProperties": {"^x": {"type": "string"}},
+                "unevaluatedProperties": false}
+        },
+        "dependentRequired": {"tags": ["meta"]},
+        "dependentSchemas": {"meta": {"required": ["tags"]}},
+        "allOf": [{"not": {"required": ["meta"]}}],
+        "oneOf": [{"required": ["tags"]}, {"required": ["meta"]}]
+    });
+    let parameters =
+        first_tool_parameters(&wire_with(&schema_request(schema.clone()), Some(astra())));
+    assert_eq!(
+        serde_json::to_string(&parameters).unwrap(),
+        serde_json::to_string(&schema).unwrap()
+    );
 }
