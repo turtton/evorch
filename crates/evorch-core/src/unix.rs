@@ -45,15 +45,24 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
 /// every subscription so before the connection closes, so a client can tell this
 /// from a crash. Bounded: a client that does not read cannot hold the shutdown.
 const GOODBYE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+struct WriterShutdown {
+    finish: tokio::sync::oneshot::Sender<()>,
+    flushed: tokio::sync::oneshot::Receiver<()>,
+    task: tokio::task::AbortHandle,
+}
 async fn say_goodbye(
     backend: &Arc<HostBackend>,
     output: &mpsc::Sender<ServerFrame>,
-    finish: tokio::sync::oneshot::Sender<()>,
-    flushed: tokio::sync::oneshot::Receiver<()>,
+    writer: WriterShutdown,
     ids: Vec<workbench_protocol::ids::SubscriptionId>,
     pumps: &mut JoinSet<io::Result<bool>>,
     log: &ConnectionLog,
 ) {
+    let WriterShutdown {
+        finish,
+        mut flushed,
+        task,
+    } = writer;
     let deadline = tokio::time::Instant::now() + GOODBYE_BOUND;
     // No more events of these subscriptions may follow the goodbye.
     pumps.abort_all();
@@ -66,6 +75,7 @@ async fn say_goodbye(
             .collect::<Vec<_>>()
     });
     let mut joined = false;
+    let mut writer_flushed = false;
     let _ = tokio::time::timeout_at(deadline, async {
         let notices = log.blocking_result(Job::Goodbye, (&mut notice).await);
         joined = true;
@@ -82,9 +92,17 @@ async fn say_goodbye(
             }
         }
         let _ = finish.send(());
-        let _ = flushed.await;
+        let _ = (&mut flushed).await;
+        writer_flushed = true;
     })
     .await;
+    // A timed-out delivery must stop the writer now, not after a slow notice
+    // job finishes. The flush sender is owned by the writer, so its closure
+    // also confirms cancellation of any outstanding write.
+    task.abort();
+    if !writer_flushed {
+        let _ = flushed.await;
+    }
     if !joined {
         // The two seconds bound wire delivery, not synchronous lock ownership.
         log.blocking_result(Job::Goodbye, notice.await);
@@ -152,7 +170,7 @@ async fn serve_connection(
     // and closes only after that.
     let (finish, mut finish_rx) = tokio::sync::oneshot::channel::<()>();
     let (flushed_tx, flushed) = tokio::sync::oneshot::channel::<()>();
-    tasks.spawn(log.task("writer", async move {
+    let writer_task = tasks.spawn(log.task("writer", async move {
         let mut finishing = false;
         loop {
             let frame = tokio::select! {
@@ -177,6 +195,11 @@ async fn serve_connection(
         }
         Ok::<_, io::Error>(true)
     }));
+    let writer = WriterShutdown {
+        finish,
+        flushed,
+        task: writer_task,
+    };
     let (incoming, mut requests) = mpsc::channel(64);
     tasks.spawn(log.task("reader", async move {
         loop {
@@ -381,7 +404,7 @@ async fn serve_connection(
             .filter(|(key, _)| subscriptions.contains_key(*key))
             .map(|(_, id)| id.clone())
             .collect();
-        say_goodbye(&backend, &output, finish, flushed, ids, &mut pumps, log).await;
+        say_goodbye(&backend, &output, writer, ids, &mut pumps, log).await;
     }
     tasks.abort_all();
     pumps.abort_all();

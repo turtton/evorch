@@ -196,6 +196,9 @@ async fn locked_host_does_not_block_other_socket_ping_or_cleanup() {
         cleanup.peer.reply("unsubscribe").await,
         ReplyResult::Success(ReplyPayload::Unsubscribed { .. })
     ));
+    // The held request jobs prevent virtual time from advancing on its own.
+    // Cleanup progress must not depend on meeting a wall-clock delivery bound.
+    tokio::time::pause();
     cleanup.stop.send(true).unwrap();
     let mut goodbye = false;
     loop {
@@ -359,11 +362,22 @@ async fn blocking_panics_close_the_connection_and_record_job_and_connection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn goodbye_deadline_does_not_detach_notice_and_pumps_end_first() {
+async fn goodbye_deadline_stops_writer_without_detaching_notice_and_pumps_end_first() {
     let mut f = Fixture::new().await;
     let (output, mut frames) = mpsc::channel(64);
     let (finish, _finishing) = oneshot::channel();
-    let (_flush, flushed) = oneshot::channel();
+    let (flush, flushed) = oneshot::channel();
+    // Model a writer stalled on a non-reading socket. Dropping `finish` must
+    // not be mistaken for cancellation of the writer's outstanding write.
+    let mut writer_task = tokio::spawn(async move {
+        let _flush = flush;
+        std::future::pending::<()>().await;
+    });
+    let writer = WriterShutdown {
+        finish,
+        flushed,
+        task: writer_task.abort_handle(),
+    };
     let (_stop, stopped) = watch::channel(false);
     let log = ConnectionLog::new(&stopped);
     let mut pumps = JoinSet::new();
@@ -384,15 +398,7 @@ async fn goodbye_deadline_does_not_detach_notice_and_pumps_end_first() {
     ready.await.unwrap();
     let id = SubscriptionId::new("deadline-sub").unwrap();
     let gate = f.hold(Job::Goodbye, false);
-    let goodbye = say_goodbye(
-        &f.backend,
-        &output,
-        finish,
-        flushed,
-        vec![id],
-        &mut pumps,
-        &log,
-    );
+    let goodbye = say_goodbye(&f.backend, &output, writer, vec![id], &mut pumps, &log);
     tokio::pin!(goodbye);
     tokio::select! {
         result = gate.started => result.unwrap(),
@@ -401,6 +407,10 @@ async fn goodbye_deadline_does_not_detach_notice_and_pumps_end_first() {
     ended.await.unwrap();
     // Blocking jobs prevent automatic virtual clock advancement.
     tokio::time::advance(GOODBYE_BOUND + std::time::Duration::from_millis(1)).await;
+    tokio::select! {
+        result = &mut writer_task => assert!(result.unwrap_err().is_cancelled()),
+        _ = goodbye.as_mut() => panic!("goodbye detached its held notice job"),
+    }
     pending(goodbye.as_mut()).await;
     gate.release.send(()).unwrap();
     goodbye.await;
