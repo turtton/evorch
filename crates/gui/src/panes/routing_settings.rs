@@ -19,6 +19,25 @@ pub fn routing_settings_body(
     model: &mut RoutingSettingsModel,
     profile_locked: bool,
 ) -> Option<RoutingSettingsAction> {
+    routing_settings_content(ui, model, profile_locked, true)
+}
+
+/// The same body for a host that draws the profile control itself (the Model Settings
+/// header): the bar and its locked notice are left out.
+pub fn routing_settings_hosted_body(
+    ui: &mut egui::Ui,
+    model: &mut RoutingSettingsModel,
+    profile_locked: bool,
+) -> Option<RoutingSettingsAction> {
+    routing_settings_content(ui, model, profile_locked, false)
+}
+
+fn routing_settings_content(
+    ui: &mut egui::Ui,
+    model: &mut RoutingSettingsModel,
+    profile_locked: bool,
+    profile_bar: bool,
+) -> Option<RoutingSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
     let ctx = ui.ctx().clone();
@@ -26,21 +45,28 @@ pub fn routing_settings_body(
     ui.label(muted(
         "Candidates are tried from top to bottom. An empty override uses the profile default.",
     ));
-    ui.add_enabled_ui(!busy && !profile_locked, |ui| {
-        if let Some(profile) =
-            crate::panes::role_profiles::role_profile_bar(ui, "routing", &mut model.profiles)
-        {
-            action = Some(RoutingSettingsAction::Profile(profile));
+    if profile_bar {
+        ui.add_enabled_ui(!busy && !profile_locked, |ui| {
+            if let Some(profile) =
+                crate::panes::role_profiles::role_profile_bar(ui, "routing", &mut model.profiles)
+            {
+                action = Some(RoutingSettingsAction::Profile(profile));
+            }
+        });
+        if profile_locked {
+            ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
         }
-    });
-    if profile_locked {
-        ui.label(muted(crate::panes::role_profiles::PROFILE_LOCKED_NOTICE));
     }
     ui.add_enabled_ui(!busy, |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt("routing-routes")
-            .max_height((ctx.viewport_rect().height() - TOPBAR * 7.5).max(TOPBAR))
-            .show(ui, |ui| route_list(ui, model));
+        if profile_bar {
+            egui::ScrollArea::vertical()
+                .id_salt("routing-routes")
+                .max_height((ctx.viewport_rect().height() - TOPBAR * 7.5).max(TOPBAR))
+                .show(ui, |ui| route_list(ui, model));
+        } else {
+            // The host's body scrolls; a second scroll area inside it would trap the wheel.
+            route_list(ui, model);
+        }
     });
     if let Some(error) = &model.validation_error {
         crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);

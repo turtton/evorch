@@ -403,11 +403,54 @@ fn a_new_session_says_it_is_connected_in_english() {
     );
 }
 
-// Given: a connected window whose Settings tab is not open
-// When: ⚙ → Routing is chosen and the core answers the settings snapshot
-// Then: the Settings tab is focused and shows the settings modal on its Routing tab
+// Given: a connected window
+// When: ⚙ is opened
+// Then: the entries are in the three groups CONFIGURE, CORE and VIEW, each with its name as
+//       accessible name; the entries that open the old tabs of Providers/Routing/Agent roles
+//       are one Model Settings entry; Config file is named so, not Settings; and the menu
+//       is the same on a window with no Config file tab
 #[test]
-fn the_settings_menu_opens_the_settings_modal_on_the_chosen_tab() {
+fn the_settings_menu_has_three_groups_of_named_entries() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.harness.get_by_label("⚙").click();
+    screen.harness.run_steps(2);
+    for label in [
+        "CONFIGURE",
+        "CORE",
+        "VIEW",
+        "Model Settings",
+        "Authentication",
+        "MCP servers",
+        "Appearance",
+        "Config file",
+        "Restart core",
+        "Usage",
+        "Evaluations",
+        "Panels",
+        "Reset layout",
+    ] {
+        assert!(
+            screen
+                .harness
+                .query_all_by_label_contains(label)
+                .next()
+                .is_some(),
+            "{label}"
+        );
+    }
+    for gone in ["Providers", "Routing", "Agent roles", "Settings", "Theme"] {
+        assert!(screen.harness.query_by_label(gone).is_none(), "{gone}");
+    }
+    screen.capture("menu");
+}
+
+// Given: a connected window whose Config file tab is not open
+// When: ⚙ → Model Settings is chosen and the core answers the settings snapshot
+// Then: Model Settings is shown over the window, on Providers, and no Config file tab was
+//       created: the modal does not live in a tab
+#[test]
+fn the_settings_menu_opens_model_settings_without_a_config_file_tab() {
     use workbench_protocol::namespaces::settings::{
         SettingsQuery, SettingsReply, SettingsRevision, SettingsSnapshot,
     };
@@ -415,7 +458,7 @@ fn the_settings_menu_opens_the_settings_modal_on_the_chosen_tab() {
     screen.settle();
     screen.harness.get_by_label("⚙").click();
     screen.harness.run_steps(2);
-    screen.harness.get_by_label("Routing").click();
+    screen.harness.get_by_label("Model Settings").click();
     screen.harness.run_steps(2);
     let tag = screen
         .settle()
@@ -430,9 +473,10 @@ fn the_settings_menu_opens_the_settings_modal_on_the_chosen_tab() {
             _ => None,
         })
         .expect("the settings snapshot was asked");
-    assert_eq!(
-        screen.front_of_leaf(CoreTab::Feature(FeatureId::Settings)),
-        CoreTab::Feature(FeatureId::Settings)
+    let dock = &screen.harness.state().dock;
+    assert!(
+        dock.find_tab(&CoreTab::Feature(FeatureId::Settings))
+            .is_none()
     );
     let revision = SettingsRevision::new("a".repeat(64)).unwrap();
     let snapshot = SettingsSnapshot {
@@ -451,8 +495,17 @@ fn the_settings_menu_opens_the_settings_modal_on_the_chosen_tab() {
         ))))),
     );
     screen.harness.run_steps(4);
-    screen.harness.get_by_label("Routing settings");
-    screen.harness.get_by_label("Save routing");
+    screen
+        .harness
+        .get_by_label("Where models come from, with their sign-in and model list");
+    assert!(
+        screen
+            .harness
+            .state()
+            .dock
+            .find_tab(&CoreTab::Feature(FeatureId::Settings))
+            .is_none()
+    );
 }
 
 mod theme {
@@ -483,7 +536,7 @@ mod theme {
         screen.settle();
         screen.harness.get_by_label("⚙").click();
         screen.harness.run_steps(2);
-        screen.harness.get_by_label("Theme").click();
+        screen.harness.get_by_label("Appearance").click();
         screen.harness.run_steps(2);
         screen
     }

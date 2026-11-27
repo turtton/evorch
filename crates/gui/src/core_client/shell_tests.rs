@@ -992,7 +992,7 @@ mod progress_band {
 
         screen.harness.get_by_label("⚙").click();
         screen.harness.run_steps(2);
-        screen.harness.get_by_label("Panels ⏵").click();
+        screen.harness.get_by_label("Panels").click();
         screen.harness.run_steps(2);
         screen.harness.get_by_label("Plan").click();
         screen.settle_band();
@@ -2696,7 +2696,7 @@ mod local_panes {
         fn open_panel(&mut self, label: &str) {
             self.harness.get_by_label("⚙").click();
             self.harness.run_steps(2);
-            self.harness.get_by_label("Panels ⏵").click();
+            self.harness.get_by_label("Panels").click();
             self.harness.run_steps(2);
             self.harness.get_by_label(label).click();
             self.harness.run_steps(2);
