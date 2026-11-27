@@ -96,18 +96,18 @@ pub(super) fn transcript(
     // are. A message that spans the top is the second choice: it may grow itself.
     let memory = ui.make_persistent_id(salt).with("view-anchor");
     let before: Option<Option<(String, f32)>> = ui.data(|data| data.get_temp(memory));
-    let previous = before.clone().flatten();
-    let mut anchor: Option<(String, f32)> = None;
-    let mut spanning: Option<(String, f32)> = None;
-    let mut moved_to = None;
+    let mut view = ViewAnchor {
+        previous: before.clone().flatten(),
+        ..ViewAnchor::default()
+    };
     let mut near_top = false;
     let output = egui::ScrollArea::vertical()
         .id_salt(salt)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let origin = ui.cursor().min.y;
-            let view_top = ui.clip_rect().min.y;
+            view.origin = ui.cursor().min.y;
+            view.top = ui.clip_rect().min.y;
             ui.add_space(SP_2);
             if older.is_some_and(Option::is_some) {
                 if older_failed {
@@ -142,37 +142,29 @@ pub(super) fn transcript(
                 empty(ui);
             }
             for item in items(&messages) {
-                let key = item_key(&item);
-                let top = ui.cursor().min.y;
                 match item {
                     Item::Message(message) => {
+                        let top = ui.cursor().min.y;
                         message_row(ui, requested_bodies, cache, base, message, effects);
+                        view.visit(message_key(message), top, ui.cursor().min.y);
                     }
                     Item::Tools {
                         tools,
                         folded: true,
                     } => {
-                        tool_group(ui, requested_bodies, cache, &tools, effects);
+                        tool_group(ui, requested_bodies, cache, &tools, &mut view, effects);
                     }
                     Item::Tools {
                         tools,
                         folded: false,
-                    } => tool_cards(ui, requested_bodies, cache, &tools, effects),
-                }
-                if previous.as_ref().is_some_and(|(was, _)| *was == key) {
-                    moved_to = Some(top - origin);
-                }
-                if anchor.is_none() && top >= view_top {
-                    anchor = Some((key, top - origin));
-                } else if top < view_top && ui.cursor().min.y > view_top {
-                    spanning = Some((key, top - origin));
+                    } => tool_cards(ui, requested_bodies, cache, &tools, &mut view, effects),
                 }
                 ui.add_space(SP_2);
             }
             cards(ui, effects);
             ui.add_space(SP_2);
         });
-    let shift = match (&previous, moved_to) {
+    let shift = match (&view.previous, view.moved_to) {
         (Some((_, was)), Some(now)) if (now - was).abs() > 0.5 => now - was,
         _ => 0.0,
     };
@@ -184,7 +176,7 @@ pub(super) fn transcript(
         ui.ctx()
             .request_discard("keep the messages in view in place");
     }
-    ui.data_mut(|data| data.insert_temp(memory, anchor.or(spanning)));
+    ui.data_mut(|data| data.insert_temp(memory, view.first.or(view.spanning)));
     // The first frame of an area is laid out at the top before it follows the newest
     // message, so it only measures; a page is read from the next frame on.
     if before.is_none() || shifted {
@@ -206,12 +198,36 @@ enum Item<'a> {
     },
 }
 
-fn item_key(item: &Item) -> String {
-    let message = match item {
-        Item::Message(message) => message,
-        Item::Tools { tools, .. } => tools[0],
-    };
+fn message_key(message: &CommittedMessage) -> String {
     format!("{}/{:?}", message.run, message.index)
+}
+
+/// Finds, frame by frame, the message the view is anchored on: where the one anchored
+/// last frame sits in the content now, and which one to anchor on next.
+#[derive(Default)]
+struct ViewAnchor {
+    /// The content's top, and the top of the view, in screen coordinates.
+    origin: f32,
+    top: f32,
+    previous: Option<(String, f32)>,
+    moved_to: Option<f32>,
+    first: Option<(String, f32)>,
+    spanning: Option<(String, f32)>,
+}
+
+impl ViewAnchor {
+    /// A message (or a folded group, by its last message) drawn from `top` to `bottom`.
+    fn visit(&mut self, key: String, top: f32, bottom: f32) {
+        let y = top - self.origin;
+        if self.previous.as_ref().is_some_and(|(was, _)| *was == key) {
+            self.moved_to = Some(y);
+        }
+        if self.first.is_none() && top >= self.top {
+            self.first = Some((key, y));
+        } else if top < self.top && bottom > self.top {
+            self.spanning = Some((key, y));
+        }
+    }
 }
 
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
@@ -319,10 +335,12 @@ fn tool_group(
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
     tools: &[&CommittedMessage],
+    view: &mut ViewAnchor,
     effects: &mut Vec<Effect>,
 ) {
-    let first = tools[0];
-    let id = ui.make_persistent_id(("tools", first.run.as_str(), first.index.get()));
+    // Keyed by the last one: older outputs put in front do not change it.
+    let last = tools[tools.len() - 1];
+    let id = ui.make_persistent_id(("tools", last.run.as_str(), last.index.get()));
     let failed = tools.iter().any(|tool| match &tool.content {
         MessageContent::Inline { text } => ToolOutput::parse(text).failed(),
         MessageContent::Body(_) => false,
@@ -342,11 +360,14 @@ fn tool_group(
     } else {
         icons::CARET_RIGHT
     };
+    let top = ui.cursor().min.y;
     if ghost_icon_button(ui, icon, &title).clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
     }
     if open {
-        tool_cards(ui, requested_bodies, cache, tools, effects);
+        tool_cards(ui, requested_bodies, cache, tools, view, effects);
+    } else {
+        view.visit(message_key(last), top, ui.cursor().min.y);
     }
 }
 
@@ -355,14 +376,17 @@ fn tool_cards(
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
     tools: &[&CommittedMessage],
+    view: &mut ViewAnchor,
     effects: &mut Vec<Effect>,
 ) {
     for tool in tools {
+        let top = ui.cursor().min.y;
         // The same id folded or not, so a card opened while the agent worked stays open.
         let id = ui.make_persistent_id(("tool-card", tool.run.as_str(), tool.index.get()));
         if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
             tool_card(ui, id, text);
         }
+        view.visit(message_key(tool), top, ui.cursor().min.y);
         ui.add_space(SP_1);
     }
 }

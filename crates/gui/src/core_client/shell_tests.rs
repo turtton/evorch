@@ -1770,6 +1770,59 @@ mod run_tabs {
         );
     }
 
+    // Given: thr-1 whose newest page is a run of one run's tool outputs, longer than the
+    //        window, scrolled to its first output, and older outputs of the same run
+    // When: the older page arrives, so the run of outputs begins earlier
+    // Then: the output in view stays where it was on screen
+    #[test]
+    fn the_view_stays_in_place_when_older_tool_outputs_join_a_run_of_them() {
+        let tool = |index: u64| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": "tool",
+                "content": {"type": "inline", "payload": {"text": format!("output {index}")}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                shared
+                    .cache
+                    .history
+                    .insert("thr-1".into(), (100..160).map(tool).collect());
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen.harness.get_by_label("output 100").scroll_to_me();
+        assert_eq!(older_reads_of_thr_1(&frames(&mut screen)), 1);
+        let before = screen.harness.get_by_label("output 100").rect();
+
+        let page = Page {
+            items: (80..100).map(tool).collect(),
+            next_cursor: Some(PageCursor::new("c2").unwrap()),
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        let after = screen.harness.get_by_label("output 100").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the output moved from {before:?} to {after:?}"
+        );
+    }
+
     // Given: thr-1 whose last message is longer than the window, scrolled to the middle of
     //        it so that no message starts in view, and older pages exist
     // When: an older page arrives, then another whose bodies are sent apart from it, then
