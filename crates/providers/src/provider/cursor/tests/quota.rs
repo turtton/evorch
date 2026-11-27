@@ -43,8 +43,13 @@ async fn quota_separates_model_pools_and_preserves_unknown_caps() {
         ("Cursor Models", Some(12.5), None)
     );
     assert_eq!(
-        (other.used, other.limit, other.used_percent),
-        (Some(28.0), Some(70.0), Some(40.0))
+        (
+            other.used,
+            other.limit,
+            other.used_percent,
+            other.unit.as_str()
+        ),
+        (Some(40.0), None, Some(40.0), "percent")
     );
     assert_eq!(
         (demand.used, demand.limit, demand.used_percent),
@@ -165,4 +170,83 @@ async fn summary_transport_failure_is_preserved_when_legacy_is_uninformative() {
     closer.abort();
     assert!(closer.await.unwrap_err().is_cancelled());
     assert!(matches!(result, Err(ProviderError::Transport { .. })));
+}
+
+#[tokio::test]
+async fn x_subscription_reports_the_weekly_pool_and_prepaid_credit() {
+    // Given: a unified membership, whose apiPercentUsed must not become a meter.
+    let server = MockServer::start().await;
+    Mock::given(path("/auth/usage"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(path("/summary"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "membershipType": "unified_pro",
+            "billingCycleEnd": "2026-11-01T00:00:00Z",
+            "individualUsage": {
+                "plan": {"limit": 4000, "used": 1000, "totalPercentUsed": 30, "apiPercentUsed": 99},
+                "onDemand": {"enabled": true, "limit": 0}
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/aiserver.v1.DashboardService/GetPlanInfo"))
+        .and(method("POST"))
+        .and(header(
+            "authorization",
+            format!("Bearer {}", token().access_token),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"planInfo": {"includedUsageResetsAt": "1793491200000"}})),
+        )
+        .mount(&server)
+        .await;
+
+    // When
+    let quota = CursorQuotaClient::new(CursorQuotaConfig {
+        base_url: server.uri(),
+        summary_url: format!("{}/summary", server.uri()),
+    })
+    .unwrap()
+    .fetch(&token())
+    .await
+    .unwrap();
+
+    // Then: the pool resets on the weekly date, and zero prepaid credit reads as empty.
+    assert_eq!(quota.plan_type.as_deref(), Some("unified_pro"));
+    assert_eq!(quota.windows.len(), 2);
+    let pool = &quota.windows[0];
+    assert_eq!(
+        (
+            pool.label.as_str(),
+            pool.used,
+            pool.limit,
+            pool.used_percent,
+            pool.resets_at
+        ),
+        (
+            "Cursor Models",
+            Some(12.0),
+            Some(40.0),
+            Some(30.0),
+            Some(1_793_491_200)
+        )
+    );
+    let credit = &quota.windows[1];
+    assert_eq!(
+        (
+            credit.label.as_str(),
+            credit.used_percent,
+            credit.limit,
+            credit.resets_at
+        ),
+        (
+            "Other Models (prepaid credit)",
+            Some(100.0),
+            Some(0.0),
+            None
+        )
+    );
 }

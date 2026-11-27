@@ -229,6 +229,15 @@ const DOCS: &[DocsRow] = &[
         }),
     },
     DocsRow {
+        id: "grok-4.7-500k",
+        context_window: 500_000,
+        // 明示的な 500K SKU は入力の大きさによらず、最初のトークンから上の tier 料金で課金される。
+        prices: Some(DocsPrices {
+            standard: flat(4.0, 1.0, 12.0),
+            fast: Some(flat(6.0, 1.5, 18.0)),
+        }),
+    },
+    DocsRow {
         id: "grok-4.6",
         context_window: 256_000,
         prices: Some(DocsPrices {

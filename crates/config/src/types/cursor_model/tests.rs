@@ -128,6 +128,19 @@ fn docs_prices_cover_cursor_models_and_the_documented_fast_lane() {
         input("grok-4.5-fast", 1),
         Some((Some(4.0), Some(1.0), Some(18.0)))
     );
+    // The explicit 500K SKU bills at the long-context card from the first token.
+    assert_eq!(
+        input("grok-4.7-500k", 1),
+        Some((Some(4.0), Some(1.0), Some(12.0)))
+    );
+    assert_eq!(
+        input("grok-4.7-500k-fast", 1),
+        Some((Some(6.0), Some(1.5), Some(18.0)))
+    );
+    assert_eq!(
+        cursor_docs_context_window("grok-4.7-500k-fast"),
+        Some(500_000)
+    );
     // Third-party models are priced by models.dev, and unknown models have no row.
     assert_eq!(input("claude-opus-5-5", 1), None);
     assert_eq!(input("unknown-model", 1), None);

@@ -208,8 +208,9 @@ fn add_rich_routes(
     routes: &mut HashMap<String, ModelRoute>,
     bytes: &[u8],
 ) -> Result<(), ProviderError> {
-    // A nonempty usable roster is the entitlement boundary; rich data enriches
-    // those routes even when GetUsableModels succeeded. Empty usable falls back.
+    // AvailableModels is the account's authoritative roster: every model it lists
+    // is sendable, including ones GetUsableModels omits. The usable rows seed the
+    // routes (a fallback roster) and only decide which aliases get their own route.
     let usable: HashSet<_> = routes.keys().cloned().collect();
     let mut rich_ids = HashSet::new();
     for details in messages(bytes, 2)? {
@@ -218,6 +219,9 @@ fn add_rich_routes(
             || wire::integer(details, 5)? == Some(0)
             || wire::integer(details, 4)? == Some(1)
             || wire::integer(details, 46)? == Some(1)
+            // Without the usable gate, models Cursor serves only to inline Cmd-K
+            // edits would be listed and fail when chosen.
+            || wire::integer(details, 27)? == Some(1)
         {
             continue;
         }
@@ -229,28 +233,24 @@ fn add_rich_routes(
         }
         let mut aliases = strings(details, 37)?;
         aliases.push(base.clone());
-        let variant_base_entitled = usable.is_empty() || aliases.iter().any(|a| usable.contains(a));
         aliases.extend(strings(details, 36)?);
-        let base_entitled = usable.is_empty() || aliases.iter().any(|a| usable.contains(a));
         let base_max =
             wire::integer(details, 19)? == Some(0) && wire::integer(details, 14)? == Some(1);
         let variants = messages(details, 30)?;
         if variants.is_empty() {
-            if base_entitled {
-                let route = ModelRoute {
-                    model_id: base.clone(),
-                    details_id: base.clone(),
-                    parameters: Vec::new(),
-                    max_mode: routes.get(&base).map_or(base_max, |r| r.max_mode),
-                    fixed_parameters: true,
-                };
-                routes.insert(base, route.clone());
-                for alias in aliases.iter().filter(|id| usable.contains(*id)) {
-                    let mut alias_route = route.clone();
-                    alias_route.details_id = alias.clone();
-                    alias_route.max_mode = routes.get(alias).map_or(base_max, |r| r.max_mode);
-                    routes.insert(alias.clone(), alias_route);
-                }
+            let route = ModelRoute {
+                model_id: base.clone(),
+                details_id: base.clone(),
+                parameters: Vec::new(),
+                max_mode: routes.get(&base).map_or(base_max, |r| r.max_mode),
+                fixed_parameters: true,
+            };
+            routes.insert(base, route.clone());
+            for alias in aliases.iter().filter(|id| usable.contains(*id)) {
+                let mut alias_route = route.clone();
+                alias_route.details_id = alias.clone();
+                alias_route.max_mode = routes.get(alias).map_or(base_max, |r| r.max_mode);
+                routes.insert(alias.clone(), alias_route);
             }
             continue;
         }
@@ -291,9 +291,6 @@ fn add_rich_routes(
             } else {
                 format!("{base}@variant-{}", index + 1)
             };
-            if !variant_base_entitled && !usable.contains(&id) {
-                continue;
-            }
             let max_mode = wire::integer(variant, 3)?
                 .map(|v| v == 1)
                 .unwrap_or_else(|| routes.get(&id).map_or(base_max, |r| r.max_mode));

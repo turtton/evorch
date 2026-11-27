@@ -26,9 +26,15 @@ async fn browser_pkce_pending_poll_and_refresh_retains_token_family_without_secr
         .mount(&server)
         .await;
     Mock::given(path("/profile"))
+        .and(method("POST"))
+        .and(header(
+            "authorization",
+            format!("Bearer {}", token().access_token),
+        ))
+        .and(header("connect-protocol-version", "1"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(json!({"sub":"user_1","email":"user@example.test"})),
+                .set_body_json(json!({"authId":"auth0|user_1","email":"user@example.test"})),
         )
         .mount(&server)
         .await;

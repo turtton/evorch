@@ -1,6 +1,6 @@
 //! Small lossless protobuf envelope codec for Cursor's evolving Connect protocol.
 //!
-//! Field numbers follow oh-my-pi 602b6c8 `agent.proto` / `cursor-models.proto`
+//! Field numbers follow oh-my-pi 1263bcd `agent.proto` / `cursor-models.proto`
 //! (OMP-LICENSE). Opaque checkpoints retain unknown fields byte-for-byte.
 use crate::ProviderError;
 use serde_json::Value;
