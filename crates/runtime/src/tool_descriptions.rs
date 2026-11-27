@@ -177,6 +177,23 @@ impl BuiltinCatalog {
             .collect()
     }
 
+    /// Whether an override of the fixed tool `name`'s description can reach a
+    /// model whose route uses the edit interface `edit_tool`: the one place that
+    /// answers it, so that the checks before a replay and the report agree.
+    ///
+    /// The tool must survive the send-time narrowing of the edit interface
+    /// (`edit_tools::narrow`: `edit`/`write` are not sent with apply-patch,
+    /// `apply_patch` is not sent with edit). `apply_patch` is never counted:
+    /// the Responses wire replaces its description with a fixed text, and other
+    /// wires are not checked, so its override cannot be confirmed to be sent.
+    pub fn description_reaches_wire(&self, name: &str, edit_tool: config::EditToolConfig) -> bool {
+        name != "apply_patch"
+            && self.fixed.contains(name)
+            && crate::edit_tools::narrow(&self.specs, edit_tool)
+                .iter()
+                .any(|spec| spec.name == name)
+    }
+
     /// Whether `role` can be offered the fixed tool `name`, reading the per-run
     /// filters as permissively as they can be.
     pub fn visible_to(&self, role: Role, name: &str) -> bool {
@@ -193,6 +210,23 @@ impl BuiltinCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_description_reaches_the_wire_only_through_the_models_edit_interface() {
+        // Given: the catalog every evaluation replay runs with.
+        let catalog = BuiltinCatalog::for_evaluation().unwrap();
+        let reaches = |tool, edit_tool| catalog.description_reaches_wire(tool, edit_tool);
+
+        // When / Then: edit and write are sent only with the edit interface, apply_patch
+        // is never confirmable, and every other fixed tool is unaffected.
+        use config::EditToolConfig::{ApplyPatch, Edit};
+        assert!(reaches("edit", Edit) && reaches("write", Edit));
+        assert!(!reaches("edit", ApplyPatch) && !reaches("write", ApplyPatch));
+        assert!(!reaches("apply_patch", Edit) && !reaches("apply_patch", ApplyPatch));
+        assert!(reaches("read", Edit) && reaches("read", ApplyPatch));
+        assert!(!reaches("run_js", Edit) && !reaches("no_such_tool", Edit));
+    }
+
     use providers::{Message, ToolSpec};
     struct Routed {
         profile: &'static str,

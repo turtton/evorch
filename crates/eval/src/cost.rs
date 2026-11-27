@@ -209,11 +209,23 @@ pub struct Cost {
     /// the cost is incomplete.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreported: Vec<Unpriced>,
+    /// Replays that left no usage record at all (their database is gone): an
+    /// empty record is not a free replay, so while any remain the cost is incomplete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<String>,
+    /// Replays that were started and have no recorded end: they may have spent
+    /// anything, so their cost is unknown, not nothing. A replay never started
+    /// is not listed; it spent nothing and is reported as missing instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
 }
 
 impl Cost {
     pub fn is_complete(&self) -> bool {
-        self.unpriced.is_empty() && self.unreported.is_empty()
+        self.unpriced.is_empty()
+            && self.unreported.is_empty()
+            && self.unrecorded.is_empty()
+            && self.unfinished.is_empty()
     }
 
     pub fn is_api_equivalent(&self) -> bool {
@@ -228,6 +240,16 @@ impl Cost {
         }
         for unreported in &other.unreported {
             self.note_unreported(unreported);
+        }
+        for run in &other.unrecorded {
+            if !self.unrecorded.contains(run) {
+                self.unrecorded.push(run.clone());
+            }
+        }
+        for run in &other.unfinished {
+            if !self.unfinished.contains(run) {
+                self.unfinished.push(run.clone());
+            }
         }
     }
 
