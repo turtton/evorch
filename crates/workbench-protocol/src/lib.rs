@@ -1,3 +1,4 @@
+// throwaway: a comment-only change in a low crate, for the screen-diff evidence demo
 //! Wire protocol between the evorch core and its clients (ADR 0045).
 //!
 //! The desktop GUI, the web adapter and the CLI all speak this protocol, so it
