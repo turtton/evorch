@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<!-- The only fontconfig a capture sees. It knows one font file and does not include
+     the system configuration, so the CJK font the GUI resolves with `fc-match
+     sans:lang=ja` is that file or nothing. Everything is rejected first, then the
+     font directory (it is filtered too) and the one file are accepted again, so another
+     font in the same directory is not used. The globs match on the trailing path
+     component: fontconfig did not match absolute paths here. @FONT_DIR@, @DIR_NAME@
+     and @FILE_NAME@ are filled in by make-fonts-conf.sh. -->
+<fontconfig>
+  <dir>@FONT_DIR@</dir>
+  <cachedir prefix="xdg">fontconfig</cachedir>
+  <selectfont>
+    <rejectfont>
+      <glob>*</glob>
+    </rejectfont>
+    <acceptfont>
+      <glob>*/@DIR_NAME@</glob>
+      <glob>*/@FILE_NAME@</glob>
+    </acceptfont>
+  </selectfont>
+</fontconfig>

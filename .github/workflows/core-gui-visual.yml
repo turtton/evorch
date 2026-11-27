@@ -1,0 +1,176 @@
+name: core-gui-visual
+
+# Per-PR screen diff of the new GUI (crates/gui/src/core_client/): the main screens are
+# drawn at the PR's base and at its merge result and compared pixel by pixel.
+# scripts/core-gui-visual/capture.sh does the drawing; nothing here needs a display.
+#
+# The trigger is `pull_request` only. There is no `paths` filter on purpose: it would also
+# keep the `closed` run, which removes the PR's published images, from starting; the
+# capture job decides by paths itself (scripts/core-gui-visual/changed-paths.sh).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+# One run per PR at a time, and a run is never cut short: the writer must not be
+# interrupted between its API calls. Different PRs do not wait for each other.
+concurrency:
+  group: core-gui-visual-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  capture:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    # The same job-level env as the other cargo jobs: rust-cache hashes CARGO_* and
+    # RUSTFLAGS into its key, so a different set restores nothing.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+      FONT_FILE: /usr/share/fonts/opentype/ipafont-gothic/ipag.ttf
+    steps:
+      # The PR's merge result and its two parents: the first is the base the PR merges into.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Fix the two sides of the comparison
+        id: sides
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          after=$(git rev-parse HEAD)
+          before=$(git rev-parse 'HEAD^1')
+          second=$(git rev-parse 'HEAD^2')
+          if [[ "$second" != "$PR_HEAD_SHA" ]]; then
+            echo "::error::the merge commit's second parent $second is not the PR head $PR_HEAD_SHA"
+            exit 1
+          fi
+          { echo "before=$before"; echo "after=$after"; } >> "$GITHUB_OUTPUT"
+      - name: Does the PR change anything the screens depend on
+        id: scope
+        run: scripts/core-gui-visual/changed-paths.sh "${{ steps.sides.outputs.before }}" "${{ steps.sides.outputs.after }}" >> "$GITHUB_OUTPUT"
+      - name: Not relevant
+        if: steps.scope.outputs.relevant != 'true'
+        run: |
+          echo "No screen diff: the PR changes only files the new GUI does not depend on." >> "$GITHUB_STEP_SUMMARY"
+      - name: Tooling tests
+        if: steps.scope.outputs.relevant == 'true'
+        run: |
+          scripts/core-gui-visual/tests/test_changed_paths.sh
+          node --test scripts/core-gui-visual/tests/*.test.mjs
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: steps.scope.outputs.relevant == 'true'
+        with:
+          toolchain: 1.99.0
+      # The shared dependency cache of the ci jobs, read only: only the main push writes it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: rust-cache
+        if: steps.scope.outputs.relevant == 'true'
+        with:
+          shared-key: ${{ runner.os }}-ci-workspace-v2
+          save-if: false
+      # The package list of the ci gui-evidence job, so that its cached .debs are the ones
+      # restored here and this job saves no cache entry of its own.
+      - name: Install headless rendering and build dependencies
+        if: steps.scope.outputs.relevant == 'true'
+        timeout-minutes: 30
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq weston libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0 cmake clang libclang-dev ninja-build perl git
+      # The CJK font and fontconfig, outside apt-install: that action would save a cache
+      # entry per pull request for a package list no other job has.
+      - name: Install the CJK font
+        if: steps.scope.outputs.relevant == 'true'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=3 \
+              && sudo apt-get install -y --no-install-recommends fontconfig fonts-ipafont-gothic; then
+              break
+            fi
+            [[ "$attempt" != 3 ]] || exit 1
+          done
+          test -r "$FONT_FILE"
+      - name: The capture's fontconfig lists only that font
+        if: steps.scope.outputs.relevant == 'true'
+        run: scripts/core-gui-visual/tests/test_fonts_conf.sh
+      # Only a libcef.so link: the distribution's Vulkan loader would shadow the system one.
+      - uses: ./.github/actions/setup-cef
+        if: steps.scope.outputs.relevant == 'true'
+      - name: Draw and compare the screens
+        if: steps.scope.outputs.relevant == 'true'
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/core-gui-visual/capture.sh "${{ steps.sides.outputs.before }}" "${{ steps.sides.outputs.after }}" "$RUNNER_TEMP/gui-visual"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        if: always() && steps.scope.outputs.relevant == 'true'
+        with:
+          name: core-gui-visual
+          path: ${{ runner.temp }}/gui-visual/out
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Summary
+        if: always() && steps.scope.outputs.relevant == 'true'
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          {
+            echo "rust-cache hit: $RUST_CACHE_HIT"
+            echo
+            scripts/core-gui-visual/summary.sh "$RUNNER_TEMP/gui-visual/out"
+            echo
+            echo "Artifact (all captures, the comparison and its images): $ARTIFACT_URL"
+            if [[ "$FORK" == true ]]; then
+              echo
+              echo "This pull request comes from a fork: no comment is posted and nothing is published, only this summary and the artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Publishes the images of the changed screens to the evidence branch and keeps the PR's
+  # one comment up to date; on `closed` it removes the PR's images. The only job with write
+  # permission, and only for a pull request from this repository (a fork's token cannot
+  # write, and it must not get a comment path). It runs no cargo and nothing the capture
+  # built: it reads the artifact's JSON and PNG bytes as data. Its own scripts come from
+  # the PR head (same repository, so the author could run that code anyway); the head
+  # commit exists even when the PR is closed and its merge ref is gone.
+  publish:
+    needs: capture
+    if: >-
+      always()
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (github.event.action == 'closed' || needs.capture.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: scripts/core-gui-visual
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: github.event.action != 'closed' && needs.capture.outputs.relevant == 'true'
+        with:
+          name: core-gui-visual
+          path: ${{ runner.temp }}/capture-artifact
+      - name: Publish or clean up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEVANT: ${{ needs.capture.outputs.relevant }}
+        run: node scripts/core-gui-visual/publish.mjs --relevant "$RELEVANT" --artifact "$RUNNER_TEMP/capture-artifact"
