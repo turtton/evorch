@@ -209,3 +209,67 @@ fn a_goal_as_the_first_message_creates_the_thread() {
         (&*thread, "ship it")
     );
 }
+
+impl Screen {
+    /// What the actor does once the core accepted the first message of `thread`.
+    fn core_accepts_first_message(&mut self, project: &str, thread: &str) {
+        let mut shared = self.shared.lock().unwrap();
+        shared
+            .new_conversations
+            .remove(&ProjectId::new(project).unwrap());
+        shared.sending.remove(thread);
+        shared.drafts.remove(thread);
+        drop(shared);
+        self.harness.run_steps(2);
+    }
+
+    /// Text typed with no click or focus request first: it lands only where the focus is.
+    fn type_without_focusing(&mut self, text: &str) {
+        self.harness.event(egui::Event::Text(text.into()));
+        self.harness.run_steps(2);
+    }
+}
+
+// Given: a new conversation whose first message is sent
+// When: the core accepts it, and the person keeps typing without clicking the input
+// Then: the thread's screen has the same input focused, so the text goes to the draft
+#[test]
+fn typing_continues_in_the_thread_screen_once_the_first_message_is_accepted() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.open_new_conversation("evorch");
+    let thread = screen.new_thread_of("proj-1");
+    screen.type_in_composer("hello");
+    screen.harness.key_press(Key::Enter);
+    screen.settle();
+
+    screen.core_accepts_first_message("proj-1", &thread);
+    assert!(screen.harness.query_by_label(HEADING).is_none());
+    screen.type_without_focusing("more");
+
+    assert_eq!(screen.draft_of(&thread), "more");
+}
+
+// Given: a new conversation whose first message is sent, and another thread opened meanwhile
+// When: the core accepts the message
+// Then: the person stays on the other thread, with nothing focused for them to type into
+#[test]
+fn an_acceptance_after_leaving_neither_moves_the_selection_nor_takes_the_focus() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.open_new_conversation("evorch");
+    let thread = screen.new_thread_of("proj-1");
+    screen.type_in_composer("hello");
+    screen.harness.key_press(Key::Enter);
+    screen.settle();
+    screen.select_thread("Refactor storage writer");
+
+    screen.core_accepts_first_message("proj-1", &thread);
+    screen.type_without_focusing("stray");
+
+    screen
+        .harness
+        .get_by_label("Thread: Refactor storage writer");
+    assert_eq!(screen.draft_of("thr-2"), "");
+    assert_eq!(screen.draft_of(&thread), "");
+}
