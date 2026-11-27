@@ -81,6 +81,42 @@
     },
     "type": "execution"
   },
+  "execution/tool_finished": {
+    "payload": {
+      "payload": {
+        "call_id": "call-1",
+        "duration_ms": 1240,
+        "run": "run-1",
+        "status": "succeeded",
+        "thread": "thr-1"
+      },
+      "type": "tool_finished"
+    },
+    "type": "execution"
+  },
+  "execution/tool_started": {
+    "payload": {
+      "payload": {
+        "tool": {
+          "call_id": "call-1",
+          "elapsed_ms": 1200,
+          "input": {
+            "payload": {
+              "text": "command: cargo test"
+            },
+            "type": "inline"
+          },
+          "input_summary": "cargo test",
+          "parent_call_id": "call-0",
+          "run": "run-1",
+          "thread": "thr-1",
+          "tool_name": "shell"
+        }
+      },
+      "type": "tool_started"
+    },
+    "type": "execution"
+  },
   "lifecycle/core_status_changed": {
     "payload": {
       "payload": {

@@ -10,7 +10,7 @@ use crate::{
     limits::{MAX_NAME_BYTES, MAX_OBJECTIVE_BYTES, MAX_TITLE_BYTES},
     queries::{PageRequest, ThreadQuery},
     validation::{ValidationError, check_bytes, check_count},
-    views::{Page, RunSummary},
+    views::{MessageContent, Page, RunSummary},
     wire::{Revision, Sequence, UnixMillis},
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ pub const QUERY_OPERATIONS: &[&str] = &[
 ];
 pub const EVENT_TYPES: &[&str] = &[
     "run_changed",
+    "tool_started",
+    "tool_finished",
     "thread_execution_changed",
     "conversation_plan_changed",
 ];
@@ -396,6 +398,17 @@ impl ExecutionReply {
     deny_unknown_fields
 )]
 pub enum ExecutionEvent {
+    ToolStarted {
+        tool: ToolActivityView,
+    },
+    ToolFinished {
+        thread: ThreadId,
+        run: RunId,
+        call_id: String,
+        status: ToolActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
     /// Invalidation only. Always re-read the projection; never replace state with this event.
     ConversationPlanChanged {
         thread: ThreadId,
@@ -412,9 +425,52 @@ pub enum ExecutionEvent {
     },
 }
 
+/// Memory-only activity: snapshots contain running calls, never completed history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolActivityView {
+    pub thread: ThreadId,
+    pub run: RunId,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<MessageContent>,
+    /// Elapsed time at publication / snapshot cut, not at client receipt.
+    pub elapsed_ms: u64,
+}
+impl ToolActivityView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("call_id", &self.call_id, MAX_NAME_BYTES, false)?;
+        check_bytes("tool_name", &self.tool_name, MAX_NAME_BYTES, false)?;
+        if let Some(parent) = &self.parent_call_id {
+            check_bytes("parent_call_id", parent, MAX_NAME_BYTES, false)?;
+        }
+        if let Some(summary) = &self.input_summary {
+            check_bytes("input_summary", summary, MAX_TITLE_BYTES, false)?;
+        }
+        self.input.as_ref().map_or(Ok(()), |v| v.validate("input"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityStatus {
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+
 impl ExecutionEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
+            Self::ToolStarted { tool } => tool.validate(),
+            Self::ToolFinished { call_id, .. } => {
+                check_bytes("call_id", call_id, MAX_NAME_BYTES, false)
+            }
             Self::RunChanged { .. } | Self::ConversationPlanChanged { .. } => Ok(()),
             Self::ThreadExecutionChanged { goal, .. } => {
                 goal.as_ref().map_or(Ok(()), GoalView::validate)

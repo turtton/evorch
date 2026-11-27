@@ -15,6 +15,20 @@ pub const SUMMARY_BYTES: usize = 16 * 1024;
 
 type Parts = Vec<(String, bool)>;
 
+/// Match the nanosecond precision and range of stored event headers.
+pub fn wall_clock_ns(at: std::time::SystemTime) -> i64 {
+    match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
+    }
+}
+
+/// Shared by indexed history, live history and live activity; backwards clocks are unknown.
+pub fn duration_ms(start_ns: i64, end_ns: i64) -> Option<u64> {
+    let nanos = i128::from(end_ns) - i128::from(start_ns);
+    (nanos >= 0).then_some((nanos / 1_000_000) as u64)
+}
+
 /// The arguments of one tool call as shown in a transcript.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ToolInput {
@@ -31,6 +45,8 @@ pub struct ToolRow {
     pub call_id: String,
     pub parent_call_id: Option<String>,
     pub is_error: bool,
+    /// Wall-clock difference between the matching start and completion, when nonnegative.
+    pub duration_ms: Option<u64>,
     /// `None` when no start event with arguments precedes the completion.
     pub input: Option<ToolInput>,
     pub detail: Option<Parts>,
@@ -115,6 +131,7 @@ pub fn committed(
                 call_id: call_id.clone(),
                 parent_call_id: parent_call_id.clone(),
                 is_error: *is_error,
+                duration_ms: None,
                 input: start,
                 detail: detail
                     .as_ref()
@@ -125,7 +142,7 @@ pub fn committed(
     }
 }
 
-fn tool_input(tool_name: &str, input: &Value, tokenized: bool) -> ToolInput {
+pub fn tool_input(tool_name: &str, input: &Value, tokenized: bool) -> ToolInput {
     let parts = match input {
         // The source of a script is the argument worth reading verbatim, whatever else the call sets.
         Value::Object(map)
@@ -149,15 +166,17 @@ fn token_bytes(value: &str, tokenized: bool) -> Option<u64> {
         .map(|reference| reference.byte_len)
 }
 
-/// Compact JSON as parts. A long string stays a deferred part between two quote marks, so
-/// nothing nested in an argument is lost and no body is read to build a row.
+/// JSON-shaped display parts, with string contents shown verbatim even when nested.
+/// A deferred body contains the original string, not its JSON encoding. Inline strings
+/// must use that same representation so tokenization cannot change the displayed input.
+/// No body is read to build a row.
 fn json_parts(value: &Value, tokenized: bool) -> Parts {
     fn walk(value: &Value, tokenized: bool, text: &mut String, parts: &mut Parts) {
         match value {
-            Value::String(s) if token_bytes(s, tokenized).is_some() => {
+            Value::String(s) => {
                 text.push('"');
                 parts.push((std::mem::take(text), false));
-                parts.push((s.clone(), true));
+                parts.push((s.clone(), token_bytes(s, tokenized).is_some()));
                 text.push('"');
             }
             Value::Array(items) => {

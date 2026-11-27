@@ -8,6 +8,7 @@ fn storage_descriptor_encoding_is_the_legacy_raw_byte_cap_measure() {
         call_id: "call-1".into(),
         parent_call_id: Some("call-0".into()),
         is_error: true,
+        duration_ms: Some(1240),
         input: Some(storage::history::ToolInput {
             summary: Some("echo \"日本語\"".into()),
             parts: vec![

@@ -783,5 +783,5 @@ fn opening_a_v69_database_adds_the_audit_tables_without_touching_other_data() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 79);
+    assert_eq!(version, 80);
 }

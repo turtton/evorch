@@ -10,7 +10,7 @@ use std::{
 };
 
 pub(crate) const FORMAT_VERSION: i64 = 1;
-pub(crate) const REDUCER_VERSION: i64 = 3;
+pub(crate) const REDUCER_VERSION: i64 = 4;
 pub(crate) const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid() -> StorageError {
@@ -122,6 +122,19 @@ pub(crate) fn source_kind_limited(
     drop(rows);
     super::meter::statement(conn, &s);
     Ok((kind, format == 1))
+}
+pub(crate) fn duration_ms(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+) -> Result<Option<u64>, StorageError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT a.wall_clock_ns,b.wall_clock_ns FROM events a,events b WHERE a.id=?1 AND b.id=?2",
+    )?;
+    let (start, end): (i64, i64) =
+        statement.query_row(params![start, end], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    super::meter::statement(conn, &statement);
+    Ok(super::rows::duration_ms(start, end))
 }
 fn text_part(kind: &EventKind, tokenized: bool) -> Result<(String, bool), StorageError> {
     let EventKind::Message(MessageEvent::MessagePart { text, .. }) = kind else {
@@ -261,6 +274,7 @@ pub(crate) fn prepare_budgeted(
             next.first_prompt_merge = next.merge_max;
         }
         let mut start = None;
+        let mut duration = None;
         if let Some((_, call_id, _)) = super::rows::tool_start(kind, tokenized) {
             tool_start = Some(call_id.to_owned());
         }
@@ -280,13 +294,16 @@ pub(crate) fn prepare_budgeted(
             if let Some(source) = begun {
                 let (begun, format) = source_kind_limited(conn, source, remaining)?;
                 let (_, _, input) = super::rows::tool_start(&begun, format).ok_or_else(invalid)?;
-                if input.is_some() {
-                    sources.push(source);
-                }
+                sources.push(source);
+                duration = duration_ms(conn, source, id)?;
                 start = input;
             }
         }
-        next.reducer.observe(kind, tokenized, &mut None, start)
+        let mut message = next.reducer.observe(kind, tokenized, &mut None, start);
+        if let Some(tool) = message.as_mut().and_then(|m| m.tool.as_mut()) {
+            tool.duration_ms = duration;
+        }
+        message
     };
     next.checkpoint = Some(id);
     next.last_indexed = Some(next.last_indexed.map_or(id, |last| last.max(id)));

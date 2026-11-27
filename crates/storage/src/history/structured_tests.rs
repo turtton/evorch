@@ -425,3 +425,67 @@ fn reasoning_neither_counts_as_a_reply_nor_survives_empty() {
     assert_eq!((row.index, row.role), (0, Role::Reasoning));
     assert!(reducer.last_assistant.is_none());
 }
+
+// The persisted clocks, not process sessions or tool names, determine elapsed time.
+#[test]
+fn tool_duration_survives_rebuild_and_missing_or_backwards_start_is_unknown() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let db = Database::open_in_memory().unwrap();
+    scope(&db, &["run"]);
+    let at = |kind: ToolEvent, millis: u64| {
+        let mut event = Event::new(kind);
+        event.meta.wall_clock = UNIX_EPOCH + Duration::from_millis(millis);
+        append_event(
+            &db.conn,
+            None,
+            &event,
+            &HardLimits::default(),
+            &mut EventAccounting::default(),
+        )
+        .unwrap();
+    };
+    at(
+        started("run", "normal", "shell", Some(json!({"command":"true"}))),
+        1000,
+    );
+    at(completed("run", "normal", "shell", None, false), 2240);
+    at(started("run", "no-input", "wait", None), 3000);
+    at(completed("run", "no-input", "wait", None, true), 3100);
+    at(started("run", "backwards", "run_js", None), 5000);
+    at(completed("run", "backwards", "run_js", None, false), 4000);
+    at(completed("run", "missing", "delegate", None, false), 6000);
+    let before = every_descriptor(&db, 1, Direction::Forward);
+    let durations: Vec<_> = before
+        .iter()
+        .map(|d| d.tool.as_ref().unwrap().duration_ms)
+        .collect();
+    assert_eq!(durations, [Some(1240), Some(100), None, None]);
+    db.conn
+        .execute(
+            "UPDATE history_run_state SET phase=0 WHERE run_id='run'",
+            [],
+        )
+        .unwrap();
+    struct FrozenClock;
+    impl super::build::Clock for FrozenClock {
+        fn now_ns(&self) -> i64 {
+            0
+        }
+    }
+    loop {
+        if db
+            .history_build_step("run", super::build::BuildBudget::default(), &FrozenClock)
+            .unwrap()
+            .ready
+        {
+            break;
+        }
+    }
+    assert_eq!(before, every_descriptor(&db, 1, Direction::Backward));
+    assert_eq!(
+        rows::duration_ms(i64::MIN, i64::MAX),
+        Some(18_446_744_073_709)
+    );
+    assert_eq!(rows::duration_ms(1, 0), None);
+    assert_eq!(rows::duration_ms(0, 999_999), Some(0));
+}

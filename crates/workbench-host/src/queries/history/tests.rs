@@ -562,7 +562,7 @@ fn per_run_fold_matches_legacy_global_fold_under_monotonic_clocks() {
         let db = storage::Database::open(&config).unwrap();
         let through = db.last_event_id().unwrap();
         let legacy = legacy_committed_messages(&db, &runs, through).unwrap();
-        let history = committed_messages(&db, &runs, through).unwrap();
+        let mut history = committed_messages(&db, &runs, through).unwrap();
         let scanner = CommitScanner {
             cut: Some(0),
             ..Default::default()
@@ -574,6 +574,13 @@ fn per_run_fold_matches_legacy_global_fold_under_monotonic_clocks() {
             trailing += usize::from(order.0 == i64::MAX);
             merged += usize::from(order.0 != i64::MAX && !order.1);
             window.push(message);
+        }
+        // This differential test protects the pre-duration ordering / folding contract.
+        // Deterministic clock tests independently cover E3 timing in all three routes.
+        for row in history.iter_mut().chain(window.iter_mut()) {
+            if let Some(tool) = row.tool.as_mut() {
+                tool.duration_ms = None;
+            }
         }
         deferred_inputs += legacy.iter().filter(|m| m.input.is_some()).count();
         assert_eq!(per_run(&history), per_run(&legacy), "seed {seed}");

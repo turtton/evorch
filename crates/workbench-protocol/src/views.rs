@@ -303,7 +303,7 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
-    fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
         match self {
             Self::Inline { text } => check_bytes(field, text, MAX_INLINE_MESSAGE_BYTES, true),
             Self::Body(_) => Ok(()),
@@ -335,6 +335,8 @@ pub struct ToolCallView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<MessageContent>,
     pub status: ToolCallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// Metadata the tool attached to its result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<MessageContent>,

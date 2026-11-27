@@ -4,6 +4,7 @@ use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use std::sync::Barrier;
 use workbench_protocol::namespaces::{LifecycleEvent as WireLifecycleEvent, ProjectionEvent};
+use workbench_protocol::queries::ReadBody;
 
 struct NoModel;
 #[async_trait::async_trait]
@@ -305,7 +306,8 @@ async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch()
         RefreshWakeups {
             dirty: true,
             lagged: true,
-            closed: false
+            closed: false,
+            ..Default::default()
         }
     );
 }
@@ -737,4 +739,477 @@ async fn an_area_source_publishes_only_its_own_namespace_through_the_one_boundar
         lifecycle.publish(event(3)).unwrap_err().code,
         ErrorCode::Draining
     );
+}
+
+// Activity fixtures stamp both event clocks and inject a manual monotonic "now".
+fn activity_fixture() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    storage::Storage,
+    Arc<Projection>,
+    Arc<std::sync::atomic::AtomicU64>,
+    Arc<EventBus>,
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (dir, store, bus, runtime) = stored();
+    for (thread, run) in [("thread", "run"), ("other-thread", "other-run")] {
+        store
+            .handle()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: thread.into(),
+                project_id: Some("project".into()),
+                project_root: Some(dir.path().to_string_lossy().into_owned()),
+                root_run_id: Some(run.into()),
+                ..Default::default()
+            }])
+            .unwrap();
+        store
+            .handle()
+            .upsert_run_context(&storage::RunContextRecord {
+                run_id: run.into(),
+                role: "worker".into(),
+                name: "activity".into(),
+                parent_run_id: None,
+                config_json: "{}".into(),
+                messages_json: "[]".into(),
+                checkpoints_json: "[]".into(),
+                terminal_phase: "running".into(),
+                restorable: false,
+                updated_at_ns: 1,
+                host_inputs_json: "[]".into(),
+            })
+            .unwrap();
+    }
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(2000));
+    let clock = now.clone();
+    let p = Projection::with_activity_clock(
+        runtime,
+        rt.handle(),
+        Default::default(),
+        None,
+        Arc::new(move || std::time::Duration::from_millis(clock.load(Ordering::Relaxed))),
+    );
+    p.configure_projects(
+        vec![(ProjectId::new("project").unwrap(), dir.path().to_path_buf())],
+        Default::default(),
+    )
+    .unwrap();
+    (rt, dir, store, p, now, bus)
+}
+fn activity_start(call: &str, name: &str, input: serde_json::Value) -> Event {
+    activity_at(
+        event_bus::ToolEvent::ToolStarted {
+            run_id: Some("run".into()),
+            call_id: call.into(),
+            parent_call_id: Some("parent".into()),
+            tool_name: name.into(),
+            input: Some(input),
+        },
+        1000,
+    )
+}
+fn activity_at(kind: impl Into<EventKind>, millis: u64) -> Event {
+    let mut event = Event::new(kind);
+    event.meta.monotonic = std::time::Duration::from_millis(millis);
+    event.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis);
+    event
+}
+fn activity_done(call: &str, millis: u64, failed: bool) -> Event {
+    activity_at(
+        event_bus::ToolEvent::ToolCompleted {
+            run_id: Some("run".into()),
+            call_id: call.into(),
+            parent_call_id: Some("parent".into()),
+            tool_name: "shell".into(),
+            output: None,
+            detail: None,
+            is_error: failed,
+        },
+        millis,
+    )
+}
+fn activity_snapshot(
+    p: &Projection,
+) -> Vec<workbench_protocol::namespaces::execution::ToolActivityView> {
+    let sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    sub.started
+        .initial_page
+        .unwrap()
+        .items
+        .into_iter()
+        .filter_map(|v| match v {
+            SnapshotItem::ToolActivity(tool) => Some(tool),
+            _ => None,
+        })
+        .collect()
+}
+#[test]
+fn activity_bus_order_scopes_reconnect_and_duration_use_the_event_clocks() {
+    use workbench_protocol::namespaces::execution::ToolActivityStatus;
+    let (rt, _dir, _store, p, now, bus) = activity_fixture();
+    let mut sub = p
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::Thread {
+                thread: ThreadId::new("thread").unwrap(),
+            },
+            after: None,
+        })
+        .unwrap();
+    let mut other = p
+        .subscribe_with_snapshot(&Subscribe {
+            scope: SubscriptionScope::Thread {
+                thread: ThreadId::new("other-thread").unwrap(),
+            },
+            after: None,
+        })
+        .unwrap();
+    bus.emit(activity_start(
+        "shell",
+        "shell",
+        serde_json::json!({"command":"true"}),
+    ));
+    let first = rt.block_on(sub.recv()).unwrap();
+    let UiEvent::Execution(ExecutionEvent::ToolStarted { tool }) = first.event else {
+        panic!("start")
+    };
+    assert_eq!(tool.elapsed_ms, 1000);
+    now.store(3500, Ordering::Relaxed);
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 2500);
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 2500);
+    assert_eq!(p.activity_formats.load(Ordering::Relaxed), 1);
+    bus.emit(activity_done("shell", 2240, true));
+    let end = rt.block_on(sub.recv()).unwrap();
+    assert!(matches!(
+        end.event,
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            status: ToolActivityStatus::Failed,
+            duration_ms: Some(1240),
+            ..
+        })
+    ));
+    assert!(end.cursor.sequence > first.cursor.sequence);
+    assert!(activity_snapshot(&p).is_empty());
+    // An explicit close is the first event in the other thread's queue.
+    p.unsubscribe(&other.started.subscription_id);
+    assert!(matches!(
+        rt.block_on(other.recv()).unwrap().event,
+        UiEvent::Projection(ProjectionEvent::SubscriptionClosed { .. })
+    ));
+    p.observe_activity(activity_done("missing", 900, false));
+    assert!(matches!(
+        rt.block_on(sub.recv()).unwrap().event,
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            duration_ms: None,
+            ..
+        })
+    ));
+    p.observe_activity(activity_start("backwards", "wait", serde_json::json!({})));
+    let _ = rt.block_on(sub.recv());
+    p.observe_activity(activity_done("backwards", 999, false));
+    assert!(matches!(
+        rt.block_on(sub.recv()).unwrap().event,
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            duration_ms: None,
+            status: ToolActivityStatus::Succeeded,
+            ..
+        })
+    ));
+}
+#[test]
+fn activity_masks_before_formatting_and_reuses_e2_inputs_and_bodies() {
+    let (_rt, dir, store, p, _now, _bus) = activity_fixture();
+    // Synthetic test value; no credential is loaded from the environment.
+    let secret = format!("sk-{}", "a".repeat(32));
+    for (call, name, input) in [
+        (
+            "shell",
+            "shell",
+            serde_json::json!({"command":format!("echo {secret}"), "cwd":"/work"}),
+        ),
+        (
+            "js",
+            "run_js",
+            serde_json::json!({"code":format!("const token = '{secret}';\nconsole.log(token);"), "ignored":true}),
+        ),
+        (
+            "large",
+            "run_js",
+            serde_json::json!({"code":format!("// {secret}\n{}", "x".repeat(20 * 1024))}),
+        ),
+    ] {
+        let start = activity_start(call, name, input);
+        store.handle().append_event(None, &start).unwrap();
+        p.observe_activity(start);
+        let db = storage::Database::open(&storage::StorageConfig {
+            db_path: dir.path().join("host.db"),
+            ..Default::default()
+        })
+        .unwrap();
+        let input = db.tool_start_input(db.last_event_id().unwrap()).unwrap();
+        let expected = p
+            .bodies
+            .tool(
+                &ThreadId::new("thread").unwrap(),
+                &RunId::new("run").unwrap(),
+                storage::history::ToolRow {
+                    tool_name: name.into(),
+                    call_id: call.into(),
+                    parent_call_id: Some("parent".into()),
+                    is_error: false,
+                    input,
+                    detail: None,
+                    duration_ms: None,
+                },
+            )
+            .unwrap();
+        let tools = activity_snapshot(&p);
+        let actual = tools.iter().find(|t| t.call_id == call).unwrap();
+        if call != "large" {
+            assert_eq!(actual.input_summary, expected.input_summary);
+        }
+        let read = |input: &Option<MessageContent>| {
+            input.as_ref().map(|input| match input {
+                MessageContent::Inline { text } => text.clone(),
+                MessageContent::Body(body) => {
+                    let mut text = String::new();
+                    let mut offset = ByteOffset(0);
+                    loop {
+                        let chunk = p
+                            .bodies
+                            .read(
+                                &p.runtime,
+                                &ReadBody {
+                                    body_id: body.body_id.clone(),
+                                    offset,
+                                    max_bytes: 65536,
+                                },
+                            )
+                            .unwrap();
+                        text.push_str(&chunk.text);
+                        match chunk.next_offset {
+                            Some(next) => offset = next,
+                            None => break,
+                        }
+                    }
+                    text
+                }
+            })
+        };
+        let shown = read(&actual.input).unwrap();
+        assert_eq!(Some(shown.clone()), read(&expected.input));
+        assert!(!shown.contains(&secret));
+        assert!(shown.contains("[REDACTED:openai-style-key]"));
+        if name == "run_js" {
+            assert!(!shown.contains("ignored"));
+        }
+        assert!(!serde_json::to_string(actual).unwrap().contains(&secret));
+    }
+    assert_eq!(p.activity_formats.load(Ordering::Relaxed), 3);
+    assert!(p.retained_bodies() >= 1);
+}
+#[test]
+fn activity_capacity_terminal_and_lag_snapshots_are_bounded_and_empty_after_loss() {
+    use workbench_protocol::namespaces::execution::ToolActivityStatus;
+    let (rt, _dir, _store, p, _now, bus) = activity_fixture();
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    for n in 0..activity::MAX_LIVE_TOOLS + 10 {
+        p.observe_activity(activity_start(
+            &format!("call-{n}"),
+            "run_js",
+            serde_json::json!({"code":"x".repeat(16 * 1024)}),
+        ));
+    }
+    assert_eq!(activity_snapshot(&p).len(), activity::MAX_LIVE_TOOLS);
+    assert_eq!(
+        p.activity_formats.load(Ordering::Relaxed),
+        activity::MAX_LIVE_TOOLS
+    );
+    for _ in 0..activity::MAX_LIVE_TOOLS {
+        let _ = rt.block_on(sub.recv()).unwrap();
+    }
+    p.observe_activity(activity_at(
+        LifecycleEvent::AgentRunStateChanged {
+            run_id: "run".into(),
+            from: event_bus::AgentRunPhase::Running,
+            to: event_bus::AgentRunPhase::Error,
+            reason: None,
+            waiting: None,
+        },
+        3000,
+    ));
+    for _ in 0..activity::MAX_LIVE_TOOLS {
+        assert!(matches!(
+            rt.block_on(sub.recv()).unwrap().event,
+            UiEvent::Execution(ExecutionEvent::ToolFinished {
+                status: ToolActivityStatus::Interrupted,
+                ..
+            })
+        ));
+    }
+    assert!(activity_snapshot(&p).is_empty());
+    p.observe_activity(activity_start("lost", "wait", serde_json::json!({})));
+    let mut epoch = p.epoch_changes();
+    // The current-thread executor has not polled the bus task; force a real bus lag.
+    for n in 0..256 {
+        bus.emit(wakeup(n));
+    }
+    rt.block_on(epoch.changed()).unwrap();
+    assert!(activity_snapshot(&p).is_empty());
+}
+
+#[test]
+fn activity_snapshot_cut_keeps_starts_and_finishes_on_one_side_of_high_water() {
+    for finishing in [false, true] {
+        let (rt, _dir, _store, p, _now, _bus) = activity_fixture();
+        if finishing {
+            p.observe_activity(activity_start(
+                "cut",
+                "shell",
+                serde_json::json!({"command":"true"}),
+            ));
+        }
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        p.state.lock().unwrap().snapshot_hook = Some({
+            let entered = entered.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                entered.wait();
+                release.wait();
+            })
+        });
+        let snap = {
+            let p = p.clone();
+            std::thread::spawn(move || p.subscribe_with_snapshot(&all(None)).unwrap())
+        };
+        entered.wait();
+        let updating = Arc::new(Barrier::new(2));
+        let update = {
+            let p = p.clone();
+            let updating = updating.clone();
+            std::thread::spawn(move || {
+                updating.wait();
+                p.observe_activity(if finishing {
+                    activity_done("cut", 2240, false)
+                } else {
+                    activity_start("cut", "shell", serde_json::json!({"command":"true"}))
+                });
+            })
+        };
+        updating.wait();
+        release.wait();
+        let mut sub = snap.join().unwrap();
+        update.join().unwrap();
+        let initial = sub
+            .started
+            .initial_page
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .filter(|item| matches!(item, SnapshotItem::ToolActivity(_)))
+            .count();
+        assert_eq!(initial, usize::from(finishing));
+        let change = rt.block_on(sub.recv()).unwrap();
+        assert_eq!(
+            change.cursor.sequence.get(),
+            sub.started.high_water.sequence.get() + 1
+        );
+        assert_eq!(
+            matches!(
+                change.event,
+                UiEvent::Execution(ExecutionEvent::ToolFinished { .. })
+            ),
+            finishing
+        );
+    }
+}
+
+#[test]
+fn a_new_projection_does_not_reconstruct_activity_from_saved_starts() {
+    let (rt, dir, store, p, _now, _bus) = activity_fixture();
+    let start = activity_start("saved", "wait", serde_json::json!({}));
+    store.handle().append_event(None, &start).unwrap();
+    p.observe_activity(start);
+    assert_eq!(activity_snapshot(&p).len(), 1);
+    let fresh = Projection::new(p.runtime.clone(), rt.handle(), Default::default());
+    fresh
+        .configure_projects(
+            vec![(ProjectId::new("project").unwrap(), dir.path().to_path_buf())],
+            Default::default(),
+        )
+        .unwrap();
+    assert!(activity_snapshot(&fresh).is_empty());
+}
+
+#[test]
+fn activity_elapsed_uses_monotonic_time_but_finishes_use_wall_clock_stamps() {
+    let (rt, _dir, _store, p, now, _bus) = activity_fixture();
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let mut start = activity_start("clock", "wait", serde_json::json!({}));
+    start.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(500_000);
+    p.observe_activity(start);
+    let _ = rt.block_on(sub.recv()).unwrap();
+    // The manual "now" is 2000ms and the start's monotonic stamp is 1000ms,
+    // despite the unrelated wall clock (which can jump while a call runs).
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 1000);
+    now.store(3500, Ordering::Relaxed);
+    assert_eq!(activity_snapshot(&p)[0].elapsed_ms, 2500);
+    let mut done = activity_done("clock", 2240, false);
+    done.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_millis(500_125);
+    p.observe_activity(done);
+    assert!(matches!(
+        rt.block_on(sub.recv()).unwrap().event,
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            duration_ms: Some(125),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn optional_activity_cannot_overflow_an_almost_full_workspace_snapshot() {
+    let (_rt, dir, store, p, _now, _bus) = activity_fixture();
+    let mut template = p.state.lock().unwrap().models.threads["thread"]
+        .summary
+        .clone();
+    template.id = ThreadId::new("bulk-00000").unwrap();
+    template.title = "x".repeat(workbench_protocol::limits::MAX_TITLE_BYTES);
+    let item_bytes = serde_json::to_vec(&SnapshotItem::Thread(template.clone()))
+        .unwrap()
+        .len()
+        + 1;
+    // Leave less than the 16 inline activities, but enough for per-row revision
+    // digit differences and the fixture's other canonical snapshot items.
+    let count = (MAX_SNAPSHOT_BYTES - 128 * 1024) / item_bytes;
+    let threads: Vec<_> = (0..count)
+        .map(|n| storage::threads::ThreadUpsert {
+            thread_id: format!("bulk-{n:05}"),
+            project_id: Some("project".into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: Some(template.title.clone()),
+            ..Default::default()
+        })
+        .collect();
+    store.handle().upsert_threads_host(&threads).unwrap();
+    for n in 0..activity::MAX_LIVE_TOOLS {
+        p.observe_activity(activity_start(
+            &format!("call-{n}"),
+            "run_js",
+            serde_json::json!({"code":"x".repeat(16 * 1024)}),
+        ));
+    }
+    p.subscribe_with_snapshot(&all(None)).unwrap();
+    let state = p.state.lock().unwrap();
+    let items = &state.snapshots.back().unwrap().items;
+    let shown = items
+        .iter()
+        .filter(|item| matches!(item, SnapshotItem::ToolActivity(_)))
+        .count();
+    assert!(shown < activity::MAX_LIVE_TOOLS);
+    assert_eq!(state.activities.len(), activity::MAX_LIVE_TOOLS);
+    assert!(serde_json::to_vec(items).unwrap().len() <= MAX_SNAPSHOT_BYTES);
 }

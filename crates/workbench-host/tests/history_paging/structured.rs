@@ -278,54 +278,72 @@ fn run_js_input_is_the_script_even_with_other_arguments() {
     }
 }
 
-// Given: an edit whose nested replacement strings are large
-// Then: the input names no size in their place: each stays a stored body that reads back
-//       in full on both routes, and a page resolves no blob
+// Given: nested edit strings with JSON-sensitive characters around the tokenization
+//       threshold, and a live input large enough to require a Body itself
+// Then: live and actual committed inputs read back identically on both routes,
+//       while neither observation nor paging resolves a stored blob
 #[test]
-fn nested_large_input_strings_stay_readable() {
-    let f = current_thread_fixture();
-    let (first, second) = ("alpha ".repeat(900), "beta ".repeat(900));
-    save(
-        &f,
-        started(
+fn nested_input_strings_match_live_before_and_after_tokenization() {
+    use workbench_protocol::namespaces::ExecutionEvent;
+    for bytes in [2047, 2048, 2049, 20 * 1024] {
+        let f = current_thread_fixture();
+        let special = "α\n\"quoted\"\\path\t\r\u{0001}";
+        let first = format!("{special}{}", "x".repeat(bytes - special.len()));
+        let second = first.replace("quoted", "second");
+        assert_eq!(first.len(), bytes);
+        let meter = read_meter(&f);
+        let before = meter.counts();
+        let mut sub = f.subscribe();
+        let start = Event::new(started(
             "edit",
             "edit",
             serde_json::json!({
                 "path": "src/lib.rs",
                 "edits": [
-                    {"old_string": "a", "new_string": first},
-                    {"old_string": "b", "new_string": second},
+                    {"old_string": "a\n\"before\"", "new_string": first},
+                    {"old_string": "b\\before", "new_string": second},
                 ],
             }),
-        ),
-    );
-    save(&f, completed("edit", "edit", Some("ok".into()), false));
-    let meter = read_meter(&f);
-    for (indexed, dirty_first) in [(true, false), (false, true)] {
-        if dirty_first {
-            dirty(&f);
+        ));
+        f.store.handle().append_event(None, &start).unwrap();
+        f.runtime.event_bus().emit(start);
+        let live = f.rt.block_on(async {
+            loop {
+                let envelope = sub.recv().await.unwrap();
+                if let UiEvent::Execution(ExecutionEvent::ToolStarted { tool }) = envelope.event {
+                    break tool;
+                }
+            }
+        });
+        assert_eq!(meter.counts(), before, "observing a start resolves no blob");
+        let read = |input: &MessageContent| match input {
+            MessageContent::Inline { text } => text.clone(),
+            MessageContent::Body(_) => body_text(&f, input),
+        };
+        let live_input = live.input.as_ref().unwrap();
+        assert_eq!(
+            matches!(live_input, MessageContent::Body(_)),
+            bytes == 20 * 1024
+        );
+        let shown_live = read(live_input);
+        save(&f, completed("edit", "edit", Some("ok".into()), false));
+        for (indexed, dirty_first) in [(true, false), (false, true)] {
+            if dirty_first {
+                dirty(&f);
+            }
+            let before = meter.counts();
+            let rows = read_all(&f, HistoryDirection::Forward, indexed);
+            assert_eq!(meter.counts(), before, "paging resolves no nested blob");
+            assert_eq!(rows.len(), 1);
+            let input = tool(&rows[0]).input.as_ref().unwrap();
+            assert_eq!(matches!(input, MessageContent::Body(_)), bytes >= 2048);
+            let shown = read(input);
+            assert_eq!(shown, shown_live, "bytes={bytes}, indexed={indexed}");
+            if bytes >= 2048 {
+                assert!(shown.contains(&first) && shown.contains(&second));
+            }
         }
-        let rows = read_all(&f, HistoryDirection::Forward, indexed);
-        assert_eq!(rows.len(), 1);
-        let input = tool(&rows[0]).input.clone().unwrap();
-        let shown = body_text(&f, &input);
-        assert!(
-            shown.starts_with("edits: [{") && shown.ends_with("path: src/lib.rs"),
-            "{shown:.60}"
-        );
-        assert!(
-            shown.contains(&first) && shown.contains(&second),
-            "indexed={indexed}"
-        );
-        assert!(!shown.contains(" bytes>"));
     }
-    let before = meter.counts();
-    read_all(&f, HistoryDirection::Forward, false);
-    assert_eq!(
-        meter.counts(),
-        before,
-        "paging must not resolve nested blobs either"
-    );
 }
 
 fn long_id(fill: char, len: usize) -> String {
@@ -404,4 +422,70 @@ fn a_tool_call_id_past_the_limit_resyncs_the_stream() {
             }
         }
     });
+}
+
+// Wall clock stamps are explicit: the test does not depend on time spent executing it.
+#[test]
+fn durations_match_in_indexed_live_and_legacy_history_for_all_tool_names() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    let at = |kind: ToolEvent, millis| {
+        let mut event = Event::new(kind);
+        event.meta.wall_clock = UNIX_EPOCH + Duration::from_millis(millis);
+        f.store.handle().append_event(None, &event).unwrap();
+    };
+    for (call, name, input, start, end) in [
+        (
+            "shell",
+            "shell",
+            Some(serde_json::json!({"command":"true"})),
+            Some(1000),
+            2240,
+        ),
+        (
+            "poll",
+            "shell",
+            Some(serde_json::json!({"action":"poll","job_id":"job-1"})),
+            Some(3000),
+            3100,
+        ),
+        ("wait", "wait", None, Some(4000), 4999),
+        (
+            "js",
+            "run_js",
+            Some(serde_json::json!({"code":"1"})),
+            Some(6000),
+            5000,
+        ),
+        ("missing", "delegate", None, None, 7000),
+    ] {
+        if let Some(start) = start {
+            let mut kind = started(call, name, serde_json::Value::Null);
+            if let ToolEvent::ToolStarted { input: value, .. } = &mut kind {
+                *value = input;
+            }
+            at(kind, start);
+        }
+        at(completed(call, name, None, false), end);
+    }
+    let indexed = read_all(&f, HistoryDirection::Forward, true);
+    assert_eq!(
+        indexed
+            .iter()
+            .map(|m| tool(m).duration_ms)
+            .collect::<Vec<_>>(),
+        [Some(1240), Some(100), Some(999), None, None]
+    );
+    let live: Vec<_> = (0..indexed.len())
+        .map(|_| next_message(&f, &mut sub))
+        .collect();
+    assert_eq!(live, indexed);
+    // Invalidate via the existing trigger without changing a timestamp: `dirty`
+    // advances the first start by 1ns, which correctly changes a floored duration.
+    let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+    db.execute("UPDATE events SET wall_clock_ns=wall_clock_ns WHERE id=(SELECT MIN(id) FROM events WHERE run_id='run-1')", []).unwrap();
+    assert_eq!(read_all(&f, HistoryDirection::Forward, false), indexed);
+    rebuild(&f);
+    assert_eq!(read_all(&f, HistoryDirection::Backward, true), indexed);
 }

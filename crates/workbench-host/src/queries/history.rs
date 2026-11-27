@@ -115,7 +115,7 @@ impl Bodies {
             }
         }
     }
-    fn tool(
+    pub(crate) fn tool(
         &self,
         thread: &ThreadId,
         run: &RunId,
@@ -148,6 +148,7 @@ impl Bodies {
                 .input
                 .as_ref()
                 .map(|input| self.parts_content(thread, run, &input.parts)),
+            duration_ms: tool.duration_ms,
             status: if tool.is_error {
                 ToolCallStatus::Failed
             } else {
@@ -552,12 +553,7 @@ type Digest = [u8; 32];
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Order(i64, bool, i64, String);
 
-fn wall_clock_ns(at: std::time::SystemTime) -> i64 {
-    match at.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
-        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap_or(i64::MAX),
-    }
-}
+use storage::history::rows::wall_clock_ns;
 
 fn extend(chain: &Digest, raw: &RawMessage) -> Digest {
     use sha2::{Digest as _, Sha256};
@@ -586,7 +582,7 @@ struct RunFold {
     consumed: std::collections::BTreeMap<String, (i64, bool)>,
     /// Tool calls started and not yet completed, with the id of the event that started them;
     /// the input is read from that event when the completion is projected.
-    starts: std::collections::BTreeMap<String, i64>,
+    starts: std::collections::BTreeMap<String, (i64, i64)>,
     chain: Digest,
 }
 impl RunFold {
@@ -626,6 +622,7 @@ impl RunFold {
         if let Some(message) = self.observe(
             db,
             row.id,
+            at,
             &row.event.kind,
             row.format == storage::StoredFormat::Tokenized,
         ) {
@@ -675,6 +672,7 @@ impl RunFold {
         &mut self,
         db: &storage::Database,
         id: i64,
+        at: i64,
         kind: &EventKind,
         tokenized: bool,
     ) -> Option<RawMessage> {
@@ -686,13 +684,9 @@ impl RunFold {
         };
         let mut pending = response.as_ref().and_then(|id| self.parts.remove(id));
         let mut start = None;
-        if let Some((_, call_id, input)) = storage::history::rows::tool_start(kind, tokenized) {
-            // Only a start with arguments can give a completion its input.
-            if input.is_some() {
-                self.starts.insert(call_id.to_owned(), id);
-            } else {
-                self.starts.remove(call_id);
-            }
+        let mut duration = None;
+        if let Some((_, call_id, _)) = storage::history::rows::tool_start(kind, tokenized) {
+            self.starts.insert(call_id.to_owned(), (id, at));
         } else if let EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
             call_id,
             run_id: Some(_),
@@ -700,12 +694,15 @@ impl RunFold {
         }) = kind
         {
             // A start that is gone or unreadable leaves the input unknown.
-            start = self
-                .starts
-                .remove(call_id)
-                .and_then(|id| db.tool_start_input(id).ok().flatten());
+            if let Some((id, began)) = self.starts.remove(call_id) {
+                duration = storage::history::rows::duration_ms(began, at);
+                start = db.tool_start_input(id).ok().flatten();
+            }
         }
-        let message = self.reducer.observe(kind, tokenized, &mut pending, start);
+        let mut message = self.reducer.observe(kind, tokenized, &mut pending, start);
+        if let Some(tool) = message.as_mut().and_then(|m| m.tool.as_mut()) {
+            tool.duration_ms = duration;
+        }
         if let Some((id, pending)) = response.zip(pending) {
             self.parts.insert(id, pending);
         }

@@ -612,6 +612,7 @@ impl Feature for ExecutionFeature {
             return;
         };
         let changed = match event {
+            ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => None,
             ExecutionEvent::RunChanged { run } => Some(&run.thread),
             ExecutionEvent::ThreadExecutionChanged { thread, .. } => Some(thread),
             ExecutionEvent::ConversationPlanChanged { thread, .. } => Some(thread),
@@ -619,6 +620,7 @@ impl Feature for ExecutionFeature {
         if changed == self.thread.as_ref() {
             // Ask again instead of patching: the core's answer is current.
             match event {
+                ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => (),
                 ExecutionEvent::RunChanged { run } => {
                     self.runs_stale = true;
                     // The ledger and goal shown belong to the thread's current root:

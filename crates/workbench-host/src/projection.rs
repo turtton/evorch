@@ -31,6 +31,8 @@ use workbench_protocol::{
     wire::*,
 };
 
+mod activity;
+
 struct Replay {
     cursor: EventCursor,
     event: UiEvent,
@@ -38,6 +40,7 @@ struct Replay {
 }
 /// Frozen cuts survive connection closure, but not epoch invalidation.
 const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SNAPSHOTS: usize = 4;
 struct Frozen {
     id: SnapshotId,
@@ -60,6 +63,7 @@ struct State {
     /// The names saved with the projects; an id stands in for a missing one.
     project_names: std::collections::BTreeMap<String, String>,
     models: Models,
+    activities: BTreeMap<(String, String), activity::LiveTool>,
     replay: VecDeque<Replay>,
     replay_bytes: usize,
     subscribers: Vec<Subscriber>,
@@ -120,6 +124,7 @@ impl State {
         self.epoch = self.epoch.checked_add(1).expect("epoch exhausted");
         self.epoch_tx.send_replace(self.epoch);
         self.sequence = 0;
+        self.activities.clear();
         self.replay.clear();
         self.replay_bytes = 0;
         self.snapshots.clear();
@@ -150,6 +155,10 @@ struct BodyCursor {
 }
 /// Transport-independent host read service. All adapters may share this instance.
 pub struct Projection {
+    activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
+    activity_redactor: secret_guard::SecretRedactor,
+    #[cfg(test)]
+    activity_formats: std::sync::atomic::AtomicUsize,
     runtime: AgentRuntime,
     registry: Arc<ApprovalRegistry>,
     state: Mutex<State>,
@@ -167,11 +176,12 @@ pub struct Projection {
 // Bound work per wakeup, not time: a continuously busy producer must still let runs advance.
 const MAX_REFRESH_WAKEUPS: usize = 64;
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq)]
 struct RefreshWakeups {
     dirty: bool,
     lagged: bool,
     closed: bool,
+    activities: Vec<event_bus::Event>,
 }
 
 impl RefreshWakeups {
@@ -192,8 +202,12 @@ impl RefreshWakeups {
                                 | event_bus::MessageEvent::ToolCallDelta { .. }
                         )
                     );
+                    if activity::relevant(&event.kind) {
+                        wakeups.activities.push(event);
+                    }
                 }
                 Err(RecvError::Lagged(_)) => {
+                    wakeups.activities.clear();
                     wakeups.lagged = true;
                     wakeups.dirty = true;
                 }
@@ -238,6 +252,21 @@ impl Projection {
         limits: SubscriptionLimits,
         epoch: Option<u64>,
     ) -> Arc<Self> {
+        Self::with_activity_clock(
+            runtime,
+            handle,
+            limits,
+            epoch,
+            Arc::new(|| event_bus::EventMeta::now().monotonic),
+        )
+    }
+    fn with_activity_clock(
+        runtime: AgentRuntime,
+        handle: &tokio::runtime::Handle,
+        limits: SubscriptionLimits,
+        epoch: Option<u64>,
+        activity_now: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
+    ) -> Arc<Self> {
         assert!(
             epoch.is_none_or(|e| e != 0 && e != u64::MAX),
             "a fixed projection epoch must be nonzero and advanceable"
@@ -255,6 +284,10 @@ impl Projection {
         });
         let epoch_tx = Arc::new(tokio::sync::watch::Sender::new(epoch));
         let this = Arc::new(Self {
+            activity_now,
+            activity_redactor: secret_guard::SecretRedactor::from_env(),
+            #[cfg(test)]
+            activity_formats: std::sync::atomic::AtomicUsize::new(0),
             _commit_observer: observer,
             runtime,
             registry,
@@ -279,6 +312,7 @@ impl Projection {
                 projects: vec![],
                 project_names: Default::default(),
                 models: Models::default(),
+                activities: BTreeMap::new(),
                 replay: VecDeque::new(),
                 replay_bytes: 0,
                 subscribers: vec![],
@@ -297,12 +331,14 @@ impl Projection {
                 // failed bootstrap must be able to drop both without another task poll.
                 let closed = match (this, change) {
                     (this, Change::Event(event)) => {
-                        // Bus events only wake a canonical read. Coalesce queued wakeups:
-                        // the ledger supplies current state and the commit scanner retains
-                        // every durable message, even when its bus notification was skipped.
+                        // Durable model notifications coalesce; live tools retain bus order
+                        // and share the snapshot / cursor publication boundary.
                         let wakeups = RefreshWakeups::drain(&mut events, event).await;
                         if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty { Self::in_background(this, |p| if p.refresh_models().is_err() { p.invalidate(); }).await; }
+                        if wakeups.dirty { Self::in_background(this, move |p| {
+                            if p.refresh_models().is_err() { p.invalidate(); return; }
+                            for event in wakeups.activities { p.observe_activity(event); }
+                        }).await; }
                         wakeups.closed
                     }
                     (this, Change::Approval(Ok(approval))) => { Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
@@ -942,12 +978,30 @@ impl Projection {
             if let Some(hook) = state.snapshot_hook.take() {
                 hook();
             }
-            let items = snapshot_items(&state.models, &request.scope);
-            if serde_json::to_vec(&items).unwrap().len() > 8 * 1024 * 1024 {
+            let mut items = snapshot_items(&state.models, &request.scope);
+            let mut snapshot_bytes = serde_json::to_vec(&items).unwrap().len();
+            if snapshot_bytes > MAX_SNAPSHOT_BYTES {
                 return Err(queries::error(
                     ErrorCode::Busy,
                     "snapshot exceeds retention budget; use a narrower scope",
                 ));
+            }
+            let now = (self.activity_now)();
+            for item in state.activities.values().filter_map(|live| {
+                let tool = live.at(now);
+                matches_scope(
+                    &state.models,
+                    &request.scope,
+                    &UiEvent::Execution(ExecutionEvent::ToolStarted { tool: tool.clone() }),
+                )
+                .then_some(SnapshotItem::ToolActivity(tool))
+            }) {
+                // Optional live display must not turn an otherwise valid snapshot into Busy.
+                let bytes = serde_json::to_vec(&item).unwrap().len() + 1;
+                if snapshot_bytes + bytes <= MAX_SNAPSHOT_BYTES {
+                    snapshot_bytes += bytes;
+                    items.push(item);
+                }
             }
             let revision = Revision(cursor.sequence.get());
             let page = self
@@ -1204,6 +1258,8 @@ fn also_for(event: &UiEvent) -> &[ThreadId] {
 fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),
+        UiEvent::Execution(ExecutionEvent::ToolStarted { tool }) => Some(&tool.thread),
+        UiEvent::Execution(ExecutionEvent::ToolFinished { thread, .. }) => Some(thread),
         UiEvent::Execution(ExecutionEvent::RunChanged { run }) => Some(&run.thread),
         UiEvent::Execution(
             ExecutionEvent::ThreadExecutionChanged { thread, .. }

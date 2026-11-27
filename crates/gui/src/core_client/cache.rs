@@ -42,7 +42,7 @@ pub struct Cache {
 impl Cache {
     pub fn snapshot(&mut self, item: SnapshotItem) {
         match item {
-            SnapshotItem::CoreStatus(_) => (),
+            SnapshotItem::CoreStatus(_) | SnapshotItem::ToolActivity(_) => (),
             SnapshotItem::Project(p) => {
                 self.projects.insert(p.id.to_string(), p);
             }
