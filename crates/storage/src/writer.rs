@@ -305,6 +305,13 @@ impl Storage {
         writer_lease.validate(&config.db_path)?;
         let database = Database::open(&config)?;
         writer_lease.bind_identity(&config.db_path)?;
+        let released = crate::resume_intent::release_inactive_provider_messages(&database.conn)?;
+        if released > 0 {
+            tracing::info!(
+                intents = released,
+                "inactive resume intent provider messages released"
+            );
+        }
         let lease = (db_lease, writer_lease);
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;

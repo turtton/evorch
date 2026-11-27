@@ -162,6 +162,91 @@ fn write_current_or_replaced(
     Ok(outcome)
 }
 
+const RELEASABLE_ROW: &str = "json_valid(payload)
+      AND json_extract(payload, '$.active') = 0
+      AND json_array_length(payload, '$.provider_input.request.messages') > 0";
+const UNFENCED: &str = "run_id NOT IN (SELECT run_id FROM run_tombstones)
+      AND run_id NOT IN (
+        SELECT m.run_id FROM recovery_members m JOIN recovery_manifests f USING(manifest_id)
+        WHERE f.superseded = 0 AND (
+          f.committed = 0
+          OR EXISTS(SELECT 1 FROM recovery_claims c
+                    WHERE c.manifest_id = f.manifest_id AND c.state IN ('prepared', 'activated'))
+          OR EXISTS(SELECT 1 FROM recovery_members r JOIN resume_intents i ON i.run_id = r.run_id
+                    WHERE r.manifest_id = f.manifest_id AND r.resume = 1
+                      AND json_extract(i.payload, '$.active') = 1
+                      AND json_type(i.payload, '$.stop_reason') = 'null'))
+        UNION
+        SELECT e.run_id FROM restart_expected_members e JOIN restart_transactions t USING(restart_id)
+        WHERE t.phase != 'completed' AND (
+          t.phase NOT IN ('aborted', 'invalidated', 'superseded')
+          OR EXISTS(SELECT 1 FROM restart_components c
+                    WHERE c.restart_id = t.restart_id AND c.disposition = 'retry_pending')))";
+const RELEASE_TABLES: [&str; 8] = [
+    "resume_intents",
+    "run_tombstones",
+    "recovery_manifests",
+    "recovery_members",
+    "recovery_claims",
+    "restart_transactions",
+    "restart_expected_members",
+    "restart_components",
+];
+const RELEASE_BATCH_ROWS: usize = 64;
+
+fn release_supported(conn: &rusqlite::Connection) -> Result<bool, StorageError> {
+    let present: usize = conn.query_row(
+        &format!(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ({})",
+            RELEASE_TABLES.map(|name| format!("'{name}'")).join(",")
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(present == RELEASE_TABLES.len())
+}
+
+/// Inactive intents saved before the runtime started releasing their provider
+/// messages. The rewrite advances each revision, so a row that a manifest could
+/// still claim or an unfinished restart still expects is left alone, and callers
+/// run it only before any recovery reads revisions: writer startup and offline
+/// compaction. Databases older than the recovery tables have nothing to release.
+pub(crate) fn inactive_provider_message_rows(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<String>, StorageError> {
+    if !release_supported(conn)? {
+        return Ok(Vec::new());
+    }
+    let mut query = conn.prepare(&format!(
+        "SELECT run_id FROM resume_intents WHERE {RELEASABLE_ROW} AND {UNFENCED}"
+    ))?;
+    Ok(query
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?)
+}
+
+pub(crate) fn release_inactive_provider_messages(
+    conn: &rusqlite::Connection,
+) -> Result<u64, StorageError> {
+    let candidates = inactive_provider_message_rows(conn)?;
+    let mut released = 0;
+    for batch in candidates.chunks(RELEASE_BATCH_ROWS) {
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut update = tx.prepare(&format!(
+                "UPDATE resume_intents
+                 SET payload = json_set(payload, '$.provider_input.request.messages', json('[]'))
+                 WHERE run_id = ?1 AND {RELEASABLE_ROW}"
+            ))?;
+            for run_id in batch {
+                released += update.execute([run_id])? as u64;
+            }
+        }
+        tx.commit()?;
+    }
+    Ok(released)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +376,112 @@ mod tests {
         assert!(db.resume_intents().unwrap().is_empty());
         assert!(db.resume_intent("run-41").unwrap().is_none());
         assert!(save(&db.conn, &record("new", "{}"), Some("old")).is_err());
+    }
+    #[test]
+    fn writer_startup_releases_messages_of_inactive_intents_outside_recovery_fences() {
+        // Given: inactive, active and manifest-fenced intents that all carry messages
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::StorageConfig {
+            db_path: dir.path().join("intents.db"),
+            ..Default::default()
+        };
+        let intent = |run: &str, active: bool| {
+            serde_json::json!({
+                "run_id": run, "incarnation": "i", "active": active,
+                "provider_input": {"edit_tool": "edit", "request": {
+                    "model": "m", "messages": [{"role": "user", "content": []}],
+                    "tools": [{"name": "read"}]
+                }}
+            })
+            .to_string()
+        };
+        {
+            let db = Database::open(&config).unwrap();
+            for (run, active) in [
+                ("run-done", false),
+                ("run-live", true),
+                ("run-fenced", false),
+                ("run-dead-fence", false),
+            ] {
+                db.conn
+                    .execute(
+                        "INSERT INTO resume_intents(run_id,incarnation,payload) VALUES(?1,'i',?2)",
+                        params![run, intent(run, active)],
+                    )
+                    .unwrap();
+            }
+            db.conn
+                .execute_batch(
+                    "INSERT INTO recovery_manifests(manifest_id,schema_version,member_count,edge_count,edges_json)
+                     VALUES('m',1,1,0,'[]');
+                     INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json)
+                     VALUES('m','run-fenced','i',0,0,'{}');
+                     INSERT INTO recovery_manifests(manifest_id,schema_version,committed,member_count,edge_count,edges_json)
+                     VALUES('finished',1,1,1,0,'[]');
+                     INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json)
+                     VALUES('finished','run-dead-fence','i',0,1,'{}');",
+                )
+                .unwrap();
+        }
+
+        // When: the writer opens the database
+        drop(crate::Storage::open(config.clone()).unwrap());
+
+        // Then: inactive intents lost their messages unless a manifest can still claim them
+        let db = Database::open(&config).unwrap();
+        let read = |run: &str| -> (serde_json::Value, u64) {
+            db.conn
+                .query_row(
+                    "SELECT payload,revision FROM resume_intents WHERE run_id=?1",
+                    [run],
+                    |row| {
+                        Ok((
+                            serde_json::from_str(&row.get::<_, String>(0)?).unwrap(),
+                            row.get(1)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let messages = |value: &serde_json::Value| {
+            value["provider_input"]["request"]["messages"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        let (done, done_revision) = read("run-done");
+        assert_eq!(messages(&done), 0);
+        assert_eq!(
+            done["provider_input"]["request"]["tools"],
+            serde_json::json!([{"name": "read"}])
+        );
+        assert_eq!(done["provider_input"]["edit_tool"], "edit");
+        assert_eq!(done_revision, 1);
+        assert_eq!(
+            read("run-live"),
+            (serde_json::from_str(&intent("run-live", true)).unwrap(), 0)
+        );
+        assert_eq!(
+            read("run-fenced"),
+            (
+                serde_json::from_str(&intent("run-fenced", false)).unwrap(),
+                0
+            )
+        );
+        assert_eq!(messages(&read("run-dead-fence").0), 0);
+    }
+
+    #[test]
+    fn databases_without_recovery_tables_have_nothing_to_release() {
+        // Given: a database older than the recovery tables
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE resume_intents(run_id TEXT PRIMARY KEY, incarnation TEXT, payload TEXT)",
+        )
+        .unwrap();
+
+        // When / Then: the release is a no-op instead of an error
+        assert!(inactive_provider_message_rows(&conn).unwrap().is_empty());
+        assert_eq!(release_inactive_provider_messages(&conn).unwrap(), 0);
     }
 }

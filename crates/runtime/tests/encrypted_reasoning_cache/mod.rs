@@ -580,7 +580,7 @@ fn restart_responses(
 #[tokio::test]
 async fn restart_restores_the_same_reasoning_then_reuses_the_prefix() {
     // A random ciphertext substring can look like a credential. It must remain
-    // byte-exact through both the snapshot and the persisted provider input.
+    // byte-exact through the snapshot; a stopped intent no longer keeps the prefix.
     let ciphertext = format!("enc:rs_1:{}-{}:final", "sk", "A".repeat(32));
     assert!(
         secret_guard::SecretRedactor::with_known_values([])
@@ -639,7 +639,7 @@ async fn restart_restores_the_same_reasoning_then_reuses_the_prefix() {
         .resume_intent(&run.to_string())
         .unwrap()
         .unwrap();
-    assert!(before.payload.contains(&ciphertext));
+    assert!(!before.payload.contains(&ciphertext));
     storage.close();
     let storage = storage::Storage::open(db.clone()).unwrap();
     let reopened = storage::Database::open(&db)

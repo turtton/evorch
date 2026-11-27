@@ -538,3 +538,30 @@ async fn queued_lane_admissions_are_operator_drained_without_provider_tasks_with
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
     fixture.runtime.cancel(ordinary).unwrap();
 }
+
+#[tokio::test]
+async fn stopped_intent_keeps_provider_settings_but_not_its_message_prefix() {
+    // Given: a checkpointed run whose intent holds the exact provider input
+    let mut f = Fixture::new(1);
+    let run = f.start();
+    f.model.entered.notified().await;
+    f.runtime.request_quiesce();
+    f.model.release.add_permits(1);
+    f.entered.recv().await.unwrap();
+    f.release[0].add_permits(1);
+    f.completed.recv().await.unwrap();
+    f.runtime.wait_quiesced().await.unwrap();
+    let live = f.intent(run).provider_input.unwrap();
+    assert!(!live.request.messages.is_empty());
+
+    // When: the run stops
+    f.cleanup(run).await;
+
+    // Then: the durable intent drops only the message prefix
+    let stopped = f.intent(run);
+    assert!(!stopped.active);
+    let input = stopped.provider_input.unwrap();
+    assert!(input.request.messages.is_empty());
+    assert_eq!(input.edit_tool, live.edit_tool);
+    assert_eq!(input.request.tools, live.request.tools);
+}

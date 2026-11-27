@@ -418,6 +418,9 @@ impl Coordinator {
         };
         let mut intent = old.clone();
         change(&mut intent);
+        if old.active {
+            intent.release_inactive_provider_messages();
+        }
         if *old == intent {
             return Ok(());
         }
@@ -497,6 +500,9 @@ impl Coordinator {
             if intent.wait == ResumeWait::AdmissionQueued {
                 intent.active = false;
             }
+        }
+        if old.active {
+            intent.release_inactive_provider_messages();
         }
         if *old == intent {
             return Ok(());
