@@ -26,15 +26,15 @@
 #  5. Scheduling: docs-schema starts after the producer, browser-e2e after
 #     quick-checks, every other job keeps its needs; a PR supersedes older
 #     runs, a main run does not.
-#  6. cef-e2e is one job with the seven real-CEF invocations, each with its
+#  6. cef-e2e is one job with the six real-CEF invocations, each with its
 #     prerequisite builds and --no-tests fail.
 #  7. cache-save restores the shared cache with an id and runs every step
 #     after the restore (except the disk report) only when the restore was not an
 #     exact hit; the condition behaves as a truth table over the output.
-#  8. Only a main push runs offscreen-gate, gui-evidence and the main-only-gui
-#     suite; ci runs ci-remaining, never the local remaining suite; no step may
-#     continue on error; the pull request screenshot producer is gone and the GUI
-#     PR evidence publisher is paused.
+#  8. Nothing is left to a main push: the former embedded-GUI jobs (offscreen-gate,
+#     gui-evidence), the main-only-gui suite, the PR screenshot producer and its
+#     publisher workflow are gone; every event runs cache, io and remaining; no
+#     step may continue on error.
 # Each check also fails on a mutated copy of the real files.
 # shellcheck disable=SC2016 # the workflow expression is matched literally
 set -euo pipefail
@@ -142,7 +142,7 @@ check_producer_overwrite() { # <ci.yml>
 
 cache_key='${{ runner.os }}-ci-workspace-v2'
 cargo_step_re='(guard-cargo\.sh |cargo (build|test|run|nextest|clippy|check) )'
-readers=(lint docs-schema otel tests offscreen-gate gui-evidence browser-e2e cef-e2e)
+readers=(lint docs-schema otel tests browser-e2e cef-e2e)
 
 # Prints "<job> <shared-key> <save-if>" (tab separated) for each rust-cache step.
 cache_steps() { # <ci.yml>
@@ -244,7 +244,7 @@ check_recipe_covers_readers() { # <ci.yml>
   return "$bad"
 }
 
-# cef-e2e is one job: no matrix, the seven real-CEF invocations in order, each in a
+# cef-e2e is one job: no matrix, the six real-CEF invocations in order, each in a
 # step that also holds what the invocation needs (the helper and renderer builds,
 # the binaries it is pointed at) and fails when it selects no test.
 check_cef_single() { # <ci.yml>
@@ -266,7 +266,6 @@ check_cef_single() { # <ci.yml>
     'scripts/guard-cargo.sh run -p evorch-renderer --run-ignored all'
     'scripts/guard-cargo.sh run -p evorch-core --features renderer-test-helper --test renderer_owner_cef --run-ignored only'
     'scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test preview_cef --run-ignored only'
-    "scripts/guard-cargo.sh run -p gui --lib -E 'test(/^html_preview::tests::/)' --run-ignored only"
     'scripts/guard-cargo.sh run -p evorch-core --test f4_product_cef --test agent_observation_restart --test public_restart_product --run-ignored only'
     'scripts/guard-cargo.sh run -p core-client-e2e --features gui/cef --test agent_observation_gui --run-ignored only'
   )
@@ -278,7 +277,6 @@ check_cef_single() { # <ci.yml>
     "$helper"
     "$renderer|EVORCH_RENDERER_EXE=|renderer_owner_cef"
     "$renderer|$helper|EVORCH_RENDERER_EXE="
-    "$helper|EVORCH_CEF_HELPER="
     ''
     ''
   )
@@ -330,8 +328,6 @@ check_scheduling() { # <ci.yml>
     [browser-e2e]='quick-checks scope-gate '
     [tests]='scope-gate '
     [cef-e2e]='scope-gate '
-    [offscreen-gate]='scope-gate '
-    [gui-evidence]='scope-gate '
     [cache-save]='product-artifact '
   )
   for job in "${!expected[@]}"; do
@@ -414,14 +410,15 @@ check_cache_hit_truth() { # <ci.yml>
   return "$bad"
 }
 
-main_push_if="if: github.event_name == 'push' && github.ref == 'refs/heads/main'"
-check_main_only() { # <ci.yml> <gui-pr-evidence.yml>
-  local ci=$1 publisher=$2 dir bad=0 job
+# Every event runs the same suites, and the jobs and files of the former embedded GUI
+# verification are gone, not paused.
+check_every_event() { # <ci.yml>
+  local ci=$1 dir bad=0 job gone
   dir=$(mktemp -d "$work/main.XXXXXX")
   split_jobs "$ci" "$dir"
   for job in offscreen-gate gui-evidence; do
-    if [[ "$(grep -cxF "    $main_push_if" "$dir/$job")" != 1 ]]; then
-      echo "$job must run on a push to main only (job-level $main_push_if)" >&2
+    if [[ -e "$dir/$job" ]]; then
+      echo "$job belonged to the embedded GUI and must be gone" >&2
       bad=1
     fi
   done
@@ -429,43 +426,43 @@ check_main_only() { # <ci.yml> <gui-pr-evidence.yml>
     echo "the tests job must run on every event (no job-level if)" >&2
     bad=1
   fi
-  awk -v want="        $main_push_if && matrix.group == 'gui'" '
+  awk '
     function flush() {
-      if (step ~ /name: Main-only GUI tests/) {
-        found = 1
-        if (index(step, "\n" want "\n") == 0) { print "the main-only step needs exactly: " want; bad = 1 }
-        if (step !~ / main-only-gui "\$EVORCH_TEST_INVENTORY_DIR"(\n|$)/) { print "the main-only step must run the main-only-gui suite"; bad = 1 }
-      }
       if (step ~ /name: Remaining tests/) {
         rfound = 1
-        if (step !~ / ci-remaining "\$EVORCH_TEST_INVENTORY_DIR"(\n|$)/) { print "Remaining tests must run ci-remaining"; bad = 1 }
+        if (step !~ / remaining "\$EVORCH_TEST_INVENTORY_DIR"(\n|$)/) { print "Remaining tests must run the remaining suite"; bad = 1 }
         if (step ~ /\n *if:/) { print "Remaining tests must run on every event"; bad = 1 }
       }
-      if (step ~ /run-test-group\.sh run .* remaining "/) { print "a step runs the local remaining suite"; bad = 1 }
+      if (step ~ /run-test-group\.sh run .* (ci-remaining|main-only-gui) "/) { print "a step runs a removed suite"; bad = 1 }
+      if (step ~ /event_name == .push./ && step ~ /run-test-group\.sh/) { print "a test step is left to a main push"; bad = 1 }
     }
     /^      - / { flush(); step = "" }
     { step = step "\n" $0 }
-    END { flush(); if (!found || !rfound) { print "the tests job lacks the Remaining tests or the main-only step"; bad = 1 } exit bad }
+    END { flush(); if (!rfound) { print "the tests job lacks the Remaining tests step"; bad = 1 } exit bad }
   ' "$dir/tests" >&2 || bad=1
+  for gone in main-only-gui ci-remaining gui-evidence-matrix check-gui-native check-gui-wayland-idle headless_capture native_qa_window gui-pr-preview html_preview; do
+    if grep -q -- "$gone" "$ci"; then
+      echo "ci must not name the removed $gone any more" >&2
+      bad=1
+    fi
+  done
   if grep -q 'continue-on-error' "$ci"; then
     echo "no step may continue on error" >&2
     bad=1
   fi
-  if grep -q 'gui-pr-preview' "$ci"; then
-    echo "ci must not produce the pull request screenshots any more" >&2
-    bad=1
-  fi
   grep -q '^    if: always()$' "$dir/ci" || { echo "ci must keep if: always()" >&2; bad=1; }
-  if [[ "$(awk '/^  publish:/ { on = 1; next } on && /^    if: / { sub(/^    if: /, ""); print; exit }' "$publisher")" != '${{ false }}' ]]; then
-    echo "the GUI PR evidence publisher must be paused with if: \${{ false }}" >&2
-    bad=1
-  fi
-  grep -q 'workflows: \[ci\]' "$publisher" || { echo "the publisher must keep following the ci workflow" >&2; bad=1; }
+  for gone in .github/workflows/gui-pr-evidence.yml scripts/ci-main-only-gui.sh scripts/ci-main-only-gui-tests.json \
+    scripts/gui-evidence-matrix.sh scripts/gui-plan-evidence.sh scripts/check-gui-native.sh scripts/check-gui-wayland-idle.sh \
+    scripts/post-gui-pr-evidence.sh; do
+    if [[ -e "$gone" ]]; then
+      echo "$gone belonged to the embedded GUI verification and must be gone" >&2
+      bad=1
+    fi
+  done
   return "$bad"
 }
 
 ci=.github/workflows/ci.yml
-publisher=.github/workflows/gui-pr-evidence.yml
 groups=scripts/ci-test-groups.json
 fails=0
 ok() { # <description> <command...>
@@ -492,11 +489,11 @@ ok "the producer's product-core upload overwrites an older artifact" check_produ
 ok "the shared dependency cache has one writer and matching readers" check_cache_wiring "$ci"
 ok "browser-e2e and cef-e2e build into the shared target" check_e2e_target "$ci"
 ok "cache-save builds what browser-e2e and cef-e2e build" check_recipe_covers_readers "$ci"
-ok "cef-e2e is one job with the seven invocations" check_cef_single "$ci"
+ok "cef-e2e is one job with the six invocations" check_cef_single "$ci"
 ok "docs-schema, browser-e2e and the other jobs have the intended needs" check_scheduling "$ci"
 ok "cache-save skips its recipe steps only on an exact hit" check_cache_hit "$ci"
 ok "the cache-hit condition runs the recipe unless the output is exactly true" check_cache_hit_truth "$ci"
-ok "only a main push runs the former GUI checks, and the PR screenshots are paused" check_main_only "$ci" "$publisher"
+ok "every event runs the same suites and the embedded GUI verification is gone" check_every_event "$ci"
 
 # The same checks reject drift.
 mutate() { # <name> <sed-script> <file>
@@ -569,7 +566,7 @@ rejects "another job gaining a needs" check_scheduling "$work/ci-tests-needs.yml
 mutate ci-agg-needs.yml 's/needs: \[quick-checks, scope-gate, lint, docs-schema, otel, product-artifact, tests\]/needs: [quick-checks, scope-gate, lint, docs-schema, otel, product-artifact]/' "$ci"
 rejects "an aggregate that stops needing tests" check_scheduling "$work/ci-agg-needs.yml"
 
-# cef-e2e: one job, seven invocations, their prerequisites.
+# cef-e2e: one job, six invocations, their prerequisites.
 awk '/^  cef-e2e:/ { print; print "    strategy:"; print "      matrix:"; print "        cell: [engine, client]"; next } { print }' "$ci" > "$work/ci-cef-matrix.yml"
 rejects "a matrix on cef-e2e" check_cef_single "$work/ci-cef-matrix.yml"
 mutate ci-cef-restart.yml 's/ --test public_restart_product//' "$ci"
@@ -582,9 +579,9 @@ mutate ci-cef-feature.yml 's/-p core-client-e2e --features gui\/cef --test agent
 rejects "an invocation with changed features" check_cef_single "$work/ci-cef-feature.yml"
 awk '/^  cef-e2e:/ { on = 1 } on && /export EVORCH_RENDERER_EXE=/ && !done { done = 1; next } { print }' "$ci" > "$work/ci-cef-env.yml"
 rejects "a CEF step without its renderer binary" check_cef_single "$work/ci-cef-env.yml"
-awk '/^  cef-e2e:/ { on = 1 } on && /cargo build -p browser-cef --features cef --bin evorch-cef-helper/ { n++; if (n == 4) next } { print }' "$ci" > "$work/ci-cef-helper.yml"
+awk '/^  cef-e2e:/ { on = 1 } on && /cargo build -p browser-cef --features cef --bin evorch-cef-helper/ { n++; if (n == 3) next } { print }' "$ci" > "$work/ci-cef-helper.yml"
 rejects "a CEF step without its helper build" check_cef_single "$work/ci-cef-helper.yml"
-awk '/^  cef-e2e:/ { on = 1 } on && /scripts\/guard-cargo.sh run -p browser-cef --features cef --run-ignored all/ { hold = $0; next } on && /scripts\/guard-cargo.sh run -p gui --lib/ && hold != "" { print; print hold; hold = ""; next } { print }' "$ci" > "$work/ci-cef-order.yml"
+awk '/^  cef-e2e:/ { on = 1 } on && /scripts\/guard-cargo.sh run -p browser-cef --features cef --run-ignored all/ { hold = $0; next } on && /scripts\/guard-cargo.sh run -p core-client-e2e --features gui\/cef --test preview_cef/ && hold != "" { print; print hold; hold = ""; next } { print }' "$ci" > "$work/ci-cef-order.yml"
 rejects "invocations out of order" check_cef_single "$work/ci-cef-order.yml"
 
 # cache-save: the cache-hit condition on every recipe step, and nothing else.
@@ -610,23 +607,19 @@ rejects "an inverted cache-hit condition" check_cache_hit_truth "$work/ci-hit-eq
 mutate ci-hit-false.yml "s/cache-hit != 'true'/cache-hit != 'false'/" "$ci"
 rejects "a condition that skips on a partial restore" check_cache_hit_truth "$work/ci-hit-false.yml"
 
-# Main-only conditions, the suite names and the paused publisher.
-awk '/^  offscreen-gate:/ { on = 1 } on && /^    if: / && !done { done = 1; next } { print }' "$ci" > "$work/ci-main-offscreen.yml"
-rejects "offscreen-gate on every event" check_main_only "$work/ci-main-offscreen.yml" "$publisher"
-awk '/^  gui-evidence:/ { on = 1 } on && /^    if: / && !done { print "    if: github.event_name == '"'"'push'"'"'"; done = 1; next } { print }' "$ci" > "$work/ci-main-evidence.yml"
-rejects "gui-evidence on any push" check_main_only "$work/ci-main-evidence.yml" "$publisher"
-mutate ci-main-step.yml "s/ && matrix.group == 'gui'\$//" "$ci"
-rejects "a main-only step without the gui group condition" check_main_only "$work/ci-main-step.yml" "$publisher"
-mutate ci-main-suite.yml 's/ main-only-gui "\$EVORCH_TEST_INVENTORY_DIR"/ remaining "$EVORCH_TEST_INVENTORY_DIR"/' "$ci"
-rejects "the main-only step running the local remaining suite" check_main_only "$work/ci-main-suite.yml" "$publisher"
-mutate ci-main-remaining.yml 's/ ci-remaining "\$EVORCH_TEST_INVENTORY_DIR"/ remaining "$EVORCH_TEST_INVENTORY_DIR"/' "$ci"
-rejects "the shards running the local remaining suite" check_main_only "$work/ci-main-remaining.yml" "$publisher"
-mutate ci-main-coe.yml 's/^\(  *\)- name: Main-only GUI tests (main push)$/\1- name: Main-only GUI tests (main push)\n\1  continue-on-error: true/' "$ci"
-rejects "a main-only step that continues on error" check_main_only "$work/ci-main-coe.yml" "$publisher"
+# Nothing is left to a main push; the removed jobs, suites and scripts stay removed.
+awk '/^  cache-save:/ { print "  offscreen-gate:"; print "    runs-on: ubuntu-latest"; print "    steps: []" } { print }' "$ci" > "$work/ci-main-offscreen.yml"
+rejects "an offscreen-gate job back" check_every_event "$work/ci-main-offscreen.yml"
+awk '/^  tests:/ { on = 1 } on && /^    needs: scope-gate$/ && !done { print; print "    if: github.event_name == '"'"'push'"'"'"; done = 1; next } { print }' "$ci" > "$work/ci-main-tests.yml"
+rejects "the tests job left to a push" check_every_event "$work/ci-main-tests.yml"
+mutate ci-main-remaining.yml 's/ remaining "\$EVORCH_TEST_INVENTORY_DIR"/ ci-remaining "$EVORCH_TEST_INVENTORY_DIR"/' "$ci"
+rejects "the shards running a removed suite" check_every_event "$work/ci-main-remaining.yml"
+{ cat "$ci"; printf '# main-only-gui\n'; } > "$work/ci-main-name.yml"
+rejects "the main-only-gui suite named again" check_every_event "$work/ci-main-name.yml"
+mutate ci-main-coe.yml 's/^\(  *\)- name: Remaining tests$/\1- name: Remaining tests\n\1  continue-on-error: true/' "$ci"
+rejects "a test step that continues on error" check_every_event "$work/ci-main-coe.yml"
 { cat "$ci"; printf '# gui-pr-preview\n'; } > "$work/ci-preview.yml"
-rejects "the pull request screenshots producer" check_main_only "$work/ci-preview.yml" "$publisher"
-mutate publisher-active.yml "s/^    if: \\\${{ false }}\$/    if: github.event.workflow_run.conclusion == 'success'/" "$publisher"
-rejects "an active GUI PR evidence publisher" check_main_only "$ci" "$work/publisher-active.yml"
+rejects "the pull request screenshots producer" check_every_event "$work/ci-preview.yml"
 
 mutate ci-cancel.yml 's/cancel-in-progress: .*/cancel-in-progress: true/' "$ci"
 rejects "cancelling main runs" check_scheduling "$work/ci-cancel.yml"

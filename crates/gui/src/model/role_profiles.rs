@@ -41,15 +41,6 @@ pub enum RoleProfileAction {
     Delete(String),
 }
 
-/// What a settings worker did, so the poll can keep the modal open for profile edits.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum RoleProfileJob {
-    #[default]
-    Save,
-    Created(String),
-    Deleted(String),
-}
-
 impl RoleProfilePicker {
     /// `preferred` wins when it exists; otherwise the project's effective profile is edited.
     pub fn new(

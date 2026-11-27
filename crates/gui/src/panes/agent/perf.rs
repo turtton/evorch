@@ -1,5 +1,4 @@
-//! Opt-in transcript work counters, for the headless `transcript_perf`
-//! benchmark. They count work (entries enumerated, rows drawn or skipped, ...)
+//! Opt-in transcript work counters, read by the transcript card tests. They count work (entries enumerated, rows drawn or skipped, ...)
 //! and, only while enabled, time its phases. Timing is report-only: nothing
 //! may use it as a pass criterion.
 //!

@@ -81,7 +81,7 @@ wiremock = "0.6"
 # entirely and keep only line tables for workspace crates, so backtraces and
 # panic messages keep file:line for OUR code (dep frames keep symbols only).
 # The main `ci` job forces CARGO_PROFILE_DEV_DEBUG=0 / CARGO_PROFILE_TEST_DEBUG=0
-# (env overrides this manifest); other CI jobs (offscreen-gate, browser-e2e)
+# (env overrides this manifest); other CI jobs (browser-e2e, cef-e2e)
 # pick up this slimmer profile to reduce their disk/link load.
 # Tradeoff: variable inspection in a debugger needs the escape-hatch profile below.
 [profile.dev]

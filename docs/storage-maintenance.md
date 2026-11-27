@@ -599,9 +599,6 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   "removed N unused artifact files (X MB)."、読めない artifact 記録で回収が止まっているときは Skipped に件数）。束縛不一致は "Thread deletion is disabled
   (configuration mismatch: reason)"。`NoExclusive` は通知せず、ログだけ。
 
-実 DB のコピーでの確認は `cargo run -p gui --example startup_phase_check -- --db COPY/evorch-events.db --root COPY/threads --sidebar COPY/sidebar.json [--days 30] [--reclaim-cycles N]`
-（窓なしで起動回収・sidebar の片付け・背景回収を走らせる。新規確定はしない。**原本には使わない**）。
-
 ## 既知の制約
 
 - 縮小は停止中の DB が前提。`compact-events` は preview でも稼働中の store を拒否し、`backfill-events` だけが稼働中に使える。リース（`.maintenance-lock`）を迂回する手段はない。

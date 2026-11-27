@@ -9,8 +9,6 @@
 #   --expected-sha SHA     every inventory must be for this commit
 #   --reference-default F  also require the union of the group `default` sets to
 #                          equal this file (a whole-workspace `default` listing)
-#   --main-only-manifest F the registry of the main-only gui binaries (default
-#                          scripts/ci-main-only-gui-tests.json)
 #   --check-config         only validate the config against the members
 #   --summary FILE         write a markdown summary there (also appended to
 #                          $GITHUB_STEP_SUMMARY)
@@ -24,17 +22,11 @@
 # workspace members; shards of a group that disagree about the pre-partition
 # listing; duplicate rows; tests of a package outside the group; ignored tests
 # in `default` (or a default test missing from `all`); cache/io/remaining that
-# are not disjoint or do not add up to `default`; a remaining that is not
-# ci-remaining plus main-only-gui; a main-only-gui that is not exactly the
-# default tests of the registered binaries (so also: one that is not empty in a
-# group without the gui package, or that overlaps cache or io, or that names a
-# binary which lists no test); an empty suite that is not in allow_empty_suites;
-# shard partitions that overlap or do not add up to the suite.
-# Nothing here depends on the event: the pull request run and the main push list
-# and partition the same suites. The partitions of cache, io, ci-remaining and
-# main-only-gui are what the merge gate adds up; remaining (the local suite) is
-# only checked against its own partition. A pull request does not run
-# main-only-gui; this gate shows that it is listed and partitioned, not that it ran.
+# are not disjoint or do not add up to `default`; an empty suite that is not in
+# allow_empty_suites; shard partitions that overlap or do not add up to the suite.
+# Nothing here depends on the event: the pull request run and the main push list,
+# partition and run the same suites (cache, io, remaining). There is no suite that
+# only a main push runs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,7 +36,6 @@ expected_sha=""
 reference=""
 check_config=0
 summary_file=""
-manifest=scripts/ci-main-only-gui-tests.json
 dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,7 +45,6 @@ while [[ $# -gt 0 ]]; do
     --reference-default) reference="${2:?--reference-default needs a file}"; shift 2 ;;
     --check-config) check_config=1; shift ;;
     --summary) summary_file="${2:?--summary needs a file}"; shift 2 ;;
-    --main-only-manifest) manifest="${2:?--main-only-manifest needs a file}"; shift 2 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) dir="$1"; shift ;;
   esac
@@ -75,17 +65,13 @@ common() { LC_ALL=C comm -12 "$1" "$2" | wc -l | tr -d ' '; }
 
 if [[ -z "$members_file" ]]; then
   members_file="$work/members.txt"
-  for manifest in crates/*/Cargo.toml; do
-    awk -F'"' '/^name *=/ { print $2; exit }' "$manifest"
+  for crate_manifest in crates/*/Cargo.toml; do
+    awk -F'"' '/^name *=/ { print $2; exit }' "$crate_manifest"
   done | LC_ALL=C sort > "$members_file"
 else
   LC_ALL=C sort "$members_file" > "$work/members.txt"
   members_file="$work/members.txt"
 fi
-
-# The binaries the registry names, as nextest binary ids (one per line, sorted).
-scripts/ci-main-only-gui.sh --manifest "$manifest" binaries > "$work/mo-ids.txt" \
-  || { echo "FAIL: the main-only gui registry $manifest is not valid" >&2; exit 1; }
 
 mapfile -t groups < <(jq -r '.groups | keys[]' "$config")
 [[ ${#groups[@]} -gt 0 ]] || { echo "FAIL: $config defines no groups" >&2; exit 1; }
@@ -107,15 +93,9 @@ extra=$(LC_ALL=C comm -23 <(uniq "$work/config-sorted.txt") "$members_file" | tr
 missing=$(LC_ALL=C comm -13 <(uniq "$work/config-sorted.txt") "$members_file" | tr '\n' ' ')
 [[ -z "$missing" ]] || fail "workspace members in no group: $missing"
 
-# The suites of a group. What CI executes is every one but remaining, which is the
-# local suite and equals ci-remaining + main-only-gui.
-suites=(cache io remaining ci-remaining main-only-gui)
-whole_sets=(all default cache io remaining ci-remaining main-only-gui)
-gui_groups=0
-for g in "${groups[@]}"; do
-  if grep -qx gui "$work/pkgs-$g.txt"; then gui_groups=$((gui_groups + 1)); fi
-done
-[[ "$gui_groups" -ge 1 ]] || fail "the main-only registry names gui integration tests, but no group has the gui package"
+# The suites of a group; CI executes every one of them on every event.
+suites=(cache io remaining)
+whole_sets=(all default cache io remaining)
 total_all=0
 if [[ "$check_config" == 0 ]]; then
   [[ -d "$dir" ]] || { echo "FAIL: $dir is not a directory" >&2; exit 1; }
@@ -171,7 +151,7 @@ if [[ "$check_config" == 0 ]]; then
         fail "$g $k/$n: inventory is for $(jq -r '.sha' "$meta"), expected $expected_sha"
       fi
       files_ok=1
-      for f in "${whole_sets[@]}" cache.part io.part remaining.part ci-remaining.part main-only-gui.part; do
+      for f in "${whole_sets[@]}" cache.part io.part remaining.part; do
         if [[ ! -f "$d/$f.tsv" ]]; then
           fail "$g $k/$n: $f.tsv is missing"
           files_ok=0
@@ -213,7 +193,7 @@ if [[ "$check_config" == 0 ]]; then
     [[ "$ignored" == 0 ]] || fail "$g: $ignored ignored tests in default"
     n_missing=$(LC_ALL=C comm -23 "$first/default.tsv" "$first/all.tsv" | wc -l | tr -d ' ')
     [[ "$n_missing" == 0 ]] || fail "$g: $n_missing default tests are missing from all"
-    for pair in "cache io" "cache remaining" "io remaining" "cache ci-remaining" "io ci-remaining" "cache main-only-gui" "io main-only-gui" "ci-remaining main-only-gui"; do
+    for pair in "cache io" "cache remaining" "io remaining"; do
       set -- $pair
       c=$(common "$first/$1.tsv" "$first/$2.tsv")
       [[ "$c" == 0 ]] || fail "$g: $1 and $2 share $c tests"
@@ -221,25 +201,6 @@ if [[ "$check_config" == 0 ]]; then
     sorted_cat "$first/cache.tsv" "$first/io.tsv" "$first/remaining.tsv" > "$work/union-$g.tsv"
     cmp -s "$work/union-$g.tsv" "$first/default.tsv" \
       || fail "$g: cache + io + remaining ($(count "$work/union-$g.tsv")) differ from default ($(count "$first/default.tsv"))"
-    sorted_cat "$first/ci-remaining.tsv" "$first/main-only-gui.tsv" > "$work/rsplit-$g.tsv"
-    cmp -s "$work/rsplit-$g.tsv" "$first/remaining.tsv" \
-      || fail "$g: ci-remaining ($(count "$first/ci-remaining.tsv")) + main-only-gui ($(count "$first/main-only-gui.tsv")) differ from remaining ($(count "$first/remaining.tsv"))"
-    sorted_cat "$first/cache.tsv" "$first/io.tsv" "$first/ci-remaining.tsv" "$first/main-only-gui.tsv" > "$work/ciunion-$g.tsv"
-    cmp -s "$work/ciunion-$g.tsv" "$first/default.tsv" \
-      || fail "$g: cache + io + ci-remaining + main-only-gui ($(count "$work/ciunion-$g.tsv")) differ from default ($(count "$first/default.tsv"))"
-    # main-only-gui is exactly the default tests of the registered binaries, and
-    # only a group with the gui package has any.
-    if grep -qx gui "$work/pkgs-$g.txt"; then
-      awk -F'\t' 'FNR == NR { id[$0] = 1; next } $1 == "gui" && ($2 in id)' "$work/mo-ids.txt" "$first/default.tsv" > "$work/mo-expected-$g.tsv"
-      while IFS= read -r id; do
-        [[ "$(awk -F'\t' -v id="$id" '$2 == id' "$first/default.tsv" | wc -l | tr -d ' ')" != 0 ]] \
-          || fail "$g: the registered binary $id lists no default test"
-      done < "$work/mo-ids.txt"
-    else
-      : > "$work/mo-expected-$g.tsv"
-    fi
-    cmp -s "$work/mo-expected-$g.tsv" "$first/main-only-gui.tsv" \
-      || fail "$g: main-only-gui ($(count "$first/main-only-gui.tsv")) is not exactly the default tests of the registered binaries ($(count "$work/mo-expected-$g.tsv"))"
     for s in "${suites[@]}"; do
       if [[ "$(count "$first/$s.tsv")" == 0 ]]; then
         jq -e --arg g "$g" --arg s "$s" '.groups[$g].allow_empty_suites | index($s)' "$config" > /dev/null \
@@ -260,10 +221,10 @@ if [[ "$check_config" == 0 ]]; then
       sorted_cat "${parts[@]}" > "$work/partunion-$g-$s.tsv"
       cmp -s "$work/partunion-$g-$s.tsv" "$first/$s.tsv" \
         || fail "$g: the $s shards run $(count "$work/partunion-$g-$s.tsv") tests, the suite has $(count "$first/$s.tsv")"
-      [[ "$s" == remaining ]] || cat "$work/partunion-$g-$s.tsv" >> "$work/all-part-union.tsv"
+      cat "$work/partunion-$g-$s.tsv" >> "$work/all-part-union.tsv"
     done
     cat "$first/default.tsv" >> "$work/all-defaults.tsv"
-    summary_rows+="| $g | $n | $(count "$first/all.tsv") | $(count "$first/default.tsv") | $(count "$first/cache.tsv") | $(count "$first/io.tsv") | $(count "$first/ci-remaining.tsv") | $(count "$first/main-only-gui.tsv") | $(count "$first/remaining.tsv") |"$'\n'
+    summary_rows+="| $g | $n | $(count "$first/all.tsv") | $(count "$first/default.tsv") | $(count "$first/cache.tsv") | $(count "$first/io.tsv") | $(count "$first/remaining.tsv") |"$'\n'
   done
   LC_ALL=C sort "$work/all-defaults.tsv" > "$work/defaults-sorted.tsv"
   LC_ALL=C sort "$work/all-part-union.tsv" > "$work/parts-sorted.tsv"
@@ -279,16 +240,14 @@ if [[ "$check_config" == 0 ]]; then
   {
     echo "### Test inventory merge"
     echo
-    echo "| group | shards | all | default | cache | io | ci-remaining | main-only-gui | remaining (local) |"
-    echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    echo "| group | shards | all | default | cache | io | remaining |"
+    echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
     printf '%s' "$summary_rows"
     echo
     echo "union of group defaults: $total_all tests (sha256 $(sha256sum "$work/defaults-sorted.tsv" | cut -c1-12))"
     echo
     if [[ "$failures" == 0 ]]; then
-      echo "Every group and shard is present for one commit; the groups cover the workspace members; the shards of each suite partition it; cache + io + ci-remaining + main-only-gui = default, and remaining = ci-remaining + main-only-gui."
-      echo
-      echo "This lists and partitions the main-only-gui suite on every event; only a push to main runs it."
+      echo "Every group and shard is present for one commit; the groups cover the workspace members; the shards of each suite partition it; cache + io + remaining = default."
     else
       echo "**$failures invariant(s) failed.**"
     fi

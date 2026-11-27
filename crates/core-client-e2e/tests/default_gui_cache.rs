@@ -9,6 +9,16 @@
 //! * The follow-up's request extends the first one (same model, cache key, tool schema and
 //!   prefix): what the client sends, and the connection it uses, add nothing to what the
 //!   model is sent.
+//! * Pull request operations the window sends between turns (link, refresh, auto fix on)
+//!   add nothing to the next request, whether the core accepts or refuses them. The full
+//!   pull request contract (accepted operations, the one notice) is core_pr_cache, which
+//!   drives the same typed commands; this test is the path through the client actor.
+//! * A history read the window makes between two turns (what it does to restore a thread)
+//!   changes nothing in the next request.
+//! * Closing the window does not stop the core: a second window that connects afterwards
+//!   continues the same conversation, and its request extends the earlier ones. This
+//!   replaces the embedded window's own close-handling test: closing a window is only the
+//!   end of a client connection.
 //!
 //! Every wait is for an event of the core's bus or of the client's state; the timeouts only
 //! bound a failing test.
@@ -27,8 +37,11 @@ use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use workbench_host::areas::{Areas, execution::ExecutionArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
 use workbench_protocol::commands::{Command, ComposerRole, SendChat};
-use workbench_protocol::ids::{ProjectId, SubmissionId, ThreadId};
+use workbench_protocol::ids::{OperationId, ProjectId, SubmissionId, ThreadId};
 use workbench_protocol::namespaces::ConversationCommand;
+use workbench_protocol::namespaces::pull_requests::{
+    LinkPullRequest, PullRequestsCommand, RefreshPullRequest, SetAutoFix,
+};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -88,6 +101,8 @@ async fn a_conversation_typed_in_the_default_window_keeps_the_model_prefix() {
         vec![
             ScriptedResponse::text_stream("first", "mock-model", ["hello"]),
             ScriptedResponse::text_stream("second", "mock-model", ["continued"]),
+            ScriptedResponse::text_stream("third", "mock-model", ["again"]),
+            ScriptedResponse::text_stream("fourth", "mock-model", ["from a new window"]),
         ],
         vec!["mock-model".into()],
     );
@@ -188,13 +203,16 @@ context_window_tokens = 1000000
             )));
         }
     });
-    let launcher = core_launcher::Launcher::with_socket(
-        identity.clone(),
-        core_launcher::CoreBinary::explicit(&std::env::current_exe().unwrap()).unwrap(),
-        gui::core_client::client_config(),
-        instance.socket.clone(),
-    )
-    .unwrap();
+    let new_launcher = || {
+        core_launcher::Launcher::with_socket(
+            identity.clone(),
+            core_launcher::CoreBinary::explicit(&std::env::current_exe().unwrap()).unwrap(),
+            gui::core_client::client_config(),
+            instance.socket.clone(),
+        )
+        .unwrap()
+    };
+    let launcher = new_launcher();
     let (actions, rx) = tokio::sync::mpsc::channel(64);
     let shared = Arc::new(Mutex::new(Shared::default()));
     let window = tokio::spawn(serve(
@@ -229,16 +247,94 @@ context_window_tokens = 1000000
         .unwrap();
     turn_completed(&mut turns).await;
 
+    // Pull request operations of the window's bar, between two turns.
+    let thread = ThreadId::new("thread").unwrap();
+    let pull_request_commands = [
+        PullRequestsCommand::LinkPullRequest(LinkPullRequest {
+            operation_id: OperationId::new("pr-link").unwrap(),
+            thread: thread.clone(),
+            locator: "https://github.com/example/repo/pull/1".into(),
+            expected_revision: Default::default(),
+        }),
+        PullRequestsCommand::RefreshPullRequest(RefreshPullRequest {
+            operation_id: OperationId::new("pr-refresh").unwrap(),
+            thread: thread.clone(),
+        }),
+        PullRequestsCommand::SetAutoFix(SetAutoFix {
+            operation_id: OperationId::new("pr-auto-fix").unwrap(),
+            thread: thread.clone(),
+            link_revision: Default::default(),
+            policy_revision: Default::default(),
+            enabled: true,
+        }),
+    ];
+    for command in pull_request_commands {
+        actions
+            .send(Action::Command {
+                command: Command::PullRequests(command),
+                draft: None,
+            })
+            .await
+            .unwrap();
+    }
+    // What the window reads to restore a thread, between two turns.
+    actions
+        .send(Action::History(
+            ThreadId::new("thread").unwrap(),
+            None,
+            false,
+        ))
+        .await
+        .unwrap();
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::SendChat(chat(
+                "three",
+                "third prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    turn_completed(&mut turns).await;
+
+    // The window is closed. The core, its runtime and the conversation stay; a new window
+    // connects and continues the same thread.
+    actions.send(Action::Shutdown).await.unwrap();
+    let _ = tokio::time::timeout(WAIT, window).await;
+    let (actions, rx) = tokio::sync::mpsc::channel(64);
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let window = tokio::spawn(serve(
+        new_launcher(),
+        rx,
+        shared.clone(),
+        egui::Context::default(),
+    ));
+    connected(&shared).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::SendChat(chat(
+                "four",
+                "fourth prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    turn_completed(&mut turns).await;
+
     let requests: Vec<_> = mock
         .recorded_requests()
         .into_iter()
         .filter(|r| r.path.contains("completions"))
         .collect();
-    assert_eq!(requests.len(), 2, "one provider request per turn");
-    assert_append_only(CacheProtocol::OpenAi, &requests[0].body, &requests[1].body).unwrap();
-    // The follow-up is longer than the first request: the check above is about a prefix,
-    // not about two equal bodies.
-    assert!(requests[1].body.to_string().len() > requests[0].body.to_string().len());
+    assert_eq!(requests.len(), 4, "one provider request per turn");
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0].body, &pair[1].body).unwrap();
+        // Each request is longer than the one before: the check above is about a prefix,
+        // not about two equal bodies.
+        assert!(pair[1].body.to_string().len() > pair[0].body.to_string().len());
+    }
 
     actions.send(Action::Shutdown).await.unwrap();
     let _ = tokio::time::timeout(WAIT, window).await;

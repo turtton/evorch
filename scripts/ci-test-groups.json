@@ -12,9 +12,7 @@
         "evorch-core/bootstrap-test-support",
         "evorch-core/renderer-test-helper"
       ],
-      "allow_empty_suites": [
-        "main-only-gui"
-      ]
+      "allow_empty_suites": []
     },
     "gui": {
       "shards": 1,
@@ -46,9 +44,7 @@
         "storage/test-support",
         "sandbox/keychain"
       ],
-      "allow_empty_suites": [
-        "main-only-gui"
-      ]
+      "allow_empty_suites": []
     },
     "support": {
       "shards": 1,
@@ -81,8 +77,7 @@
         "workbench-host/test-support"
       ],
       "allow_empty_suites": [
-        "io",
-        "main-only-gui"
+        "io"
       ]
     }
   }

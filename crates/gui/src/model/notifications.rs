@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, ToolEvent};
 use workspace_ui::{ThreadId, ThreadRunPhase};
 
-use crate::app::{AttentionAck, DisplayRevision};
+use crate::panes::tab_attention::ack::{AttentionAck, DisplayRevision};
 
 pub const MAX_NOTIFICATIONS: usize = 64;
 

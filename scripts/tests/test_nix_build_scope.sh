@@ -105,7 +105,7 @@ case_path verdict-test true scripts/tests/test_nix_build_verdict.sh
 # Paths the Nix build does not read, or that cargo check and the ci job cover.
 case_path rust-source false crates/gui/src/lib.rs
 case_path docs false docs/readme.md
-case_path other-workflow false .github/workflows/gui-pr-evidence.yml
+case_path other-workflow false .github/workflows/release.yml
 case_path bench-lock false examples/benchmark/clamp/Cargo.lock
 case_path other-script false scripts/check-harness.sh
 
