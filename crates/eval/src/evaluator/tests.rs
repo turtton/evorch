@@ -513,6 +513,7 @@ fn evaluation_report() -> Report {
             runs: 1,
             cost: Cost {
                 unreported: Vec::new(),
+                unrecorded: Vec::new(),
                 usd: 1.5,
                 api_equivalent_usd: 1.5,
                 unpriced: Vec::new(),

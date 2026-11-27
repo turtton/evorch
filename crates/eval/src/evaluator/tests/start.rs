@@ -201,6 +201,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
             3,
             Cost {
                 unreported: Vec::new(),
+                unrecorded: Vec::new(),
                 usd: 2.0,
                 api_equivalent_usd: 0.0,
                 unpriced: Vec::new(),
@@ -212,6 +213,7 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
             1,
             Cost {
                 unreported: Vec::new(),
+                unrecorded: Vec::new(),
                 usd: 0.5,
                 api_equivalent_usd: 0.5,
                 unpriced: vec![Unpriced {
@@ -237,15 +239,18 @@ fn estimates_multiply_each_original_cost_by_its_replays() {
     let regression = &estimate["threads"][1];
     assert_eq!(regression["purpose"], "regression");
     assert_eq!(regression["replays"], 2);
-    assert_eq!(regression["original_cost"]["usd"], 0.5);
-    assert_eq!(regression["estimate"]["usd"], 1.0);
+    assert_eq!(regression["original_cost"]["usd"], Value::Null);
+    assert_eq!(regression["original_cost"]["priced_usd"], 0.5);
+    assert_eq!(regression["estimate"]["usd"], Value::Null);
+    assert_eq!(regression["estimate"]["priced_usd"], 1.0);
     assert_eq!(regression["estimate"]["api_equivalent"], true);
     assert_eq!(regression["estimate"]["complete"], false);
     assert_eq!(
         regression["estimate"]["unpriced_models"],
         "local/llama (4 requests)"
     );
-    assert_eq!(estimate["total"]["usd"], 13.0);
+    assert_eq!(estimate["total"]["usd"], Value::Null);
+    assert_eq!(estimate["total"]["priced_usd"], 13.0);
     assert_eq!(estimate["total"]["api_equivalent"], true);
     assert_eq!(estimate["total"]["complete"], false);
     assert!(estimate["note"].as_str().unwrap().contains("estimate"));

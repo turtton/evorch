@@ -8,10 +8,11 @@
 
 use std::collections::BTreeSet;
 
+use runtime::tool_descriptions::BuiltinCatalog;
 use serde::{Deserialize, Serialize};
 
 use super::{AspectTally, ConfigurationCost, LoadedRun, Overhead, PairReport, incomplete_reason};
-use crate::changes::Changes;
+use crate::changes::{self, Changes, ToolDescriptionChange};
 use crate::cost::{Cost, RequestUsage};
 use crate::driver::Status;
 use crate::output::{BaseContextSummary, Observed, RunEntry};
@@ -58,10 +59,16 @@ pub struct FirstUsage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstRequest {
     pub run: String,
+    /// The first attempt, whether or not it succeeded; unknown when it failed
+    /// or reported no usage.
     pub usage: Option<FirstUsage>,
     /// Why `usage` is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown: Option<String>,
+    /// The first request that succeeded, when the first attempt did not: a
+    /// retry, kept apart so that it never stands for the first request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_success: Option<FirstUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,15 +141,8 @@ pub struct CostLine {
 }
 
 impl CostLine {
-    fn of(cost: &Cost, requests: u32, missing: &[String]) -> Self {
-        let mut reasons = Vec::new();
-        if !cost.is_complete() {
-            reasons.push(incomplete_reason(cost));
-        }
-        for run in missing {
-            reasons.push(format!("{run} left no usage record"));
-        }
-        let unknown = (!reasons.is_empty()).then(|| reasons.join("; "));
+    fn of(cost: &Cost, requests: u32) -> Self {
+        let unknown = (!cost.is_complete()).then(|| incomplete_reason(cost));
         Self {
             usd: unknown.is_none().then_some(cost.usd),
             priced_usd: cost.usd,
@@ -189,7 +189,7 @@ pub struct CostBreakdown {
 
 impl Default for CostBreakdown {
     fn default() -> Self {
-        let none = || CostLine::of(&Cost::default(), 0, &[]);
+        let none = || CostLine::of(&Cost::default(), 0);
         Self {
             agent: Vec::new(),
             simulator: none(),
@@ -209,6 +209,10 @@ pub enum PendingKind {
     /// The replay left no readable record of what it used.
     EvidenceMissing,
     ReplayIncomplete,
+    /// A replay the evaluation was to make was never started or did not finish.
+    ReplayMissing,
+    /// The evaluation's preflight refused it: nothing was compared.
+    PreflightFailed,
     /// The checks are indeterminate, or passed on a replay whose record is incomplete.
     ChecksNotConclusive,
     JudgeOrderDisagreement,
@@ -248,7 +252,16 @@ fn base_model(id: &str) -> &str {
 }
 
 /// What `entry`'s replay used of the description changes in `changes`.
-pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
+///
+/// A description counts as used only by a run that froze it, whose role is one
+/// the change reaches and can be offered the tool: a snapshot lists every tool
+/// the model has an override for, including ones its role never sees. Without
+/// `catalog` that cannot be told, so nothing counts as used.
+pub fn effect_of(
+    changes: &Changes,
+    entry: Option<&RunEntry>,
+    catalog: Option<&BuiltinCatalog>,
+) -> RunEffect {
     let observed: Option<&Observed> = entry.and_then(|entry| entry.observed.as_ref());
     let Some(observed) = observed else {
         return RunEffect {
@@ -257,11 +270,13 @@ pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
             ..RunEffect::default()
         };
     };
-    let reaches = |applied: &crate::output::AppliedDescriptions,
-                   change: &crate::changes::ToolDescriptionChange| {
+    let used = |applied: &crate::output::AppliedDescriptions, change: &ToolDescriptionChange| {
         applied.profile.as_deref() == Some(change.profile.as_str())
             && applied.route_model_id.as_deref() == Some(change.route_model_id.as_str())
             && applied.tools.contains(&change.tool)
+            && catalog
+                .and_then(|catalog| changes::role_seeing(catalog, &applied.role, &change.tool))
+                .is_some_and(|address| changes.affected_roles.iter().any(|role| role == address))
     };
     let applied = changes
         .tool_descriptions
@@ -270,7 +285,7 @@ pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
             observed
                 .tool_descriptions
                 .iter()
-                .any(|applied| reaches(applied, change))
+                .any(|applied| used(applied, change))
         })
         .collect();
     let applied_runs = observed
@@ -280,7 +295,7 @@ pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
             changes
                 .tool_descriptions
                 .iter()
-                .any(|change| reaches(applied, change))
+                .any(|change| used(applied, change))
         })
         .map(|applied| applied.run_id.clone())
         .collect();
@@ -320,27 +335,42 @@ pub fn effect_of(changes: &Changes, entry: Option<&RunEntry>) -> RunEffect {
     }
 }
 
+fn usage_of(request: &RequestUsage) -> FirstUsage {
+    FirstUsage {
+        input_tokens: request.input_tokens,
+        cache_read_tokens: request.cache_read_tokens,
+        cache_write_tokens: request.cache_write_tokens,
+        output_tokens: request.output_tokens,
+    }
+}
+
+/// The first attempt is the first request on record, whether or not it
+/// succeeded: a later success is not what the replay's first request cost.
 fn first_request(run: &LoadedRun) -> FirstRequest {
-    let name = run.summary.name();
-    let first: Option<&RequestUsage> = run.record.agent_requests().find(|request| !request.failed);
+    let first: Option<&RequestUsage> = run.record.agent_requests().next();
     let unknown = match first {
-        None => Some("the replay made no successful agent request on record".to_owned()),
+        None => Some("the replay made no agent request on record".to_owned()),
+        Some(request) if request.failed => {
+            Some("the first attempt failed and left no usage".to_owned())
+        }
         Some(request) if !request.usage_reported => {
             Some("the provider reported no usage for it".to_owned())
         }
         Some(_) => None,
     };
+    let first_success = first
+        .filter(|request| request.failed)
+        .and_then(|_| {
+            run.record
+                .agent_requests()
+                .find(|request| !request.failed && request.usage_reported)
+        })
+        .map(usage_of);
     FirstRequest {
-        run: name,
-        usage: first
-            .filter(|_| unknown.is_none())
-            .map(|request| FirstUsage {
-                input_tokens: request.input_tokens,
-                cache_read_tokens: request.cache_read_tokens,
-                cache_write_tokens: request.cache_write_tokens,
-                output_tokens: request.output_tokens,
-            }),
+        run: run.summary.name(),
+        usage: first.filter(|_| unknown.is_none()).map(usage_of),
         unknown,
+        first_success,
     }
 }
 
@@ -359,6 +389,13 @@ fn verification_text(run: &LoadedRun) -> Option<String> {
 /// What [`build`] reads from the evaluation.
 pub struct Inputs<'a> {
     pub changes: &'a Changes,
+    /// What tells which roles can be offered a tool; without it no changed
+    /// description can be shown to have been in force.
+    pub catalog: Option<&'a BuiltinCatalog>,
+    /// The configurations the evaluation was to replay, `repeat` times each.
+    pub configurations: &'a [String],
+    pub repeat: u32,
+    pub preflight_failure: Option<&'a str>,
     pub runs: &'a [LoadedRun],
     pub entries: &'a [RunEntry],
     pub costs: &'a [ConfigurationCost],
@@ -370,6 +407,10 @@ pub struct Inputs<'a> {
 pub fn build(input: &Inputs<'_>) -> Breakdown {
     let Inputs {
         changes,
+        catalog,
+        configurations,
+        repeat,
+        preflight_failure,
         runs,
         entries,
         costs,
@@ -424,15 +465,18 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
         aspects: tally.to_vec(),
     };
 
-    let candidates: Vec<(&LoadedRun, RunEffect)> = runs
+    let effects: Vec<(&LoadedRun, RunEffect)> = runs
         .iter()
-        .filter(|run| run.summary.label == CANDIDATE)
         .map(|run| {
             let entry = entries
                 .iter()
                 .find(|entry| entry.label == run.summary.label && entry.index == run.summary.index);
-            (run, effect_of(changes, entry))
+            (run, effect_of(changes, entry, *catalog))
         })
+        .collect();
+    let candidates: Vec<&(&LoadedRun, RunEffect)> = effects
+        .iter()
+        .filter(|(run, _)| run.summary.label == CANDIDATE)
         .collect();
     let effective_changes = EffectiveChanges {
         bindings: changes.bindings.clone(),
@@ -462,7 +506,7 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
                 }
             })
             .collect(),
-        fallbacks: candidates
+        fallbacks: effects
             .iter()
             .flat_map(|(run, effect)| {
                 effect
@@ -473,14 +517,6 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
             .collect(),
     };
 
-    let missing = |label: Option<&str>| -> Vec<String> {
-        runs.iter()
-            .filter(|run| {
-                run.evidence_missing && label.is_none_or(|label| run.summary.label == label)
-            })
-            .map(|run| run.summary.name())
-            .collect()
-    };
     let requests = |label: &str| -> u32 {
         runs.iter()
             .filter(|run| run.summary.label == label)
@@ -490,11 +526,7 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
     let agent: Vec<LabeledCost> = costs
         .iter()
         .map(|cost| {
-            let mut line = CostLine::of(
-                &cost.cost,
-                requests(&cost.label),
-                &missing(Some(&cost.label)),
-            );
+            let mut line = CostLine::of(&cost.cost, requests(&cost.label));
             if cost.runs == 0 && line.unknown.is_none() {
                 line.usd = None;
                 line.unknown = Some("no replay of it finished".to_owned());
@@ -508,13 +540,8 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
     let simulator = CostLine::of(
         &overhead.user_simulation.cost,
         overhead.user_simulation.tokens.requests,
-        &missing(None),
     );
-    let judge = CostLine::of(
-        &overhead.judging.cost,
-        overhead.judging.tokens.requests,
-        &[],
-    );
+    let judge = CostLine::of(&overhead.judging.cost, overhead.judging.tokens.requests);
     let total = {
         let lines: Vec<(&str, &CostLine)> = agent
             .iter()
@@ -582,26 +609,28 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
         }
     }
     if !changes.tool_descriptions.is_empty() {
-        for (run, effect) in &candidates {
+        for (run, effect) in &effects {
             let name = run.summary.name();
             if !effect.observed {
                 pending.push(Pending {
                     kind: PendingKind::EvidenceMissing,
                     subject: name.clone(),
-                    reason: "the replay recorded neither the models nor the descriptions it used, so it cannot be told whether the changed descriptions applied".into(),
+                    reason: "the replay recorded neither the models nor the descriptions it used, so it cannot be told whether a request went to another model or the changed descriptions applied".into(),
                 });
                 continue;
             }
-            for (change, applied) in changes.tool_descriptions.iter().zip(&effect.applied) {
-                if !applied {
-                    pending.push(Pending {
-                        kind: PendingKind::NotApplied,
-                        subject: name.clone(),
-                        reason: format!(
-                            "no run froze the changed description of `{}` for {}/{}; the comparison says nothing of it",
-                            change.tool, change.profile, change.route_model_id
-                        ),
-                    });
+            if run.summary.label == CANDIDATE {
+                for (change, applied) in changes.tool_descriptions.iter().zip(&effect.applied) {
+                    if !applied {
+                        pending.push(Pending {
+                            kind: PendingKind::NotApplied,
+                            subject: name.clone(),
+                            reason: format!(
+                                "no run of a role that can be offered `{}` froze the changed description for {}/{}; the comparison says nothing of it",
+                                change.tool, change.profile, change.route_model_id
+                            ),
+                        });
+                    }
                 }
             }
             for detail in &effect.fallbacks {
@@ -611,6 +640,40 @@ pub fn build(input: &Inputs<'_>) -> Breakdown {
                     reason: detail.clone(),
                 });
             }
+        }
+    }
+    if let Some(reason) = preflight_failure {
+        pending.push(Pending {
+            kind: PendingKind::PreflightFailed,
+            subject: "preflight".into(),
+            reason: format!(
+                "the evaluation was refused before any replay compared anything: {reason}"
+            ),
+        });
+    }
+    for label in *configurations {
+        let started: Vec<&RunEntry> = entries
+            .iter()
+            .filter(|entry| &entry.label == label && entry.index >= 1 && entry.index <= *repeat)
+            .collect();
+        let never = usize::try_from(*repeat)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(started.len());
+        if never > 0 {
+            pending.push(Pending {
+                kind: PendingKind::ReplayMissing,
+                subject: label.clone(),
+                reason: format!("{never} of {repeat} replay(s) were never started"),
+            });
+        }
+        for entry in started.iter().filter(|entry| entry.status.is_none()) {
+            pending.push(Pending {
+                kind: PendingKind::ReplayMissing,
+                subject: format!("{label}-{}", entry.index),
+                reason:
+                    "the replay was started but has no recorded end (still running, or interrupted)"
+                        .into(),
+            });
         }
     }
     for aspect in *tally {
@@ -704,6 +767,16 @@ pub fn markdown(breakdown: &Breakdown) -> String {
                 first.run,
                 first.unknown.as_deref().unwrap_or("unknown")
             )),
+        }
+        if let Some(retry) = &first.first_success {
+            out.push_str(&format!(
+                "| {} (first request that succeeded, a retry) | {} | {} | {} | {} |\n",
+                first.run,
+                retry.input_tokens,
+                retry.cache_read_tokens,
+                retry.cache_write_tokens,
+                retry.output_tokens
+            ));
         }
     }
 

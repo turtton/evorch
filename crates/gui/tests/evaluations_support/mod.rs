@@ -25,6 +25,7 @@ pub fn cost(usd: f64) -> Cost {
         api_equivalent_usd: 0.0,
         unpriced: Vec::new(),
         unreported: Vec::new(),
+        unrecorded: Vec::new(),
     }
 }
 

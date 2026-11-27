@@ -11,6 +11,7 @@ use catalog::ModelCatalog;
 use config::{Config, EvalBudgetConfig};
 use event_bus::EventBus;
 use routing::EnvLookup;
+use runtime::tool_descriptions::BuiltinCatalog;
 use sandbox::credential::CredentialStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -408,7 +409,14 @@ fn load_run(
         status: outcome.status,
         reason: outcome.reason.clone(),
         metrics: RunMetrics::of(&record, &outcome),
-        cost: table.cost(record.agent_requests()),
+        cost: {
+            let mut cost = table.cost(record.agent_requests());
+            if evidence_missing {
+                cost.unrecorded
+                    .push(format!("{}-{}", entry.label, entry.index));
+            }
+            cost
+        },
         verification: outcome.verification.clone(),
         external_dependencies: metrics::external_dependencies(&record, &outcome),
         pushed_refs: outcome.pushed_refs.len(),
@@ -508,6 +516,7 @@ async fn report_dir(
         .map_err(|error| EvalError::Usage(format!("not an evaluation directory: {error}")))?;
     let mut runs = Vec::new();
     let mut warnings = Vec::new();
+    let mut preflight_failure = None;
     if dir.is_regular_file(runner::preflight::REPORT_FILE)?
         && let Some(reason) =
             read_json_in::<runner::preflight::Report>(dir, runner::preflight::REPORT_FILE)
@@ -521,6 +530,7 @@ async fn report_dir(
                 runner::preflight::REPORT_FILE,
             ),
         });
+        preflight_failure = Some(reason);
     }
     for entry in &manifest.runs {
         if entry.status.is_none() {
@@ -540,7 +550,15 @@ async fn report_dir(
         .collect();
     overhead.user_simulation = Usage {
         tokens: Tokens::of(simulated.iter().copied()),
-        cost: context.table.cost(simulated.iter().copied()),
+        cost: {
+            let mut cost = context.table.cost(simulated.iter().copied());
+            cost.unrecorded.extend(
+                runs.iter()
+                    .filter(|run| run.evidence_missing)
+                    .map(|run| run.summary.name()),
+            );
+            cost
+        },
     };
     let find = |label: &str, index: u32| {
         runs.iter()
@@ -548,6 +566,8 @@ async fn report_dir(
     };
     let aspects = judge::aspects(manifest.problem.is_some());
     let changes = manifest_changes(&manifest);
+    // Without the catalog, nothing can be shown to have been offered a changed tool.
+    let catalog = BuiltinCatalog::for_evaluation().ok();
     let mut judging = Vec::new();
     let mut pairs = Vec::new();
     for index in 1..=manifest.repeat {
@@ -561,6 +581,7 @@ async fn report_dir(
                 .runs
                 .iter()
                 .find(|entry| entry.label == CANDIDATE && entry.index == index),
+            catalog.as_ref(),
         );
         let pair = judge_pair(
             context,
@@ -681,6 +702,10 @@ async fn report_dir(
 
     let breakdown = breakdown::build(&breakdown::Inputs {
         changes: &changes,
+        catalog: catalog.as_ref(),
+        configurations: &manifest.configurations,
+        repeat: manifest.repeat,
+        preflight_failure: preflight_failure.as_deref(),
         runs: &runs,
         entries: &manifest.runs,
         costs: &costs,
@@ -835,6 +860,12 @@ pub(crate) fn incomplete_reason(cost: &Cost) -> String {
     if !cost.unreported.is_empty() {
         reasons.push(format!("no reported usage for {}", unreported_list(cost)));
     }
+    if !cost.unrecorded.is_empty() {
+        reasons.push(format!(
+            "no usage record for {}",
+            cost.unrecorded.join(", ")
+        ));
+    }
     reasons.join("; ")
 }
 
@@ -975,7 +1006,8 @@ async fn judge_pair(
         applied,
         ..baseline_focus
     };
-    let compare_identity = judge::compare_identity(aspects, changes);
+    let sample = manifest.sample.as_ref().map(|pinned| pinned.hash.as_str());
+    let compare_identity = judge::compare_identity(aspects, changes, sample);
     for order in [Order::BaselineFirst, Order::CandidateFirst] {
         let file = format!("pair-{index}-{}.json", order.as_str());
         let valid =
@@ -1044,7 +1076,7 @@ async fn judge_pair(
         context,
         &manifest.thread_id,
         (dir, &format!("pair-{index}-process.json")),
-        (&names, &judge::analysis_identity(changes)),
+        (&names, &judge::analysis_identity(changes, sample)),
         |_: &ProcessAnalysis| true,
         async |judge: Judge| judge.analyze(&payload).await,
     )
@@ -1195,11 +1227,14 @@ pub(crate) fn compact_metrics(metrics: &RunMetrics) -> serde_json::Value {
 
 pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
     serde_json::json!({
-        "usd": cost.usd,
+        // Null when any part is unknown: the priced part alone is not the cost.
+        "usd": cost.is_complete().then_some(cost.usd),
+        "priced_usd": cost.usd,
         "api_equivalent": cost.is_api_equivalent(),
         "complete": cost.is_complete(),
         "unpriced_models": unpriced_list(cost),
         "unreported_models": unreported_list(cost),
+        "unrecorded_replays": cost.unrecorded,
     })
 }
 
@@ -1263,6 +1298,31 @@ fn delegated_outputs(record: &RunRecord, focus: &Focus<'_>) -> Vec<serde_json::V
     entries
 }
 
+/// What the sample's machine checks found in a replay, for the judge: the
+/// condition and the result of each, and whether the replay's record is a
+/// complete account. Nothing in it names the configuration, so it can sit under
+/// either position of a comparison. `null` when the thread declares no checks.
+fn checks_view(run: &LoadedRun) -> serde_json::Value {
+    let Some(grading) = &run.summary.checks else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "quality": grading.quality().label(),
+        "replay_record_complete": grading.validity.valid,
+        "replay_record_issues": grading.validity.issues,
+        "results": grading
+            .results
+            .iter()
+            .map(|result| serde_json::json!({
+                "check": result.description,
+                "verdict": result.verdict,
+                "observed": result.observed,
+                "reason": result.reason,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn side(run: &LoadedRun, focus: &Focus<'_>) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
@@ -1276,6 +1336,7 @@ fn side(run: &LoadedRun, focus: &Focus<'_>) -> serde_json::Value {
         "delegated_outputs": delegated_outputs(&run.record, focus),
         "diff": bounded_diff(&run.diff),
         "verification": run.summary.verification,
+        "checks": checks_view(run),
         "metrics": compact_metrics(&run.summary.metrics),
         "cost": cost_value(&run.summary.cost),
     })
@@ -1286,20 +1347,24 @@ fn process_side(run: &LoadedRun, focus: &Focus<'_>) -> serde_json::Value {
         "status": run.summary.status,
         "status_reason": run.summary.reason,
         "metrics": compact_metrics(&run.summary.metrics),
+        "checks": checks_view(run),
         "delegated_outputs": delegated_outputs(&run.record, focus),
         "timeline": metrics::timeline(&run.record),
     })
 }
 
+/// A cost as text: the amount when every part of it is known, and otherwise
+/// `unknown` with the priced part, which is a lower bound and not the cost.
 pub(crate) fn usd(cost: &Cost) -> String {
-    let mut text = format!("${:.4}", cost.usd);
+    let mut amount = format!("${:.4}", cost.usd);
     if cost.is_api_equivalent() {
-        text.push_str(" (API-equivalent)");
+        amount.push_str(" (API-equivalent)");
     }
-    if !cost.is_complete() {
-        text.push_str(" (cost incomplete)");
+    if cost.is_complete() {
+        amount
+    } else {
+        format!("unknown (priced part {amount})")
     }
-    text
 }
 
 fn status_name(status: Status) -> String {

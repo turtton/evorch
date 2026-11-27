@@ -27,9 +27,9 @@ pub const PROBLEM_ASPECT: &str = "problem";
 /// The version of the judge's instructions and payloads. It is part of the
 /// identity of every cached judgment: bump it with any change to what the judge
 /// is asked or sent that the instruction texts below do not already show.
-pub const PAYLOAD_VERSION: u32 = 2;
+pub const PAYLOAD_VERSION: u32 = 3;
 
-const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past conversation between a user and a coding agent. Both started from the same repository state, and a simulated user replayed the original user's messages (`original_user_messages`) to each. For each replay you get its status, the conversation the user saw (the root run's messages only), `delegated_outputs` (the final output of each delegated child run, such as a Reviewer's or Worker's report; `delegated_by` names the delegating role), the diff from the start state, the verification command's result when one ran, metrics, and its cost in USD. `changes` states in what the configurations of A and B differ, and only in that; `focus` marks the delegated runs of the roles those differences can reach. A difference is one of: `role_bindings` (the listed roles are bound to other models, routes or presets), or `tool_descriptions` (for the listed tool, A and B send different description texts to the same model; the model is not changed, and `description_hash_A` / `description_hash_B` identify the two texts). Do not assume that a model differs unless `role_bindings` names the role. Judge what each replay did, not what its configuration was meant to achieve, and do not credit a difference the replays show no sign of. A replay that did not complete is still judged on what it achieved. When a delegated child's output is part of the evidence, judge its quality and whether the root relied on it correctly, rather than only the root's summary of it. Judge each aspect on its own and return the winner (\"A\", \"B\" or \"tie\") with a short reason that cites evidence:
+const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past conversation between a user and a coding agent. Both started from the same repository state, and a simulated user replayed the original user's messages (`original_user_messages`) to each. For each replay you get its status, the conversation the user saw (the root run's messages only), `delegated_outputs` (the final output of each delegated child run, such as a Reviewer's or Worker's report; `delegated_by` names the delegating role), the diff from the start state, the verification command's result when one ran, `checks`, metrics, and its cost in USD (`usd` is null when part of it is unknown, with the priced part in `priced_usd`). `checks` holds the machine checks declared for the thread and what each found in that replay (`pass`, `fail` or `indeterminate`, with the count observed and the reason), the `quality` they add up to, and whether the replay's record is a complete account (`replay_record_complete`); it is null when the thread declares no checks. A check is evidence about a replay, not a verdict on an aspect: `indeterminate` is not a pass, and checks that pass on a replay whose record is incomplete prove nothing. `changes` states in what the configurations of A and B differ, and only in that; `focus` marks the delegated runs of the roles those differences can reach. A difference is one of: `role_bindings` (the listed roles are bound to other models, routes or presets), or `tool_descriptions` (for the listed tool, A and B send different description texts to the same model; the model is not changed, and `description_hash_A` / `description_hash_B` identify the two texts). Do not assume that a model differs unless `role_bindings` names the role. Judge what each replay did, not what its configuration was meant to achieve, and do not credit a difference the replays show no sign of. A replay that did not complete is still judged on what it achieved. When a delegated child's output is part of the evidence, judge its quality and whether the root relied on it correctly, rather than only the root's summary of it. Judge each aspect on its own and return the winner (\"A\", \"B\" or \"tie\") with a short reason that cites evidence:
 - requirement: how fully the original requests were met.
 - correctness: whether the changes are correct, from the diff and the verification result.
 - scope: whether the replay kept to what was asked, without unrequested changes.
@@ -37,7 +37,7 @@ const COMPARE_INSTRUCTION: &str = "You compare two replays, A and B, of one past
 - problem (only when `problem` is given): whether the described problem occurred; the replay where it did not occur, or that fixed it, wins.
 Answer \"tie\" when the evidence does not separate the replays. The order in which they are presented carries no meaning.";
 
-const ANALYZE_INSTRUCTION: &str = "You analyse how two replays, baseline and candidate, of one past conversation between a user and a coding agent went. The candidate's configuration differs from the baseline's only in `changes`: `role_bindings` (roles bound to other models, routes or presets) and `tool_descriptions` (another description of a tool for the same model; the model itself is not changed). `affected_roles` lists the roles those differences can reach, and `applied` says, for each changed description, whether the candidate's runs really used it and whether any request went to another model. Do not infer an effect from a difference that `applied` shows was not in force. For each replay you get its status, metrics, `delegated_outputs` (the final output of each delegated child run; `focus` marks the affected roles) and a bounded summary of its events: token totals per role, then timestamped delegations, tool calls with short inputs, durations and errors, turns, provider failures and notable diagnostics. Answer each field concisely with concrete evidence from the timelines:
+const ANALYZE_INSTRUCTION: &str = "You analyse how two replays, baseline and candidate, of one past conversation between a user and a coding agent went. The candidate's configuration differs from the baseline's only in `changes`: `role_bindings` (roles bound to other models, routes or presets) and `tool_descriptions` (another description of a tool for the same model; the model itself is not changed). `affected_roles` lists the roles those differences can reach, and `applied` says, for each changed description, whether the candidate's runs really used it and whether any request went to another model. Do not infer an effect from a difference that `applied` shows was not in force. For each replay you get its status, its machine `checks` (as described above; null without any), metrics, `delegated_outputs` (the final output of each delegated child run; `focus` marks the affected roles) and a bounded summary of its events: token totals per role, then timestamped delegations, tool calls with short inputs, durations and errors, turns, provider failures and notable diagnostics. Answer each field concisely with concrete evidence from the timelines:
 - time_and_tokens: where time and tokens went in each replay.
 - detours: detours, and duplicated or redundant tool calls.
 - delegation: whether the delegations were appropriate.
@@ -208,21 +208,23 @@ fn identity(parts: &[&str]) -> String {
     sha256_hex(format!("judge-payload-{PAYLOAD_VERSION}\n{}", parts.join("\n")).as_bytes())
 }
 
-/// Names the instruction, the payload version, the aspects asked and the
-/// differences told, so that a judgment made under any other is not reused.
-pub fn compare_identity(aspects: &[&str], changes: &Changes) -> String {
+/// Names the instruction, the payload version, the aspects asked, the
+/// differences told and the sample whose checks were shown, so that a judgment made under any other is not reused.
+pub fn compare_identity(aspects: &[&str], changes: &Changes, sample: Option<&str>) -> String {
     identity(&[
         COMPARE_INSTRUCTION,
         &aspects.join(","),
         &serde_json::to_string(changes).unwrap_or_default(),
+        sample.unwrap_or("no sample"),
     ])
 }
 
 /// [`compare_identity`] for the process analysis.
-pub fn analysis_identity(changes: &Changes) -> String {
+pub fn analysis_identity(changes: &Changes, sample: Option<&str>) -> String {
     identity(&[
         ANALYZE_INSTRUCTION,
         &serde_json::to_string(changes).unwrap_or_default(),
+        sample.unwrap_or("no sample"),
     ])
 }
 
@@ -565,17 +567,33 @@ mod tests {
     fn a_judgment_is_reused_only_under_the_same_instructions_aspects_and_changes() {
         // Given: the identity of a comparison and of an analysis.
         let changes = description_change();
-        let known = compare_identity(&aspects(false), &changes);
+        let known = compare_identity(&aspects(false), &changes, Some("sample-a"));
 
         // When / Then: another aspect set, another change, or the other kind of question is
         // another identity, and the same question is the same one.
-        assert_eq!(known, compare_identity(&aspects(false), &changes));
-        assert_ne!(known, compare_identity(&aspects(true), &changes));
+        let same = |sample| compare_identity(&aspects(false), &changes, sample);
+        assert_eq!(known, same(Some("sample-a")));
+        assert_ne!(
+            known,
+            compare_identity(&aspects(true), &changes, Some("sample-a"))
+        );
+        assert_ne!(known, same(Some("sample-b")));
+        assert_ne!(known, same(None));
         let mut other = changes.clone();
         other.tool_descriptions[0].candidate_hash = "another".into();
-        assert_ne!(known, compare_identity(&aspects(false), &other));
-        assert_ne!(analysis_identity(&changes), analysis_identity(&other));
-        assert_ne!(known, analysis_identity(&changes));
+        assert_ne!(
+            known,
+            compare_identity(&aspects(false), &other, Some("sample-a"))
+        );
+        assert_ne!(
+            analysis_identity(&changes, Some("sample-a")),
+            analysis_identity(&other, Some("sample-a"))
+        );
+        assert_ne!(
+            analysis_identity(&changes, Some("sample-a")),
+            analysis_identity(&changes, Some("sample-b"))
+        );
+        assert_ne!(known, analysis_identity(&changes, Some("sample-a")));
     }
 
     #[test]

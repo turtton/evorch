@@ -223,6 +223,7 @@ mod tests {
             api_equivalent_usd: 0.0,
             unpriced: Vec::new(),
             unreported: Vec::new(),
+            unrecorded: Vec::new(),
         }
     }
 

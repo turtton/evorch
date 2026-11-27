@@ -148,6 +148,19 @@ fn description_changes(
     Ok(changes)
 }
 
+/// The address of `role` (given by address, key or name) when a run of it can
+/// be offered the fixed builtin tool `tool`.
+pub(crate) fn role_seeing(
+    catalog: &BuiltinCatalog,
+    role: &str,
+    tool: &str,
+) -> Option<&'static str> {
+    let address = roles::address(role)?;
+    runtime_role(address)
+        .filter(|runtime| catalog.visible_to(*runtime, tool))
+        .map(|_| address)
+}
+
 const DESCRIBABLE_ROLES: [Role; 9] = [
     Role::Orchestrator,
     Role::Explorer,
