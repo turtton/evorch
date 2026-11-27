@@ -1227,6 +1227,14 @@ fn apply_effect(
     {
         match effect {
             shell::Effect::Send(action) => enqueue(actions, shared, *action),
+            shell::Effect::ModelChoice(thread, choice) => {
+                if let Some(workspace) = shared.features.workspace_mut() {
+                    workspace.ask(
+                        thread.as_str(),
+                        features::workspace::Intent::ModelChoice(choice),
+                    );
+                }
+            }
             shell::Effect::Reveal(feature) => shared.features.reveal(feature),
             shell::Effect::Open(shell::CoreTab::Plan) => shell::focus_beside(
                 dock,

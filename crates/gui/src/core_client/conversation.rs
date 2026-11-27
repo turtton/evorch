@@ -43,6 +43,12 @@ mod slash;
 const MAX_ANSWER_BYTES: usize = 4096;
 
 pub struct ConversationPane {
+    model_picker: crate::panes::core_model_picker::CoreModelPicker,
+    model_catalog: Option<workbench_protocol::namespaces::settings::ProjectModelChoices>,
+    model_choice: workbench_protocol::commands::ModelChoice,
+    model_thread: Option<ThreadId>,
+    model_saving: bool,
+    draft_model_choices: BTreeMap<String, workbench_protocol::commands::ModelChoice>,
     answers: BTreeMap<String, String>,
     pub(super) attachment_io: AttachmentIo,
     pub(super) attachment_imports: BTreeMap<String, (ProjectId, ThreadId)>,
@@ -69,6 +75,12 @@ pub struct ConversationPane {
 impl Default for ConversationPane {
     fn default() -> Self {
         Self {
+            model_picker: Default::default(),
+            model_catalog: None,
+            model_choice: Default::default(),
+            model_thread: None,
+            model_saving: false,
+            draft_model_choices: Default::default(),
             answers: BTreeMap::new(),
             attachment_io: AttachmentIo::default(),
             attachment_imports: BTreeMap::new(),
@@ -88,6 +100,28 @@ impl Default for ConversationPane {
 }
 
 impl ConversationPane {
+    pub(super) fn sync_model_picker(
+        &mut self,
+        thread: Option<&ThreadId>,
+        catalog: Option<&workbench_protocol::namespaces::settings::ProjectModelChoices>,
+        detail: Option<&workbench_protocol::namespaces::workspace::ThreadDetail>,
+        saving: bool,
+    ) {
+        if self.model_thread.as_ref() != thread {
+            self.model_picker.close();
+        }
+        self.model_thread = thread.cloned();
+        self.model_catalog = catalog.cloned();
+        self.model_saving = saving;
+        self.model_choice = detail
+            .map(|d| d.model_choice.clone())
+            .or_else(|| thread.and_then(|t| self.draft_model_choices.get(t.as_str()).cloned()))
+            .unwrap_or_default();
+        if let Some(detail) = detail {
+            self.draft_model_choices.remove(detail.thread.as_str());
+        }
+    }
+
     /// A new projection (a reconnect or resync) holds none of the bodies read before,
     /// so its messages ask for them again.
     pub(super) fn follow_projection(&mut self, projection: u64) {

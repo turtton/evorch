@@ -57,7 +57,6 @@ fn automatic_question_wake_keeps_stop_bookkeeping_until_explicit_continue() {
             project_root: None,
             thread_id: "thread".into(),
             composer_role: Default::default(),
-            model_preference: None,
             automatic,
         })
     };

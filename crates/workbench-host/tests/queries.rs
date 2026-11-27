@@ -23,6 +23,113 @@ struct Fixture {
     runtime: AgentRuntime,
     host: CommandHost,
 }
+
+struct MetadataModel(&'static str);
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for MetadataModel {
+    fn selected_model(&self, role: runtime::Role, category: Option<&str>) -> String {
+        assert_eq!(category, Some("conversation"));
+        format!("{}/{}", self.0, role.name())
+    }
+    fn selected_reasoning_effort(
+        &self,
+        _: runtime::Role,
+        category: Option<&str>,
+    ) -> Option<String> {
+        assert_eq!(category, Some("conversation"));
+        Some("custom".into())
+    }
+    fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
+        vec![runtime::compose::ProfileSummary {
+            name: self.0.into(),
+            provider_type: model::ProviderType::AnthropicSubscription,
+            default_model: Some("chat".into()),
+            models: vec!["chat".into()],
+            effort_levels: std::collections::BTreeMap::from([(
+                "chat".into(),
+                vec!["low".into(), "custom".into()],
+            )]),
+        }]
+    }
+    fn route_pins(&self, _: &str) -> Vec<runtime::RoutePinRecord> {
+        panic!("metadata must not inspect or pin a live run")
+    }
+    async fn complete(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        _: runtime::Role,
+        _: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        panic!("metadata must not contact a provider")
+    }
+}
+
+#[test]
+fn model_choices_come_from_the_applied_project_model_and_are_credential_free() {
+    use std::sync::Arc;
+    use workbench_protocol::namespaces::settings::{ProviderKind, SettingsQuery, SettingsReply};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let root = first.path().to_path_buf();
+    let runtime = common::runtime().with_project_models(Arc::new(move |path| {
+        Some(Arc::new(MetadataModel(if path == root {
+            "first"
+        } else {
+            "second"
+        })))
+    }));
+    let host = common::host_with_two_projects(&rt, runtime.clone(), first.path(), second.path());
+    for (project, expected) in [
+        (common::project(), "first"),
+        (ProjectId::new("project-2").unwrap(), "second"),
+    ] {
+        let reply = host
+            .handle_query(
+                &SessionId::new("metadata").unwrap(),
+                &Query::Settings(SettingsQuery::ModelChoices {
+                    project: project.clone(),
+                }),
+                &workbench_host::provenance::local_desktop(),
+            )
+            .unwrap();
+        let QueryReply::Settings(SettingsReply::ModelChoices(catalog)) = reply else {
+            panic!()
+        };
+        assert_eq!(catalog.project, project);
+        assert_eq!(catalog.profiles[0].name, expected);
+        assert_eq!(
+            catalog.profiles[0].provider_type,
+            ProviderKind::AnthropicSubscription
+        );
+        assert_eq!(catalog.profiles[0].effort_levels["chat"], ["low", "custom"]);
+        assert_eq!(catalog.worker.model, format!("{expected}/Worker"));
+        assert_eq!(
+            catalog.orchestrator.model,
+            format!("{expected}/Orchestrator")
+        );
+        assert_eq!(catalog.worker.reasoning_effort.as_deref(), Some("custom"));
+        let wire = serde_json::to_value(catalog).unwrap();
+        assert_eq!(
+            wire["profiles"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                "default_model",
+                "effort_levels",
+                "models",
+                "name",
+                "provider_type"
+            ]
+        );
+    }
+    assert!(runtime.list_agents().is_empty());
+}
 impl Fixture {
     fn new() -> Self {
         Self::with_runtime(tokio::runtime::Runtime::new().unwrap())

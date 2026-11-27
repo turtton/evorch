@@ -51,7 +51,7 @@ pub fn chat_fingerprint(chat: &ChatInput) -> String {
         field(&mut hasher, skill.as_bytes());
     }
     match &chat.model_preference {
-        Some(preference) => {
+        runtime::ModelPreferenceUpdate::Explicit(preference) => {
             hasher.update([1]);
             field(&mut hasher, preference.profile.as_bytes());
             optional(&mut hasher, preference.model.as_deref().map(str::as_bytes));
@@ -60,7 +60,8 @@ pub fn chat_fingerprint(chat: &ChatInput) -> String {
                 preference.reasoning_effort.as_deref().map(str::as_bytes),
             );
         }
-        None => hasher.update([0]),
+        runtime::ModelPreferenceUpdate::RoleDefault => hasher.update([0]),
+        runtime::ModelPreferenceUpdate::Keep => hasher.update([2]),
     }
     match &chat.fork_seed {
         Some(seed) => {
@@ -102,7 +103,7 @@ mod tests {
             thread_id: "thread-1".into(),
             text: "hello".into(),
             skills: vec!["review".into()],
-            model_preference: None,
+            model_preference: runtime::ModelPreferenceUpdate::Keep,
             fork_seed: None,
         }
     }
@@ -138,11 +139,12 @@ mod tests {
                     ));
             }),
             ("model", |c| {
-                c.model_preference = Some(runtime::ModelPreference {
-                    profile: "fast".into(),
-                    model: None,
-                    reasoning_effort: None,
-                });
+                c.model_preference =
+                    runtime::ModelPreferenceUpdate::explicit(runtime::ModelPreference {
+                        profile: "fast".into(),
+                        model: None,
+                        reasoning_effort: None,
+                    });
             }),
             ("fork", |c| {
                 c.fork_seed = Some(runtime::ChatForkSeed {

@@ -51,6 +51,7 @@ async fn restored_publication_invalidates_unused_scratch_observation() {
                     execution,
                     (run, parent, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        input_selection_transition: None,
                         recovery_waits: Vec::new(),
                         mcp_snapshot: None,
                         harness_notice_pending: false,

@@ -935,7 +935,7 @@ impl CommandHost {
             Ok(permit) => permit,
             Err(refusal) => return vec![refusal],
         };
-        match self.execute(command, permit, provenance, Some(restart.clone())) {
+        match self.execute(command, permit, provenance, Some(restart.clone()), false) {
             Executed::Duplicate { thread_id, run_id } => vec![HostEvent::ChatAccepted {
                 thread_id,
                 run_id: run_id.unwrap_or_default(),
@@ -951,7 +951,7 @@ impl CommandHost {
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Result<Vec<HostEvent>, WorkbenchError> {
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance, restart) {
+        match self.execute(command, permit, provenance, restart, false) {
             Executed::Events(events) => Ok(events),
             Executed::Duplicate { .. } => unreachable!("only a chat can be a duplicate"),
         }
@@ -964,6 +964,7 @@ impl CommandHost {
         permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
+        resolve_wire_choice: bool,
     ) -> Executed {
         let submission = match &command {
             HostCommand::SendChat(chat) if !chat.submission_id.is_empty() => Some(chat.clone()),
@@ -983,6 +984,26 @@ impl CommandHost {
                         chat.thread_id.clone(),
                         refusal.0,
                         refusal.1,
+                    )]);
+                }
+            }
+        }
+        if resolve_wire_choice && let HostCommand::SendChat(chat) = &mut command {
+            let explicit = match &chat.model_preference {
+                runtime::ModelPreferenceUpdate::Explicit(p) => Some(p.as_ref()),
+                _ => None,
+            };
+            match self
+                .areas
+                .workspace
+                .choice_for_send(&chat.thread_id, explicit)
+            {
+                Ok(choice) => chat.model_preference = choice,
+                Err(error) => {
+                    return Executed::Events(vec![HostEvent::chat_rejected(
+                        &chat.thread_id,
+                        RejectKind::Invalid,
+                        error.message,
                     )]);
                 }
             }
@@ -1194,7 +1215,10 @@ impl CommandHost {
                 thread_id: send.thread.to_string(),
                 text: send.text.clone(),
                 skills: send.skills.clone(),
-                model_preference: send.model_preference.as_ref().map(model_preference),
+                model_preference: send.model_preference.as_ref().map(model_preference).map_or(
+                    runtime::ModelPreferenceUpdate::RoleDefault,
+                    runtime::ModelPreferenceUpdate::explicit,
+                ),
                 fork_seed: send.fork_seed.as_ref().map(|seed| runtime::ChatForkSeed {
                     source_run_id: seed.source_run_id.to_string(),
                     context_len: seed.context_len.get(),
@@ -1225,7 +1249,7 @@ impl CommandHost {
         let command = HostCommand::SendChat(self.chat_input(send)?);
         self.reserve_chat_after_gate(send)?;
         let permit = self.service.authorize(&command).map_err(refusal_error)?;
-        match self.execute(command, permit, provenance, None) {
+        match self.execute(command, permit, provenance, None, true) {
             Executed::Duplicate { run_id, .. } => Ok(CommandReply {
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
@@ -1264,7 +1288,10 @@ impl CommandHost {
             thread_id: send.thread.as_str().to_owned(),
             text: send.text.clone(),
             skills: send.skills.clone(),
-            model_preference: send.model_preference.as_ref().map(model_preference),
+            model_preference: send.model_preference.as_ref().map(model_preference).map_or(
+                runtime::ModelPreferenceUpdate::RoleDefault,
+                runtime::ModelPreferenceUpdate::explicit,
+            ),
             fork_seed: send.fork_seed.as_ref().map(|seed| runtime::ChatForkSeed {
                 source_run_id: seed.source_run_id.as_str().to_owned(),
                 context_len: seed.context_len.get(),

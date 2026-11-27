@@ -125,7 +125,7 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
         lineage: fixture.parent.as_ref().map(|(_, lineage)| *lineage),
         root_run: fixture.root_run.map(|run| RunId::new(run).unwrap()),
         active_root: None,
-        model_profile: None,
+        model_choice: workbench_protocol::commands::ModelChoice::RoleDefault,
         chat_role: None,
         extra_read_dirs: Vec::new(),
         archived: fixture.archived,
@@ -353,6 +353,18 @@ impl Screen {
                         let reply = FeatureReply::Query(Ok(QueryReply::Workspace(answer)));
                         let mut shared = self.shared.lock().unwrap();
                         shared.features.reply(FeatureId::Workspace, tag, reply);
+                        answered = true;
+                    }
+                    Action::Feature(FeatureAction {
+                        feature: FeatureId::Workspace, tag,
+                        request: FeatureRequest::Query(Query::Settings(workbench_protocol::namespaces::settings::SettingsQuery::ModelChoices { project })),
+                    }) => {
+                        use workbench_protocol::namespaces::settings::{SettingsReply, ProjectModelChoices, RoleModelChoice};
+                        let role = RoleModelChoice { model: "fixture/default".into(), reasoning_effort: None };
+                        let reply = FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ModelChoices(ProjectModelChoices {
+                            project, profiles: Vec::new(), worker: role.clone(), orchestrator: role,
+                        }))));
+                        self.shared.lock().unwrap().features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;
                     }
                     other => others.push(other),

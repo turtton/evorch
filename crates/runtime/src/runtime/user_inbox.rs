@@ -9,7 +9,13 @@ use std::sync::{Arc, Mutex, Weak};
 /// internal team notification). Only host input contributes to the GUI queue.
 /// The fourth field is its durable prompt UUID; the fifth is an incarnation-local
 /// enqueue sequence (zero for internal notices), never a durable identity.
-pub(crate) type UserInput = (String, bool, Option<String>, u64);
+pub(crate) type UserInput = (
+    String,
+    bool,
+    Option<String>,
+    u64,
+    crate::ModelPreferenceUpdate,
+);
 
 /// Receiving/draining is not adoption. Keep a removable staging buffer so a
 /// withdrawal releases its bounded channel slot even during an in-flight tool.
@@ -744,7 +750,13 @@ mod channel_withdrawal_tests {
         for id in ["first", "withdraw"] {
             inbox
                 .enqueue(Some(id), |seq| {
-                    sender.try_send((id.into(), true, Some(id.into()), seq))
+                    sender.try_send((
+                        id.into(),
+                        true,
+                        Some(id.into()),
+                        seq,
+                        crate::ModelPreferenceUpdate::Keep,
+                    ))
                 })
                 .unwrap();
         }
@@ -754,7 +766,13 @@ mod channel_withdrawal_tests {
         inbox.withdraw("withdraw", || Ok(())).unwrap();
         inbox
             .enqueue(Some("new"), |seq| {
-                sender.try_send(("new".into(), true, Some("new".into()), seq))
+                sender.try_send((
+                    "new".into(),
+                    true,
+                    Some("new".into()),
+                    seq,
+                    crate::ModelPreferenceUpdate::Keep,
+                ))
             })
             .unwrap();
         let first = receiver.recv().await.unwrap();

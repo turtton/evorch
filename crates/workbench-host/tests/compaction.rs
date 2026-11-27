@@ -127,7 +127,6 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                     project_root: None,
                     thread_id: "thread".into(),
                     composer_role: Default::default(),
-                    model_preference: None,
                     automatic: false,
                 }),
             ] {
@@ -144,7 +143,7 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                     attachments: Vec::new(),
                     thread_id: "thread".into(),
                     text: "keep this draft".into(),
-                    model_preference: None,
+                    model_preference: runtime::ModelPreferenceUpdate::Keep,
                     fork_seed: None,
                     skills: Vec::new(),
                 }

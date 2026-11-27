@@ -56,8 +56,6 @@ pub struct ThreadBindings {
     pub chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     /// Project each thread last submitted from, for host follow-ups that carry none.
     pub thread_roots: BTreeMap<String, PathBuf>,
-    /// Model each thread last submitted with, so a runtime-requested wake keeps it.
-    pub model_preferences: BTreeMap<String, runtime::ModelPreference>,
 }
 
 impl ThreadBindings {
@@ -258,7 +256,6 @@ impl CommandService {
                                 .cloned()
                                 .or_else(|| self.shell_cwd.clone()),
                             goal_project: self.bindings.goal_projects.get(thread).cloned(),
-                            model_preference: self.bindings.model_preferences.get(thread).cloned(),
                         },
                     ))
                 })
@@ -589,7 +586,7 @@ impl CommandService {
                         project_root: continuation.project_root,
                         thread_id: continuation.thread_id,
                         composer_role: continuation.composer_role,
-                        model_preference: continuation.model_preference,
+                        model_preference: runtime::ModelPreferenceUpdate::Keep,
                         attachments: Vec::new(),
                         // The resume_only path never submits this placeholder as input.
                         text: String::new(),

@@ -570,7 +570,11 @@ pub(crate) async fn prepare_model_switch(
         run_id: state.caller_run_id().to_string(),
         turn: Some(state.turn.clone()),
         category: state.task.config.category.clone(),
-        model_preference: preference,
+        model_preference: if state.input_selection_transition.is_some() {
+            state.channels.model_preference_rx.borrow().clone()
+        } else {
+            preference
+        },
         purpose: event_bus::RequestPurpose::Agent,
     };
     let mut cancel = state.channels.cancel_rx.clone();
@@ -883,6 +887,10 @@ fn install_prepared_context(
     let old_instructions = state.allowed_instructions.clone();
     let old_rule_injections = state.project_rule_injections.clone();
     let old_pending = state.boundary_pending;
+    let old_transition = state.input_selection_transition.clone();
+    if let Some(transition) = &mut state.input_selection_transition {
+        transition.prepared = true;
+    }
     if replaced_history {
         state.told_directories.rewrite_pending = true;
         state.allowed_instructions.forget_history();
@@ -894,6 +902,7 @@ fn install_prepared_context(
         state.allowed_instructions = old_instructions;
         state.project_rule_injections = old_rule_injections;
         state.boundary_pending = old_pending;
+        state.input_selection_transition = old_transition;
         return Err(CompactionError::PrepareFailed(error.to_string()));
     }
     state.context = prepared;

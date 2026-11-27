@@ -260,7 +260,7 @@ fn ordinary_send(host: &BootstrappedHost, run: RunId, text: &str) {
             text: text.into(),
             attachments: vec![],
             skills: vec![],
-            model_preference: None,
+            model_preference: runtime::ModelPreferenceUpdate::Keep,
             fork_seed: None,
         }),
         &workbench_protocol::envelope::Provenance::human(

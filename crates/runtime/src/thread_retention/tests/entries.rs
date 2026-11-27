@@ -85,6 +85,16 @@ fn table() -> BTreeMap<&'static str, Guard> {
         (
             "runtime/chat_restore.rs::continue_goal",
             Guarded {
+                via: &[
+                    "continue_goal_with_model_update",
+                    "continue_chat",
+                    "continue_chat_fenced",
+                ],
+            },
+        ),
+        (
+            "runtime/chat_restore.rs::continue_goal_with_model_update",
+            Guarded {
                 via: &["continue_chat", "continue_chat_fenced"],
             },
         ),
@@ -360,6 +370,10 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
         ("lane_instructions.rs::send_lane_instruction", "G2"),
         ("runtime.rs::compact", "G3"),
         ("runtime/chat_restore.rs::continue_goal", "G3"),
+        (
+            "runtime/chat_restore.rs::continue_goal_with_model_update",
+            "G3",
+        ),
         ("runtime/chat_restore.rs::delegate_chat", "G3"),
         ("runtime/chat_restore.rs::delegate_chat_seeded", "G3"),
         ("runtime/chat_restore.rs::resume_chat", "G3"),
@@ -459,6 +473,9 @@ fn archive_admission_entries_are_closed_and_do_not_reuse_live_only_exemptions() 
         let text = definition(&all, path, name).unwrap_or_else(|| panic!("{key} removed"));
         let text = if text.contains("deny_deleted_spawn(") {
             definition(&all, "runtime.rs", "deny_deleted_spawn").expect("spawn admission helper")
+        } else if text.contains("self.continue_goal_with_model_update(") {
+            definition(&all, path, "continue_goal_with_model_update")
+                .expect("input-scoped continuation admission helper")
         } else {
             text
         };

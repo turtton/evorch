@@ -29,7 +29,16 @@ async fn ready_wake(
             answers.send_replace(1);
         }
         4 => {
-            inbox.send(("notice".into(), false, None, 0)).await.unwrap();
+            inbox
+                .send((
+                    "notice".into(),
+                    false,
+                    None,
+                    0,
+                    crate::ModelPreferenceUpdate::Keep,
+                ))
+                .await
+                .unwrap();
         }
         5 => {
             state
@@ -180,7 +189,13 @@ async fn simultaneous_ready_wakes_keep_priority_and_leave_losers_unconsumed() {
     deliveries.send_replace(1);
     answers.send_replace(1);
     sender
-        .send(("preserved inbox".into(), false, None, 0))
+        .send((
+            "preserved inbox".into(),
+            false,
+            None,
+            0,
+            crate::ModelPreferenceUpdate::Keep,
+        ))
         .await
         .unwrap();
     state
@@ -203,7 +218,7 @@ async fn simultaneous_ready_wakes_keep_priority_and_leave_losers_unconsumed() {
             | (2, InputWake::Deliveries(Ok(())))
             | (3, InputWake::Answers(Ok(())))
             | (5, InputWake::Mailbox(Ok(()))) => {}
-            (4, InputWake::Inbox(Some((text, _, _, _)))) => assert_eq!(text, "preserved inbox"),
+            (4, InputWake::Inbox(Some((text, _, _, _, _)))) => assert_eq!(text, "preserved inbox"),
             _ => panic!("simultaneously ready wake lost priority at {source}"),
         }
         assert!(!q.has_changed().unwrap());

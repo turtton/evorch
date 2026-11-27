@@ -413,7 +413,7 @@ mod tests {
             lineage: None,
             root_run: None,
             active_root: None,
-            model_profile: None,
+            model_choice: workbench_protocol::commands::ModelChoice::RoleDefault,
             chat_role: None,
             extra_read_dirs: Vec::new(),
             archived: false,

@@ -31,7 +31,7 @@ pub struct ChatInput {
     /// agent sees; the words stay as typed everywhere else.
     pub text: String,
     pub skills: Vec<String>,
-    pub model_preference: Option<runtime::ModelPreference>,
+    pub model_preference: runtime::ModelPreferenceUpdate,
     /// Completed-turn boundary a forked thread starts from.
     pub fork_seed: Option<runtime::ChatForkSeed>,
 }
@@ -42,7 +42,6 @@ pub struct ContinueInput {
     pub project_root: Option<PathBuf>,
     pub thread_id: String,
     pub composer_role: ComposerRole,
-    pub model_preference: Option<runtime::ModelPreference>,
     /// The runtime asked to resume the root for held subagent reports. This is
     /// not user input and does not renew the automatic-continuation budget.
     /// Only the in-process adapter can set it; the protocol cannot.

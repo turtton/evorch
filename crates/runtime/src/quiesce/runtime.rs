@@ -131,6 +131,7 @@ impl AgentRuntime {
                         .unwrap_or_else(|| "initial".into()),
                     text: prompt.into(),
                     trusted_user: config.initial_prompt_id.is_some(),
+                    model_preference_update: crate::ModelPreferenceUpdate::Keep,
                 }),
                 inputs: Vec::new(),
                 active: true,

@@ -208,6 +208,280 @@ fn title_on_disk(fixture: &Fixture, id: &str) -> Option<String> {
         .map(|t| t.title.clone())
 }
 
+#[derive(Default)]
+struct ChoiceModel {
+    seen: std::sync::Mutex<Vec<Option<runtime::ModelPreference>>>,
+    reached: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for ChoiceModel {
+    fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
+        "known/chat".into()
+    }
+    fn validate_model_preference(
+        &self,
+        p: &runtime::ModelPreference,
+    ) -> Result<(), runtime::RuntimeError> {
+        if p.profile == "known" && p.model.as_deref().is_none_or(|m| m == "chat") {
+            Ok(())
+        } else {
+            Err(runtime::RuntimeError::Model {
+                reason: "invalid explicit selection".into(),
+            })
+        }
+    }
+    async fn complete(
+        &self,
+        invocation: &runtime::AgentInvocationContext,
+        _: runtime::Role,
+        _: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(invocation.model_preference.clone());
+        self.reached.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[test]
+fn model_choice_is_shared_revisioned_and_preserves_arbitrary_effort() {
+    use workbench_protocol::commands::{ModelChoice, ModelPreference};
+    let mut f = fixture(vec![thread("t1")]);
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let runtime = runtime::AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        Arc::new(ChoiceModel::default()),
+    );
+    f.area = WorkspaceArea::with_store(
+        SidebarStore::new(f.store.path()),
+        Some(runtime),
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    );
+    let update = |choice, expected_revision| {
+        WorkspaceCommand::SetThreadModelChoice(SetThreadModelChoice {
+            thread: wire_thread("t1"),
+            choice,
+            expected_revision,
+        })
+    };
+    let first = f.detail("t1");
+    let chosen = ModelChoice::Explicit(ModelPreference {
+        profile: "known".into(),
+        model: None,
+        reasoning_effort: Some("custom-effort".into()),
+    });
+    let saved = applied(f.send(update(chosen.clone(), first.revision)));
+    assert!(saved.changed);
+    assert_ne!(saved.revision, first.revision);
+    assert!(!applied(f.send(update(chosen.clone(), saved.revision))).changed);
+    assert!(matches!(
+        rejected(f.send(update(ModelChoice::RoleDefault, first.revision))),
+        WorkspaceRejection::Conflict { .. }
+    ));
+    // A fresh client reads the file, not the first client's in-memory selection.
+    let second = WorkspaceArea::with_store(
+        SidebarStore::new(f.store.path()),
+        None,
+        vec![],
+        None,
+        |_| false,
+    );
+    let WorkspaceReply::ThreadDetail(read) = second
+        .query(&WorkspaceQuery::GetThreadDetail(ThreadTarget {
+            thread: wire_thread("t1"),
+        }))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(read.model_choice, chosen);
+    assert_eq!(read.revision, saved.revision);
+    assert!(f.on_disk().sidebar.threads[0].extra_read_dirs.is_empty());
+    let invalid = ModelChoice::Explicit(ModelPreference {
+        profile: "removed".into(),
+        model: Some("non-chat".into()),
+        reasoning_effort: None,
+    });
+    assert!(matches!(
+        rejected(f.send(update(invalid, saved.revision))),
+        WorkspaceRejection::Invalid { .. }
+    ));
+    assert_eq!(f.detail("t1").model_choice, chosen);
+    applied(f.send(update(ModelChoice::RoleDefault, saved.revision)));
+    assert!(f.on_disk().sidebar.threads[0].model_preference.is_none());
+}
+
+#[test]
+fn unknown_saved_choice_is_visible_and_can_be_cleared_without_fallback() {
+    use workbench_protocol::commands::ModelChoice;
+    let mut record = thread("t1");
+    record.model_preference = Some(workspace_state::ModelPreference {
+        profile: "deleted-profile".into(),
+        model: Some("deleted-model".into()),
+        reasoning_effort: None,
+    });
+    let f = fixture(vec![record]);
+    let first = f.detail("t1");
+    assert!(
+        matches!(&first.model_choice, ModelChoice::Explicit(p) if p.profile == "deleted-profile")
+    );
+    applied(f.send(WorkspaceCommand::SetThreadModelChoice(
+        SetThreadModelChoice {
+            thread: wire_thread("t1"),
+            expected_revision: first.revision,
+            choice: ModelChoice::RoleDefault,
+        },
+    )));
+    assert_eq!(f.detail("t1").model_choice, ModelChoice::RoleDefault);
+}
+
+#[test]
+fn send_receipts_use_the_original_choice_and_duplicates_never_roll_back_saved_selection() {
+    use workbench_host::{
+        CommandHost, areas::Areas, commands::CommandService, projects::StaticProjects,
+    };
+    use workbench_protocol::{
+        commands::{Command, CommandDisposition, ModelChoice, ModelPreference},
+        namespaces::ConversationCommand,
+    };
+    let mut legacy = thread("t2");
+    legacy.model_preference = Some(workspace_state::ModelPreference {
+        profile: "known".into(),
+        model: None,
+        reasoning_effort: Some("saved-but-not-applied".into()),
+    });
+    let f = fixture(vec![thread("t1"), legacy]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let config = storage::StorageConfig {
+        db_path: f.config.join("runtime.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(event_bus::EventBus::new(64));
+    let model = Arc::new(ChoiceModel::default());
+    let runtime = runtime::AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        model.clone(),
+    )
+    .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let mut projects = StaticProjects::default();
+    projects.insert(&wire_project(), f.root.clone());
+    let area = WorkspaceArea::with_store(
+        SidebarStore::new(f.store.path()),
+        Some(runtime.clone()),
+        vec![f.config.clone()],
+        None,
+        |_| false,
+    );
+    let mut host = CommandHost::new(CommandService::new(runtime.clone(), rt.handle().clone()))
+        .with_projects(projects)
+        .with_areas(Areas {
+            workspace: area,
+            ..Default::default()
+        });
+    let preference = ModelPreference {
+        profile: "known".into(),
+        model: None,
+        reasoning_effort: Some("first".into()),
+    };
+    let mut send = common::send("t1", "explicit", "original");
+    send.project = wire_project();
+    send.model_preference = Some(preference.clone());
+    let original = Command::Conversation(ConversationCommand::SendChat(send.clone()));
+    let run = host
+        .handle_command(original.clone(), local_desktop())
+        .unwrap()
+        .run_id
+        .unwrap();
+    rt.block_on(model.reached.notified());
+    assert_eq!(
+        model.seen.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("first")
+    );
+    let next = ModelChoice::Explicit(ModelPreference {
+        reasoning_effort: Some("second".into()),
+        ..preference
+    });
+    let set = |choice, expected_revision| {
+        Command::Workspace(WorkspaceCommand::SetThreadModelChoice(
+            SetThreadModelChoice {
+                thread: wire_thread("t1"),
+                expected_revision,
+                choice,
+            },
+        ))
+    };
+    host.handle_command(set(next.clone(), f.detail("t1").revision), local_desktop())
+        .unwrap();
+    assert_eq!(
+        host.handle_command(original, local_desktop())
+            .unwrap()
+            .disposition,
+        CommandDisposition::AlreadyApplied
+    );
+    assert_eq!(f.detail("t1").model_choice, next);
+    send.submission_id = workbench_protocol::ids::SubmissionId::new("saved-choice").unwrap();
+    send.text = "resolve the current saved choice".into();
+    send.model_preference = None;
+    let saved = Command::Conversation(ConversationCommand::SendChat(send));
+    host.handle_command(saved.clone(), local_desktop()).unwrap();
+    host.handle_command(
+        set(ModelChoice::RoleDefault, f.detail("t1").revision),
+        local_desktop(),
+    )
+    .unwrap();
+    assert_eq!(
+        host.handle_command(saved, local_desktop())
+            .unwrap()
+            .disposition,
+        CommandDisposition::AlreadyApplied
+    );
+    assert_eq!(f.detail("t1").model_choice, ModelChoice::RoleDefault);
+    use workbench_host::commands::{ChatInput, HostCommand, HostEvent};
+    let local = ChatInput {
+        submission_id: "legacy".into(),
+        project_root: Some(f.root.clone()),
+        composer_role: workbench_host::commands::ComposerRole::Worker,
+        thread_id: "t2".into(),
+        text: "old GUI automatic".into(),
+        skills: vec![],
+        attachments: vec![],
+        model_preference: runtime::ModelPreferenceUpdate::RoleDefault,
+        fork_seed: None,
+    };
+    let local_events = host.submit_local(HostCommand::SendChat(local), &local_desktop());
+    let local_run = local_events
+        .iter()
+        .find_map(|e| match e {
+            HostEvent::ChatAccepted { run_id, .. } => Some(run_id.parse().unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    rt.block_on(model.reached.notified());
+    assert_eq!(model.seen.lock().unwrap()[1], None);
+    assert!(matches!(
+        f.detail("t2").model_choice,
+        ModelChoice::Explicit(_)
+    ));
+    runtime.cancel(local_run).unwrap();
+    rt.block_on(runtime.wait(local_run)).unwrap();
+    let run = run.as_str().parse().unwrap();
+    runtime.cancel(run).unwrap();
+    rt.block_on(runtime.wait(run)).unwrap();
+}
+
 #[test]
 fn a_stale_revision_is_a_conflict_and_changes_nothing() {
     let f = fixture(vec![thread("t1")]);

@@ -45,6 +45,7 @@ pub enum CoreTab {
 /// What a frame asks the screen to do once the dock is drawn and the shared state is free.
 pub enum Effect {
     Send(Box<Action>),
+    ModelChoice(ThreadId, workbench_protocol::commands::ModelChoice),
     Reveal(FeatureId),
     Open(CoreTab),
     /// Open pane pressed on an Execution row.
@@ -464,6 +465,21 @@ impl TabViewer for Viewer<'_, '_> {
             CoreTab::Projects => self.projects(ui),
             CoreTab::Notifications => self.notifications(ui),
             CoreTab::Conversation => {
+                let workspace = self.pass.workspace();
+                let thread = self.selection.thread.as_ref();
+                self.conversation.sync_model_picker(
+                    thread,
+                    workspace.and_then(|w| {
+                        self.selection
+                            .project
+                            .as_ref()
+                            .and_then(|p| w.model_catalog(p.as_str()))
+                    }),
+                    workspace.and_then(|w| thread.and_then(|t| w.model().details.get(t.as_str()))),
+                    workspace.is_some_and(|w| {
+                        thread.is_some_and(|t| w.model_choice_pending(t.as_str()))
+                    }),
+                );
                 let root = self.selected_root();
                 let band = self.pass.execution().and_then(|e| e.band());
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());

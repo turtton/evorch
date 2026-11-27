@@ -68,19 +68,35 @@ impl AgentRuntime {
         for source in &sources {
             if let Some(config) = authority.members.get(&source.record.run_id) {
                 self.validate_recovery_authority(source, config)?;
-                models
-                    .current(self, source.record.run_id, config)?
-                    .validate_checkpoint_compatibility(
-                        &crate::AgentInvocationContext {
-                            run_id: source.record.run_id.to_string(),
-                            category: config.category.clone(),
-                            model_preference: config.model_preference.clone(),
-                            ..Default::default()
-                        },
-                        Role::from_name(&source.record.role).map_err(error)?,
-                        &source.intent.route_pins,
-                        source.intent.provider_input.as_ref(),
-                    )?;
+                let model = models.current(self, source.record.run_id, config)?;
+                if source
+                    .record
+                    .recipe
+                    .descriptor
+                    .as_ref()
+                    .is_some_and(|d| d.input_selection_transition.is_some())
+                    && let Some(preference) = &config.model_preference
+                {
+                    model.validate_model_preference(preference)?;
+                }
+                model.validate_checkpoint_compatibility(
+                    &crate::AgentInvocationContext {
+                        run_id: source.record.run_id.to_string(),
+                        category: config.category.clone(),
+                        model_preference: source
+                            .record
+                            .recipe
+                            .descriptor
+                            .as_ref()
+                            .and_then(|d| d.input_selection_transition.as_ref())
+                            .map(|t| t.previous_preference.clone())
+                            .unwrap_or_else(|| config.model_preference.clone()),
+                        ..Default::default()
+                    },
+                    Role::from_name(&source.record.role).map_err(error)?,
+                    &source.intent.route_pins,
+                    source.intent.provider_input.as_ref(),
+                )?;
             }
         }
         let ids = sources

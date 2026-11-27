@@ -297,11 +297,28 @@ impl AgentRuntime {
                 ));
             }
             let model = models.current(self, id, &candidate.entry.config)?;
+            if source
+                .record
+                .recipe
+                .descriptor
+                .as_ref()
+                .is_some_and(|d| d.input_selection_transition.is_some())
+                && let Some(preference) = &candidate.entry.config.model_preference
+            {
+                model.validate_model_preference(preference)?;
+            }
             model.validate_checkpoint_compatibility(
                 &crate::AgentInvocationContext {
                     run_id: id.to_string(),
                     category: candidate.entry.config.category.clone(),
-                    model_preference: candidate.entry.config.model_preference.clone(),
+                    model_preference: source
+                        .record
+                        .recipe
+                        .descriptor
+                        .as_ref()
+                        .and_then(|d| d.input_selection_transition.as_ref())
+                        .map(|t| t.previous_preference.clone())
+                        .unwrap_or_else(|| candidate.entry.config.model_preference.clone()),
                     ..Default::default()
                 },
                 candidate.task.role,

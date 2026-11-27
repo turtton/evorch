@@ -37,6 +37,48 @@ impl CommandHost {
     ) -> Result<QueryReply, WorkbenchError> {
         let settings = &self.areas.settings;
         Ok(QueryReply::Settings(match query {
+            SettingsQuery::ModelChoices { project } => {
+                use workbench_protocol::namespaces::settings::{
+                    ModelProfileChoice, ProjectModelChoices, ProviderKind, RoleModelChoice,
+                };
+                let root = self.project_root(project)?;
+                let model = self.service.runtime().project_model_snapshot(&root);
+                let role = |role| RoleModelChoice {
+                    model: model.selected_model(role, Some("conversation")),
+                    reasoning_effort: model.selected_reasoning_effort(role, Some("conversation")),
+                };
+                let worker = role(runtime::Role::Worker);
+                let orchestrator = role(runtime::Role::Orchestrator);
+                let profiles = model
+                    .available_profiles()
+                    .into_iter()
+                    .map(|p| ModelProfileChoice {
+                        name: p.name,
+                        provider_type: match p.provider_type {
+                            model::ProviderType::Anthropic => ProviderKind::Anthropic,
+                            model::ProviderType::AnthropicSubscription => {
+                                ProviderKind::AnthropicSubscription
+                            }
+                            model::ProviderType::OpenAi => ProviderKind::Openai,
+                            model::ProviderType::OpenAiCodex => ProviderKind::OpenaiCodex,
+                            model::ProviderType::GithubCopilot => ProviderKind::GithubCopilot,
+                            model::ProviderType::Openrouter => ProviderKind::Openrouter,
+                            model::ProviderType::OpenAiCompatible => ProviderKind::OpenaiCompatible,
+                            model::ProviderType::KimiSubscription => ProviderKind::KimiSubscription,
+                            model::ProviderType::Cursor => ProviderKind::Cursor,
+                        },
+                        models: p.models,
+                        default_model: p.default_model,
+                        effort_levels: p.effort_levels,
+                    })
+                    .collect();
+                SettingsReply::ModelChoices(ProjectModelChoices {
+                    project: project.clone(),
+                    profiles,
+                    worker,
+                    orchestrator,
+                })
+            }
             SettingsQuery::GetSettingsSnapshot {} => {
                 SettingsReply::Settings(Box::new(settings.snapshot()?))
             }

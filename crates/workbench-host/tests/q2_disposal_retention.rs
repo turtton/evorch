@@ -62,7 +62,6 @@ fn check(f: &fixture::Fixture, case: &str) {
                         root: fixture::run_id(thread),
                         project_root: Some(f.root.join("project")),
                         goal_project: None,
-                        model_preference: None,
                     },
                 )
             })));

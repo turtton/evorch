@@ -52,6 +52,7 @@ const DETAILS_IN_FLIGHT: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
     Rename(String),
+    ModelChoice(workbench_protocol::commands::ModelChoice),
     Archive(bool),
     Pin(bool),
 }
@@ -59,6 +60,7 @@ pub enum Intent {
 #[derive(Debug, Clone)]
 enum Inflight {
     Families,
+    Models(String, u64),
     Projects,
     Detail(String),
     Command(String),
@@ -181,6 +183,10 @@ struct Requests {
 #[derive(Default)]
 pub struct WorkspaceFeature {
     model: SidebarModel,
+    model_catalogs: BTreeMap<String, workbench_protocol::namespaces::settings::ProjectModelChoices>,
+    model_catalog_generation: u64,
+    detail_generation: u64,
+    detail_generations: BTreeMap<u64, u64>,
     next_tag: u64,
     /// Which request each tag stands for. Kept across a reset: a reply to a
     /// request sent before it is still delivered.
@@ -319,8 +325,44 @@ impl WorkspaceFeature {
         !self.stale && self.inflight.is_empty() && self.outbox.is_empty()
     }
 
+    pub fn model_catalog(
+        &self,
+        project: &str,
+    ) -> Option<&workbench_protocol::namespaces::settings::ProjectModelChoices> {
+        self.model_catalogs.get(project)
+    }
+
+    pub fn model_choice_pending(&self, thread: &str) -> bool {
+        self.intents.contains_key(thread)
+            || self
+                .inflight
+                .values()
+                .any(|i| matches!(i, Inflight::Command(t) if t == thread))
+            || self.refetch_details.contains(thread)
+    }
+
+    fn want_model_catalog(&mut self, project: &workbench_protocol::ids::ProjectId) {
+        if self.model_catalogs.contains_key(project.as_str()) || self.inflight.values().any(|i| matches!(i, Inflight::Models(p, g) if p == project.as_str() && *g == self.model_catalog_generation)) { return; }
+        let tag = self.tag(Inflight::Models(
+            project.to_string(),
+            self.model_catalog_generation,
+        ));
+        self.outbox.push(Outgoing::Query(
+            tag,
+            Query::Settings(
+                workbench_protocol::namespaces::settings::SettingsQuery::ModelChoices {
+                    project: project.clone(),
+                },
+            ),
+        ));
+    }
+
     fn tag(&mut self, what: Inflight) -> u64 {
         self.next_tag += 1;
+        if matches!(what, Inflight::Detail(_)) {
+            self.detail_generations
+                .insert(self.next_tag, self.detail_generation);
+        }
         self.inflight.insert(self.next_tag, what);
         self.next_tag
     }
@@ -409,6 +451,7 @@ impl WorkspaceFeature {
     pub fn want_selection(&mut self, selection: &Selection, cache: &Cache) {
         if let Some(project) = &selection.project {
             self.want_access(project.as_str());
+            self.want_model_catalog(project);
         }
         if let Some(thread) = &selection.thread
             && cache.threads.contains_key(thread.as_str())
@@ -453,6 +496,13 @@ impl WorkspaceFeature {
             return;
         };
         let command = match intent {
+            Intent::ModelChoice(choice) => WorkspaceCommand::SetThreadModelChoice(
+                workbench_protocol::namespaces::workspace::SetThreadModelChoice {
+                    thread: detail.thread.clone(),
+                    choice,
+                    expected_revision: detail.revision,
+                },
+            ),
             Intent::Rename(title) => WorkspaceCommand::RenameThread(RenameThread {
                 thread: detail.thread.clone(),
                 title,
@@ -585,7 +635,32 @@ impl WorkspaceFeature {
         let Some(what) = self.inflight.remove(&tag) else {
             return;
         };
+        if matches!(what, Inflight::Detail(_))
+            && self
+                .detail_generations
+                .remove(&tag)
+                .is_some_and(|generation| generation != self.detail_generation)
+        {
+            if let Inflight::Detail(thread) = &what
+                && (self.intents.contains_key(thread) || self.refetch_details.contains(thread))
+            {
+                self.want_detail(thread);
+            }
+            return;
+        }
         match (what, reply) {
+            (
+                Inflight::Models(project, generation),
+                FeatureReply::Query(Ok(QueryReply::Settings(
+                    workbench_protocol::namespaces::settings::SettingsReply::ModelChoices(catalog),
+                ))),
+            ) => {
+                if generation == self.model_catalog_generation
+                    && catalog.project.as_str() == project
+                {
+                    self.model_catalogs.insert(project, catalog);
+                }
+            }
             (
                 Inflight::Families,
                 FeatureReply::Query(Ok(QueryReply::Workspace(WorkspaceReply::Families(page)))),
@@ -708,6 +783,9 @@ impl WorkspaceFeature {
                     detail,
                 )))),
             ) => {
+                if detail.thread.as_str() != thread {
+                    return;
+                }
                 self.refetch_details.remove(&thread);
                 self.model.details.insert(thread.clone(), *detail);
                 if self.intents.contains_key(&thread) {
@@ -717,12 +795,16 @@ impl WorkspaceFeature {
             (Inflight::Command(thread), FeatureReply::Command(Ok(reply))) => {
                 match reply.result.as_deref() {
                     Some(CommandResult::Workspace(WorkspaceResult::Applied(_))) => {
+                        self.refetch_details.insert(thread.clone());
+                        self.want_detail(&thread);
                         self.stale = true;
                     }
                     Some(CommandResult::Workspace(WorkspaceResult::Rejected(rejection))) => {
                         self.notice = Some(rejection_text(rejection));
                         // Whatever it was decided on is not current any more.
                         self.model.details.remove(&thread);
+                        self.refetch_details.insert(thread.clone());
+                        self.want_detail(&thread);
                         self.stale = true;
                     }
                     _ => self.notice = Some("the core answered something unexpected".into()),
@@ -758,7 +840,13 @@ impl WorkspaceFeature {
                     self.stale = true;
                     self.want_access(&project);
                 }
-                Inflight::Register | Inflight::Command(_) => self.stale = true,
+                Inflight::Command(thread) => {
+                    let thread = thread.clone();
+                    self.refetch_details.insert(thread.clone());
+                    self.want_detail(&thread);
+                    self.stale = true;
+                }
+                Inflight::Register => self.stale = true,
                 _ => {}
             }
         }
@@ -803,6 +891,9 @@ impl Feature for WorkspaceFeature {
 
     fn reset(&mut self) {
         self.model = SidebarModel::default();
+        self.detail_generation += 1;
+        self.model_catalogs.clear();
+        self.model_catalog_generation += 1;
         self.refetch_details.clear();
         self.refetch_access.clear();
         // Replies can queue reads between frames. Keep those not-yet-sent
@@ -821,8 +912,20 @@ impl Feature for WorkspaceFeature {
     fn event(&mut self, event: &UiEvent) {
         if matches!(
             event,
+            UiEvent::Settings(
+                workbench_protocol::namespaces::settings::SettingsEvent::SettingsSnapshotChanged { .. }
+            )
+        ) {
+            self.model_catalogs.clear();
+            self.model_catalog_generation += 1;
+        }
+        if matches!(
+            event,
             UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged { .. })
         ) {
+            self.detail_generation += 1;
+            self.refetch_details
+                .extend(self.model.details.keys().cloned());
             self.stale = true;
         }
     }
@@ -948,7 +1051,7 @@ mod tests {
             lineage: None,
             root_run: None,
             active_root: None,
-            model_profile: None,
+            model_choice: workbench_protocol::commands::ModelChoice::RoleDefault,
             chat_role: None,
             extra_read_dirs: Vec::new(),
             archived: false,
@@ -1348,8 +1451,14 @@ mod tests {
             "the stale decision basis is dropped"
         );
         assert!(
-            feature.take_outbox().is_empty(),
-            "nothing is resent on its own"
+            matches!(
+                feature.take_outbox().as_slice(),
+                [Outgoing::Query(
+                    _,
+                    Query::Workspace(WorkspaceQuery::GetThreadDetail(_))
+                )]
+            ),
+            "only a fresh read is sent, never the conflicted command"
         );
         feature.refresh_if_stale();
         assert!(matches!(
@@ -1956,9 +2065,17 @@ mod tests {
         feature.reset();
         assert!(feature.model.details.is_empty() && feature.model.families.is_empty());
         feature.reply(tag, detail_reply(detail("t2", 9, "t2")));
+        let reads = feature.take_outbox();
+        let [Outgoing::Query(fresh, Query::Workspace(WorkspaceQuery::GetThreadDetail(_)))] =
+            reads.as_slice()
+        else {
+            panic!("{reads:?}")
+        };
+        assert!(feature.model.details.is_empty());
+        feature.reply(*fresh, detail_reply(detail("t2", 10, "t2")));
         let (_, command) = only_command(feature.take_outbox());
         assert!(
-            matches!(command, WorkspaceCommand::RenameThread(r) if r.expected_revision == Revision(9))
+            matches!(command, WorkspaceCommand::RenameThread(r) if r.expected_revision == Revision(10))
         );
     }
 
@@ -2044,6 +2161,111 @@ mod tests {
             FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
         );
         assert!(feature.notice().unwrap().contains("not known"));
-        assert!(feature.take_outbox().is_empty());
+        assert!(matches!(
+            feature.take_outbox().as_slice(),
+            [Outgoing::Query(
+                _,
+                Query::Workspace(WorkspaceQuery::GetThreadDetail(_))
+            )]
+        ));
+    }
+
+    #[test]
+    fn model_choice_saves_with_revision_and_waits_for_a_fresh_authoritative_detail() {
+        use workbench_protocol::commands::{ModelChoice, ModelPreference};
+        let choice = ModelChoice::Explicit(ModelPreference {
+            profile: "work".into(),
+            model: None,
+            reasoning_effort: Some("custom".into()),
+        });
+        for outcome in ["applied", "conflict", "unknown"] {
+            let mut feature = WorkspaceFeature::default();
+            feature
+                .model
+                .details
+                .insert("t1".into(), detail("t1", 1, "t1"));
+            feature.ask("t1", Intent::ModelChoice(choice.clone()));
+            assert!(feature.model_choice_pending("t1"));
+            assert!(!feature.model_choice_pending("t2"));
+            let (tag, command) = only_command(feature.take_outbox());
+            let WorkspaceCommand::SetThreadModelChoice(command) = command else {
+                panic!()
+            };
+            assert_eq!(command.choice, choice);
+            assert_eq!(command.expected_revision, Revision(1));
+            let reply = match outcome {
+                "applied" => command_reply(WorkspaceResult::Applied(
+                    workbench_protocol::namespaces::workspace::Applied {
+                        revision: Revision(2),
+                        changed: true,
+                        project: None,
+                    },
+                )),
+                "conflict" => {
+                    command_reply(WorkspaceResult::Rejected(WorkspaceRejection::Conflict {
+                        expected: Revision(1),
+                        actual: Revision(2),
+                    }))
+                }
+                _ => FeatureReply::Command(Err(FeatureError::outcome_unknown("connection lost"))),
+            };
+            feature.on_reply(tag, reply);
+            assert!(feature.model_choice_pending("t1"));
+            let reads = feature.take_outbox();
+            let [Outgoing::Query(read_tag, Query::Workspace(WorkspaceQuery::GetThreadDetail(_)))] =
+                reads.as_slice()
+            else {
+                panic!("{reads:?}")
+            };
+            let mut current = detail("t1", 2, "t1");
+            current.model_choice = choice.clone();
+            feature.on_reply(*read_tag, detail_reply(current));
+            assert!(!feature.model_choice_pending("t1"));
+            assert_eq!(feature.model.details["t1"].model_choice, choice);
+            assert!(feature.take_outbox().is_empty());
+        }
+    }
+
+    #[test]
+    fn old_detail_and_catalog_results_cannot_overwrite_reconnected_state() {
+        use workbench_protocol::ids::ProjectId;
+        use workbench_protocol::namespaces::settings::{
+            ProjectModelChoices, RoleModelChoice, SettingsReply,
+        };
+        let mut feature = WorkspaceFeature::default();
+        feature.want_detail("t1");
+        let old_detail = match feature.take_outbox().as_slice() {
+            [Outgoing::Query(tag, _)] => *tag,
+            other => panic!("{other:?}"),
+        };
+        let project = ProjectId::new("p").unwrap();
+        feature.want_model_catalog(&project);
+        let old_catalog = match feature.take_outbox().as_slice() {
+            [Outgoing::Query(tag, _)] => *tag,
+            other => panic!("{other:?}"),
+        };
+        feature.reset();
+        feature
+            .model
+            .details
+            .insert("t1".into(), detail("t1", 5, "t1"));
+        feature.on_reply(old_detail, detail_reply(detail("t1", 1, "t1")));
+        assert_eq!(feature.model.details["t1"].revision, Revision(5));
+        let role = RoleModelChoice {
+            model: "old".into(),
+            reasoning_effort: None,
+        };
+        feature.on_reply(
+            old_catalog,
+            FeatureReply::Query(Ok(QueryReply::Settings(SettingsReply::ModelChoices(
+                ProjectModelChoices {
+                    project,
+                    profiles: Vec::new(),
+                    worker: role.clone(),
+                    orchestrator: role,
+                },
+            )))),
+        );
+        assert!(feature.model_catalog("p").is_none());
     }
 }

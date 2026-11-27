@@ -143,7 +143,11 @@ fn project_revision(project: &workspace_state::ProjectRecord) -> Revision {
 }
 
 fn thread_revision(thread: &ThreadRecord) -> Revision {
-    revision(&(&thread.title, &thread.extra_read_dirs))
+    revision(&(
+        &thread.title,
+        &thread.extra_read_dirs,
+        &thread.model_preference,
+    ))
 }
 
 fn path_text(path: &Path) -> String {
@@ -305,6 +309,103 @@ impl WorkspaceArea {
         service
             .register_thread(new)
             .map_err(|reason| internal(&reason))
+    }
+
+    /// Resolve the wire send after duplicate checks. An explicit send saves under
+    /// the shared lock, but does not update any live run or runtime binding.
+    pub(crate) fn choice_for_send(
+        &self,
+        thread: &str,
+        explicit: Option<&runtime::ModelPreference>,
+    ) -> Result<runtime::ModelPreferenceUpdate, WorkbenchError> {
+        let Some(service) = self.inner.as_ref() else {
+            return Ok(explicit.cloned().map_or(
+                runtime::ModelPreferenceUpdate::RoleDefault,
+                runtime::ModelPreferenceUpdate::explicit,
+            ));
+        };
+        let deleted = service.deleted().map_err(|e| internal(&format!("{e:?}")))?;
+        if deleted(thread) {
+            return Err(internal("thread was deleted"));
+        }
+        let lock = service.store.lock().map_err(|e| internal(&e.to_string()))?;
+        let mut document = service
+            .store
+            .read(&lock)
+            .map_err(|e| internal(&e.to_string()))?;
+        let selection = if let Some(p) = explicit {
+            let selection = workspace_state::ModelPreference {
+                profile: p.profile.clone(),
+                model: p.model.clone(),
+                reasoning_effort: p.reasoning_effort.clone(),
+            };
+            service
+                .validate_selection(
+                    &document,
+                    &WireThread::new(thread).map_err(|e| internal(&e.to_string()))?,
+                    Some(&selection),
+                )
+                .map_err(|e| {
+                    WorkbenchError::new(
+                        ErrorCode::InvalidRequest,
+                        format!("{e:?}"),
+                        RetryAdvice::Never,
+                    )
+                })?;
+            let record = document
+                .sidebar
+                .threads
+                .iter_mut()
+                .find(|t| t.id.to_string() == thread)
+                .ok_or_else(|| internal("thread is not registered"))?;
+            let changed = record.model_preference.as_ref() != Some(&selection);
+            record.model_preference = Some(selection.clone());
+            let revision = thread_revision(record);
+            if changed {
+                service
+                    .store
+                    .write(&lock, &document)
+                    .map_err(|e| internal(&e.to_string()))?;
+                service.publish(&Done {
+                    applied: Applied {
+                        revision,
+                        changed: true,
+                        project: None,
+                    },
+                    access: false,
+                });
+            }
+            Some(selection)
+        } else {
+            document
+                .sidebar
+                .threads
+                .iter()
+                .find(|t| t.id.to_string() == thread)
+                .and_then(|t| t.model_preference.clone())
+        };
+        service
+            .validate_selection(
+                &document,
+                &WireThread::new(thread).map_err(|e| internal(&e.to_string()))?,
+                selection.as_ref(),
+            )
+            .map_err(|e| {
+                WorkbenchError::new(
+                    ErrorCode::InvalidRequest,
+                    format!("{e:?}"),
+                    RetryAdvice::Never,
+                )
+            })?;
+        Ok(
+            selection.map_or(runtime::ModelPreferenceUpdate::RoleDefault, |p| {
+                runtime::ModelPreferenceUpdate::explicit(runtime::ModelPreference {
+                    profile: p.profile,
+                    model: p.model,
+                    reasoning_effort: p.reasoning_effort,
+                })
+            }),
+        )
     }
 
     /// The projects of the sidebar: id, root directory and the name saved.
@@ -530,10 +631,21 @@ impl Service {
                     .flatten()
                     .and_then(|row| row.map(|row| row.thread_id))
             });
+        let parent_preference = parent
+            .as_ref()
+            .and_then(|parent| {
+                document
+                    .sidebar
+                    .threads
+                    .iter()
+                    .find(|t| t.id.to_string() == *parent)
+            })
+            .and_then(|t| t.model_preference.clone());
         let now = lane
             .as_ref()
             .map_or_else(now_seconds, |lane| lane.created_at);
         if let Some(record) = document.sidebar.threads.iter_mut().find(|t| t.id == id) {
+            record.model_preference = parent_preference;
             record.title_is_placeholder = title.is_empty();
             record.created_at = now;
             record.chat_role = Some(if lane.is_some() || new.orchestrator {
@@ -808,6 +920,46 @@ impl Service {
         Ok(done)
     }
 
+    fn validate_selection(
+        &self,
+        document: &SidebarDocument,
+        thread: &WireThread,
+        selection: Option<&workspace_state::ModelPreference>,
+    ) -> Result<(), WorkspaceRejection> {
+        let Some(selection) = selection else {
+            return Ok(());
+        };
+        let record = document
+            .sidebar
+            .threads
+            .iter()
+            .find(|t| t.id.to_string() == thread.as_str())
+            .ok_or(WorkspaceRejection::NotFound)?;
+        let root = document
+            .sidebar
+            .projects
+            .iter()
+            .find(|p| p.id == record.project_id)
+            .map(|p| &p.repo_root)
+            .ok_or(WorkspaceRejection::NotFound)?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| WorkspaceRejection::Invalid {
+                reason: "model selection is unavailable".into(),
+            })?;
+        runtime
+            .project_model_snapshot(root)
+            .validate_model_preference(&runtime::ModelPreference {
+                profile: selection.profile.clone(),
+                model: selection.model.clone(),
+                reasoning_effort: selection.reasoning_effort.clone(),
+            })
+            .map_err(|e| WorkspaceRejection::Invalid {
+                reason: e.to_string(),
+            })
+    }
+
     fn thread_mut<'a>(
         document: &'a mut SidebarDocument,
         thread: &WireThread,
@@ -925,6 +1077,29 @@ impl Service {
                         project.allowed_directories != before,
                     ),
                     access: true,
+                })
+            }
+            WorkspaceCommand::SetThreadModelChoice(c) => {
+                let selection = match &c.choice {
+                    workbench_protocol::commands::ModelChoice::RoleDefault => None,
+                    workbench_protocol::commands::ModelChoice::Explicit(p) => {
+                        Some(workspace_state::ModelPreference {
+                            profile: p.profile.clone(),
+                            model: p.model.clone(),
+                            reasoning_effort: p.reasoning_effort.clone(),
+                        })
+                    }
+                };
+                let current = Self::thread_mut(document, &c.thread, deleted)?;
+                check_expected(c.expected_revision, thread_revision(current))?;
+                self.validate_selection(document, &c.thread, selection.as_ref())?;
+                let thread = Self::thread_mut(document, &c.thread, deleted)?;
+                check_expected(c.expected_revision, thread_revision(thread))?;
+                let changed = thread.model_preference != selection;
+                thread.model_preference = selection;
+                Ok(Done {
+                    applied: applied(thread_revision(thread), changed),
+                    access: false,
                 })
             }
             WorkspaceCommand::RenameThread(c) => {
@@ -1178,7 +1353,18 @@ impl Service {
                 .as_deref()
                 .and_then(|r| workbench_protocol::ids::RunId::new(r).ok()),
             active_root: record.active_root.as_deref().map(path_text),
-            model_profile: record.model_preference.as_ref().map(|m| m.profile.clone()),
+            model_choice: record.model_preference.as_ref().map_or(
+                workbench_protocol::commands::ModelChoice::RoleDefault,
+                |p| {
+                    workbench_protocol::commands::ModelChoice::Explicit(
+                        workbench_protocol::commands::ModelPreference {
+                            profile: p.profile.clone(),
+                            model: p.model.clone(),
+                            reasoning_effort: p.reasoning_effort.clone(),
+                        },
+                    )
+                },
+            ),
             chat_role: record.chat_role.map(|role| match role {
                 ThreadChatRole::Worker => "worker".to_owned(),
                 ThreadChatRole::Orchestrator => "orchestrator".to_owned(),

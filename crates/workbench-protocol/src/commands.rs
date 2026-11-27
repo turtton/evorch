@@ -321,6 +321,29 @@ impl Command {
     }
 }
 
+/// Persisted next-send choice, distinct from an input update instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ModelChoice {
+    #[default]
+    RoleDefault,
+    Explicit(ModelPreference),
+}
+
+impl ModelChoice {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::RoleDefault => Ok(()),
+            Self::Explicit(p) => p.validate(),
+        }
+    }
+}
+
 impl ModelPreference {
     pub fn validate(&self) -> Result<(), ValidationError> {
         check_line(

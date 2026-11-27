@@ -82,6 +82,14 @@ models = [
 - 切り替え後の履歴が切り替え先の context window × 閾値を超える場合は、送信前に通常の compaction を行う。
 - 切り替えた時点で cache はどのみち失われるので、ここでの compaction は追加の cache 損失にならない。AGENTS.md の cache 契約上も、切り替えは明示的な境界として扱う。
 
+### スレッドの次回選択の採用（ADR 0045 E1）
+
+- model／effort／Role default の保存は実行中の選択を変更しない。次の通常ユーザー入力が採用され、適用済みの選択値と異なるとき、その最初の request の前に既存の `prepare_model_switch` を通す。同じ実効モデルを別の選択値で指定した場合も、この境界を一度許容する。
+- 編集インターフェース、編集呼出し、opaque checkpoint の replay が互換なら、replay reset と必要時の context fit のみを行い、履歴置換用の再要約を必須にしない。非互換な編集・opaque checkpoint は既存の再要約条件に従う。
+- この境界は既送信履歴、ToolResult、system、tool schema、cache affinity key の独自な変更を許可しない。境界後の通常 request は新しい prefix を維持する。
+- 選択の保存だけ、内部 wake、Continue、goal 投入、設定 reload は E1 の追加トリガではない。設定 reload や routing fallback、直接の `set_model_preference` は既存の切替判定を維持する。
+- 採用後・最初の送信前の再起動では、snapshot の適用済み選択と最小の transition 証拠（直前の選択、準備済みか）を保持する。旧 provider input は旧選択で厳密に検証し、新選択の検証や現在の権限検証を省略しない。未送信のスレッド保存値で復元時の選択を上書きしない。
+
 ### 同一モデルの自動グルーピング
 
 - プロバイダを追加したりモデルを有効にしたりした時点で、models.dev の `canonical_model_id` を引き、同じ canonical id（と速度区分）のプールがあれば最低優先度に `auto = true` で書き込む。ロールが参照していないプールは作らない。

@@ -76,11 +76,6 @@ impl CommandService {
                     .goal_projects
                     .insert(thread.clone(), project.clone());
             }
-            if let Some(model) = &binding.model_preference {
-                self.bindings
-                    .model_preferences
-                    .insert(thread.clone(), model.clone());
-            }
         }
         self.publish_lane_bindings();
         drop(guard);

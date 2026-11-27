@@ -11,7 +11,7 @@ use workbench_protocol::{
 };
 
 use crate::commands::{ContinueInput, HostCommand};
-use crate::ingress::{CommandHost, composer_role, model_preference};
+use crate::ingress::{CommandHost, composer_role};
 use workbench_protocol::namespaces::ExecutionCommand;
 
 #[derive(Default)]
@@ -49,14 +49,13 @@ impl CommandHost {
                 project,
                 thread,
                 composer_role: role,
-                model_preference: preference,
+                model_preference: _,
             }) => {
                 return self.run_host_command(
                     HostCommand::ContinueChat(ContinueInput {
                         project_root: Some(self.project_root(&project)?),
                         thread_id: thread.as_str().to_owned(),
                         composer_role: composer_role(role),
-                        model_preference: preference.as_ref().map(model_preference),
                         // Automatic continuations are the core's own decision.
                         automatic: false,
                     }),

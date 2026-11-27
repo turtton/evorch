@@ -274,6 +274,7 @@ mod review_tests {
                     execution,
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
+                        input_selection_transition: None,
                         recovery_waits: Vec::new(),
                         mcp_snapshot: None,
                         harness_notice_pending: false,

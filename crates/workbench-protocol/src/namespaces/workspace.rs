@@ -34,6 +34,7 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "set_project_trust",
     "update_allowed_directory",
     "rename_thread",
+    "set_thread_model_choice",
     "set_family_archived",
     "set_family_pinned",
     "set_thread_extra_read_dirs",
@@ -115,6 +116,14 @@ pub struct UpdateAllowedDirectory {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SetThreadModelChoice {
+    pub thread: ThreadId,
+    pub expected_revision: Revision,
+    pub choice: crate::commands::ModelChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameThread {
     pub thread: ThreadId,
     pub title: String,
@@ -177,6 +186,7 @@ pub enum WorkspaceCommand {
     SetProjectTrust(SetProjectTrust),
     UpdateAllowedDirectory(UpdateAllowedDirectory),
     RenameThread(RenameThread),
+    SetThreadModelChoice(SetThreadModelChoice),
     SetFamilyArchived(SetFamilyArchived),
     SetFamilyPinned(SetFamilyPinned),
     SetThreadExtraReadDirs(SetThreadExtraReadDirs),
@@ -215,6 +225,7 @@ impl WorkspaceCommand {
                     check_line("path", path, MAX_PATH_BYTES, false)
                 }
             },
+            Self::SetThreadModelChoice(c) => c.choice.validate(),
             Self::RenameThread(c) => check_line("title", &c.title, MAX_TITLE_BYTES, false),
             Self::SetThreadExtraReadDirs(c) => {
                 check_count("dirs", c.dirs.len(), MAX_EXTRA_READ_DIRS)?;
@@ -456,8 +467,7 @@ pub struct ThreadDetail {
     pub root_run: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_profile: Option<String>,
+    pub model_choice: crate::commands::ModelChoice,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_role: Option<String>,
     pub extra_read_dirs: Vec<AllowedDirectoryView>,

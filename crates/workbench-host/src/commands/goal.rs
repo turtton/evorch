@@ -51,7 +51,7 @@ impl CommandService {
                 text: prompt,
                 composer_role: ComposerRole::Orchestrator,
                 attachments: Vec::new(),
-                model_preference: None,
+                model_preference: runtime::ModelPreferenceUpdate::Keep,
                 fork_seed: None,
                 skills: Vec::new(),
             },

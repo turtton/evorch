@@ -160,7 +160,7 @@ fn the_desktop_door_gets_the_same_answer_after_a_restart() {
         thread_id: "thread-1".into(),
         text: text.into(),
         skills: Vec::new(),
-        model_preference: None,
+        model_preference: runtime::ModelPreferenceUpdate::RoleDefault,
         fork_seed: None,
     };
 

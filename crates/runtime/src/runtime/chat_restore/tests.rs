@@ -5,6 +5,7 @@ mod compressed_snapshot;
 mod escalation;
 mod fork_seed;
 mod host_receipts;
+mod input_selection;
 mod invalidation;
 mod registration;
 mod resume;

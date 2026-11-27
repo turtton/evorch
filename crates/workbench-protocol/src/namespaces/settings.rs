@@ -47,6 +47,7 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "reload_models",
 ];
 pub const QUERY_OPERATIONS: &[&str] = &[
+    "model_choices",
     "get_settings_snapshot",
     "get_settings_operation",
     "list_settings_operations",
@@ -530,6 +531,9 @@ pub enum SettingsResult {
 pub enum SettingsQuery {
     /// The snapshot the core holds (`refresh` reads the file again).
     GetSettingsSnapshot {},
+    ModelChoices {
+        project: crate::ids::ProjectId,
+    },
     GetSettingsOperation {
         operation_id: OperationId,
     },
@@ -555,6 +559,7 @@ impl SettingsQuery {
     deny_unknown_fields
 )]
 pub enum SettingsReply {
+    ModelChoices(ProjectModelChoices),
     Settings(Box<SettingsSnapshot>),
     Operation(SettingsOperationView),
     Operations {
@@ -562,9 +567,66 @@ pub enum SettingsReply {
     },
 }
 
+/// Credential-free metadata from one applied project-model snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectModelChoices {
+    pub project: crate::ids::ProjectId,
+    pub profiles: Vec<ModelProfileChoice>,
+    pub worker: RoleModelChoice,
+    pub orchestrator: RoleModelChoice,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelProfileChoice {
+    pub name: String,
+    pub provider_type: ProviderKind,
+    pub models: Vec<String>,
+    pub default_model: Option<String>,
+    pub effort_levels: std::collections::BTreeMap<String, Vec<String>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleModelChoice {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+}
+
 impl SettingsReply {
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
+            Self::ModelChoices(catalog) => {
+                check_count("profiles", catalog.profiles.len(), MAX_PROVIDERS)?;
+                for profile in &catalog.profiles {
+                    check_line("profile.name", &profile.name, MAX_NAME_BYTES, false)?;
+                    check_count("profile.models", profile.models.len(), MAX_MODELS)?;
+                    for model in &profile.models {
+                        check_line("profile.model", model, MAX_NAME_BYTES, false)?;
+                    }
+                    if let Some(model) = &profile.default_model {
+                        check_line("profile.default_model", model, MAX_NAME_BYTES, false)?;
+                    }
+                    check_count(
+                        "profile.effort_levels",
+                        profile.effort_levels.len(),
+                        MAX_MODELS,
+                    )?;
+                    for (model, efforts) in &profile.effort_levels {
+                        check_line("profile.effort_model", model, MAX_NAME_BYTES, false)?;
+                        check_count("profile.efforts", efforts.len(), MAX_MODELS)?;
+                        for effort in efforts {
+                            check_line("profile.effort", effort, MAX_NAME_BYTES, false)?;
+                        }
+                    }
+                }
+                for role in [&catalog.worker, &catalog.orchestrator] {
+                    check_line("role.model", &role.model, MAX_VALUE_BYTES, true)?;
+                    if let Some(effort) = &role.reasoning_effort {
+                        check_line("role.reasoning_effort", effort, MAX_NAME_BYTES, false)?;
+                    }
+                }
+                Ok(())
+            }
             Self::Settings(snapshot) => {
                 check_text("document", &snapshot.document, MAX_DOCUMENT_BYTES, true)?;
                 check_count("providers", snapshot.providers.len(), MAX_PROVIDERS)

@@ -132,7 +132,7 @@ async fn chat(core: &ComposedCore) -> runtime::RunId {
             thread_id: "plain".into(),
             text: "ordinary".into(),
             skills: vec![],
-            model_preference: None,
+            model_preference: runtime::ModelPreferenceUpdate::Keep,
             fork_seed: None,
         }),
         &Provenance::human(Surface::Desktop, ClientId::new("human").unwrap()),

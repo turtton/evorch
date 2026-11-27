@@ -7,7 +7,13 @@ fn adopt(state: &mut LoopState) {
         .channels
         .user_inbox
         .enqueue(None, |seq| {
-            input = Some(("accepted input".into(), true, None, seq));
+            input = Some((
+                "accepted input".into(),
+                true,
+                None,
+                seq,
+                crate::ModelPreferenceUpdate::Keep,
+            ));
             Ok::<_, ()>(())
         })
         .unwrap();

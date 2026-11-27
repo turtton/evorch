@@ -132,6 +132,12 @@ impl Shared {
 }
 
 impl AgentRuntime {
+    /// One applied model snapshot for a project's picker metadata and validation.
+    pub fn project_model_snapshot(&self, root: &std::path::Path) -> Arc<dyn AgentModel> {
+        let model = self.shared.project(root).model.clone();
+        model.invocation_snapshot().unwrap_or(model)
+    }
+
     /// Lets the host compose each project's model, for example from its
     /// selected role profile. Set once before starting runs; first wins.
     #[must_use]

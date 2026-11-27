@@ -143,7 +143,13 @@ pub fn recovery_record(root: &Path, thread: &str) -> RunRecoveryRecord {
             goal_id: None,
             team: None,
             lane: None,
-            descriptor: None,
+            descriptor: Some(
+                serde_json::from_value(serde_json::json!({
+                    "role": "worker", "interactive": true, "keep_alive": true,
+                    "load_skills": [], "restorable": true
+                }))
+                .unwrap(),
+            ),
         },
         waits: vec![],
         deliveries: vec![],
@@ -195,6 +201,7 @@ fn seed(root: &Path, identity: &ConfigIdentity, case: &str) {
                 id: "initial".into(),
                 text: "physical fixture".into(),
                 trusted_user: false,
+                model_preference_update: runtime::ModelPreferenceUpdate::Keep,
             }),
             inputs: vec![],
             active: true,

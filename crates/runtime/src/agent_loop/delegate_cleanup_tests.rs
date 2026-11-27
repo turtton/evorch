@@ -119,6 +119,7 @@ fn fixture_for_runtime(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        input_selection_transition: None,
         recovery_waits: Vec::new(),
         delegate_wait_calls: Vec::new(),
         last_provider_input: None,
@@ -422,7 +423,13 @@ async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() 
     runtime
         .set_goal_checks_paused("resume-race", &goal.goal_id, false)
         .unwrap();
-    state.queue_user_message((crate::thread_goals::CHECKS_WAKE.into(), false, None, 0));
+    state.queue_user_message((
+        crate::thread_goals::CHECKS_WAKE.into(),
+        false,
+        None,
+        0,
+        crate::ModelPreferenceUpdate::Keep,
+    ));
     assert!(!state.flush_aside());
     assert!(state.goal_wake_pending);
     assert_eq!(state.turn, human_turn, "a wake alone is not input");

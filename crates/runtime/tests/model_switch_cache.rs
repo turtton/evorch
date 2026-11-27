@@ -1,5 +1,7 @@
 //! A chain fallback to a smaller window compacts at an explicit cache boundary, then the
 //! new member's prefix is preserved across later turns (ADR 0030).
+#[path = "model_switch_cache/input_selection.rs"]
+mod input_selection;
 mod support;
 use std::sync::Arc;
 
