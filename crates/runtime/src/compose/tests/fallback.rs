@@ -87,8 +87,7 @@ pub(super) fn fixture_with(
         },
         catalog,
     )
-    .unwrap()
-    .with_health(Arc::clone(&model.health));
+    .unwrap();
     model.tool_router = model
         .router
         .clone()
@@ -124,50 +123,172 @@ async fn fallback_uses_each_candidates_reasoning_effort() {
 }
 
 #[tokio::test]
-async fn quota_failure_keeps_new_runs_off_the_profile() {
-    // Given: the primary reports a payment/quota failure and its fallback succeeds.
-    let (mut model, requests) = fixture(vec![
-        Some(ProviderError::Http {
-            status: 402,
-            body: "quota exceeded".into(),
-        }),
-        None,
-    ]);
-    let bus = Arc::new(EventBus::new(32));
-    let mut rx = bus.subscribe();
-    model.event_bus = Some(bus);
-    // When: one run falls back, then an unrelated run starts.
-    assert_eq!(complete(&model, "run-1").await, Ok(response()));
-    assert_eq!(complete(&model, "run-2").await, Ok(response()));
-    // Then: the second run never contacts the cooling profile.
-    assert_eq!(requests[0].lock().unwrap().len(), 1);
-    assert_eq!(requests[1].lock().unwrap().len(), 2);
-    let mut cooldowns = Vec::new();
-    // Events are emitted before `complete` returns; the timeout only ends the drain.
-    while let Ok(Ok(event)) =
-        tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await
-    {
-        if let EventKind::Provider(ProviderEvent::CooldownStarted {
-            profile,
-            model,
-            failure,
-            cooldown_ms,
-            run_id,
-        }) = event.kind
-        {
-            cooldowns.push((profile, model, failure, cooldown_ms, run_id));
-        }
-    }
-    assert_eq!(
-        cooldowns,
-        [(
-            "profile-0".to_owned(),
-            None,
+async fn cooldown_is_isolated_between_runs() {
+    for (error, kind, model_id, duration) in [
+        (
+            ProviderError::Http {
+                status: 402,
+                body: "quota exceeded".into(),
+            },
             event_bus::ProviderFailureKind::Quota,
+            None,
             Some(1_800_000),
-            Some("run-1".to_owned()),
-        )]
+        ),
+        (
+            ProviderError::Http {
+                status: 401,
+                body: "unauthorized".into(),
+            },
+            event_bus::ProviderFailureKind::Auth,
+            None,
+            None,
+        ),
+        (
+            ProviderError::RateLimited { retry_after: None },
+            event_bus::ProviderFailureKind::RateLimited,
+            Some("model-0".to_owned()),
+            Some(30_000),
+        ),
+    ] {
+        let (mut model, requests) = fixture(vec![Some(error), None]);
+        let bus = Arc::new(EventBus::new(32));
+        let mut rx = bus.subscribe();
+        model.event_bus = Some(bus);
+        assert_eq!(complete(&model, "run-1").await, Ok(response()));
+        assert_eq!(complete(&model, "run-1").await, Ok(response()));
+        assert_eq!(complete(&model, "run-2").await, Ok(response()));
+        assert_eq!(
+            requests[0].lock().unwrap().len(),
+            2,
+            "a new run retries primary"
+        );
+        assert_eq!(requests[1].lock().unwrap().len(), 3);
+        let mut cooldowns = Vec::new();
+        // All requests have completed, so their synchronous events are already queued.
+        for event in rx.drain_pending_snapshot() {
+            if let EventKind::Provider(ProviderEvent::CooldownStarted {
+                profile,
+                model,
+                failure,
+                cooldown_ms,
+                run_id,
+            }) = event.kind
+            {
+                cooldowns.push((profile, model, failure, cooldown_ms, run_id));
+            }
+        }
+        assert_eq!(
+            cooldowns,
+            ["run-1", "run-2"].map(|run| (
+                "profile-0".to_owned(),
+                model_id.clone(),
+                kind,
+                duration,
+                Some(run.to_owned())
+            ))
+        );
+    }
+}
+
+#[tokio::test]
+async fn runless_selection_ignores_another_runs_cooldown() {
+    let (model, _) = fixture_with_efforts(
+        vec![
+            Some(ProviderError::Http {
+                status: 401,
+                body: "auth".into(),
+            }),
+            None,
+        ],
+        &[Some("high"), Some("low")],
     );
+    assert_eq!(complete(&model, "run-1").await, Ok(response()));
+    let before = model.health_by_run.lock().unwrap().len();
+    assert_eq!(
+        model.selected_model(Role::Worker, None),
+        "profile-0/model-0"
+    );
+    assert_eq!(
+        model.chain_models(Role::Worker, None),
+        vec!["profile-0/model-0", "profile-1/model-1"]
+    );
+    assert_eq!(
+        model
+            .selected_reasoning_effort(Role::Worker, None)
+            .as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        model.selected_model_for_run("preview", Role::Worker, None),
+        "profile-0/model-0"
+    );
+    assert_eq!(model.health_by_run.lock().unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn quota_and_auth_block_the_profile_but_rate_limit_only_blocks_the_model() {
+    for (failure, primary_attempts) in [
+        (
+            ProviderError::Http {
+                status: 402,
+                body: "quota".into(),
+            },
+            1,
+        ),
+        (
+            ProviderError::Http {
+                status: 401,
+                body: "auth".into(),
+            },
+            1,
+        ),
+        (ProviderError::RateLimited { retry_after: None }, 2),
+    ] {
+        let (mut model, requests) = fixture(vec![Some(failure), None]);
+        let mut profiles: Vec<_> = model
+            .providers
+            .values()
+            .map(|p| p.profile.clone())
+            .collect();
+        profiles[0].models.push("alternate".into());
+        let mut catalog = model.router.catalog().clone();
+        catalog.merge_discovered(vec!["alternate".into()]);
+        model.router = Router::new(
+            profiles,
+            &RoutingConfig {
+                routes: BTreeMap::from([(
+                    "worker".into(),
+                    vec![
+                        RouteCandidateConfig {
+                            profile: "profile-0".into(),
+                            model: Some("model-0".into()),
+                            auto: false,
+                        },
+                        RouteCandidateConfig {
+                            profile: "profile-0".into(),
+                            model: Some("alternate".into()),
+                            auto: false,
+                        },
+                        RouteCandidateConfig {
+                            profile: "profile-1".into(),
+                            model: None,
+                            auto: false,
+                        },
+                    ],
+                )]),
+                ..Default::default()
+            },
+            catalog,
+        )
+        .unwrap();
+        model.tool_router = model
+            .router
+            .clone()
+            .requiring_capability(Capability::ToolCalling);
+        assert_eq!(complete(&model, "run").await, Ok(response()));
+        assert_eq!(requests[0].lock().unwrap().len(), primary_attempts);
+        assert_eq!(requests[1].lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -252,11 +373,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
         }) if from_provider == "profile-0" && from_model.as_deref() == Some("model-0")
             && to_provider == "profile-1" && to_model == "model-1" && session_id == "session")
         );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv())
-                .await
-                .is_err()
-        );
+        assert!(rx.drain_pending_snapshot().is_empty());
     }
 }
 
@@ -479,8 +596,7 @@ async fn failing_route_pool_falls_back_to_the_next_chain_entry() {
         },
         model.router.catalog().clone(),
     )
-    .unwrap()
-    .with_health(Arc::clone(&model.health));
+    .unwrap();
     model.tool_router = model
         .router
         .clone()

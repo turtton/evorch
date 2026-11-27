@@ -92,7 +92,7 @@ impl RoutedModel {
                 &invocation.run_id,
                 role,
                 invocation.category.as_deref(),
-                !input.request.tools.is_empty(),
+                &self.existing_run_router(&invocation.run_id, !input.request.tools.is_empty()),
             )?;
             let member = choice.chain.member(choice.position);
             (

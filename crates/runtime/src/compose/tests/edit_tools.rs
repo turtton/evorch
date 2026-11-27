@@ -713,8 +713,7 @@ async fn same_profile_same_family_fallback_still_resummarizes_when_edit_tools_ch
         },
         catalog,
     )
-    .unwrap()
-    .with_health(model.health.clone());
+    .unwrap();
     model.tool_router = model
         .router
         .clone()

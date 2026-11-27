@@ -21,7 +21,9 @@ use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
 mod checkpoint;
+mod health;
 mod hosted_search;
+use health::RunHealth;
 mod image_generation;
 mod images;
 mod output_limits;
@@ -324,9 +326,9 @@ pub struct RoutedModel {
     affinity: Mutex<SessionAffinity>,
     checkpoint_inputs: Mutex<BTreeMap<String, crate::quiesce::ProviderInput>>,
     recovery_output_limits: Mutex<BTreeMap<String, checkpoint::RecoveryOutputLimit>>,
-    /// 失敗したプロファイル・モデルのクールダウン。両 Router と共有する。
-    health: Arc<routing::ProviderHealth>,
-    image_health: Arc<routing::ProviderHealth>,
+    /// Failure health is shared only by requests carrying the same run ID.
+    cooldown_policy: config::CooldownConfig,
+    health_by_run: Mutex<BTreeMap<String, RunHealth>>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
     /// フォールバックの一周で Retry-After を待つ上限。
@@ -379,16 +381,14 @@ impl RoutedModel {
     }
 
     pub fn new(composed: ComposedProviders, agents: config::AgentsConfig) -> Self {
-        let health = Arc::new(routing::ProviderHealth::default());
         Self {
             tool_router: composed
                 .router
                 .clone()
-                .requiring_capability(Capability::ToolCalling)
-                .with_health(Arc::clone(&health)),
-            router: composed.router.with_health(Arc::clone(&health)),
-            health,
-            image_health: Arc::new(routing::ProviderHealth::default()),
+                .requiring_capability(Capability::ToolCalling),
+            router: composed.router,
+            cooldown_policy: config::CooldownConfig::default(),
+            health_by_run: Mutex::default(),
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             checkpoint_inputs: Mutex::default(),
@@ -445,9 +445,8 @@ impl RoutedModel {
     /// クールダウンの既定期間を設定し、空の状態から始める。
     #[must_use]
     pub fn with_cooldown(mut self, policy: config::CooldownConfig) -> Self {
-        self.health = Arc::new(routing::ProviderHealth::new(policy));
-        self.router = self.router.with_health(Arc::clone(&self.health));
-        self.tool_router = self.tool_router.with_health(Arc::clone(&self.health));
+        self.cooldown_policy = policy;
+        self.health_by_run = Mutex::default();
         self
     }
 
@@ -467,6 +466,7 @@ impl RoutedModel {
         category: Option<&str>,
         requires_tools: bool,
     ) -> Result<(config::types::agents::ResolvedAgentBinding, ChainChoice), RuntimeError> {
+        let router = self.existing_run_router(session_id, requires_tools);
         self.resolve_binding_in(
             &mut self
                 .affinity
@@ -475,7 +475,7 @@ impl RoutedModel {
             session_id,
             role,
             category,
-            requires_tools,
+            &router,
         )
     }
 
@@ -486,13 +486,12 @@ impl RoutedModel {
         session_id: &str,
         role: Role,
         category: Option<&str>,
-        requires_tools: bool,
+        router: &routing::Router,
     ) -> Result<(config::types::agents::ResolvedAgentBinding, ChainChoice), RuntimeError> {
         let binding = self
             .agents
             .binding_for(role_key(role), category)
             .map_err(model_error)?;
-        let router = self.router_for(requires_tools);
         let resolution_error =
             |error| route_resolution_error(error, role, category, &binding.models);
         let chain = router
@@ -538,6 +537,7 @@ impl RoutedModel {
     /// 始めるが、要約の結果でピンは動かさない。
     fn resolve_summary_invocation(
         &self,
+        router: &routing::Router,
         invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
@@ -564,7 +564,6 @@ impl RoutedModel {
         };
         let needed = crate::compaction::estimator::estimate_tokens(messages)
             .saturating_add(crate::compaction::estimator::estimate_tool_tokens(tools));
-        let router = self.router_for(!tools.is_empty());
         let mut scratch = self
             .affinity
             .lock()
@@ -623,6 +622,16 @@ impl RoutedModel {
         role: Role,
         tools: &[ToolSpec],
     ) -> Result<ResolvedInvocation, RuntimeError> {
+        let router = self.existing_run_router(&invocation.run_id, !tools.is_empty());
+        self.resolve_invocation_with_router(invocation, role, &router)
+    }
+
+    fn resolve_invocation_with_router(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        router: &routing::Router,
+    ) -> Result<ResolvedInvocation, RuntimeError> {
         Ok(match &invocation.model_preference {
             Some(preference) => {
                 // Explicit user selection is authoritative: never apply ADR 0004 fallback.
@@ -680,11 +689,15 @@ impl RoutedModel {
                         &chain_key(role, invocation.category.as_deref()),
                     )
                     .map(|pin| (pin.profile.clone(), pin.model.clone()));
-                let (binding, choice) = self.resolve_binding(
+                let (binding, choice) = self.resolve_binding_in(
+                    &mut self
+                        .affinity
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
                     &invocation.run_id,
                     role,
                     invocation.category.as_deref(),
-                    !tools.is_empty(),
+                    router,
                 )?;
                 let member = choice.chain.member(choice.position);
                 ResolvedInvocation {
@@ -708,7 +721,7 @@ impl RoutedModel {
         run_id: &str,
         bus: Option<&EventBus>,
     ) {
-        let Some(cooldown) = self.health.record_failure(
+        let Some(cooldown) = self.run_health(run_id).shared.record_failure(
             &route.profile,
             &route.model_id,
             failure,
@@ -825,6 +838,11 @@ impl RoutedModel {
         benchmark: Option<&crate::benchmark::BenchmarkModelSettings>,
         replay: Option<&crate::ResponsesReplayState>,
     ) -> Result<ChatResponse, RuntimeError> {
+        let health = self.run_health(&invocation.run_id);
+        let router = self
+            .router_for(!tools.is_empty())
+            .clone()
+            .with_health(health.shared);
         let summary = invocation.purpose == event_bus::RequestPurpose::Compaction
             && invocation.model_preference.is_none();
         let ResolvedInvocation {
@@ -835,14 +853,14 @@ impl RoutedModel {
             pin_on_success,
             pinned_before,
         } = if summary {
-            self.resolve_summary_invocation(invocation, role, messages, tools)?
+            self.resolve_summary_invocation(&router, invocation, role, messages, tools)?
         } else {
-            self.resolve_invocation(invocation, role, tools)?
+            self.resolve_invocation_with_router(invocation, role, &router)?
         };
         let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
         let mut position = chain.as_ref().map(|choice| choice.position);
         let chain = chain.map(|choice| choice.chain);
-        let router = self.router_for(!tools.is_empty());
+        let router = &router;
         let mut cycle: Option<routing::FallbackCycle> = None;
         let mut failures = Vec::new();
         loop {
@@ -1605,7 +1623,7 @@ impl AgentModel for RoutedModel {
         let Ok(binding) = self.agents.binding_for(role_key(role), category) else {
             return format!("unresolved:{}", role_key(role));
         };
-        self.resolve_binding("runtime-selected-model", role, category, false)
+        self.resolve_unscoped_binding(role, category)
             .map(|(_, choice)| {
                 let route = &choice.chain.member(choice.position).target;
                 format!("{}/{}", route.profile, route.model_id)
@@ -1614,7 +1632,7 @@ impl AgentModel for RoutedModel {
     }
 
     fn chain_models(&self, role: Role, category: Option<&str>) -> Vec<String> {
-        match self.resolve_binding("runtime-chain-models", role, category, false) {
+        match self.resolve_unscoped_binding(role, category) {
             Ok((_, choice)) => choice
                 .chain
                 .members()
@@ -1626,12 +1644,13 @@ impl AgentModel for RoutedModel {
     }
 
     fn selected_model_for_run(&self, run_id: &str, role: Role, category: Option<&str>) -> String {
+        let router = self.existing_run_router(run_id, false);
         let mut scratch = self
             .affinity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        match self.resolve_binding_in(&mut scratch, run_id, role, category, false) {
+        match self.resolve_binding_in(&mut scratch, run_id, role, category, &router) {
             Ok((_, choice)) => {
                 let route = &choice.chain.member(choice.position).target;
                 format!("{}/{}", route.profile, route.model_id)
@@ -1641,9 +1660,7 @@ impl AgentModel for RoutedModel {
     }
 
     fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
-        let (_, choice) = self
-            .resolve_binding("runtime-selected-model", role, category, false)
-            .ok()?;
+        let (_, choice) = self.resolve_unscoped_binding(role, category).ok()?;
         choice
             .chain
             .member(choice.position)

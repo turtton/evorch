@@ -162,6 +162,21 @@ async fn ac5_ac7_image_chain_fallback_includes_404_and_shares_auth_quota_cooldow
             "subsequent images skip the cooling candidate"
         );
         assert_eq!(records[1].lock().unwrap().len(), 2);
+        model
+            .generate_image(
+                &AgentInvocationContext {
+                    run_id: "new-image-run".into(),
+                    ..Default::default()
+                },
+                ImageGenerationRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            records[0].lock().unwrap().len(),
+            2,
+            "another run retries the first image candidate"
+        );
         let route = routing::ResolvedRoute {
             profile: "profile-0".into(),
             model_id: "model-0".into(),
@@ -174,36 +189,34 @@ async fn ac5_ac7_image_chain_fallback_includes_404_and_shares_auth_quota_cooldow
             } | ProviderError::RateLimited { .. }
         );
         assert_eq!(
-            model.router.is_member_available(&route),
+            model
+                .existing_run_router("run-image", false)
+                .is_member_available(&route),
             !shared,
-            "image-only failures must not block the same chat route"
+            "image-only failures must not block chat; auth/quota/rate limits stay shared within the run"
         );
-        if !shared {
-            let now = std::time::Instant::now();
-            assert!(model.image_health.is_cooling_down(
-                "profile-0",
-                "model-0",
-                now + std::time::Duration::from_secs(59)
-            ));
-            assert!(!model.image_health.is_cooling_down(
-                "profile-0",
-                "model-0",
-                now + std::time::Duration::from_secs(60)
-            ));
-        }
-        if matches!(
+        assert!(
+            model
+                .existing_run_router("unaffected-chat", false)
+                .is_member_available(&route)
+        );
+        let other_model = routing::ResolvedRoute {
+            model_id: "model-1".into(),
+            ..route
+        };
+        let profile_wide = matches!(
             error,
             ProviderError::Http {
                 status: 401 | 402,
                 ..
-            } | ProviderError::RateLimited { .. }
-        ) {
-            assert!(model.health.is_cooling_down(
-                "profile-0",
-                "model-0",
-                std::time::Instant::now()
-            ));
-        }
+            }
+        );
+        assert_eq!(
+            model
+                .existing_run_router("run-image", false)
+                .is_member_available(&other_model),
+            !profile_wide
+        );
     }
 }
 #[tokio::test]
@@ -223,25 +236,31 @@ async fn ac5_rejected_stops_without_fallback_or_cooldown() {
     assert_eq!(error, "unsafe content");
     assert_eq!(records[0].lock().unwrap().len(), 1);
     assert!(records[1].lock().unwrap().is_empty());
+    let route = routing::ResolvedRoute {
+        profile: "profile-0".into(),
+        model_id: "model-0".into(),
+    };
+    let health = model.existing_run_health("").unwrap();
     assert!(
-        !model
-            .image_health
-            .is_cooling_down("profile-0", "model-0", std::time::Instant::now())
-    );
-    assert!(
-        !model
-            .health
-            .is_cooling_down("profile-0", "model-0", std::time::Instant::now())
+        model
+            .router
+            .clone()
+            .with_health(health.shared)
+            .with_additional_health(health.image)
+            .is_member_available(&route)
     );
 }
 #[tokio::test]
 async fn ac5_image_quota_retry_after_reaches_shared_health() {
-    let (model, records) = fixture(vec![
+    let (mut model, records) = fixture(vec![
         Err(ImageGenerationError::Quota {
             retry_after: Some(std::time::Duration::from_secs(17)),
         }),
         Ok(()),
     ]);
+    let bus = Arc::new(EventBus::new(32));
+    let mut receiver = bus.subscribe();
+    model.event_bus = Some(bus);
     model
         .generate_image(
             &AgentInvocationContext::default(),
@@ -249,17 +268,28 @@ async fn ac5_image_quota_retry_after_reaches_shared_health() {
         )
         .await
         .unwrap();
-    let now = std::time::Instant::now();
-    assert!(model.health.is_cooling_down(
-        "profile-0",
-        "another-model",
-        now + std::time::Duration::from_secs(16)
+    let event = receiver.recv().await.unwrap();
+    assert!(matches!(
+        event.kind,
+        event_bus::EventKind::Provider(event_bus::ProviderEvent::CooldownStarted {
+            cooldown_ms: Some(17_000),
+            ..
+        })
     ));
-    assert!(!model.health.is_cooling_down(
-        "profile-0",
-        "another-model",
-        now + std::time::Duration::from_secs(17)
-    ));
+    let other = routing::ResolvedRoute {
+        profile: "profile-0".into(),
+        model_id: "model-1".into(),
+    };
+    assert!(
+        !model
+            .existing_run_router("", false)
+            .is_member_available(&other)
+    );
+    assert!(
+        model
+            .existing_run_router("other-run", false)
+            .is_member_available(&other)
+    );
     model
         .generate_image(
             &AgentInvocationContext::default(),
