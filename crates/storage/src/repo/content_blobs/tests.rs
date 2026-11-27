@@ -51,20 +51,20 @@ fn file_database(dir: &TempDir) -> (std::path::PathBuf, Database) {
 }
 
 #[test]
-fn a_step_looks_at_no_more_than_64_candidates() {
-    // Given: 100 queued blobs nothing refers to.
+fn a_step_looks_at_no_more_than_the_candidate_budget() {
+    // Given: one candidate budget plus 36 unreferenced queued blobs.
     let conn = &database().conn;
-    for index in 0..100 {
+    for index in 0..(GC_CANDIDATES_PER_STEP + 36) {
         queued_blob(conn, &format!("s{index}"), 10);
     }
 
     // When: one step runs.
     let progress = gc_step(conn).unwrap();
 
-    // Then: 64 were looked at and deleted, in queue order, and 36 wait.
+    // Then: exactly one budget was deleted in queue order, and 36 wait.
     assert_eq!(
         (progress.candidates, progress.deleted, progress.deferred),
-        (64, 64, false)
+        (GC_CANDIDATES_PER_STEP, GC_CANDIDATES_PER_STEP, false)
     );
     assert_eq!((blob_count(conn), queue_len(conn)), (36, 36));
     assert_eq!(gc_step(conn).unwrap().deleted, 36);

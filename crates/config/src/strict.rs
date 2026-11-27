@@ -108,7 +108,11 @@ const PULL_REQUESTS_KEYS: &[&str] = &[
     "backoff_max_seconds",
 ];
 const STORAGE_KEYS: &[&str] = &["thread_index", "thread_retention"];
-const THREAD_RETENTION_KEYS: &[&str] = &["auto_archive_after_days", "archived_delete_after_days"];
+const THREAD_RETENTION_KEYS: &[&str] = &[
+    "auto_archive_after_days",
+    "archived_delete_after_days",
+    "tool_body_delete_after_days",
+];
 const THREAD_INDEX_KEYS: &[&str] = &["enabled", "max_bytes"];
 const SELF_IMPROVEMENT_KEYS: &[&str] = &[
     "enabled",
