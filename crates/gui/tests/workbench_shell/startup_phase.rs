@@ -407,8 +407,10 @@ fn held_family(
     workspace_ui::save_sidebar(&sidebar, plan.sidebar_path.as_ref().unwrap()).unwrap();
 
     let (_, prelude) = collect(&plan, 30);
-    // The start-up explores nothing; the stored exploration the scheduler reads comes
-    // from the retention engine, here the storage exploration on the same database.
+    // Fixture only: the start-up explores nothing, so the stored exploration the scheduler
+    // reads is written here with the storage's explore API. The online engine does not
+    // write `retention_staging`, so this does not show that a held family is displayed
+    // on the online path (a separate gap).
     explore(
         &storage::Database::open(&config).unwrap(),
         &retention_input(&plan, i64::MAX / 2),

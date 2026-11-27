@@ -436,8 +436,6 @@ const FRAMES_PER_FLUSH: usize = 2;
 
 /// How many frames a click waits at most for its target to hold still under the pointer.
 const SETTLE_FRAMES: usize = 10;
-/// How often [`Desktop::click_until_sent`] presses a target that did not take the press.
-const MAX_CLICK_ATTEMPTS: usize = 20;
 
 /// How many frames in a row a wait draws, the screen asking for each at once, before it
 /// names itself as a wait that may never end.
@@ -573,13 +571,6 @@ impl Desktop {
                         ..
                     } => self.commands.push("send"),
                     Action::Command { .. } => self.commands.push("other"),
-                    Action::Feature(FeatureAction {
-                        request: FeatureRequest::Command(command),
-                        ..
-                    }) => {
-                        self.sent.push(command_name(command));
-                        self.actions.send(action).await.unwrap();
-                    }
                     _ => self.actions.send(action).await.unwrap(),
                 }
             }
@@ -685,27 +676,6 @@ impl Desktop {
     async fn click(&mut self, label: &str) {
         self.press(|d| d.harness.get_by_label(label).rect().center())
             .await;
-    }
-
-    /// Clicks `label` until the screen has sent a command for it. Now and then a press
-    /// reaches nothing although the target did not move (observed with the goal band while
-    /// its phase changes; the exact egui cause is not pinned down). Such a click has no
-    /// effect to undo, so it is repeated; a click that did land is seen as the command it
-    /// sent and is never repeated. The attempts are counted, not timed.
-    async fn click_until_sent(&mut self, label: &str) {
-        for _ in 0..MAX_CLICK_ATTEMPTS {
-            let before = self.sent.len();
-            self.click(label).await;
-            // The command leaves on the frame after the press that queued it.
-            self.flush().await;
-            if self.sent.len() > before {
-                return;
-            }
-        }
-        panic!(
-            "the click on {label:?} sent no command in {MAX_CLICK_ATTEMPTS} attempts; sent: {:?}",
-            self.sent
-        );
     }
 
     /// Clicks where `at` finds the target once it holds still. A click queued at a centre
@@ -963,7 +933,7 @@ async fn clicks_on_runs_and_goals_reach_the_core_and_its_answers_come_back() {
         LEAD,
     );
     page.until(|d| d.shows("Goal: ship it")).await;
-    page.click_until_sent("Enable independent review before completion")
+    page.click("Enable independent review before completion")
         .await;
     page.until(|d| {
         d.shows("Disable independent review before completion") && d.shows("Goal review: accepted")
