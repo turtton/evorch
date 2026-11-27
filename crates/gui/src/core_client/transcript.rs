@@ -146,7 +146,7 @@ pub(super) fn transcript(
                     Item::Message(message) => {
                         let top = ui.cursor().min.y;
                         message_row(ui, requested_bodies, cache, base, message, effects);
-                        view.visit(message_key(message), top, ui.cursor().min.y);
+                        view.visit(message_key(message), top, ui.cursor().min.y, true);
                     }
                     Item::Tools {
                         tools,
@@ -216,11 +216,15 @@ struct ViewAnchor {
 }
 
 impl ViewAnchor {
-    /// A message (or a folded group, by its last message) drawn from `top` to `bottom`.
-    fn visit(&mut self, key: String, top: f32, bottom: f32) {
+    /// A message drawn from `top` to `bottom`, or the header of a group of tool outputs.
+    /// An open group's header is only looked for, not chosen: what is read is below it.
+    fn visit(&mut self, key: String, top: f32, bottom: f32, chosen: bool) {
         let y = top - self.origin;
         if self.previous.as_ref().is_some_and(|(was, _)| *was == key) {
             self.moved_to = Some(y);
+        }
+        if !chosen {
+            return;
         }
         if self.first.is_none() && top >= self.top {
             self.first = Some((key, y));
@@ -364,10 +368,11 @@ fn tool_group(
     if ghost_icon_button(ui, icon, &title).clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
     }
+    // The header is not the card of the last output: opening the group must not move it.
+    let header = format!("tools {}", message_key(last));
+    view.visit(header, top, ui.cursor().min.y, !open);
     if open {
         tool_cards(ui, requested_bodies, cache, tools, view, effects);
-    } else {
-        view.visit(message_key(last), top, ui.cursor().min.y);
     }
 }
 
@@ -386,7 +391,7 @@ fn tool_cards(
         if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
             tool_card(ui, id, text);
         }
-        view.visit(message_key(tool), top, ui.cursor().min.y);
+        view.visit(message_key(tool), top, ui.cursor().min.y, true);
         ui.add_space(SP_1);
     }
 }

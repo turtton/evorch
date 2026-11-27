@@ -1770,6 +1770,128 @@ mod run_tabs {
         );
     }
 
+    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled to its
+    //        header, which is the first thing in view
+    // When: the header is pressed to open the group, and pressed again
+    // Then: the header stays where it was on screen
+    #[test]
+    fn opening_a_group_of_tool_outputs_leaves_its_header_in_place() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (0..20)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(20, "assistant", "Done.".into()));
+                history.extend((21..61).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+            },
+        );
+        frames(&mut screen);
+        let header = |screen: &Screen| {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .rect()
+        };
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        let before = header(&screen);
+        for what in ["opened", "closed"] {
+            screen
+                .harness
+                .get_by_label_contains("20 tool outputs")
+                .click();
+            frames(&mut screen);
+            let after = header(&screen);
+            assert!(
+                (after.min.y - before.min.y).abs() < 1.0,
+                "the header moved from {before:?} to {after:?} once {what}"
+            );
+        }
+    }
+
+    // Given: a folded group of tool outputs that was opened, with older outputs of its run
+    // When: the older page arrives and joins the group
+    // Then: the group stays open, its header and the output below it stay where they were
+    #[test]
+    fn an_open_group_stays_open_when_older_tool_outputs_join_it() {
+        let message = |index: u64, role: &str, text: String| {
+            view::<CommittedMessage>(json!({
+                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
+                "content": {"type": "inline", "payload": {"text": text}},
+            }))
+        };
+        let mut screen = screen_from(
+            egui::vec2(1440.0, 900.0),
+            super::super::local::LocalPanes::new(
+                Arc::new(crate::diff::FixtureDiffSource::empty()),
+                None,
+            ),
+            |shared| {
+                shared.cache.questions.clear();
+                shared.cache.approvals.clear();
+                let mut history: Vec<_> = (100..120)
+                    .map(|index| message(index, "tool", format!("output {index}")))
+                    .collect();
+                history.push(message(120, "assistant", "Done.".into()));
+                history
+                    .extend((121..161).map(|index| message(index, "user", format!("Q {index}"))));
+                shared.cache.history.insert("thr-1".into(), history);
+                let cursor = Some(PageCursor::new("c1").unwrap());
+                shared.cache.older.insert("thr-1".into(), cursor);
+            },
+        );
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .scroll_to_me();
+        frames(&mut screen);
+        screen
+            .harness
+            .get_by_label_contains("20 tool outputs")
+            .click();
+        frames(&mut screen);
+        let before = screen.harness.get_by_label("output 105").rect();
+
+        let page = Page {
+            items: (80..100)
+                .map(|index| message(index, "tool", format!("output {index}")))
+                .collect(),
+            next_cursor: Some(PageCursor::new("c2").unwrap()),
+            snapshot_revision: Revision(1),
+        };
+        screen
+            .shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_page("thr-1", page, true);
+        frames(&mut screen);
+        screen.harness.get_by_label_contains("40 tool outputs");
+        let after = screen.harness.get_by_label("output 105").rect();
+        assert!(
+            (after.min.y - before.min.y).abs() < 1.0,
+            "the output moved from {before:?} to {after:?}"
+        );
+    }
+
     // Given: thr-1 whose newest page is a run of one run's tool outputs, longer than the
     //        window, scrolled to its first output, and older outputs of the same run
     // When: the older page arrives, so the run of outputs begins earlier
