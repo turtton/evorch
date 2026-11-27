@@ -565,6 +565,89 @@ fn remove_drops_one_file_and_discards_its_upload() {
     assert_eq!(left, ["busy", "failed"]);
 }
 
+// Given: a narrow window, thr-2 with one file whose chip is drawn, and thr-7 (idle as
+//        well, so its composer is laid out as thr-2's) with three files never drawn, one
+//        of them long-named; both with the same one-line draft
+// When: thr-7 is selected
+// Then: in the first frame that draws thr-7's composer, its chips already wrap inside it
+//       and Send is where it stays, instead of being pushed out of the pane for a frame
+#[test]
+fn attachment_chips_wrap_inside_a_narrow_composer_from_the_first_frame() {
+    let mut screen = screen(egui::vec2(900.0, 600.0));
+    screen.settle();
+    screen
+        .harness
+        .get_by_label("Refactor storage writer")
+        .click();
+    screen.settle();
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        // A one-line draft, so the input is as tall at any width and only the chips
+        // could change the composer's layout.
+        for thread in ["thr-2", "thr-7"] {
+            shared.drafts.insert(
+                thread.into(),
+                crate::core_client::Draft {
+                    text: "see".into(),
+                    revision: 1,
+                },
+            );
+        }
+        shared
+            .attachment_drafts
+            .insert("thr-2".into(), vec![file("one", true, false)]);
+        shared.attachment_drafts.insert(
+            "thr-7".into(),
+            vec![
+                file("a-long-screenshot-name-from-the-clipboard", true, false),
+                file("two", true, false),
+                file("three", true, false),
+            ],
+        );
+    }
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("one.txt");
+    screen
+        .harness
+        .get_by_label("Migrate the lane table")
+        .click();
+    // Its first chip marks the first frame that draws thr-7's composer, whose Send ends
+    // the input row (with or without its icon in the name, as it can send or not).
+    let send = |screen: &Screen| {
+        screen
+            .harness
+            .get_all_by_label_contains("Send")
+            .map(|node| node.rect().max.x)
+            .fold(f32::MIN, f32::max)
+    };
+    let mut first = None;
+    for _ in 0..16 {
+        screen.harness.run_steps(1);
+        if screen.harness.query_by_label("two.txt").is_some() {
+            first = Some(send(&screen));
+            break;
+        }
+    }
+    let first = first.expect("thr-7's composer is drawn");
+    let removes: Vec<_> = screen
+        .harness
+        .get_all_by_label("Remove")
+        .map(|node| node.rect())
+        .collect();
+    assert_eq!(removes.len(), 3);
+    assert!(
+        removes.iter().all(|r| r.max.x <= first),
+        "{removes:?} {first}"
+    );
+    assert!(removes[2].min.y > removes[0].max.y, "{removes:?}");
+
+    screen.settle();
+    screen.harness.run_steps(4);
+    screen.capture("narrow-chips");
+    let settled = send(&screen);
+    assert!((first - settled).abs() < 0.5, "{first} {settled}");
+}
+
 #[derive(Debug)]
 struct DroppedPath(std::path::PathBuf);
 
@@ -624,15 +707,35 @@ fn a_hidden_composer_leaves_tab_and_dropped_files_to_the_window() {
     );
 }
 
+// Given: the composer of thr-1
+// When: the attach "+" gets keyboard focus
+// Then: its tooltip says files can also be pasted or dropped, without hovering
+#[test]
+fn the_attach_button_mentions_paste_and_drop_on_focus() {
+    let mut screen = composer();
+    screen.harness.get_by_label("Attach files").focus();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label_contains("paste or drop");
+    screen.capture("attach-focus");
+}
+
 // Given: thr-1's message being sent, with the composer focused
 // When: Ctrl+V arrives as the platform's empty paste
-// Then: nothing is prepared, and the person is told to wait for the send
+// Then: nothing is prepared, the person is told to wait for the send, and the attach
+//       "+" waits too
 #[test]
 fn a_paste_while_sending_is_refused_with_a_status() {
     let mut screen = composer();
     screen.type_message("see");
     screen.shared.lock().unwrap().sending.insert("thr-1".into());
     screen.harness.run_steps(2);
+    assert!(
+        screen
+            .harness
+            .get_by_label("Attach files")
+            .accesskit_node()
+            .is_disabled()
+    );
 
     let mut raw = egui::RawInput {
         events: vec![egui::Event::Paste(String::new())],
