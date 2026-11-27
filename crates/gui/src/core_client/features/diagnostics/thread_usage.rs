@@ -38,9 +38,19 @@ pub(super) struct ThreadUsageState {
     asked_at: Option<Instant>,
     noticed: Vec<RunId>,
     noticed_all: bool,
+    /// Replaces [`REASK_GAP`] when set.
+    gap: Option<Duration>,
 }
 
 impl ThreadUsageState {
+    pub(super) fn set_gap(&mut self, gap: Duration) {
+        self.gap = Some(gap);
+    }
+
+    fn gap(&self) -> Duration {
+        self.gap.unwrap_or(REASK_GAP)
+    }
+
     pub(super) fn generation(&self) -> u64 {
         self.read.generation()
     }
@@ -127,7 +137,7 @@ impl ThreadUsageState {
         if !self.dirty || !cache.threads.contains_key(thread.as_str()) {
             return None;
         }
-        if self.asked_at.is_some_and(|at| now < at + REASK_GAP) {
+        if self.asked_at.is_some_and(|at| now < at + self.gap()) {
             return None;
         }
         self.dirty = false;
@@ -146,7 +156,7 @@ impl ThreadUsageState {
             return None;
         }
         self.asked_at
-            .map(|at| (at + REASK_GAP).saturating_duration_since(now))
+            .map(|at| (at + self.gap()).saturating_duration_since(now))
             .filter(|wait| !wait.is_zero())
     }
 

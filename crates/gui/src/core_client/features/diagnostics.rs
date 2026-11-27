@@ -247,6 +247,13 @@ impl DiagnosticsFeature {
         self.thread_usage.wake_in(now)
     }
 
+    /// Lets a test that drives a real core read the thread again without waiting out the
+    /// gap between two reads.
+    #[doc(hidden)]
+    pub fn set_thread_reask_gap(&mut self, gap: Duration) {
+        self.thread_usage.set_gap(gap);
+    }
+
     fn keep_thread_usage(
         &mut self,
         ctx: &mut FeatureContext<'_>,
@@ -595,6 +602,10 @@ impl Feature for DiagnosticsFeature {
     }
 
     fn as_diagnostics(&self) -> Option<&DiagnosticsFeature> {
+        Some(self)
+    }
+
+    fn as_diagnostics_mut(&mut self) -> Option<&mut DiagnosticsFeature> {
         Some(self)
     }
 

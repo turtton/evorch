@@ -526,6 +526,11 @@ pub trait Feature: Send {
         None
     }
 
+    /// The diagnostics feature itself, for a test that must not wait out the gap between two reads.
+    fn as_diagnostics_mut(&mut self) -> Option<&mut diagnostics::DiagnosticsFeature> {
+        None
+    }
+
     /// The execution feature itself, for the conversation's goal and plan band
     /// and the Plan tab, which queue what is pressed in them into it.
     fn as_execution(&self) -> Option<&execution::ExecutionFeature> {
@@ -816,6 +821,12 @@ impl Features {
 
     pub fn diagnostics(&self) -> Option<&diagnostics::DiagnosticsFeature> {
         self.features.iter().find_map(|f| f.as_diagnostics())
+    }
+
+    pub fn diagnostics_mut(&mut self) -> Option<&mut diagnostics::DiagnosticsFeature> {
+        self.features
+            .iter_mut()
+            .find_map(|f| f.as_diagnostics_mut())
     }
 
     pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
