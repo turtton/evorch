@@ -39,12 +39,13 @@ use workbench_protocol::{
     errors::{ErrorCode, RetryAdvice},
     events::UiEvent,
     handshake::Capability,
-    ids::{OperationId, ThreadId},
+    ids::{OperationId, RunId, ThreadId},
     namespaces::pull_requests::{
-        CandidateState, ConfirmCandidate, DismissCandidate, PullRequestOperationKind,
-        PullRequestOperationView, PullRequestRef, PullRequestsCommand, PullRequestsEvent,
-        PullRequestsQuery, PullRequestsReply, PullRequestsResult, RefreshPullRequest,
-        RequestManualNotice, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest, UnlinkPullRequest,
+        CandidateState, CandidateView, ConfirmCandidate, DismissCandidate,
+        PullRequestOperationKind, PullRequestOperationView, PullRequestRef, PullRequestsCommand,
+        PullRequestsEvent, PullRequestsQuery, PullRequestsReply, PullRequestsResult,
+        RefreshPullRequest, RequestManualNotice, ResetAutoFixBudget, SetAutoFix, ThreadPullRequest,
+        UnlinkPullRequest,
     },
     operation::{CancelReason, OperationState, OperationView},
     queries::{Query, QueryReply},
@@ -107,6 +108,78 @@ impl PullRequestBar<'_> {
             thread: self.thread.clone(),
             choice,
             seen: self.seen.clone(),
+        }
+    }
+}
+
+/// "Link PR" or "Ignore" pressed on a suggestion in a tool card. `seen` is what the chip
+/// drew from, as for the bar: a press is applied only while the thread still reads the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestChipAction {
+    pub thread: ThreadId,
+    pub candidate_id: u64,
+    pub choice: CandidateChoice,
+    seen: BarSeen,
+}
+
+/// The pull requests the tool calls of the selected thread suggested and the person has
+/// neither linked nor ignored, to be offered on the cards of those calls.
+#[derive(Clone)]
+pub struct PullRequestChips<'a> {
+    pub thread: &'a ThreadId,
+    candidates: Vec<&'a CandidateView>,
+    can_write: bool,
+    seen: BarSeen,
+}
+
+impl PullRequestChips<'_> {
+    /// Whether the offers may be pressed now.
+    pub fn can_write(&self) -> bool {
+        self.can_write
+    }
+
+    /// The suggestions of one call, as (candidate id, `owner/repo#number`). A call is named
+    /// by its run and its id together: another run may use the same call id.
+    pub fn offers(&self, run: &RunId, call_id: &str) -> Vec<(u64, String)> {
+        self.candidates
+            .iter()
+            .filter(|c| &c.source_run_id == run && c.source_call_id == call_id)
+            .map(|c| (c.candidate_id, view::label(&c.pull_request)))
+            .collect()
+    }
+
+    pub fn action(&self, candidate_id: u64, choice: CandidateChoice) -> PullRequestChipAction {
+        PullRequestChipAction {
+            thread: self.thread.clone(),
+            candidate_id,
+            choice,
+            seen: self.seen.clone(),
+        }
+    }
+}
+
+/// The command a press on a suggestion sends: it quotes the revision the suggestion was read at.
+fn candidate_command(
+    thread: &ThreadId,
+    view: &ThreadPullRequest,
+    candidate_id: u64,
+    choice: CandidateChoice,
+) -> PullRequestsCommand {
+    match choice {
+        CandidateChoice::Link => {
+            PullRequestsCommand::ConfirmPullRequestCandidate(ConfirmCandidate {
+                operation_id: new_operation(),
+                thread: thread.clone(),
+                candidate_id,
+                expected_revision: view.lifecycle_revision,
+            })
+        }
+        CandidateChoice::Ignore => {
+            PullRequestsCommand::DismissPullRequestCandidate(DismissCandidate {
+                operation_id: new_operation(),
+                thread: thread.clone(),
+                candidate_id,
+            })
         }
     }
 }
@@ -193,6 +266,7 @@ pub struct PullRequestsFeature {
     /// A move of the notice destination the person has not confirmed yet.
     destination: Option<dialogs::DestinationMove>,
     bar_actions: Vec<PullRequestBarAction>,
+    chip_actions: Vec<PullRequestChipAction>,
     intents: Vec<PullRequestIntent>,
 }
 
@@ -593,6 +667,58 @@ impl PullRequestsFeature {
         }
     }
 
+    fn apply_chip(&mut self, ctx: &mut FeatureContext<'_>, action: PullRequestChipAction) {
+        let PullRequestChipAction {
+            thread,
+            candidate_id,
+            choice,
+            seen,
+        } = action;
+        let Some(entry) = self.threads.get(&thread) else {
+            return;
+        };
+        let Some(view) = entry.view.clone().filter(|_| entry.error.is_none()) else {
+            return;
+        };
+        if BarSeen::of(&view) != seen {
+            self.say(&thread, failure_label(ErrorCode::StaleRevision, false));
+            return;
+        }
+        let offered = view
+            .candidates
+            .iter()
+            .any(|c| c.candidate_id == candidate_id && c.state == CandidateState::Presented);
+        if offered && view.owned_here && view.tracking_enabled && !self.running() {
+            self.send(ctx, candidate_command(&thread, &view, candidate_id, choice));
+        }
+    }
+
+    /// Queue what was pressed on a suggestion in a tool card; it is applied at the next pass.
+    pub fn enqueue_chip(&mut self, action: PullRequestChipAction) {
+        self.chip_actions.push(action);
+    }
+
+    /// The suggestions of the selected thread that are still open.
+    pub fn chips(&self) -> Option<PullRequestChips<'_>> {
+        let thread = self.selected.as_ref()?;
+        let entry = self.threads.get(thread)?;
+        let view = entry.view.as_ref().filter(|view| view.tracking_enabled)?;
+        let candidates: Vec<_> = view
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.state == CandidateState::Presented)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(PullRequestChips {
+            thread,
+            candidates,
+            can_write: view.owned_here && !self.running() && entry.error.is_none(),
+            seen: BarSeen::of(view),
+        })
+    }
+
     pub fn menu(&self) -> PullRequestMenu {
         let mut badges = BTreeMap::new();
         let mut tracking_off = false;
@@ -789,23 +915,11 @@ impl PullRequestsFeature {
                             .inner
                     })
                     .inner;
-                commands.extend(choice.map(|choice| match choice {
-                    CandidateChoice::Link => {
-                        PullRequestsCommand::ConfirmPullRequestCandidate(ConfirmCandidate {
-                            operation_id: new_operation(),
-                            thread: thread.clone(),
-                            candidate_id: candidate.candidate_id,
-                            expected_revision: view.lifecycle_revision,
-                        })
-                    }
-                    CandidateChoice::Ignore => {
-                        PullRequestsCommand::DismissPullRequestCandidate(DismissCandidate {
-                            operation_id: new_operation(),
-                            thread: thread.clone(),
-                            candidate_id: candidate.candidate_id,
-                        })
-                    }
-                }));
+                commands.extend(
+                    choice.map(|choice| {
+                        candidate_command(thread, view, candidate.candidate_id, choice)
+                    }),
+                );
             }
         });
         if can_write {
@@ -995,6 +1109,7 @@ impl Feature for PullRequestsFeature {
         if !visibility.available {
             self.intents.clear();
             self.bar_actions.clear();
+            self.chip_actions.clear();
             return;
         }
         for intent in std::mem::take(&mut self.intents) {
@@ -1005,6 +1120,9 @@ impl Feature for PullRequestsFeature {
         }
         for action in std::mem::take(&mut self.bar_actions) {
             self.apply_bar(ctx, action);
+        }
+        for action in std::mem::take(&mut self.chip_actions) {
+            self.apply_chip(ctx, action);
         }
         self.read(ctx);
         for id in std::mem::take(&mut self.to_check) {

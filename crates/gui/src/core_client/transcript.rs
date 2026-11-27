@@ -4,18 +4,21 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use workbench_protocol::{ids::*, views::*};
 
 use super::cache::Cache;
 use super::connection::Action;
+use super::features::pull_requests::PullRequestChips;
 use super::shell::Effect;
 use crate::panes::markdown_render::render_markdown_in_workspace;
-use crate::panes::transcript_widgets::{code_block, diff_block, user_bubble};
+use crate::panes::transcript_widgets::user_bubble;
 use crate::theme::icons;
 use crate::theme::text::muted;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{ghost, ghost_icon_button, soft_frame};
+use crate::theme::widgets::{ghost, ghost_icon_button};
+
+mod cards;
 
 #[derive(Clone, Copy)]
 pub(super) enum Scope<'a> {
@@ -32,6 +35,8 @@ pub(super) struct TranscriptView<'a> {
     pub scope: Scope<'a>,
     /// What relative links and images in the messages resolve against.
     pub base: Option<&'a Path>,
+    /// The open pull request suggestions, offered on the cards of the calls that made them.
+    pub chips: Option<&'a PullRequestChips<'a>>,
 }
 
 /// Height of the row above the first message that stands for the older ones.
@@ -49,7 +54,18 @@ pub(super) fn transcript(
     cards: impl FnOnce(&mut Ui, &mut Vec<Effect>),
     effects: &mut Vec<Effect>,
 ) {
-    let TranscriptView { cache, scope, base } = view;
+    let TranscriptView {
+        cache,
+        scope,
+        base,
+        chips,
+    } = view;
+    let chips = chips.filter(|chips| {
+        chips.thread
+            == match scope {
+                Scope::Thread(thread) | Scope::Run { thread, .. } => thread,
+            }
+    });
     let mut failed = None;
     let (salt, messages, older, earlier): (_, Vec<_>, _, _) = match scope {
         Scope::Thread(thread) => (
@@ -154,19 +170,22 @@ pub(super) fn transcript(
                 match item {
                     Item::Message(message) => {
                         let top = ui.cursor().min.y;
-                        message_row(ui, requested_bodies, cache, base, message, effects);
+                        message_row(ui, requested_bodies, cache, base, chips, message, effects);
                         view.visit(message_key(message), top, ui.cursor().min.y, true);
                     }
-                    Item::Tools {
-                        tools,
-                        folded: true,
-                    } => {
-                        tool_group(ui, requested_bodies, cache, &tools, &mut view, effects);
+                    Item::Tools { rows, folded } => {
+                        let mut env = cards::Env {
+                            requested_bodies,
+                            cache,
+                            chips,
+                            effects,
+                        };
+                        if folded {
+                            tool_group(ui, &mut env, &rows, &mut view);
+                        } else {
+                            cards::rows(ui, &mut env, &rows, &mut view);
+                        }
                     }
-                    Item::Tools {
-                        tools,
-                        folded: false,
-                    } => tool_cards(ui, requested_bodies, cache, &tools, &mut view, effects),
                 }
                 ui.add_space(SP_2);
             }
@@ -195,14 +214,16 @@ pub(super) fn transcript(
     }
 }
 
-/// A run of one run's tool outputs folds under one header once the run's next message
-/// is a reply to the person, as the embedded workbench folds a turn's tool calls; until
-/// then (the agent still works, or a person's message came next) each stays in sight.
+/// A run of one run's tool calls folds under one header once the run's next reply to the
+/// person is committed, as the embedded workbench folds a turn's tool calls; until then (the
+/// agent still works, or a person's message came next) each stays in sight. Reasoning,
+/// notices and errors between two calls belong to the run, and are not replies.
 #[derive(Debug, PartialEq, Eq)]
 enum Item<'a> {
     Message(&'a CommittedMessage),
     Tools {
-        tools: Vec<&'a CommittedMessage>,
+        /// Tool calls, and the asides committed between them.
+        rows: Vec<&'a CommittedMessage>,
         folded: bool,
     },
 }
@@ -216,13 +237,21 @@ fn data_fingerprint(cache: &Cache, messages: &[&CommittedMessage], older_row: (b
     for message in messages {
         message.run.as_str().hash(&mut hasher);
         message.index.get().hash(&mut hasher);
-        match &message.content {
-            MessageContent::Inline { text } => text.len().hash(&mut hasher),
-            MessageContent::Body(body) => cache
-                .bodies
-                .get(body.body_id.as_str())
-                .map(String::len)
-                .hash(&mut hasher),
+        let contents = [Some(&message.content)].into_iter().chain(
+            message
+                .tool
+                .iter()
+                .flat_map(|tool| [tool.input.as_ref(), tool.detail.as_ref()]),
+        );
+        for content in contents.flatten() {
+            match content {
+                MessageContent::Inline { text } => text.len().hash(&mut hasher),
+                MessageContent::Body(body) => cache
+                    .bodies
+                    .get(body.body_id.as_str())
+                    .map(String::len)
+                    .hash(&mut hasher),
+            }
         }
     }
     hasher.finish()
@@ -264,37 +293,64 @@ impl ViewAnchor {
     }
 }
 
-/// Whether this view draws `message`. Reasoning, notices and errors are not replies, so they
-/// neither show nor close a tool run; a tool call without output has never drawn a card.
+/// Whether this view draws `message`: a tool call always has a card, and a note without text
+/// is nothing to show.
 fn drawn(message: &CommittedMessage) -> bool {
     match message.role {
         MessageRole::User | MessageRole::Assistant => true,
-        MessageRole::Tool => {
+        MessageRole::Tool => message.tool.is_some(),
+        MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {
             !matches!(&message.content, MessageContent::Inline { text } if text.is_empty())
         }
-        MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => false,
     }
+}
+
+fn is_aside(message: &CommittedMessage) -> bool {
+    matches!(
+        message.role,
+        MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error
+    )
 }
 
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
     let mut items: Vec<Item<'a>> = Vec::new();
-    for message in history.iter().filter(|message| drawn(message)) {
-        let same_run = |tools: &[&CommittedMessage]| tools[0].run == message.run;
-        match (message.role, items.last_mut()) {
-            (MessageRole::Tool, Some(Item::Tools { tools, .. })) if same_run(tools) => {
-                tools.push(message);
+    // Asides after a run's last call: they join its group when another call follows, and
+    // stand on their own after it otherwise.
+    let mut trailing: Vec<&'a CommittedMessage> = Vec::new();
+    for message in history.iter().copied().filter(|message| drawn(message)) {
+        let open_run =
+            matches!(items.last(), Some(Item::Tools { rows, .. }) if rows[0].run == message.run);
+        match message.role {
+            MessageRole::Tool if open_run => {
+                if let Some(Item::Tools { rows, .. }) = items.last_mut() {
+                    rows.append(&mut trailing);
+                    rows.push(message);
+                }
             }
-            (MessageRole::Tool, _) => items.push(Item::Tools {
-                tools: vec![message],
-                folded: false,
-            }),
-            (MessageRole::Assistant, Some(Item::Tools { tools, folded })) if same_run(tools) => {
-                *folded = true;
+            MessageRole::Tool => {
+                items.extend(trailing.drain(..).map(Item::Message));
+                items.push(Item::Tools {
+                    rows: vec![message],
+                    folded: false,
+                });
+            }
+            _ if is_aside(message) && open_run => trailing.push(message),
+            MessageRole::Assistant => {
+                let tools_at = items.len().checked_sub(1).filter(|_| open_run);
+                items.extend(trailing.drain(..).map(Item::Message));
+                if let Some(Item::Tools { folded, .. }) = tools_at.and_then(|at| items.get_mut(at))
+                {
+                    *folded = true;
+                }
                 items.push(Item::Message(message));
             }
-            _ => items.push(Item::Message(message)),
+            _ => {
+                items.extend(trailing.drain(..).map(Item::Message));
+                items.push(Item::Message(message));
+            }
         }
     }
+    items.extend(trailing.drain(..).map(Item::Message));
     items
 }
 
@@ -305,7 +361,19 @@ fn message_text<'a>(
     message: &'a CommittedMessage,
     effects: &mut Vec<Effect>,
 ) -> Option<&'a str> {
-    match &message.content {
+    content_text(ui, requested_bodies, cache, &message.content, effects)
+}
+
+/// The text of `content`: inline, or its body once read. Reading a body is asked for at
+/// the first frame that needs the text, so only what is drawn is read.
+fn content_text<'a>(
+    ui: &mut Ui,
+    requested_bodies: &mut BTreeSet<String>,
+    cache: &'a Cache,
+    content: &'a MessageContent,
+    effects: &mut Vec<Effect>,
+) -> Option<&'a str> {
+    match content {
         MessageContent::Inline { text } => Some(text),
         MessageContent::Body(body) => {
             if let Some(text) = cache.bodies.get(body.body_id.as_str()) {
@@ -343,6 +411,7 @@ fn message_row(
     requested_bodies: &mut BTreeSet<String>,
     cache: &Cache,
     base: Option<&Path>,
+    chips: Option<&PullRequestChips<'_>>,
     message: &CommittedMessage,
     effects: &mut Vec<Effect>,
 ) {
@@ -354,7 +423,7 @@ fn message_row(
                     user_bubble(ui, text, &[]);
                 }
             }
-            MessageRole::Assistant | MessageRole::Tool => {
+            MessageRole::Assistant => {
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(SP_1 as i8, SP_1 as i8))
                     .show(ui, |ui| {
@@ -370,36 +439,40 @@ fn message_row(
                         }
                     });
             }
-            // Filtered out by `drawn`.
-            MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {}
+            // A tool call is always drawn as part of its group.
+            MessageRole::Tool => {}
+            MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {
+                let mut env = cards::Env {
+                    requested_bodies,
+                    cache,
+                    chips,
+                    effects,
+                };
+                cards::aside(ui, &mut env, message);
+            }
         },
     );
 }
 
-/// The header of a folded run of tool outputs, closed until the person opens it, as the
+/// The header of a folded run of tool calls, closed until the person opens it, as the
 /// embedded workbench draws its tool-call groups.
 fn tool_group(
     ui: &mut Ui,
-    requested_bodies: &mut BTreeSet<String>,
-    cache: &Cache,
-    tools: &[&CommittedMessage],
+    env: &mut cards::Env<'_, '_>,
+    rows: &[&CommittedMessage],
     view: &mut ViewAnchor,
-    effects: &mut Vec<Effect>,
 ) {
-    // Keyed by the last one: older outputs put in front do not change it.
-    let last = tools[tools.len() - 1];
+    // Keyed by the last one: older rows put in front do not change it.
+    let last = rows[rows.len() - 1];
     let id = ui.make_persistent_id(("tools", last.run.as_str(), last.index.get()));
-    let failed = tools.iter().any(|tool| match &tool.content {
-        MessageContent::Inline { text } => ToolOutput::parse(text).failed(),
-        MessageContent::Body(_) => false,
-    });
-    let count = tools.len();
+    let tools = || rows.iter().filter_map(|row| row.tool.as_ref());
+    let count = tools().count();
     let mut title = if count == 1 {
-        "1 tool output".to_owned()
+        "1 tool call".to_owned()
     } else {
-        format!("{count} tool outputs")
+        format!("{count} tool calls")
     };
-    if failed {
+    if tools().any(|tool| tool.status == ToolCallStatus::Failed) {
         title.push_str(", some failed");
     }
     let open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
@@ -412,161 +485,17 @@ fn tool_group(
     if ghost_icon_button(ui, icon, &title).clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
     }
-    // The header is not the card of the last output: opening the group must not move it.
+    // The header is not the card of the last call: opening the group must not move it.
     let header = format!("tools {}", message_key(last));
     view.visit(header, top, ui.cursor().min.y, !open);
     if open {
-        tool_cards(ui, requested_bodies, cache, tools, view, effects);
+        cards::rows(ui, env, rows, view);
     }
-}
-
-fn tool_cards(
-    ui: &mut Ui,
-    requested_bodies: &mut BTreeSet<String>,
-    cache: &Cache,
-    tools: &[&CommittedMessage],
-    view: &mut ViewAnchor,
-    effects: &mut Vec<Effect>,
-) {
-    for tool in tools {
-        let top = ui.cursor().min.y;
-        // The same id folded or not, so a card opened while the agent worked stays open.
-        let id = ui.make_persistent_id(("tool-card", tool.run.as_str(), tool.index.get()));
-        if let Some(text) = message_text(ui, requested_bodies, cache, tool, effects) {
-            tool_card(ui, id, text);
-        }
-        view.visit(message_key(tool), top, ui.cursor().min.y, true);
-        ui.add_space(SP_1);
-    }
-}
-
-/// What the shape of a committed tool output says about it. The core commits the output
-/// alone, without the tool's name, input or error flag, so this reads the formats the
-/// tools write: a shell result begins with its exit code, a change is a unified diff.
-#[derive(Debug, PartialEq, Eq)]
-enum ToolOutput<'a> {
-    Shell { exit_code: i64, body: &'a str },
-    Diff { added: usize, removed: usize },
-    Text,
-}
-
-impl<'a> ToolOutput<'a> {
-    fn parse(text: &'a str) -> Self {
-        if let Some(rest) = text.strip_prefix("exit_code:") {
-            let (code, body) = rest.split_once('\n').unwrap_or((rest, ""));
-            if let Ok(exit_code) = code.trim().parse() {
-                return Self::Shell { exit_code, body };
-            }
-        }
-        let is_diff = text
-            .lines()
-            .any(|line| line.starts_with("@@ ") || line.starts_with("+++ "));
-        if is_diff {
-            let added = text
-                .lines()
-                .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-                .count();
-            let removed = text
-                .lines()
-                .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-                .count();
-            return Self::Diff { added, removed };
-        }
-        Self::Text
-    }
-
-    fn failed(&self) -> bool {
-        matches!(self, Self::Shell { exit_code, .. } if *exit_code != 0)
-    }
-}
-
-fn tool_card(ui: &mut Ui, id: egui::Id, text: &str) {
-    let output = ToolOutput::parse(text);
-    let (icon, title, meta) = match &output {
-        ToolOutput::Shell { exit_code, .. } => {
-            (icons::TERMINAL, "Shell", Some(format!("exit {exit_code}")))
-        }
-        ToolOutput::Diff { added, removed } => (
-            icons::GIT_DIFF,
-            "Change",
-            Some(format!("+{added} −{removed}")),
-        ),
-        ToolOutput::Text => (icons::WRENCH, "Output", None),
-    };
-    let lines = text.lines().count();
-    let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    soft_frame(palette().SURFACE).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-            .show_header(ui, |ui| {
-                let color = if output.failed() {
-                    palette().ERROR_FG
-                } else {
-                    palette().TEXT
-                };
-                ui.label(RichText::new(icons::with_icon(icon, title)).color(color));
-                let mut summary = String::new();
-                if let Some(meta) = &meta {
-                    summary.push_str(meta);
-                    summary.push_str(" · ");
-                }
-                summary.push_str(&format!(
-                    "{lines} line{}",
-                    if lines == 1 { "" } else { "s" }
-                ));
-                ui.label(muted(summary).size(FONT_SMALL));
-                ui.add(egui::Label::new(muted(first_line).size(FONT_SMALL).monospace()).truncate());
-            })
-            .body(|ui| match output {
-                ToolOutput::Diff { .. } => diff_block(ui, text),
-                ToolOutput::Shell { exit_code, body } => code_block(
-                    ui,
-                    body,
-                    if exit_code == 0 {
-                        palette().TEXT
-                    } else {
-                        palette().ERROR_FG
-                    },
-                ),
-                ToolOutput::Text => code_block(ui, text, palette().TEXT),
-            });
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_shell_result_is_read_from_its_exit_code_line() {
-        assert_eq!(
-            ToolOutput::parse("exit_code: 2\n--- stderr ---\nboom"),
-            ToolOutput::Shell {
-                exit_code: 2,
-                body: "--- stderr ---\nboom"
-            }
-        );
-        assert!(ToolOutput::parse("exit_code: 1\n").failed());
-        assert!(!ToolOutput::parse("exit_code: 0\nok").failed());
-    }
-
-    #[test]
-    fn a_unified_diff_is_counted_without_its_file_headers() {
-        let diff = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n+more\n context";
-        assert_eq!(
-            ToolOutput::parse(diff),
-            ToolOutput::Diff {
-                added: 2,
-                removed: 1
-            }
-        );
-    }
-
-    #[test]
-    fn plain_output_is_neither_a_shell_result_nor_a_diff() {
-        assert_eq!(ToolOutput::parse("exit_code: x\nhello"), ToolOutput::Text);
-        assert_eq!(ToolOutput::parse("just text"), ToolOutput::Text);
-    }
 
     // Given: a root run, its child, and a run the cache does not know
     // Then: the thread view keeps the root's and the unknown run's messages only
@@ -601,129 +530,489 @@ mod tests {
         .unwrap()
     }
 
+    fn body(id: &str) -> serde_json::Value {
+        serde_json::json!({"type": "body", "payload": {"body_id": id, "total_bytes": "2048"}})
+    }
+
+    fn inline(text: &str) -> serde_json::Value {
+        serde_json::json!({"type": "inline", "payload": {"text": text}})
+    }
+
+    /// A tool row with the given call fields on top of a successful `run_js` call.
+    fn tool_row(
+        run: &str,
+        index: u64,
+        call: serde_json::Value,
+        content: serde_json::Value,
+    ) -> CommittedMessage {
+        let mut tool = serde_json::json!({
+            "tool_name": "run_js", "call_id": format!("call-{index}"),
+            "input_summary": format!("summary {index}"), "status": "succeeded",
+        });
+        tool.as_object_mut()
+            .unwrap()
+            .extend(call.as_object().unwrap().clone());
+        serde_json::from_value(serde_json::json!({
+            "thread": "thr", "run": run, "index": index.to_string(), "role": "tool",
+            "content": content, "tool": tool,
+        }))
+        .unwrap()
+    }
+
+    fn call(run: &str, index: u64) -> CommittedMessage {
+        tool_row(run, index, serde_json::json!({}), inline("done"))
+    }
+
     fn shapes(history: &[CommittedMessage]) -> Vec<(usize, bool)> {
         let history: Vec<_> = history.iter().collect();
         items(&history)
             .iter()
             .filter_map(|item| match item {
-                Item::Tools { tools, folded } => Some((tools.len(), *folded)),
+                Item::Tools { rows, folded } => Some((rows.len(), *folded)),
                 Item::Message(_) => None,
             })
             .collect()
     }
 
-    // Given: tool outputs followed by the same run's reply, by nothing, by the person's
-    //        message, and by another run's reply after another run's tools
-    // Then: only those the same run replied after fold; each run's tools are a group
+    // Given: tool calls followed by the same run's reply, by nothing, by the person's
+    //        message, and by another run's reply after another run's calls
+    // Then: only those the same run replied after fold; each run's calls are a group
     #[test]
-    fn tool_outputs_fold_once_their_run_replies() {
-        let tool = |run, index| committed(run, index, "tool", "exit_code: 0\nok");
+    fn tool_calls_fold_once_their_run_replies() {
         let replied = [
-            tool("r", 0),
-            tool("r", 1),
+            call("r", 0),
+            call("r", 1),
             committed("r", 2, "assistant", "done"),
         ];
         assert_eq!(shapes(&replied), [(2, true)]);
-        assert_eq!(shapes(&[tool("r", 0), tool("r", 1)]), [(2, false)]);
-        let interrupted = [tool("r", 0), committed("r", 1, "user", "stop")];
+        assert_eq!(shapes(&[call("r", 0), call("r", 1)]), [(2, false)]);
+        let interrupted = [call("r", 0), committed("r", 1, "user", "stop")];
         assert_eq!(shapes(&interrupted), [(1, false)]);
         let mixed = [
-            tool("r", 0),
-            tool("s", 0),
+            call("r", 0),
+            call("s", 0),
             committed("r", 1, "assistant", "not s's reply"),
         ];
         assert_eq!(shapes(&mixed), [(1, false), (1, false)]);
     }
 
-    // Given: reasoning, a notice and an error between and after a run's tool outputs
-    // Then: none of them is drawn, none counts as the run's reply, and the tools stay one
-    //       open group; a real reply afterwards still folds them
+    // Given: reasoning, a notice and an error around and between a run's tool calls
+    // Then: they are drawn, those between two calls inside the group and the others beside
+    //       it; none counts as the run's reply, and a real reply afterwards still folds
     #[test]
-    fn reasoning_notices_and_errors_are_not_replies() {
-        let tool = |index| committed("r", index, "tool", "exit_code: 0\nok");
+    fn reasoning_does_not_close_a_tool_group() {
         let aside = |index, role| committed("r", index, role, "aside");
         let history = [
             aside(0, "reasoning"),
-            tool(1),
+            call("r", 1),
             aside(2, "notice"),
-            tool(3),
+            call("r", 3),
             aside(4, "error"),
         ];
-        assert_eq!(shapes(&history), [(2, false)]);
+        assert_eq!(shapes(&history), [(3, false)]);
         let refs: Vec<_> = history.iter().collect();
-        assert!(
-            items(&refs)
-                .iter()
-                .all(|item| matches!(item, Item::Tools { .. }))
-        );
+        let all = items(&refs);
+        assert_eq!(all.len(), 3);
+        assert!(matches!(&all[0], Item::Message(m) if m.role == MessageRole::Reasoning));
+        assert!(matches!(&all[2], Item::Message(m) if m.role == MessageRole::Error));
 
         let mut replied = history.to_vec();
         replied.push(committed("r", 5, "assistant", "done"));
-        assert_eq!(shapes(&replied), [(2, true)]);
+        assert_eq!(shapes(&replied), [(3, true)]);
+        let refs: Vec<_> = replied.iter().collect();
+        let all = items(&refs);
         assert!(
-            items(&[&aside(0, "reasoning")]).is_empty(),
-            "an aside alone draws nothing"
+            matches!(&all[2], Item::Message(m) if m.role == MessageRole::Error),
+            "the error stays in sight after the fold"
         );
+        assert!(
+            items(&[&aside(0, "notice")][..]).len() == 1,
+            "an aside alone is drawn"
+        );
+        assert!(items(&[&committed("r", 0, "notice", "")][..]).is_empty());
     }
 
-    fn harness(cache: Cache) -> egui_kittest::Harness<'static, Cache> {
+    struct State {
+        cache: Cache,
+        requested: BTreeSet<String>,
+        effects: Vec<Effect>,
+    }
+
+    fn harness(cache: Cache) -> egui_kittest::Harness<'static, State> {
+        let state = State {
+            cache,
+            requested: BTreeSet::new(),
+            effects: Vec::new(),
+        };
         egui_kittest::Harness::new_ui_state(
-            |ui, cache: &mut Cache| {
+            |ui, state: &mut State| {
                 let thread = ThreadId::new("thr").unwrap();
-                let mut bodies = BTreeSet::new();
-                let mut effects = Vec::new();
                 transcript(
                     ui,
-                    &mut bodies,
+                    &mut state.requested,
                     TranscriptView {
-                        cache,
+                        cache: &state.cache,
                         scope: Scope::Thread(&thread),
                         base: None,
+                        chips: None,
                     },
                     |_| {},
                     |_, _| {},
-                    &mut effects,
+                    &mut state.effects,
                 );
             },
-            cache,
+            state,
         )
+    }
+
+    fn history(rows: Vec<CommittedMessage>) -> Cache {
+        let mut cache = Cache::default();
+        cache.history.insert("thr".into(), rows);
+        cache
+    }
+
+    // Given: a failed call whose input, result and details are all bodies not read yet
+    // When: it is drawn closed, then opened
+    // Then: closed, its name, summary and failure show and nothing is asked for; opened,
+    //       each body is asked for once
+    #[test]
+    fn tool_header_uses_metadata_without_loading_body() {
+        use egui_kittest::kittest::Queryable;
+        let failing = tool_row(
+            "r",
+            0,
+            serde_json::json!({
+                "status": "failed", "input": body("in"), "detail": body("detail"),
+            }),
+            body("out"),
+        );
+        let mut cache = Cache::default();
+        cache.history.insert("thr".into(), vec![failing]);
+        let mut harness = harness(cache);
+        harness.run_steps(3);
+        harness.get_by_label_contains("run_js");
+        harness.get_by_label("summary 0");
+        harness.get_by_label("Failed");
+        assert!(harness.state().requested.is_empty());
+        assert!(harness.state().effects.is_empty());
+
+        harness.get_by_label_contains("run_js").click();
+        harness.run_steps(3);
+        let wanted: BTreeSet<_> = ["in", "out", "detail"].map(String::from).into();
+        assert_eq!(harness.state().requested, wanted);
+    }
+
+    // Given: a closed card with its input and result, and a card that made another call
+    // When: the card is pressed on its name, on its padding, and a card inside another is
+    //       pressed
+    // Then: each press opens or closes the card it was on; one inside another leaves the
+    //       outer card as it was, and an opened card stays open over later frames
+    #[test]
+    fn whole_card_click_toggles_without_stealing_actions() {
+        use egui_kittest::kittest::Queryable;
+        let single = tool_row(
+            "r",
+            0,
+            serde_json::json!({"input": inline("const x = 1;")}),
+            inline("the result"),
+        );
+        let mut harness = harness(history(vec![single]));
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Input").is_none());
+        harness.get_by_label_contains("run_js").click();
+        harness.run_steps(3);
+        harness.get_by_label("Input");
+        harness.get_by_label("Output");
+        harness.run_steps(3);
+        harness.get_by_label("Input");
+
+        let status = harness.get_by_label("Succeeded").rect();
+        let padding = egui::pos2(status.right() + 3.0, status.center().y);
+        harness.hover_at(padding);
+        harness.run_steps(2);
+        harness.drag_at(padding);
+        harness.drop_at(padding);
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Input").is_none());
+
+        let nested = [
+            tool_row(
+                "r",
+                0,
+                serde_json::json!({"parent_call_id": "call-1"}),
+                inline("inner"),
+            ),
+            tool_row(
+                "r",
+                1,
+                serde_json::json!({"input": inline("outer input")}),
+                inline("outer"),
+            ),
+        ];
+        let mut harness = self::harness(history(nested.to_vec()));
+        harness.run_steps(3);
+        assert!(
+            harness.query_by_label("summary 0").is_none(),
+            "nested until opened"
+        );
+        harness.get_by_label("summary 1").click();
+        harness.run_steps(3);
+        harness.get_by_label("summary 0");
+        harness.get_by_label("outer input");
+        harness.get_by_label("summary 0").click();
+        harness.run_steps(3);
+        harness.get_by_label("inner");
+        harness.get_by_label("outer input");
+    }
+
+    // Given: a call made by a call that is not in the rows, and a call inside a caller
+    // Then: the first is drawn on its own and the second only inside its caller
+    #[test]
+    fn orphan_children_remain_visible() {
+        use egui_kittest::kittest::Queryable;
+        let child = |index, parent: &str| {
+            tool_row(
+                "r",
+                index,
+                serde_json::json!({"parent_call_id": parent}),
+                inline("x"),
+            )
+        };
+        let rows = vec![child(0, "call-gone"), child(1, "call-2"), call("r", 2)];
+        let mut harness = harness(history(rows));
+        harness.run_steps(3);
+        harness.get_by_label("summary 0");
+        harness.get_by_label("summary 2");
+        assert!(harness.query_by_label("summary 1").is_none());
+    }
+
+    // Given: another run's call with the same call id as a call that is the caller of a child
+    // Then: the child is drawn inside the caller of its own run only
+    #[test]
+    fn a_caller_is_found_in_the_childs_own_run() {
+        use egui_kittest::kittest::Queryable;
+        let rows = vec![
+            tool_row(
+                "s",
+                0,
+                serde_json::json!({"call_id": "shared"}),
+                inline("x"),
+            ),
+            tool_row(
+                "r",
+                1,
+                serde_json::json!({"parent_call_id": "shared"}),
+                inline("x"),
+            ),
+        ];
+        let mut harness = harness(history(rows));
+        harness.run_steps(3);
+        harness.get_by_label("summary 0");
+        harness.get_by_label("summary 1");
+    }
+
+    // Given: a folded run of calls, and the card of one opened by the person
+    // When: the run's group is folded and unfolded
+    // Then: the card is still open
+    #[test]
+    fn an_opened_card_keeps_its_state_when_its_group_folds() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = harness(history(vec![
+            tool_row(
+                "r",
+                0,
+                serde_json::json!({"input": inline("code")}),
+                inline("out"),
+            ),
+            tool_row(
+                "r",
+                1,
+                serde_json::json!({"input": inline("code2")}),
+                inline("out"),
+            ),
+        ]));
+        harness.run_steps(3);
+        harness.get_by_label("summary 0").click();
+        harness.run_steps(3);
+        harness.get_by_label("code");
+
+        harness
+            .state_mut()
+            .cache
+            .history
+            .get_mut("thr")
+            .unwrap()
+            .push(committed("r", 2, "assistant", "Done."));
+        harness.run_steps(3);
+        harness.get_by_label("2 tool calls");
+        assert!(harness.query_by_label("code").is_none());
+        harness.get_by_label("2 tool calls").click();
+        harness.run_steps(4);
+        harness.get_by_label("code");
+        assert!(
+            harness.query_by_label("code2").is_none(),
+            "the other stays closed"
+        );
     }
 
     // Given: a shell result and a change committed while the agent still works
     // When: the agent's reply is committed, then the folded header is clicked
     // Then: both cards are in sight without a header while it works; once it replied
-    //       only "2 tool outputs" shows; a click opens it and it stays open
+    //       only "2 tool calls" shows; a click opens it and it stays open
     #[test]
-    fn tool_outputs_stay_in_sight_until_the_reply_and_then_fold() {
+    fn tool_calls_stay_in_sight_until_the_reply_and_then_fold() {
         use egui_kittest::kittest::Queryable;
-        let mut cache = Cache::default();
-        cache.history.insert(
-            "thr".into(),
-            vec![
-                committed("r", 0, "user", "fix it"),
-                committed("r", 1, "tool", "exit_code: 0\nsrc/lib.rs"),
-                committed("r", 2, "tool", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b"),
-            ],
+        let shell = tool_row(
+            "r",
+            1,
+            serde_json::json!({"tool_name": "shell", "input_summary": "ls src"}),
+            inline("lib.rs"),
         );
-        let mut harness = harness(cache);
+        let edit = tool_row(
+            "r",
+            2,
+            serde_json::json!({"tool_name": "edit"}),
+            inline("ok"),
+        );
+        let mut harness = harness(history(vec![
+            committed("r", 0, "user", "fix it"),
+            shell,
+            edit,
+        ]));
         harness.run_steps(2);
-        harness.get_by_label_contains("Shell");
-        harness.get_by_label_contains("Change");
-        assert!(harness.query_by_label_contains("tool outputs").is_none());
+        harness.get_by_label_contains("shell");
+        harness.get_by_label_contains("edit");
+        assert!(harness.query_by_label_contains("tool calls").is_none());
 
         harness
             .state_mut()
+            .cache
             .history
             .get_mut("thr")
             .unwrap()
             .push(committed("r", 3, "assistant", "Fixed."));
         harness.run_steps(2);
-        harness.get_by_label("2 tool outputs");
-        assert!(harness.query_by_label_contains("Shell").is_none());
+        harness.get_by_label("2 tool calls");
+        assert!(harness.query_by_label_contains("shell").is_none());
 
-        harness.get_by_label("2 tool outputs").click();
+        harness.get_by_label("2 tool calls").click();
         harness.run_steps(4);
-        harness.get_by_label_contains("Shell");
-        harness.get_by_label_contains("Change");
+        harness.get_by_label_contains("shell");
+        harness.get_by_label_contains("edit");
+    }
+
+    // Given: reasoning, a notice and an error of a run
+    // Then: reasoning is one closed line whose text is not asked for until it is pressed,
+    //       and the notice and the error show their text
+    #[test]
+    fn reasoning_is_closed_and_notices_show() {
+        use egui_kittest::kittest::Queryable;
+        let reasoning: CommittedMessage = serde_json::from_value(serde_json::json!({
+            "thread": "thr", "run": "r", "index": "0", "role": "reasoning", "content": body("why"),
+        }))
+        .unwrap();
+        let mut harness = harness(history(vec![
+            reasoning,
+            committed("r", 1, "notice", "Switched to the fallback model"),
+            committed("r", 2, "error", "The request failed"),
+        ]));
+        harness.run_steps(3);
+        harness.get_by_label_contains("Reasoning");
+        harness.get_by_label("Switched to the fallback model");
+        harness.get_by_label("The request failed");
+        assert!(harness.state().requested.is_empty());
+        harness.get_by_label_contains("Reasoning").click();
+        harness.run_steps(3);
+        assert!(harness.state().requested.contains("why"));
+    }
+
+    // Given: thr's first messages, scrolled to the first, and an older page of tool calls
+    // When: the page arrives, and the bodies of its calls arrive in a later frame
+    // Then: the message stays where it was on screen after each
+    #[test]
+    fn earlier_tool_details_preserve_scroll_anchor() {
+        use egui_kittest::kittest::Queryable;
+        let mut cache = Cache::default();
+        let questions = (0..60)
+            .map(|index| committed("r", 100 + index, "user", &format!("Question {index}")))
+            .collect();
+        cache.history.insert("thr".into(), questions);
+        cache
+            .older
+            .insert("thr".into(), Some(PageCursor::new("c1").unwrap()));
+        let mut harness = harness(cache);
+        harness.run_steps(3);
+        harness.get_by_label("You: Question 0").scroll_to_me();
+        harness.run_steps(3);
+        let before = harness.get_by_label("You: Question 0").rect();
+
+        let calls = (0..20)
+            .map(|index| {
+                tool_row(
+                    "r",
+                    index,
+                    serde_json::json!({"input": body(&format!("in-{index}"))}),
+                    body(&format!("out-{index}")),
+                )
+            })
+            .collect();
+        harness.state_mut().cache.history_page(
+            "thr",
+            Page {
+                items: calls,
+                next_cursor: None,
+                snapshot_revision: workbench_protocol::wire::Revision(1),
+            },
+            true,
+        );
+        harness.run_steps(4);
+        let after_page = harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_page.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_page:?} with the page"
+        );
+
+        let state = harness.state_mut();
+        let long = (0..30)
+            .map(|l| format!("line {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for index in 0..20 {
+            state
+                .cache
+                .bodies
+                .insert(format!("in-{index}"), long.clone());
+            state
+                .cache
+                .bodies
+                .insert(format!("out-{index}"), long.clone());
+        }
+        harness.run_steps(4);
+        let after_bodies = harness.get_by_label("You: Question 0").rect();
+        assert!(
+            (after_bodies.min.y - before.min.y).abs() < 1.0,
+            "the message moved from {before:?} to {after_bodies:?} with the bodies"
+        );
+    }
+
+    // Given: a call whose input and detail are bodies
+    // When: those bodies are read
+    // Then: what the transcript is made of differs, so a view anchored below them is moved back
+    #[test]
+    fn a_body_of_a_calls_input_or_detail_changes_the_data_shown() {
+        let row = tool_row(
+            "r",
+            0,
+            serde_json::json!({"input": body("in"), "detail": body("detail")}),
+            inline("out"),
+        );
+        let mut cache = Cache::default();
+        let fingerprint = |cache: &Cache| data_fingerprint(cache, &[&row], (false, false));
+        let unread = fingerprint(&cache);
+        cache.bodies.insert("in".into(), "code".into());
+        let input_read = fingerprint(&cache);
+        cache.bodies.insert("detail".into(), "more".into());
+        let all_read = fingerprint(&cache);
+        assert!(unread != input_read && input_read != all_read);
     }
 }

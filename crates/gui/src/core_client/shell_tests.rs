@@ -27,13 +27,22 @@ fn view<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> T {
     serde_json::from_value(value).unwrap()
 }
 
+/// A committed message; a tool row is a successful shell call whose summary is the first line
+/// of its output.
 fn message(index: u64, role: &str, text: &str) -> CommittedMessage {
+    let tool = (role == "tool").then(|| {
+        json!({
+            "tool_name": "shell", "call_id": format!("call-{index}"),
+            "input_summary": text.lines().next().unwrap_or(""), "status": "succeeded",
+        })
+    });
     view(json!({
         "thread": "thr-1",
         "run": "run-1",
         "index": index.to_string(),
         "role": role,
         "content": {"type": "inline", "payload": {"text": text}},
+        "tool": tool,
     }))
 }
 
@@ -1770,18 +1779,13 @@ mod run_tabs {
         );
     }
 
-    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled to its
+    // Given: thr-1 whose first messages are a folded group of tool calls, scrolled to its
     //        header, which is the first thing in view
     // When: the header is pressed to open the group, and pressed again
     // Then: the header stays where it was on screen
     #[test]
     fn opening_a_group_of_tool_outputs_leaves_its_header_in_place() {
-        let message = |index: u64, role: &str, text: String| {
-            view::<CommittedMessage>(json!({
-                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
-                "content": {"type": "inline", "payload": {"text": text}},
-            }))
-        };
+        let message = |index: u64, role: &str, text: String| message(index, role, &text);
         let mut screen = screen_from(
             egui::vec2(1440.0, 900.0),
             super::super::local::LocalPanes::new(
@@ -1800,22 +1804,17 @@ mod run_tabs {
             },
         );
         frames(&mut screen);
-        let header = |screen: &Screen| {
-            screen
-                .harness
-                .get_by_label_contains("20 tool outputs")
-                .rect()
-        };
+        let header = |screen: &Screen| screen.harness.get_by_label_contains("20 tool calls").rect();
         screen
             .harness
-            .get_by_label_contains("20 tool outputs")
+            .get_by_label_contains("20 tool calls")
             .scroll_to_me();
         frames(&mut screen);
         let before = header(&screen);
         for what in ["opened", "closed"] {
             screen
                 .harness
-                .get_by_label_contains("20 tool outputs")
+                .get_by_label_contains("20 tool calls")
                 .click();
             frames(&mut screen);
             let after = header(&screen);
@@ -1826,18 +1825,13 @@ mod run_tabs {
         }
     }
 
-    // Given: thr-1 whose first messages are a folded group of tool outputs, scrolled so that
+    // Given: thr-1 whose first messages are a folded group of tool calls, scrolled so that
     //        the header's top edge is just out of view, and a reply after the group
     // When: the header is pressed to open the group
     // Then: the header stays where it was on screen; the reply moves down with the cards
     #[test]
     fn opening_a_group_whose_header_is_partly_out_of_view_leaves_it_in_place() {
-        let message = |index: u64, role: &str, text: String| {
-            view::<CommittedMessage>(json!({
-                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
-                "content": {"type": "inline", "payload": {"text": text}},
-            }))
-        };
+        let message = |index: u64, role: &str, text: String| message(index, role, &text);
         let mut screen = screen_from(
             egui::vec2(1440.0, 900.0),
             super::super::local::LocalPanes::new(
@@ -1856,15 +1850,10 @@ mod run_tabs {
             },
         );
         frames(&mut screen);
-        let header = |screen: &Screen| {
-            screen
-                .harness
-                .get_by_label_contains("20 tool outputs")
-                .rect()
-        };
+        let header = |screen: &Screen| screen.harness.get_by_label_contains("20 tool calls").rect();
         screen
             .harness
-            .get_by_label_contains("20 tool outputs")
+            .get_by_label_contains("20 tool calls")
             .scroll_to_me();
         frames(&mut screen);
         let at_top = header(&screen);
@@ -1879,7 +1868,7 @@ mod run_tabs {
         let before = header(&screen);
         screen
             .harness
-            .get_by_label_contains("20 tool outputs")
+            .get_by_label_contains("20 tool calls")
             .click();
         frames(&mut screen);
         let after = header(&screen);
@@ -1935,17 +1924,12 @@ mod run_tabs {
         );
     }
 
-    // Given: a folded group of tool outputs that was opened, with older outputs of its run
+    // Given: a folded group of tool calls that was opened, with older outputs of its run
     // When: the older page arrives and joins the group
     // Then: the group stays open, its header and the output below it stay where they were
     #[test]
     fn an_open_group_stays_open_when_older_tool_outputs_join_it() {
-        let message = |index: u64, role: &str, text: String| {
-            view::<CommittedMessage>(json!({
-                "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": role,
-                "content": {"type": "inline", "payload": {"text": text}},
-            }))
-        };
+        let message = |index: u64, role: &str, text: String| message(index, role, &text);
         let mut screen = screen_from(
             egui::vec2(1440.0, 900.0),
             super::super::local::LocalPanes::new(
@@ -1969,12 +1953,12 @@ mod run_tabs {
         frames(&mut screen);
         screen
             .harness
-            .get_by_label_contains("20 tool outputs")
+            .get_by_label_contains("20 tool calls")
             .scroll_to_me();
         frames(&mut screen);
         screen
             .harness
-            .get_by_label_contains("20 tool outputs")
+            .get_by_label_contains("20 tool calls")
             .click();
         frames(&mut screen);
         let before = screen.harness.get_by_label("output 105").rect();
@@ -1993,7 +1977,7 @@ mod run_tabs {
             .cache
             .history_page("thr-1", page, true);
         frames(&mut screen);
-        screen.harness.get_by_label_contains("40 tool outputs");
+        screen.harness.get_by_label_contains("40 tool calls");
         let after = screen.harness.get_by_label("output 105").rect();
         assert!(
             (after.min.y - before.min.y).abs() < 1.0,
@@ -2001,7 +1985,7 @@ mod run_tabs {
         );
     }
 
-    // Given: thr-1 whose newest page is a run of one run's tool outputs, longer than the
+    // Given: thr-1 whose newest page is a run of one run's tool calls, longer than the
     //        window, scrolled to its first output, and older outputs of the same run
     // When: the older page arrives, so the run of outputs begins earlier
     // Then: the output in view stays where it was on screen
@@ -2011,6 +1995,10 @@ mod run_tabs {
             view::<CommittedMessage>(json!({
                 "thread": "thr-1", "run": "run-1", "index": index.to_string(), "role": "tool",
                 "content": {"type": "inline", "payload": {"text": format!("output {index}")}},
+                "tool": {
+                    "tool_name": "shell", "call_id": format!("call-{index}"),
+                    "input_summary": format!("output {index}"), "status": "succeeded",
+                },
             }))
         };
         let mut screen = screen_from(
@@ -2573,13 +2561,13 @@ mod tool_outputs {
 
     const SHELL: &str = "exit code: 0";
     const CHANGE: &str = "--- a/src/auth/login.rs";
-    const FOLDED: &str = "2 tool outputs";
+    const FOLDED: &str = "2 tool calls";
 
-    // Given: thr-1's root committed two tool outputs and has not replied yet
+    // Given: thr-1's root committed two tool calls and has not replied yet
     // When: the window is drawn, then the root's reply is committed, then the folded
     //       header is pressed and more of the conversation arrives
     // Then: both outputs stay in sight without a header while it works; once it
-    //       replied only "2 tool outputs" shows; pressed, they show again and stay
+    //       replied only "2 tool calls" shows; pressed, they show again and stay
     //       shown over later frames and messages
     #[test]
     fn tool_outputs_stay_in_sight_while_the_root_works_and_fold_once_it_replies() {
@@ -2598,7 +2586,7 @@ mod tool_outputs {
         assert!(
             screen
                 .harness
-                .query_by_label_contains("tool outputs")
+                .query_by_label_contains("tool calls")
                 .is_none()
         );
         screen.harness.get_by_label("No subagents of this run");

@@ -4,8 +4,8 @@ use egui_kittest::kittest::NodeT;
 use workbench_protocol::ErrorCode;
 use workbench_protocol::commands::{Command, CommandReply, CommandResult};
 use workbench_protocol::namespaces::pull_requests::{
-    AutoFixView, CheckView, FactsView, HeadAttribution, LinkOrigin, LinkView,
-    PullRequestOperationKind, PullRequestOperationView, PullRequestRef, PullRequestState,
+    AutoFixView, CandidateState, CandidateView, CheckView, FactsView, HeadAttribution, LinkOrigin,
+    LinkView, PullRequestOperationKind, PullRequestOperationView, PullRequestRef, PullRequestState,
     PullRequestsCommand, PullRequestsQuery, PullRequestsReply, PullRequestsResult, ReviewDecision,
     SnapshotView, ThreadPullRequest,
 };
@@ -113,6 +113,17 @@ impl Screen {
         &mut self,
         reply_to_command: CommandAnswer<'_>,
     ) -> Vec<PullRequestsCommand> {
+        self.settle_pull_requests_reading(
+            &|thread| read_of(thread, thread.as_str() == LINKED),
+            reply_to_command,
+        )
+    }
+
+    fn settle_pull_requests_reading(
+        &mut self,
+        read: &dyn Fn(&ThreadId) -> ThreadPullRequest,
+        reply_to_command: CommandAnswer<'_>,
+    ) -> Vec<PullRequestsCommand> {
         let mut commands = Vec::new();
         for _ in 0..16 {
             self.harness.run_steps(1);
@@ -131,12 +142,9 @@ impl Screen {
                     }
                     FeatureRequest::Query(Query::PullRequests(
                         PullRequestsQuery::GetThreadPullRequest { thread },
-                    )) => {
-                        let read = read_of(&thread, thread.as_str() == LINKED);
-                        FeatureReply::Query(Ok(QueryReply::PullRequests(
-                            PullRequestsReply::Thread(Box::new(read)),
-                        )))
-                    }
+                    )) => FeatureReply::Query(Ok(QueryReply::PullRequests(
+                        PullRequestsReply::Thread(Box::new(read(&thread))),
+                    ))),
                     FeatureRequest::Command(Command::PullRequests(command)) => {
                         let reply = reply_to_command(&command);
                         commands.push(command);
@@ -391,4 +399,54 @@ fn the_pull_requests_tab_shows_the_facts_in_english() {
         .harness
         .get_by_label("No pull request is linked to this thread.");
     assert!(screen.button_enabled("Link PR…"));
+}
+
+// Given: thr-1 whose root's calls are a shell result and a change, with a pull request
+//        suggested by the first (call-2 of run-1), one by a call of another run that has
+//        the same call id, and one by a call that is not in the conversation
+// When: the group of calls is opened, and the first's Link PR is pressed
+// Then: only the first call's card offers its suggestion, pressing it sends that
+//       suggestion's confirmation at the revision read and leaves the card closed
+#[test]
+fn a_suggestion_is_offered_on_the_card_of_the_call_that_made_it() {
+    let candidate = |id: u64, run: &str, call: &str| CandidateView {
+        candidate_id: id,
+        pull_request: PullRequestRef {
+            provider: "github".into(),
+            host: "github.com".into(),
+            repository: "o/r".into(),
+            number: 40 + id,
+        },
+        state: CandidateState::Presented,
+        source_run_id: RunId::new(run).unwrap(),
+        source_call_id: call.into(),
+    };
+    let read = |thread: &ThreadId| {
+        let mut read = read_of(thread, false);
+        read.candidates = vec![
+            candidate(1, "run-1", "call-2"),
+            candidate(2, "run-2", "call-2"),
+            candidate(3, "run-1", "call-99"),
+        ];
+        read
+    };
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle_pull_requests_reading(&read, &|_| None);
+    screen.harness.get_by_label("2 tool calls").click();
+    screen.settle_pull_requests_reading(&read, &|_| None);
+    screen.harness.get_by_label("Link PR o/r#41");
+    screen.capture_with_the_pointer_away("suggestion");
+    screen.harness.get_by_label("Link PR o/r#41").click();
+    let commands = screen.settle_pull_requests_reading(&read, &|_| None);
+    let [PullRequestsCommand::ConfirmPullRequestCandidate(confirm)] = &commands[..] else {
+        panic!("one confirmation was expected: {commands:?}");
+    };
+    assert_eq!(confirm.candidate_id, 1);
+    assert_eq!(confirm.expected_revision, Revision(3));
+    assert!(
+        screen.harness.query_by_label("Output").is_none(),
+        "pressing a button on the card does not open it"
+    );
+    assert!(screen.harness.query_by_label("Link PR o/r#42").is_none());
+    assert!(screen.harness.query_by_label("Link PR o/r#43").is_none());
 }

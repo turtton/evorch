@@ -16,7 +16,7 @@ use super::cache::Cache;
 use super::connection::Action;
 use super::features::execution::ExecutionBand;
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
-use super::features::pull_requests::PullRequestBar;
+use super::features::pull_requests::{PullRequestBar, PullRequestChips};
 use super::features::{FeatureId, Navigation, Selection};
 use super::run_tabs::RunTab;
 use super::shell::{CoreTab, Effect};
@@ -134,6 +134,8 @@ pub struct Bands<'a> {
     pub band: Option<ExecutionBand<'a>>,
     pub lane: Option<(&'a ThreadId, LaneCardView<'a>)>,
     pub pull_request: Option<PullRequestBar<'a>>,
+    /// The open suggestions of the thread's pull requests, offered on the tool cards.
+    pub chips: Option<PullRequestChips<'a>>,
 }
 
 /// `root` is the thread's current root run, as its detail names it.
@@ -146,6 +148,7 @@ pub fn show(
         band,
         lane,
         pull_request,
+        chips,
     }: Bands<'_>,
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
@@ -212,16 +215,19 @@ pub fn show(
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| thread_transcript(ui, pane, io, &thread, effects));
+                .show(ui, |ui| {
+                    thread_transcript(ui, pane, io, &thread, chips.as_ref(), effects)
+                });
         });
     });
 }
 
 /// A run tab and the phase its badge follows with whether it is unread.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RunTabView<'a> {
     pub tab: Option<&'a RunTab>,
     pub phase: Option<(ThreadRunPhase, bool)>,
+    pub chips: Option<PullRequestChips<'a>>,
 }
 
 /// One run tab: the committed messages of a single run, as the embedded workbench's
@@ -235,7 +241,7 @@ pub fn run_tab(
     view: RunTabView<'_>,
     effects: &mut Vec<Effect>,
 ) {
-    let RunTabView { tab, phase } = view;
+    let RunTabView { tab, phase, chips } = view;
     let Some(tab) = tab else {
         pane_root(ui, "Transcript", |ui| run_transcript_empty(ui, None));
         return;
@@ -264,6 +270,7 @@ pub fn run_tab(
                         run: &tab.run,
                     },
                     base,
+                    chips: chips.as_ref(),
                 },
                 |ui| run_transcript_empty(ui, name),
                 |_, _| {},
@@ -541,6 +548,7 @@ fn thread_transcript(
     pane: &mut ConversationPane,
     io: &ConversationIo<'_>,
     thread: &ThreadId,
+    chips: Option<&PullRequestChips<'_>>,
     effects: &mut Vec<Effect>,
 ) {
     let questions = open_questions(io.cache, thread);
@@ -567,6 +575,7 @@ fn thread_transcript(
             cache: io.cache,
             scope: Scope::Thread(thread),
             base: io.link_base,
+            chips,
         },
         |ui| {
             if !waiting && !older {
