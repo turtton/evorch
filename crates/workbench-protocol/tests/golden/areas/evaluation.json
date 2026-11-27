@@ -25,7 +25,9 @@
   "command/evaluation/start_evaluation_run": {
     "payload": {
       "payload": {
+        "approved_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "candidate": "[agents.worker]\n",
+        "common": "[routing]\n",
         "keep_workspace": false,
         "operation_id": "op-1",
         "output": "run-1",

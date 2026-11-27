@@ -356,6 +356,7 @@ fn a_thread_folded_before_the_restart_stays_folded() {
     store
         .save(&SavedState {
             folded_threads: vec![ThreadId::new("thr-1").unwrap()],
+            opened_lanes: vec![ThreadId::new("thr-1").unwrap()],
             ..SavedState::default()
         })
         .unwrap();
@@ -400,6 +401,39 @@ fn folding_and_unfolding_a_thread_is_kept_across_windows() {
     second.settle();
     second.harness.state().save_state();
     assert!(store.load().unwrap().folded_threads.is_empty());
+}
+
+// Given: a window restored from a file that opened no lane list
+// When: the person opens the lane list of thr-1, the state is saved, and a new window reads it
+// Then: the first window starts collapsed, the new one shows the lane at once, and hiding the
+//       lanes there saves the list collapsed again
+#[test]
+fn opening_and_hiding_a_lane_list_is_kept_across_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ClientStateStore::in_config_dir(dir.path());
+    store.save(&SavedState::default()).unwrap();
+    let mut first = restored(store.clone(), true);
+    first.settle();
+    assert!(first.harness.query_by_label(LANE_ROW).is_none());
+    first.harness.get_by_label("Show lanes (1)").click();
+    first.settle();
+    first.harness.run_steps(2);
+    first.harness.get_by_label(LANE_ROW);
+    first.harness.state().save_state();
+    assert_eq!(
+        store.load().unwrap().opened_lanes,
+        [ThreadId::new("thr-1").unwrap()]
+    );
+
+    let mut second = restored(store.clone(), true);
+    second.settle();
+    second.harness.get_by_label(LANE_ROW);
+    second.harness.get_by_label("Hide lanes").click();
+    second.settle();
+    second.harness.run_steps(2);
+    assert!(second.harness.query_by_label(LANE_ROW).is_none());
+    second.harness.state().save_state();
+    assert!(store.load().unwrap().opened_lanes.is_empty());
 }
 
 /// A window restored on a named subagent tab (run-9, a child of thr-1's root) with a file

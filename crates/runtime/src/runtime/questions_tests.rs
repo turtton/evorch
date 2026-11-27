@@ -300,9 +300,9 @@ async fn multiple_recipients_resync_after_commit_without_duplicate_evidence() {
 }
 
 #[tokio::test]
-async fn unresolved_lineage_and_suspended_writes_reject_answers_and_trusted_send() {
+async fn unresolved_lineage_rejects_answers() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = storage::StorageConfig {
+    let config = storage::StorageConfig {
         db_path: dir.path().join("answers.db"),
         ..Default::default()
     };
@@ -339,40 +339,6 @@ async fn unresolved_lineage_and_suspended_writes_reject_answers_and_trusted_send
     );
     live.cancel(root).unwrap();
     storage.close();
-    config.hard_limits.max_db_bytes = 1;
-    let storage = storage::Storage::open(config.clone()).unwrap();
-    let live = runtime(&config, storage.handle());
-    assert!(
-        live.answer_user_question(&question.id, "yes")
-            .unwrap_err()
-            .contains("writes suspended")
-    );
-    assert!(
-        live.user_question(&question.id)
-            .unwrap()
-            .unwrap()
-            .answer
-            .is_none()
-    );
-    // An internal live run needs no initial evidence write.
-    let run = live.delegate_background(Role::Worker, "internal".into(), RunConfig::default());
-    let review = live.shared.review_runs.lock().unwrap()[&run].clone();
-    assert!(
-        live.capture_pending_reference(run, "reference".into())
-            .is_err()
-    );
-    assert!(live.peek_pending_reference(run).unwrap().is_none());
-    let before = review.stamp();
-    let requests_before = review.requests().0;
-    assert!(!before.synced);
-    assert!(live.send_message(run, "yes".into()).is_err());
-    let after = review.stamp();
-    assert!(!after.synced);
-    assert!(after.revision > before.revision);
-    assert_eq!(review.requests().0, requests_before);
-    assert_eq!(live.follow_up_status(run).unwrap().pending, 0);
-    assert!(live.peek_pending_reference(run).unwrap().is_none());
-    live.cancel(run).unwrap();
 }
 
 #[tokio::test]

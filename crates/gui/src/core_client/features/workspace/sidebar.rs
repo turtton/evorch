@@ -3,7 +3,7 @@
 //! the revision the core reported, or changes of this window's view.
 use egui::collapsing_header::CollapsingState;
 use egui::{Align, Layout, Ui};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use workbench_protocol::ids::{ProjectId, ThreadId};
 use workspace_ui::ProjectSort;
 
@@ -13,10 +13,12 @@ use crate::core_client::cache::Cache;
 use crate::core_client::features::lanes::{LaneIntent, LaneMenu, LaneMenuEntry};
 use crate::core_client::features::pull_requests::{PullRequestIntent, PullRequestMenu};
 use crate::core_client::features::{FeatureContext, Navigation, Selection};
-use crate::panes::lane_widgets::{LaneMenuChoice, lane_menu};
+use crate::panes::lane_widgets::{
+    LaneMenuChoice, close_badge, close_badge_text, close_kind_label, lane_menu,
+};
 use crate::panes::pull_request_widgets::pull_request_badge;
 use crate::panes::sidebar_widgets::{
-    FAMILY_GAP, FAMILY_PAGE, Hidden, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
+    FAMILY_GAP, FAMILY_PAGE, Hidden, INDENT, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
     ToolbarView, TrailingView, TreeRails, TreeRowLead, attention_note, family_gap_before,
     family_limit_id, hidden_count_badge, limit_families, project_row, restore_button, roll_up,
     sidebar_toolbar, title_label, trailing_controls, tree_row_lead,
@@ -159,7 +161,7 @@ impl WorkspaceFeature {
                                 ui,
                                 &scope,
                                 unread,
-                                &mut view.folded_threads,
+                                (&mut view.folded_threads, &mut view.opened_lanes),
                                 &mut rename,
                                 requests,
                             );
@@ -189,7 +191,7 @@ fn threads(
     ui: &mut Ui,
     scope: &Scope<'_>,
     unread: &BTreeSet<String>,
-    folded: &mut BTreeSet<String>,
+    (folded, opened_lanes): (&mut BTreeSet<String>, &mut BTreeSet<String>),
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
@@ -214,7 +216,38 @@ fn threads(
             || row.own.approval
             || row.own.unread
     });
-    draw_tree(ui, scope, &rows, false, folded, rename, requests);
+    // Lanes whose close stands go after the others; a lane not read yet counts as open.
+    let closed = |row: &ThreadRow<'_>| {
+        scope
+            .lanes
+            .is_some_and(|menu| menu.current_close(&row.summary.id).is_some())
+    };
+    let rows = tree::order_lanes(&rows, closed);
+    let lane_view = |lead: &str| {
+        if !opened_lanes.contains(lead) {
+            tree::LaneView::Collapsed
+        } else if ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(lane_all_id(project, lead)))
+            .unwrap_or(false)
+        {
+            tree::LaneView::All
+        } else {
+            tree::LaneView::Page
+        }
+    };
+    let lanes = tree::limit_lanes(&rows, tree::LANE_PAGE, lane_view);
+    let archived_rows = tree::order_lanes(&tree.archived, closed);
+    let archived_lanes = tree::limit_lanes(&archived_rows, tree::LANE_PAGE, lane_view);
+    draw_tree(
+        ui,
+        scope,
+        TreeKind::Live,
+        (&lanes, &mut *opened_lanes),
+        folded,
+        rename,
+        requests,
+    );
     if hidden > 0 {
         ui.indent(("more-threads-indent", project), |ui| {
             if ui
@@ -232,21 +265,44 @@ fn threads(
             egui::CollapsingHeader::new(format!("Archived ({})", tree.archived.len()))
                 .id_salt(("archived-threads", project))
                 .show(ui, |ui| {
-                    draw_tree(ui, scope, &tree.archived, true, folded, rename, requests);
+                    draw_tree(
+                        ui,
+                        scope,
+                        TreeKind::Archived,
+                        (&archived_lanes, opened_lanes),
+                        folded,
+                        rename,
+                        requests,
+                    );
                 });
         });
     }
 }
 
+/// Where a thread's "See more" for lanes is kept in egui's temporary data.
+fn lane_all_id(project: &str, lead: &str) -> egui::Id {
+    egui::Id::new(("sidebar-lane-all", project, lead))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeKind {
+    Live,
+    Archived,
+}
+
+/// Draws a section's rows, whose lane lists were limited as `lanes` says; `opened` holds the
+/// threads whose lane list the person opened.
 fn draw_tree(
     ui: &mut Ui,
     scope: &Scope<'_>,
-    rows: &[(ThreadRow<'_>, usize)],
-    archived: bool,
+    kind: TreeKind,
+    (lanes, opened): (&tree::LaneLimit<'_>, &mut BTreeSet<String>),
     folded: &mut BTreeSet<String>,
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
+    let archived = kind == TreeKind::Archived;
+    let rows = &lanes.rows[..];
     let rails = TreeRails::new(rows);
     let clip = ui.clip_rect();
     // Rails bridge the vertical gap between rows so a branch reads as one line.
@@ -257,8 +313,14 @@ fn draw_tree(
         .get(scope.project.as_str())
         .map(|access| access.root.as_str());
     let mut collapsed_depth = None;
+    // The threads drawn with their children open: only their lane controls are drawn.
+    let mut open_leads = HashSet::new();
+    let project = scope.project.as_str();
     for (index, &(row, depth)) in rows.iter().enumerate() {
         if collapsed_depth.is_some_and(|hidden_depth| depth > hidden_depth) {
+            // The last row of a thread's subtree may sit in a folded child; the thread's
+            // controls follow it all the same.
+            lane_controls_after(ui, project, lanes, &open_leads, index, opened);
             continue;
         }
         collapsed_depth = None;
@@ -271,10 +333,22 @@ fn draw_tree(
         let mut expansion = CollapsingState::load_with_default_open(ui.ctx(), id, true);
         // The folds are kept in the session file, so they decide over what egui remembers.
         expansion.set_open(!folded.contains(row.id()));
+        // Lanes the limit left out are hidden descendants too: they keep their count and what
+        // they ask of the user on the row. A folded row rolls up everything below it, the
+        // omitted lanes of its descendants too; an open one only its own omitted lanes.
         let hidden = if has_children && !expansion.is_open() {
-            roll_up(rows, index, |row| (row.running, row.own))
+            let shown = roll_up(rows, index, |row| (row.running, row.own));
+            let omitted = lanes
+                .omitted_below
+                .get(row.id())
+                .copied()
+                .unwrap_or_default();
+            sum_hidden(shown, omitted)
         } else {
-            Hidden::default()
+            lanes
+                .groups
+                .get(row.id())
+                .map_or_else(Hidden::default, |group| group.omitted)
         };
         let colors = if archived {
             None
@@ -337,6 +411,9 @@ fn draw_tree(
                         }
                         attention_note(row.own, hidden.attention)
                     };
+                    if let Some(menu) = scope.lanes {
+                        lane_close_row(ui, menu, &row, requests);
+                    }
                     title(
                         ui,
                         (
@@ -368,6 +445,8 @@ fn draw_tree(
         }
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
+        } else {
+            open_leads.insert(row.id());
         }
         if !archived
             && let (Some(root), Some(project_root)) = (row.active_root, project_root)
@@ -375,7 +454,74 @@ fn draw_tree(
         {
             ui.label(muted(format!("Shared workspace: {root}")));
         }
+        lane_controls_after(ui, project, lanes, &open_leads, index, opened);
     }
+}
+
+/// Draws the lane controls that follow `rows[index]`, for the threads drawn open.
+fn lane_controls_after(
+    ui: &mut Ui,
+    project: &str,
+    lanes: &tree::LaneLimit<'_>,
+    open_leads: &HashSet<&str>,
+    index: usize,
+    opened: &mut BTreeSet<String>,
+) {
+    for lead in lanes.controls.get(&index).into_iter().flatten() {
+        if open_leads.contains(lead)
+            && let Some(group) = lanes.groups.get(lead)
+        {
+            lane_controls(ui, project, lead, group, opened);
+        }
+    }
+}
+
+fn sum_hidden(left: Hidden, right: Hidden) -> Hidden {
+    Hidden {
+        count: left.count + right.count,
+        running: left.running || right.running,
+        attention: left.attention.merge(right.attention),
+    }
+}
+
+/// The controls after a thread's rows that show, limit and hide its lane list.
+fn lane_controls(
+    ui: &mut Ui,
+    project: &str,
+    lead: &str,
+    group: &tree::LaneGroup,
+    opened: &mut BTreeSet<String>,
+) {
+    let all = lane_all_id(project, lead);
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT * group.depth as f32 + SP_2);
+        if !group.open {
+            if ui
+                .add(ghost(muted(format!("Show lanes ({})", group.total))))
+                .on_hover_text("Show the lanes of this thread, newest first")
+                .clicked()
+            {
+                opened.insert(lead.to_owned());
+            }
+            return;
+        }
+        if group.omitted_lanes > 0
+            && ui
+                .add(ghost(muted(format!("See more ({})", group.omitted_lanes))))
+                .on_hover_text("Show every lane, the oldest and closed ones too")
+                .clicked()
+        {
+            ui.ctx().data_mut(|data| data.insert_temp(all, true));
+        }
+        if ui
+            .add(ghost(muted("Hide lanes")))
+            .on_hover_text("Collapse the lanes of this thread")
+            .clicked()
+        {
+            opened.remove(lead);
+            ui.ctx().data_mut(|data| data.remove::<bool>(all));
+        }
+    });
 }
 
 /// The row's title, or the field its new title is typed in.
@@ -463,6 +609,33 @@ fn pull_request_row(
     }
 }
 
+/// What a lane's close badge adds on hover to the kind of the close.
+const CLOSE_BADGE_HOVER: &str =
+    "Only the lane's ledger entry ended: its run was not stopped and nothing was deleted.";
+
+/// The badge of a lane thread's row whose close stands, once its lane was read. A row on
+/// screen whose lane was not asked for yet asks for it; the hidden pass that only collects
+/// requests asks for nothing. Nothing is drawn for a lane that is unread, refused or not closed.
+fn lane_close_row(ui: &mut Ui, menu: &LaneMenu, row: &ThreadRow<'_>, requests: &mut Requests) {
+    let Some(lead) = &row.summary.lead_thread else {
+        return;
+    };
+    let thread = &row.summary.id;
+    if let Some(kind) = menu.current_close(thread) {
+        close_badge(
+            ui,
+            close_badge_text(kind),
+            &format!("{}\n{CLOSE_BADGE_HOVER}", close_kind_label(kind)),
+        );
+    }
+    if !menu.is_known(thread) && ui.is_visible() && ui.is_rect_visible(ui.max_rect()) {
+        requests.lanes.push(LaneIntent::Lookup {
+            thread: thread.clone(),
+            lead: lead.clone(),
+        });
+    }
+}
+
 /// The lane items of a lane thread's menu: the operations its lead's lane offers, once the
 /// lanes feature found the lane; until then a disabled line, while the lane is looked up.
 fn lane_items(
@@ -509,10 +682,12 @@ fn lane_items(
         None => {
             ui.add_enabled(false, egui::Button::new("Reading lane…"));
             ui.separator();
-            requests.lanes.push(LaneIntent::Lookup {
-                thread: thread.clone(),
-                lead: lead.clone(),
-            });
+            if !lanes.is_known(thread) {
+                requests.lanes.push(LaneIntent::Lookup {
+                    thread: thread.clone(),
+                    lead: lead.clone(),
+                });
+            }
         }
     }
 }

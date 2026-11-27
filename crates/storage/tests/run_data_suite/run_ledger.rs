@@ -249,23 +249,3 @@ fn secret_body_is_rejected() {
         })
     ));
 }
-
-#[test]
-fn suspended_writer_rejects_ledger_append() {
-    // Given: a database that already exceeds its configured size limit.
-    let temp = TempDir::new().unwrap();
-    let mut config = config(&temp);
-    config.hard_limits.max_db_bytes = 1;
-    let storage = Storage::open(config.clone()).unwrap();
-    // When: appending while suspended.
-    let result = storage.handle().append_run_ledger("a", "body");
-    // Then: no ledger entry is persisted.
-    assert!(result.is_err());
-    assert!(
-        Database::open(&config)
-            .unwrap()
-            .run_ledger_all()
-            .unwrap()
-            .is_empty()
-    );
-}

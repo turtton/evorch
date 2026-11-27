@@ -21,6 +21,7 @@ pub mod deferred;
 pub(crate) mod diagnostic;
 pub(crate) mod first_pass;
 pub(crate) mod select;
+pub(crate) mod tool_body_retention;
 use accounting::{day_start_ns, enforce_limit};
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
@@ -44,10 +45,24 @@ pub struct EventAccounting {
     seeded_session_id: Option<String>,
     seeded_day_start_ns: Option<i64>,
     data_version: Option<i64>,
+    /// The UTC day (start, ns) whose daily-limit overrun was already logged, so the
+    /// warning fires once per day. It survives reseeding.
+    daily_warned_day_ns: Option<i64>,
     sessions: VecDeque<(String, u64)>,
     /// Tombstones as of `data_version`; any other connection's commit
     /// (including a retention confirmation) invalidates it with the rest.
     tombstones: Option<Arc<crate::thread_retention::TombstoneSet>>,
+}
+
+impl EventAccounting {
+    /// An empty cache that is reseeded from the database on the next append. The
+    /// daily-limit warning marker is kept, so invalidating does not repeat the warning.
+    pub(crate) fn invalidated(&self) -> Self {
+        Self {
+            daily_warned_day_ns: self.daily_warned_day_ns,
+            ..Self::default()
+        }
+    }
 }
 
 /// 容量上限を検査してイベントを一件追記します。
@@ -104,7 +119,7 @@ pub(crate) fn append_event_in_transaction(
     let mut next_accounting = if accounting.data_version == Some(data_version) {
         accounting.clone()
     } else {
-        EventAccounting::default()
+        accounting.invalidated()
     };
     next_accounting.data_version = Some(data_version);
     let tombstones = match &next_accounting.tombstones {
@@ -165,11 +180,18 @@ pub(crate) fn append_event_in_transaction(
             .day_bytes
             .checked_add(event_len)
             .ok_or(StorageError::OutOfRange("daily event bytes"))?;
-        enforce_limit(
-            LimitKind::DailyBytes,
-            next_day_bytes,
-            limits.max_daily_event_bytes,
-        )?;
+        // The daily volume is advisory: the event is written regardless, and the
+        // overrun is logged once per day.
+        if next_day_bytes > limits.max_daily_event_bytes
+            && next_accounting.daily_warned_day_ns != Some(day_start)
+        {
+            tracing::warn!(
+                day_bytes = next_day_bytes,
+                max_bytes = limits.max_daily_event_bytes,
+                "daily event byte limit exceeded; event writes continue"
+            );
+            next_accounting.daily_warned_day_ns = Some(day_start);
+        }
         conn.prepare_cached(
             "INSERT INTO events \
              (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind, \

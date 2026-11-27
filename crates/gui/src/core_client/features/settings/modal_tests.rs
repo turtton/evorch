@@ -6,9 +6,12 @@ use super::tests::{open_modal, provider, provider_save, revision, settings_comma
 use super::*;
 use crate::core_client::features::FeatureRequest;
 use crate::core_client::features::execution::tests::{Screen, answer, asked, query_of, screen};
-use crate::model::settings_tabs::ROUTING_CONFLICT;
+use crate::model::settings_document::SettingsDocument;
 use egui::accesskit::Role;
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use workbench_protocol::namespaces::settings::{
     CredentialRef, OpenaiCompatibleKind, ProviderInput, ProviderKind,
 };
@@ -85,6 +88,10 @@ fn answer_snapshot(screen: &mut Harness<'static, Screen>, saved: char, document:
 }
 
 fn type_into(screen: &mut Harness<'static, Screen>, label: &str, text: &str) {
+    screen
+        .get_by_role_and_label(Role::TextInput, label)
+        .scroll_to_me();
+    screen.run();
     screen.get_by_role_and_label(Role::TextInput, label).focus();
     screen.run();
     screen
@@ -93,7 +100,10 @@ fn type_into(screen: &mut Harness<'static, Screen>, label: &str, text: &str) {
     screen.run();
 }
 
+/// Presses the control named `label`, scrolled into view first: the section's body scrolls.
 fn click(screen: &mut Harness<'static, Screen>, label: &str) {
+    screen.get_by_label(label).scroll_to_me();
+    screen.run();
     screen.get_by_label(label).click();
     screen.run();
 }
@@ -122,9 +132,40 @@ fn end(screen: &mut Harness<'static, Screen>, save: &SaveDocument, state: Operat
     screen.run();
 }
 
+/// Adds a route through the pinned Add button and names it: the name field of a new route
+/// is open and selected, so what is typed replaces the placeholder.
 fn add_route(screen: &mut Harness<'static, Screen>, name: &str) {
-    type_into(screen, "New logical model name", name);
     click(screen, "Add route");
+    type_into(screen, "Logical model name", name);
+    click(screen, "Accept name");
+}
+
+/// Opens the card of the route `name`.
+fn open_route(screen: &mut Harness<'static, Screen>, name: &str) {
+    screen.get_by_label(&format!("Route {name}")).click();
+    screen.run();
+}
+
+/// Picks the role named `label` in the table (its row is a button).
+fn pick_role(screen: &mut Harness<'static, Screen>, label: &str) {
+    screen
+        .get_by_role_and_label(Role::Button, label)
+        .scroll_to_me();
+    screen.run();
+    screen.get_by_role_and_label(Role::Button, label).click();
+    screen.run();
+}
+
+/// Turns the Advanced Temperature override of the selected role on: a small edit that makes
+/// the role unsaved.
+fn edit_selected_role(screen: &mut Harness<'static, Screen>) {
+    screen
+        .query_all_by_label_contains("ADVANCED")
+        .next()
+        .expect("the Advanced header")
+        .click();
+    screen.run();
+    click(screen, "Temperature");
 }
 
 // Given: two providers, one of a type this screen cannot edit
@@ -135,7 +176,7 @@ fn add_route(screen: &mut Harness<'static, Screen>, name: &str) {
 fn a_provider_row_names_its_type_and_is_deleted_only_after_its_confirmation() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("Provider settings");
+    screen.get_by_label("Where models come from, with their sign-in and model list");
     screen.get_by_label("OpenAI-compatible");
     screen.get_by_label("Claude API");
     screen.get_all_by_label("Edit").nth(1).unwrap().click();
@@ -258,13 +299,15 @@ fn a_kimi_subscription_is_added_with_its_defaults() {
 
 // Given: the Routing tab of a file with comments, restart targets and providers
 // When: a route is added and the routing saved, and the save ends
-// Then: the whole document is sent at the snapshot revision with the route and everything
-//       else it had, and the end asks for the reload
+// Then: the document is sent at the snapshot revision with the route and everything else it
+//       had, and the end names the route and asks for the reload
 #[test]
 fn a_routing_save_quotes_its_revision_and_keeps_the_rest_of_the_file() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Routing");
-    screen.get_by_label("Routing settings");
+    screen.get_by_label(
+        "Logical model name to real provider and model. Candidates are tried from the top",
+    );
     add_route(&mut screen, "slow");
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
@@ -275,7 +318,7 @@ fn a_routing_save_quotes_its_revision_and_keeps_the_rest_of_the_file() {
     assert!(save.text.contains("slow"));
 
     end(&mut screen, &save, OperationState::Ready);
-    screen.get_by_label("Routing settings updated. Reload models to apply them.");
+    screen.get_by_label("Route 'slow' saved. Reload models to apply it.");
     answer_snapshot(&mut screen, 'e', &save.text);
     assert!(screen.query_by_label(STALE_DRAFT).is_none());
 }
@@ -348,29 +391,177 @@ fn a_stale_routing_save_is_rebased_onto_a_file_whose_routes_did_not_change() {
     assert!(again.text.contains("slow"));
 }
 
-// Given: a routing draft with an added route
-// When: the file changes elsewhere, and its routes are among the changes
-// Then: the draft is kept, the conflict is named, and Save routing sends nothing
+// Given: a draft of the route `fast` (a candidate added), and a draft of a new route
+// When: the file changes elsewhere, in `fast` itself
+// Then: `fast` is flagged as changed elsewhere and Save sends nothing for it, while Discard
+//       takes the saved route; the new route stays a draft, and saves
 #[test]
-fn a_routing_draft_whose_routes_changed_elsewhere_is_not_saved() {
+fn a_route_changed_elsewhere_under_unsaved_edits_is_not_saved_over() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Routing");
     add_route(&mut screen, "slow");
-    screen
-        .state_mut()
-        .feature
-        .event(&UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
-            revision: revision('c'),
-            applied_revision: Some(revision('a')),
-        }));
+    open_route(&mut screen, "fast");
+    click(&mut screen, "Add candidate");
+    snapshot_changed(&mut screen, 'c');
     let elsewhere = DOCUMENT.replace(
         "fast = [{ profile = \"local\" }]",
-        "fast = [{ profile = \"local\" }]\nother = [{ profile = \"local\" }]",
+        "fast = [{ profile = \"local\", model = \"m\" }]",
     );
     answer_snapshot(&mut screen, 'c', &elsewhere);
-    screen.get_by_label(ROUTING_CONFLICT);
+    screen.get_by_label("Changed elsewhere");
     click(&mut screen, "Save routing");
     assert!(asked(&mut screen).is_empty());
+
+    click(&mut screen, "Discard");
+    assert!(screen.query_by_label("Changed elsewhere").is_none());
+    open_route(&mut screen, "slow");
+    click(&mut screen, "Save routing");
+    let save = document_save(&mut screen);
+    assert_eq!(save.expected_revision, revision('c'));
+    assert!(save.text.contains("slow"));
+    assert!(save.text.contains("model = \"m\""), "{}", save.text);
+}
+
+// Given: a new route whose name was typed but not accepted
+// When: Save routing is pressed
+// Then: the typed name is what is saved, not the placeholder
+#[test]
+fn save_takes_the_name_still_being_typed() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    click(&mut screen, "Add route");
+    type_into(&mut screen, "Logical model name", "typed-name");
+    click(&mut screen, "Save routing");
+    let save = document_save(&mut screen);
+    assert!(save.text.contains("typed-name"), "{}", save.text);
+    assert!(!save.text.contains("new-route"), "{}", save.text);
+}
+
+// Given: edits of the saved route `fast` and of a new route, and `fast` changed elsewhere
+// When: the new route is saved and its end seen, then `fast` is opened and Save is pressed
+// Then: `fast` is still flagged as changed elsewhere and sends nothing, so the newer file is
+//       not overwritten with the old draft; only Discard resolves it
+#[test]
+fn saving_another_route_does_not_clear_a_conflict() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "slow");
+    open_route(&mut screen, "fast");
+    click(&mut screen, "Add candidate");
+    snapshot_changed(&mut screen, 'c');
+    let elsewhere = DOCUMENT.replace(
+        "fast = [{ profile = \"local\" }]",
+        "fast = [{ profile = \"local\", model = \"m\" }]",
+    );
+    answer_snapshot(&mut screen, 'c', &elsewhere);
+    screen.get_by_label("Changed elsewhere");
+
+    open_route(&mut screen, "slow");
+    click(&mut screen, "Save routing");
+    let slow = document_save(&mut screen);
+    end(&mut screen, &slow, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &slow.text);
+
+    open_route(&mut screen, "fast");
+    screen.get_by_label("Changed elsewhere");
+    click(&mut screen, "Save routing");
+    assert!(asked(&mut screen).is_empty());
+    click(&mut screen, "Discard");
+    assert!(screen.query_by_label("Changed elsewhere").is_none());
+}
+
+// Given: edits of two roles, and the Orchestrator changed elsewhere
+// When: the Explorer is saved and its end seen, then the Orchestrator is picked and saved
+// Then: the Orchestrator is still flagged as changed elsewhere and sends nothing
+#[test]
+fn saving_another_role_does_not_clear_a_conflict() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    pick_role(&mut screen, "Explorer");
+    edit_selected_role(&mut screen);
+    snapshot_changed(&mut screen, 'c');
+    let elsewhere =
+        format!("{DOCUMENT}\n[agents.orchestrator]\ngeneration = {{ temperature = 0.7 }}\n");
+    answer_snapshot(&mut screen, 'c', &elsewhere);
+
+    click(&mut screen, "Save role");
+    let explorer = document_save(&mut screen);
+    end(&mut screen, &explorer, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &explorer.text);
+
+    pick_role(&mut screen, "Orchestrator");
+    screen.get_by_label_contains("Changed elsewhere");
+    click(&mut screen, "Save role");
+    assert!(asked(&mut screen).is_empty());
+    click(&mut screen, "Discard");
+    assert!(
+        screen
+            .query_by_label_contains("Changed elsewhere")
+            .is_none()
+    );
+}
+
+// Given: the saved route `fast` whose new name is typed but not accepted
+// When: the footer and the profile control are looked at, then Discard is pressed
+// Then: the typed name counts as unsaved (the profile control is locked) until it is discarded
+#[test]
+fn a_name_typed_for_a_saved_route_is_an_unsaved_edit() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    open_route(&mut screen, "fast");
+    assert!(!disabled(&screen, "Profile menu"));
+    click(&mut screen, "Rename route fast");
+    type_into(&mut screen, "Logical model name", "quick");
+    screen.get_by_label_contains("Unsaved changes: fast");
+    assert!(disabled(&screen, "Profile menu"));
+
+    click(&mut screen, "Discard");
+    assert!(!disabled(&screen, "Profile menu"));
+    assert!(screen.query_by_label_contains("Unsaved changes").is_none());
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: two routes added one after the other
+// When: Routing is drawn
+// Then: the one added last is on top
+#[test]
+fn the_route_added_last_is_listed_first() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "first");
+    add_route(&mut screen, "second");
+    let top = |screen: &Harness<'static, Screen>, name: &str| {
+        screen.get_by_label(&format!("Route {name}")).rect().min.y
+    };
+    assert!(top(&screen, "second") < top(&screen, "first"));
+    assert!(top(&screen, "first") < top(&screen, "fast"));
+}
+
+// Given: unsaved drafts of two routes
+// When: the first is saved and its end seen
+// Then: the second is still unsaved, is not in conflict, and saves at the revision the first
+//       wrote, with the first still in the file
+#[test]
+fn saving_one_route_leaves_the_other_draft_saveable() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "first");
+    add_route(&mut screen, "second");
+    open_route(&mut screen, "first");
+    click(&mut screen, "Save routing");
+    let first = document_save(&mut screen);
+    assert!(first.text.contains("first") && !first.text.contains("second"));
+    end(&mut screen, &first, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &first.text);
+    screen.get_by_label("● 1 other route unsaved");
+    assert!(screen.query_by_label("Changed elsewhere").is_none());
+
+    open_route(&mut screen, "second");
+    click(&mut screen, "Save routing");
+    let second = document_save(&mut screen);
+    assert_eq!(second.expected_revision, revision('e'));
+    assert!(second.text.contains("first") && second.text.contains("second"));
 }
 
 // Given: the Agent roles tab
@@ -381,17 +572,19 @@ fn a_routing_draft_whose_routes_changed_elsewhere_is_not_saved() {
 fn agent_roles_and_role_profiles_are_saved_at_the_revision_they_were_made_from() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Agent roles");
-    screen.get_by_label("Agent role settings");
-    click(&mut screen, "Save role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
+    edit_selected_role(&mut screen);
+    click(&mut screen, "Save role");
     let roles = document_save(&mut screen);
     assert_eq!(roles.expected_revision, revision('a'));
     for kept in KEPT.iter().chain(&["fast"]) {
         assert!(roles.text.contains(kept), "{kept} in {}", roles.text);
     }
     end(&mut screen, &roles, OperationState::Ready);
-    screen.get_by_label("Agent role settings updated. Reload models to apply them.");
+    screen.get_by_label("Orchestrator saved. Reload models to apply it.");
     answer_snapshot(&mut screen, 'e', &roles.text);
 
+    click(&mut screen, "Profile menu");
     type_into(&mut screen, "New profile name", "night");
     click(&mut screen, "New profile");
     let created = document_save(&mut screen);
@@ -404,6 +597,7 @@ fn agent_roles_and_role_profiles_are_saved_at_the_revision_they_were_made_from()
     screen.get_by_label("Role profile 'night' created. Reload models to apply it.");
     answer_snapshot(&mut screen, 'e', &created.text);
 
+    click(&mut screen, "Profile menu");
     click(&mut screen, "Delete profile");
     let deleted = document_save(&mut screen);
     assert!(!deleted.text.contains("night"));
@@ -432,7 +626,7 @@ fn an_unusable_document_is_named_and_offers_no_save() {
             .next()
             .is_some()
     );
-    assert!(screen.query_by_label("Save role settings").is_none());
+    assert!(screen.query_by_label("Save role").is_none());
     assert!(asked(&mut screen).is_empty());
 }
 
@@ -444,15 +638,16 @@ fn an_unusable_document_is_named_and_offers_no_save() {
 fn create_route_opens_routing_and_returns_to_agent_roles_after_the_save() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Agent roles");
-    click(&mut screen, "Orchestrator");
     click(&mut screen, "Create route");
-    screen.get_by_label("Routing settings");
+    screen.get_by_label(
+        "Logical model name to real provider and model. Candidates are tried from the top",
+    );
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
     assert_eq!(save.expected_revision, revision('a'));
     assert!(save.text.contains("orchestrator"), "{}", save.text);
     end(&mut screen, &save, OperationState::Ready);
-    screen.get_by_label("Agent role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
 }
 
 fn snapshot_changed(screen: &mut Harness<'static, Screen>, saved: char) {
@@ -477,7 +672,7 @@ fn a_rebased_routing_draft_keeps_a_cooldown_set_elsewhere() {
     let elsewhere =
         format!("{DOCUMENT}\n[routing.cooldown]\nquota_secs = 600\nrate_limit_secs = 30\n");
     answer_snapshot(&mut screen, 'c', &elsewhere);
-    assert!(screen.query_by_label(ROUTING_CONFLICT).is_none());
+    assert!(screen.query_by_label("Changed elsewhere").is_none());
 
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
@@ -528,13 +723,13 @@ fn settings<'a>(screen: &'a mut Harness<'static, Screen>) -> &'a mut SettingsFea
 // Given: an Agent roles draft with unsaved edits bound to route `fast`, and a routing save
 //       that renames `fast` to `faster`
 // When: a reconnect asks for the snapshot the save wrote before the save's own end
-// Then: the rename is first taken for another save's change, and once the save's end is
-//       seen the roles draft carries the rename, is no longer in conflict and can be saved
+// Then: the renamed route is flagged until the save's end is seen; the end clears it, the
+//       roles draft carries the rename and its save quotes the revision the rename wrote
 #[test]
 fn a_rename_seen_in_the_snapshot_before_its_own_save_ends_leaves_agent_roles_saveable() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Agent roles");
-    screen.get_by_label("Agent role settings");
+    screen.get_by_label("Which route each agent role uses, and how it is tuned");
     {
         let modal = settings(&mut screen).modal.as_mut().expect("the modal");
         let roles = modal.roles.as_mut().expect("the roles draft");
@@ -542,16 +737,10 @@ fn a_rename_seen_in_the_snapshot_before_its_own_save_ends_leaves_agent_roles_sav
         modal.select(SettingsTab::Routing);
     }
     screen.run();
-    settings(&mut screen)
-        .modal
-        .as_mut()
-        .and_then(|modal| modal.routing.as_mut())
-        .expect("the routing draft")
-        .model
-        .expanded
-        .insert("fast".into());
-    screen.run();
-    type_into(&mut screen, "Logical model name", "er");
+    open_route(&mut screen, "fast");
+    click(&mut screen, "Rename route fast");
+    type_into(&mut screen, "Logical model name", "faster");
+    click(&mut screen, "Accept name");
     click(&mut screen, "Save routing");
     let save = document_save(&mut screen);
     assert!(save.text.contains("route = \"faster\""), "{}", save.text);
@@ -579,18 +768,15 @@ fn a_rename_seen_in_the_snapshot_before_its_own_save_ends_leaves_agent_roles_sav
         snapshot_tag,
         snapshot_reply('e', &save.text, None),
     );
-    settings(&mut screen)
-        .modal
-        .as_mut()
-        .expect("the modal")
-        .select(SettingsTab::AgentRoles);
     screen.run();
-    assert!(
-        screen
-            .query_all_by_label_contains("Agent roles were changed by another save")
-            .next()
-            .is_some()
-    );
+    let flagged = |screen: &mut Harness<'static, Screen>| {
+        settings(screen)
+            .modal
+            .as_ref()
+            .and_then(|modal| modal.routing.as_ref())
+            .is_some_and(|routing| !routing.model.conflicted.is_empty())
+    };
+    assert!(flagged(&mut screen));
 
     let mut ended = view(
         &save.operation_id,
@@ -605,16 +791,18 @@ fn a_rename_seen_in_the_snapshot_before_its_own_save_ends_leaves_agent_roles_sav
     );
     screen.run();
     let _ = asked(&mut screen);
-    assert!(
-        screen
-            .query_all_by_label_contains("Agent roles were changed by another save")
-            .next()
-            .is_none()
-    );
-    click(&mut screen, "Save role settings");
+    assert!(!flagged(&mut screen));
+    settings(&mut screen)
+        .modal
+        .as_mut()
+        .expect("the modal")
+        .select(SettingsTab::AgentRoles);
+    screen.run();
+    click(&mut screen, "Save role");
     let roles = document_save(&mut screen);
     assert_eq!(roles.expected_revision, revision('e'));
     assert!(!roles.text.contains("\"fast\""), "{}", roles.text);
+    assert!(roles.text.contains("faster"), "{}", roles.text);
 }
 
 // Given: a Claude subscription whose sign-in is kept under the keychain account of its name
@@ -655,3 +843,174 @@ fn renaming_an_existing_subscription_keeps_its_keychain_account() {
     assert_ne!(name, "claude");
     assert_eq!(account, "claude");
 }
+
+// Given: Model Settings open on Routing with nothing edited
+// When: Esc is pressed
+// Then: it closes at once, without asking
+#[test]
+fn escape_closes_a_clean_modal_at_once() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    assert!(settings(&mut screen).modal_tab().is_some());
+    screen.key_press(egui::Key::Escape);
+    screen.run();
+    assert!(settings(&mut screen).modal_tab().is_none());
+}
+
+// Given: a Routing draft with an added route
+// When: × is pressed, "Keep editing" is chosen, then Esc and "Discard and close"
+// Then: the first request only asks and keeps the draft; discarding closes the modal and sends
+//       nothing
+#[test]
+fn closing_a_dirty_modal_asks_first_and_discarding_sends_nothing() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Routing");
+    add_route(&mut screen, "slow");
+    screen.get_by_label("● Unsaved changes: slow");
+
+    screen.get_by_label("Close").click();
+    screen.run();
+    screen.get_by_label("Discard unsaved changes and close?");
+    assert!(settings(&mut screen).modal_tab().is_some());
+    screen.get_by_label("Keep editing").click();
+    screen.run();
+    assert!(
+        screen
+            .query_by_label("Discard unsaved changes and close?")
+            .is_none()
+    );
+    screen.get_by_label("● Unsaved changes: slow");
+
+    screen.key_press(egui::Key::Escape);
+    screen.run();
+    screen.get_by_label("Discard unsaved changes and close?");
+    screen.get_by_label("Discard and close").click();
+    screen.run();
+    assert!(settings(&mut screen).modal_tab().is_none());
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: a screen that has not read the settings yet
+// When: Model Settings is opened and the screen is drawn over several frames
+// Then: the snapshot is asked for once (by maintain), not once per frame and not once per
+//       surface that draws the feature
+#[test]
+fn the_snapshot_is_asked_for_by_maintain_once_while_the_modal_is_open() {
+    let mut screen = screen(Box::<SettingsFeature>::default(), None);
+    settings(&mut screen).open_modal(SettingsTab::Providers);
+    screen.run_steps(6);
+    let snapshots = asked(&mut screen)
+        .iter()
+        .filter(|action| {
+            matches!(
+                query_of(action),
+                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+            )
+        })
+        .count();
+    assert_eq!(snapshots, 1);
+    screen.run_steps(6);
+    assert!(
+        asked(&mut screen).is_empty(),
+        "nothing is asked again while it waits"
+    );
+}
+
+fn disabled(screen: &Harness<'static, Screen>, label: &str) -> bool {
+    screen.get_by_label(label).accesskit_node().is_disabled()
+}
+
+// Given: unsaved edits in two roles (Orchestrator, then Explorer)
+// When: the Explorer is saved and its end seen
+// Then: only the Explorer is written, the Orchestrator is still unsaved and says so in the
+//       footer, the profile control stays locked until it is discarded, and Discard of the
+//       selected role leaves nothing else changed
+#[test]
+fn saving_one_role_leaves_the_other_edit_and_the_profile_waits_for_it() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    pick_role(&mut screen, "Explorer");
+    edit_selected_role(&mut screen);
+    screen.get_by_label("● Unsaved changes: Explorer (+1 other role)");
+    assert!(disabled(&screen, "Profile menu"));
+
+    click(&mut screen, "Save role");
+    let explorer = document_save(&mut screen);
+    let saved = SettingsDocument::parse(&explorer.text)
+        .unwrap()
+        .seed_roles(None);
+    assert_eq!(saved.agents.explorer.generation.temperature, Some(0.0));
+    assert_eq!(saved.agents.orchestrator.generation.temperature, None);
+    end(&mut screen, &explorer, OperationState::Ready);
+    answer_snapshot(&mut screen, 'e', &explorer.text);
+    screen.get_by_label("● 1 other role unsaved");
+    assert!(disabled(&screen, "Profile menu"));
+
+    pick_role(&mut screen, "Orchestrator");
+    click(&mut screen, "Discard");
+    assert!(screen.query_by_label_contains("unsaved").is_none());
+    assert!(!disabled(&screen, "Profile menu"));
+    assert!(asked(&mut screen).is_empty());
+}
+
+// Given: the Agent roles of a file where only the Orchestrator and Explorer have routes
+// When: the Compactor, the Image generator and the Planner are picked
+// Then: the Compactor and the Image generator say what an empty chain means and are not
+//       reported as having no route; the Planner is, and offers to create its route
+#[test]
+fn an_inheriting_compactor_and_an_image_generator_without_a_chain_are_not_errors() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    open_modal(&mut screen, "Agent roles");
+    pick_role(&mut screen, "Compactor");
+    screen.get_by_label_contains("Uses the running role's chain");
+    assert!(
+        screen
+            .query_by_label_contains("Undefined (no route)")
+            .is_none()
+    );
+    pick_role(&mut screen, "Image generator");
+    screen.get_by_label_contains("Disabled (generate_image unavailable)");
+    assert!(
+        screen
+            .query_by_label_contains("Undefined (no route)")
+            .is_none()
+    );
+    assert!(screen.query_by_label("Create route").is_none());
+    pick_role(&mut screen, "Planner");
+    screen.get_by_label_contains("Undefined (no route)");
+    screen.get_by_label("Create route");
+}
+
+// Given: Routing and Agent Roles at the smallest window the app supports
+// When: a route is added (Routing) and a role is edited (Agent Roles)
+// Then: the footer's Discard and Save, the pinned bar and the open card (or the table and
+//       the pane) are all inside the window
+#[test]
+fn routing_and_roles_fit_the_smallest_window() {
+    let mut screen = loaded_with(DOCUMENT, None);
+    screen.set_size(egui::vec2(960.0, 600.0));
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 600.0));
+    open_modal(&mut screen, "Routing");
+    click(&mut screen, "Add route");
+    for label in ["Add route", "Save routing", "Discard", "Logical model name"] {
+        let rect = screen.get_by_label(label).rect();
+        assert!(window.contains_rect(rect), "{label} at {rect:?}");
+    }
+    screen.get_by_label("Discard").click();
+    screen.run();
+    open_modal(&mut screen, "Agent roles");
+    edit_selected_role(&mut screen);
+    for label in ["Save role", "Discard", "Role route", "Temperature"] {
+        let rect = screen.get_by_label(label).rect();
+        assert!(window.contains_rect(rect), "{label} at {rect:?}");
+    }
+    for role in ["Orchestrator", "Explorer"] {
+        let rect = screen.get_by_role_and_label(Role::Button, role).rect();
+        assert!(window.contains_rect(rect), "{role} at {rect:?}");
+    }
+}
+
+#[cfg(test)]
+#[path = "modal_evidence.rs"]
+mod evidence;

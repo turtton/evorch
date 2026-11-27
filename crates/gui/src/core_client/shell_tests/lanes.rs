@@ -74,6 +74,12 @@ impl Screen {
     /// fixed number of frames; returns the lanes queries asked and the other actions.
     fn settle_lanes_with(&mut self, detail: &serde_json::Value) -> (Vec<Query>, Vec<Action>) {
         let (mut asked, mut others) = (Vec::new(), Vec::new());
+        for (tag, query) in HELD_LANE_QUERIES.take() {
+            let reply = FeatureReply::Query(Ok(answer_lanes(&query, detail)));
+            let mut shared = self.shared.lock().unwrap();
+            shared.features.reply(FeatureId::Lanes, tag, reply);
+            asked.push(query);
+        }
         for _ in 0..12 {
             self.harness.run_steps(1);
             while let Ok(action) = self.actions.try_recv() {
@@ -177,11 +183,12 @@ fn a_lane_threads_menu_reads_its_lane_and_detaches_it_at_the_listed_revision() {
 
 // Given: thr-2, a thread that is no lane
 // When: its row's menu opens
-// Then: it offers no lane item and reads nothing of the lanes
+// Then: it offers no lane item and reads nothing of the lanes beyond what the rows asked
 #[test]
 fn a_thread_that_is_no_lane_has_no_lane_items() {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
     screen.settle();
+    screen.settle_lanes();
     screen
         .harness
         .get_by_label("Refactor storage writer")
@@ -508,4 +515,240 @@ fn a_lane_card_names_what_wants_attention_and_offers_the_operation_that_clears_i
     assert_eq!(resume.expected_management_revision, Revision(5));
     assert_eq!(resume.lead_thread_id.as_str(), "thr-1");
     assert_eq!(resume.expected_lead_root_run_id.as_str(), "run-1");
+}
+
+/// The lane as `ListLanes` lists it, with the close that stands, if any.
+fn detail_closed(kind: Option<&str>) -> serde_json::Value {
+    let mut detail = held_detail();
+    if let Some(kind) = kind {
+        detail["summary"]["current_close"] = json!({"close_id": "close-1", "kind": kind});
+    }
+    detail
+}
+
+fn close_badges(screen: &Screen) -> usize {
+    screen
+        .harness
+        .query_all_by_label_contains("Lane close:")
+        .count()
+}
+
+fn announce(screen: &mut Screen, detail: &serde_json::Value) {
+    let lane = serde_json::from_value(detail["summary"].clone()).expect("a lane summary");
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .features
+        .event(&workbench_protocol::events::UiEvent::Lanes(
+            workbench_protocol::namespaces::LanesEvent::LaneChanged {
+                lane,
+                also_for: vec![],
+            },
+        ));
+    screen.harness.run_steps(2);
+}
+
+// Given: thr-4, a lane whose standing close the core lists, and thr-1 selected, with no
+//        lane menu, Lanes tab or lane card open
+// When: the sidebar is drawn
+// Then: the rows asked once for the lead's lanes, and nothing else of the lanes, and thr-4's
+//       row alone carries its badge
+#[test]
+fn a_closed_lane_threads_row_shows_its_badge_without_a_menu_a_tab_or_a_card() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    let others = screen.settle();
+    assert!(lanes_commands(&others).is_empty());
+    assert_eq!(close_badges(&screen), 0, "nothing is shown before the read");
+    let (asked, others) = screen.settle_lanes_with(&detail_closed(Some("lead_closed")));
+    assert!(lanes_commands(&others).is_empty());
+    assert!(
+        matches!(&asked[..], [Query::Lanes(LanesQuery::ListLanes(list))]
+        if list.lead_thread.as_str() == "thr-1" && !list.detached)
+    );
+    assert_eq!(close_badges(&screen), 1);
+    screen.harness.get_by_label("Lane close: closed");
+    // The Lanes tab and the lane card are not what draws it.
+    assert!(screen.harness.query_by_label("Detach lane").is_none());
+    assert!(
+        screen
+            .harness
+            .query_by_label("lane \u{b7} attached")
+            .is_none()
+    );
+    // The row keeps its title and its place.
+    screen.harness.get_by_label(LANE_TITLE);
+    screen.capture("sidebar-close-badge");
+    let (asked, others) = screen.settle_lanes_with(&detail_closed(Some("lead_closed")));
+    assert!(
+        asked.is_empty() && others.is_empty(),
+        "nothing is asked again"
+    );
+}
+
+// Given: a lane the ledger closed in each of the three ways
+// When: the sidebar is drawn
+// Then: the row says closed, closed (unverified) or discarded
+#[test]
+fn each_kind_of_close_reads_as_its_own_word() {
+    for (kind, word) in [
+        ("lead_closed", "closed"),
+        ("human_closed", "closed (unverified)"),
+        ("discarded", "discarded"),
+    ] {
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.settle();
+        screen.settle_lanes_with(&detail_closed(Some(kind)));
+        assert_eq!(close_badges(&screen), 1, "{kind}");
+        screen.harness.get_by_label(&format!("Lane close: {word}"));
+    }
+}
+
+// Given: lanes with no standing close, in any state the core reports
+// When: the sidebar is drawn
+// Then: no row carries a badge, and the lane's own states stay where they were
+#[test]
+fn a_lane_with_no_standing_close_and_a_plain_thread_get_no_badge() {
+    for report in ["working", "ready", "blocked", "failed"] {
+        let mut detail = detail_closed(None);
+        detail["summary"]["latest_report_status"] = json!(report);
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.settle();
+        screen.settle_lanes_with(&detail);
+        assert_eq!(close_badges(&screen), 0, "{report}");
+        screen.harness.get_by_label(LANE_TITLE);
+    }
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.settle_lanes_with(&detail_closed(None));
+    assert_eq!(close_badges(&screen), 0);
+}
+
+// Given: thr-4's badge shown while another thread is selected and the Lanes tab is hidden
+// When: the core announces the lane without a close, then discarded, then closed again
+// Then: the row follows each announcement with nothing read in between
+#[test]
+fn the_badge_follows_the_lane_events_without_reading_again() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.settle_lanes_with(&detail_closed(Some("human_closed")));
+    screen
+        .harness
+        .get_by_label("Lane close: closed (unverified)");
+
+    for (kind, word) in [
+        (None, None),
+        (Some("discarded"), Some("discarded")),
+        (None, None),
+        (Some("lead_closed"), Some("closed")),
+    ] {
+        announce(&mut screen, &detail_closed(kind));
+        match word {
+            Some(word) => {
+                assert_eq!(close_badges(&screen), 1);
+                screen.harness.get_by_label(&format!("Lane close: {word}"));
+            }
+            None => assert_eq!(close_badges(&screen), 0),
+        }
+        let (asked, others) = screen.settle_lanes();
+        assert!(asked.is_empty() && others.is_empty());
+    }
+}
+
+// Given: a lane thread whose row asked for its lane and is waiting for the answer
+// When: frames go by, then the core refuses the read
+// Then: the row asks once only and queues no more asks (each would repaint the window);
+//       after the refusal it draws no badge and asks nothing again
+#[test]
+fn a_row_waiting_for_its_lane_and_one_the_core_refused_ask_no_more() {
+    let queued = |screen: &Screen| {
+        let mut shared = screen.shared.lock().unwrap();
+        shared
+            .features
+            .lanes_mut()
+            .map(|lanes| lanes.queued_sidebar_intents())
+    };
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    assert_eq!(HELD_LANE_QUERIES.with_borrow(Vec::len), 1);
+    for _ in 0..4 {
+        screen.harness.run_steps(1);
+        assert_eq!(queued(&screen), Some(0), "a waiting row asks no more");
+    }
+    assert!(
+        screen.actions.try_recv().is_err(),
+        "nothing more was asked while waiting"
+    );
+    let (tag, _) = HELD_LANE_QUERIES.with_borrow_mut(|held| held.remove(0));
+    screen.shared.lock().unwrap().features.reply(
+        FeatureId::Lanes,
+        tag,
+        FeatureReply::Query(Err(crate::core_client::features::FeatureError::new("busy"))),
+    );
+    for _ in 0..4 {
+        screen.harness.run_steps(1);
+        assert_eq!(queued(&screen), Some(0), "a refused row asks no more");
+    }
+    let (asked, others) = screen.settle_lanes_with(&detail_closed(Some("lead_closed")));
+    assert!(asked.is_empty() && others.is_empty());
+    assert_eq!(close_badges(&screen), 0);
+}
+
+// Given: thr-4's badge shown
+// When: a new session replaces the projection
+// Then: the old badge is gone until the row reads the lane again, and the new answer shows
+//       the close it lists
+#[test]
+fn a_new_session_drops_the_badge_and_the_row_reads_the_lane_again() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle();
+    screen.settle_lanes_with(&detail_closed(Some("lead_closed")));
+    assert_eq!(close_badges(&screen), 1);
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        let cache = populated().cache;
+        shared.begin_session(cache, Capability::IMPLEMENTED.to_vec(), &[], Vec::new());
+    }
+    screen.settle();
+    assert_eq!(close_badges(&screen), 0);
+    assert_eq!(HELD_LANE_QUERIES.with_borrow(Vec::len), 1);
+    let (asked, _) = screen.settle_lanes_with(&detail_closed(Some("discarded")));
+    assert_eq!(asked.len(), 1);
+    screen.harness.get_by_label("Lane close: discarded");
+}
+
+// Given: thr-4's lane closed, in a window as narrow as the sidebar's
+// When: the sidebar is drawn
+// Then: the title and the badge are still both there
+#[test]
+fn the_badge_and_the_title_stay_in_a_narrow_window() {
+    let mut screen = screen(egui::vec2(640.0, 600.0));
+    screen.settle();
+    screen.settle_lanes_with(&detail_closed(Some("human_closed")));
+    screen
+        .harness
+        .get_by_label("Lane close: closed (unverified)");
+    screen.harness.get_by_label(LANE_TITLE);
+}
+
+// Given: thr-4 archived, with its Archived section folded, and its lane read
+// When: the section is folded, then opened
+// Then: the folded row is not drawn, and the opened row carries the badge
+#[test]
+fn an_archived_lane_threads_row_shows_its_badge_once_the_section_is_open() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    screen.settle_with(&|query, reply| {
+        if let (WorkspaceQuery::GetThreadDetail(_), WorkspaceReply::ThreadDetail(detail)) =
+            (query, reply)
+        {
+            detail.archived = detail.thread.as_str() == "thr-4";
+        }
+    });
+    assert!(screen.harness.query_by_label(LANE_TITLE).is_none());
+    screen.harness.get_by_label_contains("Archived (").click();
+    screen.settle();
+    screen.harness.get_by_label(LANE_TITLE);
+    screen.settle_lanes_with(&detail_closed(Some("discarded")));
+    screen.harness.get_by_label("Lane close: discarded");
+    assert_eq!(close_badges(&screen), 1);
 }

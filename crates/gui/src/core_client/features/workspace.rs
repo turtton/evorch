@@ -138,6 +138,9 @@ struct SidebarView {
     /// The threads whose children the person folded; the rest show theirs. Kept in the
     /// session file, so a restart does not unfold them.
     folded_threads: BTreeSet<String>,
+    /// The threads whose lane list the person opened; the rest keep it collapsed. Kept in
+    /// the session file like the folds.
+    opened_lanes: BTreeSet<String>,
 }
 
 impl Default for SidebarView {
@@ -146,6 +149,7 @@ impl Default for SidebarView {
             sort: ProjectSort::Name,
             collapsed: BTreeSet::new(),
             folded_threads: BTreeSet::new(),
+            opened_lanes: BTreeSet::new(),
         }
     }
 }
@@ -159,6 +163,16 @@ impl WorkspaceFeature {
     /// Folds the threads the session file kept.
     pub fn restore_folded_threads(&mut self, threads: impl IntoIterator<Item = String>) {
         self.view.folded_threads = threads.into_iter().collect();
+    }
+
+    /// The threads whose lane list is open in the sidebar, for the session file.
+    pub fn opened_lanes(&self) -> Vec<String> {
+        self.view.opened_lanes.iter().cloned().collect()
+    }
+
+    /// Opens the lane lists the session file kept.
+    pub fn restore_opened_lanes(&mut self, threads: impl IntoIterator<Item = String>) {
+        self.view.opened_lanes = threads.into_iter().collect();
     }
 }
 

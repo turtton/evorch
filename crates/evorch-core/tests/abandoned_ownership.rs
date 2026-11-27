@@ -59,12 +59,6 @@ impl AgentModel for Model {
             .insert(invocation.run_id.clone(), body.clone());
         self.received.notify_one();
         let script = self.scripted.lock().unwrap().remove(&invocation.run_id);
-        eprintln!(
-            "model source={} run={} scripted={}",
-            self.source,
-            invocation.run_id,
-            script.is_some()
-        );
         // Both the lead and an independent lane root are Orchestrators. Identify
         // the fixture lane by run identity, never by text or role alone.
         let source_lane = self.source
@@ -315,10 +309,6 @@ async fn killed_lane(saved: &str) {
         socket.exists(),
         "SIGKILL socket must not be removed by the fixture"
     );
-    eprintln!(
-        "{saved}: endpoint after SIGKILL {:?}",
-        std::os::unix::net::UnixStream::connect(&socket).map(|_| ())
-    );
     // Grace-period negative: move expiry just before the source lease began.
     // The configured day-long grace avoids making test runtime a correctness condition;
     // exact grace boundaries are checked separately with an explicit clock.
@@ -348,9 +338,10 @@ async fn killed_lane(saved: &str) {
     eprintln!("{saved}: lead continued");
     let writer = host.composition.storage_writer.clone();
     let record = writer.lane(lane).unwrap().unwrap();
-    let request = json!({"operation_id":"supplement", "lane_id":lane,
+    let request = json!({"operation_id":"supplement", "message":TEXT, "targets":[{
+        "lane_id":lane,
         "expected_management_revision":record.management_revision,
-        "expected_brief_revision":record.brief_revision, "message":TEXT});
+        "expected_brief_revision":record.brief_revision}]});
     let mut delivery_events = host.runtime.event_bus().subscribe();
     if saved == "Checkpoint" {
         // Set up a durable held instruction without scheduling an active receiver.
@@ -403,7 +394,6 @@ async fn killed_lane(saved: &str) {
             .unwrap();
         loop {
             let event = delivery_events.recv().await.unwrap();
-            eprintln!("{saved}: tool dispatch event {:?}", event.kind);
             if let EventKind::Tool(ToolEvent::ToolCompleted {
                 run_id,
                 tool_name,
@@ -417,11 +407,13 @@ async fn killed_lane(saved: &str) {
                 assert!(!is_error, "lane_send failed: {output:?}");
                 let result: Value =
                     serde_json::from_str(&output.expect("lane_send output")).unwrap();
-                assert_eq!(result["status"], "accepted", "{result:?}");
+                let results = result["results"].as_array().expect("per-lane results");
+                assert_eq!(results.len(), 1, "{result:?}");
+                assert_eq!(results[0]["lane_id"], lane, "{result:?}");
+                assert_eq!(results[0]["status"], "accepted", "{result:?}");
                 break;
             }
         }
-        eprintln!("{saved}: accepted; owner {:?}", registry.attach(thread));
     }
     eprintln!("{saved}: delivery requested");
     loop {

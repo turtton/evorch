@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use super::{WriterState, file_sizes, refresh_size_state};
-use crate::repo::event::{self, diagnostic};
+use crate::repo::event::diagnostic;
 use crate::{
     DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary, StorageError,
 };
@@ -28,7 +28,7 @@ pub(super) fn cleanup_batch(
     let result = diagnostic::cleanup_batch(&state.conn, scope, after, through)?;
     // Our own commit does not increment data_version. Invalidate quota caches
     // before replying and allowing the next ordinary writer command to run.
-    state.accounting = event::EventAccounting::default();
+    state.accounting = state.accounting.invalidated();
     state.diagnostic_cursor = None;
     Ok(result)
 }
@@ -66,7 +66,7 @@ pub(super) fn retain_recent(state: &mut WriterState, now: SystemTime) -> Result<
         .saturating_sub((DIAGNOSTIC_RETENTION_DAYS * 86_400 * 1_000_000_000) as i64);
     let summary = diagnostic::retention_batch(&state.conn, cutoff, &mut state.diagnostic_cursor)?;
     if summary.event_count > 0 {
-        state.accounting = event::EventAccounting::default();
+        state.accounting = state.accounting.invalidated();
         tracing::info!(
             events_removed = summary.event_count,
             payload_bytes_removed = summary.payload_bytes,

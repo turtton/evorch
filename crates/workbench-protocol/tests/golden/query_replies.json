@@ -124,6 +124,21 @@
     },
     "type": "execution"
   },
+  "execution/shell_output": {
+    "payload": {
+      "payload": {
+        "available_from": "7",
+        "chunk": "tail\n",
+        "job_uid": "shell-uid",
+        "offset": "7",
+        "output_end": "12",
+        "run": "run-1",
+        "thread": "thr-1"
+      },
+      "type": "shell_output"
+    },
+    "type": "execution"
+  },
   "lanes/lane_management": {
     "payload": {
       "payload": {

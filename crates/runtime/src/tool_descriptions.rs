@@ -141,6 +141,55 @@ impl FrozenToolDescriptions {
     }
 }
 
+/// The fixed builtin tools a replay's executor offers, for checks that must
+/// run before any provider request: which names a description may change, what
+/// the build says today, and which roles can see each tool.
+pub struct BuiltinCatalog {
+    specs: Vec<providers::ToolSpec>,
+    fixed: BTreeSet<String>,
+}
+
+impl BuiltinCatalog {
+    /// The standard and web tools every evaluation replay runs with, plus the
+    /// runtime's meta operations. Browser tools are off in replays.
+    ///
+    /// # Errors
+    /// The web tools cannot be built.
+    pub fn for_evaluation() -> Result<Self, RuntimeError> {
+        let executor = tools::ToolExecutor::with_standard_tools(
+            std::sync::Arc::new(event_bus::EventBus::new(4)),
+            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        )
+        .with_web_tools()
+        .map_err(|error_| error(&error_.to_string()))?;
+        Ok(Self {
+            fixed: crate::agent_loop::tool_catalog::description_registry(&executor),
+            specs: crate::agent_loop::tool_catalog::raw_specs(&executor),
+        })
+    }
+
+    /// The build's own description of every overridable tool, by name.
+    pub fn descriptions(&self) -> std::collections::BTreeMap<String, String> {
+        self.specs
+            .iter()
+            .filter(|spec| self.fixed.contains(&spec.name))
+            .map(|spec| (spec.name.clone(), spec.description.clone()))
+            .collect()
+    }
+
+    /// Whether `role` can be offered the fixed tool `name`, reading the per-run
+    /// filters as permissively as they can be.
+    pub fn visible_to(&self, role: Role, name: &str) -> bool {
+        self.fixed.contains(name)
+            && crate::agent_loop::tool_catalog::permissive_visible_specs(
+                self.specs.clone(),
+                &crate::ExecutionPolicy::for_role(role),
+            )
+            .iter()
+            .any(|spec| spec.name == name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

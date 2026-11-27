@@ -171,7 +171,8 @@ async fn preflight_checks_candidate_child_roles_before_starting_any_baseline() {
     deps.models = None;
     deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
     let args = fixture.args(Some(
-        "[routing.routes]\nreviewer = [{ profile = \"primary\", model = \"missing\" }]\n",
+        "[routing.routes]\nreviewer = [{ profile = \"primary\", model = \"missing\" }]\n\
+         [role_profiles.post_capture.routing.routes]\nreviewer = [{ profile = \"primary\", model = \"missing-live\" }]\n",
     ));
     let output = args.output.clone().unwrap();
     let error = run(args, deps, |_| panic!("no replay may start"))
@@ -377,6 +378,21 @@ async fn preflight_accepts_explicit_simulator_with_conversation_only_worker() {
         verify: None,
         verify_timeout: verify::DEFAULT_TIMEOUT,
         simulator: simulator_config(&config).0,
+        inputs_guard: pins::Guard {
+            user_config_dir: Some(fixture.user.path().into()),
+            project_root: fixture.user.path().into(),
+            common: None,
+            probe: None,
+            candidate: None,
+            pinned: pins::collect(
+                Some(fixture.user.path()),
+                fixture.user.path(),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        },
         trust: ProjectTrust::Unapproved,
         credentials: Arc::clone(deps.credentials.as_ref().unwrap()),
         deps,
@@ -532,7 +548,7 @@ async fn preflight_rejects_undefined_category_fallback_before_any_replay() {
 async fn baseline_and_candidate_replays_each_leave_their_results() {
     // Given: a recorded thread, an agent that writes a file, and a user who then finishes.
     let fixture = Fixture::new().await;
-    let overlay = "[sandbox]\nweb_tools_enabled = false\n";
+    let overlay = "[agents.worker.generation]\ntemperature = 0.2\n";
     let deps = fixture.deps(
         vec![
             tool(
@@ -688,7 +704,7 @@ async fn a_cancel_during_the_first_replay_leaves_it_incomplete_and_starts_no_oth
     );
     let (cancel, signal) = tokio::sync::watch::channel(false);
     deps.cancel = Some(signal);
-    let overlay = "[sandbox]\nweb_tools_enabled = false\n";
+    let overlay = "[agents.worker.generation]\ntemperature = 0.2\n";
 
     // When: a stop is asked while that request is in flight.
     let (result, ()) = tokio::join!(run(fixture.args(Some(overlay)), deps, |_| {}), async {
@@ -711,33 +727,28 @@ async fn a_cancel_during_the_first_replay_leaves_it_incomplete_and_starts_no_oth
 }
 
 #[tokio::test]
-async fn unpreparable_workspace_is_recorded_as_prepare_failed() {
+async fn an_unrebuildable_start_is_refused_before_any_replay() {
     // Given: a recorded thread whose source repository has since lost its history.
     let fixture = Fixture::new().await;
     std::fs::remove_dir_all(fixture.recorded.source.root().join(".git")).unwrap();
 
-    // When: the baseline is replayed.
-    let evaluation = run(
+    // When: the evaluation is started.
+    let error = run(
         fixture.args(None),
         fixture.deps(Vec::new(), Vec::new()),
-        |_| {},
+        |_| panic!("no replay may start"),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    // Then: the replay never started and its outcome says why.
-    let [report] = evaluation.runs.as_slice() else {
-        panic!("one replay");
-    };
-    assert_eq!(report.outcome.status, Status::PrepareFailed);
-    assert_eq!(
-        read_json(&report.dir.join(output::OUTCOME_FILE))["status"],
-        "prepare_failed"
+    // Then: the project configuration the replays would load cannot be resolved, so the
+    // evaluation is refused with the reason, and no model was built or output written.
+    assert!(
+        matches!(&error, EvalError::Usage(text) if text.contains("cannot be rebuilt")),
+        "{error}"
     );
-    assert!(!report.dir.join(output::DATABASE_FILE).exists());
     assert!(fixture.agents.lock().unwrap().is_empty());
-    assert!(!evaluation.dir.join("preflight-workspace").exists());
-    assert!(!report.dir.join("workspace").exists());
+    assert!(!fixture.user.path().join("out").exists());
 }
 
 #[tokio::test]
@@ -1160,5 +1171,247 @@ async fn regrading_the_same_sample_keeps_the_earlier_result_and_writes_a_new_one
     assert_eq!(
         std::fs::read(evaluation.dir.join(first.file_name("md"))).unwrap(),
         first_md
+    );
+}
+
+fn with_common(fixture: &Fixture, mut args: EvalArgs, common: &str) -> EvalArgs {
+    let path = fixture.user.path().join("common.toml");
+    std::fs::write(&path, common).unwrap();
+    args.common = Some(path);
+    args
+}
+
+const WORKER_TEMPERATURE: &str = "[agents.worker.generation]\ntemperature = 0.2\n";
+
+#[tokio::test]
+async fn the_common_overlay_is_pinned_on_both_sides_and_the_manifest_records_what_changed() {
+    // Given: a common overlay and a candidate that changes the worker's generation.
+    let fixture = Fixture::new().await;
+    let common = "[agents.reviewer.generation]\nmax_tokens = 4000\n";
+    let args = with_common(&fixture, fixture.args(Some(WORKER_TEMPERATURE)), common);
+    let deps = fixture.deps(vec![text("done")], vec![decision("finish", "")]);
+
+    // When: the evaluation runs.
+    let evaluation = run(args, deps, |_| {}).await.unwrap();
+
+    // Then: the manifest keeps the common overlay, records the change as a binding difference
+    // with the roles it reaches, and pins hashes of both sides, where the baseline already
+    // carries the common overlay.
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["common_overlay"], common);
+    assert_eq!(
+        manifest["changes"]["bindings"],
+        serde_json::json!(["worker"])
+    );
+    assert_eq!(
+        manifest["changes"]["affected_roles"],
+        serde_json::json!(["worker"])
+    );
+    assert_eq!(
+        manifest["changes"]["tool_descriptions"],
+        serde_json::json!([])
+    );
+    let user = Some(fixture.user.path());
+    let project = fixture.recorded.source.root().canonicalize().unwrap();
+    let candidate = Overlay {
+        text: WORKER_TEMPERATURE.into(),
+        value: toml::from_str(WORKER_TEMPERATURE).unwrap(),
+    };
+    let common = Overlay {
+        text: common.into(),
+        value: toml::from_str(common).unwrap(),
+    };
+    let sample = manifest["pins"]["inputs"]["sample_hash"]
+        .as_str()
+        .map(str::to_owned);
+    let with = pins::collect(
+        user,
+        &project,
+        sample.clone(),
+        Some(&common),
+        Some(&candidate),
+    )
+    .unwrap();
+    let without = pins::collect(user, &project, sample, None, Some(&candidate)).unwrap();
+    assert_eq!(manifest["pins"]["digest"], with.digest());
+    assert_eq!(
+        manifest["pins"]["inputs"]["baseline_config_hash"],
+        with.baseline_config_hash
+    );
+    assert_ne!(with.baseline_config_hash, without.baseline_config_hash);
+    assert_eq!(manifest["pins"]["build"]["package"], "eval");
+    assert!(manifest["pins"]["configured_models"]["baseline"].is_array());
+    assert!(manifest["pins"]["configured_models"]["candidate"].is_array());
+    assert!(
+        manifest["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|run| run["observed"].is_object()),
+        "{manifest}"
+    );
+}
+
+#[tokio::test]
+async fn a_common_overlay_cannot_change_anything_but_models_and_roles() {
+    // Given: a common overlay that tries to change the sandbox.
+    let fixture = Fixture::new().await;
+    let args = with_common(
+        &fixture,
+        fixture.args(Some(WORKER_TEMPERATURE)),
+        "[sandbox]\nweb_tools_enabled = false\n",
+    );
+    let deps = fixture.deps(vec![], vec![]);
+
+    // When: the evaluation is started.
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+
+    // Then: it is refused as a common overlay, before anything is written.
+    assert!(matches!(error, EvalError::Common(_)), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot be set by a common overlay"),
+        "{error}"
+    );
+    assert!(!fixture.user.path().join("out").exists());
+}
+
+#[tokio::test]
+async fn candidates_that_change_nothing_or_a_tool_description_are_refused_before_any_replay() {
+    // Given: a candidate equal to the baseline, and one that rewrites a tool description.
+    let fixture = Fixture::new().await;
+    for (candidate, reason) in [
+        ("[agents.worker]\n", "changes nothing"),
+        (
+            "[model_tool_descriptions.primary.gpt-4o]\nread = \"Read.\"\n",
+            "judge is not yet told",
+        ),
+    ] {
+        let deps = fixture.deps(vec![], vec![]);
+
+        // When: the evaluation is started.
+        let error = run(fixture.args(Some(candidate)), deps, |_| {
+            panic!("no replay may start")
+        })
+        .await
+        .unwrap_err();
+
+        // Then: the comparison is refused with its reason, with no output and no model built.
+        assert!(
+            matches!(&error, EvalError::Comparison(text) if text.contains(reason))
+                || matches!(&error, EvalError::Overlay(_) | EvalError::Config(_)),
+            "{error}"
+        );
+        assert!(!fixture.user.path().join("out").exists());
+        assert!(fixture.agents.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_evaluation_approved_on_other_inputs_runs_nothing() {
+    // Given: an approval digest of inputs that no longer match.
+    let fixture = Fixture::new().await;
+    let mut args = fixture.args(Some(WORKER_TEMPERATURE));
+    args.approved_digest = Some("0".repeat(64));
+    let deps = fixture.deps(vec![], vec![]);
+
+    // When: the evaluation is started.
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+
+    // Then: it is refused, and nothing was written.
+    assert!(
+        matches!(&error, EvalError::Usage(text) if text.contains("after the evaluation was approved")),
+        "{error}"
+    );
+    assert!(!fixture.user.path().join("out").exists());
+    assert!(fixture.agents.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_preset_edited_after_the_baseline_stops_the_evaluation_before_the_candidate() {
+    // Given: an evaluation of one baseline and one candidate replay.
+    let fixture = Fixture::new().await;
+    let deps = fixture.deps(vec![text("done")], vec![decision("finish", "")]);
+    let presets = fixture.user.path().join("presets");
+
+    // When: a prompt preset is edited as the baseline ends.
+    let result = run(fixture.args(Some(WORKER_TEMPERATURE)), deps, |report| {
+        if report.label == BASELINE {
+            std::fs::create_dir_all(&presets).unwrap();
+            std::fs::write(presets.join("role-worker.md"), "edited between the replays").unwrap();
+        }
+    })
+    .await;
+
+    // Then: the candidate never starts, and the manifest says the evaluation ended.
+    let error = result.unwrap_err();
+    assert!(
+        matches!(&error, EvalError::Usage(text) if text.contains("prompt presets")),
+        "{error}"
+    );
+    let manifest = read_json(&fixture.user.path().join("out").join(output::MANIFEST_FILE));
+    assert_eq!(manifest["runs"].as_array().unwrap().len(), 1);
+    assert!(manifest["finished_at"].is_string());
+}
+
+#[tokio::test]
+async fn the_project_layer_is_read_from_the_rebuilt_start_not_the_live_checkout() {
+    // Given: a role profile that routes the worker to another model, which the live checkout
+    // selects after the thread's start was captured.
+    let fixture = Fixture::new().await;
+    let mut config = preflight_config(&fixture, "http://127.0.0.1:1".into());
+    let mut late = config.role_profile_config(None).unwrap();
+    late.routing.routes.get_mut("worker").unwrap()[0].model = Some("missing".into());
+    config.role_profiles.insert("post_capture".into(), late);
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let live_root = fixture.recorded.source.root();
+    std::fs::create_dir_all(live_root.join(".evorch")).unwrap();
+    std::fs::write(
+        live_root.join(".evorch/config.toml"),
+        "role_profile = 'post_capture'\n",
+    )
+    .unwrap();
+    let live = load_config(Some(fixture.user.path()), Some(&live_root), None).unwrap();
+    assert_eq!(roles::role_models(&live, "worker")[0].model, "missing");
+    let deps = fixture.deps(vec![text("done")], vec![decision("finish", "")]);
+
+    // When: the evaluation runs.
+    let evaluation = run(fixture.args(Some(WORKER_TEMPERATURE)), deps, |_| {})
+        .await
+        .unwrap();
+
+    // Then: the pinned models and hashes are those of the start the replays rebuild, and
+    // differ from what the live checkout would have given.
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    let pinned = &manifest["pins"]["configured_models"];
+    assert_eq!(pinned["baseline"][0]["model"], "gpt-4o", "{pinned}");
+    assert_eq!(pinned["candidate"][0]["model"], "gpt-4o", "{pinned}");
+    let candidate = Overlay {
+        text: WORKER_TEMPERATURE.into(),
+        value: toml::from_str(WORKER_TEMPERATURE).unwrap(),
+    };
+    let sample = manifest["pins"]["inputs"]["sample_hash"]
+        .as_str()
+        .map(str::to_owned);
+    let from_live = pins::collect(
+        Some(fixture.user.path()),
+        &live_root,
+        sample,
+        None,
+        Some(&candidate),
+    )
+    .unwrap();
+    assert_ne!(
+        manifest["pins"]["digest"].as_str().unwrap(),
+        from_live.digest()
     );
 }

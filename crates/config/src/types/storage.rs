@@ -40,6 +40,8 @@ pub struct StorageConfig {
 pub struct ThreadRetentionConfig {
     /// 最終活動から自動アーカイブするまでの日数。既定7、0で新規処理を無効化する。
     pub auto_archive_after_days: u32,
+    /// 最終活動から Tool の長い表示用本文を除去する日数。既定7、0で本文除去だけを無効化。
+    pub tool_body_delete_after_days: u32,
     /// アーカイブしてから削除するまでの日数。既定 7、0 で新規の削除確定を無効化する。
     /// 時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる
     /// （pin・評価サンプル・実行中の family は除外）。
@@ -50,6 +52,7 @@ impl Default for ThreadRetentionConfig {
     fn default() -> Self {
         Self {
             auto_archive_after_days: 7,
+            tool_body_delete_after_days: 7,
             archived_delete_after_days: DEFAULT_ARCHIVED_DELETE_AFTER_DAYS,
         }
     }
@@ -222,6 +225,35 @@ mod tests {
             assert!(
                 toml::from_str::<StorageConfig>(text).is_err(),
                 "{text:?} は拒否される"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_body_retention_tests {
+    use super::*;
+    #[test]
+    fn tool_body_retention_days_default_disable_and_reject_invalid() {
+        assert_eq!(
+            ThreadRetentionConfig::default().tool_body_delete_after_days,
+            7
+        );
+        for days in [0, 1, 30, u32::MAX] {
+            let c: StorageConfig = toml::from_str(&format!(
+                "[thread_retention]\ntool_body_delete_after_days={days}"
+            ))
+            .unwrap();
+            assert_eq!(c.thread_retention.tool_body_delete_after_days, days);
+            assert_eq!(c.thread_retention.auto_archive_after_days, 7);
+            assert_eq!(c.thread_retention.archived_delete_after_days, 7);
+        }
+        for value in ["-1", "4294967296", "\"7\""] {
+            assert!(
+                toml::from_str::<StorageConfig>(&format!(
+                    "[thread_retention]\ntool_body_delete_after_days={value}"
+                ))
+                .is_err()
             );
         }
     }

@@ -4,6 +4,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventMeta, MessageEvent};
 
 use super::*;
+use crate::repo::event;
 use crate::{Database, StorageConfig};
 
 fn fixture() -> WriterState {
@@ -15,7 +16,7 @@ fn fixture() -> WriterState {
         pending: HashMap::new(),
         writes_suspended: false,
         soft_warned: false,
-        suspend_logged: false,
+        over_limit_warned: false,
         temp_warned: false,
         next_flush_at: Instant::now(),
         next_checkpoint_at: Instant::now(),

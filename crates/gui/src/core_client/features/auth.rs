@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::layout::bounded_list;
-use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply};
+use super::{Availability, Feature, FeatureContext, FeatureId, FeatureReply, Visibility};
 use crate::format::token_expiry;
 use crate::panes::provider_widgets::{
     API_KEY_EMPTY_HINT, API_KEY_STORED_HINT, provider_kind_label, provider_type_badge,
@@ -613,8 +613,14 @@ impl Feature for AuthFeature {
         }
     }
 
-    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
-        if self.status_stale && !self.status_in_flight {
+    fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
+        if !visibility.available {
+            return;
+        }
+        // The credential status is read for the tab that shows it. A login being completed and
+        // the operations whose end was not seen are looked up whichever tab is in front, so a
+        // sign-in does not stall behind a hidden tab.
+        if visibility.is_visible() && self.status_stale && !self.status_in_flight {
             self.status_stale = false;
             self.status_in_flight = true;
             let tag = self.tag(Pending::Status);
@@ -638,6 +644,9 @@ impl Feature for AuthFeature {
                 Query::Auth(AuthQuery::GetAuthOperation { operation_id: id }),
             );
         }
+    }
+
+    fn render(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>) {
         if !self.message.is_empty() {
             ui.label(&self.message);
         }

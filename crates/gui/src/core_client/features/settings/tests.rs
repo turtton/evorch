@@ -106,9 +106,21 @@ pub(super) fn settings_command(
     command
 }
 
-/// Opens the settings modal from the tab's button of `tab`.
+/// Opens Model Settings on the section named `tab`, as the ⚙ menu does: the modal is the
+/// feature's overlay, so no button of the Config file tab is pressed.
 pub(super) fn open_modal(screen: &mut Harness<'static, Screen>, tab: &str) {
-    screen.get_by_label(tab).click();
+    let tab = match tab {
+        "Providers" => SettingsTab::Providers,
+        "Routing" => SettingsTab::Routing,
+        "Agent roles" => SettingsTab::AgentRoles,
+        other => panic!("no such section: {other}"),
+    };
+    screen
+        .state_mut()
+        .feature
+        .as_settings_mut()
+        .expect("the settings feature")
+        .open_modal(tab);
     screen.run();
 }
 
@@ -123,8 +135,9 @@ fn type_into_document(screen: &mut Harness<'static, Screen>, text: &str) {
 fn what_is_saved_and_what_is_applied_are_shown_apart() {
     let screen = loaded('b');
     screen.get_by_label("Saved settings are not applied to the running core yet.");
+    // The way to the model sections is the menu, not a button of this tab.
     for tab in ["Providers", "Routing", "Agent roles"] {
-        screen.get_by_label(tab);
+        assert!(screen.query_by_label(tab).is_none(), "{tab}");
     }
     drop(screen);
 

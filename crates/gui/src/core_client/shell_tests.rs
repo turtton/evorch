@@ -143,6 +143,33 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
     }
 }
 
+/// A lane a test added to the cache: "thr-lane-3" is "Lane 3", a lane of thr-1; "thr-alane-3"
+/// is "Archived lane 3", a lane of the archived thr-5.
+fn extra_lane(id: &str) -> Option<Fixture> {
+    if id == "thr-sub-1" {
+        return Some(Fixture {
+            parent: Some(("thr-3", LineageType::Fork)),
+            family: "thr-1",
+            ..thread("thr-sub-1", "Sub thread", 0)
+        });
+    }
+    let (lead, archived, title) =
+        match (id.strip_prefix("thr-lane-"), id.strip_prefix("thr-alane-")) {
+            (Some(number), _) => ("thr-1", false, format!("Lane {number}")),
+            (_, Some(number)) => ("thr-5", true, format!("Archived lane {number}")),
+            _ => return None,
+        };
+    let title: &'static str = Box::leak(title.into_boxed_str());
+    let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+    Some(Fixture {
+        lead: Some(lead),
+        parent: Some((lead, LineageType::Fork)),
+        family: lead,
+        archived,
+        ..thread(id, title, 0)
+    })
+}
+
 fn project(id: &str, name: &str) -> ProjectSummary {
     view(json!({"id": id, "display_name": name, "thread_count": 1, "revision": "1"}))
 }
@@ -183,6 +210,7 @@ fn answer(query: &WorkspaceQuery) -> WorkspaceReply {
             let fixture = threads()
                 .into_iter()
                 .find(|t| t.id == target.thread.as_str())
+                .or_else(|| extra_lane(target.thread.as_str()))
                 .expect("a fixture thread");
             WorkspaceReply::ThreadDetail(Box::new(detail(&fixture)))
         }
@@ -279,6 +307,10 @@ fn populated() -> Shared {
         }));
         cache.approvals.insert(id.into(), approval);
     }
+    // Lanes are collapsed by default; the lane tests start from a lead whose list was opened.
+    if let Some(workspace) = shared.features.workspace_mut() {
+        workspace.restore_opened_lanes(["thr-1".to_owned()]);
+    }
     shared
 }
 
@@ -286,6 +318,14 @@ struct Screen {
     harness: Harness<'static, CoreClientScreen>,
     shared: Arc<Mutex<Shared>>,
     actions: tokio::sync::mpsc::Receiver<Action>,
+}
+
+thread_local! {
+    /// Lanes queries a settle saw and did not answer, for the screen the test thread built
+    /// last: the sidebar's rows look their lanes up by themselves, and
+    /// [`Screen::settle_lanes_with`] answers them.
+    static HELD_LANE_QUERIES: std::cell::RefCell<Vec<(u64, Query)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The window at `size`, whose Diff never runs git and whose Terminal starts no shell.
@@ -317,6 +357,7 @@ fn screen_from_outbox(
     patch: impl FnOnce(&mut Shared),
 ) -> Screen {
     let (tx, actions) = tokio::sync::mpsc::channel(capacity);
+    HELD_LANE_QUERIES.with_borrow_mut(Vec::clear);
     let mut populated = populated();
     patch(&mut populated);
     let shared = Arc::new(Mutex::new(populated));
@@ -376,6 +417,11 @@ impl Screen {
                         self.shared.lock().unwrap().features.reply(FeatureId::Workspace, tag, reply);
                         answered = true;
                     }
+                    Action::Feature(FeatureAction {
+                        feature: FeatureId::Lanes,
+                        tag,
+                        request: FeatureRequest::Query(query),
+                    }) => HELD_LANE_QUERIES.with_borrow_mut(|held| held.push((tag, query))),
                     other => others.push(other),
                 }
             }
@@ -992,7 +1038,7 @@ mod progress_band {
 
         screen.harness.get_by_label("⚙").click();
         screen.harness.run_steps(2);
-        screen.harness.get_by_label("Panels ⏵").click();
+        screen.harness.get_by_label("Panels").click();
         screen.harness.run_steps(2);
         screen.harness.get_by_label("Plan").click();
         screen.settle_band();
@@ -2696,7 +2742,7 @@ mod local_panes {
         fn open_panel(&mut self, label: &str) {
             self.harness.get_by_label("⚙").click();
             self.harness.run_steps(2);
-            self.harness.get_by_label("Panels ⏵").click();
+            self.harness.get_by_label("Panels").click();
             self.harness.run_steps(2);
             self.harness.get_by_label(label).click();
             self.harness.run_steps(2);
@@ -3060,6 +3106,7 @@ mod footer;
 mod settings;
 
 mod lanes;
+mod sidebar_lanes;
 
 mod composer;
 mod english_panes;

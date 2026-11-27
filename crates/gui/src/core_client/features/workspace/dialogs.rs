@@ -4,9 +4,10 @@ use egui::Ui;
 use workbench_protocol::namespaces::workspace::{ProjectAccessView, TrustLevel};
 
 use super::{Dialog, ProjectForms, ProjectIntent, Requests, WorkspaceFeature};
+use crate::theme::icons;
 use crate::theme::text::{h3, muted, section};
-use crate::theme::tokens::{PROVIDER_MODAL_MAX_WIDTH, SP_2, SP_4, palette};
-use crate::theme::widgets::{primary_button, reason_label, surface_frame};
+use crate::theme::tokens::{PROVIDER_MODAL_MAX_WIDTH, ROW_DENSE, SP_2, SP_4, palette};
+use crate::theme::widgets::{badge, icon_button, primary_button, reason_label, surface_frame};
 
 const NAME_LABEL: &str = "Project name";
 const PATH_LABEL: &str = "Project path";
@@ -32,7 +33,7 @@ impl WorkspaceFeature {
                     }
                     Dialog::Settings(project) => {
                         let access = self.model.access.get(project);
-                        settings(ui, project, access, &mut self.forms, requests);
+                        settings(ui, project, access, &mut self.forms, requests, &mut close);
                     }
                 }
                 if let Some(notice) = &self.notice {
@@ -40,9 +41,6 @@ impl WorkspaceFeature {
                 }
                 if let Some(confirmation) = &self.confirmation {
                     ui.label(muted(confirmation));
-                }
-                if matches!(dialog, Dialog::Settings(_)) && ui.button("Close").clicked() {
-                    close = true;
                 }
             });
         if close || modal.should_close() {
@@ -86,78 +84,103 @@ fn settings(
     access: Option<&ProjectAccessView>,
     forms: &mut ProjectForms,
     requests: &mut Requests,
+    close: &mut bool,
 ) {
-    ui.label(h3("Project settings"));
-    let Some(access) = access else {
-        // Same height as the trust row it stands in for, so a read that ends does not
-        // move the controls below under the pointer.
-        ui.horizontal(|ui| {
-            ui.label("Trust: …");
-            ui.add_enabled(false, egui::Button::new("…").small());
+    let approved = access.is_some_and(|access| access.trust == TrustLevel::Approved);
+    ui.horizontal(|ui| {
+        ui.label(h3("Project settings"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_button(ui, icons::X, "Close").clicked() {
+                *close = true;
+            }
+            if access.is_none() {
+                // Same height as the trust row it stands in for, so a read that ends does not
+                // move the controls below under the pointer.
+                ui.add_enabled(false, egui::Button::new("…").small());
+                ui.label(muted("Trust: …"));
+                return;
+            }
+            let (button, next) = if approved {
+                ("Revoke trust", TrustLevel::Unapproved)
+            } else {
+                ("Approve project", TrustLevel::Approved)
+            };
+            if ui.small_button(button).clicked() {
+                requests.trust.push((project.to_owned(), next));
+            }
+            let (icon, text, color) = if approved {
+                (icons::SHIELD_CHECK, "Trusted", palette().SUCCESS)
+            } else {
+                (icons::SHIELD, "Not trusted", palette().WARNING_FG)
+            };
+            chip(ui, &icons::with_icon(icon, text), color);
         });
+    });
+    let Some(access) = access else {
         return;
     };
-    ui.label(format!("Directory: {}", access.root));
-    let approved = access.trust == TrustLevel::Approved;
+    ui.label(muted("Name"));
     ui.horizontal(|ui| {
-        ui.label(if approved {
-            "Trust: Approved"
-        } else {
-            "Trust: Unapproved"
-        });
-        let (button, next) = if approved {
-            ("Revoke trust", TrustLevel::Unapproved)
-        } else {
-            ("Approve project", TrustLevel::Approved)
-        };
-        if ui.small_button(button).clicked() {
-            requests.trust.push((project.to_owned(), next));
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut forms.rename).hint_text(access.name.as_str()));
+        let width = (ui.available_width() - ROW_DENSE - SP_2).max(80.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut forms.rename)
+                .hint_text(access.name.as_str())
+                .desired_width(width),
+        );
         let name = forms.rename.trim().to_owned();
-        if ui
-            .add_enabled(!name.is_empty(), egui::Button::new("Rename project"))
-            .clicked()
-        {
+        let rename = ui
+            .add_enabled_ui(!name.is_empty(), |ui| {
+                icon_button(ui, icons::CHECK, "Rename project")
+            })
+            .inner;
+        if rename.clicked() {
             requests
                 .project
                 .push((project.to_owned(), ProjectIntent::Rename(name)));
             forms.rename.clear();
         }
     });
-    ui.label(section("Allowed directories"));
+    ui.label(muted(icons::with_icon(icons::FOLDER_SIMPLE, &access.root)));
+    ui.label(section("ALLOWED DIRECTORIES"));
     for directory in &access.allowed_directories {
         ui.push_id(&directory.path, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} ({}{})",
-                    directory.path,
-                    if directory.trust == TrustLevel::Approved {
-                        "approved"
+                ui.label(egui::RichText::new(&directory.path).monospace());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, icons::TRASH, "Remove").clicked() {
+                        requests.project.push((
+                            project.to_owned(),
+                            ProjectIntent::RemoveDirectory(directory.path.clone()),
+                        ));
+                    }
+                    let (text, color) = if directory.trust == TrustLevel::Approved {
+                        ("approved", palette().SUCCESS)
                     } else {
-                        "unapproved"
-                    },
-                    if directory.live { "" } else { ", missing" }
-                ));
-                if ui.small_button("Remove").clicked() {
-                    requests.project.push((
-                        project.to_owned(),
-                        ProjectIntent::RemoveDirectory(directory.path.clone()),
-                    ));
-                }
+                        ("unapproved", palette().WARNING_FG)
+                    };
+                    chip(ui, text, color);
+                    if !directory.live {
+                        chip(ui, "missing", palette().ERROR_FG);
+                    }
+                });
             });
         });
     }
     ui.horizontal(|ui| {
-        ui.text_edit_singleline(&mut forms.directory);
-        ui.checkbox(&mut forms.directory_approved, "Approved");
+        let width = (ui.available_width() - 160.0).max(80.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut forms.directory)
+                .hint_text("Add a directory…")
+                .desired_width(width),
+        );
+        ui.checkbox(&mut forms.directory_approved, "approved");
         let path = forms.directory.trim().to_owned();
-        if ui
-            .add_enabled(!path.is_empty(), egui::Button::new("Add directory"))
-            .clicked()
-        {
+        let add = ui
+            .add_enabled_ui(!path.is_empty(), |ui| {
+                icon_button(ui, icons::PLUS, "Add directory")
+            })
+            .inner;
+        if add.clicked() {
             let trust = if forms.directory_approved {
                 TrustLevel::Approved
             } else {
@@ -170,4 +193,125 @@ fn settings(
             forms.directory.clear();
         }
     });
+}
+
+/// A small status pill: `text` in `color` on the raised surface.
+fn chip(ui: &mut Ui, text: &str, color: egui::Color32) {
+    badge(ui, text, color, palette().SURFACE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use workbench_protocol::{
+        ids::ProjectId, namespaces::workspace::AllowedDirectoryView, wire::Revision,
+    };
+
+    fn access(trust: TrustLevel) -> ProjectAccessView {
+        ProjectAccessView {
+            project: ProjectId::new("p").unwrap(),
+            name: "evorch".into(),
+            root: "/src/evorch".into(),
+            trust,
+            allowed_directories: vec![
+                AllowedDirectoryView {
+                    path: "/cache/targets".into(),
+                    trust: TrustLevel::Approved,
+                    live: true,
+                },
+                AllowedDirectoryView {
+                    path: "/gone".into(),
+                    trust: TrustLevel::Unapproved,
+                    live: false,
+                },
+            ],
+            revision: Revision(1),
+        }
+    }
+
+    struct Dialog {
+        access: ProjectAccessView,
+        forms: ProjectForms,
+        requests: Requests,
+        close: bool,
+    }
+
+    fn dialog(trust: TrustLevel) -> egui_kittest::Harness<'static, Dialog> {
+        egui_kittest::Harness::new_ui_state(
+            |ui, state: &mut Dialog| {
+                settings(
+                    ui,
+                    "p",
+                    Some(&state.access),
+                    &mut state.forms,
+                    &mut state.requests,
+                    &mut state.close,
+                );
+            },
+            Dialog {
+                access: access(trust),
+                forms: ProjectForms::default(),
+                requests: Requests::default(),
+                close: false,
+            },
+        )
+    }
+
+    // Given: a trusted project with a live and a missing allowed directory
+    // When: the settings are drawn and the icons are pressed
+    // Then: the trust shows as a chip with its way back, each directory carries its state and a
+    //       remove icon, and each icon sends the request its text button did
+    #[test]
+    fn the_project_settings_show_their_state_and_keep_their_operations_as_icons() {
+        let mut harness = dialog(TrustLevel::Approved);
+        harness.run_steps(2);
+        harness.get_by_label_contains("Trusted");
+        harness.get_by_label_contains("/src/evorch");
+        // The chip of the approved directory, and the add form's checkbox of the same name.
+        assert_eq!(harness.get_all_by_label("approved").count(), 2);
+        harness.get_by_label("unapproved");
+        harness.get_by_label("missing");
+        assert!(
+            harness
+                .query_by_label("Add directory")
+                .unwrap()
+                .accesskit_node()
+                .is_disabled(),
+            "nothing to add yet"
+        );
+
+        harness.get_by_label("Revoke trust").click();
+        harness.get_all_by_label("Remove").next().unwrap().click();
+        harness.run_steps(2);
+        let requests = &harness.state().requests;
+        assert_eq!(requests.trust, [("p".to_owned(), TrustLevel::Unapproved)]);
+        assert_eq!(
+            requests.project,
+            [(
+                "p".to_owned(),
+                ProjectIntent::RemoveDirectory("/cache/targets".into())
+            )]
+        );
+
+        harness.get_by_label("Close").click();
+        harness.run_steps(2);
+        assert!(harness.state().close);
+    }
+
+    // Given: a project that is not trusted
+    // When: the settings are drawn
+    // Then: the chip says so and the button offers the approval
+    #[test]
+    fn an_untrusted_project_offers_the_approval() {
+        let mut harness = dialog(TrustLevel::Unapproved);
+        harness.run_steps(2);
+        harness.get_by_label_contains("Not trusted");
+        harness.get_by_label("Approve project").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().requests.trust,
+            [("p".to_owned(), TrustLevel::Approved)]
+        );
+    }
 }

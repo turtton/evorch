@@ -16,9 +16,11 @@ pub mod notifications;
 pub mod persistence;
 pub mod run_tabs;
 pub mod shell;
+mod shell_jobs;
 mod subagent_panes;
 pub mod theme;
 mod thread_search;
+pub mod tool_activity;
 mod transcript;
 use features::{FeatureFrame, FeatureView, Navigation, Selection};
 
@@ -425,6 +427,14 @@ impl CoreClientScreen {
                 .into_iter()
                 .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
                 .collect(),
+            opened_lanes: shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.opened_lanes())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
+                .collect(),
         };
         let saved = if explicit {
             store.save(&state).map(|()| true)
@@ -529,6 +539,12 @@ impl CoreClientScreen {
             workspace.restore_folded_threads(
                 state
                     .folded_threads
+                    .iter()
+                    .map(|thread| thread.as_str().to_owned()),
+            );
+            workspace.restore_opened_lanes(
+                state
+                    .opened_lanes
                     .iter()
                     .map(|thread| thread.as_str().to_owned()),
             );
@@ -1087,6 +1103,7 @@ impl CoreClientScreen {
                 .style(crate::theme::dock::dock_style(ui.style()))
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
+            pass.render_overlays(ui.ctx());
             pass.finish(ui)
         };
         self.conversation.end_frame();
@@ -1114,9 +1131,11 @@ impl CoreClientScreen {
                     | shell::Effect::Lane(_)
                     | shell::Effect::PullRequest(_)
                     | shell::Effect::PullRequestChip(_)
+                    | shell::Effect::Settings(_)
             )
         }) {
-            // The goal or lane command leaves in its feature's next pass.
+            // The goal or lane command leaves in its feature's next pass, and the settings
+            // modal that was just opened reads its snapshot in it.
             ui.ctx().request_repaint();
         }
         for effect in effects {
@@ -1295,11 +1314,14 @@ fn apply_effect(
             shell::Effect::Status(status) => shared.status = status,
             // The screen opens its own theme picker; nothing shared changes.
             shell::Effect::ThemeSettings => {}
-            shell::Effect::Settings(tab) => {
-                shell::focus(dock, shell::CoreTab::Feature(features::FeatureId::Settings));
+            // Model Settings is the settings feature's own overlay: no tab is created or selected.
+            shell::Effect::Settings(features::settings::SettingsIntent::ModelSettings(tab)) => {
                 if let Some(settings) = shared.features.settings_mut() {
                     settings.open_modal(tab);
                 }
+            }
+            shell::Effect::Settings(features::settings::SettingsIntent::ConfigFile) => {
+                shell::focus(dock, shell::CoreTab::Feature(features::FeatureId::Settings));
             }
             shell::Effect::AttachRequested {
                 request,

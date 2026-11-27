@@ -19,6 +19,30 @@ pub const MAX_CHECKS: usize = 32;
 /// serialized. Over the limit a sample is refused, never cut.
 pub const MAX_SPEC_BYTES: usize = 64 * 1024;
 
+/// Lowercase hex SHA-256 of `bytes`: the hash every evaluation pin uses.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Lowercase hex SHA-256 of the file at `path`, read in chunks.
+///
+/// # Errors
+/// The file cannot be read.
+pub fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 /// What the sample is kept for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,8 +215,7 @@ impl EvalSample {
             "focus_roles": self.focus_roles,
             "spec": self.spec(),
         });
-        let digest = Sha256::digest(content.to_string().as_bytes());
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        sha256_hex(content.to_string().as_bytes())
     }
 
     /// Check the sample.

@@ -220,113 +220,6 @@ fn append_event_end_to_end_enforces_event_and_session_limits() {
 }
 
 #[test]
-fn db_size_suspension_rejects_events_but_allows_usage() {
-    // Given: DB 本体より小さい最大サイズ
-    let temp_dir = TempDir::new().expect("temporary directory must be created");
-    let mut config = config(&temp_dir);
-    config.hard_limits = HardLimits {
-        max_db_bytes: 1,
-        ..HardLimits::default()
-    };
-    let storage = Storage::open(config.clone()).expect("storage must open in suspended mode");
-    let handle = storage.handle();
-
-    // When: event と usage をそれぞれ投入する
-    let event_result = handle.append_event(
-        None,
-        &event(
-            LifecycleEvent::Completed {
-                session_id: "s1".into(),
-            },
-            1,
-        ),
-    );
-    handle.submit(vec![bucket(60, "alpha", 10)]);
-    let flush_result = handle.flush_usage_now();
-
-    // Then: event だけ DbSize 超過となり usage は保存される
-    assert!(matches!(
-        event_result,
-        Err(StorageError::LimitExceeded {
-            limit: LimitKind::DbSize,
-            ..
-        })
-    ));
-    assert_eq!(flush_result, Ok(()));
-    assert_eq!(read_buckets(&config.db_path), [bucket(60, "alpha", 10)]);
-}
-
-#[test]
-fn suspended_writer_restats_db_size_before_rejecting() {
-    // Given: DB 上限を極小にした Storage
-    let temp_dir = TempDir::new().expect("temporary directory must be created");
-    let mut config = config(&temp_dir);
-    config.hard_limits = HardLimits {
-        max_db_bytes: 1,
-        ..HardLimits::default()
-    };
-    let storage = Storage::open(config.clone()).expect("storage must open in suspended mode");
-    let handle = storage.handle();
-    let event = event(
-        LifecycleEvent::Completed {
-            session_id: "s1".into(),
-        },
-        1,
-    );
-
-    // When: 中断状態で append_event する
-    let first = handle
-        .append_event(None, &event)
-        .expect_err("suspended append must fail");
-    let first_actual = match first {
-        StorageError::LimitExceeded {
-            limit: LimitKind::DbSize,
-            actual,
-            ..
-        } => actual,
-        other => panic!("expected DbSize limit exceeded, got {other:?}"),
-    };
-
-    // Then: 生の第二接続で events テーブルを肥大させ TRUNCATE checkpoint する
-    let raw = Connection::open(&config.db_path).expect("raw connection must open");
-    let big_payload = "x".repeat(50_000);
-    raw.execute(
-        "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) VALUES (NULL, 1, 0, 0, 'Message', ?1)",
-        [&big_payload],
-    )
-    .expect("raw insert must succeed");
-    raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-        .expect("raw checkpoint must truncate");
-    let expected_size = std::fs::metadata(&config.db_path)
-        .expect("database metadata")
-        .len()
-        + std::fs::metadata(format!("{}-wal", config.db_path.display()))
-            .expect("WAL metadata")
-            .len()
-        + std::fs::metadata(format!("{}-shm", config.db_path.display()))
-            .expect("shared-memory metadata")
-            .len();
-
-    // When: 再び append_event する
-    let second = handle
-        .append_event(None, &event)
-        .expect_err("suspended append must still fail");
-    let second_actual = match second {
-        StorageError::LimitExceeded {
-            limit: LimitKind::DbSize,
-            actual,
-            ..
-        } => actual,
-        other => panic!("expected DbSize limit exceeded, got {other:?}"),
-    };
-
-    // Then: checkpoint can shrink DB + WAL; the reported size must be fresh.
-    assert_ne!(expected_size, first_actual);
-    assert_eq!(second_actual, expected_size);
-    storage.close();
-}
-
-#[test]
 fn checkpoint_now_passive_preserves_reopenable_database() {
     // Given: file-backed writer による一件の書き込み
     let temp_dir = TempDir::new().expect("temporary directory must be created");
@@ -358,4 +251,44 @@ impl BucketTestExt for UsageBucket {
         self.request_count *= multiplier;
         self
     }
+}
+
+#[test]
+fn writes_continue_past_the_db_size_and_daily_limits() {
+    // Given: a database already over max_db_bytes, with a daily event limit of zero
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let mut config = config(&temp_dir);
+    config.hard_limits = HardLimits {
+        max_db_bytes: 1,
+        max_daily_event_bytes: 0,
+        ..HardLimits::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open over its size limit");
+    let handle = storage.handle();
+
+    // When: events, a ledger entry and usage are written repeatedly
+    for nanos in 1..=2 {
+        let completed = event(
+            LifecycleEvent::Completed {
+                session_id: "s1".into(),
+            },
+            nanos,
+        );
+        handle
+            .append_event(None, &completed)
+            .expect("limits only warn, so the event must be stored");
+    }
+    handle
+        .append_run_ledger("run", "body")
+        .expect("ledger writes are not suspended");
+    handle.submit(vec![bucket(60, "alpha", 10)]);
+    let flush_result = handle.flush_usage_now();
+
+    // Then: everything is persisted and no write failure is counted
+    assert_eq!(flush_result, Ok(()));
+    assert_eq!(read_buckets(&config.db_path), [bucket(60, "alpha", 10)]);
+    let database = Database::open(&config).expect("database must reopen");
+    assert_eq!(database.events_all_ordered().unwrap().len(), 2);
+    assert_eq!(database.run_ledger_all().unwrap().len(), 1);
+    assert_eq!(handle.statistics().unwrap().event_write_failures, 0);
 }

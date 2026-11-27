@@ -19,6 +19,14 @@ pub fn routing_settings_body(
     model: &mut RoutingSettingsModel,
     profile_locked: bool,
 ) -> Option<RoutingSettingsAction> {
+    routing_settings_content(ui, model, profile_locked)
+}
+
+fn routing_settings_content(
+    ui: &mut egui::Ui,
+    model: &mut RoutingSettingsModel,
+    profile_locked: bool,
+) -> Option<RoutingSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
     let ctx = ui.ctx().clone();

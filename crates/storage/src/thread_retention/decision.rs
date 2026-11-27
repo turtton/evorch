@@ -541,3 +541,42 @@ impl Database {
 #[cfg(test)]
 #[path = "decision_tests.rs"]
 mod tests;
+
+/// Body retention deliberately ignores goals and deletion-family holds. Membership
+/// has already been bounded and re-read by its caller in the same transaction.
+pub(crate) fn decide_tool_bodies_on_connection(
+    conn: &Connection,
+    member: &FamilyMember,
+    cutoff_ns: i64,
+    budget: &DecisionBudget,
+) -> Result<Decision, StorageError> {
+    let mut reader = Reader {
+        conn,
+        budget,
+        stats: DecisionStats::default(),
+    };
+    let result = (|| -> Hit<()> {
+        if member.runs.len() > budget.family_entries {
+            return hold(Hold::FamilyRunBudget);
+        }
+        if member.created_ns > cutoff_ns {
+            return hold(Hold::NotDue);
+        }
+        if crate::migrations::backfill::backfill_pending(conn).or_else(fail)? {
+            return hold(Hold::HeaderBackfillPending);
+        }
+        let threads = json(&[&member.thread_id])?;
+        let runs = json(&member.runs)?;
+        reader.protections(&threads, &runs)?;
+        reader.activity(&runs, cutoff_ns)
+    })();
+    let verdict = match result {
+        Ok(()) => Verdict::Due,
+        Err(Ok(h)) => Verdict::Hold(h),
+        Err(Err(e)) => return Err(e),
+    };
+    Ok(Decision {
+        verdict,
+        stats: reader.stats,
+    })
+}

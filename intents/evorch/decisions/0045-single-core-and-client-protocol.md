@@ -171,7 +171,7 @@ CLI（`evorch run` 等）は次の方針とする。
 
 ### 12. 段階的移行順序
 
-並行作業との競合を避け、安全に移行を進めるため、以下の順序で実装する。
+並行作業との競合を避け、安全に移行を進めるため、以下の順序で実装する。実害が owner 機構側にあるためその撤去を早め、GUI の依存分離より先に PR 20 を行う。19b-G は GUI と protocol を広く変更するため、並行 lane との競合を避けて PR 20 の後に行う。B と C に技術的依存はない。
 
 1. **Protocol / Client 層の策定**: `crates/protocol`（Command/Query/Snapshot/UiEvent/DTO）およびクライアント通信基盤の定義。
 2. **Host ロジックの実装**: コア側のコマンド・クエリハンドラ、および承認要求の有効性管理（有効期限や解決済み判定）の実装。
@@ -179,12 +179,15 @@ CLI（`evorch run` 等）は次の方針とする。
 4. **コア独立バイナリの構築と接続**: `evorch-core` バイナリの分離、単一インスタンス管理、およびプロセス間接続の実装。
 5. **安全点再起動＋自動再開の実装**: checkpoint 保存、再開意図の永続化、および自動復元パイプラインの構築。
 6. **デスクトップ GUI のクライアント化（opt-in）**: デスクトップ GUI の接続先をコアプロセスへ切り替える。初期は opt-in の core-client モードとし、embedded runtime への fallback は禁止する。デフォルトの切り替えは 19a で行う（安全点再起動機構が安定する前には切り替えない）。
-7. **ADR 0024 の撤去（20）**: 旧所有権機構・共有 DB 同期として `owners.db`、heartbeat/claim、`readonly_threads`、`shared_feed`、`sidebar.json` merge を完全削除する。
-8. **allowlist のゼロ化（19b）**: §11 の allowlist を 0 にし、内部 crate への直接依存を CI で禁止する。
+7. **旧 embedded GUI と専用検証基盤の削除（A）**: `--legacy-embedded` と旧 GUI 専用検証基盤を削除する。
+8. **owner 以外の責務の分離（C0）**: 挙動を変えずに owner 以外の責務を分離する準備 PR。
+9. **ADR 0024 の撤去（C / PR 20）**: 旧所有権機構・共有 DB 同期として `owners.db`、heartbeat/claim、`readonly_threads`、`shared_feed`、`sidebar.json` merge を完全削除する。
+10. **GUI の内部 crate 依存ゼロ化（B / 19b-G）**: GUI の内部 crate への直接依存をなくす。
+11. **依存 allowlist 全体のゼロ化（D / 19b-C）**: §11 の allowlist を CLI を含めて 0 にし、内部 crate への直接依存を CI で禁止する。
 
 **移行期間の既知制約（PR 20 まで）**:
 
-- **Stop の永続化遅延**: lane の起動待ち中に operator が Stop を出しても、owners registry の EXCLUSIVE ロックが長時間保持されていると Stop を直ちに durable に記録できない。その場合は Stop をメモリ上で先に有効化し、ロック解放後に記録を書き直す。書き直し前にコアが強制終了されると、再起動後に lane が復活することがある。この制約は PR 20 まで許容し、所有権 guard の外に journal は新設しない（ユーザー決定: `question-5a4cb7e9cf8474970666fd7ee1b7667e`）。
+- **Stop の永続化遅延**: lane の起動待ち中に operator が Stop を出しても、owners registry の EXCLUSIVE ロックが長時間保持されていると Stop を直ちに durable に記録できない。その場合は Stop をメモリ上で先に有効化し、ロック解放後に記録を書き直す。書き直し前にコアが強制終了されると、再起動後に lane が復活することがある。この制約は PR 20 で解消し、所有権 guard の外に journal は新設しない（ユーザー決定: `question-5a4cb7e9cf8474970666fd7ee1b7667e`）。
 - **一時的な二重 MCP 接続**: GUI とコアが並存している間、idle thread の handoff 直後に旧・新の MCP 接続が同時に存在することがある。ツールの二重実行は per-call fence で防止し、旧 owner は fence を検知したら MCP セッションを drain する。この状態は PR 20 で解消する（暫定判断）。
 - **MCP 結果内の credential**: MCP の成功結果またはエラー content にサーバが credential を echo して含めても redaction は行わず、既存の挙動を維持する。一方、host が生成するログや診断には credential を含めない。
 

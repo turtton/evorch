@@ -41,28 +41,28 @@ fn stream_append_preserves_session_identity_and_normal_session_limits() {
 }
 
 #[test]
-fn stream_append_preserves_other_storage_limits() {
+fn stream_append_keeps_event_size_limit_but_only_warns_on_volume_limits() {
     for (limits, expected) in [
         (
             HardLimits {
                 max_event_bytes: 0,
                 ..Default::default()
             },
-            LimitKind::EventSize,
+            Some(LimitKind::EventSize),
         ),
         (
             HardLimits {
                 max_daily_event_bytes: 0,
                 ..Default::default()
             },
-            LimitKind::DailyBytes,
+            None,
         ),
         (
             HardLimits {
                 max_db_bytes: 0,
                 ..Default::default()
             },
-            LimitKind::DbSize,
+            None,
         ),
     ] {
         // Given: an exhausted non-session storage limit.
@@ -79,17 +79,24 @@ fn stream_append_preserves_other_storage_limits() {
         });
         // When: the GUI stream attempts to persist an event.
         let result = writer.handle().append_stream_event("gui", &event, None);
-        // Then: the limit still rejects the write without adding an event.
-        assert!(
-            matches!(result, Err(StorageError::LimitExceeded { limit, .. }) if limit == expected),
-            "expected {expected:?}: {result:?}"
-        );
-        assert!(
-            Database::open(&config)
-                .unwrap()
-                .events_all_ordered()
-                .unwrap()
-                .is_empty()
-        );
+        // Then: only the single-event limit rejects the write; the volume limits warn.
+        let stored = Database::open(&config)
+            .unwrap()
+            .events_all_ordered()
+            .unwrap()
+            .len();
+        match expected {
+            Some(limit) => {
+                assert!(
+                    matches!(result, Err(StorageError::LimitExceeded { limit: actual, .. }) if actual == limit),
+                    "expected {limit:?}: {result:?}"
+                );
+                assert_eq!(stored, 0);
+            }
+            None => {
+                assert_eq!(result, Ok(()));
+                assert_eq!(stored, 1);
+            }
+        }
     }
 }

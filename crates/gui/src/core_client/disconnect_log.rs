@@ -25,6 +25,9 @@ pub struct SessionEnd<'a> {
     pub resync: bool,
     /// The loss counts as unexpected: automatic recovery follows.
     pub abnormal: bool,
+    /// The core's notice that ended the subscription (`ResyncRequired`,
+    /// `SubscriptionClosed`), when one did.
+    pub ended_by: Option<&'a str>,
 }
 
 impl Episode {
@@ -47,6 +50,7 @@ impl Episode {
                 losses,
                 orderly = end.orderly,
                 planned_restart = end.planned_restart,
+                ended_by = ?end.ended_by,
                 "lost the connection to the core"
             );
         } else {
@@ -58,6 +62,7 @@ impl Episode {
                 planned_restart = end.planned_restart,
                 reconnect_requested = end.reconnect_requested,
                 resync = end.resync,
+                ended_by = ?end.ended_by,
                 "the session with the core ended"
             );
         }
@@ -124,6 +129,7 @@ mod tests {
             reconnect_requested: false,
             resync: false,
             abnormal: true,
+            ended_by: None,
         }
     }
 
@@ -170,6 +176,24 @@ mod tests {
             episode.since_loss_ms(first),
             None,
             "a new session starts over"
+        );
+    }
+
+    #[test]
+    fn the_notice_that_ended_the_subscription_is_recorded_with_the_loss() {
+        let mut episode = Episode::default();
+        let text = captured(|| {
+            episode.session_ended(
+                Instant::now(),
+                &SessionEnd {
+                    ended_by: Some("Projection(ResyncRequired { reason: SlowSubscriber })"),
+                    ..lost(&TransportError::Disconnected, Duration::from_millis(774))
+                },
+            );
+        });
+        assert!(
+            text.contains("lost the connection") && text.contains("SlowSubscriber"),
+            "{text}"
         );
     }
 

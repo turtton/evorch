@@ -1,0 +1,42 @@
+[
+  {
+    "name": "lane_send",
+    "description": "Send a supplement to a lane you currently lead (attached or summary, already started). It is appended to the lane's conversation as an agent-authored message; the brief and its revision stay unchanged, so earlier Ready reports and close evidence remain valid. Never use it to change objectives or acceptance criteria: use lane_revise_brief. Only the lane's current lane-external root Orchestrator lead may call this; a detached lane or an old lead is rejected. Use the observed management and brief revisions (lane_list) and a unique operation_id; an identical retry replays the original result. Saved durably before it is delivered; it is not read-confirmation and is never user input or permission.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_brief_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_management_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "lane_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "operation_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "lane_id",
+        "expected_management_revision",
+        "expected_brief_revision",
+        "message"
+      ],
+      "type": "object"
+    }
+  }
+]

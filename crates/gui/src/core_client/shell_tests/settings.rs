@@ -187,21 +187,26 @@ fn settings_snapshot(action: &FeatureAction) -> Option<FeatureReply> {
     })
 }
 
-fn settings(entry: &str) -> (Screen, std::collections::BTreeSet<String>) {
+/// ⚙ → Model Settings, then the section `section` of its navigation.
+fn settings(section: &str) -> (Screen, std::collections::BTreeSet<String>) {
     let mut screen = screen(egui::vec2(1440.0, 900.0));
-    let before = open(&mut screen, entry, settings_snapshot);
+    let before = open(&mut screen, "Model Settings", settings_snapshot);
+    if section != "Providers" {
+        screen.harness.get_by_label(section).click();
+        screen.harness.run_steps(8);
+    }
     (screen, before)
 }
 
 // Given: a core whose file has four providers of four types
-// When: ⚙ → Providers
+// When: ⚙ → Model Settings
 // Then: the modal lists each with its type badge and default model, Edit and Delete, and
 //       the legacy add buttons; Delete asks before anything is sent
 #[test]
 fn the_providers_tab_shows_type_badges_and_confirms_a_delete() {
     let (mut screen, before) = settings("Providers");
     let harness = &screen.harness;
-    harness.get_by_label("Provider settings");
+    harness.get_by_label("Where models come from, with their sign-in and model list");
     for label in [
         "OpenAI-compatible",
         "Codex subscription",
@@ -268,24 +273,28 @@ fn the_providers_tab_shows_type_badges_and_confirms_a_delete() {
     screen.capture("provider-editor");
 }
 
-// Given: a file with two routes / When: ⚙ → Routing
+// Given: a file with two routes / When: ⚙ → Model Settings → Routing
 // Then: the legacy routing editor shows the routes of the file
 #[test]
 fn the_routing_tab_shows_the_routes_of_the_file() {
     let (mut screen, before) = settings("Routing");
     let harness = &screen.harness;
-    harness.get_by_label("Routing settings");
+    harness.get_by_label(
+        "Logical model name to real provider and model. Candidates are tried from the top",
+    );
     harness.get_by_label("Save routing");
     assert_english(&screen, &before);
     screen.capture("routing");
 }
 
-// Given: a file binding the explorer to a route / When: ⚙ → Agent roles
+// Given: a file binding the explorer to a route / When: ⚙ → Model Settings → Agent Roles
 // Then: the legacy role editor is shown with its Save
 #[test]
 fn the_agent_roles_tab_shows_the_roles_of_the_file() {
-    let (mut screen, before) = settings("Agent roles");
-    screen.harness.get_by_label("Agent role settings");
+    let (mut screen, before) = settings("Agent Roles");
+    screen
+        .harness
+        .get_by_label("Which route each agent role uses, and how it is tuned");
     assert_english(&screen, &before);
     screen.capture("roles");
 }
@@ -383,4 +392,36 @@ fn the_authentication_tab_reads_expiry_and_types_in_english() {
     }
     assert_english(&screen, &before);
     screen.capture("auth");
+}
+
+// Given: the smallest supported window, 960×600
+// When: Model Settings is opened on each of its sections
+// Then: the × and the navigation are inside the window, and the modal's body scrolls rather
+//       than pushing anything out of it
+#[test]
+fn model_settings_keeps_its_controls_in_a_minimum_window() {
+    let size = egui::vec2(960.0, 600.0);
+    let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    for section in ["Providers", "Routing", "Agent Roles"] {
+        let mut screen = screen(size);
+        let _ = open(&mut screen, "Model Settings", settings_snapshot);
+        if section != "Providers" {
+            screen.harness.get_by_label(section).click();
+        }
+        screen.harness.run_steps(8);
+        for label in ["Close", "Providers", "Routing", "Agent Roles"] {
+            let nodes: Vec<_> = screen.harness.get_all_by_label(label).collect();
+            assert!(!nodes.is_empty(), "{label} on {section}");
+            for node in nodes {
+                let rect = node.rect();
+                assert!(
+                    screen_rect.contains_rect(rect),
+                    "{label} on {section}: {rect:?} outside {screen_rect:?}"
+                );
+            }
+        }
+        if section == "Providers" {
+            screen.capture("minimum");
+        }
+    }
 }

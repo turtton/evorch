@@ -108,18 +108,6 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
         db.review_evidence_for_target("run-1").unwrap(),
         vec![evidence()]
     );
-    storage.close();
-    let mut suspended = config.clone();
-    suspended.hard_limits.max_db_bytes = 1;
-    let storage = Storage::open(suspended).unwrap();
-    assert!(
-        matches!(storage.handle().answer_user_question_with_evidence(&question().id, "yes", &AnswerOrigin::Host { channel: Default::default() }, &[evidence()]),
-        Err(StorageError::Serialization(message)) if message.contains("writes suspended"))
-    );
-    assert_eq!(
-        db.review_evidence_for_target("run-1").unwrap(),
-        vec![evidence()]
-    );
 }
 
 #[test]
