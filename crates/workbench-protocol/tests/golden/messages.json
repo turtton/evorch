@@ -56,6 +56,7 @@
         },
         "type": "body"
       },
+      "duration_ms": 1240,
       "input": {
         "payload": {
           "text": "command: cargo test"

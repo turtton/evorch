@@ -638,9 +638,14 @@ impl PreparedHistory<'_> {
                             }
                             None => None,
                         };
-                        let row = super::rows::committed(&first, tokenized, start)
+                        let mut row = super::rows::committed(&first, tokenized, start)
                             .filter(|row| row.role == header.role)
                             .ok_or_else(invalid)?;
+                        if let Some(tool) = row.tool.as_mut()
+                            && let Some(source) = sources.get(1)
+                        {
+                            tool.duration_ms = index::duration_ms(self.conn, *source, sources[0])?;
+                        }
                         super::Reducer::default().assemble(row)
                     }
                     .ok_or_else(invalid)?;

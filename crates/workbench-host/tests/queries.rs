@@ -2774,6 +2774,7 @@ fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
                 format!("thread:{}", t.id)
             }
             SnapshotItem::Run(r) => format!("run:{}", r.id),
+            SnapshotItem::ToolActivity(t) => format!("tool:{}:{}", t.run, t.call_id),
             SnapshotItem::Question(q) => format!("question:{}", q.id),
             SnapshotItem::Approval(a) => format!("approval:{}", a.id),
         };

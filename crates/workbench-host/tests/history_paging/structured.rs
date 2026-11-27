@@ -405,3 +405,64 @@ fn a_tool_call_id_past_the_limit_resyncs_the_stream() {
         }
     });
 }
+
+// Wall clock stamps are explicit: the test does not depend on time spent executing it.
+#[test]
+fn durations_match_in_indexed_live_and_legacy_history_for_all_tool_names() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let f = current_thread_fixture();
+    let mut sub = f.subscribe();
+    let at = |kind: ToolEvent, millis| {
+        let mut event = Event::new(kind);
+        event.meta.wall_clock = UNIX_EPOCH + Duration::from_millis(millis);
+        f.store.handle().append_event(None, &event).unwrap();
+    };
+    for (call, name, input, start, end) in [
+        (
+            "shell",
+            "shell",
+            Some(serde_json::json!({"command":"true"})),
+            Some(1000),
+            2240,
+        ),
+        (
+            "poll",
+            "shell",
+            Some(serde_json::json!({"action":"poll","job_id":"job-1"})),
+            Some(3000),
+            3100,
+        ),
+        ("wait", "wait", None, Some(4000), 4999),
+        (
+            "js",
+            "run_js",
+            Some(serde_json::json!({"code":"1"})),
+            Some(6000),
+            5000,
+        ),
+        ("missing", "delegate", None, None, 7000),
+    ] {
+        if let Some(start) = start {
+            let mut kind = started(call, name, serde_json::Value::Null);
+            if let ToolEvent::ToolStarted { input: value, .. } = &mut kind {
+                *value = input;
+            }
+            at(kind, start);
+        }
+        at(completed(call, name, None, false), end);
+    }
+    let indexed = read_all(&f, HistoryDirection::Forward, true);
+    assert_eq!(
+        indexed
+            .iter()
+            .map(|m| tool(m).duration_ms)
+            .collect::<Vec<_>>(),
+        [Some(1240), Some(100), Some(999), None, None]
+    );
+    let live: Vec<_> = (0..indexed.len())
+        .map(|_| next_message(&f, &mut sub))
+        .collect();
+    assert_eq!(live, indexed);
+    dirty(&f);
+    assert_eq!(read_all(&f, HistoryDirection::Forward, false), indexed);
+}

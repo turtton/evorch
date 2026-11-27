@@ -466,6 +466,16 @@ pub fn ui_events() -> Vec<UiEvent> {
             thread: thread_summary(),
         }),
         UiEvent::Execution(ExecutionEvent::RunChanged { run: run_summary() }),
+        UiEvent::Execution(ExecutionEvent::ToolStarted {
+            tool: tool_activity(),
+        }),
+        UiEvent::Execution(ExecutionEvent::ToolFinished {
+            thread: thread(),
+            run: run(),
+            call_id: "call-1".into(),
+            status: workbench_protocol::namespaces::execution::ToolActivityStatus::Succeeded,
+            duration_ms: Some(1240),
+        }),
         UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt: receipt() }),
         UiEvent::Questions(QuestionsEvent::QuestionChanged {
             question: question(QuestionTarget::Lead {
@@ -582,6 +592,7 @@ pub fn reply_payloads() -> Vec<ReplyPayload> {
                 items: vec![
                     SnapshotItem::CoreStatus(status()),
                     SnapshotItem::Thread(thread_summary()),
+                    SnapshotItem::ToolActivity(tool_activity()),
                 ],
                 next_cursor: None,
                 snapshot_revision: Revision(99),
@@ -624,6 +635,20 @@ pub fn all_query_replies() -> Vec<QueryReply> {
         .collect()
 }
 
+pub fn tool_activity() -> workbench_protocol::namespaces::execution::ToolActivityView {
+    workbench_protocol::namespaces::execution::ToolActivityView {
+        thread: thread(),
+        run: run(),
+        call_id: "call-1".into(),
+        parent_call_id: Some("call-0".into()),
+        tool_name: "shell".into(),
+        input_summary: Some("cargo test".into()),
+        input: Some(MessageContent::Inline {
+            text: "command: cargo test".into(),
+        }),
+        elapsed_ms: 1200,
+    }
+}
 pub fn tool_call() -> ToolCallView {
     ToolCallView {
         tool_name: "shell".into(),
@@ -634,6 +659,7 @@ pub fn tool_call() -> ToolCallView {
             text: "command: cargo test".into(),
         }),
         status: ToolCallStatus::Failed,
+        duration_ms: Some(1240),
         detail: Some(MessageContent::Body(body_ref())),
     }
 }

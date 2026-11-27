@@ -110,6 +110,24 @@
                 "updated_at": "1793799134000"
               },
               "type": "thread"
+            },
+            {
+              "payload": {
+                "call_id": "call-1",
+                "elapsed_ms": 1200,
+                "input": {
+                  "payload": {
+                    "text": "command: cargo test"
+                  },
+                  "type": "inline"
+                },
+                "input_summary": "cargo test",
+                "parent_call_id": "call-0",
+                "run": "run-1",
+                "thread": "thr-1",
+                "tool_name": "shell"
+              },
+              "type": "tool_activity"
             }
           ],
           "snapshot_revision": "99"

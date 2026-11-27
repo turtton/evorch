@@ -73,6 +73,7 @@ pub enum SnapshotItem {
     Project(ProjectSummary),
     Thread(ThreadSummary),
     Run(RunSummary),
+    ToolActivity(crate::namespaces::execution::ToolActivityView),
     Question(QuestionView),
     Approval(ApprovalView),
 }
@@ -259,6 +260,7 @@ impl SnapshotItem {
             Self::Project(project) => project.validate(),
             Self::Thread(thread) => thread.validate(),
             Self::Run(_) => Ok(()),
+            Self::ToolActivity(tool) => tool.validate(),
             Self::Question(question) => question.validate(),
             Self::Approval(approval) => approval.validate(),
         }
