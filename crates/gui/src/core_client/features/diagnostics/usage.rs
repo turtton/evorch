@@ -33,7 +33,7 @@ pub(super) fn cells(totals: &UsageTotals) -> UsageCells {
     }
 }
 
-fn add(into: &mut UsageTotals, other: &UsageTotals) {
+pub(super) fn add(into: &mut UsageTotals, other: &UsageTotals) {
     into.requests += other.requests;
     into.failed += other.failed;
     into.input_tokens += other.input_tokens;

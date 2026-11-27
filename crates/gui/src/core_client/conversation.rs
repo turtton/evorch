@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use egui::{RichText, Ui};
+use workbench_protocol::namespaces::diagnostics::ThreadUsage;
 use workbench_protocol::namespaces::execution::{GoalPhase, GoalView};
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ConversationCommand, ExecutionCommand, QuestionsCommand,
@@ -14,6 +15,7 @@ use workspace_ui::ThreadRunPhase;
 
 use super::cache::Cache;
 use super::connection::Action;
+use super::features::diagnostics::{cost_hint, cost_text};
 use super::features::execution::ExecutionBand;
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::pull_requests::{PullRequestBar, PullRequestChips};
@@ -33,7 +35,9 @@ use crate::panes::transcript_widgets::{
 use crate::theme::icons;
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
-use crate::theme::widgets::{empty_state, fill_label, ghost, icon_button, pane_root, soft_frame};
+use crate::theme::widgets::{
+    empty_state, fill_label, ghost, icon_button, metric_detailed, pane_root, soft_frame,
+};
 
 mod composer;
 mod mentions;
@@ -147,6 +151,8 @@ pub struct ConversationIo<'a> {
     /// What relative links in the transcripts resolve against: the selected
     /// thread's working tree on this machine.
     pub link_base: Option<&'a Path>,
+    /// What the ledger holds for the selected thread, once the core answered.
+    pub thread_usage: Option<&'a ThreadUsage>,
 }
 
 impl ConversationIo<'_> {
@@ -239,7 +245,7 @@ pub fn show(
                     progress(ui, io.cache, &thread, band, details_max, effects);
                     composer::composer(ui, pane, io, &project, &thread, activity, effects);
                     ui.spacing_mut().item_spacing.y = vertical_spacing;
-                    status_strip(ui, io.cache, &thread, activity);
+                    status_strip(ui, io.cache, &thread, activity, io.thread_usage);
                 });
             // The bar sits above the composer, as in the embedded workbench.
             if let Some(bar) = pull_request.filter(|bar| bar.thread == &thread)
@@ -506,6 +512,18 @@ fn header(
                     });
                 });
             });
+            let thread_total = io
+                .thread_usage
+                .filter(|usage| &usage.thread == thread)
+                .map(|usage| &usage.total);
+            ui.label(muted(format!(
+                "Total cost (incl. subagents) {}",
+                cost_text(thread_total)
+            )))
+            .on_hover_text(cost_hint(
+                "Main agent and all of its subagents in this thread",
+                thread_total,
+            ));
         });
     ui.separator();
 }
@@ -912,7 +930,13 @@ fn queue_rows(ui: &mut Ui, receipts: &[&InputReceipt], thread: &ThreadId) -> Opt
     withdraw
 }
 
-fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId, activity: Activity) {
+fn status_strip(
+    ui: &mut Ui,
+    cache: &Cache,
+    thread: &ThreadId,
+    activity: Activity,
+    usage: Option<&ThreadUsage>,
+) {
     ui.horizontal(|ui| {
         ui.add_space(SP_2);
         let phase = thread_phase(cache, thread, activity);
@@ -927,6 +951,15 @@ fn status_strip(ui: &mut Ui, cache: &Cache, thread: &ThreadId, activity: Activit
             Some(ThreadState::Failed) => "Failed",
         };
         ui.label(muted(state).size(FONT_SMALL));
+        let main_agent = usage
+            .filter(|usage| &usage.thread == thread)
+            .map(|usage| &usage.conversation);
+        metric_detailed(
+            ui,
+            &cost_text(main_agent),
+            &cost_hint("Main agent cost (excludes subagents)", main_agent),
+            false,
+        );
         let subagents = activity.running_children;
         if subagents > 0 {
             ui.label(
