@@ -203,7 +203,8 @@ const fn flat(input: f64, cache_read: f64, output: f64) -> Tiered {
 /// "Model pricing" の表と、各モデルの <https://cursor.com/docs/models/> ページ
 /// (2026-10 時点)。context window は各ページの "Context window"（既定値）。
 /// 第三者モデルは docs が API 定価と明記しており、料金は models.dev に委ねるため
-/// context window だけを持つ。
+/// context window だけを持つ。`grok-4.7-500k` 行だけは docs ではなく oh-my-pi 1263bcd
+/// (1aeacd7a, 48f93242) の値で、context window と料金を実アカウントでは未確認。
 const DOCS: &[DocsRow] = &[
     DocsRow {
         id: "composer-2.5",
@@ -231,7 +232,8 @@ const DOCS: &[DocsRow] = &[
     DocsRow {
         id: "grok-4.7-500k",
         context_window: 500_000,
-        // 明示的な 500K SKU は入力の大きさによらず、最初のトークンから上の tier 料金で課金される。
+        // 明示的な 500K SKU は入力の大きさによらず、最初のトークンから上の tier 料金で課金される
+        // (出典: OMP 1aeacd7a, 48f93242)。
         prices: Some(DocsPrices {
             standard: flat(4.0, 1.0, 12.0),
             fast: Some(flat(6.0, 1.5, 18.0)),
