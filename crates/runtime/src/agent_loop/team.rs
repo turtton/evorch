@@ -1,5 +1,5 @@
 use super::LoopState;
-use crate::ownership::Lease;
+use crate::team::TaskLease;
 use crate::team::TeamBoard;
 use apply_patch::TargetsError;
 use providers::ToolSpec;
@@ -101,7 +101,7 @@ impl LoopState {
             "task_complete" => {
                 let args: CompleteArgs =
                     serde_json::from_value(input).map_err(|e| e.to_string())?;
-                let token = Lease {
+                let token = TaskLease {
                     owner_id: worker,
                     generation: args.generation,
                     expires_at: 0,

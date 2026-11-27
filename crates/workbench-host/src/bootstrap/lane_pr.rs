@@ -40,8 +40,9 @@ impl PullRequestAdapters {
 pub fn start_recovery(
     runtime: &AgentRuntime,
     owner: &Arc<OwnerHost>,
+    scratch: &Arc<runtime::scratch::ThreadScratch>,
 ) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
-    runtime.set_thread_scratch(owner.thread_scratch());
+    runtime.set_thread_scratch(scratch.clone());
     runtime.recover_lanes_on_startup(owner)
 }
 
@@ -52,6 +53,7 @@ pub fn start(
     services: &mut BackgroundServices,
     runtime: &AgentRuntime,
     owner: &Arc<OwnerHost>,
+    scratch: &Arc<runtime::scratch::ThreadScratch>,
     settings: config::PullRequestsConfig,
     adapters: PullRequestAdapters,
 ) -> Result<(), BootstrapError> {
@@ -74,7 +76,7 @@ pub fn start(
         writer.run_lane_stop_writes(stop).await?;
         Ok(())
     });
-    runtime.set_thread_scratch(owner.thread_scratch());
+    runtime.set_thread_scratch(scratch.clone());
     let recovery = runtime.prepare_lane_recovery(owner)?;
     services.start("lane-recovery", |stop| async move {
         // Retry storage operations are synchronous; dropping this future leaves

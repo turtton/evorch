@@ -18,6 +18,7 @@ struct World {
     sockets: test_socket_dir::SocketDir,
     data: tempfile::TempDir,
     host: OwnerHost,
+    archive: runtime::scratch::archive::ArchiveService,
     sidebar: PathBuf,
 }
 
@@ -36,11 +37,17 @@ fn world() -> World {
         Arc::new(event_bus::EventBus::new(32)),
     )
     .unwrap();
+    let archive = runtime::scratch::archive::ArchiveService::new(
+        &host.thread_scratch(),
+        host.scratch_archive_authority(),
+    )
+    .unwrap();
     let sidebar = data.path().join("sidebar.json");
     World {
         sockets,
         data,
         host,
+        archive,
         sidebar,
     }
 }
@@ -95,8 +102,8 @@ impl World {
 
     /// One archive pass over `thread`, finished (renamed or kept) on return.
     fn hint_and_wait(&self, thread: &str) {
-        self.host.hint_scratch_archive(thread);
-        self.host.scratch_archive_barrier().recv().unwrap();
+        self.archive.hint(thread);
+        self.archive.barrier().recv().unwrap();
     }
 }
 
@@ -104,7 +111,7 @@ impl World {
 fn a_saved_archived_thread_is_collected() {
     let w = world();
     w.save(vec![record("t", None)], &["t"]);
-    install(&w.host, Some(w.sidebar.clone()));
+    install(&w.archive, Some(w.sidebar.clone()));
     let dir = w.scratch("t");
     w.hint_and_wait("t");
     assert!(!dir.exists());
@@ -114,13 +121,13 @@ fn a_saved_archived_thread_is_collected() {
 fn a_saved_unarchived_thread_keeps_its_scratch_and_the_hint_is_dropped() {
     let w = world();
     w.save(vec![record("t", None)], &[]);
-    install(&w.host, Some(w.sidebar.clone()));
+    install(&w.archive, Some(w.sidebar.clone()));
     let dir = w.scratch("t");
     w.hint_and_wait("t");
     assert!(dir.join("keep").exists());
     // The hint is gone: archiving later without a new hint collects nothing.
     w.save(vec![record("t", None)], &["t"]);
-    w.host.scratch_archive_barrier().recv().unwrap();
+    w.archive.barrier().recv().unwrap();
     assert!(dir.join("keep").exists());
 }
 
@@ -128,7 +135,7 @@ fn a_saved_unarchived_thread_keeps_its_scratch_and_the_hint_is_dropped() {
 fn collection_does_not_wait_for_the_sidebar_save_lock() {
     let w = world();
     w.save(vec![record("t", None)], &["t"]);
-    install(&w.host, Some(w.sidebar.clone()));
+    install(&w.archive, Some(w.sidebar.clone()));
     let dir = w.scratch("t");
     let store = SidebarStore::new(w.sidebar.clone());
     let _held = store.lock().unwrap();
@@ -143,13 +150,13 @@ fn collection_does_not_wait_for_the_sidebar_save_lock() {
 fn anything_the_checker_cannot_establish_keeps_the_scratch() {
     // No shared sidebar at all.
     let w = world();
-    install(&w.host, None);
+    install(&w.archive, None);
     let dir = w.scratch("t");
     w.hint_and_wait("t");
     assert!(dir.join("keep").exists());
 
     // The file is not there, so the thread is unknown.
-    install(&w.host, Some(w.sidebar.clone()));
+    install(&w.archive, Some(w.sidebar.clone()));
     w.hint_and_wait("t");
     assert!(dir.join("keep").exists());
 
@@ -202,7 +209,7 @@ fn collection_never_touches_attachments() {
     use std::io::Write;
     let w = world();
     w.save(vec![record("t", None)], &["t"]);
-    install(&w.host, Some(w.sidebar.clone()));
+    install(&w.archive, Some(w.sidebar.clone()));
     let dir = w.scratch("t");
     let canonical = Path::new(w.sockets.path()).canonicalize().unwrap();
     let root = AttachmentRoot::for_scope(&canonical);

@@ -23,6 +23,8 @@ pub struct PlannedStorage {
 pub struct ClaimedBootstrap {
     pub(super) storage: PlannedStorage,
     pub(super) owner: Arc<OwnerHost>,
+    pub(super) scratch: Arc<runtime::scratch::ThreadScratch>,
+    pub(super) scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
     pub blocked_threads: Vec<String>,
     successor_epoch: u64,
 }
@@ -129,27 +131,38 @@ impl PlannedStorage {
         {
             return Err("adopted transaction epoch mismatch".into());
         }
-        let owner = Arc::new(OwnerHost::open_planned(
+        let scratch = Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(
+            &self.options.ownership_root,
+        )?);
+        let owner = Arc::new(OwnerHost::open_with_shared_scratch(
             &self.options.ownership_root,
             self.config.ownership.clone(),
             self.bus.clone(),
+            false,
+            Some(scratch.clone()),
         )?);
-        owner.retain_writer_leases(self.writer_leases.clone());
         let guard = self
             .runtime()
             .tombstone_guard()
             .ok_or("startup tombstone guard missing")?;
         owner
-            .set_tombstone_guard(guard)
+            .set_tombstone_guard(guard.clone())
             .map_err(|_| "owner guard already set")?;
+        let scratch_archive = Arc::new(runtime::scratch::archive::ArchiveService::new(
+            &scratch,
+            owner.scratch_archive_authority(),
+        )?);
+        scratch_archive.set_guard(guard);
         let report =
             self.runtime()
                 .claim_physical_bootstrap_owners(&owner, evidence, first_claim)?;
         let blocked_threads = report.blocked_threads;
-        self.runtime().set_thread_scratch(owner.thread_scratch());
+        self.runtime().set_thread_scratch(scratch.clone());
         Ok(ClaimedBootstrap {
             storage: self,
             owner,
+            scratch,
+            scratch_archive,
             blocked_threads,
             successor_epoch,
         })

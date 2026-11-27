@@ -32,7 +32,7 @@ mod registry;
 pub use disposal_support::DisposalOwnerReceipt;
 mod scratch_archive;
 pub use registry::{OwnerVerdict, Registry, RegistryError};
-pub use scratch_archive::ScratchArchiveChecker;
+
 #[cfg(unix)]
 mod host;
 #[cfg(unix)]

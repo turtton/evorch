@@ -129,6 +129,10 @@ pub struct BootstrappedHost {
     /// Central owner of core children and auxiliary workers (not GUI-owned children).
     pub spawn_ledger: sandbox::SpawnLedger,
     pub owner: Arc<OwnerHost>,
+    /// Shared by runtime, ownership cleanup and archive; scratch identity is unchanged.
+    pub scratch: Arc<runtime::scratch::ThreadScratch>,
+    /// Stop/join after producer/runtime drain and before bridge/writer/lease teardown.
+    pub scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
     pub config: config::Config,
     // The exact production DB configuration; composition inventory is test-only.
     restart_storage: storage::StorageConfig,
@@ -313,6 +317,7 @@ impl BootstrappedHost {
             writer_leases,
             seed,
             claimed_owner,
+            claimed_scratch,
             planned_collector,
         ) = if let Some(claimed) = claimed {
             let planned::PlannedStorage {
@@ -335,6 +340,7 @@ impl BootstrappedHost {
                 writer_leases,
                 Some(seed),
                 Some(claimed.owner),
+                Some((claimed.scratch, claimed.scratch_archive)),
                 Some(collector),
             )
         } else {
@@ -384,6 +390,7 @@ impl BootstrappedHost {
                 storage,
                 leases,
                 writer_leases,
+                None,
                 None,
                 None,
                 None,
@@ -609,24 +616,36 @@ impl BootstrappedHost {
                 .set_tombstone_guard(guard.clone())
                 .map_err(|_| "runtime tombstone guard already set")?;
         }
-        let owner = if let Some(owner) = claimed_owner {
-            owner
+        let (owner, scratch, scratch_archive) = if let Some(owner) = claimed_owner {
+            let (scratch, archive) = claimed_scratch.ok_or("planned scratch resources missing")?;
+            (owner, scratch, archive)
         } else {
-            Arc::new(OwnerHost::open(
+            let scratch = Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(
+                &options.ownership_root,
+            )?);
+            let owner = Arc::new(OwnerHost::open_with_shared_scratch(
                 &options.ownership_root,
                 config.ownership.clone(),
                 bus.clone(),
-            )?)
-        };
-        if !seeded {
+                true,
+                Some(scratch.clone()),
+            )?);
             owner
-                .set_tombstone_guard(guard)
+                .set_tombstone_guard(guard.clone())
                 .map_err(|_| "owner tombstone guard already set")?;
-        }
-        runtime.set_thread_scratch(owner.thread_scratch());
-        // Archive-time scratch recovery confirms the archive from the saved
-        // shared sidebar; the workspace area below sends the hints.
-        crate::scratch_archive::install(&owner, Some(options.config_dir.join("sidebar.json")));
+            let archive = Arc::new(runtime::scratch::archive::ArchiveService::new(
+                &scratch,
+                owner.scratch_archive_authority(),
+            )?);
+            archive.set_guard(guard);
+            (owner, scratch, archive)
+        };
+        runtime.set_thread_scratch(scratch.clone());
+        // Sidebar reads and fenced archive I/O stay on the dedicated worker.
+        crate::scratch_archive::install(
+            &scratch_archive,
+            Some(options.config_dir.join("sidebar.json")),
+        );
         let _ = evaluator.runtime.set(runtime.downgrade());
         let settings_runtime = runtime.downgrade();
         let reload_models: crate::areas::ReloadModels = Arc::new(move || {
@@ -705,6 +724,7 @@ impl BootstrappedHost {
             evaluator: evaluator.clone(),
             database: storage_config.db_path.clone(),
             owner: owner.clone(),
+            scratch_archive: scratch_archive.clone(),
             connections: Arc::default(),
             artifacts: artifacts.clone(),
             spawn_ledger: spawn_ledger.clone(),
@@ -753,11 +773,12 @@ impl BootstrappedHost {
             storage_writer: handle.clone(),
             model: routed_identity.unwrap_or(composed.model_identity),
         };
-        owner.retain_writer_leases(writer_leases.clone());
         let mut bootstrap = Self {
             host,
             runtime,
             owner,
+            scratch,
+            scratch_archive,
             restart_storage: storage_config.clone(),
             storage_writer: handle.clone(),
             graph_collector,
@@ -978,6 +999,7 @@ impl BootstrappedHost {
             &mut self.services,
             &self.runtime,
             &self.owner,
+            &self.scratch,
             self.config.pull_requests,
             deferred.adapters,
         ) {
@@ -1103,7 +1125,7 @@ impl BootstrappedHost {
             }
         }
         // Stop the archive worker and collector after producer/drain/release handling.
-        lane_pr::remember(&mut failure, self.owner.stop_scratch_cleanup());
+        lane_pr::remember(&mut failure, self.scratch_archive.stop_cleanup());
         if let Some(mut bridge) = self.bridge.take() {
             lane_pr::remember(&mut failure, bridge.try_shutdown());
         }

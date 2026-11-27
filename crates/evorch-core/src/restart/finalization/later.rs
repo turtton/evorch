@@ -134,12 +134,18 @@ pub(super) struct ArmedFinalization {
     armed: RestartTransaction,
 }
 
+struct ExecWorkers {
+    owner: Arc<runtime::ownership::OwnerHost>,
+    archive: Arc<runtime::scratch::archive::ArchiveService>,
+}
+
 impl RestartCoordinator {
     pub(super) async fn nine_to_eleven(
         &self,
         id: RestartId,
         armed: ArmedFinalization,
         owner: Arc<runtime::ownership::OwnerHost>,
+        archive: Arc<runtime::scratch::archive::ArchiveService>,
         writer: storage::StorageHandle,
     ) -> Result<(), String> {
         use core_instance::handoff::boot::{BOOT_TIMEOUT_SECS, BootDeadline};
@@ -201,7 +207,14 @@ impl RestartCoordinator {
             .map_err(text)?;
         let core = self.clone();
         tokio::task::spawn_blocking(move || {
-            core.prepare_and_stop_owner(id, armed, owner, control, deadline, writer)
+            core.prepare_and_stop_owner(
+                id,
+                armed,
+                ExecWorkers { owner, archive },
+                control,
+                deadline,
+                writer,
+            )
         })
         .await
         .map_err(|_| "exec preparation worker panicked".to_owned())?
@@ -210,12 +223,13 @@ impl RestartCoordinator {
         &self,
         id: RestartId,
         armed: ArmedFinalization,
-        owner: Arc<runtime::ownership::OwnerHost>,
+        workers: ExecWorkers,
         _control: crate::lifecycle::control::ControlDrained,
         deadline: core_instance::handoff::boot::BootDeadline,
         writer: storage::StorageHandle,
     ) -> Result<(), String> {
         use core_instance::handoff::HandoffRecord;
+        let ExecWorkers { owner, archive } = workers;
         let target = &armed.target;
         let environment = target
             .environment
@@ -281,7 +295,12 @@ impl RestartCoordinator {
         // up to here (the connections closed for the restart) is written first.
         // Past this point nothing logs.
         crate::logging::flush();
+        // Preserve the existing archive -> owner -> collector order, but keep
+        // each resource lifecycle separate from the ownership mechanism.
+        let stopped_archive = archive.stop().map_err(text);
         let stopped_owner = owner.stop_worker_for_exec().map_err(text);
+        let stopped_cleanup = sandbox::scratch::stop_scratch_cleanup().map_err(text);
+        let stopped_owner = stopped_archive.and(stopped_owner).and(stopped_cleanup);
         #[cfg(test)]
         if stopped_owner.is_ok()
             && let Some(after) = &target.after
@@ -368,7 +387,10 @@ struct FailedClosedOwner<'a> {
 impl Drop for FailedClosedOwner<'_> {
     fn drop(&mut self) {
         self.core.fail_finalization_closed(None);
-        if let Err(error) = self.owner.restart_worker_failed_closed() {
+        let restarted = sandbox::scratch::resume_scratch_cleanup()
+            .map_err(runtime::ownership::RegistryError::from)
+            .and_then(|()| self.owner.restart_worker_failed_closed());
+        if let Err(error) = restarted {
             tracing::error!(%error, "owner heartbeat recovery unconfirmed; business remains closed");
         }
     }

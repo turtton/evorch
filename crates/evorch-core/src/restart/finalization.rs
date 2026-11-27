@@ -224,8 +224,14 @@ impl RestartCoordinator {
         };
         let result = match result {
             Ok(armed) => {
-                self.nine_to_eleven(id, armed, owner_host, resources.writer())
-                    .await
+                self.nine_to_eleven(
+                    id,
+                    armed,
+                    owner_host,
+                    resources.scratch_archive(),
+                    resources.writer(),
+                )
+                .await
             }
             Err(error) => Err(error),
         };

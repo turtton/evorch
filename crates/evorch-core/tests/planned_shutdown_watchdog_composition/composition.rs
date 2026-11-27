@@ -247,7 +247,7 @@ async fn operate(
     if host.owner.attach("idle").is_err() {
         host.owner.start("idle")?;
     }
-    let scratch = host.owner.thread_scratch();
+    let scratch = host.scratch.clone();
     let scratch_path = scratch.thread_dir("idle");
     // Saved scratch is fixture data in the real owner's documented public path.
     // OwnerHost::start has already recorded the real lease for this thread.
@@ -295,12 +295,12 @@ async fn operate(
         let entered = Mutex::new(Some(entered));
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let blocked = Mutex::new(blocked);
-        host.owner.set_scratch_archive_checker(Arc::new(move |_| {
+        host.scratch_archive.set_checker(Arc::new(move |_| {
             entered.lock().unwrap().take().unwrap().send(()).unwrap();
             blocked.lock().unwrap().recv().unwrap();
             Ok(false)
         }));
-        host.owner.hint_scratch_archive("idle");
+        host.scratch_archive.hint("idle");
         seen.await?;
         Some(release)
     } else {
