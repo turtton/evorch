@@ -224,6 +224,7 @@ impl Fixture {
                 reference: None,
             }],
             problem: problem.map(str::to_owned),
+            sample: None,
             verify: Some("cargo test --offline".into()),
             candidate_overlay: Some("[agents.worker]\nmodels = [{ route = \"claude\" }]\n".into()),
             swapped_roles: vec![SwappedRole {
@@ -912,4 +913,82 @@ fn a_run_without_a_usable_answer_has_no_output_and_the_root_is_never_listed() {
     assert!(entries[1]["final_output"].is_null());
     assert_eq!(entries[1]["phase"], "Error");
     assert_eq!(entries[2]["final_output"], "second");
+}
+
+fn pin_checks(fixture: &Fixture, checks: Vec<storage::eval_sample::Check>) {
+    let path = fixture.dir().join(output::MANIFEST_FILE);
+    let mut manifest: Manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let sample = EvalSample {
+        checks,
+        ..EvalSample::new("thread-1".into(), "the shell failed".into(), Vec::new(), 1)
+    };
+    manifest.sample = Some(output::PinnedSample::of(sample));
+    output::write_json(&path, &manifest).unwrap();
+}
+
+fn shell_errors(max: u32) -> storage::eval_sample::Check {
+    storage::eval_sample::Check::ToolErrors {
+        tool: "shell".into(),
+        max,
+        scope: storage::eval_sample::CheckScope::Tree,
+        calls: storage::eval_sample::CallRange::Direct,
+    }
+}
+
+#[tokio::test]
+async fn a_report_without_checks_says_there_is_no_machine_judgment() {
+    // Given: an evaluation of a thread whose sample declared no checks.
+    let fixture = Fixture::new(None, CONFIG);
+    let deps = fixture.deps(judge_answers()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: neither the report nor its runs claim a machine verdict, and the markdown says so.
+    let report = &reports[0];
+    assert!(report.checks.is_none());
+    assert!(report.runs.iter().all(|run| run.checks.is_none()));
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(markdown.contains("no machine judgment"), "{markdown}");
+}
+
+#[tokio::test]
+async fn checks_are_graded_per_run_and_the_replay_validity_is_kept_apart() {
+    // Given: pinned checks that the baseline's DNS failure breaks (its shell call failed),
+    // and a candidate that stopped before it completed.
+    let fixture = Fixture::new(None, CONFIG);
+    pin_checks(&fixture, vec![shell_errors(0), shell_errors(5)]);
+    let deps = fixture.deps(judge_answers()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the baseline fails its first check and passes the second; the unfinished
+    // candidate cannot pass an upper bound by finding no errors.
+    let report = &reports[0];
+    let baseline = report.runs[0].checks.as_ref().unwrap();
+    assert_eq!(
+        baseline
+            .results
+            .iter()
+            .map(|result| result.verdict)
+            .collect::<Vec<_>>(),
+        [checks::Verdict::Fail, checks::Verdict::Pass]
+    );
+    assert_eq!(baseline.quality(), checks::Quality::Fail);
+    let candidate = report.runs[1].checks.as_ref().unwrap();
+    assert!(!candidate.validity.valid);
+    assert!(
+        candidate
+            .results
+            .iter()
+            .all(|result| result.verdict == checks::Verdict::Indeterminate),
+        "{candidate:?}"
+    );
+    assert_ne!(candidate.quality(), checks::Quality::Pass);
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(markdown.contains("## Machine checks"), "{markdown}");
+    assert!(markdown.contains("did not complete"), "{markdown}");
 }

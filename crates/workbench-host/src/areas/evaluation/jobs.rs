@@ -167,7 +167,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a started job does, resolved by the handler.
 enum Work {
     Run(Box<StartEvaluationRun>),
-    Report { targets: Vec<String>, rejudge: bool },
+    Report {
+        targets: Vec<String>,
+        rejudge: bool,
+        checks_only: bool,
+    },
 }
 
 /// How a job ended.
@@ -308,6 +312,7 @@ impl Jobs {
             Work::Report {
                 targets: start.targets.clone(),
                 rejudge: start.rejudge,
+                checks_only: start.checks_only,
             },
             owner,
             permit,
@@ -500,14 +505,18 @@ impl Jobs {
         self.at(JobStage::Started, &id).await;
         match work {
             Work::Run(run) => self.run_job(&id, *run, cancel).await,
-            Work::Report { targets, rejudge } => {
+            Work::Report {
+                targets,
+                rejudge,
+                checks_only,
+            } => {
                 // A report has no process to stop: dropping it between its
                 // awaits leaves only whole files, and each finished one is
                 // already recorded in the view.
                 tokio::select! {
                     biased;
                     () = cancelled(&cancel) => Ended::Cancelled(CancelReason::Requested),
-                    ended = self.report_job(&id, targets, rejudge) => ended,
+                    ended = self.report_job(&id, targets, rejudge, checks_only) => ended,
                 }
             }
         }
@@ -694,12 +703,54 @@ impl Jobs {
 
     // ---- report -------------------------------------------------------------
 
-    async fn report_job(&self, id: &OperationId, targets: Vec<String>, rejudge: bool) -> Ended {
+    async fn report_job(
+        &self,
+        id: &OperationId,
+        targets: Vec<String>,
+        rejudge: bool,
+        checks_only: bool,
+    ) -> Ended {
         let scrub = self.scrubber(None);
-        match self.make_reports(id, &targets, rejudge).await {
+        let made = if checks_only {
+            self.make_checks(id, &targets).await
+        } else {
+            self.make_reports(id, &targets, rejudge).await
+        };
+        match made {
             Ok(()) => Ended::Completed,
             Err(error) => failed_report(&error, &scrub, true),
         }
+    }
+
+    /// Grade the directories `names` under the evaluation root against their
+    /// sample's checks and record them in the view. The recorded evidence is
+    /// all it reads; the sample of an evaluation that pinned none is read from
+    /// this core's own database.
+    async fn make_checks(&self, id: &OperationId, names: &[String]) -> Result<(), EvalError> {
+        let root = self.parts.root.clone();
+        let wanted = names.to_vec();
+        let dirs = tokio::task::spawn_blocking(move || resolve_targets(&root, &wanted))
+            .await
+            .map_err(|error| EvalError::Io(std::io::Error::other(error.to_string())))??;
+        let reports =
+            eval::report::checks_only_pinned(dirs, Some(self.parts.database.as_path()), |index| {
+                self.record_report(id, names.get(index))
+            })
+            .await?;
+        let summary = reports
+            .iter()
+            .map(eval::report::ChecksReport::summary)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let view = lock(&self.state).table.update(id, |view| {
+            view.cross_thread = Some(crate::areas::diagnostics::read_ops::bounded(&summary));
+        });
+        if let Some(view) = view {
+            self.publish(EvaluationEvent::EvaluationJobProgress {
+                view: Box::new(view),
+            });
+        }
+        Ok(())
     }
 
     /// Report the directories `names` under the evaluation root and record

@@ -939,3 +939,178 @@ async fn cleanup_failure_does_not_change_success_and_keep_applies_to_failure() {
         );
     }
 }
+
+fn write_check() -> storage::eval_sample::Check {
+    storage::eval_sample::Check::SuccessfulCalls {
+        tool: "write".into(),
+        min: Some(1),
+        max: None,
+        scope: storage::eval_sample::CheckScope::Tree,
+        calls: storage::eval_sample::CallRange::Direct,
+    }
+}
+
+fn pinned_sample(tags: &[&str]) -> storage::eval_sample::EvalSample {
+    storage::eval_sample::EvalSample {
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        checks: vec![write_check()],
+        ..storage::eval_sample::EvalSample::new(
+            "thread-1".into(),
+            "the notes were missing".into(),
+            Vec::new(),
+            1,
+        )
+    }
+}
+
+fn writes_notes() -> Vec<Step> {
+    vec![
+        tool(
+            "write",
+            serde_json::json!({"path": "notes.txt", "content": "replayed\n"}),
+        ),
+        text("wrote the notes"),
+    ]
+}
+
+#[tokio::test]
+async fn the_manifest_pins_the_sample_as_it_was_at_the_start() {
+    // Given: a thread with a sample that declares a check.
+    let fixture = Fixture::new().await;
+    let handle = fixture.recorded.storage.handle();
+    let at_start = pinned_sample(&["first"]);
+    handle.save_eval_sample(at_start.clone()).unwrap();
+
+    // When: an evaluation runs and the sample is edited afterwards.
+    let evaluation = run(
+        fixture.args(None),
+        fixture.deps(writes_notes(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    handle.save_eval_sample(pinned_sample(&["second"])).unwrap();
+
+    // Then: the manifest still holds the sample, its checks and its hash from the start.
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["sample"]["hash"], at_start.content_hash());
+    assert_eq!(
+        manifest["sample"]["sample"]["tags"],
+        serde_json::json!(["first"])
+    );
+    assert_eq!(manifest["sample"]["sample"]["checks"][0]["tool"], "write");
+    assert_ne!(
+        manifest["sample"]["hash"],
+        pinned_sample(&["second"]).content_hash()
+    );
+}
+
+#[tokio::test]
+async fn an_evaluation_of_a_thread_without_a_sample_pins_none() {
+    let fixture = Fixture::new().await;
+
+    let evaluation = run(
+        fixture.args(None),
+        fixture.deps(writes_notes(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    assert!(manifest.get("sample").is_none(), "{manifest}");
+}
+
+#[tokio::test]
+async fn checks_only_regrades_recorded_runs_without_asking_any_model() {
+    // Given: a finished evaluation that pinned a sample whose check the replay satisfies.
+    let fixture = Fixture::new().await;
+    fixture
+        .recorded
+        .storage
+        .handle()
+        .save_eval_sample(pinned_sample(&[]))
+        .unwrap();
+    let evaluation = run(
+        fixture.args(None),
+        fixture.deps(writes_notes(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let models_before = fixture.agents.lock().unwrap().len();
+    let manifest_before = std::fs::read(evaluation.dir.join(output::MANIFEST_FILE)).unwrap();
+
+    // When: the directory is graded again from its evidence.
+    let reports = crate::report::checks_only_pinned(
+        vec![output::PinnedDir::open_path(&evaluation.dir).unwrap()],
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // Then: the replay passes its check on a complete record, the result has its own
+    // files, and neither the manifest nor a report.json was written or changed.
+    let [report] = reports.as_slice() else {
+        panic!("one report: {reports:?}");
+    };
+    assert_eq!(report.basis, crate::report::Basis::Pinned);
+    assert_eq!(
+        report.runs[0].grading.quality(),
+        crate::checks::Quality::Pass
+    );
+    assert!(evaluation.dir.join(report.file_name("json")).is_file());
+    assert!(evaluation.dir.join(report.file_name("md")).is_file());
+    assert!(!evaluation.dir.join(output::REPORT_JSON_FILE).exists());
+    assert_eq!(
+        std::fs::read(evaluation.dir.join(output::MANIFEST_FILE)).unwrap(),
+        manifest_before
+    );
+    assert_eq!(fixture.agents.lock().unwrap().len(), models_before);
+}
+
+#[tokio::test]
+async fn an_evaluation_without_a_pinned_sample_is_graded_post_hoc_and_kept_apart() {
+    // Given: an evaluation started before its thread had a sample, and a sample made afterwards.
+    let fixture = Fixture::new().await;
+    let evaluation = run(
+        fixture.args(None),
+        fixture.deps(writes_notes(), vec![decision("finish", "")]),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let handle = fixture.recorded.storage.handle();
+    let grade = |database: Option<PathBuf>| {
+        let dir = output::PinnedDir::open_path(&evaluation.dir).unwrap();
+        async move { crate::report::checks_only_pinned(vec![dir], database.as_deref(), |_| {}).await }
+    };
+
+    // When: it is graded without a database to read the sample from, and with one.
+    let without = grade(None).await.unwrap_err();
+    handle.save_eval_sample(pinned_sample(&["late"])).unwrap();
+    let first = grade(Some(fixture.recorded.config.db_path.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+    handle.save_eval_sample(pinned_sample(&["later"])).unwrap();
+    let second = grade(Some(fixture.recorded.config.db_path.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+
+    // Then: it is refused without a sample, marked post-hoc with one, and a changed sample
+    // leaves a separate result next to the earlier one.
+    assert!(
+        without.to_string().contains("no checks to grade"),
+        "{without}"
+    );
+    assert_eq!(first.basis, crate::report::Basis::CurrentSample);
+    assert!(first.note.contains("Post-hoc"), "{}", first.note);
+    assert_ne!(first.sample_hash, second.sample_hash);
+    assert!(evaluation.dir.join(first.file_name("json")).is_file());
+    assert!(evaluation.dir.join(second.file_name("json")).is_file());
+    let manifest = read_json(&evaluation.dir.join(output::MANIFEST_FILE));
+    assert!(manifest.get("sample").is_none());
+}

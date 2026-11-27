@@ -764,6 +764,7 @@ async fn a_report_job_that_fails_partway_names_the_reports_it_wrote() {
                 operation_id: operation("partway"),
                 targets: vec!["cache-run".into(), "second".into()],
                 rejudge: false,
+                checks_only: false,
             },
         )),
         local_desktop(),

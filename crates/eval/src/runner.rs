@@ -173,14 +173,22 @@ pub async fn run_with_cleanup(
         (None, Some(dir)) => dir.join("evorch-events.db"),
         (None, None) => return Err(needs_user_dir("the event database")),
     };
-    let thread = {
+    let (thread, sample) = {
         let database = storage::Database::open_read_only(&source_db).map_err(|source| {
             EvalError::Database {
                 path: source_db.clone(),
                 source,
             }
         })?;
-        OriginalThread::load(&database, &args.thread_id)?
+        let thread = OriginalThread::load(&database, &args.thread_id)?;
+        let sample =
+            database
+                .eval_sample(&args.thread_id)
+                .map_err(|source| EvalError::Database {
+                    path: source_db.clone(),
+                    source,
+                })?;
+        (thread, sample.map(output::PinnedSample::of))
     };
     let base = load_config(user_config_dir.as_deref(), None, None)?;
     let overlay = match &args.candidate {
@@ -226,6 +234,7 @@ pub async fn run_with_cleanup(
         start: StartSummary::of(&thread),
         original_turns: thread.turns.clone(),
         problem: args.problem.clone(),
+        sample,
         verify: args.verify.clone(),
         candidate_overlay: overlay.as_ref().map(|(text, _)| text.clone()),
         swapped_roles,

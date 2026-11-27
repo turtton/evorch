@@ -3,23 +3,24 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::StorageError;
-use crate::eval_sample::EvalSample;
+use crate::eval_sample::{CHECK_VERSION, EvalSample, Spec};
 
-/// Insert a sample, or replace the problem and focus roles of the thread's
-/// existing sample while keeping its creation time.
+/// Insert a sample, or replace everything but the creation time of the
+/// thread's existing sample.
 pub fn save(conn: &Connection, sample: &EvalSample) -> Result<(), StorageError> {
     sample.validate()?;
     let focus_roles = serde_json::to_string(&sample.focus_roles)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     conn.execute(
-        "INSERT INTO eval_samples (thread_id, problem, focus_roles, created_at_ns, updated_at_ns) \
-         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(thread_id) DO UPDATE SET \
-         problem = excluded.problem, focus_roles = excluded.focus_roles, \
+        "INSERT INTO eval_samples (thread_id, problem, focus_roles, spec, created_at_ns, updated_at_ns) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(thread_id) DO UPDATE SET \
+         problem = excluded.problem, focus_roles = excluded.focus_roles, spec = excluded.spec, \
          updated_at_ns = excluded.updated_at_ns",
         params![
             sample.thread_id,
             sample.problem,
             focus_roles,
+            sample.spec_json()?,
             sample.created_at_ns,
             sample.updated_at_ns,
         ],
@@ -34,7 +35,7 @@ pub fn delete(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> 
 
 pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<EvalSample>, StorageError> {
     conn.query_row(
-        "SELECT thread_id, problem, focus_roles, created_at_ns, updated_at_ns \
+        "SELECT thread_id, problem, focus_roles, spec, created_at_ns, updated_at_ns \
          FROM eval_samples WHERE thread_id = ?1 \
          AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones)",
         [thread_id],
@@ -48,14 +49,14 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<EvalSample>, Sto
 /// Most recently updated first.
 pub fn list(conn: &Connection) -> Result<Vec<EvalSample>, StorageError> {
     let mut statement = conn.prepare(
-        "SELECT thread_id, problem, focus_roles, created_at_ns, updated_at_ns \
+        "SELECT thread_id, problem, focus_roles, spec, created_at_ns, updated_at_ns \
          FROM eval_samples WHERE thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY updated_at_ns DESC, thread_id",
     )?;
     let rows = statement.query_map([], raw)?;
     rows.map(|row| decode(row?)).collect()
 }
 
-type RawSample = (String, String, String, i64, i64);
+type RawSample = (String, String, String, String, i64, i64);
 
 fn raw(row: &Row<'_>) -> rusqlite::Result<RawSample> {
     Ok((
@@ -64,17 +65,25 @@ fn raw(row: &Row<'_>) -> rusqlite::Result<RawSample> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn decode(
-    (thread_id, problem, focus_roles, created_at_ns, updated_at_ns): RawSample,
+    (thread_id, problem, focus_roles, spec, created_at_ns, updated_at_ns): RawSample,
 ) -> Result<EvalSample, StorageError> {
+    let spec: Spec = serde_json::from_str(&spec)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
     Ok(EvalSample {
         thread_id,
         problem,
         focus_roles: serde_json::from_str(&focus_roles)
             .map_err(|error| StorageError::Serialization(error.to_string()))?,
+        kind: spec.kind,
+        source_refs: spec.source_refs,
+        tags: spec.tags,
+        checks: spec.checks,
+        check_version: spec.check_version.unwrap_or(CHECK_VERSION),
         created_at_ns,
         updated_at_ns,
     })

@@ -16,6 +16,7 @@ use crate::roles::SwappedRole;
 use crate::source::{OriginalThread, UserTurn};
 use crate::verify::Verification;
 use crate::workspace::RefChange;
+use storage::eval_sample::EvalSample;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DATABASE_FILE: &str = "evorch.db";
@@ -114,6 +115,25 @@ pub struct RunEntry {
     pub status: Option<Status>,
 }
 
+/// The sample an evaluation was started for, as it was when the evaluation
+/// started: later edits of the sample do not change what this evaluation is
+/// graded against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinnedSample {
+    /// [`EvalSample::content_hash`] of `sample`.
+    pub hash: String,
+    pub sample: EvalSample,
+}
+
+impl PinnedSample {
+    pub fn of(sample: EvalSample) -> Self {
+        Self {
+            hash: sample.content_hash(),
+            sample,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub thread_id: String,
@@ -125,6 +145,10 @@ pub struct Manifest {
     /// The problem the evaluation is about, judged as its own aspect.
     #[serde(default)]
     pub problem: Option<String>,
+    /// The thread's evaluation sample as it was at the start, with its checks;
+    /// `None` when the thread had none (no machine judgment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<PinnedSample>,
     /// The verification command run in each replay's final workspace.
     #[serde(default)]
     pub verify: Option<String>,

@@ -188,6 +188,11 @@ pub struct StartEvaluationReport {
     /// Judge again even where a judgment is cached (kind `rejudge`).
     #[serde(default)]
     pub rejudge: bool,
+    /// Only grade the runs against the sample's checks, from their recorded
+    /// evidence: nothing is judged, simulated, verified or priced. Cannot be
+    /// combined with `rejudge`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks_only: bool,
 }
 
 impl StartEvaluationReport {
@@ -206,6 +211,12 @@ impl StartEvaluationReport {
         check_count("targets", self.targets.len(), MAX_REPORT_TARGETS)?;
         for target in &self.targets {
             validate_target_name("targets", target)?;
+        }
+        if self.checks_only && self.rejudge {
+            return Err(ValidationError::Inconsistent {
+                field: "checks_only",
+                reason: "a checks-only report judges nothing, so it cannot rejudge",
+            });
         }
         Ok(())
     }

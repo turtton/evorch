@@ -20,6 +20,7 @@ fn fixture(root: &Path, finished: bool, lock: bool) {
         },
         original_turns: vec![],
         problem: None,
+        sample: None,
         verify: None,
         candidate_overlay: None,
         swapped_roles: vec![],
