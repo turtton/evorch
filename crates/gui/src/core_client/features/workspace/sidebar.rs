@@ -18,7 +18,7 @@ use crate::panes::lane_widgets::{
 };
 use crate::panes::pull_request_widgets::pull_request_badge;
 use crate::panes::sidebar_widgets::{
-    FAMILY_GAP, FAMILY_PAGE, Hidden, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
+    FAMILY_GAP, FAMILY_PAGE, Hidden, INDENT, LEGACY_SORT_CHOICES, ProjectRowView, ToolbarAction,
     ToolbarView, TrailingView, TreeRails, TreeRowLead, attention_note, family_gap_before,
     family_limit_id, hidden_count_badge, limit_families, project_row, restore_button, roll_up,
     sidebar_toolbar, title_label, trailing_controls, tree_row_lead,
@@ -161,7 +161,7 @@ impl WorkspaceFeature {
                                 ui,
                                 &scope,
                                 unread,
-                                &mut view.folded_threads,
+                                (&mut view.folded_threads, &mut view.opened_lanes),
                                 &mut rename,
                                 requests,
                             );
@@ -191,7 +191,7 @@ fn threads(
     ui: &mut Ui,
     scope: &Scope<'_>,
     unread: &BTreeSet<String>,
-    folded: &mut BTreeSet<String>,
+    (folded, opened_lanes): (&mut BTreeSet<String>, &mut BTreeSet<String>),
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
@@ -216,7 +216,35 @@ fn threads(
             || row.own.approval
             || row.own.unread
     });
-    draw_tree(ui, scope, &rows, false, folded, rename, requests);
+    // Lanes whose close stands go after the others; a lane not read yet counts as open.
+    let rows = tree::order_lanes(&rows, |row| {
+        scope
+            .lanes
+            .is_some_and(|menu| menu.current_close(&row.summary.id).is_some())
+    });
+    let lane_view = |lead: &str| {
+        if !opened_lanes.contains(lead) {
+            tree::LaneView::Collapsed
+        } else if ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(lane_all_id(project, lead)))
+            .unwrap_or(false)
+        {
+            tree::LaneView::All
+        } else {
+            tree::LaneView::Page
+        }
+    };
+    let lanes = tree::limit_lanes(&rows, tree::LANE_PAGE, lane_view);
+    draw_tree(
+        ui,
+        scope,
+        &lanes.rows,
+        Some((&lanes, opened_lanes)),
+        folded,
+        rename,
+        requests,
+    );
     if hidden > 0 {
         ui.indent(("more-threads-indent", project), |ui| {
             if ui
@@ -234,21 +262,31 @@ fn threads(
             egui::CollapsingHeader::new(format!("Archived ({})", tree.archived.len()))
                 .id_salt(("archived-threads", project))
                 .show(ui, |ui| {
-                    draw_tree(ui, scope, &tree.archived, true, folded, rename, requests);
+                    draw_tree(ui, scope, &tree.archived, None, folded, rename, requests);
                 });
         });
     }
 }
 
+/// Where a thread's "See more" for lanes is kept in egui's temporary data.
+fn lane_all_id(project: &str, lead: &str) -> egui::Id {
+    egui::Id::new(("sidebar-lane-all", project, lead))
+}
+
+/// What the live tree adds to the archived one: the lane lists, collapsed or limited,
+/// and the set of threads whose list the person opened.
+type LaneLists<'a, 'b> = Option<(&'a tree::LaneLimit<'a>, &'b mut BTreeSet<String>)>;
+
 fn draw_tree(
     ui: &mut Ui,
     scope: &Scope<'_>,
     rows: &[(ThreadRow<'_>, usize)],
-    archived: bool,
+    mut lanes: LaneLists<'_, '_>,
     folded: &mut BTreeSet<String>,
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
+    let archived = lanes.is_none();
     let rails = TreeRails::new(rows);
     let clip = ui.clip_rect();
     // Rails bridge the vertical gap between rows so a branch reads as one line.
@@ -273,11 +311,23 @@ fn draw_tree(
         let mut expansion = CollapsingState::load_with_default_open(ui.ctx(), id, true);
         // The folds are kept in the session file, so they decide over what egui remembers.
         expansion.set_open(!folded.contains(row.id()));
-        let hidden = if has_children && !expansion.is_open() {
+        let mut hidden = if has_children && !expansion.is_open() {
             roll_up(rows, index, |row| (row.running, row.own))
         } else {
             Hidden::default()
         };
+        // Lanes the limit left out are hidden children too: they keep their count and
+        // what they ask of the user on the row.
+        if let Some(group) = lanes
+            .as_ref()
+            .and_then(|(lanes, _)| lanes.groups.get(row.id()))
+        {
+            hidden = Hidden {
+                count: hidden.count + group.omitted.count,
+                running: hidden.running || group.omitted.running,
+                attention: hidden.attention.merge(group.omitted.attention),
+            };
+        }
         let colors = if archived {
             None
         } else {
@@ -380,7 +430,56 @@ fn draw_tree(
         {
             ui.label(muted(format!("Shared workspace: {root}")));
         }
+        if let Some((limit, opened)) = lanes.as_mut()
+            && let Some(leads) = limit.controls.get(&index)
+        {
+            for lead in leads {
+                if let Some(group) = limit.groups.get(lead) {
+                    lane_controls(ui, scope.project.as_str(), lead, group, opened);
+                }
+            }
+        }
     }
+}
+
+/// The controls after a thread's rows that show, limit and hide its lane list.
+fn lane_controls(
+    ui: &mut Ui,
+    project: &str,
+    lead: &str,
+    group: &tree::LaneGroup,
+    opened: &mut BTreeSet<String>,
+) {
+    let all = lane_all_id(project, lead);
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT * group.depth as f32 + SP_2);
+        if !group.open {
+            if ui
+                .add(ghost(muted(format!("Show lanes ({})", group.total))))
+                .on_hover_text("Show the lanes of this thread, newest first")
+                .clicked()
+            {
+                opened.insert(lead.to_owned());
+            }
+            return;
+        }
+        if group.omitted_lanes > 0
+            && ui
+                .add(ghost(muted(format!("See more ({})", group.omitted_lanes))))
+                .on_hover_text("Show every lane, the oldest and closed ones too")
+                .clicked()
+        {
+            ui.ctx().data_mut(|data| data.insert_temp(all, true));
+        }
+        if ui
+            .add(ghost(muted("Hide lanes")))
+            .on_hover_text("Collapse the lanes of this thread")
+            .clicked()
+        {
+            opened.remove(lead);
+            ui.ctx().data_mut(|data| data.remove::<bool>(all));
+        }
+    });
 }
 
 /// The row's title, or the field its new title is typed in.

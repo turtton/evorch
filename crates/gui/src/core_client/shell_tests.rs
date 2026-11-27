@@ -143,6 +143,19 @@ fn detail(fixture: &Fixture) -> ThreadDetail {
     }
 }
 
+/// A lane of thr-1 a test added to the cache, "thr-lane-3" being titled "Lane 3".
+fn extra_lane(id: &str) -> Option<Fixture> {
+    let number = id.strip_prefix("thr-lane-")?;
+    let title: &'static str = Box::leak(format!("Lane {number}").into_boxed_str());
+    let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+    Some(Fixture {
+        lead: Some("thr-1"),
+        parent: Some(("thr-1", LineageType::Fork)),
+        family: "thr-1",
+        ..thread(id, title, 0)
+    })
+}
+
 fn project(id: &str, name: &str) -> ProjectSummary {
     view(json!({"id": id, "display_name": name, "thread_count": 1, "revision": "1"}))
 }
@@ -183,6 +196,7 @@ fn answer(query: &WorkspaceQuery) -> WorkspaceReply {
             let fixture = threads()
                 .into_iter()
                 .find(|t| t.id == target.thread.as_str())
+                .or_else(|| extra_lane(target.thread.as_str()))
                 .expect("a fixture thread");
             WorkspaceReply::ThreadDetail(Box::new(detail(&fixture)))
         }
@@ -278,6 +292,10 @@ fn populated() -> Shared {
             "input_bytes": "22", "state": "pending",
         }));
         cache.approvals.insert(id.into(), approval);
+    }
+    // Lanes are collapsed by default; the lane tests start from a lead whose list was opened.
+    if let Some(workspace) = shared.features.workspace_mut() {
+        workspace.restore_opened_lanes(["thr-1".to_owned()]);
     }
     shared
 }
@@ -3074,6 +3092,7 @@ mod footer;
 mod settings;
 
 mod lanes;
+mod sidebar_lanes;
 
 mod composer;
 mod english_panes;

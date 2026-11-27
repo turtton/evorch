@@ -20,7 +20,7 @@ use workspace_ui::ProjectSort;
 
 use super::SidebarModel;
 use crate::core_client::cache::Cache;
-use crate::panes::sidebar_widgets::{Attention, BranchKind, RowStatus, nest};
+use crate::panes::sidebar_widgets::{Attention, BranchKind, Hidden, RowStatus, nest};
 
 /// One displayed thread of a project and what its row shows.
 #[derive(Clone, Copy, Debug)]
@@ -331,6 +331,173 @@ fn arrange<'a>(
         .into_iter()
         .map(|(index, depth)| (rows[index], depth))
         .collect()
+}
+
+/// Lanes a thread shows once its lane list is open, before "See more".
+pub const LANE_PAGE: usize = 5;
+
+/// How much of a thread's lane list is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneView {
+    /// The default: no lane row, only a control to show them.
+    Collapsed,
+    /// The newest [`LANE_PAGE`] lanes, then "See more".
+    Page,
+    All,
+}
+
+/// The lane list of one thread that has lanes, as the limit left it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaneGroup {
+    /// The lanes the limit left out, with everything below them.
+    pub omitted: Hidden,
+    /// How many lanes the thread has.
+    pub total: usize,
+    /// How many of them the limit left out.
+    pub omitted_lanes: usize,
+    /// The lane list is open (not [`LaneView::Collapsed`]).
+    pub open: bool,
+    /// The row depth of its lanes.
+    pub depth: usize,
+}
+
+/// Rows with the lane lists limited.
+#[derive(Debug, Default)]
+pub struct LaneLimit<'a> {
+    pub rows: Vec<(ThreadRow<'a>, usize)>,
+    /// The groups by the thread they belong to.
+    pub groups: HashMap<&'a str, LaneGroup>,
+    /// By the index in `rows` of the last row of a thread's subtree, the threads whose
+    /// lane controls follow it, innermost first.
+    pub controls: HashMap<usize, Vec<&'a str>>,
+}
+
+/// The end (exclusive) of the subtree that starts at `rows[index]`.
+fn subtree_end(rows: &[(ThreadRow<'_>, usize)], index: usize) -> usize {
+    let depth = rows[index].1;
+    index
+        + 1
+        + rows[index + 1..]
+            .iter()
+            .take_while(|(_, next)| *next > depth)
+            .count()
+}
+
+/// Puts the lanes of every thread in the order the sidebar lists them: the ones whose
+/// close stands (`closed`) after the others, each group newest first. Other children
+/// keep their places.
+///
+/// "Newest" is the thread's `updated_at`, the core's latest activity of the thread. The
+/// core does not report when the user or the lead last wrote to a lane.
+pub fn order_lanes<'a>(
+    rows: &[(ThreadRow<'a>, usize)],
+    closed: impl Fn(&ThreadRow<'a>) -> bool,
+) -> Vec<(ThreadRow<'a>, usize)> {
+    fn level<'a>(
+        rows: &[(ThreadRow<'a>, usize)],
+        closed: &impl Fn(&ThreadRow<'a>) -> bool,
+        out: &mut Vec<(ThreadRow<'a>, usize)>,
+    ) {
+        let mut subtrees = Vec::new();
+        let mut start = 0;
+        while start < rows.len() {
+            let end = subtree_end(rows, start);
+            subtrees.push(&rows[start..end]);
+            start = end;
+        }
+        let is_lane =
+            |subtree: &[(ThreadRow<'a>, usize)]| subtree[0].0.kind == Some(BranchKind::Lane);
+        let mut lanes: Vec<_> = subtrees.iter().copied().filter(|s| is_lane(s)).collect();
+        lanes.sort_by_key(|subtree| {
+            let row = &subtree[0].0;
+            (closed(row), std::cmp::Reverse(row.summary.updated_at.get()))
+        });
+        let mut lanes = lanes.into_iter();
+        for subtree in subtrees {
+            let subtree = if is_lane(subtree) {
+                lanes.next().unwrap_or(subtree)
+            } else {
+                subtree
+            };
+            out.push(subtree[0]);
+            level(&subtree[1..], closed, out);
+        }
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    level(rows, &closed, &mut out);
+    out
+}
+
+/// Limits every thread's lane list to what `view` says; `rows` have their lanes in
+/// display order (see [`order_lanes`]), so the ones left out are the oldest, and the
+/// closed ones first. Forks and escalations are not counted and stay.
+pub fn limit_lanes<'a>(
+    rows: &[(ThreadRow<'a>, usize)],
+    limit: usize,
+    view: impl Fn(&str) -> LaneView,
+) -> LaneLimit<'a> {
+    let mut dropped = vec![false; rows.len()];
+    let mut groups = HashMap::new();
+    let mut ends = Vec::new();
+    for (lead, &(row, depth)) in rows.iter().enumerate() {
+        let end = subtree_end(rows, lead);
+        let mut group = LaneGroup {
+            omitted: Hidden::default(),
+            total: 0,
+            omitted_lanes: 0,
+            open: view(row.id()) != LaneView::Collapsed,
+            depth: depth + 1,
+        };
+        let mut child = lead + 1;
+        while child < end {
+            let next = subtree_end(rows, child);
+            if rows[child].1 == depth + 1 && rows[child].0.kind == Some(BranchKind::Lane) {
+                group.total += 1;
+                let shown = match view(row.id()) {
+                    LaneView::Collapsed => false,
+                    LaneView::Page => group.total <= limit,
+                    LaneView::All => true,
+                };
+                if !shown {
+                    group.omitted_lanes += 1;
+                    for index in child..next {
+                        dropped[index] = true;
+                        let (gone, _) = rows[index];
+                        group.omitted = Hidden {
+                            count: group.omitted.count + 1,
+                            running: group.omitted.running || gone.running,
+                            attention: group.omitted.attention.merge(gone.own),
+                        };
+                    }
+                }
+            }
+            child = next;
+        }
+        if group.total > 0 {
+            groups.insert(row.id(), group);
+            ends.push((lead, end));
+        }
+    }
+    let mut position = vec![None; rows.len()];
+    let mut kept = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if !dropped[index] {
+            position[index] = Some(kept.len());
+            kept.push(*row);
+        }
+    }
+    let mut controls: HashMap<usize, Vec<&'a str>> = HashMap::new();
+    // A deeper thread starts later in tree order, so reading backwards gives innermost first.
+    for &(lead, end) in ends.iter().rev() {
+        if let Some(last) = (lead..end).rev().find_map(|index| position[index]) {
+            controls.entry(last).or_default().push(rows[lead].0.id());
+        }
+    }
+    LaneLimit {
+        rows: kept,
+        groups,
+        controls,
+    }
 }
 
 /// The project's threads that are not archived; a thread whose detail is not read
@@ -733,5 +900,93 @@ mod tests {
         assert_eq!(ids(ProjectSort::Name), ["b", "c", "a"]);
         // "b"'s only thread is archived: it has no live activity.
         assert_eq!(ids(ProjectSort::RecentActivity), ["a", "b", "c"]);
+    }
+
+    /// "lead" with a fork and lanes `l1..` (a higher number is newer); the lanes in
+    /// `closed` are marked in the returned set.
+    fn lead_with_lanes(count: u64) -> World {
+        let mut threads = vec![("lead".to_owned(), 1_000), ("fork".to_owned(), 5)];
+        threads.extend((1..=count).map(|n| (format!("l{n}"), 100 + n)));
+        let refs: Vec<(&str, u64)> = threads.iter().map(|(id, at)| (id.as_str(), *at)).collect();
+        let mut world = World::new(&refs);
+        world.detail(detail("lead"));
+        world.detail(child("fork", "lead", LineageType::Fork));
+        for n in 1..=count {
+            world
+                .cache
+                .threads
+                .get_mut(&format!("l{n}"))
+                .unwrap()
+                .lead_thread = Some(ThreadId::new("lead").unwrap());
+            world.detail(detail(&format!("l{n}")));
+        }
+        world
+    }
+
+    fn ids(rows: &[(ThreadRow<'_>, usize)]) -> Vec<String> {
+        rows.iter().map(|(row, _)| row.id().to_owned()).collect()
+    }
+
+    // Given: a lead with six lanes, l2 and l5 closed, and a fork that is older than all
+    // When: the lanes are ordered
+    // Then: the open lanes come newest first, then the closed ones newest first; the fork,
+    //       not a lane, keeps its place at the end
+    #[test]
+    fn closed_lanes_follow_the_open_ones_each_newest_first() {
+        let world = lead_with_lanes(6);
+        let tree = world.tree();
+        let ordered = order_lanes(&tree.main, |row| ["l2", "l5"].contains(&row.id()));
+        assert_eq!(
+            ids(&ordered),
+            ["lead", "l6", "l4", "l3", "l1", "l5", "l2", "fork"]
+        );
+    }
+
+    // Given: a lead with seven lanes, the three newest closed, its list open at the page limit
+    // When: its lanes are limited
+    // Then: the five shown are the open lanes then the newest closed one, the older closed
+    //       lanes are the ones left out, and the fork stays
+    #[test]
+    fn the_limit_leaves_out_the_closed_lanes_before_the_open_ones() {
+        let world = lead_with_lanes(7);
+        let tree = world.tree();
+        let ordered = order_lanes(&tree.main, |row| ["l5", "l6", "l7"].contains(&row.id()));
+        let limited = limit_lanes(&ordered, LANE_PAGE, |_| LaneView::Page);
+        assert_eq!(
+            ids(&limited.rows),
+            ["lead", "l4", "l3", "l2", "l1", "l7", "fork"]
+        );
+        let group = limited.groups["lead"];
+        assert_eq!((group.total, group.omitted_lanes, group.open), (7, 2, true));
+        assert_eq!(group.omitted.count, 2);
+        // The controls follow the last row of the lead's subtree.
+        assert_eq!(limited.controls[&(limited.rows.len() - 1)], ["lead"]);
+    }
+
+    // Given: a lead with seven lanes in each view
+    // When: its lanes are limited
+    // Then: collapsed leaves out all of them and keeps the fork, a page shows five and all shows
+    //       every one; a lead with no more than five lanes omits none in a page
+    #[test]
+    fn a_collapsed_list_hides_every_lane_and_a_short_list_needs_no_see_more() {
+        let world = lead_with_lanes(7);
+        let tree = world.tree();
+        let ordered = order_lanes(&tree.main, |_| false);
+        let collapsed = limit_lanes(&ordered, LANE_PAGE, |_| LaneView::Collapsed);
+        assert_eq!(ids(&collapsed.rows), ["lead", "fork"]);
+        let group = collapsed.groups["lead"];
+        assert_eq!(
+            (group.total, group.omitted_lanes, group.open),
+            (7, 7, false)
+        );
+        let all = limit_lanes(&ordered, LANE_PAGE, |_| LaneView::All);
+        assert_eq!(all.rows.len(), ordered.len());
+        assert_eq!(all.groups["lead"].omitted_lanes, 0);
+
+        let world = lead_with_lanes(5);
+        let tree = world.tree();
+        let page = limit_lanes(&tree.main, LANE_PAGE, |_| LaneView::Page);
+        assert_eq!(page.rows.len(), tree.main.len());
+        assert_eq!(page.groups["lead"].omitted_lanes, 0);
     }
 }
