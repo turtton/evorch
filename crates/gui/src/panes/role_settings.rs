@@ -259,10 +259,10 @@ fn role_settings_content(
 /// Shown when the image generator has no chain: image generation is off (ADR 0038).
 pub const IMAGE_GENERATION_DISABLED: &str = "Disabled (generate_image unavailable)";
 /// What conversation and compactor chains accept.
-const CHAT_ROUTES: &str =
+pub(crate) const CHAT_ROUTES: &str =
     "Only routes of chat models are offered for agent roles and the compactor.";
 /// What the image generator chain accepts.
-const IMAGE_ROUTES: &str =
+pub(crate) const IMAGE_ROUTES: &str =
     "Only routes of image generation models on Codex or OpenAI profiles are offered.";
 
 /// `AgentsConfig::binding_for` と同じ優先順で、編集中のチェーンの先頭 route を解決する。
@@ -419,7 +419,7 @@ fn entry_effort(
 }
 
 /// 推論強度の ComboBox。一覧外の現在値は `(custom)` として保持する。
-fn effort_picker(
+pub(crate) fn effort_picker(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     unset: &str,
@@ -449,7 +449,7 @@ fn effort_picker(
         .response
 }
 
-fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+pub(crate) fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     let label = ui.label(label);
     let mut text = value.clone().unwrap_or_default();
     if ui
@@ -466,7 +466,7 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     }
 }
 
-fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
+pub(crate) fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
     optional_number(ui, "Temperature", (&mut value.temperature, 0.0..=2.0));
     optional_number(ui, "Max tokens", (&mut value.max_tokens, 1..=u32::MAX));
 }
