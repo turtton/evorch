@@ -32,6 +32,7 @@ use workbench_protocol::{
 };
 
 mod activity;
+mod shell_jobs;
 
 struct Replay {
     cursor: EventCursor,
@@ -64,6 +65,7 @@ struct State {
     project_names: std::collections::BTreeMap<String, String>,
     models: Models,
     activities: BTreeMap<(String, String), activity::LiveTool>,
+    shell_jobs: shell_jobs::ShellJobs,
     replay: VecDeque<Replay>,
     replay_bytes: usize,
     subscribers: Vec<Subscriber>,
@@ -125,6 +127,7 @@ impl State {
         self.epoch_tx.send_replace(self.epoch);
         self.sequence = 0;
         self.activities.clear();
+        self.shell_jobs.clear();
         self.replay.clear();
         self.replay_bytes = 0;
         self.snapshots.clear();
@@ -196,13 +199,19 @@ impl RefreshWakeups {
                     // Fragments are neither projected nor replayed.
                     wakeups.dirty |= !matches!(
                         event.kind,
-                        EventKind::Message(
-                            event_bus::MessageEvent::MessageDelta { .. }
-                                | event_bus::MessageEvent::ReasoningDelta { .. }
-                                | event_bus::MessageEvent::ToolCallDelta { .. }
-                        )
+                        EventKind::Tool(event_bus::ToolEvent::ShellJobOutput { .. })
+                            | EventKind::Message(
+                                event_bus::MessageEvent::MessageDelta { .. }
+                                    | event_bus::MessageEvent::ReasoningDelta { .. }
+                                    | event_bus::MessageEvent::ToolCallDelta { .. }
+                            )
                     );
-                    if activity::relevant(&event.kind) {
+                    if activity::relevant(&event.kind)
+                        || matches!(
+                            event.kind,
+                            EventKind::Tool(event_bus::ToolEvent::ShellJobOutput { .. })
+                        )
+                    {
                         wakeups.activities.push(event);
                     }
                 }
@@ -313,6 +322,7 @@ impl Projection {
                 project_names: Default::default(),
                 models: Models::default(),
                 activities: BTreeMap::new(),
+                shell_jobs: Default::default(),
                 replay: VecDeque::new(),
                 replay_bytes: 0,
                 subscribers: vec![],
@@ -323,9 +333,11 @@ impl Projection {
         });
         let weak = Arc::downgrade(&this);
         let models = handle.spawn(async move {
+            let mut flush = tokio::time::interval(shell_jobs::OUTPUT_INTERVAL);
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>) }
-                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a) };
+                enum Change { Event(Result<event_bus::Event, RecvError>), Approval(Result<ApprovalSnapshot, tokio::sync::broadcast::error::RecvError>), ShellFlush }
+                let change = tokio::select! { e = events.recv() => Change::Event(e), a = approvals.recv() => Change::Approval(a), _ = flush.tick() => Change::ShellFlush };
                 let Some(this) = weak.upgrade() else { break };
                 // Never retain the projection (and its runtime) across a scheduler wait:
                 // failed bootstrap must be able to drop both without another task poll.
@@ -335,12 +347,13 @@ impl Projection {
                         // and share the snapshot / cursor publication boundary.
                         let wakeups = RefreshWakeups::drain(&mut events, event).await;
                         if wakeups.lagged { this.invalidate(); }
-                        if wakeups.dirty { Self::in_background(this, move |p| {
-                            if p.refresh_models().is_err() { p.invalidate(); return; }
-                            for event in wakeups.activities { p.observe_activity(event); }
+                        if wakeups.dirty || !wakeups.activities.is_empty() { Self::in_background(this, move |p| {
+                            if wakeups.dirty && p.refresh_models().is_err() { p.invalidate(); return; }
+                            for event in wakeups.activities { p.observe_shell(event.clone(), tokio::time::Instant::now()); p.observe_activity(event); }
                         }).await; }
                         wakeups.closed
                     }
+                    (this, Change::ShellFlush) => { this.flush_shell(tokio::time::Instant::now()); false }
                     (this, Change::Approval(Ok(approval))) => { Self::in_background(this, move |p| if p.approval_changed(&approval.id).is_err() { p.invalidate(); }).await; false }
                     (this, Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_)))) => {
                         // Lost input means the projection cannot vouch for ANY old cursor.
@@ -829,6 +842,15 @@ impl Projection {
         query: &Query,
         q: &ExecutionQuery,
     ) -> Result<ExecutionReply, WorkbenchError> {
+        if let ExecutionQuery::ReadShellOutput(q) = q {
+            return self
+                .state
+                .lock()
+                .unwrap()
+                .shell_jobs
+                .read(q)
+                .map(ExecutionReply::ShellOutput);
+        }
         let ExecutionQuery::ListRuns(q) = q else {
             return Err(area_owned());
         };
@@ -979,6 +1001,22 @@ impl Projection {
                 hook();
             }
             let mut items = snapshot_items(&state.models, &request.scope);
+            items.extend(
+                state
+                    .shell_jobs
+                    .views()
+                    .filter(|job| {
+                        matches_scope(
+                            &state.models,
+                            &request.scope,
+                            &UiEvent::Execution(ExecutionEvent::ShellJobChanged {
+                                job: (*job).clone(),
+                            }),
+                        )
+                    })
+                    .cloned()
+                    .map(SnapshotItem::ShellJob),
+            );
             let mut snapshot_bytes = serde_json::to_vec(&items).unwrap().len();
             if snapshot_bytes > MAX_SNAPSHOT_BYTES {
                 return Err(queries::error(
@@ -1258,6 +1296,8 @@ fn also_for(event: &UiEvent) -> &[ThreadId] {
 fn thread_of(event: &UiEvent) -> Option<&ThreadId> {
     match event {
         UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) => Some(&thread.id),
+        UiEvent::Execution(ExecutionEvent::ShellJobChanged { job }) => Some(&job.thread),
+        UiEvent::Execution(ExecutionEvent::ShellJobOutput { thread, .. }) => Some(thread),
         UiEvent::Execution(ExecutionEvent::ToolStarted { tool }) => Some(&tool.thread),
         UiEvent::Execution(ExecutionEvent::ToolFinished { thread, .. }) => Some(thread),
         UiEvent::Execution(ExecutionEvent::RunChanged { run }) => Some(&run.thread),

@@ -158,6 +158,7 @@ fn each_operation_asks_for_the_capability_it_always_asked_for() {
         ("workspace/list_threads", Queries),
         ("workspace/get_thread", Queries),
         ("execution/list_runs", Queries),
+        ("execution/read_shell_output", Queries),
         ("questions/list_questions", Questions),
         ("approvals/list_approvals", Approvals),
         ("approvals/get_approval_input", Approvals),

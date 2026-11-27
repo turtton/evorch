@@ -91,7 +91,7 @@ impl ExecutionArea {
             return Ok(QueryReply::Execution(reply));
         }
         let reply = match q {
-            ExecutionQuery::ListRuns(_) => {
+            ExecutionQuery::ListRuns(_) | ExecutionQuery::ReadShellOutput(_) => {
                 return Err(error(
                     ErrorCode::InvalidRequest,
                     "answered by the projection",
