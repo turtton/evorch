@@ -686,29 +686,42 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect, lite: bool) -> Tool 
 /// (受理されている) ため、送信済みの schema を変えないよう残します。
 const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "else"];
 
-/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を再帰的に取り除きます。
+/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を取り除きます。
 ///
-/// `properties` / `$defs` / `definitions` の key は利用者の名前なので、同名でも消さず値の
-/// schema だけを辿ります。`enum` / `const` / `default` / `examples` はデータなので辿りません。
+/// schema を値に取る JSON Schema の位置だけを辿ります。`properties` などの名前付きマップは
+/// key (利用者の名前) を保ったまま値を schema として辿り、`dependentRequired` / `required` /
+/// `enum` / `const` / `default` / `examples` などのデータは触りません。
 fn strip_unsupported_keywords(schema: &mut serde_json::Value) {
     use serde_json::Value;
-    match schema {
-        Value::Object(map) => {
-            for keyword in STRICT_UNSUPPORTED_KEYWORDS {
-                map.remove(*keyword);
+    let Value::Object(map) = schema else { return };
+    for keyword in STRICT_UNSUPPORTED_KEYWORDS {
+        map.remove(*keyword);
+    }
+    for (key, child) in map.iter_mut() {
+        match (key.as_str(), child) {
+            (
+                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas",
+                Value::Object(named),
+            ) => named.values_mut().for_each(strip_unsupported_keywords),
+            (
+                "items"
+                | "additionalItems"
+                | "additionalProperties"
+                | "unevaluatedItems"
+                | "unevaluatedProperties"
+                | "contains"
+                | "propertyNames"
+                | "not",
+                child,
+            ) => match child {
+                Value::Array(tuple) => tuple.iter_mut().for_each(strip_unsupported_keywords),
+                child => strip_unsupported_keywords(child),
+            },
+            ("allOf" | "anyOf" | "oneOf" | "prefixItems", Value::Array(branches)) => {
+                branches.iter_mut().for_each(strip_unsupported_keywords);
             }
-            for (key, child) in map.iter_mut() {
-                match (key.as_str(), child) {
-                    ("enum" | "const" | "default" | "examples", _) => {}
-                    ("properties" | "$defs" | "definitions", Value::Object(named)) => {
-                        named.values_mut().for_each(strip_unsupported_keywords);
-                    }
-                    (_, child) => strip_unsupported_keywords(child),
-                }
-            }
+            _ => {}
         }
-        Value::Array(items) => items.iter_mut().for_each(strip_unsupported_keywords),
-        _ => {}
     }
 }
 

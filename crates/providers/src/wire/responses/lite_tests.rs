@@ -440,3 +440,63 @@ fn lite_schemas_without_rejected_keywords_are_unchanged() {
         serde_json::to_string(&schema).unwrap()
     );
 }
+
+// Given: a Lite tool schema that uses the rejected keywords' names as data (property names,
+// patternProperties and dependentRequired/dependentSchemas keys, required entries, enum, const
+// and default values) but has none of them as keywords
+// When: serialized for a Lite Codex model
+// Then: the schema is sent byte for byte as it is
+#[test]
+fn lite_schemas_keep_rejected_keyword_names_used_as_data() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "if": {"type": "string", "enum": ["then", "else"], "default": "uniqueItems"},
+            "then": {"type": "object", "properties": {"else": {"const": "if"}}},
+            "uniqueItems": {"type": "array", "items": {"type": "string"}}
+        },
+        "patternProperties": {"^if$": {"type": "string"}, "else": {"type": "integer"}},
+        "dependentRequired": {"if": ["then", "uniqueItems"]},
+        "dependentSchemas": {"else": {"properties": {"then": {"type": "string"}}}},
+        "required": ["if", "then"],
+        "$defs": {"uniqueItems": {"type": "string"}},
+        "examples": [{"if": 1, "uniqueItems": true}]
+    });
+    let parameters =
+        first_tool_parameters(&wire_with(&schema_request(schema.clone()), Some(astra())));
+    assert_eq!(parameters, schema);
+}
+
+// Given: rejected keywords at every schema position (items, additionalProperties, not, the
+// branches of anyOf, dependentSchemas and patternProperties values, $defs)
+// When: serialized for a Lite Codex model
+// Then: they are all removed, and the names around them are kept
+#[test]
+fn lite_schemas_lose_rejected_keywords_at_every_schema_position() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"a": {"type": "array", "items": {"type": "array", "uniqueItems": true}}},
+        "additionalProperties": {"type": "array", "uniqueItems": true},
+        "not": {"if": {"required": ["a"]}, "then": {"required": ["b"]}},
+        "anyOf": [{"type": "array", "uniqueItems": true}],
+        "dependentSchemas": {"a": {"if": {}, "else": {}}},
+        "patternProperties": {"^x": {"uniqueItems": true}},
+        "$defs": {"d": {"uniqueItems": true}},
+        "dependentRequired": {"a": ["b"]}
+    });
+    let parameters = first_tool_parameters(&wire_with(&schema_request(schema), Some(astra())));
+    assert_eq!(
+        parameters,
+        json!({
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {"type": "array"}}},
+            "additionalProperties": {"type": "array"},
+            "not": {},
+            "anyOf": [{"type": "array"}],
+            "dependentSchemas": {"a": {}},
+            "patternProperties": {"^x": {}},
+            "$defs": {"d": {}},
+            "dependentRequired": {"a": ["b"]}
+        })
+    );
+}
