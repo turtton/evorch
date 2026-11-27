@@ -1110,7 +1110,10 @@ impl CoreClientScreen {
         if effects.iter().any(|effect| {
             matches!(
                 effect,
-                shell::Effect::Goal(_) | shell::Effect::Lane(_) | shell::Effect::PullRequest(_)
+                shell::Effect::Goal(_)
+                    | shell::Effect::Lane(_)
+                    | shell::Effect::PullRequest(_)
+                    | shell::Effect::PullRequestChip(_)
             )
         }) {
             // The goal or lane command leaves in its feature's next pass.
@@ -1275,6 +1278,11 @@ fn apply_effect(
                     .is_some_and(|pull_requests| pull_requests.enqueue_bar(action))
                 {
                     shared.features.reveal(features::FeatureId::PullRequests);
+                }
+            }
+            shell::Effect::PullRequestChip(action) => {
+                if let Some(pull_requests) = shared.features.pull_requests_mut() {
+                    pull_requests.enqueue_chip(action);
                 }
             }
             // The run tabs of other threads, out of the dock, go with the layout too.

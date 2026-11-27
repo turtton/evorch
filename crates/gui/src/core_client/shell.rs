@@ -57,6 +57,9 @@ pub enum Effect {
     /// A control pressed on the pull request bar of a conversation, for the pull requests
     /// feature.
     PullRequest(super::features::pull_requests::PullRequestBarAction),
+    /// "Link PR" or "Ignore" pressed on a suggestion shown on a tool card, for the pull
+    /// requests feature.
+    PullRequestChip(super::features::pull_requests::PullRequestChipAction),
     ResetLayout,
     ThemeSettings,
     /// ⚙ → Providers, Routing or Agent roles: the Settings tab with its modal on that tab.
@@ -484,6 +487,7 @@ impl TabViewer for Viewer<'_, '_> {
                 let band = self.pass.execution().and_then(|e| e.band());
                 let lane = self.pass.lanes().and_then(|lanes| lanes.card());
                 let pull_request = self.pass.pull_requests().and_then(|prs| prs.bar());
+                let chips = self.pass.pull_requests().and_then(|prs| prs.chips());
                 self.conversation.set_mention_scope(self.local.roots());
                 conversation::show(
                     ui,
@@ -494,6 +498,7 @@ impl TabViewer for Viewer<'_, '_> {
                         band,
                         lane,
                         pull_request,
+                        chips,
                     },
                     root.as_ref(),
                     self.effects,
@@ -508,6 +513,7 @@ impl TabViewer for Viewer<'_, '_> {
             CoreTab::File(id) => self.local.file_tab(ui, id),
             CoreTab::Run(id) => {
                 let phase = self.attention.run_phase(id);
+                let chips = self.pass.pull_requests().and_then(|prs| prs.chips());
                 conversation::run_tab(
                     ui,
                     self.conversation,
@@ -517,6 +523,7 @@ impl TabViewer for Viewer<'_, '_> {
                     conversation::RunTabView {
                         tab: self.run_tabs.get(id),
                         phase,
+                        chips,
                     },
                     self.effects,
                 );

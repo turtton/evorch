@@ -797,6 +797,87 @@ fn candidates_are_offered_by_their_label_and_linked_at_the_revision_read() {
     assert_eq!(confirm.expected_revision, Revision(3));
 }
 
+fn candidate(id: u64, state: CandidateState, run: &str, call: &str) -> CandidateView {
+    CandidateView {
+        candidate_id: id,
+        pull_request: PullRequestRef {
+            number: 100 + id,
+            ..reference()
+        },
+        state,
+        source_run_id: RunId::new(run).unwrap(),
+        source_call_id: call.into(),
+    }
+}
+
+// Given: suggestions of two runs that used the same call id, and an ignored one
+// Then: a call is offered only the open suggestions of its own run and call id
+#[test]
+fn candidate_chips_are_scoped_to_run_and_call() {
+    let mut view = view(false, true);
+    view.candidates = vec![
+        candidate(5, CandidateState::Presented, "run-1", "call-1"),
+        candidate(6, CandidateState::Presented, "run-2", "call-1"),
+        candidate(7, CandidateState::Dismissed, "run-1", "call-1"),
+    ];
+    let mut screen = loaded(view);
+    let run = |name: &str| RunId::new(name).unwrap();
+    let chips = feature(&mut screen).chips().unwrap();
+    assert_eq!(
+        chips.offers(&run("run-1"), "call-1"),
+        [(5, "o/r#105".to_owned())]
+    );
+    assert_eq!(
+        chips.offers(&run("run-2"), "call-1"),
+        [(6, "o/r#106".to_owned())]
+    );
+    assert!(chips.offers(&run("run-1"), "call-2").is_empty());
+}
+
+// Given: a suggestion offered on a call's card
+// When: Link PR and Ignore are pressed from it, and a press is applied after a newer read
+// Then: each sends the command of that suggestion at the revision read, and the press made
+//       from the older read is dropped
+#[test]
+fn a_chip_press_sends_the_candidate_command_and_is_dropped_when_stale() {
+    let mut view = view(false, true);
+    view.candidates = vec![candidate(5, CandidateState::Presented, "run-1", "call-1")];
+    let mut screen = loaded(view.clone());
+    let press = |screen: &mut Harness<'static, Screen>, choice| {
+        let chips = feature(screen).chips().unwrap();
+        let action = chips.action(5, choice);
+        feature(screen).enqueue_chip(action);
+    };
+    press(&mut screen, CandidateChoice::Link);
+    let sent = asked(&mut screen);
+    let PullRequestsCommand::ConfirmPullRequestCandidate(confirm) = pr_command(&sent[0]) else {
+        panic!("a confirmation was expected");
+    };
+    assert_eq!(
+        (confirm.candidate_id, confirm.expected_revision),
+        (5, Revision(3))
+    );
+
+    let mut screen = loaded(view.clone());
+    press(&mut screen, CandidateChoice::Ignore);
+    let sent = asked(&mut screen);
+    assert!(matches!(
+        pr_command(&sent[0]),
+        PullRequestsCommand::DismissPullRequestCandidate(dismiss) if dismiss.candidate_id == 5
+    ));
+
+    let mut screen = loaded(view.clone());
+    let chips = feature(&mut screen).chips().unwrap();
+    let stale = chips.action(5, CandidateChoice::Link);
+    feature(&mut screen).event(&changed(THREAD));
+    let read = asked(&mut screen);
+    let mut newer = view;
+    newer.lifecycle_revision = Revision(4);
+    answer(&mut screen, read[0].tag, thread_reply(newer));
+    feature(&mut screen).enqueue_chip(stale);
+    assert!(asked(&mut screen).is_empty());
+}
+
 const STORE_CLOSED: &str = "the event store is not open";
 
 fn read_failure() -> FeatureReply {
