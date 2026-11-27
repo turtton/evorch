@@ -166,15 +166,17 @@ fn token_bytes(value: &str, tokenized: bool) -> Option<u64> {
         .map(|reference| reference.byte_len)
 }
 
-/// Compact JSON as parts. A long string stays a deferred part between two quote marks, so
-/// nothing nested in an argument is lost and no body is read to build a row.
+/// JSON-shaped display parts, with string contents shown verbatim even when nested.
+/// A deferred body contains the original string, not its JSON encoding. Inline strings
+/// must use that same representation so tokenization cannot change the displayed input.
+/// No body is read to build a row.
 fn json_parts(value: &Value, tokenized: bool) -> Parts {
     fn walk(value: &Value, tokenized: bool, text: &mut String, parts: &mut Parts) {
         match value {
-            Value::String(s) if token_bytes(s, tokenized).is_some() => {
+            Value::String(s) => {
                 text.push('"');
                 parts.push((std::mem::take(text), false));
-                parts.push((s.clone(), true));
+                parts.push((s.clone(), token_bytes(s, tokenized).is_some()));
                 text.push('"');
             }
             Value::Array(items) => {
