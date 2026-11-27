@@ -20,7 +20,8 @@ pub(super) fn retain(
     let result = crate::repo::event::tool_body_retention::apply(&tx, request)?;
     tx.commit()?;
     if result.changed != 0 {
-        state.accounting = crate::repo::event::EventAccounting::default();
+        // Preserve the warn-only lane's once-per-day warning marker.
+        state.accounting = state.accounting.invalidated();
     }
     Ok(result)
 }

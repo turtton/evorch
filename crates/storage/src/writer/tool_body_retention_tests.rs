@@ -24,6 +24,13 @@ fn tool_body_retention_wal_pipeline_bounds_gc_vacuum_and_allows_writes_between_t
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("pipeline.db"),
+        // The warn-only lane is now on main: all stages also progress over limits.
+        hard_limits: HardLimits {
+            max_db_bytes: 1,
+            max_wal_bytes: 1,
+            max_daily_event_bytes: 1,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let db = Database::open(&config).unwrap();
@@ -83,7 +90,7 @@ fn tool_body_retention_wal_pipeline_bounds_gc_vacuum_and_allows_writes_between_t
         pending: HashMap::new(),
         writes_suspended: false,
         soft_warned: false,
-        suspend_logged: false,
+        over_limit_warned: false,
         temp_warned: false,
         next_flush_at: now,
         next_checkpoint_at: now,
@@ -148,7 +155,7 @@ fn tool_body_retention_wal_pipeline_bounds_gc_vacuum_and_allows_writes_between_t
                 run_id: "foreground".into(),
                 text: format!("write-{tick}"),
             }),
-            &HardLimits::default(),
+            &config.hard_limits,
             &mut event::EventAccounting::default(),
         )
         .unwrap();
