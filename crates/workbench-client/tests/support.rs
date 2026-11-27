@@ -263,6 +263,7 @@ pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
                 content: MessageContent::Inline {
                     text: "x".repeat(bytes),
                 },
+                tool: None,
             },
         }),
     )

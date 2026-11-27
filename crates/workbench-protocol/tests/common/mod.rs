@@ -437,6 +437,7 @@ pub fn message(content: MessageContent) -> CommittedMessage {
         index: Sequence(17),
         role: MessageRole::Assistant,
         content,
+        tool: None,
     }
 }
 
@@ -621,4 +622,28 @@ pub fn all_query_replies() -> Vec<QueryReply> {
         .into_iter()
         .chain(areas::query_replies())
         .collect()
+}
+
+pub fn tool_call() -> ToolCallView {
+    ToolCallView {
+        tool_name: "shell".into(),
+        call_id: "call-1".into(),
+        parent_call_id: Some("call-0".into()),
+        input_summary: Some("cargo test".into()),
+        input: Some(MessageContent::Inline {
+            text: "command: cargo test".into(),
+        }),
+        status: ToolCallStatus::Failed,
+        detail: Some(MessageContent::Body(body_ref())),
+    }
+}
+
+pub fn tool_message() -> CommittedMessage {
+    CommittedMessage {
+        role: MessageRole::Tool,
+        tool: Some(tool_call()),
+        ..message(MessageContent::Inline {
+            text: "exit code 1".into(),
+        })
+    }
 }

@@ -146,10 +146,11 @@ pub(super) fn transcript(
                     }
                 });
             }
-            if messages.is_empty() {
+            let items = items(&messages);
+            if items.is_empty() {
                 empty(ui);
             }
-            for item in items(&messages) {
+            for item in items {
                 match item {
                     Item::Message(message) => {
                         let top = ui.cursor().min.y;
@@ -263,9 +264,21 @@ impl ViewAnchor {
     }
 }
 
+/// Whether this view draws `message`. Reasoning, notices and errors are not replies, so they
+/// neither show nor close a tool run; a tool call without output has never drawn a card.
+fn drawn(message: &CommittedMessage) -> bool {
+    match message.role {
+        MessageRole::User | MessageRole::Assistant => true,
+        MessageRole::Tool => {
+            !matches!(&message.content, MessageContent::Inline { text } if text.is_empty())
+        }
+        MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => false,
+    }
+}
+
 fn items<'a>(history: &[&'a CommittedMessage]) -> Vec<Item<'a>> {
     let mut items: Vec<Item<'a>> = Vec::new();
-    for message in history {
+    for message in history.iter().filter(|message| drawn(message)) {
         let same_run = |tools: &[&CommittedMessage]| tools[0].run == message.run;
         match (message.role, items.last_mut()) {
             (MessageRole::Tool, Some(Item::Tools { tools, .. })) if same_run(tools) => {
@@ -357,6 +370,8 @@ fn message_row(
                         }
                     });
             }
+            // Filtered out by `drawn`.
+            MessageRole::Reasoning | MessageRole::Notice | MessageRole::Error => {}
         },
     );
 }
@@ -618,6 +633,37 @@ mod tests {
             committed("r", 1, "assistant", "not s's reply"),
         ];
         assert_eq!(shapes(&mixed), [(1, false), (1, false)]);
+    }
+
+    // Given: reasoning, a notice and an error between and after a run's tool outputs
+    // Then: none of them is drawn, none counts as the run's reply, and the tools stay one
+    //       open group; a real reply afterwards still folds them
+    #[test]
+    fn reasoning_notices_and_errors_are_not_replies() {
+        let tool = |index| committed("r", index, "tool", "exit_code: 0\nok");
+        let aside = |index, role| committed("r", index, role, "aside");
+        let history = [
+            aside(0, "reasoning"),
+            tool(1),
+            aside(2, "notice"),
+            tool(3),
+            aside(4, "error"),
+        ];
+        assert_eq!(shapes(&history), [(2, false)]);
+        let refs: Vec<_> = history.iter().collect();
+        assert!(
+            items(&refs)
+                .iter()
+                .all(|item| matches!(item, Item::Tools { .. }))
+        );
+
+        let mut replied = history.to_vec();
+        replied.push(committed("r", 5, "assistant", "done"));
+        assert_eq!(shapes(&replied), [(2, true)]);
+        assert!(
+            items(&[&aside(0, "reasoning")]).is_empty(),
+            "an aside alone draws nothing"
+        );
     }
 
     fn harness(cache: Cache) -> egui_kittest::Harness<'static, Cache> {

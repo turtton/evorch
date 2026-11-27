@@ -9,9 +9,11 @@ struct LegacyScanner {
     initial_receipts: std::collections::BTreeSet<String>,
     first_prompt: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
     last_assistant: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
+    starts: std::collections::BTreeMap<(String, String), Option<storage::history::ToolInput>>,
 }
 impl LegacyScanner {
     fn observe(&mut self, kind: &EventKind, tokenized: bool) -> Option<RawMessage> {
+        let mut tool = None;
         let (run, role, parts) = if let EventKind::Message(MessageEvent::MessagePart {
             run_id,
             response_id,
@@ -37,17 +39,33 @@ impl LegacyScanner {
             let parts = self.parts.remove(&key)?.2;
             (run_id.as_str(), MessageRole::Assistant, parts)
         } else {
-            let (run, role, body) = committed_text(kind)?;
-            (run, role, vec![(body.to_owned(), tokenized)])
+            let mut start = None;
+            if let Some((run, call, input)) = storage::history::rows::tool_start(kind, tokenized) {
+                self.starts.insert((run.to_owned(), call.to_owned()), input);
+            } else if let EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+                call_id,
+                run_id: Some(run),
+                ..
+            }) = kind
+            {
+                start = self
+                    .starts
+                    .remove(&(run.clone(), call_id.clone()))
+                    .flatten();
+            }
+            let row = committed_row(kind, tokenized, start)?;
+            tool = row.tool;
+            (row.run, message_role(row.role), row.parts)
         };
         let prompt = matches!(
             kind,
             EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
         );
-        self.message(
+        self.message_with(
             run,
             role,
             parts,
+            tool,
             prompt,
             matches!(
                 kind,
@@ -78,6 +96,7 @@ impl LegacyScanner {
                 id: input.prompt_id,
                 bytes: input.text_bytes,
             }),
+            tool: None,
         };
         *index += 1;
         Some(raw)
@@ -87,6 +106,17 @@ impl LegacyScanner {
         run: &str,
         role: MessageRole,
         parts: Vec<(String, bool)>,
+        prompt: bool,
+        finish: bool,
+    ) -> Option<RawMessage> {
+        self.message_with(run, role, parts, None, prompt, finish)
+    }
+    fn message_with(
+        &mut self,
+        run: &str,
+        role: MessageRole,
+        parts: Vec<(String, bool)>,
+        tool: Option<storage::history::ToolRow>,
         prompt: bool,
         finish: bool,
     ) -> Option<RawMessage> {
@@ -111,7 +141,8 @@ impl LegacyScanner {
                 }
             })
             .collect();
-        if (role == MessageRole::Assistant && key.iter().all(|(_, n)| *n == 0))
+        if (matches!(role, MessageRole::Assistant | MessageRole::Reasoning)
+            && key.iter().all(|(_, n)| *n == 0))
             || (finish && self.last_assistant.get(run) == Some(&key))
         {
             return None;
@@ -141,6 +172,7 @@ impl LegacyScanner {
             role,
             parts,
             input: None,
+            tool,
         };
         *index += 1;
         Some(raw)
@@ -303,22 +335,14 @@ fn fixed_digest_matches_vector_oracle_at_parts_boundaries() {
             ] {
                 let expected = old.message("run", role, parts.clone(), prompt, finish);
                 let actual = new
-                    .message(
-                        match role {
-                            MessageRole::User => storage::history::Role::User,
-                            MessageRole::Assistant => storage::history::Role::Assistant,
-                            MessageRole::Tool => storage::history::Role::Tool,
-                        },
-                        parts.clone(),
-                        prompt,
-                        finish,
-                    )
+                    .message(storage_role(role), parts.clone(), prompt, finish)
                     .map(|m| RawMessage {
                         run: "run".into(),
                         index: m.index,
                         role,
                         parts: m.parts,
                         input: None,
+                        tool: None,
                     });
                 assert_eq!(
                     serde_json::to_value(actual).unwrap(),
@@ -474,19 +498,34 @@ fn seed_history(store: &storage::Storage, runs: &[String], rng: &mut Rng) {
                     },
                 );
             }
-            5 => append(
-                store,
-                clock,
-                event_bus::ToolEvent::ToolCompleted {
-                    tool_name: "t".into(),
-                    call_id: format!("c{n}"),
-                    is_error: false,
-                    output: (rng.below(3) != 0).then(|| "out".into()),
-                    detail: None,
-                    run_id: Some(run),
-                    parent_call_id: None,
-                },
-            ),
+            5 => {
+                if rng.below(3) != 0 {
+                    append(
+                        store,
+                        clock,
+                        event_bus::ToolEvent::ToolStarted {
+                            tool_name: "t".into(),
+                            call_id: format!("c{n}"),
+                            input: Some(serde_json::json!({"command": format!("run {n}")})),
+                            run_id: Some(run.clone()),
+                            parent_call_id: None,
+                        },
+                    );
+                }
+                append(
+                    store,
+                    clock,
+                    event_bus::ToolEvent::ToolCompleted {
+                        tool_name: "t".into(),
+                        call_id: format!("c{n}"),
+                        is_error: false,
+                        output: (rng.below(3) != 0).then(|| "out".into()),
+                        detail: None,
+                        run_id: Some(run),
+                        parent_call_id: None,
+                    },
+                );
+            }
             6 => append(
                 store,
                 clock,

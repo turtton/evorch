@@ -41,7 +41,7 @@ use storage::pull_requests as stored;
 use workbench_protocol::{
     errors::{ErrorCode, RetryAdvice, WorkbenchError},
     events::UiEvent,
-    ids::{OperationId, ThreadId},
+    ids::{OperationId, RunId, ThreadId},
     namespaces::pull_requests::{
         AUTO_FIX_LIMIT, AutoFixView, CandidateState, CandidateView, CheckView, FactsView,
         FetchFailureView, HeadAttribution, LinkOrigin, LinkView, MAX_MESSAGE_BYTES, MAX_OPERATIONS,
@@ -939,14 +939,21 @@ impl ThreadRead {
             candidates: self
                 .candidates
                 .iter()
-                .map(|candidate| CandidateView {
-                    candidate_id: candidate.candidate_id,
-                    pull_request: reference(&candidate.key),
-                    state: match candidate.state {
-                        stored::CandidateState::Presented => CandidateState::Presented,
-                        stored::CandidateState::Dismissed => CandidateState::Dismissed,
-                        stored::CandidateState::Confirmed => CandidateState::Confirmed,
-                    },
+                .filter_map(|candidate| {
+                    // A view the protocol would refuse must not take the rest of the snapshot down.
+                    (candidate.source_call_id.len() <= workbench_protocol::limits::MAX_NAME_BYTES)
+                        .then_some(())?;
+                    Some(CandidateView {
+                        candidate_id: candidate.candidate_id,
+                        pull_request: reference(&candidate.key),
+                        source_run_id: RunId::new(candidate.source_run_id.clone()).ok()?,
+                        source_call_id: candidate.source_call_id.clone(),
+                        state: match candidate.state {
+                            stored::CandidateState::Presented => CandidateState::Presented,
+                            stored::CandidateState::Dismissed => CandidateState::Dismissed,
+                            stored::CandidateState::Confirmed => CandidateState::Confirmed,
+                        },
+                    })
                 })
                 .collect(),
             auto_fix: self.auto_fix.as_ref().map(|state| AutoFixView {
@@ -1043,4 +1050,66 @@ fn notice_view(notice: &storage::pull_request_auto_fix::PrNotice) -> Option<Noti
         },
         payload: notice.payload.clone(),
     })
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    // Given: two candidates of one pull request source, from different runs with one call id
+    // Then: each view names its own run and call, so a client never joins the wrong card
+    #[test]
+    fn candidate_view_preserves_run_and_call_origin() {
+        let candidate = |id, run: &str| stored::PullRequestCandidate {
+            candidate_id: id,
+            thread_id: "thread-1".into(),
+            key: stored::PullRequestKey::github("o/r", id).unwrap(),
+            source_run_id: run.into(),
+            source_call_id: "call-1".into(),
+            state: stored::CandidateState::Presented,
+            created_at_ns: 0,
+            updated_at_ns: 0,
+        };
+        let read = ThreadRead {
+            state: stored::ThreadPullRequestState {
+                thread_id: "thread-1".into(),
+                lifecycle_revision: 0,
+                transition_seq: 0,
+                active_link: None,
+                local_head: None,
+                inheritance: None,
+            },
+            link: None,
+            snapshot: None,
+            candidates: vec![
+                candidate(1, "run-a"),
+                candidate(2, "run-b"),
+                stored::PullRequestCandidate {
+                    source_call_id: "x".repeat(300),
+                    ..candidate(3, "run-c")
+                },
+            ],
+            auto_fix: None,
+        };
+        let view = read.into_view(
+            ThreadId::new("thread-1").unwrap(),
+            true,
+            true,
+            true,
+            HeadAttribution::Unknown,
+        );
+        let origins: Vec<_> = view
+            .candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.candidate_id,
+                    c.source_run_id.as_str(),
+                    c.source_call_id.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(origins, [(1, "run-a", "call-1"), (2, "run-b", "call-1")]);
+        view.validate().unwrap();
+    }
 }

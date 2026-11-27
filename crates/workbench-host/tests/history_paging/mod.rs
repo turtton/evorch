@@ -1,4 +1,5 @@
 use super::*;
+mod structured;
 use workbench_host::queries::HistoryRoute;
 
 fn append(f: &Fixture, text: &str) {

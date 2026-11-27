@@ -729,6 +729,7 @@ impl TranscriptModel {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
             MessageEvent::MessageCompleted { .. }
+            | MessageEvent::ReasoningCompleted { .. }
             | MessageEvent::MessagePart { .. }
             | MessageEvent::ToolCallDelta { .. }
             | MessageEvent::StreamRetried { .. } => return,
@@ -798,6 +799,7 @@ impl TranscriptModel {
                 MessageEvent::MessageDelta { .. }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. }
+                | MessageEvent::ReasoningCompleted { .. }
                 | MessageEvent::MessagePart { .. }
                 | MessageEvent::ToolCallDelta { .. }
                 | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {

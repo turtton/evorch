@@ -10,7 +10,7 @@ use std::{
 };
 
 pub(crate) const FORMAT_VERSION: i64 = 1;
-pub(crate) const REDUCER_VERSION: i64 = 2;
+pub(crate) const REDUCER_VERSION: i64 = 3;
 pub(crate) const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid() -> StorageError {
@@ -124,12 +124,10 @@ pub(crate) fn source_kind_limited(
     Ok((kind, format == 1))
 }
 fn text_part(kind: &EventKind, tokenized: bool) -> Result<(String, bool), StorageError> {
-    let text = if let EventKind::Message(MessageEvent::MessagePart { text, .. }) = kind {
-        text.as_str()
-    } else {
-        super::committed_text(kind).ok_or_else(invalid)?.2
+    let EventKind::Message(MessageEvent::MessagePart { text, .. }) = kind else {
+        return Err(invalid());
     };
-    Ok((text.into(), tokenized))
+    Ok((text.clone(), tokenized))
 }
 
 #[derive(Debug)]
@@ -142,6 +140,10 @@ pub(crate) struct Prepared {
     pub response: Option<String>,
     pub clear_pending: bool,
     pub pending: Option<(usize, usize)>,
+    /// A `ToolStarted` to remember: `(call_id)`, keyed by this event.
+    pub tool_start: Option<String>,
+    /// The call a `ToolCompleted` ends, so its start is forgotten.
+    pub tool_end: Option<String>,
     pub write_bound: usize,
 }
 
@@ -194,6 +196,8 @@ pub(crate) fn prepare_budgeted(
     let mut clear_pending = false;
     let mut pending = None;
     let mut pending_rows = 0;
+    let mut tool_start = None;
+    let mut tool_end = None;
     let message = if let EventKind::Message(MessageEvent::MessagePart {
         response_id,
         index,
@@ -256,7 +260,33 @@ pub(crate) fn prepare_budgeted(
             next.first_prompt = Some(id);
             next.first_prompt_merge = next.merge_max;
         }
-        next.reducer.observe(kind, tokenized, &mut None)
+        let mut start = None;
+        if let Some((_, call_id, _)) = super::rows::tool_start(kind, tokenized) {
+            tool_start = Some(call_id.to_owned());
+        }
+        if let EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+            call_id,
+            run_id: Some(_),
+            ..
+        }) = kind
+        {
+            tool_end = Some(call_id.clone());
+            let begun: Option<i64> = conn
+                .prepare_cached(
+                    "SELECT event_id FROM history_tool_starts WHERE run_id=?1 AND call_id=?2",
+                )?
+                .query_row(params![prior.run, call_id], |r| r.get(0))
+                .optional()?;
+            if let Some(source) = begun {
+                let (begun, format) = source_kind_limited(conn, source, remaining)?;
+                let (_, _, input) = super::rows::tool_start(&begun, format).ok_or_else(invalid)?;
+                if input.is_some() {
+                    sources.push(source);
+                }
+                start = input;
+            }
+        }
+        next.reducer.observe(kind, tokenized, &mut None, start)
     };
     next.checkpoint = Some(id);
     next.last_indexed = Some(next.last_indexed.map_or(id, |last| last.max(id)));
@@ -272,6 +302,8 @@ pub(crate) fn prepare_budgeted(
     let write_bound = 2
         + if clear_pending { pending_rows } else { 0 }
         + usize::from(pending.is_some())
+        + usize::from(tool_start.is_some())
+        + usize::from(tool_end.is_some())
         + if message.is_some() {
             sources.len() + 1
         } else {
@@ -286,6 +318,8 @@ pub(crate) fn prepare_budgeted(
         response,
         clear_pending,
         pending,
+        tool_start,
+        tool_end,
         write_bound,
     })
 }
@@ -297,13 +331,11 @@ struct EncodedMessage<'a> {
     role: &'static str,
     parts: &'a [(String, bool)],
     input: Option<()>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: &'a Option<super::ToolRow>,
 }
 fn encoded_len(run: &str, message: &super::Message) -> Result<usize, StorageError> {
-    let role = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    };
+    let role = message.role.as_str();
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -323,6 +355,7 @@ fn encoded_len(run: &str, message: &super::Message) -> Result<usize, StorageErro
             role,
             parts: &message.parts,
             input: None,
+            tool: &message.tool,
         },
     )
     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -348,13 +381,19 @@ pub(crate) fn apply(conn: &Connection, p: &Prepared, ready: bool) -> Result<bool
     if let Some((index, total)) = p.pending {
         conn.prepare_cached("INSERT INTO history_pending_parts(run_id,response_id,part_index,total,event_id) VALUES (?1,?2,?3,?4,?5)")?.execute(params![n.run,p.response,index as u64,total as u64,p.id])?;
     }
+    if let Some(call_id) = &p.tool_end {
+        conn.prepare_cached("DELETE FROM history_tool_starts WHERE run_id=?1 AND call_id=?2")?
+            .execute(params![n.run, call_id])?;
+    }
+    if let Some(call_id) = &p.tool_start {
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO history_tool_starts(run_id,call_id,event_id) VALUES (?1,?2,?3)",
+        )?
+        .execute(params![n.run, call_id, p.id])?;
+    }
     conn.prepare_cached("INSERT INTO history_event_cuts(run_id,event_id,before_count,after_count,merge_max) VALUES (?1,?2,?3,?4,?5)")?.execute(params![n.run,p.id,old.reducer.next,n.reducer.next,n.merge_max])?;
     if let Some(message) = &p.message {
-        let role = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
+        let role = message.role.as_str();
         conn.prepare_cached("INSERT INTO history_messages(run_id,output_event_id,ordinal,role,encoded_len) VALUES (?1,?2,?3,?4,?5)")?.execute(params![n.run,p.id,message.index,role,message.encoded_len as u64])?;
         let mut s=conn.prepare_cached("INSERT INTO history_message_sources(run_id,output_event_id,part_index,event_id) VALUES (?1,?2,?3,?4)")?;
         for (index, id) in p.sources.iter().enumerate() {

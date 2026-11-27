@@ -474,3 +474,29 @@ async fn usage_tick_flushes_reasoning_first_and_cancelled_receiver_releases_capa
     assert_eq!(monitor.snapshot().pending_events, 0);
     assert_eq!(monitor.snapshot().oldest_pending_age, Duration::ZERO);
 }
+
+// Given: an accepted reasoning observation larger than a stored row
+// Then: it becomes independent observation rows that lose no text and need no reassembly
+#[test]
+fn oversized_reasoning_observation_becomes_independent_rows() {
+    let guard = secret_guard::SecretRedactor::with_known_values([]);
+    let text = "思考".repeat(400);
+    let event = Event::new(MessageEvent::ReasoningCompleted {
+        run_id: "run".into(),
+        text: text.clone(),
+    });
+    let rows = split_oversize(&event, 512, &guard).unwrap();
+    assert!(rows.len() > 1);
+    let joined: String = rows
+        .iter()
+        .map(|row| match &row.kind {
+            EventKind::Message(MessageEvent::ReasoningCompleted { run_id, text }) => {
+                assert_eq!(run_id, "run");
+                assert!(json_len(&row.kind) <= 512);
+                text.as_str()
+            }
+            other => panic!("expected a reasoning observation, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(joined, text);
+}

@@ -111,6 +111,7 @@ impl EventKind {
             },
             Self::Message(event) => match event {
                 MessageEvent::MessageCompleted { .. } => "MessageCompleted",
+                MessageEvent::ReasoningCompleted { .. } => "ReasoningCompleted",
                 MessageEvent::MessagePart { .. } => "MessagePart",
                 MessageEvent::FinalResultPublished { .. } => "FinalResultPublished",
                 MessageEvent::MessageDelta { .. } => "MessageDelta",
@@ -202,6 +203,7 @@ impl EventKind {
             },
             Self::Message(event) => match event {
                 MessageEvent::MessageCompleted { run_id, .. }
+                | MessageEvent::ReasoningCompleted { run_id, .. }
                 | MessageEvent::MessagePart { run_id, .. }
                 | MessageEvent::FinalResultPublished { run_id, .. } => Some(run_id),
                 MessageEvent::MessageDelta { run_id, .. }
@@ -1013,6 +1015,11 @@ pub enum MessageEvent {
     /// Canonical text of one accepted model response, replacing its streamed deltas.
     /// This is observational only and does not mark the run as finished.
     MessageCompleted { run_id: String, text: String },
+    /// Displayable reasoning text of one accepted model response, published just
+    /// before that response's `MessageCompleted`. Observational only: it is a copy,
+    /// never part of the conversation sent to the provider, and failed or retried
+    /// attempts never produce it. Opaque or encrypted reasoning is not carried.
+    ReasoningCompleted { run_id: String, text: String },
     /// One slice of an accepted response, written only by the storage bridge
     /// when the response is too large for a single `MessageCompleted` row.
     ///

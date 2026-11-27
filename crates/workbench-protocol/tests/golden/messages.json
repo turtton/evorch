@@ -23,5 +23,49 @@
     "role": "assistant",
     "run": "run-1",
     "thread": "thr-1"
+  },
+  "reasoning": {
+    "content": {
+      "payload": {
+        "text": "think"
+      },
+      "type": "inline"
+    },
+    "index": "17",
+    "role": "reasoning",
+    "run": "run-1",
+    "thread": "thr-1"
+  },
+  "tool": {
+    "content": {
+      "payload": {
+        "text": "exit code 1"
+      },
+      "type": "inline"
+    },
+    "index": "17",
+    "role": "tool",
+    "run": "run-1",
+    "thread": "thr-1",
+    "tool": {
+      "call_id": "call-1",
+      "detail": {
+        "payload": {
+          "body_id": "body-1",
+          "total_bytes": "1099511627776"
+        },
+        "type": "body"
+      },
+      "input": {
+        "payload": {
+          "text": "command: cargo test"
+        },
+        "type": "inline"
+      },
+      "input_summary": "cargo test",
+      "parent_call_id": "call-0",
+      "status": "failed",
+      "tool_name": "shell"
+    }
   }
 }

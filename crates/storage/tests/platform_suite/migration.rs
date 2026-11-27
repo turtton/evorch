@@ -12,15 +12,16 @@ use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 78;
+const LATEST_SCHEMA: u32 = 79;
 
-const EXPECTED_TABLES: [&str; 136] = [
+const EXPECTED_TABLES: [&str; 137] = [
     "history_control",
     "history_run_state",
     "history_event_cuts",
     "history_messages",
     "history_message_sources",
     "history_pending_parts",
+    "history_tool_starts",
     "thread_goal_usage_current",
     "cli_continuity_grants",
     "cli_continuity_clock",
@@ -1358,6 +1359,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../../undo/undo_v79.sql"),
                 include_str!("../../undo/undo_v78.sql"),
                 include_str!("../../undo/undo_v77.sql"),
                 include_str!("../../undo/undo_v76.sql"),

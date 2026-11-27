@@ -91,6 +91,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "events-only transcript projection",
     ),
     (
+        "history_tool_starts",
+        ReclaimRun,
+        "events-only transcript projection",
+    ),
+    (
         "history_messages",
         ReclaimRun,
         "events-only transcript projection",

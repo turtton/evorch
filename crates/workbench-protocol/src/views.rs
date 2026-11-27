@@ -271,12 +271,19 @@ pub struct InputReceipt {
     pub sent_by: Provenance,
 }
 
+/// What a committed-history row is. `Tool` rows carry a [`ToolCallView`]; no other role does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
     Assistant,
     Tool,
+    /// Displayable reasoning of an accepted model response; never a reply.
+    Reasoning,
+    /// A core-written note about the run, such as a provider switch.
+    Notice,
+    /// A core-written failure of a request or of the run.
+    Error,
 }
 
 /// A body stored apart from its message because it is large.
@@ -295,6 +302,63 @@ pub enum MessageContent {
     Body(BodyRef),
 }
 
+impl MessageContent {
+    fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
+        match self {
+            Self::Inline { text } => check_bytes(field, text, MAX_INLINE_MESSAGE_BYTES, true),
+            Self::Body(_) => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    Succeeded,
+    Failed,
+}
+
+/// One finished tool call as committed history records it. The call's result is the
+/// row's `content`; a call without output has empty content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCallView {
+    pub tool_name: String,
+    /// Provider call id; together with the row's run it identifies the call.
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
+    /// One line naming what the call acted on, absent when its arguments have no obvious subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<String>,
+    /// The arguments as text; absent when the call's start was not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<MessageContent>,
+    pub status: ToolCallStatus,
+    /// Metadata the tool attached to its result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<MessageContent>,
+}
+
+impl ToolCallView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("tool_name", &self.tool_name, MAX_NAME_BYTES, false)?;
+        check_bytes("call_id", &self.call_id, MAX_NAME_BYTES, false)?;
+        if let Some(parent) = &self.parent_call_id {
+            check_bytes("parent_call_id", parent, MAX_NAME_BYTES, false)?;
+        }
+        if let Some(summary) = &self.input_summary {
+            check_bytes("input_summary", summary, MAX_TITLE_BYTES, false)?;
+        }
+        self.input
+            .as_ref()
+            .map_or(Ok(()), |input| input.validate("input"))?;
+        self.detail
+            .as_ref()
+            .map_or(Ok(()), |detail| detail.validate("detail"))
+    }
+}
+
 /// A message that is part of committed history. Streaming deltas are never exposed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -305,15 +369,25 @@ pub struct CommittedMessage {
     pub index: Sequence,
     pub role: MessageRole,
     pub content: MessageContent,
+    /// Present exactly on `Tool` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolCallView>,
 }
 
 impl CommittedMessage {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        match &self.content {
-            MessageContent::Inline { text } => {
-                check_bytes("content", text, MAX_INLINE_MESSAGE_BYTES, true)
-            }
-            MessageContent::Body(_) => Ok(()),
+        self.content.validate("content")?;
+        match (&self.role, &self.tool) {
+            (MessageRole::Tool, Some(tool)) => tool.validate(),
+            (MessageRole::Tool, None) => Err(ValidationError::Inconsistent {
+                field: "tool",
+                reason: "a tool row must describe its call",
+            }),
+            (_, Some(_)) => Err(ValidationError::Inconsistent {
+                field: "tool",
+                reason: "only a tool row describes a call",
+            }),
+            (_, None) => Ok(()),
         }
     }
 }

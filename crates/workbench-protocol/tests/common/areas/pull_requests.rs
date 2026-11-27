@@ -87,6 +87,8 @@ pub fn thread_view() -> ThreadPullRequest {
             candidate_id: 9,
             pull_request: reference(),
             state: CandidateState::Presented,
+            source_run_id: crate::run(),
+            source_call_id: "call-1".into(),
         }],
         auto_fix: Some(AutoFixView {
             enabled: true,

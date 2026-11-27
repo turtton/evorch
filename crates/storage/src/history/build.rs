@@ -45,9 +45,10 @@ impl Clock for SystemClock {
     }
 }
 
-pub(crate) const TABLES: [&str; 4] = [
+pub(crate) const TABLES: [&str; 5] = [
     "history_message_sources",
     "history_pending_parts",
+    "history_tool_starts",
     "history_messages",
     "history_event_cuts",
 ];

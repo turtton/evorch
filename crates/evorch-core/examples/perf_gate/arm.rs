@@ -223,7 +223,10 @@ impl CoreArm {
                     match message.role {
                         MessageRole::Assistant => *counts.assistant.entry(thread).or_default() += 1,
                         MessageRole::User => *counts.user.entry(thread).or_default() += 1,
-                        MessageRole::Tool => {}
+                        MessageRole::Tool
+                        | MessageRole::Reasoning
+                        | MessageRole::Notice
+                        | MessageRole::Error => {}
                     }
                     drop(counts);
                     sink.notify.notify_waiters();

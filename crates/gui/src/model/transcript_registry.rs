@@ -269,6 +269,7 @@ impl TranscriptRegistry {
             EventKind::Message(
                 MessageEvent::FinalResultPublished { run_id, .. }
                 | MessageEvent::MessageCompleted { run_id, .. }
+                | MessageEvent::ReasoningCompleted { run_id, .. }
                 | MessageEvent::MessagePart { run_id, .. },
             ) => self.route_run(run_id),
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
@@ -386,6 +387,7 @@ impl TranscriptRegistry {
                 | MessageEvent::StreamRetried { run_id: Some(_) }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. }
+                | MessageEvent::ReasoningCompleted { .. }
                 | MessageEvent::MessagePart { .. },
             )
             | EventKind::Lifecycle(_)
