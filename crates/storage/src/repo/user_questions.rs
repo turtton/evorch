@@ -176,6 +176,8 @@ fn answer_checked(
             params![id, route.routing_revision, payload],
         )?;
         question.routing_revision = route.routing_revision;
+        let at_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
+        crate::repo::lane_delivery::notify_lead_of_user_answer(conn, &route, at_ns)?;
         crate::repo::lane_delivery::enqueue(
             conn,
             event_bus::lane::LaneNotification {
@@ -189,7 +191,7 @@ fn answer_checked(
                     routing_revision: route.routing_revision,
                 },
                 report_seq: None,
-                created_at_ns: crate::system_time_to_ns(std::time::SystemTime::now())?,
+                created_at_ns: at_ns,
             },
         )?;
     }

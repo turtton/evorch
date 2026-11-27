@@ -207,6 +207,10 @@ async fn attached_questions_list_answer_and_user_reroute_preserve_lead_cache_pre
     )
     .await;
     assert_eq!(result(&h, "route")["question"]["id"], routed.id);
+    // The user's answer reaches the lane in full, and the live lead only by
+    // reference: one appended notification, then the usual turn on it.
+    h.mock
+        .enqueue(vec![text_response("noted the user's answer")]);
     let human = h
         .runtime
         .answer_user_question(&routed.id, "actual user decision")
@@ -215,6 +219,7 @@ async fn attached_questions_list_answer_and_user_reroute_preserve_lead_cache_pre
         human.answer_origin,
         Some(AnswerOrigin::Host { .. })
     ));
+    events.extend(through_phase(&mut h.receiver, lead, AgentRunPhase::Waiting).await);
     input(
         &mut h,
         lead,
@@ -237,6 +242,12 @@ async fn attached_questions_list_answer_and_user_reroute_preserve_lead_cache_pre
     .await;
     let requests = lead_requests(&h);
     assert!(requests.len() >= 9);
+    let wire = serde_json::to_string(requests.last().unwrap()).unwrap();
+    assert!(wire.contains("user_answered") && wire.contains(&routed.id));
+    assert!(
+        !wire.contains("actual user decision"),
+        "the lead is told by reference, never the answer text"
+    );
     for pair in requests.windows(2) {
         assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
     }
