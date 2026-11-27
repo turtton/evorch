@@ -1,5 +1,6 @@
 //! 4-byte BE length + JSON. A dedicated writer multiplexes replies and events.
 use crate::backend::{HostBackend, error};
+use crate::connection_log::ConnectionLog;
 use std::{collections::BTreeMap, io, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -21,6 +22,19 @@ async fn payload(read: &mut (impl AsyncRead + Unpin), max: u32) -> io::Result<Ve
     let mut bytes = vec![0; len as usize];
     read.read_exact(&mut bytes).await?;
     Ok(bytes)
+}
+/// The text of serde's error quotes the input (an unknown field name, a wrong
+/// value), and this error is logged: keep only what kind of error and where.
+fn malformed_hello(e: serde_json::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "malformed client hello ({:?} error at line {} column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        ),
+    )
 }
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
@@ -68,7 +82,19 @@ async fn say_goodbye(
 pub async fn connection(
     stream: UnixStream,
     backend: Arc<HostBackend>,
+    shutdown: watch::Receiver<bool>,
+) -> io::Result<()> {
+    let log = ConnectionLog::new(&shutdown);
+    let result = serve_connection(stream, backend, shutdown, &log).await;
+    log.finished(&result);
+    result
+}
+
+async fn serve_connection(
+    stream: UnixStream,
+    backend: Arc<HostBackend>,
     mut shutdown: watch::Receiver<bool>,
+    log: &ConnectionLog,
 ) -> io::Result<()> {
     let verified_peer = workbench_authority::verify_unix_peer(&stream)?;
     let (mut read, write) = stream.into_split();
@@ -81,7 +107,7 @@ pub async fn connection(
     };
     let mut hello = backend.hello();
     let _connected = backend.connected();
-    let client: ClientHello = serde_json::from_slice(&first).map_err(invalid)?;
+    let client: ClientHello = serde_json::from_slice(&first).map_err(malformed_hello)?;
     let negotiated = negotiate(
         &client,
         &ServerOffer {
@@ -113,7 +139,7 @@ pub async fn connection(
     // and closes only after that.
     let (finish, mut finish_rx) = tokio::sync::oneshot::channel::<()>();
     let (flushed_tx, flushed) = tokio::sync::oneshot::channel::<()>();
-    tasks.spawn(async move {
+    tasks.spawn(log.task("writer", async move {
         let mut finishing = false;
         loop {
             let frame = tokio::select! {
@@ -137,16 +163,17 @@ pub async fn connection(
             let _ = flushed_tx.send(());
         }
         Ok::<_, io::Error>(true)
-    });
+    }));
     let (incoming, mut requests) = mpsc::channel(64);
-    tasks.spawn(async move {
+    tasks.spawn(log.task("reader", async move {
         loop {
             let frame = payload(&mut read, max).await?;
             if incoming.send(frame).await.is_err() {
                 return Ok(true);
             }
         }
-    });
+    }));
+    log.established(client.client_instance_id.as_str());
     let _client_connection = backend.client_connection(client.client_instance_id.clone());
     let surface = match client.local_surface {
         Some(LocalSurface::Cli) => Surface::Cli,
@@ -163,7 +190,7 @@ pub async fn connection(
     loop {
         let bytes = tokio::select! {
             _ = shutdown.changed() => break,
-            ended = tasks.join_next() => match ended { Some(Ok(Ok(false))) => continue, Some(Err(e)) if e.is_cancelled() => continue, _ => break },
+            ended = tasks.join_next() => match ended { Some(Ok(Ok(false))) => continue, Some(Err(e)) if e.is_cancelled() => continue, other => { log.task_ended(&other); break } },
             r = requests.recv() => match r { Some(r) => r, None => break },
         };
         let request = match decode_request(&bytes, &hello.limits) {
@@ -179,6 +206,7 @@ pub async fn connection(
                     tokio::select! { _ = shutdown.changed() => break, r = output.send(ServerFrame::Reply(reply)) => { r.map_err(invalid)?; } }
                     continue;
                 }
+                log.closing("a request without an id could not be decoded");
                 break;
             }
         };

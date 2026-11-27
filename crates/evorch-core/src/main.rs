@@ -12,7 +12,9 @@ mod args;
 #[cfg(target_os = "linux")]
 mod planned_entry;
 fn main() -> std::process::ExitCode {
-    match run() {
+    let result = run();
+    evorch_core::logging::flush();
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             let code = if e
@@ -64,6 +66,7 @@ fn run() -> Result<(), BootstrapError> {
         if args.mode != args::Mode::Serve || args.launch_fd.is_some() {
             return Err("invalid planned handoff mode".into());
         }
+        evorch_core::logging::init();
         return planned_entry::run(args, mask, inherited);
     }
     if args.mode == args::Mode::Help {
@@ -87,6 +90,7 @@ fn run() -> Result<(), BootstrapError> {
     )? {
         return Ok(());
     }
+    evorch_core::logging::init();
     let config_dir = args
         .config_dir
         .or_else(config::user_config_dir)
@@ -124,6 +128,8 @@ async fn serve(
     #[cfg(target_os = "linux")] observer: evorch_core::lifecycle::shutdown_watchdog::Observer,
     #[cfg(target_os = "linux")] mask: Arc<core_instance::handoff::BlockedShutdownSignals>,
 ) -> Result<(), BootstrapError> {
+    // The runtime exists and the entry work that needs one thread is done.
+    evorch_core::logging::start();
     let instance = Arc::new(Instance::acquire_default(&launch)?);
     #[cfg(target_os = "linux")]
     let options =

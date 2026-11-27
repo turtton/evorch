@@ -179,3 +179,20 @@ fn handshake_frames_use_the_same_framing() {
         HandshakeReply::Accepted(server_hello())
     );
 }
+
+#[test]
+fn a_json_error_names_the_kind_and_place_but_never_quotes_the_input() {
+    use workbench_protocol::handshake::ClientHello;
+    // serde's own text quotes an unknown field name and a wrong value; both
+    // ends log this error, and the input can hold anything a peer sent.
+    for payload in [
+        &br#"{"MARKER-field":1}"#[..],
+        &br#"{"supported_versions":"MARKER-value"}"#[..],
+    ] {
+        let error = decode_payload::<ClientHello>(payload).unwrap_err();
+        assert!(matches!(error, FramingError::Json(_)));
+        let text = error.to_string();
+        assert!(!text.contains("MARKER"), "{text}");
+        assert!(text.contains("line 1 column"), "{text}");
+    }
+}

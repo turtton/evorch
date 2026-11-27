@@ -213,6 +213,46 @@ fn an_untrusted_record_stops_automatic_starts_and_is_left_untouched() {
     }
 }
 
+/// What `connect_existing` does against the three states a lost connection can
+/// leave behind: a live core, a core that died, and nothing at all.
+fn connect_existing_in_process(r: &Rig) -> Option<core_launcher::ConnectedCore> {
+    let launcher = local_launcher(r);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(launcher.connect_existing(std::time::Duration::MAX))
+        .expect("probing a socket is not an error")
+}
+
+#[test]
+fn a_running_core_is_found_without_starting_anything_or_touching_the_budget() {
+    let _serial = serial();
+    let r = Rig::new();
+    let _core = start_core(&r);
+    let connected = connect_existing_in_process(&r).expect("the running core answers");
+    assert_eq!(connected.endpoint, r.identity().socket(&r.runtime).unwrap());
+    assert_eq!(recent(&r), 0);
+}
+
+#[test]
+fn a_dead_core_is_not_found_and_the_probe_neither_starts_one_nor_counts_the_crash() {
+    let _serial = serial();
+    let r = Rig::new();
+    let socket = r.identity().socket(&r.runtime).unwrap();
+    // Nothing was ever started.
+    assert!(connect_existing_in_process(&r).is_none());
+    let mut core = start_core(&r);
+    core.kill();
+    // The crashed core left its socket; the probe finds no core behind it and
+    // leaves that evidence, and the decision about it, to the budgeted start.
+    assert!(socket.exists());
+    assert!(connect_existing_in_process(&r).is_none());
+    assert!(socket.exists());
+    assert_eq!(recent(&r), 0, "only a budgeted start records the crash");
+    nothing_is_running(&r);
+}
+
 #[test]
 fn a_core_that_rejects_the_version_is_reported_as_incompatible_and_left_running() {
     let _serial = serial();

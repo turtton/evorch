@@ -69,7 +69,9 @@ CLIENT=workbench-client
 HOST=workbench-host
 WEB=workbench-web
 PROTOCOL_EXTERNAL_ALLOW="serde serde_json thiserror"
-CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
+# tracing: the only trace of the socket error that ends a core connection (it is
+# folded into TransportError::Disconnected); a facade crate, silent without a subscriber.
+CLIENT_EXTERNAL_ALLOW="serde thiserror tokio tracing"
 # TaskTracker (rt) proves detached work has exited even after handle/waiter drop.
 WEB_EXTERNAL_ALLOW="axum futures-core http http-body-util hyper hyper-util serde serde_json thiserror tokio tokio-util"
 # The transport authority (rule 9, 10 and 11). It may use the protocol only.

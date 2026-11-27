@@ -2,10 +2,12 @@
 pub mod admin_composition;
 pub mod allocator;
 pub mod backend;
+pub(crate) mod connection_log;
 #[cfg(target_os = "linux")]
 pub mod handoff_description;
 pub mod instance;
 pub mod lifecycle;
+pub mod logging;
 #[cfg(target_os = "linux")]
 pub mod planned_bootstrap;
 pub mod restart;

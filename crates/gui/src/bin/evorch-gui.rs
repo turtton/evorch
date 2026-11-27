@@ -1782,7 +1782,9 @@ fn main() {
         eprintln!("evorch-gui: process guard bundle validation failed");
         std::process::exit(1);
     }
-    if let Err(error) = run() {
+    let result = run();
+    gui::logging::flush();
+    if let Err(error) = result {
         eprintln!("evorch-gui: {error}");
         std::process::exit(1);
     }

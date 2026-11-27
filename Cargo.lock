@@ -8556,6 +8556,7 @@ dependencies = [
  "test-socket-dir",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "workbench-protocol",
 ]
 

@@ -257,6 +257,11 @@ impl Shared {
                 return;
             }
             state.closed = Some(reason.clone());
+            if reason == TransportError::Disconnected {
+                tracing::info!(%reason, pending = state.pending.len(), subscriptions = state.subscriptions.len(), "connection closed");
+            } else {
+                tracing::warn!(%reason, pending = state.pending.len(), subscriptions = state.subscriptions.len(), "connection closed");
+            }
             // Under the state lock: `submit` and `complete` fail callers once
             // they read `closed`, so the state must already say so.
             self.connection
@@ -499,6 +504,7 @@ async fn read_loop<S: FrameSource>(mut source: S, shared: Arc<Shared>) {
                 }
             }
             Ok(None) => {
+                tracing::info!("the peer ended the stream (end of file)");
                 shared.close(TransportError::Disconnected);
                 return;
             }

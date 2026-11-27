@@ -4,6 +4,7 @@ pub mod attachments;
 mod attention;
 pub mod auto_reconnect;
 pub mod cache;
+mod disconnect_log;
 pub mod restart;
 use crate::attachments::AttachmentFile;
 pub use attachments::ClientAttachmentDraft;

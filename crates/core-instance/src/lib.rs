@@ -6,6 +6,7 @@ pub mod handoff;
 use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 mod handoff_proof;
+pub mod log_file;
 pub use handoff_proof::InheritedHandoffProof;
 
 /// Synthetic physical evidence for recovery tests only. Never enabled by default.

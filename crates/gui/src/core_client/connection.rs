@@ -2,7 +2,8 @@
 //! schedules a stop. Only explicit human actions can issue state-changing wire
 //! commands, and a command with a lost reply is reconciled, never replayed.
 mod data;
-use super::auto_reconnect::{self, AutoReconnect};
+use super::auto_reconnect::{self, AutoReconnect, LiveCoreBackoff};
+use super::disconnect_log::{Episode, SessionEnd};
 use super::features::data::DataAction;
 use data::DataReaders;
 
@@ -269,6 +270,11 @@ pub async fn serve(
 ) {
     let mut uncertain = Vec::<(RequestId, Pending)>::new();
     let mut auto = AutoReconnect::default();
+    let mut live_backoff = LiveCoreBackoff::default();
+    let mut episode = Episode::default();
+    // A core that still answered after the connection to it was lost, connected
+    // and waiting for its reconnect pace to elapse.
+    let mut live: Option<core_launcher::ConnectedCore> = None;
     // Resolved outcomes for features, held until the next snapshot has replaced
     // the projection and reset the features (see `features`).
     let mut held = Vec::<HeldReply>::new();
@@ -288,12 +294,22 @@ pub async fn serve(
                     s.disconnect();
                     s.status = CONNECTING.into();
                 });
-                launcher.connect_or_start_with_endpoint().await
+                match live.take() {
+                    Some(core) => Ok(core),
+                    None => launcher.connect_or_start_with_endpoint().await,
+                }
             }
         };
+        let connected_at = std::time::Instant::now();
         let (client, endpoint) = match connected {
             Ok(connected) => (connected.client, connected.endpoint),
             Err(e) => {
+                tracing::warn!(
+                    stage = "connect-or-start",
+                    error = %e,
+                    since_loss_ms = ?episode.since_loss_ms(connected_at),
+                    "could not connect to or start the core"
+                );
                 update(&shared, &ctx, |s| {
                     s.status = auto_reconnect::launch_failure(&e)
                 });
@@ -325,9 +341,11 @@ pub async fn serve(
                     update(&shared, &ctx, |s| {
                         s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
                     });
+                    episode.recovered(std::time::Instant::now());
                     stream
                 }
                 Err(OpenFailed::Subscribe(error)) => {
+                    tracing::warn!(stage = "subscribe", %error, since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()), "could not subscribe to the core");
                     update(&shared, &ctx, |s| s.status = error);
                     break;
                 }
@@ -344,6 +362,7 @@ pub async fn serve(
                     break;
                 }
                 Err(OpenFailed::Snapshot(error)) => {
+                    tracing::warn!(stage = "snapshot", %error, since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()), "could not read the snapshot from the core");
                     update(&shared, &ctx, |s| s.status = error);
                     if matches!(
                         client.connection_state(),
@@ -488,6 +507,23 @@ pub async fn serve(
                 client.connection_state(),
                 workbench_client::ConnectionState::Closed(_)
             );
+        let closed = match client.connection_state() {
+            workbench_client::ConnectionState::Closed(error) => Some(error),
+            workbench_client::ConnectionState::Connected => None,
+        };
+        let session = connected_at.elapsed();
+        episode.session_ended(
+            std::time::Instant::now(),
+            &SessionEnd {
+                transport: closed.as_ref(),
+                session,
+                orderly,
+                planned_restart: planned,
+                reconnect_requested,
+                resync,
+                abnormal,
+            },
+        );
         data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| s.disconnect());
         if reconnect_requested {
@@ -506,14 +542,78 @@ pub async fn serve(
             }
         }
         if abnormal {
+            // A core that still answers lost only the connection: reconnecting
+            // starts nothing and spends no crash budget, so it is not held to
+            // the allowance meant for a core that keeps dying, only paced.
+            let probed = match await_probe(
+                launcher.connect_existing(LIVE_CORE_PROBE),
+                &mut actions,
+                &shared,
+                &ctx,
+            )
+            .await
+            {
+                Probed::Done(probed) => probed,
+                Probed::Reconnect => continue,
+                Probed::Stop => return,
+            };
+            match probed {
+                Ok(Some(core)) => {
+                    let delay = live_backoff.next_delay(session);
+                    tracing::info!(
+                        stage = "live-core",
+                        live_attempt = live_backoff.attempts(),
+                        crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
+                        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
+                        "the core is still running; reconnecting to it"
+                    );
+                    update(&shared, &ctx, |s| {
+                        s.status = auto_reconnect::reconnecting_live(delay)
+                    });
+                    match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
+                        Paused::Elapsed | Paused::Reconnect => {
+                            live = Some(core);
+                            continue;
+                        }
+                        Paused::Stop => return,
+                    }
+                }
+                Ok(None) => tracing::info!(
+                    stage = "live-core",
+                    crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
+                    "no running core answered; the start is left to the crash budget"
+                ),
+                Err(error) => tracing::info!(
+                    stage = "live-core",
+                    crash_budget_attempts_in_window = auto.used(std::time::Instant::now()),
+                    %error,
+                    "the running core could not be probed; the start is left to the crash budget"
+                ),
+            }
             match auto.attempt(std::time::Instant::now()) {
                 Some(attempt) => {
+                    tracing::warn!(
+                        stage = "auto-reconnect",
+                        attempt,
+                        limit = auto_reconnect::MAX_ATTEMPTS,
+                        since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
+                        "automatic reconnect attempt"
+                    );
                     update(&shared, &ctx, |s| {
                         s.status = auto_reconnect::retrying(attempt)
                     });
                     continue;
                 }
-                None => update(&shared, &ctx, |s| s.status = auto_reconnect::gave_up()),
+                None => {
+                    tracing::warn!(
+                        stage = "auto-reconnect",
+                        limit = auto_reconnect::MAX_ATTEMPTS,
+                        since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
+                        "automatic reconnection gave up; waiting for a manual reconnect"
+                    );
+                    update(&shared, &ctx, |s| s.status = auto_reconnect::gave_up());
+                }
             }
         } else if orderly && !planned {
             update(&shared, &ctx, |s| s.status = auto_reconnect::orderly_stop());
@@ -943,6 +1043,66 @@ fn next_upload(
     None
 }
 
+/// How long a running core has to answer the probe that tells it from a dead one.
+const LIVE_CORE_PROBE: std::time::Duration = std::time::Duration::from_secs(5);
+
+enum Probed<T> {
+    Done(T),
+    /// The person asked to reconnect by hand while the probe ran.
+    Reconnect,
+    Stop,
+}
+
+/// Ask whether a core still answers, without making the window wait for the
+/// answer: a person's reconnect or the window closing is taken at once.
+async fn await_probe<T>(
+    probe: impl std::future::Future<Output = T>,
+    actions: &mut mpsc::Receiver<Action>,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+) -> Probed<T> {
+    tokio::pin!(probe);
+    loop {
+        tokio::select! {
+            probed = &mut probe => return Probed::Done(probed),
+            action = actions.recv() => match action {
+                None | Some(Action::Shutdown) => return Probed::Stop,
+                Some(Action::Reconnect) => return Probed::Reconnect,
+                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+            },
+        }
+    }
+}
+
+enum Paused {
+    Elapsed,
+    /// The person asked to reconnect by hand: the pace does not apply.
+    Reconnect,
+    Stop,
+}
+
+/// Wait out the reconnect pace while the window stays usable: whatever the
+/// person does is refused as for any lost connection.
+async fn pause_for_reconnect(
+    delay: std::time::Duration,
+    actions: &mut mpsc::Receiver<Action>,
+    shared: &Arc<Mutex<Shared>>,
+    ctx: &egui::Context,
+) -> Paused {
+    let pace = tokio::time::sleep(delay);
+    tokio::pin!(pace);
+    loop {
+        tokio::select! {
+            () = &mut pace => return Paused::Elapsed,
+            action = actions.recv() => match action {
+                None | Some(Action::Shutdown) => return Paused::Stop,
+                Some(Action::Reconnect) => return Paused::Reconnect,
+                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+            },
+        }
+    }
+}
+
 async fn wait_reconnect(
     actions: &mut mpsc::Receiver<Action>,
     shared: &Arc<Mutex<Shared>>,
@@ -1045,6 +1205,79 @@ async fn body(client: &WorkbenchClient, id: BodyId) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn a_probe_of_the_core_does_not_hold_back_a_reconnect_or_the_window_closing() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let ctx = egui::Context::default();
+
+        // A probe that never answers: a person's reconnect and the close are taken at once.
+        tx.send(Action::Reconnect).await.unwrap();
+        assert!(matches!(
+            await_probe(std::future::pending::<u8>(), &mut rx, &shared, &ctx).await,
+            Probed::Reconnect
+        ));
+        tx.send(Action::Shutdown).await.unwrap();
+        assert!(matches!(
+            await_probe(std::future::pending::<u8>(), &mut rx, &shared, &ctx).await,
+            Probed::Stop
+        ));
+
+        // An answer that arrives is returned.
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        answer.send(7u8).unwrap();
+        match await_probe(async { answered.await.unwrap() }, &mut rx, &shared, &ctx).await {
+            Probed::Done(value) => assert_eq!(value, 7),
+            _ => panic!("the probe answered"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_reconnect_pace_runs_out_with_time_and_a_manual_reconnect_ends_it_at_once() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let ctx = egui::Context::default();
+        let pace = std::time::Duration::from_secs(30);
+
+        // Nothing happens meanwhile: virtual time runs the pace out.
+        assert!(matches!(
+            pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
+            Paused::Elapsed
+        ));
+
+        // A command sent meanwhile is refused (its input kept), and the pace still runs out.
+        shared.lock().unwrap().sending.insert("t".into());
+        tx.send(Action::Command {
+            command: Command::Execution(
+                workbench_protocol::namespaces::ExecutionCommand::StopChat(
+                    workbench_protocol::commands::ThreadTarget {
+                        thread: ThreadId::new("t").unwrap(),
+                    },
+                ),
+            ),
+            draft: Some(("t".into(), 1)),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
+            Paused::Elapsed
+        ));
+        assert!(!shared.lock().unwrap().sending.contains("t"));
+
+        // A person's reconnect, and the window closing, end it without waiting.
+        tx.send(Action::Reconnect).await.unwrap();
+        assert!(matches!(
+            pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
+            Paused::Reconnect
+        ));
+        tx.send(Action::Shutdown).await.unwrap();
+        assert!(matches!(
+            pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
+            Paused::Stop
+        ));
+    }
+
     #[tokio::test]
     async fn disconnect_keeps_unwritten_input_but_never_replays_queued_commands() {
         let (tx, mut rx) = mpsc::channel(4);

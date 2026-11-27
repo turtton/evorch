@@ -11,6 +11,7 @@ description = "Client side of the evorch workbench protocol (ADR 0045)."
 workbench-protocol = { path = "../workbench-protocol" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "io-util", "net", "macros"] }
 
 [dev-dependencies]

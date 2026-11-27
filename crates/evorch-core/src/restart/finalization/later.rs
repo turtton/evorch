@@ -277,6 +277,10 @@ impl RestartCoordinator {
             owner: &owner,
         };
         tracing::debug!(target: "restart_drain", phase = "owner_stop_begin");
+        // The exec below replaces this image and its log thread; what was logged
+        // up to here (the connections closed for the restart) is written first.
+        // Past this point nothing logs.
+        crate::logging::flush();
         let stopped_owner = owner.stop_worker_for_exec().map_err(text);
         #[cfg(test)]
         if stopped_owner.is_ok()
