@@ -68,14 +68,11 @@ fn the_band_shows_the_servers_progress_and_opens_on_request() {
 }
 
 #[test]
-fn without_a_plan_the_band_says_so_and_cannot_open() {
+fn without_a_plan_the_band_is_hidden() {
     let mut harness = band_harness(PlanScenario::Unplanned);
     harness.run();
-    assert!(harness.query_all_by_label(NOT_PLANNED).next().is_some());
-    let open = harness.get_by_label(OPEN_LABEL);
-    assert!(open.accesskit_node().is_disabled());
-    open.click();
-    harness.run();
+    assert!(harness.query_all_by_label(NOT_PLANNED).next().is_none());
+    assert!(harness.query_all_by_label(OPEN_LABEL).next().is_none());
     assert!(!harness.state().1);
 }
 

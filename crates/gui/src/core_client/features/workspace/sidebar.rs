@@ -3,6 +3,7 @@
 //! the revision the core reported, or changes of this window's view.
 use egui::collapsing_header::CollapsingState;
 use egui::{Align, Layout, Ui};
+use std::collections::BTreeSet;
 use workbench_protocol::ids::{ProjectId, ThreadId};
 use workspace_ui::ProjectSort;
 
@@ -154,7 +155,14 @@ impl WorkspaceFeature {
                             focus: focus_rename,
                         };
                         ui.push_id(("threads", id), |ui| {
-                            threads(ui, &scope, unread, &mut rename, requests);
+                            threads(
+                                ui,
+                                &scope,
+                                unread,
+                                &mut view.folded_threads,
+                                &mut rename,
+                                requests,
+                            );
                         });
                     } else {
                         let limit = family_limit_id(id);
@@ -180,7 +188,8 @@ impl WorkspaceFeature {
 fn threads(
     ui: &mut Ui,
     scope: &Scope<'_>,
-    unread: &std::collections::BTreeSet<String>,
+    unread: &BTreeSet<String>,
+    folded: &mut BTreeSet<String>,
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
@@ -205,7 +214,7 @@ fn threads(
             || row.own.approval
             || row.own.unread
     });
-    draw_tree(ui, scope, &rows, false, rename, requests);
+    draw_tree(ui, scope, &rows, false, folded, rename, requests);
     if hidden > 0 {
         ui.indent(("more-threads-indent", project), |ui| {
             if ui
@@ -223,7 +232,7 @@ fn threads(
             egui::CollapsingHeader::new(format!("Archived ({})", tree.archived.len()))
                 .id_salt(("archived-threads", project))
                 .show(ui, |ui| {
-                    draw_tree(ui, scope, &tree.archived, true, rename, requests);
+                    draw_tree(ui, scope, &tree.archived, true, folded, rename, requests);
                 });
         });
     }
@@ -234,6 +243,7 @@ fn draw_tree(
     scope: &Scope<'_>,
     rows: &[(ThreadRow<'_>, usize)],
     archived: bool,
+    folded: &mut BTreeSet<String>,
     rename: &mut Rename<'_>,
     requests: &mut Requests,
 ) {
@@ -259,6 +269,8 @@ fn draw_tree(
         // Excludes the section, so a family moving between sections keeps its folds.
         let id = egui::Id::new(("sidebar-thread-children", scope.project.as_str(), row.id()));
         let mut expansion = CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        // The folds are kept in the session file, so they decide over what egui remembers.
+        expansion.set_open(!folded.contains(row.id()));
         let hidden = if has_children && !expansion.is_open() {
             roll_up(rows, index, |row| (row.running, row.own))
         } else {
@@ -347,6 +359,13 @@ fn draw_tree(
             }
         });
         expansion.store(ui.ctx());
+        if has_children {
+            if expansion.is_open() {
+                folded.remove(row.id());
+            } else {
+                folded.insert(row.id().to_owned());
+            }
+        }
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
         }

@@ -40,6 +40,8 @@ const MAX_BYTES: u64 = 1 << 20;
 const MAX_DEPTH: usize = 10;
 /// The most tabs a restored dock has; past them only the required tabs are kept.
 const MAX_TABS: usize = 256;
+/// The most folded threads a restored sidebar keeps.
+const MAX_FOLDED_THREADS: usize = 4096;
 /// Below this width or height a floating window shows no more than its tab bar (folded
 /// or minimized). Such a rect is neither kept nor restored.
 const MIN_WINDOW_EDGE: f32 = 64.0;
@@ -155,6 +157,8 @@ pub struct SavedState {
     /// The most recently opened first, as [`super::run_tabs::RunTabs::panes`] gives them.
     pub run_tabs: Vec<RunPane>,
     pub selection: Option<SavedSelection>,
+    /// The threads whose children the sidebar shows folded.
+    pub folded_threads: Vec<ThreadId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +267,8 @@ struct SavedFile {
     run_tabs: Value,
     #[serde(default)]
     selection: Value,
+    #[serde(default)]
+    folded_threads: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -305,10 +311,17 @@ impl SavedState {
             })
             .collect();
         let selection = serde_json::from_value(file.selection).ok().flatten();
+        let folded_threads = serde_json::from_value::<Vec<Value>>(file.folded_threads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|thread| serde_json::from_value::<ThreadId>(thread).ok())
+            .take(MAX_FOLDED_THREADS)
+            .collect();
         Ok(Self {
             layout,
             run_tabs,
             selection,
+            folded_threads,
         })
     }
 
@@ -328,6 +341,7 @@ impl SavedState {
             layout: serde_json::to_value(&self.layout)?,
             run_tabs: serde_json::to_value(run_tabs)?,
             selection: serde_json::to_value(&self.selection)?,
+            folded_threads: serde_json::to_value(&self.folded_threads)?,
         })
     }
 }
@@ -773,6 +787,7 @@ mod tests {
                 layout: Some(layout.clone()),
                 run_tabs: vec![run.clone()],
                 selection: Some(selection.clone()),
+                folded_threads: vec![ThreadId::new("thr-2").unwrap()],
             })
             .unwrap();
 
@@ -782,8 +797,12 @@ mod tests {
 
         assert_eq!(extract(&restored, &fresh, &no_rects()), Some(layout));
         assert_eq!(
-            (loaded.run_tabs, loaded.selection),
-            (vec![run], Some(selection))
+            (loaded.run_tabs, loaded.selection, loaded.folded_threads),
+            (
+                vec![run],
+                Some(selection),
+                vec![ThreadId::new("thr-2").unwrap()]
+            )
         );
         let (_, file) = restored
             .iter_all_tabs()
@@ -955,6 +974,30 @@ mod tests {
             SavedNode::Split { first, second, .. } => 1 + depth(first).max(depth(second)),
             SavedNode::Tabs { .. } => 0,
         }
+    }
+
+    // Given: a file whose folded threads hold a bad entry and a section of the wrong type
+    // When: it is decoded / Then: the good thread ids are kept, and a wrong section reads as none
+    #[test]
+    fn folded_threads_that_do_not_decode_are_dropped() {
+        let bytes =
+            serde_json::to_vec(&json!({"version": 1, "folded_threads": ["thr-1", 7, "", "thr-2"]}))
+                .unwrap();
+        let state = SavedState::decode(&bytes).unwrap();
+        assert_eq!(
+            state.folded_threads,
+            [
+                ThreadId::new("thr-1").unwrap(),
+                ThreadId::new("thr-2").unwrap()
+            ]
+        );
+        let bytes = serde_json::to_vec(&json!({"version": 1, "folded_threads": "x"})).unwrap();
+        assert!(
+            SavedState::decode(&bytes)
+                .unwrap()
+                .folded_threads
+                .is_empty()
+        );
     }
 
     // Given: the default dock with its splits dragged to the edges, at fraction 0 and 1

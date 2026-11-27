@@ -28,6 +28,7 @@ use std::{
 };
 use workbench_client::ClientConfig;
 use workbench_protocol::namespaces::ConversationCommand;
+use workbench_protocol::views::RunPhase;
 use workbench_protocol::{
     commands::*,
     handshake::{BuildInfo, Capability},
@@ -407,6 +408,14 @@ impl CoreClientScreen {
             layout: persistence::extract(&self.dock, &self.local.files, &self.window_rects),
             run_tabs: self.run_tabs.panes(),
             selection: self.saved_selection(shared),
+            folded_threads: shared
+                .features
+                .workspace()
+                .map(|workspace| workspace.folded_threads())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|thread| workbench_protocol::ids::ThreadId::new(thread).ok())
+                .collect(),
         };
         let saved = if explicit {
             store.save(&state).map(|()| true)
@@ -455,20 +464,66 @@ impl CoreClientScreen {
         let Some(execution) = shared.features.execution_mut() else {
             return;
         };
-        let unnamed: Vec<_> = run_tabs
+        let shown: Vec<_> = run_tabs
             .shown_tabs()
-            .filter(|(_, tab)| tab.name.is_none())
-            .map(|(id, tab)| (id, tab.thread.clone(), tab.run.clone()))
+            .map(|(id, tab)| (id, tab.run.clone()))
             .collect();
-        for (id, thread, run) in unnamed {
-            match execution.run_name(&run) {
-                Some(name) => run_tabs.set_name(id, name),
-                None => execution.want_name(thread, run),
+        for (id, run) in shown {
+            if let Some(model) = execution.run_model(&run) {
+                run_tabs.set_model(id, model);
+            }
+        }
+        // What a tab lacks is asked of the core on its own terms, whatever the Subagents
+        // tab shows: a name once, a model once and once more when the run works.
+        let wanted: Vec<_> = run_tabs
+            .shown_tabs()
+            .filter(|(_, tab)| tab.name.is_none() || tab.model.is_none())
+            .map(|(id, tab)| {
+                (
+                    id,
+                    tab.thread.clone(),
+                    tab.run.clone(),
+                    (tab.name.is_none(), tab.model.is_none()),
+                )
+            })
+            .collect();
+        for (id, thread, run, (unnamed, modelless)) in wanted {
+            if unnamed {
+                match execution.run_name(&run) {
+                    Some(name) => run_tabs.set_name(id, name),
+                    None => execution.want_name(thread.clone(), run.clone()),
+                }
+            }
+            if modelless {
+                let live = shared.cache.runs.get(run.as_str()).is_some_and(|summary| {
+                    matches!(
+                        summary.phase,
+                        RunPhase::Pending
+                            | RunPhase::Running
+                            | RunPhase::WaitingForUser
+                            | RunPhase::WaitingForApproval
+                    )
+                });
+                execution.want_model(thread, run, live);
             }
         }
     }
 
     fn apply_restore(&mut self, state: persistence::SavedState) {
+        if let Some(workspace) = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .features
+            .workspace_mut()
+        {
+            workspace.restore_folded_threads(
+                state
+                    .folded_threads
+                    .iter()
+                    .map(|thread| thread.as_str().to_owned()),
+            );
+        }
         self.dock = persistence::restore_dock(state.layout.as_ref(), &mut self.local.files);
         self.window_rects = persistence::WindowRects::default();
         self.pending_run_tab_prune = !state.run_tabs.is_empty();
