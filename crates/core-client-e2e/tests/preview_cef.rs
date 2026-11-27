@@ -86,7 +86,7 @@ async fn until_tabs(peer: &mut data_peer::Peer, expected: u32) {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires actual CEF; the cef-e2e job supplies EVORCH_RENDERER_EXE"]
-async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
+async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection_after_resync() {
     support::use_real_helper();
     let env = support::start(&[(
         "page.html",
@@ -94,6 +94,12 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
         "text/html",
     )])
     .await;
+    // A projection resync advances the epoch advertised by hello, while the
+    // already-installed renderer keeps its tab/frame epoch. No core restart.
+    let projection = env.boot.host.lock().unwrap().projection().clone();
+    let renderer_epoch = projection.instance_epoch();
+    projection.invalidate();
+    assert_ne!(projection.instance_epoch(), renderer_epoch);
     let mut window = open_window(&env, egui::vec2(1100.0, 1500.0), None::<NoRenderer>);
 
     // From the conversation: its "Artifacts" header button brings the artifacts tab
@@ -114,7 +120,17 @@ async fn a_conversation_reaches_the_artifact_its_preview_and_its_inspection() {
 
     // Its preview: the browser section opens by itself and frames reach the texture.
     click_exact(&mut window, "Open preview");
-    window.until(|w| frames_taken(w) > 0).await;
+    window
+        .until(|w| {
+            // Opening and binding have explicit failure states; report them rather
+            // than waiting for a frame that the failed operation cannot deliver.
+            for label in ["Could not open the preview", "Could not start the stream"] {
+                let failure = w.harness.query_by_label_contains(label);
+                assert!(failure.is_none(), "preview failed: {failure:?}");
+            }
+            frames_taken(w) > 0
+        })
+        .await;
     window.until(|w| !shows(w, "No preview is open")).await;
     let stats = window.shared.lock().unwrap().features.data_stats();
     assert!(stats.frames_received >= stats.frames_taken && stats.bytes_held < 40 << 20);
