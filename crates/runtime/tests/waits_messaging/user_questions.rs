@@ -765,8 +765,7 @@ impl runtime::AgentModel for PendingQuestionRecipientModel {
 }
 
 #[tokio::test]
-async fn stale_active_question_recipient_is_fenced_even_before_provider_admission() {
-    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+async fn answer_is_refused_for_a_recipient_without_review_lineage_even_before_provider_admission() {
     for admission in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
@@ -791,17 +790,6 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             cancelled: false,
         };
         storage.handle().create_user_question(&question).unwrap();
-        let path = dir.path().join("owners.db");
-        let owner = ThreadOwner::new(
-            "thread".into(),
-            Lease {
-                owner_id: "first".into(),
-                generation: 1,
-                expires_at: 100,
-            },
-        );
-        let mut registry = Registry::open(&path).unwrap();
-        registry.start(&owner).unwrap();
         let bus = Arc::new(EventBus::new(128));
         let runtime = AgentRuntime::new(
             bus.clone(),
@@ -810,19 +798,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
         )
         .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-        let run = runtime.delegate_background(
-            Role::Worker,
-            "work".into(),
-            RunConfig {
-                ownership: Some(OwnerPermit {
-                    registry_path: path,
-                    thread_id: "thread".into(),
-                    lease: owner.lease.clone(),
-                    run_id: None,
-                }),
-                ..Default::default()
-            },
-        );
+        let run = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
         storage
             .handle()
             .bind_user_questions(
@@ -832,12 +808,11 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             )
             .unwrap();
         assert!(runtime.has_active_question_recipient(&question.id).unwrap());
-        registry
-            .update("thread", |state| state.claim(&owner.lease, "next", 200, 50))
-            .unwrap();
+        // The live recipient has no review lineage to record the user's word against, so the
+        // answer is refused and nothing is stored, whether or not the provider was admitted.
         let error = runtime.answer_user_question(&question.id, "A").unwrap_err();
         assert!(
-            error.contains("owner or generation no longer matches"),
+            error.contains("review lineage is unavailable for question recipient"),
             "{error}"
         );
         assert!(
@@ -848,6 +823,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
                 .answer
                 .is_none()
         );
+        assert!(runtime.has_active_question_recipient(&question.id).unwrap());
         runtime.cancel(run).unwrap();
     }
 }

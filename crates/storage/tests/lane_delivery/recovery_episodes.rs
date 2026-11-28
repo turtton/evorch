@@ -56,10 +56,7 @@ fn three_failures_count_batches_not_notices_and_survive_restart_rebind_until_res
         f = f.reopen();
     }
     assert_eq!(f.count("lane_notifications"), 2);
-    let changed_owner = LaneDeliveryOwner {
-        ownership_generation: 9,
-        ..owner()
-    };
+    let changed_owner = LaneDeliveryOwner { ..owner() };
     f.h()
         .bind_lane_delivery_destination(
             "lead".into(),

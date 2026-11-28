@@ -81,7 +81,7 @@ impl AgentRuntime {
         keys
     }
 
-    /// Register trusted host thread ownership before starting the reserved root.
+    /// Register a trusted host thread binding before starting the reserved root.
     pub fn bind_thread_root(&self, thread_id: &str, run_id: RunId) -> Result<(), String> {
         let _retention_admission = self.retention_admission();
         let plan_gate = self.shared.plan_authority.get(thread_id);
@@ -543,7 +543,7 @@ impl AgentRuntime {
     }
 
     /// Resolve the fixed conversation identity of a live delegation tree (at most 64 links).
-    pub(crate) fn thread_of_live_run(&self, run: RunId) -> Option<String> {
+    pub fn thread_of_live_run(&self, run: RunId) -> Option<String> {
         let root = {
             let runs = crate::runtime::lock_runs(&self.shared.runs);
             let mut current = run;
@@ -588,21 +588,19 @@ impl AgentRuntime {
         &self,
         source: RunId,
         target: RunId,
-        source_owner: Option<&crate::ownership::OwnerPermit>,
-        before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
-    ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        before_transfer: impl FnOnce(),
+    ) -> Result<(), String> {
         let _retention_admission = self.retention_admission();
-        self.handoff_thread_goal_prepared(source, target, source_owner, None, before_transfer)
+        self.handoff_thread_goal_prepared(source, target, None, before_transfer)
     }
 
     pub(crate) fn handoff_thread_goal_prepared(
         &self,
         source: RunId,
         target: RunId,
-        source_owner: Option<&crate::ownership::OwnerPermit>,
         incarnation: Option<&str>,
-        before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
-    ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        before_transfer: impl FnOnce(),
+    ) -> Result<(), String> {
         let _retention_admission = self.retention_admission();
         // Authority before Q; never wait for a plan gate while holding Q/runs.
         // Sorted two-thread acquisition also permits opposite handoffs without ABBA.
@@ -654,31 +652,7 @@ impl AgentRuntime {
             }
             Ok(goals)
         };
-        // Acquire ownership before the goal mutex, matching GUI controls. The
-        // registry commits its exclusive transaction before any event is emitted.
-        let prepared_owner = if incarnation.is_some() {
-            source_owner
-                .map(|permit| permit.prepare_lane(&child_thread))
-                .transpose()?
-        } else {
-            None
-        };
-        let _authority = if incarnation.is_some() {
-            source_owner
-                .map(|permit| permit.mutation_guard())
-                .transpose()
-                .map_err(|e| e.to_string())?
-        } else {
-            None
-        };
-        let (owner, mut goals) = match source_owner {
-            Some(permit) if incarnation.is_none() => {
-                let (owner, goals) = permit.prepare_child(&child_thread, prepare)?;
-                (Some(owner), goals)
-            }
-            Some(_) => (prepared_owner, prepare()?),
-            None => (None, prepare()?),
-        };
+        let mut goals = prepare()?;
         let source_thread = goals.roots.get(&source).cloned();
         self.advance_scratch_epochs(&scratch_keys);
         if incarnation.is_none()
@@ -688,10 +662,6 @@ impl AgentRuntime {
             // Non-durable/test handoffs use the same binding move. Production's
             // durable receipt commit moves it in its transaction (PR1).
             drop(goals);
-            let _registry = source_owner
-                .map(|p| p.mutation_guard())
-                .transpose()
-                .map_err(|e| e.to_string())?;
             store
                 .handle
                 .rebind_conversation_plan(from, &child_thread)
@@ -710,7 +680,7 @@ impl AgentRuntime {
             // this copy. Lock order: goal, then thread read dirs.
             self.inherit_thread_read_only_directories(thread, &child_thread);
         }
-        before_transfer(&owner);
+        before_transfer();
         goals.roots.insert(target, child_thread.clone());
         if let Some(request) = goals.requests.remove(&source) {
             goals.requests.insert(target, request);
@@ -746,16 +716,15 @@ impl AgentRuntime {
             drop(goals);
             self.cancel_goal_reviewer(reviewer);
         }
-        Ok(owner)
+        Ok(())
     }
 
     #[cfg(test)]
     fn transfer_thread_goal_root(&self, source: RunId, target: RunId) -> Result<(), String> {
-        self.handoff_thread_goal(source, target, None, |_| {})
-            .map(|_| ())
+        self.handoff_thread_goal(source, target, || {}).map(|_| ())
     }
 
-    // Called with Q held, after ownership has been prepared. The durable commit
+    // Called with Q held. The durable commit
     // precedes all in-memory transfer and every public source terminal event.
     pub(crate) fn commit_handoff_receipt(
         &self,

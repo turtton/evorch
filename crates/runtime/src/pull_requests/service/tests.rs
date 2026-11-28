@@ -2,13 +2,13 @@
 //!
 //! Time is virtual (`start_paused`): a test moves it with `advance` and lets the service's tasks
 //! run with `settle`; it waits for what the service publishes, never for a duration. The
-//! blocking storage and registry calls run inline under `cfg(test)`, so the clock cannot move
+//! blocking storage calls run inline under `cfg(test)`, so the clock cannot move
 //! while one is outstanding. "Nothing happened" is shown by a marker event published after
 //! the quiet point: everything the service emitted before it is already in the receiver.
 
 mod candidates;
 mod inheritance;
-mod ownership;
+mod lifecycle;
 mod review;
 mod tracking;
 
@@ -28,7 +28,6 @@ use storage::{Storage, StorageConfig, StorageHandle};
 use test_socket_dir::SplitDir;
 
 use super::*;
-use crate::ownership::OwnerHost;
 use crate::pull_requests::{FakePullRequestSource, FetchedPullRequest};
 
 pub(super) const REPOSITORY: &str = "turtton/evorch";
@@ -214,78 +213,19 @@ impl ThreadEnvironment for FakeEnvironment {
     }
 }
 
-type PermitAction = Box<dyn FnOnce(&OwnerPermit) + Send>;
-
-/// Actions the ownership view runs while the scheduler plans, as if the world changed while the
-/// registry was being read.
-#[derive(Default)]
-pub(super) struct Hooks {
-    before_permit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    after_permit: Mutex<Option<PermitAction>>,
-    during_confirm: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-impl Hooks {
-    /// Runs `action` just before the next permit is looked up.
-    pub(super) fn before_permit(&self, action: impl FnOnce() + Send + 'static) {
-        *self.before_permit.lock().unwrap() = Some(Box::new(action));
-    }
-
-    /// Runs `action` in the middle of the next check that a permit still holds its thread, as if
-    /// the registry were busy and the world changed while the check waited.
-    pub(super) fn during_confirm(&self, action: impl FnOnce() + Send + 'static) {
-        *self.during_confirm.lock().unwrap() = Some(Box::new(action));
-    }
-
-    /// Runs `action` with the next permit that was found, before it is handed to the plan.
-    pub(super) fn after_permit(&self, action: impl FnOnce(&OwnerPermit) + Send + 'static) {
-        *self.after_permit.lock().unwrap() = Some(Box::new(action));
-    }
-}
-
-struct HookedOwnership {
-    host: Arc<OwnerHost>,
-    hooks: Arc<Hooks>,
-}
-
-impl OwnershipView for HookedOwnership {
-    fn owned_permit(&self, thread_id: &str) -> Option<OwnerPermit> {
-        let before = self.hooks.before_permit.lock().unwrap().take();
-        if let Some(action) = before {
-            action();
-        }
-        let permit = OwnershipView::owned_permit(&*self.host, thread_id)?;
-        let after = self.hooks.after_permit.lock().unwrap().take();
-        if let Some(action) = after {
-            action(&permit);
-        }
-        Some(permit)
-    }
-
-    fn confirms(&self, permit: &OwnerPermit) -> bool {
-        let during = self.hooks.during_confirm.lock().unwrap().take();
-        if let Some(action) = during {
-            action();
-        }
-        crate::pull_requests::ownership::permit_holds(permit)
-    }
-}
-
-/// A database and an ownership registry that several "processes" share.
+/// A database that several "processes" share.
 pub(super) struct World {
     pub(super) dir: SplitDir,
     pub(super) clock: Arc<ManualClock>,
 }
 
-/// One "process": its own storage connection, host, bus, source and service.
+/// One "process": its own storage connection, bus, source and service.
 pub(super) struct Process {
     pub(super) _storage: Storage,
     pub(super) storage_handle: StorageHandle,
-    pub(super) host: Arc<OwnerHost>,
     pub(super) bus: Arc<EventBus>,
     pub(super) source: FakePullRequestSource,
     pub(super) environment: Arc<FakeEnvironment>,
-    pub(super) hooks: Arc<Hooks>,
     pub(super) service: PullRequestService,
     pub(super) events: EventReceiver,
 }
@@ -325,26 +265,13 @@ impl World {
         })
         .unwrap();
         let bus = Arc::new(EventBus::new(4096));
-        let host = Arc::new(
-            OwnerHost::open(
-                self.dir.sockets(),
-                config::OwnershipConfig::default(),
-                Arc::clone(&bus),
-            )
-            .unwrap(),
-        );
         let source = FakePullRequestSource::new();
         let environment = Arc::new(FakeEnvironment::default());
-        let hooks = Arc::new(Hooks::default());
         let events = bus.subscribe();
         let service = PullRequestService::start_with_notice_delivery(
             ServiceParts {
                 storage: storage.handle(),
                 source: Arc::new(source.clone()),
-                ownership: Arc::new(HookedOwnership {
-                    host: Arc::clone(&host),
-                    hooks: Arc::clone(&hooks),
-                }),
                 environment: Arc::clone(&environment) as Arc<dyn ThreadEnvironment>,
                 bus: Arc::clone(&bus),
                 settings,
@@ -357,11 +284,9 @@ impl World {
         Process {
             storage_handle: storage.handle(),
             _storage: storage,
-            host,
             bus,
             source,
             environment,
-            hooks,
             service,
             events,
         }
@@ -380,14 +305,6 @@ impl Process {
             .insert(stage, Box::new(action));
     }
 
-    /// The permit for `thread`, starting its lease the way chat does when nobody owns it.
-    pub(super) fn permit(&self, thread: &str) -> OwnerPermit {
-        self.host
-            .owned_permit(thread)
-            .or_else(|_| self.host.start(thread))
-            .unwrap()
-    }
-
     pub(super) fn state(&self, thread: &str) -> storage::pull_requests::ThreadPullRequestState {
         self.storage_handle
             .pull_request_thread_state(thread)
@@ -400,15 +317,14 @@ impl Process {
         thread: &str,
         number: u64,
     ) -> storage::pull_requests::LinkReceipt {
-        let permit = self.permit(thread);
         let revision = self.state(thread).lifecycle_revision;
         self.service
-            .link(thread, &format!("{REPOSITORY}#{number}"), revision, &permit)
+            .link(thread, &format!("{REPOSITORY}#{number}"), revision)
             .await
             .unwrap()
     }
 
-    /// Links in the database only, as another process would.
+    /// Links in the database only, without the service's event.
     pub(super) fn link_directly(&self, thread: &str, number: u64) {
         let revision = self.state(thread).lifecycle_revision;
         self.storage_handle

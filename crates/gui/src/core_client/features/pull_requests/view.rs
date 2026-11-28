@@ -90,7 +90,6 @@ pub(crate) fn controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFixC
     let input = AutoFixInput {
         thread: view.thread.as_str(),
         link_revision: link.link_revision.get(),
-        tracked: view.owned_here,
         open,
         failing: glyph(view) == Some(PrGlyph::Failing),
         checks_pending: facts.is_none_or(|f| checks_pending(&rows(f), f.checks_complete)),
@@ -134,7 +133,6 @@ pub(crate) fn bar_view(view: &ThreadPullRequest, shape: BarShape) -> Option<BarV
         glyph: glyph(view).unwrap_or(PrGlyph::Unknown),
         ci: ci(view),
         statuses: statuses_of(
-            view.owned_here,
             fetched_at_ns,
             failure.map(|failure| (failure.kind.as_str(), failure.message.as_str())),
             shape.now_ns,

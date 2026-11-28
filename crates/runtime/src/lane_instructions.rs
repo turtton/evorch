@@ -48,7 +48,7 @@ impl AgentRuntime {
             .restore_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (actor, config) = self.lane_lead_actor(store, caller)?;
+        let (actor, _) = self.lane_lead_actor(store, caller)?;
         let LaneManagementActor::Lead {
             thread_id,
             root_run_id,
@@ -56,12 +56,6 @@ impl AgentRuntime {
         else {
             return Err(LaneError::new("not_current_lead", "caller is not a lead"));
         };
-        let authority = config
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
         let lane_id = request.lane_id.clone();
         let operation = store
             .handle
@@ -74,7 +68,6 @@ impl AgentRuntime {
                 crate::run_store::review_time_ns(),
             )
             .map_err(instruction_error)?;
-        drop(authority);
         // The commit is the acceptance. A failed read-back must not turn it into a
         // retryable error: the receipt answers the retry.
         let delivery = operation.instruction_seq.and_then(|seq| {

@@ -168,7 +168,7 @@ fn family_hold(
     let owners: BTreeMap<String, String> = overrides
         .iter()
         .filter_map(|(thread, reason)| match reason {
-            BlockReason::Owner(text) => Some((thread.clone(), text.clone())),
+            BlockReason::SafetyHold(text) => Some((thread.clone(), text.clone())),
             _ => None,
         })
         .collect();
@@ -196,7 +196,9 @@ pub(super) fn family_blocked(
     }
     let restart: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM retention_staging s JOIN restart_expected_members m ON m.run_id=s.id JOIN restart_transactions t USING(restart_id) WHERE s.family_key=?1 AND s.kind='run' AND t.phase!='completed')",[family_key],|r|r.get(0))?;
     if restart {
-        return Ok(Some(BlockReason::Owner("restart evidence retained".into())));
+        return Ok(Some(BlockReason::SafetyHold(
+            "restart evidence retained".into(),
+        )));
     }
     let prepared: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM retention_staging s \
@@ -207,7 +209,9 @@ pub(super) fn family_blocked(
         |row| row.get(0),
     )?;
     if prepared {
-        return Ok(Some(BlockReason::Owner("recovery claim pending".into())));
+        return Ok(Some(BlockReason::SafetyHold(
+            "recovery claim pending".into(),
+        )));
     }
     let sidebar: HashMap<&str, &SidebarThread> = input
         .threads
@@ -235,7 +239,7 @@ pub(super) fn family_blocked(
             return Ok(Some(BlockReason::EvalSample));
         }
         if let Some(reason) = owners.get(thread_id) {
-            return Ok(Some(BlockReason::Owner(reason.clone())));
+            return Ok(Some(BlockReason::SafetyHold(reason.clone())));
         }
         let activity = thread_activity_ns(conn, thread)?.max(run_activity);
         if due_at_ns(thread, activity, policy).is_some_and(|due| due > input.now_ns) {

@@ -451,7 +451,7 @@ async fn cancel_before_registration_is_durably_cancelled() {
 async fn cancel_before_registration_is_durably_cancelled_with_admission(admission: bool) {
     let fixture = Fixture::for_s2(1, admission);
     let run = fixture.runtime.reserve_run_id();
-    fixture.runtime.reserve_admission(run, None, None);
+    fixture.runtime.reserve_admission(run, None);
     fixture.runtime.cancel(run).unwrap();
     fixture
         .runtime

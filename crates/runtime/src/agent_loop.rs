@@ -162,9 +162,6 @@ impl LoopShared {
 /// Model switches the loop prepares before a response arrives (ADR 0030). Each one
 /// moves the pin along the chain, so more than this means availability keeps flapping.
 const MAX_MODEL_SWITCHES: u32 = 16;
-/// A registry wait this long is reported as the run's owner-registry activity.
-const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
-
 /// How many times a run is reminded of shell jobs nobody has looked at before it is
 /// stopped for ignoring them.
 const MAX_UNOBSERVED_JOB_REMINDERS: u32 = 3;
@@ -234,10 +231,7 @@ pub(crate) struct LoopState {
     pub(crate) boundary_context_deferred: bool,
     /// Model switches prepared since the last response; bounds a switch that never settles.
     model_switches: u32,
-    /// Whether this run's turn on its thread owner is open: begun at the loop head and
-    /// ended only by the checkpoint after a response's tools.
-    owner_turn_open: bool,
-    /// The activity last reported, restored after an owner-registry wait.
+    /// The activity last reported by the run.
     current_activity: std::sync::Mutex<event_bus::RunActivity>,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
@@ -347,7 +341,6 @@ impl LoopState {
             plan_notice: Default::default(),
             boundary_context_deferred: false,
             model_switches: 0,
-            owner_turn_open: false,
             current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
             pending_escalation: None,
             escalation_detector: EscalationDetector::default(),
@@ -1223,26 +1216,6 @@ impl LoopState {
                 self.finish_interrupted(kind);
                 return;
             }
-            // A model switch comes back here inside the turn it already began, and
-            // the owner rejects beginning a run's turn again before its checkpoint.
-            if let Some(permit) = self.task.config.ownership.clone() {
-                let result = if self.owner_turn_open {
-                    // Still fence a stale generation, without opening a second turn or
-                    // rejecting a quiescing owner's already-active turn.
-                    self.validate_owner_mutation().await
-                } else {
-                    self.await_ownership(
-                        permit
-                            .begin_turn_off_thread(self.ownership_retry(), self.interrupt_probe()),
-                    )
-                    .await
-                };
-                if let Err(error) = result {
-                    self.finish_owner_error("begin_turn", error);
-                    return;
-                }
-                self.owner_turn_open = true;
-            }
             // Ordinary follow-ups wait for Stop unless the host explicitly
             // requests delivery at this safe (post-tools) turn boundary.
             self.flush_scheduled_user_messages();
@@ -1660,8 +1633,8 @@ impl LoopState {
                 return;
             }
             self.observe_retracted_delegates(&tool_uses);
-            if let Err(error) = self.validate_owner_mutation().await {
-                self.finish_owner_error("validate", error);
+            if let Err(error) = self.validate_execution_mutation().await {
+                self.finish_error(error.to_string());
                 return;
             }
             // Keep a complete observational copy: display/storage subscribers can
@@ -1753,32 +1726,16 @@ impl LoopState {
             {
                 return;
             }
-            if !self.checkpoint_preflight().await {
+            if !self.checkpoint_uninterrupted() {
                 return;
             }
-            let snapshot = match self.save_checkpoint() {
+            let _snapshot = match self.save_checkpoint() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.finish_error(format!("Cannot persist required checkpoint state: {error}"));
                     return;
                 }
             };
-            if let Some(permit) = self.task.config.ownership.clone()
-                && let Err(error) = self
-                    .await_ownership(permit.checkpoint_off_thread(
-                        crate::ownership::CheckpointBoundary::TurnEnd,
-                        snapshot,
-                        self.ownership_retry(),
-                        self.interrupt_probe(),
-                    ))
-                    .await
-            {
-                // An interrupted checkpoint committed nothing; finalization
-                // checkpoints the run again before publishing its terminal state.
-                self.finish_owner_error("checkpoint", error);
-                return;
-            }
-            self.owner_turn_open = false;
             if has_tool_uses {
                 self.budget.finish_round();
                 match self.publish_budget() {
@@ -2237,19 +2194,23 @@ impl LoopState {
 
     fn save_checkpoint(
         &self,
-    ) -> Result<crate::ownership::SnapshotReference, crate::restore::SnapshotError> {
+    ) -> Result<crate::checkpoint::SnapshotReference, crate::restore::SnapshotError> {
         let snapshot = self.save_checkpoint_reference()?;
-        // Unknown shell effects must be durable BEFORE TurnEnd clears active
-        // authority, including absent stores and skipped snapshots. Leave
-        // owner_turn_open set so finalization can retry without reopening a turn.
-        if self.task.config.ownership.is_some()
+        // A store-backed run must record unknown shell effects before another
+        // round can proceed, including failed or skipped writes. A standalone
+        // runtime without a run store has no durable checkpoint obligation.
+        // In particular, attaching a store later must enable this check then.
+        let persistence_required = self
+            .runtime()
+            .is_some_and(|runtime| runtime.shared.run_store.get().is_some());
+        if persistence_required
             && self
                 .shared
                 .executor
                 .has_unobserved_shell_jobs(&self.task.run_id.to_string())
             && !matches!(
                 snapshot,
-                crate::ownership::SnapshotReference::RunContext { .. }
+                crate::checkpoint::SnapshotReference::RunContext { .. }
             )
         {
             return Err(crate::restore::SnapshotError::UnrecordedShellEffects);
@@ -2259,12 +2220,12 @@ impl LoopState {
 
     fn save_checkpoint_reference(
         &self,
-    ) -> Result<crate::ownership::SnapshotReference, crate::restore::SnapshotError> {
+    ) -> Result<crate::checkpoint::SnapshotReference, crate::restore::SnapshotError> {
         match crate::restore::persist_checkpoint(self) {
             Ok(snapshot) => {
                 if matches!(
                     snapshot,
-                    crate::ownership::SnapshotReference::RunContext { .. }
+                    crate::checkpoint::SnapshotReference::RunContext { .. }
                 ) {
                     self.snapshot_saved_diagnostic();
                 }
@@ -2274,8 +2235,8 @@ impl LoopState {
             Err(error) => {
                 tracing::warn!(run_id = %self.task.run_id, %error, "context checkpoint failed");
                 self.snapshot_diagnostic(&error);
-                Ok(crate::ownership::SnapshotReference::none(
-                    crate::ownership::SnapshotNoneReason::WriteFailed,
+                Ok(crate::checkpoint::SnapshotReference::none(
+                    crate::checkpoint::SnapshotNoneReason::WriteFailed,
                 ))
             }
         }
@@ -2447,113 +2408,33 @@ impl LoopState {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
     }
 
-    async fn checkpoint_preflight(&mut self) -> bool {
-        if let Some(permit) = self.task.config.ownership.clone()
-            && let Err(error) = self
-                .await_ownership(
-                    permit.validate_generation_off_thread(
-                        self.ownership_retry(),
-                        self.interrupt_probe(),
-                    ),
-                )
-                .await
-        {
-            self.finish_owner_error("checkpoint preflight", error);
-            return false;
-        }
-        true
-    }
-
-    /// Fence a stale generation (and renew a delayed lease) before the run
-    /// changes anything. Contention is retried under [`Self::ownership_retry`].
-    pub(super) async fn validate_owner_mutation(
-        &self,
-    ) -> Result<(), crate::ownership::RegistryError> {
-        let Some(permit) = self.task.config.ownership.clone() else {
-            return Ok(());
-        };
-        self.await_ownership(
-            permit.validate_mutation_off_thread(self.ownership_retry(), self.interrupt_probe()),
-        )
-        .await
-    }
-
-    /// Await an ownership registry operation. Contention is not loss of
-    /// authority, so the run waits rather than failing; once the wait is
-    /// noticeable it reports the owner-registry activity (and records one
-    /// diagnostic), then returns to the activity it interrupted.
-    pub(super) async fn await_ownership<T>(
-        &self,
-        operation: impl std::future::Future<Output = Result<T, crate::ownership::RegistryError>>,
-    ) -> Result<T, crate::ownership::RegistryError> {
-        let mut operation = std::pin::pin!(operation);
-        tokio::select! {
-            biased;
-            result = &mut operation => return result,
-            () = tokio::time::sleep(OWNERSHIP_WAIT_NOTICE) => {}
-        }
-        let resume = self.current_activity();
-        self.activity(event_bus::RunActivity::Ownership);
-        self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
-            source: "ownership".into(),
-            severity: event_bus::DiagnosticSeverity::Warning,
-            code: diagnostic_codes::OWNERSHIP_REGISTRY_WAIT.into(),
-            detail: format!(
-                "Waiting for the owner registry (locked for over {} s)",
-                OWNERSHIP_WAIT_NOTICE.as_secs()
-            ),
-            run_id: Some(self.task.run_id.to_string()),
-            thread_id: self.thread_id.clone(),
-            call_id: None,
-        }));
-        let result = operation.await;
-        self.activity(resume);
-        result
-    }
-
-    /// The ownership contention budget: none in production, so registry
-    /// contention never ends a run by itself. Tests may set a bounded one.
-    fn ownership_retry(&self) -> crate::ownership::RetryPolicy {
-        self.runtime()
-            .and_then(|runtime| runtime.shared.ownership_retry.get().copied())
-            .unwrap_or_else(crate::ownership::RetryPolicy::unbounded)
-    }
-
-    /// Lets blocking ownership retries observe Cancel/Stop without the loop.
-    fn interrupt_probe(&self) -> impl Fn() -> bool + Send + 'static {
-        let interrupts = self.channels.cancel_rx.clone();
-        move || interrupts.borrow().kind().is_some()
-    }
-
-    /// End the run on an ownership registry failure. A retry stopped by an
-    /// interrupt ends as that interrupt; other reasons keep the error text,
-    /// which names the registry operation and phase for SQLite failures.
-    fn finish_owner_error(&mut self, stage: &'static str, error: crate::ownership::RegistryError) {
-        if matches!(error, crate::ownership::RegistryError::Interrupted { .. })
-            && let Some(kind) = self.interrupted()
-        {
+    /// Do not commit a normal checkpoint after an accepted Stop/Cancel.
+    /// Terminal finalization persists the interrupted history independently.
+    fn checkpoint_uninterrupted(&mut self) -> bool {
+        if let Some(kind) = self.interrupted() {
             self.finish_interrupted(kind);
-            return;
+            false
+        } else {
+            true
         }
-        if let crate::ownership::RegistryError::Database {
-            operation,
-            phase,
-            attempt,
-            ..
-        } = &error
-        {
-            tracing::warn!(
-                target: crate::ownership::DB_TRACE_TARGET,
-                run_id = %self.task.run_id,
-                stage,
-                operation = operation.as_str(),
-                phase = phase.as_str(),
-                attempt,
-                sqlite_code = ?error.sqlite_code(),
-                "ownership registry failure ends the run"
-            );
+    }
+
+    /// Recheck the in-process incarnation and Stop/tombstone fence after waits.
+    /// No serialized recipe or reused RunId can stand in for the live execution.
+    pub(super) async fn validate_execution_mutation(&self) -> Result<(), crate::RuntimeError> {
+        let runtime = self
+            .runtime()
+            .ok_or_else(|| crate::RuntimeError::RunTerminated {
+                run_id: self.task.run_id.to_string(),
+            })?;
+        runtime.validate_run_mutation(self.task.run_id)?;
+        let execution = runtime.execution_snapshot(self.task.run_id)?;
+        if execution.publication().incarnation() != self.task.publication.incarnation() {
+            return Err(crate::RuntimeError::RunTerminated {
+                run_id: self.task.run_id.to_string(),
+            });
         }
-        self.finish_error(error.to_string());
+        Ok(())
     }
 
     fn finish_stopped(&mut self) {

@@ -320,12 +320,6 @@ async fn adopted_selection_restores_before_and_after_switch_preparation() {
         runtime
             .restore_relations_and_continuations(&mut paused)
             .unwrap();
-        let owner = crate::ownership::OwnerHost::open(
-            &ownership,
-            Default::default(),
-            Arc::new(EventBus::new(64)),
-        )
-        .unwrap();
         let authority = crate::CurrentRecoveryAuthority {
             members: BTreeMap::from([(
                 run,
@@ -333,7 +327,6 @@ async fn adopted_selection_restores_before_and_after_switch_preparation() {
                     interactive: true,
                     keep_alive: true,
                     model_preference: explicit().selection().flatten(),
-                    ownership: Some(owner.start("current").unwrap()),
                     ..Default::default()
                 },
             )]),

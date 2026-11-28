@@ -28,6 +28,9 @@ pub mod receipt;
 const SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
 const TICKET_LIMIT: u64 = 8192;
 
+/// Owner-free planned handoff. Older tickets are rejected before adoption.
+pub const HANDOFF_FORMAT_VERSION: u32 = 2;
+
 /// Values read back from the durable transaction by the integrator. A serialized
 /// record alone grants no authority: the inherited sealed FD and lock are required.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +70,19 @@ struct Ticket {
     device: u64,
     inode: u64,
     record: HandoffRecord,
+}
+
+impl Ticket {
+    fn validate_lifetime(&self, lifetime: &fs::Metadata) -> io::Result<()> {
+        if self.version != HANDOFF_FORMAT_VERSION
+            || self.pid != std::process::id()
+            || self.device != lifetime.dev()
+            || self.inode != lifetime.ino()
+        {
+            return Err(unsafe_path());
+        }
+        Ok(())
+    }
 }
 
 /// Establish the shutdown-signal policy before creating the first thread.
@@ -267,13 +283,7 @@ impl HandoffEntry {
         let ticket: Ticket = serde_json::from_slice(&data)?;
         ticket.record.validate()?;
         let m = lifetime.metadata()?;
-        if ticket.version != 1
-            || ticket.pid != std::process::id()
-            || ticket.device != m.dev()
-            || ticket.inode != m.ino()
-        {
-            return Err(unsafe_path());
-        }
+        ticket.validate_lifetime(&m)?;
         let mask = mask_now()?;
         // SAFETY: initialized sigset and valid signal numbers.
         if unsafe {
@@ -426,7 +436,7 @@ impl Instance {
             .collect::<io::Result<Vec<_>>>()?;
         let meta = self._lifetime.metadata()?;
         let ticket = Ticket {
-            version: 1,
+            version: HANDOFF_FORMAT_VERSION,
             pid: std::process::id(),
             device: meta.dev(),
             inode: meta.ino(),
@@ -765,9 +775,34 @@ mod tests {
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, 0);
     }
     #[test]
+    fn legacy_ticket_is_rejected_before_adoption() {
+        let file = tempfile::tempfile().unwrap();
+        let metadata = file.metadata().unwrap();
+        let mut ticket = Ticket {
+            version: HANDOFF_FORMAT_VERSION,
+            pid: std::process::id(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            record: HandoffRecord {
+                restart_id: "restart".into(),
+                config_identity: "config".into(),
+                predecessor_epoch: 1,
+                successor_epoch: 2,
+                nonce_hash: "nonce".into(),
+                successor_build: "build".into(),
+                boot_deadline: boot::BootDeadline::start().unwrap(),
+            },
+        };
+        ticket.validate_lifetime(&metadata).unwrap();
+        ticket.version = 1;
+        assert!(ticket.validate_lifetime(&metadata).is_err());
+        ticket.version = HANDOFF_FORMAT_VERSION + 1;
+        assert!(ticket.validate_lifetime(&metadata).is_err());
+    }
+    #[test]
     fn ticket_cannot_be_written_resized_or_unsealed() {
         let t = Ticket {
-            version: 1,
+            version: HANDOFF_FORMAT_VERSION,
             pid: std::process::id(),
             device: 0,
             inode: 0,
@@ -819,7 +854,7 @@ mod tests {
                 boot_deadline: boot::BootDeadline::start().unwrap(),
             };
             let ticket = Ticket {
-                version: 1,
+                version: HANDOFF_FORMAT_VERSION,
                 pid: std::process::id(),
                 device: 0,
                 inode: 0,

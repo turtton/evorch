@@ -62,6 +62,11 @@ impl World {
                 .sidebar
                 .add_project(project.clone(), "test", base)
                 .unwrap();
+            // The continue revalidates the project the host currently trusts.
+            document
+                .sidebar
+                .set_project_trust(&project, workspace_state::TrustState::Approved)
+                .unwrap();
             document
                 .sidebar
                 .create_thread(workspace_state::ThreadId::new("thread"), project, "test")

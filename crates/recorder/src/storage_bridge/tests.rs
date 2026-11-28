@@ -1,5 +1,5 @@
 use super::*;
-use event_bus::{LifecycleEvent, OwnershipAction, OwnershipEvent, UsageEvent};
+use event_bus::{LifecycleEvent, UsageEvent};
 use std::time::{Duration, UNIX_EPOCH};
 use storage::{Database, Storage, StorageConfig};
 
@@ -75,30 +75,6 @@ fn ledger_event_is_persisted() {
 }
 
 #[test]
-fn ownership_event_is_persisted() {
-    let (_dir, storage, db) = fixture();
-    let mut bridge = StorageBridge::new(storage.handle(), "session");
-    let event = Event::new(OwnershipEvent {
-        thread_id: "thread-1".into(),
-        owner_id: "owner-1".into(),
-        generation: 2,
-        action: OwnershipAction::Quiescing,
-    });
-
-    bridge.handle_event(&event).unwrap();
-
-    let events = db.events_all_ordered().unwrap();
-    assert_eq!(
-        events,
-        vec![storage::StoredEvent {
-            id: events[0].id,
-            session_id: Some("session".into()),
-            event,
-        }]
-    );
-}
-
-#[test]
 fn flush_usage_produces_metrics_bucket() {
     // Given: two observations in one minute.
     let (_dir, storage, db) = fixture();
@@ -171,49 +147,6 @@ fn composing_tool_call_drafts_and_retry_markers_are_not_persisted() {
         stored[0].event.kind,
         event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { .. })
     ));
-}
-
-#[test]
-fn heartbeat_is_observational_but_ownership_transitions_are_durable() {
-    let (_dir, storage, db) = fixture();
-    let mut bridge = StorageBridge::new(storage.handle(), "session");
-    let actions = [
-        OwnershipAction::Claimed,
-        OwnershipAction::Suspect,
-        OwnershipAction::Stale,
-        OwnershipAction::Claimable,
-        OwnershipAction::Quiescing,
-        OwnershipAction::Released,
-        OwnershipAction::Handoff,
-        OwnershipAction::MutationRejected,
-    ];
-    for _ in 0..1_000 {
-        bridge
-            .handle_event(&Event::new(OwnershipEvent {
-                thread_id: "thread".into(),
-                owner_id: "owner".into(),
-                generation: 1,
-                action: OwnershipAction::Heartbeat,
-            }))
-            .unwrap();
-    }
-    assert!(db.events_all_ordered().unwrap().is_empty());
-    for action in actions {
-        bridge
-            .handle_event(&Event::new(OwnershipEvent {
-                thread_id: "thread".into(),
-                owner_id: "owner".into(),
-                generation: 1,
-                action,
-            }))
-            .unwrap();
-    }
-    assert_eq!(db.events_all_ordered().unwrap().len(), actions.len());
-    assert_eq!(bridge.monitor().snapshot().skipped_heartbeats, 1_000);
-    assert_eq!(
-        bridge.monitor().snapshot().persisted_events,
-        actions.len() as u64
-    );
 }
 
 #[test]
@@ -318,48 +251,6 @@ async fn a_single_reasoning_fragment_flushes_on_deadline_and_shutdown_drains_the
 }
 
 #[tokio::test]
-async fn coalesced_delta_still_checks_the_generation_at_storage_write() {
-    let (_dir, storage, db) = fixture();
-    let mut bridge = StorageBridge::new(storage.handle(), "session");
-    let bus = EventBus::new(32);
-    let accepted = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let flag = accepted.clone();
-    bus.register_mutation_fence(
-        "run".into(),
-        Arc::new(move || flag.load(std::sync::atomic::Ordering::SeqCst)),
-    );
-    bridge.validator = Some(bus.mutation_validator());
-    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-    let mut queue = EventQueue::new(
-        tx,
-        bridge.monitor(),
-        PersistencePolicy::default(),
-        storage.handle().max_event_bytes(),
-    );
-    for text in ["first", "second"] {
-        queue
-            .push(Event::new(event_bus::MessageEvent::ReasoningDelta {
-                run_id: Some("run".into()),
-                delta: text.into(),
-            }))
-            .await
-            .unwrap();
-    }
-    queue.flush().await.unwrap();
-    accepted.store(false, std::sync::atomic::Ordering::SeqCst);
-    let WriteRequest::Event(queued) = rx.recv().await.unwrap() else {
-        panic!("expected event")
-    };
-    assert!(matches!(
-        bridge.handle_event(&queued.event),
-        Err(StorageError::StaleMutation)
-    ));
-    assert!(db.events_all_ordered().unwrap().is_empty());
-    assert_eq!(bridge.monitor().snapshot().persisted_events, 0);
-    assert_eq!(bridge.monitor().snapshot().failed_events, 1);
-}
-
-#[tokio::test]
 async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact() {
     use event_bus::{DiagnosticEvent, DiagnosticSeverity};
     let (_dir, storage, db) = fixture();
@@ -369,12 +260,6 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
     let monitor = bridge.monitor();
     let task = spawn_test_bridge(&bus, bridge, Duration::from_millis(10));
 
-    let heartbeat = Event::new(OwnershipEvent {
-        thread_id: "thread".into(),
-        owner_id: "owner".into(),
-        generation: 1,
-        action: OwnershipAction::Heartbeat,
-    });
     let info = Event::new(DiagnosticEvent {
         source: "test".into(),
         severity: DiagnosticSeverity::Info,
@@ -384,10 +269,6 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
         thread_id: None,
         call_id: None,
     });
-    for _ in 0..100 {
-        bus.emit(heartbeat.clone());
-        assert_eq!(live.recv().await.unwrap(), heartbeat);
-    }
     for event in [info, usage_event(10)] {
         bus.emit(event.clone());
         assert_eq!(live.recv().await.unwrap(), event);
@@ -397,60 +278,9 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
     assert!(db.events_all_ordered().unwrap().is_empty());
     assert!(db.metrics_range(120, 180).unwrap().is_empty());
     let snapshot = monitor.snapshot();
-    assert_eq!(snapshot.skipped_heartbeats, 100);
     assert_eq!(snapshot.skipped_diagnostics, 1);
     assert_eq!(snapshot.peak_pending_events, 0);
     assert_eq!(snapshot.persisted_events, 0);
-}
-
-#[tokio::test]
-async fn real_owner_handoff_still_rejects_an_already_queued_old_generation() {
-    let (dir, storage, db) = fixture();
-    let bus = Arc::new(EventBus::new(64));
-    let root = dir.sockets().to_path_buf();
-    let first =
-        runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap();
-    let successor =
-        runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap();
-    let permit = first.start("thread").unwrap();
-    let token = permit.clone();
-    bus.register_mutation_guard(
-        "run".into(),
-        Arc::new(move || {
-            token
-                .mutation_guard()
-                .ok()
-                .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
-        }),
-    );
-    let mut bridge = StorageBridge::new(storage.handle(), "session");
-    bridge.validator = Some(bus.mutation_validator());
-    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-    let mut queue = EventQueue::new(
-        tx,
-        bridge.monitor(),
-        PersistencePolicy::default(),
-        storage.handle().max_event_bytes(),
-    );
-    queue
-        .push(Event::new(event_bus::MessageEvent::ReasoningDelta {
-            run_id: Some("run".into()),
-            delta: "queued by old owner".into(),
-        }))
-        .await
-        .unwrap();
-    first.begin_quiesce().unwrap();
-    let next = first.handoff(&permit, &successor).unwrap();
-    assert!(next.lease.generation > permit.lease.generation);
-    queue.flush().await.unwrap();
-    let WriteRequest::Event(queued) = rx.recv().await.unwrap() else {
-        panic!("expected delta")
-    };
-    assert!(matches!(
-        bridge.handle_event(&queued.event),
-        Err(StorageError::StaleMutation)
-    ));
-    assert!(db.events_all_ordered().unwrap().is_empty());
 }
 
 #[test]

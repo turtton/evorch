@@ -264,9 +264,9 @@ fn recorded_progress_that_is_not_finished_keeps_the_discard_partial() {
         sql.execute("DELETE FROM recovery_graph_thread_progress", [])
             .unwrap();
         sql.execute(
-            "INSERT INTO recovery_graph_thread_progress(disposal_key,manifest_id,restart_id,capture_id,thread_id,owner_generation,revision,operation_id,attempt_nonce,owners,scratch) \
-             VALUES('k',?1,?2,?3,'run-a',1,1,'op-1','nonce-op-1',?4,?5)",
-            rusqlite::params![MANIFEST, TX, CAPTURE, steps.0, steps.1],
+            "INSERT INTO recovery_graph_thread_progress(disposal_key,manifest_id,restart_id,capture_id,thread_id,revision,operation_id,attempt_nonce,scratch) \
+             VALUES('k',?1,?2,?3,'run-a',1,'op-1','nonce-op-1',?4)",
+            rusqlite::params![MANIFEST, TX, CAPTURE, steps.1],
         )
         .unwrap();
         assert_eq!(f.graph().completion, expected, "{steps:?}");
@@ -293,11 +293,9 @@ fn no_disposal_record_is_not_evidence_that_nothing_remains() {
                     restart_id: TX.into(),
                     capture_id: CAPTURE.into(),
                     thread_id: "run-a".into(),
-                    owner_generation: 1,
                 },
                 expected_revision: 0,
                 control,
-                owners: storage::recovery::graph_progress::GraphDisposalStep::NotApplicable,
                 scratch: storage::recovery::graph_progress::GraphDisposalStep::Applied,
             },
         )
@@ -310,7 +308,7 @@ fn a_graph_is_complete_only_when_every_thread_has_a_finished_record() {
     use storage::recovery::graph_progress::GraphDisposalStep::*;
     let (f, _) = Fixture::cold_quarantine(false);
     discard(&f, f.request("op-1")).unwrap();
-    f.record_cleanup(NotApplicable, Applied);
+    f.record_cleanup(Applied);
     let done = f.graph();
     assert_eq!(done.completion, QuarantineCompletion::Complete);
     // A later request on the revoked graph reports that same finished state.
@@ -324,12 +322,12 @@ fn an_unknown_disposal_step_or_unreadable_membership_is_unknown_not_complete() {
     use storage::recovery::graph_progress::GraphDisposalStep::*;
     let (f, _) = Fixture::cold_quarantine(false);
     discard(&f, f.request("op-1")).unwrap();
-    f.record_cleanup(Unknown, Applied);
+    f.record_cleanup(Unknown);
     assert_eq!(f.graph().completion, QuarantineCompletion::Unknown);
 
     let (f, _) = Fixture::cold_quarantine(false);
     discard(&f, f.request("op-1")).unwrap();
-    f.record_cleanup(NotApplicable, NotApplicable);
+    f.record_cleanup(NotApplicable);
     assert_eq!(f.graph().completion, QuarantineCompletion::Complete);
     f.sql()
         .execute(

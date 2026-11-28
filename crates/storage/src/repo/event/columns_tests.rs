@@ -466,13 +466,6 @@ fn every_variant_is_stored_with_the_columns_its_helpers_and_payload_give() {
         "",
         None,
     ));
-    cases.push((
-        kind_from(json!({"kind": "Ownership", "payload": {
-            "thread_id": "t", "owner_id": "o", "generation": 1, "action": "claimed"
-        }})),
-        "",
-        None,
-    ));
 
     for (kind, variant, run) in &cases {
         // When: it is appended.
@@ -501,7 +494,7 @@ fn every_variant_is_stored_with_the_columns_its_helpers_and_payload_give() {
             "{variant}"
         );
     }
-    assert_eq!(cases.len(), 61);
+    assert_eq!(cases.len(), 60);
 }
 
 #[test]
@@ -765,7 +758,7 @@ fn scenario() -> Scenario {
         (
             true,
             kind_from(
-                json!({"kind": "Ownership", "payload": {"thread_id": "t", "owner_id": "o", "generation": 1, "action": "claimed"}}),
+                json!({"kind": "Diagnostic", "payload": {"source": "s", "severity": "info", "code": "c", "detail": "d", "run_id": null, "thread_id": null}}),
             ),
         ),
         (
@@ -846,8 +839,8 @@ impl Scenario {
         );
         assert_eq!(self.matching(&[("Tool", None)]), self.pick(&[3, 4, 5]));
         assert_eq!(
-            self.matching(&[("Tool", Some("ApprovalResolved")), ("Ownership", Some(""))]),
-            self.pick(&[4, 13])
+            self.matching(&[("Tool", Some("ApprovalResolved")), ("Diagnostic", Some(""))]),
+            self.pick(&[4, 13, 14, 15])
         );
         assert_eq!(
             self.matching(&[("Message", Some("StreamRetried"))]),

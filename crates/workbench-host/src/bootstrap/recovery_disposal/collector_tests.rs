@@ -1,5 +1,6 @@
 use super::*;
 use crate::admin::failure;
+use runtime::AgentRuntime;
 use std::sync::{
     Barrier,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -19,7 +20,7 @@ fn fact(n: usize, undisposed: bool) -> GraphFact {
         undisposed,
         incomplete: false,
         over_limit: false,
-        ownership: (runtime::OwnedGraphOwnershipState::LiveSelf, 0, 0),
+        threads: 1,
     }
 }
 fn runtime() -> AgentRuntime {
@@ -46,14 +47,11 @@ fn runtime() -> AgentRuntime {
         Arc::new(Never),
     )
 }
-fn collector(rt: &AgentRuntime) -> Arc<LiveGraphCollector> {
-    LiveGraphCollector::new(
-        rt,
-        StorageConfig {
-            db_path: std::path::PathBuf::from("/no-collector-database/observation"),
-            ..Default::default()
-        },
-    )
+fn collector() -> Arc<LiveGraphCollector> {
+    LiveGraphCollector::new(StorageConfig {
+        db_path: std::path::PathBuf::from("/no-collector-database/observation"),
+        ..Default::default()
+    })
 }
 fn ready(c: &LiveGraphCollector) {
     c.bind_epoch(InstanceEpoch(7)).unwrap();
@@ -66,8 +64,7 @@ fn reject<T>(_: &T) -> Arc<dyn Fn() -> bool + Send + Sync> {
 }
 #[test]
 fn atomic_admission_runs_once_keeps_guard_and_excludes_effects_until_canonical_cancel() {
-    let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     ready(&c);
     let revision = c.snapshot().unwrap().snapshot_revision;
     let calls = AtomicUsize::new(0);
@@ -100,8 +97,7 @@ fn atomic_admission_runs_once_keeps_guard_and_excludes_effects_until_canonical_c
 }
 #[test]
 fn stale_pending_membership_aba_and_epoch_refuse_before_transition() {
-    let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     ready(&c);
     let initial = c.snapshot().unwrap().snapshot_revision;
     assert_eq!(initial, c.snapshot().unwrap().snapshot_revision);
@@ -139,8 +135,7 @@ fn stale_pending_membership_aba_and_epoch_refuse_before_transition() {
 }
 #[test]
 fn barrier_q2_cannot_overtake_atomic_gate_transition() {
-    let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     ready(&c);
     let revision = c.snapshot().unwrap().snapshot_revision;
     let entered = Arc::new(Barrier::new(2));
@@ -179,8 +174,7 @@ fn barrier_q2_cannot_overtake_atomic_gate_transition() {
 }
 #[test]
 fn full_count_not_display_limit_and_warnings_are_not_blockers() {
-    let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     ready(&c);
     for n in [64, 65] {
         let mut state = c.state.lock().unwrap();
@@ -233,7 +227,7 @@ fn unavailable_is_permanent_automatic_continues_manual_and_restart_are_closed() 
         db_path: root.path().join("not-created.db"),
         ..Default::default()
     };
-    let c = LiveGraphCollector::new(&rt, config.clone());
+    let c = LiveGraphCollector::new(config.clone());
     c.bind_epoch(InstanceEpoch(7)).unwrap();
     rt.install_graph_observer(c.clone()).unwrap();
     c.rebuild().unwrap();
@@ -269,8 +263,7 @@ fn unavailable_is_permanent_automatic_continues_manual_and_restart_are_closed() 
 }
 #[test]
 fn uninitialized_poison_exhaustion_and_failed_transition_do_not_become_empty_success() {
-    let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     assert!(c.snapshot().is_err());
     ready(&c);
     let revision = c.snapshot().unwrap().snapshot_revision;
@@ -287,7 +280,7 @@ fn uninitialized_poison_exhaustion_and_failed_transition_do_not_become_empty_suc
     c.state.lock().unwrap().revision = u64::MAX;
     assert!(c.begin_change("manifest").is_err());
     assert!(c.snapshot().is_err());
-    let poisoned = collector(&rt);
+    let poisoned = collector();
     ready(&poisoned);
     let other = poisoned.clone();
     assert!(
@@ -310,7 +303,7 @@ fn uninitialized_poison_exhaustion_and_failed_transition_do_not_become_empty_suc
 #[test]
 fn dropped_effect_ticket_remains_unknown_and_stale_readback_cannot_clear_successor() {
     let rt = runtime();
-    let c = collector(&rt);
+    let c = collector();
     ready(&c);
     rt.install_graph_observer(c.clone()).unwrap();
     let token = rt.reserve_automatic_activation("manifest").unwrap();

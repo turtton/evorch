@@ -2,7 +2,7 @@ use crate::admin::{self, AdminFailure};
 use std::collections::BTreeMap;
 use workbench_protocol::wire::Revision;
 
-/// Bounded diagnostic cache only. Neither a CAS nor an owner/graph reservation.
+/// Bounded diagnostic cache only. Neither a CAS nor a graph reservation.
 #[derive(Default)]
 pub(super) struct SnapshotClock {
     next: u64,

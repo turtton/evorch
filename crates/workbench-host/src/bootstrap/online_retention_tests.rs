@@ -1,4 +1,4 @@
-//! Real bootstrap, writer, event bridge and owner; only provider/sandbox are seams.
+//! Real bootstrap, writer and event bridge; only provider/sandbox are seams.
 use super::{BootstrapOptions, BootstrappedHost, TestSeams};
 use event_bus::{AgentMessageKind, AgentRunPhase, EventKind, LifecycleEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole};
@@ -185,7 +185,6 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
     .unwrap();
     core.enable_retention_producers_for_test().unwrap();
     let mut events = core.runtime.event_bus().subscribe();
-    let permit = core.owner.start("online-family").unwrap();
     let run = core
         .runtime
         .delegate_chat(
@@ -195,7 +194,6 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
             RunConfig {
                 interactive,
                 keep_alive: interactive,
-                ownership: Some(permit),
                 ..Default::default()
             },
         )
@@ -364,7 +362,6 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
                 );
                 // Stop won first. The next explicit user interaction uses the
                 // existing chat restoration route, never an automatic wake.
-                let permit = core.owner.owned_permit("online-family").unwrap();
                 let resumed = core
                     .runtime
                     .delegate_chat(
@@ -374,7 +371,6 @@ async fn lifecycle(interactive: bool, unrelated: usize, pin_after_stop: bool) ->
                         RunConfig {
                             interactive: true,
                             keep_alive: true,
-                            ownership: Some(permit),
                             ..Default::default()
                         },
                     )
@@ -551,7 +547,7 @@ async fn online_retention_pin_after_idle_stop_never_auto_resumes() {
 /// Synthetic, warm-cache workbench-host measurement; deliberately no wall-clock
 /// assertions. Run serially with --ignored --nocapture; never touches real XDG.
 #[tokio::test]
-#[ignore = "manual host/fence/foreground performance measurement"]
+#[ignore = "manual host/foreground performance measurement"]
 async fn online_retention_host_measurement() {
     for threads in [1_000, 2_000] {
         for repetition in 0..6 {

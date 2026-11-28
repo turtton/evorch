@@ -4680,8 +4680,20 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
     if legacy {
         harness.runtime = enable_scratch(&harness.runtime);
     }
-    // The ownership host empties the directory when this process claims the thread.
+    // Simulate an actual cold-start scratch reset before restoring this thread.
+    // The legacy run had no scratch guidance; populate its historical directory
+    // as well, since an absent directory must not produce a loss notice.
+    let dir = scratch.thread_dir("thread");
+    let scratch_root = sandbox::scratch::ScratchRoot::at(scratch.parent().to_owned());
+    assert_eq!(
+        scratch_root
+            .prepare(dir.file_name().unwrap().to_str().unwrap())
+            .unwrap(),
+        dir
+    );
+    std::fs::write(dir.join("prior-output"), "historical scratch data").unwrap();
     scratch.reset_thread("thread");
+    assert!(!dir.exists(), "the fixture must actually remove scratch");
     harness
         .runtime
         .resume_chat(run, RunConfig::default())
@@ -4711,7 +4723,6 @@ async fn scratch_restore_preserves_wire_prefix(legacy: bool) {
         .map(|request| request.body)
         .collect::<Vec<_>>();
     assert_eq!(requests.len(), 3);
-    let dir = scratch.thread_dir("thread");
     let note = format!("Temporary files (evorch): $TMPDIR is {}.", dir.display());
     let systems = wire_texts(&requests[0], "system");
     for request in &requests {
@@ -4793,21 +4804,61 @@ async fn archive_reclaim_resume_appends_one_notice_and_preserves_wire_prefix() {
         db_path: root.join("archive-history.db"),
         ..Default::default()
     };
-    let storage = storage::Storage::open(storage_config.clone()).unwrap();
-    let host = runtime::ownership::OwnerHost::open(
-        harness._directory.sockets(),
-        Default::default(),
-        bus.clone(),
+    // Archive authority is the existing DB/root writer lease and retention binding;
+    // scratch lifetime and provider history do not depend on process ownership.
+    let thread_root = harness._directory.sockets().to_path_buf();
+    let sidebar = root.join("sidebar.json");
+    std::fs::write(&sidebar, "{}").unwrap();
+    let leases = Arc::new(
+        storage::WriterLeases::acquire(
+            &storage_config.db_path,
+            &thread_root,
+            std::time::Duration::ZERO,
+        )
+        .unwrap(),
+    );
+    let shared = storage::shared_with_wait(
+        &storage_config.db_path,
+        &thread_root,
+        std::time::Duration::ZERO,
     )
     .unwrap();
-    host.start("thread").unwrap();
+    let storage = storage::Storage::open_with_writer_lease(
+        storage_config.clone(),
+        shared.db_lease().unwrap(),
+        leases.db_lease(),
+    )
+    .unwrap();
+    runtime::thread_retention::binding::ensure_binding(
+        &storage::Database::open(&storage_config).unwrap(),
+        &storage.handle(),
+        &leases.authority().unwrap(),
+        runtime::thread_retention::BindingPaths {
+            ownership_root: &thread_root,
+            sidebar_path: &sidebar,
+        },
+        &storage_config.db_path,
+        1,
+    )
+    .unwrap();
+    let scratch =
+        Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(&thread_root).unwrap());
+    let archive = runtime::scratch::archive::ArchiveService::new(
+        &scratch,
+        runtime::scratch::archive::authority(
+            storage_config.clone(),
+            thread_root,
+            sidebar,
+            leases,
+            scratch.clone(),
+        ),
+    )
+    .unwrap();
     let (consulted_tx, mut consulted) = tokio::sync::mpsc::unbounded_channel();
-    let archive = runtime_archive(&host);
     archive.set_checker(Arc::new(move |_| {
         let _ = consulted_tx.send(());
         Ok(true)
     }));
-    let scratch = host.thread_scratch();
     harness.runtime = AgentRuntime::with_sandbox_factory(
         bus.clone(),
         Arc::new(
@@ -6633,14 +6684,4 @@ async fn interactive_delegate_turn_output_preserves_parent_wire_prefix() {
         harness.runtime.cancel(child.run_id).unwrap();
         harness.runtime.wait(child.run_id).await.unwrap();
     }
-}
-
-fn runtime_archive(
-    host: &runtime::ownership::OwnerHost,
-) -> runtime::scratch::archive::ArchiveService {
-    runtime::scratch::archive::ArchiveService::new(
-        &host.thread_scratch(),
-        host.scratch_archive_authority(),
-    )
-    .unwrap()
 }

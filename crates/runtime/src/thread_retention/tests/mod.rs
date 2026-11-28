@@ -10,7 +10,6 @@ use storage::thread_retention::{
 use storage::{Database, ExclusiveLeases, StorageConfig};
 
 use super::{StartupBudget, StartupPaths, StartupReport, run_exclusive_phase, startup_input};
-use crate::ownership::{Lease, Registry, ThreadOwner};
 use crate::scratch::ThreadScratch;
 
 mod binding;
@@ -234,33 +233,6 @@ impl World {
         run_exclusive_phase(&leases, &self.paths(), policy, input, budget, NOW_NS).unwrap()
     }
 
-    pub fn registry(&self) -> Registry {
-        Registry::open(&self.root.join("owners.db")).unwrap()
-    }
-
-    /// An owner row; `active` marks a turn in flight.
-    pub fn owner_row(&self, thread: &str, active: bool, expires_at_ms: u64) {
-        let mut owner = ThreadOwner::new(
-            thread.to_owned(),
-            Lease {
-                owner_id: "previous-process".into(),
-                generation: 1,
-                expires_at: expires_at_ms,
-            },
-        );
-        owner.active_turn = active;
-        self.registry().start(&owner).unwrap();
-    }
-
-    pub fn owner_rows(&self) -> Vec<String> {
-        self.registry()
-            .list()
-            .unwrap()
-            .into_iter()
-            .map(|owner| owner.thread_id)
-            .collect()
-    }
-
     pub fn scratch_exists(&self, thread: &str) -> bool {
         self.scratch().thread_dir_exists(thread).unwrap()
     }
@@ -301,14 +273,12 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
     match &report.outcome {
         super::StartupOutcome::Ran {
             confirmed,
-            owners_removed,
             scratch,
             errors,
             gc,
             ..
         } => RanView {
             confirmed: confirmed.iter().map(|f| f.family_key.as_str()).collect(),
-            owners_removed: *owners_removed,
             scratch,
             errors,
             gc: gc.as_ref(),
@@ -318,7 +288,6 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
 }
 pub(super) struct RanView<'a> {
     pub confirmed: Vec<&'a str>,
-    pub owners_removed: usize,
     pub scratch: &'a super::startup::ScratchReport,
     pub errors: &'a [String],
     pub gc: Option<&'a crate::artifacts::GcReport>,

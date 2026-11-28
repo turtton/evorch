@@ -11,7 +11,7 @@ pub fn metadata() -> RestartMetadata {
         old_build: "old".into(),
         successor_build: "new".into(),
         target_identity: "target".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: 62,
         old_builtin_tool_names: BTreeSet::from(["read".into()]),

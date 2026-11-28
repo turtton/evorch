@@ -280,7 +280,7 @@ fn stream_and_normal_commands_share_daily_totals_and_restore_session_limits() {
     let queue = |stream: bool, session: &str| {
         let (reply, result) = mpsc::channel();
         let command = if stream {
-            Command::AppendStreamEvent(session.into(), event.clone(), None, reply)
+            Command::AppendStreamEvent(session.into(), event.clone(), reply)
         } else {
             Command::AppendEvent(Some(session.into()), event.clone(), reply)
         };

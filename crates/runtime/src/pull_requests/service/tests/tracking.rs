@@ -117,27 +117,6 @@ async fn switching_tracking_off_during_a_fetch_starts_no_git_afterwards() {
     assert!(stored.is_none());
 }
 
-// Given: tracking is switched off while the scheduler reads the registry for its plan / When:
-// the plan is done / Then: nothing is started from it
-#[tokio::test(start_paused = true)]
-async fn switching_tracking_off_while_planning_starts_nothing() {
-    let world = World::new();
-    let process = world.process(enabled());
-    process.source.push_ok(&key(1), open_running(1));
-    process.link_directly("t1", 1);
-    let service = process.service.clone();
-    process.hooks.before_permit(move || {
-        service
-            .update_settings(PullRequestsConfig::default())
-            .unwrap();
-    });
-
-    process.host.start("t1").unwrap();
-    settle().await;
-
-    assert!(process.source.calls().is_empty());
-}
-
 // Given: tracking is switched off while the directories of a checkout are looked up / When: the
 // lookup is done / Then: git is not started
 #[tokio::test(start_paused = true)]
@@ -161,58 +140,6 @@ async fn switching_tracking_off_while_looking_up_directories_starts_no_git() {
     assert_eq!(process.environment.directory_requests(), 1);
     assert_eq!(process.environment.resolutions(), 0);
     assert!(process.state("t1").local_head.is_none(), "{events:?}");
-}
-
-// Given: the lease of a thread is handed to another process after the plan found it / When: the
-// fetch is about to start / Then: gh is not started for a lease that is gone
-#[tokio::test(start_paused = true)]
-async fn a_handed_off_lease_starts_no_fetch() {
-    let world = World::new();
-    let process = world.process(enabled());
-    let successor = world.process(enabled());
-    process.source.push_ok(&key(1), open_running(1));
-    process.link_directly("t1", 1);
-    let (host, next_host) = (Arc::clone(&process.host), Arc::clone(&successor.host));
-    process.hooks.after_permit(move |permit| {
-        host.handoff(permit, &next_host).unwrap();
-    });
-
-    process.host.start("t1").unwrap();
-    settle().await;
-
-    assert!(
-        process.source.calls().is_empty(),
-        "the old owner must not start gh"
-    );
-}
-
-// Given: the lease of a thread is handed off while the directories of its checkout are looked
-// up / When: the lookup is done / Then: git is not started for it
-#[tokio::test(start_paused = true)]
-async fn a_handed_off_lease_starts_no_git() {
-    let world = World::new();
-    let mut process = world.process(enabled());
-    let successor = world.process(enabled());
-    let checkout = world.dir.path().join("checkout");
-    std::fs::create_dir_all(&checkout).unwrap();
-    process.environment.set_directories(vec![checkout]);
-    let permit = process.permit("t1");
-    let (host, next_host) = (Arc::clone(&process.host), Arc::clone(&successor.host));
-    process.environment.on_directories(move || {
-        host.handoff(&permit, &next_host).unwrap();
-    });
-    process.source.push_ok(&key(1), open_running(1));
-
-    let owner = process.permit("t1");
-    process
-        .service
-        .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
-        .await
-        .unwrap();
-    process.quiet_events().await;
-
-    assert_eq!(process.environment.directory_requests(), 1);
-    assert_eq!(process.environment.resolutions(), 0);
 }
 
 // Given: a pull request waiting for its next poll / When: the settings change at the same time as
@@ -250,96 +177,34 @@ async fn new_settings_apply_to_a_waiting_poll_even_when_another_wake_comes_with_
     );
 }
 
-// Given: tracking is switched off, or the lease is handed off, while a fetch is being numbered
-// (a wait on the blocking pool right before gh) / When: the numbering is done / Then: gh is not
-// started
+// Given: tracking is switched off while a fetch is being numbered (a wait on the blocking pool
+// right before gh) / When: the numbering is done / Then: gh is not started
 #[tokio::test(start_paused = true)]
-async fn nothing_changes_gh_s_start_after_the_wait_for_the_fetch_number() {
-    for handoff in [false, true] {
-        let world = World::new();
-        let process = world.process(enabled());
-        let successor = world.process(enabled());
-        process.source.push_ok(&key(1), open_running(1));
-        let permit = process.permit("t1");
-        let (service, host, next_host) = (
-            process.service.clone(),
-            Arc::clone(&process.host),
-            Arc::clone(&successor.host),
-        );
-        process.at_stage(Stage::BeginFetch, move || {
-            if handoff {
-                host.handoff(&permit, &next_host).unwrap();
-            } else {
-                service
-                    .update_settings(PullRequestsConfig::default())
-                    .unwrap();
-            }
-        });
-
-        let owner = process.permit("t1");
-        process
-            .service
-            .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
-            .await
+async fn switching_tracking_off_after_the_wait_for_the_fetch_number_starts_no_gh() {
+    let world = World::new();
+    let process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    let service = process.service.clone();
+    process.at_stage(Stage::BeginFetch, move || {
+        service
+            .update_settings(PullRequestsConfig::default())
             .unwrap();
-        settle().await;
+    });
 
-        assert!(
-            process.source.calls().is_empty(),
-            "gh was started (handoff: {handoff})"
-        );
-    }
+    process
+        .service
+        .link("t1", &format!("{REPOSITORY}#1"), 0)
+        .await
+        .unwrap();
+    settle().await;
+
+    assert!(process.source.calls().is_empty(), "gh was started");
 }
 
-// Given: tracking is switched off, or the lease is handed off, while the look for a checkout waits
-// for the blocking pool / When: the work runs / Then: git is not started
+// Given: tracking is switched off while the look for a checkout waits for the blocking pool /
+// When: the work runs / Then: git is not started
 #[tokio::test(start_paused = true)]
-async fn nothing_changes_git_s_start_after_the_wait_for_the_pool() {
-    for handoff in [false, true] {
-        let world = World::new();
-        let process = world.process(enabled());
-        let successor = world.process(enabled());
-        let checkout = world.dir.path().join("checkout");
-        std::fs::create_dir_all(&checkout).unwrap();
-        process.environment.set_directories(vec![checkout]);
-        process.source.push_ok(&key(1), open_running(1));
-        let permit = process.permit("t1");
-        let (service, host, next_host) = (
-            process.service.clone(),
-            Arc::clone(&process.host),
-            Arc::clone(&successor.host),
-        );
-        process.at_stage(Stage::Checkout, move || {
-            if handoff {
-                host.handoff(&permit, &next_host).unwrap();
-            } else {
-                service
-                    .update_settings(PullRequestsConfig::default())
-                    .unwrap();
-            }
-        });
-
-        let owner = process.permit("t1");
-        process
-            .service
-            .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
-            .await
-            .unwrap();
-        settle().await;
-
-        assert_eq!(process.environment.directory_requests(), 1);
-        assert_eq!(
-            process.environment.resolutions(),
-            0,
-            "git was started (handoff: {handoff})"
-        );
-    }
-}
-
-// Given: tracking is switched off while the last check of the thread's lease waits on the
-// registry / When: the check returns / Then: git is not started: tracking is read after the lease
-#[tokio::test(start_paused = true)]
-async fn tracking_is_read_after_the_lease_is_confirmed_before_git() {
+async fn switching_tracking_off_after_the_wait_for_the_pool_starts_no_git() {
     let world = World::new();
     let process = world.process(enabled());
     let checkout = world.dir.path().join("checkout");
@@ -347,17 +212,21 @@ async fn tracking_is_read_after_the_lease_is_confirmed_before_git() {
     process.environment.set_directories(vec![checkout]);
     process.source.push_ok(&key(1), open_running(1));
     let service = process.service.clone();
-    process.hooks.during_confirm(move || {
+    process.at_stage(Stage::Checkout, move || {
         service
             .update_settings(PullRequestsConfig::default())
             .unwrap();
     });
 
-    process.link("t1", 1).await;
+    process
+        .service
+        .link("t1", &format!("{REPOSITORY}#1"), 0)
+        .await
+        .unwrap();
     settle().await;
 
     assert_eq!(process.environment.directory_requests(), 1);
-    assert_eq!(process.environment.resolutions(), 0);
+    assert_eq!(process.environment.resolutions(), 0, "git was started");
 }
 
 // Given: a merged pull request that a refresh cannot fetch / When: time passes / Then: it is still
@@ -371,7 +240,6 @@ async fn a_failed_refresh_of_a_merged_pull_request_does_not_restart_the_polling(
         &key(1),
         fetched(1, facts(PullRequestState::Merged, passing())),
     );
-    let permit = process.permit("t1");
     process.link("t1", 1).await;
     process.next().await;
     process.next().await;
@@ -380,7 +248,7 @@ async fn a_failed_refresh_of_a_merged_pull_request_does_not_restart_the_polling(
     process
         .source
         .push_err(&key(1), FetchError::Network("down".into()));
-    process.service.refresh("t1", &permit).await.unwrap();
+    process.service.refresh("t1").await.unwrap();
     settle().await;
     assert_eq!(
         process.source.calls().len(),
@@ -397,7 +265,7 @@ async fn a_failed_refresh_of_a_merged_pull_request_does_not_restart_the_polling(
 
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    process.service.refresh("t1", &permit).await.unwrap();
+    process.service.refresh("t1").await.unwrap();
     settle().await;
     assert_eq!(process.source.calls().len(), 3);
     pass(30).await;
@@ -413,7 +281,6 @@ async fn a_merge_found_in_the_shared_snapshot_stops_the_polling_of_a_tracked_key
     let mut process = world.process(enabled());
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    let permit = process.permit("t1");
     process.link("t1", 1).await;
     process.next().await;
     process.next().await;
@@ -437,7 +304,7 @@ async fn a_merge_found_in_the_shared_snapshot_stops_the_polling_of_a_tracked_key
         "the merge in the shared snapshot is honoured"
     );
 
-    process.service.refresh("t1", &permit).await.unwrap();
+    process.service.refresh("t1").await.unwrap();
     settle().await;
     assert_eq!(
         process.source.calls().len(),
@@ -642,11 +509,10 @@ async fn a_disabled_service_fetches_nothing_and_refuses_decisions() {
     let world = World::new();
     let mut process = world.process(PullRequestsConfig::default());
     process.source.push_ok(&key(1), open_running(1));
-    let permit = process.permit("t1");
 
     let refused = process
         .service
-        .link("t1", &format!("{REPOSITORY}#1"), 0, &permit)
+        .link("t1", &format!("{REPOSITORY}#1"), 0)
         .await;
     process.link_directly("t1", 1);
     pass(3_600).await;
@@ -743,7 +609,6 @@ async fn a_title_edit_with_a_merge_adds_no_notification_of_its_own() {
 async fn an_unlinked_service_fetches_nothing() {
     let world = World::new();
     let mut process = world.process(enabled());
-    process.permit("t1");
 
     pass(3_600).await;
 
@@ -874,7 +739,6 @@ async fn a_merged_pull_request_stops_until_a_refresh_finds_it_open() {
         &key(1),
         fetched(1, facts(PullRequestState::Merged, passing())),
     );
-    let permit = process.permit("t1");
     process.link("t1", 1).await;
     process.next().await;
     process.next().await;
@@ -888,7 +752,7 @@ async fn a_merged_pull_request_stops_until_a_refresh_finds_it_open() {
 
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    process.service.refresh("t1", &permit).await.unwrap();
+    process.service.refresh("t1").await.unwrap();
     let reopened = process.next().await;
     let (fields, notifications, _) = changed(&reopened);
     assert!(fields.contains(&PullRequestChangedField::State));
@@ -906,17 +770,12 @@ async fn one_fetch_serves_every_thread_and_an_unlink_does_not_cancel_it() {
     let world = World::new();
     let mut process = world.process(enabled());
     let gate = process.source.push_gate(&key(1));
-    let first = process.permit("t1");
     process.link("t1", 1).await;
     gate.arrived().await;
 
     process.link("t2", 1).await;
     let revision = process.state("t1").lifecycle_revision;
-    process
-        .service
-        .unlink("t1", revision, &first)
-        .await
-        .unwrap();
+    process.service.unlink("t1", revision).await.unwrap();
     settle().await;
     assert_eq!(process.source.calls().len(), 1, "single-flight");
     gate.release_ok(open_running(1));
@@ -986,12 +845,11 @@ async fn a_stale_window_cannot_unlink_a_newer_link() {
     let process = world.process(enabled());
     process.source.push_ok(&key(1), open_running(1));
     process.source.push_ok(&key(2), open_running(2));
-    let permit = process.permit("t1");
     process.link("t1", 1).await;
     let stale = process.state("t1").lifecycle_revision;
     process.link("t1", 2).await;
 
-    let outcome = process.service.unlink("t1", stale, &permit).await;
+    let outcome = process.service.unlink("t1", stale).await;
 
     assert!(matches!(outcome, Err(PullRequestError::StaleRevision)));
     assert_eq!(process.state("t1").active_link.unwrap().key, key(2));
@@ -1049,8 +907,9 @@ async fn the_service_never_talks_to_an_agent() {
     let events = process.quiet_raw_events().await;
 
     assert!(!events.is_empty());
-    assert!(events.iter().all(|event| matches!(
-        event.kind,
-        EventKind::PullRequest(_) | EventKind::Ownership(_)
-    )));
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event.kind, EventKind::PullRequest(_)))
+    );
 }

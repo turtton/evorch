@@ -3,11 +3,9 @@
 //!
 //! The model never answers (see `common`), so a run stays in flight until the
 //! test, or the invocation's end, stops it. Every wait is for the run's own
-//! settling; the timeout only bounds a failing test.
+//! terminal state; the suite watchdog detects hangs.
 
 mod common;
-
-use std::time::Duration;
 
 use common::{cli, host_with_project, runtime, runtime_with_store, send, web};
 use event_bus::AgentRunPhase;
@@ -88,12 +86,7 @@ fn runtime_run(run: &workbench_protocol::ids::RunId) -> runtime::RunId {
 
 fn settle(rt: &tokio::runtime::Runtime, host: &CommandHost, run: runtime::RunId) -> AgentRunPhase {
     let runtime = host.service().runtime().clone();
-    rt.block_on(async move {
-        tokio::time::timeout(Duration::from_secs(60), runtime.wait(run))
-            .await
-            .expect("the run settles")
-            .expect("the run is known")
-    })
+    rt.block_on(runtime.wait(run)).expect("the run is known")
 }
 
 fn is_live(host: &CommandHost, run: runtime::RunId) -> bool {
@@ -101,6 +94,88 @@ fn is_live(host: &CommandHost, run: runtime::RunId) -> bool {
         host.service().runtime().inspect_agent(run).map(|a| a.phase),
         Ok(AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting)
     )
+}
+
+#[test]
+fn cold_existing_thread_invocations_reject_a_different_project() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (_, storage) = runtime_with_store(dir.path());
+    let old = common::offline_question(&rt, dir.path(), &storage);
+    storage
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread-1".into(),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            root_run_id: Some(old.run_id.clone()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let runtime = common::runtime_on_store(dir.path(), &storage);
+    let sidebar = dir.path().join("sidebar.json");
+    let service =
+        workbench_host::commands::CommandService::new(runtime.clone(), rt.handle().clone())
+            .with_sidebar_path(sidebar.clone());
+    let mut host = CommandHost::new(service);
+    let _connection = host.connections().open(ClientId::new("cli-1").unwrap());
+    let mut document = workspace_state::SidebarDocument::default();
+    let project = workspace_state::ProjectId::new("project-1");
+    document
+        .sidebar
+        .add_project(project, "Current project", dir.path())
+        .unwrap();
+    std::fs::write(&sidebar, serde_json::to_vec(&document).unwrap()).unwrap();
+    let wrong = host
+        .handle_command(
+            start("wrong-project", other.path(), Some("thread-1")),
+            cli(),
+        )
+        .unwrap_err();
+    assert_eq!(wrong.code, ErrorCode::PermissionDenied);
+    assert!(runtime.list_agents().is_empty());
+    assert_eq!(host.service().restart_gate().running_invocations(), 0);
+    assert_eq!(
+        storage::Database::open(&storage::StorageConfig {
+            db_path: dir.path().join("host.db"),
+            ..Default::default()
+        })
+        .unwrap()
+        .thread("thread-1")
+        .unwrap()
+        .unwrap()
+        .root_run_id,
+        Some(old.run_id),
+        "rejected clients must not replace the saved root"
+    );
+}
+
+#[test]
+fn a_new_cli_thread_still_starts_without_an_existing_sidebar_trust_record() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let service =
+        workbench_host::commands::CommandService::new(runtime.clone(), rt.handle().clone())
+            .with_sidebar_path(dir.path().join("not-created-sidebar.json"));
+    let mut host = CommandHost::new(service);
+    let _connection = host.connections().open(ClientId::new("cli-1").unwrap());
+    let reply = started(
+        host.handle_command(start("new-thread", dir.path(), None), cli())
+            .unwrap(),
+    );
+    assert_eq!(reply.ownership, InvocationOwnership::OwnsRun);
+    assert_eq!(
+        runtime
+            .thread_of_live_run(runtime_run(&reply.run))
+            .as_deref(),
+        Some(reply.thread.as_str())
+    );
+    host.handle_command(end("new-thread"), cli()).unwrap();
+    assert_eq!(
+        rt.block_on(runtime.wait(runtime_run(&reply.run))).unwrap(),
+        AgentRunPhase::Stopped
+    );
 }
 
 #[test]
@@ -137,7 +212,9 @@ fn an_invocation_needs_a_live_connection() {
 fn ending_an_invocation_stops_its_run_and_nothing_else() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut host = host_with_project(&rt, runtime(), dir.path());
+    // Ending the invocation stops its run durably, so the runtime needs its store.
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_with_project(&rt, runtime, dir.path());
     let _gui = host.connections().open(ClientId::new("web-1").unwrap());
     let _cli = host.connections().open(ClientId::new("cli-1").unwrap());
     // A conversation another client started stays live whatever the CLI does.
@@ -202,7 +279,9 @@ fn ending_an_invocation_stops_its_run_and_nothing_else() {
 fn losing_the_connection_stops_what_that_client_started_and_nothing_else() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut host = host_with_project(&rt, runtime(), dir.path());
+    // Stopping is durable, so the runtime needs its store.
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_with_project(&rt, runtime, dir.path());
     let gone = host.connections().open(ClientId::new("cli-1").unwrap());
     let _other = host.connections().open(ClientId::new("cli-2").unwrap());
     let lost = started(
@@ -220,6 +299,12 @@ fn losing_the_connection_stops_what_that_client_started_and_nothing_else() {
     assert_eq!(
         settle(&rt, &host, runtime_run(&lost.run)),
         AgentRunPhase::Stopped
+    );
+    // The run can end before the disconnect operation finishes durable Stop.
+    // Read the invocation's terminal observation before checking its lease.
+    assert_eq!(
+        view(&host, "inv-1", &cli()).unwrap().state,
+        InvocationState::Stopped
     );
     assert!(is_live(&host, runtime_run(&kept.run)));
     assert_eq!(host.service().restart_gate().running_invocations(), 1);

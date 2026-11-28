@@ -24,7 +24,7 @@ run format cargo fmt --all --check
 run cache-contracts scripts/check-cache-contracts.sh
 # The grouped targets run every test of their group; the filters keep the former per-file selection.
 run runtime scripts/guard-cargo.sh run --no-tests fail -p runtime --test restore_state --test tools_shell --test delegation \
-    --test waits_messaging --test escalation_ownership --test compaction_budget -- \
+    --test waits_messaging --test escalation_runtime --test compaction_budget -- \
     restore_expansion:: restore_tool_intent:: shell_jobs_integration:: state_transitions:: \
     background:: messaging_loop:: wait_runs:: user_questions:: escalation_questions:: \
     escalation_handoff:: context_observability:: compaction_engine:: compaction_policy:: \

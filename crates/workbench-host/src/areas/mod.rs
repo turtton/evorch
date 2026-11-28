@@ -81,7 +81,6 @@ pub struct AreaHandles {
     /// business: read through `runtime` or write through `storage`.
     pub database: PathBuf,
     /// Owner validation for operations that still need it during C0.
-    pub owner: Arc<runtime::ownership::OwnerHost>,
     /// The workspace area hints this independent worker after an archive save.
     pub scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
     /// The connections of the clients and the hooks to run when one leaves; an

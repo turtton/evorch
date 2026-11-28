@@ -4,7 +4,6 @@ use crate::support;
 
 use event_bus::{AgentMessageKind, AgentRunPhase, EventBus};
 use providers::FinishReason;
-use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
 use runtime::{AgentRuntime, Role, RunConfig, RunId, RunRestoreFailure, RunStore, RuntimeError};
 use std::sync::Arc;
 use storage::{Storage, StorageConfig};
@@ -17,14 +16,13 @@ struct Fixture {
     model: Arc<ScriptedModel>,
     parent: RunId,
     child: RunId,
-    permit: OwnerPermit,
     child_gate: Arc<Notify>,
     storage: Storage,
     config: StorageConfig,
     _dir: tempfile::TempDir,
 }
 
-/// An owned, still-running parent whose child is gated before its first answer.
+/// A thread-bound, still-running parent whose child is gated before its first answer.
 async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -49,33 +47,9 @@ async fn fixture() -> Fixture {
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    let registry_path = dir.path().join("owners.db");
-    let owner = ThreadOwner::new(
-        "thread".into(),
-        Lease {
-            owner_id: "first".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    );
-    Registry::open(&registry_path)
-        .unwrap()
-        .start(&owner)
-        .unwrap();
-    let permit = OwnerPermit {
-        registry_path,
-        thread_id: owner.thread_id,
-        lease: owner.lease,
-        run_id: None,
-    };
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".into(),
-        RunConfig {
-            ownership: Some(permit.clone()),
-            ..Default::default()
-        },
-    );
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    runtime.bind_thread_root("thread", parent).unwrap();
     model.wait_for_request(0).await;
     let child = runtime
         .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
@@ -86,7 +60,6 @@ async fn fixture() -> Fixture {
         model,
         parent,
         child,
-        permit,
         child_gate,
         storage,
         config,
@@ -119,8 +92,8 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn parent_message_continues_a_finished_owned_child_with_its_history() {
-    // Given: a child that inherited the parent's ownership and finished.
+async fn parent_message_continues_a_finished_child_with_its_history() {
+    // Given: a child of a thread-bound parent that finished.
     let fixture = fixture().await;
     fixture.finish_child().await;
     let record = storage::Database::open(&fixture.config)
@@ -129,8 +102,8 @@ async fn parent_message_continues_a_finished_owned_child_with_its_history() {
         .unwrap()
         .unwrap();
     assert!(
-        !record.restorable,
-        "an owned child is not restorable from disk alone"
+        record.restorable,
+        "owner-free child history must be restorable"
     );
     // When: the parent sends a follow-up.
     fixture.child_gate.notify_one();
@@ -217,13 +190,7 @@ async fn operator_stop_holds_until_the_operator_resumes_the_root() {
     );
     fixture
         .runtime
-        .resume_chat(
-            fixture.parent,
-            RunConfig {
-                ownership: Some(fixture.permit.clone()),
-                ..Default::default()
-            },
-        )
+        .resume_chat(fixture.parent, RunConfig::default())
         .unwrap();
     // Then: the resumed parent may continue the child again.
     fixture.child_gate.notify_one();

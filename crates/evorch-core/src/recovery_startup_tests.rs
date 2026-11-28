@@ -5,7 +5,10 @@ use runtime::{
 };
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use workbench_host::{bootstrap::services::BackgroundServices, projects::StaticProjects};
 struct ParkedModel {
@@ -51,6 +54,23 @@ fn runtime(
     writer: &storage::StorageHandle,
     model: Arc<ParkedModel>,
 ) -> AgentRuntime {
+    let root = config.db_path.parent().unwrap().canonicalize().unwrap();
+    if !root.join("sidebar.json").exists() {
+        let mut sidebar = workspace_state::SidebarState::default();
+        sidebar
+            .add_project(
+                workspace_state::ProjectId::new("fixture-project"),
+                "fixture",
+                &root,
+            )
+            .unwrap();
+        sidebar.projects[0].trust = workspace_state::TrustState::Approved;
+        std::fs::write(
+            root.join("sidebar.json"),
+            serde_json::to_vec(&sidebar).unwrap(),
+        )
+        .unwrap();
+    }
     let bus = Arc::new(event_bus::EventBus::new(256));
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(tools::ToolExecutor::new(bus)), model)
         .with_run_store(RunStore::open(config, writer.clone()).unwrap());
@@ -322,18 +342,9 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         );
         let catalog = available_catalog(&options).await;
         let first = runtime(&config, &writer, model.clone());
-        let owner = Arc::new(
-            OwnerHost::open(
-                &options.ownership_root,
-                Default::default(),
-                first.event_bus().clone(),
-            )
-            .unwrap(),
-        );
         let coordinator = StartupCoordinator::new(
             StartupInputs {
                 runtime: &first,
-                owner: &owner,
                 storage: &config,
                 writer: &writer,
                 options: &options,
@@ -361,10 +372,6 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
                 .unwrap()
                 .is_empty()
         );
-        assert!(matches!(
-            owner.attach("thread"),
-            Err(runtime::ownership::RegistryError::Absent)
-        ));
         assert!(!first.has_paused_recovery());
         assert!(first.list_agents().is_empty());
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
@@ -382,18 +389,9 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
         assert_eq!(same_handle.claim_id(), claim.claim_id);
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         let second = runtime(&config, &writer, model.clone());
-        let successor = Arc::new(
-            OwnerHost::open(
-                &options.ownership_root,
-                Default::default(),
-                second.event_bus().clone(),
-            )
-            .unwrap(),
-        );
         let reopened = StartupCoordinator::new(
             StartupInputs {
                 runtime: &second,
-                owner: &successor,
                 storage: &config,
                 writer: &writer,
                 options: &options,
@@ -403,15 +401,6 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             catalog,
         )
         .unwrap();
-        assert_eq!(
-            reopened.prepare_existing(&manifests[0]).err().unwrap(),
-            StartupBlocked::OwnerBlocked
-        );
-        assert!(!second.has_paused_recovery());
-        assert_eq!(
-            reopened.prepare(&manifests[0]).err().unwrap(),
-            StartupBlocked::OwnerBlocked
-        );
         let host = Arc::new(std::sync::Mutex::new(workbench_host::CommandHost::new(
             workbench_host::commands::CommandService::new(
                 second.clone(),
@@ -423,38 +412,6 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
             runs: vec![run],
             disposition: Disposition::Prepared,
         };
-        assert!(matches!(
-            crate::recovery_service::attempt(&reopened, &second, &host, &status),
-            crate::recovery_service::AutomaticAttempt::Finished(
-                crate::recovery_service::RecoveryDiagnostic {
-                    state: crate::recovery_service::RecoveryState::Blocked,
-                    reason: Some(StartupBlocked::OwnerBlocked),
-                    ..
-                }
-            )
-        ));
-        // Blocked returned its automatic reservation without releasing Prepared.
-        let manual = second
-            .reserve_manual_activation(
-                &manifests[0],
-                storage::recovery::graph_control::GraphEffectKey {
-                    operation_id: "after-blocked".into(),
-                    attempt_nonce: "attempt".into(),
-                },
-                0,
-            )
-            .unwrap();
-        drop(manual);
-        assert_eq!(
-            storage::Database::open(&config)
-                .unwrap()
-                .recovery_claims()
-                .unwrap()
-                .as_slice(),
-            std::slice::from_ref(&claim)
-        );
-        assert!(!owner.begin_quiesce().unwrap());
-        assert!(!owner.release_ready().unwrap());
         if let Some(failure) = failure {
             assert_automatic_failure_keeps_reservation(&reopened, &host, &status, failure).await;
             assert_eq!(model.admissions.load(Ordering::SeqCst), before);
@@ -468,10 +425,6 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
                 .recovery_claims()
                 .unwrap(),
             [claim]
-        );
-        assert!(
-            prepared.release(&first).is_err(),
-            "stale current owner cannot release the claim"
         );
         assert_eq!(model.admissions.load(Ordering::SeqCst), before);
         if activate {
@@ -525,18 +478,9 @@ async fn prepared_adoption_preserves_claim_and_fences_release_or_post_ack_replay
                 .recovery_startup_complete(&config.db_path, &options.ownership_root)
                 .unwrap();
             let observer = runtime(&config, &writer, model.clone());
-            let observer_owner = Arc::new(
-                OwnerHost::open(
-                    &options.ownership_root,
-                    Default::default(),
-                    observer.event_bus().clone(),
-                )
-                .unwrap(),
-            );
             let observed = StartupCoordinator::new(
                 StartupInputs {
                     runtime: &observer,
-                    owner: &observer_owner,
                     storage: &config,
                     writer: &writer,
                     options: &options,
@@ -645,14 +589,11 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
         Arc::new(tools::ToolExecutor::new(bus.clone())),
         model.clone(),
     );
-    let owner =
-        Arc::new(OwnerHost::open(&options.ownership_root, Default::default(), bus).unwrap());
     let projects = StaticProjects::default();
     assert_eq!(
         StartupCoordinator::new(
             StartupInputs {
                 runtime: &missing,
-                owner: &owner,
                 storage: &config,
                 writer: &writer,
                 options: &options,
@@ -676,7 +617,6 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
         StartupCoordinator::new(
             StartupInputs {
                 runtime: &attached,
-                owner: &owner,
                 storage: &other,
                 writer: &writer,
                 options: &options,
@@ -702,7 +642,6 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
         StartupCoordinator::new(
             StartupInputs {
                 runtime: &attached,
-                owner: &owner,
                 storage: &config,
                 writer: &writer,
                 options: &options,
@@ -718,7 +657,6 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
     let current = StartupCoordinator::new(
         StartupInputs {
             runtime: &attached,
-            owner: &owner,
             storage: &config,
             writer: &writer,
             options: &options,
@@ -736,10 +674,6 @@ async fn wrong_startup_evidence_or_missing_high_watermarks_do_not_install_the_la
             .unwrap()
             .is_empty()
     );
-    assert!(matches!(
-        owner.attach("thread"),
-        Err(runtime::ownership::RegistryError::Absent)
-    ));
 }
 
 #[tokio::test]
@@ -836,6 +770,19 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
     };
     let bad = manifest(runs[0]);
     let good = manifest(runs[1]);
+    // Fault-injection peers exercise row-local isolation while a valid current
+    // graph is actually prepared/adopted below. This is not an old-build fixture.
+    let sql = rusqlite::Connection::open(&config.db_path).unwrap();
+    for (id, phase) in [
+        ("old-completed", "completed"),
+        ("old-quarantined", "invalidated"),
+    ] {
+        sql.execute("INSERT INTO recovery_manifests(manifest_id,schema_version,committed,superseded,member_count,edge_count,edges_json) VALUES(?1,1,1,0,1,0,'broken JSON')", [id]).unwrap();
+        sql.execute("INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json) VALUES(?1,?2,'old',0,1,'broken JSON')", rusqlite::params![id, source.reserve_run_id().to_string()]).unwrap();
+        sql.execute("INSERT INTO restart_transactions(restart_id,capture_id,revision,phase,metadata_json,old_builtin_tool_names_json,format_version) VALUES(?1,?2,7,?3,'broken JSON','broken JSON',1)", rusqlite::params![id, format!("capture-{id}"), phase]).unwrap();
+        sql.execute("INSERT INTO restart_components(restart_id,manifest_id,disposition,revision) VALUES(?1,?1,'quarantined',3)", [id]).unwrap();
+    }
+
     let first = runtime(&config, &writer, model.clone());
     writer
         .claim_recovery_manifest(storage::recovery::RecoveryClaimRequest {
@@ -856,18 +803,9 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
         &workbench_protocol::ids::ProjectId::new("project").unwrap(),
         root.clone(),
     );
-    let owner = Arc::new(
-        OwnerHost::open(
-            &options.ownership_root,
-            Default::default(),
-            first.event_bus().clone(),
-        )
-        .unwrap(),
-    );
     let coordinator = StartupCoordinator::new(
         StartupInputs {
             runtime: &first,
-            owner: &owner,
             storage: &config,
             writer: &writer,
             options: &options,
@@ -881,6 +819,21 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
     .unwrap();
     let scan = coordinator.scan().unwrap();
     assert!(scan.unreadable_claims);
+    assert!(
+        !scan
+            .components
+            .iter()
+            .any(|c| c.manifest_id == "old-completed")
+    );
+    assert_eq!(
+        scan.components
+            .iter()
+            .find(|c| c.manifest_id == "old-quarantined")
+            .unwrap()
+            .disposition,
+        Disposition::NeedsAttention
+    );
+
     assert_eq!(
         scan.components
             .iter()
@@ -904,21 +857,10 @@ async fn corrupt_peer_claim_does_not_block_prepare_or_same_claim_adoption() {
         .unwrap()
         .1
         .unwrap();
-    assert!(!owner.begin_quiesce().unwrap());
-    assert!(!owner.release_ready().unwrap());
     let second = runtime(&config, &writer, model.clone());
-    let successor = Arc::new(
-        OwnerHost::open(
-            &options.ownership_root,
-            Default::default(),
-            second.event_bus().clone(),
-        )
-        .unwrap(),
-    );
     let reopened = StartupCoordinator::new(
         StartupInputs {
             runtime: &second,
-            owner: &successor,
             storage: &config,
             writer: &writer,
             options: &options,

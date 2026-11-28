@@ -81,7 +81,7 @@ impl AgentModel for Model {
     }
 }
 struct Fixture {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
     storage: storage::Storage,
     config: storage::StorageConfig,
     runtime: AgentRuntime,
@@ -98,7 +98,7 @@ impl Fixture {
         let model = Arc::new(Model::default());
         let runtime = Self::runtime(&config, &storage, model.clone());
         Self {
-            dir,
+            _dir: dir,
             storage,
             config,
             runtime,
@@ -137,11 +137,7 @@ impl Fixture {
         self.runtime.run_mailbox(run).unwrap()
     }
     fn caller<'a>(&self, run: RunId, mailbox: &'a Arc<crate::mailbox::RunMailbox>) -> Caller<'a> {
-        Caller {
-            run,
-            mailbox,
-            permit: None,
-        }
+        Caller { run, mailbox }
     }
     fn add(&self, run: RunId) -> Value {
         tools::update(
@@ -246,7 +242,6 @@ async fn parallel_calls_commit_only_one_revision_and_one_saved_event() {
                         &Caller {
                             run,
                             mailbox: &mailbox,
-                            permit: None,
                         },
                         addition(0, "pending"),
                     )
@@ -353,61 +348,26 @@ async fn superseded_root_child_foreign_thread_and_reused_execution_are_refused()
 }
 
 #[tokio::test]
-async fn owner_generation_and_thread_binding_are_checked_for_reads_and_writes() {
+async fn root_binding_and_execution_incarnation_are_checked_for_reads_and_writes() {
     let f = Fixture::new();
-    let path = f.dir.path().join("owners.db");
-    let mut registry = crate::ownership::Registry::open(&path).unwrap();
-    let owner = crate::ownership::ThreadOwner::new(
-        "thread".into(),
-        crate::ownership::Lease {
-            owner_id: "host".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    );
-    registry.start(&owner).unwrap();
-    let permit = OwnerPermit {
-        registry_path: path,
-        thread_id: "thread".into(),
-        lease: owner.lease.clone(),
-        run_id: None,
-    };
     let run = f
         .start_config(
             "thread",
             RunConfig {
-                ownership: Some(permit),
+                interactive: true,
+                keep_alive: true,
                 ..Default::default()
             },
         )
         .await;
-    let permit = f
-        .runtime
-        .shared
-        .runs
-        .lock()
-        .unwrap()
-        .get(&run)
-        .unwrap()
-        .config
-        .ownership
-        .clone()
-        .unwrap();
     let mailbox = f.mailbox(run);
-    let caller = Caller {
-        run,
-        mailbox: &mailbox,
-        permit: Some(&permit),
-    };
+    let caller = f.caller(run, &mailbox);
     tools::update(&f.runtime, &caller, addition(0, "in_progress")).unwrap();
-    let mut next = registry.attach("thread").unwrap();
-    next.lease.generation += 1;
-    registry
-        .update("thread", |owner| {
-            *owner = next;
-            Ok(())
-        })
-        .unwrap();
+    tools::read(&f.runtime, &caller, json!({"view":"tree"})).unwrap();
+
+    // The thread's root binding moves to another run: this execution loses read and write.
+    let other = f.runtime.reserve_run_id();
+    f.runtime.bind_thread_root("thread", other).unwrap();
     assert!(tools::read(&f.runtime, &caller, json!({"view":"tree"})).is_err());
     assert!(tools::update(&f.runtime, &caller, addition(1, "pending")).is_err());
     assert!(!f.runtime.reconcile_plan_or_report(&caller));
@@ -418,6 +378,44 @@ async fn owner_generation_and_thread_binding_are_checked_for_reads_and_writes() 
             .revision,
         1
     );
+
+    // The binding returns, and so does access.
+    f.runtime.bind_thread_root("thread", run).unwrap();
+    tools::update(&f.runtime, &caller, addition(1, "pending")).unwrap();
+
+    // A new incarnation of the same run replaces the mailbox: the old execution's caller is
+    // refused, the new one is not.
+    f.stop(run).await;
+    f.runtime
+        .resume_chat(
+            run,
+            RunConfig {
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    f.model.entered.notified().await;
+    let before = f
+        .runtime
+        .conversation_plan_summary("thread")
+        .unwrap()
+        .revision;
+    assert!(tools::read(&f.runtime, &caller, json!({"view":"tree"})).is_err());
+    assert!(tools::update(&f.runtime, &caller, addition(before, "pending")).is_err());
+    assert_eq!(
+        f.runtime
+            .conversation_plan_summary("thread")
+            .unwrap()
+            .revision,
+        before
+    );
+    tools::read(
+        &f.runtime,
+        &f.caller(run, &f.mailbox(run)),
+        json!({"view":"tree"}),
+    )
+    .expect("the new incarnation reads the same plan");
     f.stop(run).await;
 }
 
@@ -592,7 +590,7 @@ async fn projection_survives_runtime_restart_and_handoff_without_snapshot_event(
     let target = f.runtime.reserve_run_id();
     let child = event_bus::escalation_thread_id(&target.to_string());
     f.runtime
-        .handoff_thread_goal(source, target, None, |_| {})
+        .handoff_thread_goal(source, target, || {})
         .unwrap();
     assert_eq!(
         f.runtime

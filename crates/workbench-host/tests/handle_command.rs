@@ -3,14 +3,12 @@
 
 mod common;
 
-use std::sync::Arc;
 use workbench_protocol::namespaces::{
     ApprovalsCommand, ConversationCommand, ExecutionCommand, ProjectionQuery, ProjectionReply,
     QuestionsCommand,
 };
 
 use common::{cli, host_with_project, runtime, runtime_on_store, runtime_with_store, send, web};
-use event_bus::EventBus;
 use workbench_protocol::commands::{
     AnswerUserQuestion, ApprovalDecision, Command, CommandDisposition, DecideToolApproval,
     Delegation, SetAgentWebToolsEnabled, StopRun, SubmitGoal, ThreadTarget,
@@ -178,51 +176,6 @@ fn a_rejected_send_is_not_remembered_and_may_be_retried() {
 }
 
 #[test]
-fn losing_thread_ownership_refuses_the_command_before_it_reaches_the_runtime() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let mut host = host_with_project(&rt, runtime(), dir.path());
-    host.handle_command(
-        Command::Conversation(ConversationCommand::SendChat(send(
-            "thread-1", "sub-1", "start",
-        ))),
-        web(),
-    )
-    .unwrap();
-    let owners = test_socket_dir::SocketDir::new();
-    let bus = Arc::new(EventBus::new(64));
-    let owner = runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus.clone())
-        .unwrap();
-    owner.start("thread-1").unwrap();
-    let permit = owner.owned_permit("thread-1").unwrap();
-    let successor =
-        runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap();
-    owner.handoff(&permit, &successor).unwrap();
-    host.service_mut().set_ownership(Some(Arc::new(owner)));
-    let run = host.service().bindings.chat_runs["thread-1"];
-
-    for command in [
-        Command::Conversation(ConversationCommand::SendChat(send(
-            "thread-1", "sub-2", "more",
-        ))),
-        Command::Execution(ExecutionCommand::StopChat(ThreadTarget {
-            thread: thread("thread-1"),
-        })),
-        Command::Conversation(ConversationCommand::CompactChat(ThreadTarget {
-            thread: thread("thread-1"),
-        })),
-        Command::Execution(ExecutionCommand::StopRun(StopRun {
-            thread: thread("thread-1"),
-            run: RunId::new(run.to_string()).unwrap(),
-        })),
-    ] {
-        let error = host.handle_command(command, web()).unwrap_err();
-        assert_eq!(error.code, ErrorCode::PermissionDenied);
-    }
-    assert!(host.submission_provenance("sub-2").is_none());
-}
-
-#[test]
 fn stopping_a_thread_with_nothing_running_is_a_conflict_not_a_success() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -265,7 +218,9 @@ fn stopping_a_thread_with_nothing_running_is_a_conflict_not_a_success() {
 fn stopping_a_running_thread_names_the_stopped_run() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut host = host_with_project(&rt, runtime(), dir.path());
+    // Stopping is durable, so the runtime needs its store.
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_with_project(&rt, runtime, dir.path());
     let started = host
         .handle_command(
             Command::Conversation(ConversationCommand::SendChat(send(
@@ -503,6 +458,18 @@ fn an_answered_question_accepts_the_same_answer_again_and_refuses_another() {
         requester.wait(run).await.unwrap();
         question
     });
+    // The conversation the other incarnation started is bound to this project;
+    // an ordinary continue resumes it under that stored binding.
+    storage
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread-1".into(),
+            project_id: Some(common::project().to_string()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            root_run_id: Some(question.run_id.clone()),
+            ..Default::default()
+        }])
+        .unwrap();
     let mut host = host_with_project(&rt, runtime.clone(), dir.path());
     let answer = |text: &str| {
         Command::Questions(QuestionsCommand::AnswerUserQuestion(AnswerUserQuestion {

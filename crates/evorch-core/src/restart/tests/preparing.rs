@@ -286,7 +286,6 @@ async fn pending_db_preflight_allows_stop_cancel_shutdown_and_new_generation() {
                 runtime::Role::Orchestrator,
                 "stop".into(),
                 runtime::RunConfig {
-                    ownership: Some(host.owner.start("preflight").unwrap()),
                     interactive: true,
                     keep_alive: true,
                     ..Default::default()
@@ -422,7 +421,6 @@ mod observation_retry {
                 runtime::Role::Orchestrator,
                 "observe".into(),
                 runtime::RunConfig {
-                    ownership: Some(host.owner.start("observed").unwrap()),
                     interactive: true,
                     keep_alive: true,
                     ..Default::default()

@@ -100,6 +100,7 @@ context_window_tokens = 1000000
     sidebar
         .add_project(workspace_state::ProjectId::new("p"), "cache fixture", root)
         .unwrap();
+    sidebar.projects[0].trust = workspace_state::TrustState::Approved;
     std::fs::write(
         config.join("sidebar.json"),
         serde_json::to_vec(&sidebar).unwrap(),

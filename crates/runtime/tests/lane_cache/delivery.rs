@@ -25,7 +25,7 @@ impl LaneDeliveryHost for Host {
     ) -> Result<LaneDeliveryTarget, storage::lane_delivery::LaneDeliveryNack> {
         self.checked.notify_one();
         if self.denied.load(Ordering::SeqCst) {
-            return Err(storage::lane_delivery::LaneDeliveryNack::Readonly);
+            return Err(storage::lane_delivery::LaneDeliveryNack::BindingConflict);
         }
         if thread != self.thread {
             return Err(storage::lane_delivery::LaneDeliveryNack::UnknownThread);

@@ -505,9 +505,7 @@ mod tests {
         runtime.bind_thread_root("source", source).unwrap();
         runtime.set_thread_read_only_directories("source", vec![drafts.clone()]);
         let target = runtime.reserve_run_id();
-        runtime
-            .handoff_thread_goal(source, target, None, |_| {})
-            .unwrap();
+        runtime.handoff_thread_goal(source, target, || {}).unwrap();
         let child = event_bus::escalation_thread_id(&target.to_string());
         assert_eq!(runtime.thread_of_run(target).as_deref(), Some(&*child));
         assert_eq!(

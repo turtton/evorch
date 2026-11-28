@@ -79,20 +79,7 @@ pub struct GraphCas {
     pub capture_id: AdminId,
     pub expected_revision: Revision,
     pub expected_core_epoch: InstanceEpoch,
-    pub owner_identity: Option<AdminId>,
-    pub owner_generation: Option<Revision>,
     pub operation_id: AdminId,
-}
-impl GraphCas {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.owner_identity.is_some() != self.owner_generation.is_some() {
-            return Err(ValidationError::Inconsistent {
-                field: "graph.owner",
-                reason: "identity and generation must both be present or absent",
-            });
-        }
-        Ok(())
-    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,7 +89,6 @@ pub struct ConfirmedGraph {
 }
 impl ConfirmedGraph {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.binding.validate()?;
         confirmation(self.confirmed)
     }
 }

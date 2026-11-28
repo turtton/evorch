@@ -110,7 +110,12 @@ fn tombstones(plan: &RetentionPlan) -> Vec<String> {
 }
 
 fn run_core_start(plan: &RetentionPlan) {
-    let leases = acquire_leases(plan, Duration::ZERO).unwrap();
+    let leases = acquire_leases(
+        plan,
+        Duration::ZERO,
+        &runtime::scratch::ThreadScratch::for_ownership_root(&plan.ownership_root).unwrap(),
+    )
+    .unwrap();
     drop(leases);
 }
 

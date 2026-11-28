@@ -1,11 +1,11 @@
 //! The world the pull request review tests share: a runtime with the pull request service on
-//! (or off), its mutable source, the owner registry and the storage, plus helpers to read the
+//! (or off), its mutable source and the storage, plus helpers to read the
 //! escalation reviews the model was asked to make.
 
 #![allow(dead_code, unused_imports)]
 
 use crate::support::{ScriptedModel, text_response, tool_response};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agents::Role;
@@ -13,9 +13,8 @@ use async_trait::async_trait;
 use config::{EscalationApproval, PullRequestsConfig};
 use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole};
-use runtime::ownership::OwnerHost;
 use runtime::pull_requests::{
-    FetchError, FetchedPullRequest, OwnershipView, PullRequestService, PullRequestSource,
+    FetchError, FetchedPullRequest, PullRequestService, PullRequestSource,
 };
 use runtime::{AgentRuntime, RunConfig, RunStore};
 use sandbox::DirectSandbox;
@@ -97,6 +96,22 @@ pub fn failing_answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
 #[derive(Clone, Default)]
 pub struct ReviewSource {
     state: Arc<Mutex<SourceState>>,
+    gate: Arc<SourceGate>,
+}
+
+/// Holds every fetch back while a link is being set up, and says when one has arrived.
+struct SourceGate {
+    closed: tokio::sync::watch::Sender<bool>,
+    arrived: tokio::sync::Notify,
+}
+
+impl Default for SourceGate {
+    fn default() -> Self {
+        Self {
+            closed: tokio::sync::watch::channel(false).0,
+            arrived: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -122,6 +137,11 @@ impl PullRequestSource for ReviewSource {
         key: &PullRequestKey,
         _: Duration,
     ) -> Result<FetchedPullRequest, FetchError> {
+        let mut closed = self.gate.closed.subscribe();
+        if *closed.borrow_and_update() {
+            self.gate.arrived.notify_one();
+            closed.wait_for(|closed| !*closed).await.unwrap();
+        }
         let mut state = self.state.lock().unwrap();
         state.fetches += 1;
         let current = state
@@ -137,42 +157,22 @@ impl PullRequestSource for ReviewSource {
 /// Otherwise a poll can finish before `link` registers its forced refresh, and that refresh can
 /// cross a test's fetch-count baseline. This gates only setup; real review lookups and refreshes
 /// still use the enabled service and the same source.
-struct ReviewOwnership {
-    host: Arc<OwnerHost>,
-    linking: Mutex<bool>,
-    linked: Condvar,
-    poll_waiting: tokio::sync::Notify,
-}
-
-impl ReviewOwnership {
-    fn pause_polling(&self) -> LinkSetup<'_> {
-        let mut linking = self.linking.lock().unwrap();
-        assert!(!*linking, "link setup is not reentrant");
-        *linking = true;
-        LinkSetup(self)
-    }
-}
-
-impl OwnershipView for ReviewOwnership {
-    fn owned_permit(&self, thread_id: &str) -> Option<runtime::ownership::OwnerPermit> {
-        let mut linking = self.linking.lock().unwrap();
-        while *linking {
-            self.poll_waiting.notify_one();
-            // OwnershipView is synchronous; the service calls it on its blocking pool.
-            linking = self.linked.wait(linking).unwrap();
-        }
-        drop(linking);
-        self.host.owned_permit(thread_id).ok()
-    }
-}
-
-/// Release the blocking-pool reader even if setup panics or its future is dropped.
-struct LinkSetup<'a>(&'a ReviewOwnership);
+struct LinkSetup<'a>(&'a SourceGate);
 
 impl Drop for LinkSetup<'_> {
+    /// Release the held fetch even if setup panics or its future is dropped.
     fn drop(&mut self) {
-        *self.0.linking.lock().unwrap() = false;
-        self.0.linked.notify_all();
+        self.0.closed.send_replace(false);
+    }
+}
+
+impl ReviewSource {
+    fn pause_polling(&self) -> LinkSetup<'_> {
+        assert!(
+            !self.gate.closed.send_replace(true),
+            "link setup is not reentrant"
+        );
+        LinkSetup(&self.gate)
     }
 }
 
@@ -182,11 +182,9 @@ pub struct World {
     pub runtime: AgentRuntime,
     pub service: PullRequestService,
     pub source: ReviewSource,
-    pub host: Arc<OwnerHost>,
     pub storage: storage::Storage,
     pub events: tokio::sync::Mutex<EventReceiver>,
     pub _directory: test_socket_dir::SplitDir,
-    ownership: Arc<ReviewOwnership>,
 }
 
 pub fn world(
@@ -227,51 +225,24 @@ pub fn world_with(
         runtime.shell_escalation_gate(),
         Arc::new(DirectSandbox::new_unchecked()),
     );
-    let host = Arc::new(
-        OwnerHost::open(
-            directory.sockets(),
-            config::OwnershipConfig::default(),
-            Arc::clone(&bus),
-        )
-        .unwrap(),
-    );
     let source = ReviewSource::default();
-    let ownership = Arc::new(ReviewOwnership {
-        host: Arc::clone(&host),
-        linking: Mutex::new(false),
-        linked: Condvar::new(),
-        poll_waiting: tokio::sync::Notify::new(),
-    });
     let service = runtime
-        .start_pull_requests(
-            Arc::clone(&ownership) as Arc<dyn OwnershipView>,
-            Arc::new(source.clone()),
-            settings,
-        )
+        .start_pull_requests(Arc::new(source.clone()), settings)
         .unwrap();
     World {
         bus: Arc::clone(&bus),
         runtime,
         service,
         source,
-        host,
         storage,
         events: tokio::sync::Mutex::new(events),
         _directory: directory,
-        ownership,
     }
 }
 
 impl World {
     pub fn db_path(&self) -> std::path::PathBuf {
         self._directory.path().join("review-cache.db")
-    }
-
-    pub fn permit(&self) -> runtime::ownership::OwnerPermit {
-        self.host
-            .owned_permit(THREAD)
-            .or_else(|_| self.host.start(THREAD))
-            .unwrap()
     }
 
     /// Waits until the stored facts show `head`, woken by the service's own events.
@@ -286,7 +257,7 @@ impl World {
 
     /// Links the thread to the current PR state.
     pub async fn link(&self, first: FetchedPullRequest) {
-        let setup = self.ownership.pause_polling();
+        let setup = self.source.pause_polling();
         let head = first.facts.head_sha.chars().next().unwrap();
         self.source.set(first);
         let revision = self
@@ -295,10 +266,9 @@ impl World {
             .pull_request_thread_state(THREAD)
             .unwrap()
             .lifecycle_revision;
-        let permit = self.permit();
         let locator = format!("{REPOSITORY}#7");
         let mut events = self.bus.subscribe();
-        let linking = self.service.link(THREAD, &locator, revision, &permit);
+        let linking = self.service.link(THREAD, &locator, revision);
         tokio::pin!(linking);
         loop {
             tokio::select! {
@@ -310,7 +280,7 @@ impl World {
                         // Exercise the adversarial order: planning sees the saved link before
                         // the link future resumes to register its forced refresh.
                         self.service.notify_changed();
-                        self.ownership.poll_waiting.notified().await;
+                        self.source.gate.arrived.notified().await;
                         linking.await.unwrap();
                         break;
                     }
@@ -329,7 +299,7 @@ impl World {
     pub async fn update_facts(&self, next: FetchedPullRequest) {
         let head = next.facts.head_sha.chars().next().unwrap();
         self.source.set(next);
-        self.service.refresh(THREAD, &self.permit()).await.unwrap();
+        self.service.refresh(THREAD).await.unwrap();
         self.head_is(head).await;
     }
 
@@ -337,7 +307,7 @@ impl World {
     pub async fn update_title(&self, next: FetchedPullRequest) {
         let expected = next.display.title.as_ref().map(|t| t.as_str().to_owned());
         self.source.set(next);
-        self.service.refresh(THREAD, &self.permit()).await.unwrap();
+        self.service.refresh(THREAD).await.unwrap();
         let mut events = self.events.lock().await;
         while self.stored_title() != expected {
             let event = events.recv().await.unwrap();

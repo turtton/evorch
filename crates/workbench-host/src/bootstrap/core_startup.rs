@@ -1,7 +1,7 @@
 //! Core-only startup boundary, after shared leases/reload and before producers.
 use super::{BootstrapError, BootstrapOptions, services::BackgroundServices};
 use crate::projects::StaticProjects;
-use runtime::{AgentRuntime, ownership::OwnerHost};
+use runtime::AgentRuntime;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 /// Chosen by the bootstrap entry, not inferred from runtime proof registration.
@@ -17,7 +17,6 @@ pub struct CoreStartupInputs {
     pub mode: CoreBootMode,
     pub options: BootstrapOptions,
     pub runtime: AgentRuntime,
-    pub owner: Arc<OwnerHost>,
     pub storage: storage::StorageConfig,
     pub writer: storage::StorageHandle,
     pub projects: StaticProjects,

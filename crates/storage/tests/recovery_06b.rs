@@ -107,7 +107,7 @@ impl Fixture {
             .handle()
             .prepare_recovery_manifest(RecoveryManifestRecord {
                 manifest_id: "component".into(),
-                schema_version: 1,
+                schema_version: 2,
                 committed: false,
                 superseded: false,
                 edges: vec![RecoveryEdge {

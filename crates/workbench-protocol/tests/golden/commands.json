@@ -130,16 +130,6 @@
     },
     "type": "conversation"
   },
-  "conversation/prepare_existing_thread": {
-    "payload": {
-      "payload": {
-        "project": "proj-1",
-        "thread": "thr-1"
-      },
-      "type": "prepare_existing_thread"
-    },
-    "type": "conversation"
-  },
   "conversation/resolve_project": {
     "payload": {
       "payload": {

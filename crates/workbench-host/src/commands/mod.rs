@@ -1,8 +1,7 @@
 //! The command services: what a thread-targeting request does to the runtime.
 //!
 //! [`CommandService`] holds the host-side state that the commands share (which
-//! root run a thread is bound to, which stops this host issued, the ownership
-//! permits it checked) and executes [`HostCommand`]s against the runtime. It is
+//! root run a thread is bound to and which stops this host issued) and executes [`HostCommand`]s against the runtime. It is
 //! the one implementation behind every ingress: the desktop GUI adapter and
 //! the protocol handler both reach it through [`crate::CommandHost`], which authorises
 //! and deduplicates before [`CommandService`] runs anything.
@@ -53,7 +52,6 @@ pub struct ThreadBindings {
     /// Retain resume eligibility even after stage two clears `stop_marked`.
     pub stopped_by_us: BTreeSet<String>,
     pub goal_projects: BTreeMap<String, String>,
-    pub chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     /// Project each thread last submitted from, for host follow-ups that carry none.
     pub thread_roots: BTreeMap<String, PathBuf>,
 }
@@ -83,6 +81,7 @@ pub struct CommandService {
     event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
+    sidebar_path: Option<PathBuf>,
     recovering_roots: Arc<std::sync::Mutex<BTreeSet<String>>>,
     runtime: AgentRuntime,
     shell_cwd: Option<PathBuf>,
@@ -90,7 +89,6 @@ pub struct CommandService {
     pub bindings: ThreadBindings,
     /// Set while serving a runtime-requested resume, which is not user input.
     automatic_resume: bool,
-    ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     compaction_jobs: BTreeMap<String, compaction::CompactionJob>,
     background_work: Arc<tokio::sync::Notify>,
     /// What the lane delivery host reads; republished after every change of the bindings.
@@ -114,13 +112,13 @@ impl CommandService {
             event_bus: None,
             team_writer: None,
             memory_config: None,
+            sidebar_path: None,
             runtime,
             recovering_roots: Default::default(),
             shell_cwd: None,
             handle,
             bindings: ThreadBindings::default(),
             automatic_resume: false,
-            ownership: None,
             compaction_jobs: BTreeMap::new(),
             background_work: Arc::new(tokio::sync::Notify::new()),
             lane_bindings: BindingTable::default(),
@@ -132,10 +130,10 @@ impl CommandService {
         self.publish_lane_bindings();
         let host = Arc::new(crate::lane_delivery::HostLaneDeliveryHost::new(
             self.runtime.downgrade(),
-            self.ownership.clone(),
             self.lane_bindings(),
             self.memory_config.clone(),
             self.team_writer.clone(),
+            self.sidebar_path.clone(),
         ));
         let _guard = self.handle.enter();
         drop(self.runtime.bind_lane_delivery_host(host));
@@ -151,13 +149,13 @@ impl CommandService {
         self
     }
 
-    pub fn with_ownership(mut self, ownership: Arc<runtime::ownership::OwnerHost>) -> Self {
-        self.ownership = Some(ownership);
+    pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
+        self.set_memory_storage(config);
         self
     }
 
-    pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
-        self.set_memory_storage(config);
+    pub fn with_sidebar_path(mut self, path: PathBuf) -> Self {
+        self.sidebar_path = Some(path);
         self
     }
 
@@ -263,14 +261,6 @@ impl CommandService {
         );
     }
 
-    pub fn ownership(&self) -> Option<&Arc<runtime::ownership::OwnerHost>> {
-        self.ownership.as_ref()
-    }
-
-    pub fn set_ownership(&mut self, ownership: Option<Arc<runtime::ownership::OwnerHost>>) {
-        self.ownership = ownership;
-    }
-
     /// Whether a compaction job started by [`HostCommand::CompactChat`] is still
     /// tracked, so a caller knows [`Self::poll`] has a result to collect.
     pub fn has_background_work(&self) -> bool {
@@ -278,7 +268,7 @@ impl CommandService {
     }
 
     /// After ingress closes, await saved-chat compaction before flushing
-    /// checkpoints and releasing ownership.
+    /// checkpoints and releasing storage resources.
     pub(crate) fn take_background_tasks(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
         std::mem::take(&mut self.compaction_jobs)
             .into_values()
@@ -387,8 +377,7 @@ impl CommandService {
     }
 
     /// Point a lane thread at the root run the runtime itself started, without spawning
-    /// work. Stop and follow-ups then reach it like any other conversation root; every
-    /// ownership check still applies to the command that uses the binding.
+    /// work. Stop and follow-ups then reach it like any other conversation root.
     pub fn bind_lane_root(&mut self, thread: &str, run: &str) {
         // The runtime decides what a lane root is; a name or a child never qualifies.
         if let Ok(id) = run.parse::<RunId>()
@@ -434,88 +423,17 @@ impl CommandService {
         self.poll_compactions()
     }
 
-    /// Read-only permit lookup for desktop operations that are not host commands
-    /// (none without an ownership host or a thread). Execution
-    /// authorization separately permits reclaiming abandoned ownership.
-    pub fn permit_for_thread(
-        &self,
-        thread: Option<&str>,
-    ) -> Result<Option<runtime::ownership::OwnerPermit>, runtime::ownership::RegistryError> {
-        let Some(host) = &self.ownership else {
-            return Ok(None);
-        };
-        thread.map(|thread| host.owned_permit(thread)).transpose()
-    }
-
-    /// The ownership permit `command` needs.
-    ///
-    /// With an ownership host configured, a command that targets a thread needs
-    /// that host to own the thread right now; a command that does not is refused
-    /// with [`RejectKind::Fenced`] before it reaches the runtime. This is the
-    /// first step of every ingress, ahead of deduplication.
-    pub(crate) fn authorize(
-        &self,
-        command: &HostCommand,
-    ) -> Result<Option<runtime::ownership::OwnerPermit>, HostEvent> {
-        let Some(host) = &self.ownership else {
-            return Ok(None);
-        };
-        command
-            .thread()
-            .map(|thread| host.owned_or_claim_abandoned(thread))
-            .transpose()
-            .map_err(|error| HostEvent::rejected(RejectKind::Fenced, error.to_string()))
-    }
-
-    /// Check that a permit the caller already holds still is the thread's
-    /// current ownership.
-    pub(crate) fn authorize_chat_permit(
-        &self,
-        chat: &ChatInput,
-        permit: &runtime::ownership::OwnerPermit,
-    ) -> Result<(), HostEvent> {
-        let validation = (|| {
-            if permit.thread_id != chat.thread_id {
-                return Err(runtime::ownership::OwnershipError::Fenced.into());
-            }
-            if let Some(host) = &self.ownership {
-                let current = host.owned_permit(&chat.thread_id)?;
-                if current.registry_path != permit.registry_path
-                    || current.lease.owner_id != permit.lease.owner_id
-                    || current.lease.generation != permit.lease.generation
-                {
-                    return Err(runtime::ownership::OwnershipError::Fenced.into());
-                }
-            }
-            permit.validate_generation()
-        })();
-        validation.map_err(|error: runtime::ownership::RegistryError| {
-            HostEvent::chat_rejected(
-                chat.thread_id.clone(),
-                RejectKind::Fenced,
-                error.to_string(),
-            )
-        })
-    }
-
-    /// Run a command under a permit the caller already authorised (or none without
-    /// an ownership host). Reached only through [`crate::CommandHost`], which
-    /// authorises and deduplicates first.
-    pub(crate) fn submit_authorized(
-        &mut self,
-        command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
-    ) -> Vec<HostEvent> {
-        self.submit_authorized_tracked(command, permit, None)
+    /// Run a command after host admission and submission deduplication.
+    pub(crate) fn submit_authorized(&mut self, command: HostCommand) -> Vec<HostEvent> {
+        self.submit_authorized_tracked(command, None)
     }
 
     pub(crate) fn submit_authorized_tracked(
         &mut self,
         command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
-        let events = self.dispatch_authorized(command, permit, restart);
+        let events = self.dispatch_authorized(command, restart);
         self.publish_lane_bindings();
         events
     }
@@ -523,9 +441,18 @@ impl CommandService {
     fn dispatch_authorized(
         &mut self,
         command: HostCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
+        if let Some(thread) = command.thread()
+            && let Some(guard) = self.runtime.tombstone_guard()
+            && let Err(deleted) = guard.check_thread(thread)
+        {
+            return vec![HostEvent::chat_rejected(
+                thread,
+                RejectKind::NotFound,
+                deleted.to_string(),
+            )];
+        }
         if let Some(thread) = Self::compaction_excluded_thread(&command)
             && self.compaction_jobs.contains_key(thread)
         {
@@ -540,7 +467,7 @@ impl CommandService {
                 thread_id,
                 question_id,
                 answer,
-            } => self.answer_user_question(thread_id, question_id, answer, permit),
+            } => self.answer_user_question(thread_id, question_id, answer),
             HostCommand::SetWebToolsEnabled { enabled } => {
                 self.runtime.set_web_tools_enabled(enabled);
                 Vec::new()
@@ -558,31 +485,31 @@ impl CommandService {
                 }
                 Vec::new()
             }
-            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit, restart),
+            HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, restart),
             HostCommand::ResumeLaneDeliveries { thread_id } => {
-                self.resume_lane_deliveries(thread_id, permit)
+                self.resume_lane_deliveries(thread_id)
             }
             HostCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 self.deliver_follow_ups_next_turn(thread_id)
             }
-            HostCommand::StopRun { thread_id, run_id } => self.stop_run(thread_id, run_id, permit),
+            HostCommand::StopRun { thread_id, run_id } => self.stop_run(thread_id, run_id),
             HostCommand::StopChat { thread_id } => self.stop_chat(thread_id),
-            HostCommand::SubmitGoal(submission) => self.submit_goal(submission, permit),
+            HostCommand::SubmitGoal(submission) => self.submit_goal(submission),
             HostCommand::SetGoalReview {
                 thread_id,
                 goal_id,
                 enabled,
-            } => self.goal_control(&thread_id, permit, |runtime| {
-                runtime.set_goal_review(&thread_id, &goal_id, enabled)
-            }),
+            } => {
+                self.goal_control(|runtime| runtime.set_goal_review(&thread_id, &goal_id, enabled))
+            }
             HostCommand::SetGoalChecksPaused {
                 thread_id,
                 goal_id,
                 paused,
-            } => self.goal_control(&thread_id, permit, |runtime| {
+            } => self.goal_control(|runtime| {
                 runtime.set_goal_checks_paused(&thread_id, &goal_id, paused)
             }),
-            HostCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
+            HostCommand::SendChat(submission) => self.submit_chat(submission, false),
             HostCommand::ContinueChat(continuation) => {
                 self.automatic_resume = continuation.automatic;
                 let events = self.submit_chat(
@@ -598,7 +525,6 @@ impl CommandService {
                         text: String::new(),
                         skills: Vec::new(),
                     },
-                    permit,
                     true,
                 );
                 self.automatic_resume = false;

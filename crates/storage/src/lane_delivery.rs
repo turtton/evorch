@@ -1,7 +1,7 @@
 //! Durable lane routing/delivery contracts (ADR 0044 Phase 1c).
 //!
 //! All clocks are caller supplied Unix nanoseconds. Runtime authenticates callers,
-//! resolves current roots and holds its ownership mutation guard around these APIs.
+//! resolves and validates current root bindings around these APIs.
 //! A successful source write is not delivery: snapshot + receipt precedes ACK.
 
 pub use event_bus::lane::{
@@ -44,12 +44,11 @@ pub enum LaneQuestionCreated {
     CapacityBlocked(QuestionCapacityBlocked),
 }
 
-/// Identifies a currently bound destination root; not itself an ownership permit.
+/// Identifies a currently bound destination root; never execution authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneDeliveryOwner {
     pub root_run_id: String,
     pub generation: u64,
-    pub ownership_generation: u64,
 }
 
 /// Durable destination binding, readable after restart or a lost bind reply.
@@ -80,8 +79,7 @@ pub struct LaneDeliveryClaim<N = LaneNotification> {
 #[serde(rename_all = "snake_case")]
 pub enum LaneDeliveryNack {
     UnknownThread,
-    Readonly,
-    OwnershipLost,
+    BindingConflict,
     Stopped,
     RestoreFailed,
     StorageFailed,
@@ -89,7 +87,7 @@ pub enum LaneDeliveryNack {
     PayloadUnavailable,
 }
 
-/// Rebinding ownership/root never implicitly resumes a stopped destination.
+/// Rebinding the root never implicitly resumes a stopped destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneDestinationAction {

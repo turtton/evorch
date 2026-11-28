@@ -12,11 +12,6 @@ name = "measure_learning_suspend"
 required-features = ["recovery-test-support"]
 
 [[test]]
-name = "physical_ownership_retention"
-path = "tests/physical_ownership_retention/main.rs"
-harness = false
-
-[[test]]
 name = "owned_graphs_admin"
 path = "tests/owned_graphs_admin.rs"
 harness = false
@@ -68,7 +63,7 @@ core-instance = { path = "../core-instance", features = ["recovery-test-support"
 test-socket-dir = { path = "../test-socket-dir" }
 recorder = { path = "../recorder" }
 # The conversion tests take a database the runtime wrote back to version 39 and convert it.
-storage = { path = "../storage", features = ["unchecked-open", "recovery-test-support", "plan-write-gate", "goal-usage-test-support"] }
+storage = { path = "../storage", features = ["unchecked-open", "recovery-test-support", "plan-write-gate", "goal-usage-test-support", "test-support"] }
 # S8 copies only the approved backup, using SQLite's online backup API.
 rusqlite = { workspace = true, features = ["backup"] }
 test-support = { path = "../test-support" }

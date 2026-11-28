@@ -100,24 +100,15 @@ impl AgentRuntime {
         old: &str,
         reason: crate::quiesce::StopReason,
     ) -> Result<(), RuntimeError> {
-        let (claim, permit) = self
+        let claim = self
             .shared
             .spawn_intents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&run)
             .and_then(|i| i.paused_recovery.as_ref())
-            .map(|p| {
-                (
-                    p.claim_id.clone(),
-                    p.stop_config.as_ref().and_then(|c| c.ownership.clone()),
-                )
-            })
+            .map(|p| p.claim_id.clone())
             .ok_or_else(|| error("paused recovery Stop index missing"))?;
-        let permit =
-            permit.ok_or_else(|| error("paused recovery Stop requires current authority"))?;
-        // Pin this owner generation from re-observation through the durable CAS.
-        let _authority = permit.mutation_guard().map_err(error)?;
         let store = self
             .shared
             .run_store
@@ -403,7 +394,7 @@ impl AgentRuntime {
             .iter()
             .map(|intent| intent.run_id)
             .collect::<BTreeSet<_>>();
-        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&indexed), true)
+        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&indexed))
     }
 
     /// Only an unactivated claim may be released. A failed/uncertain ACK retains
@@ -422,7 +413,7 @@ impl AgentRuntime {
             .iter()
             .map(|i| i.run_id)
             .collect::<BTreeSet<_>>();
-        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&expected), false)
+        self.release_indexed_recovery(&paused.claim.claim_id, reason, Some(&expected))
     }
 
     fn release_indexed_recovery(
@@ -430,7 +421,6 @@ impl AgentRuntime {
         claim_id: &str,
         reason: &str,
         expected: Option<&BTreeSet<RunId>>,
-        require_current_stop: bool,
     ) -> Result<(), RuntimeError> {
         let members = {
             let indexes = self
@@ -498,23 +488,6 @@ impl AgentRuntime {
             .run_store
             .get()
             .ok_or_else(|| error("no run store"))?;
-        let permits = if require_current_stop {
-            members
-                .iter()
-                .filter(|(_, _, e)| e.is_some())
-                .map(|(id, _, _)| {
-                    indexes
-                        .get(id)
-                        .and_then(|i| i.paused_recovery.as_ref())
-                        .and_then(|p| p.stop_config.as_ref())
-                        .and_then(|c| c.ownership.clone())
-                        .ok_or_else(|| error("shutdown release requires current authority"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
-        };
-        let _authority = crate::ownership::OwnerPermit::mutation_guards(&permits).map_err(error)?;
         if let Err(write_error) = store
             .handle
             .release_recovery_claim(claim_id.into(), reason.into())
@@ -602,7 +575,7 @@ impl AgentRuntime {
                         paused.claim.members.iter().try_for_each(|m| {
                             self.stop(m.run_id.parse().map_err(error)?, crate::StopScope::SelfOnly)
                         })?;
-                        self.release_indexed_recovery(&claim, "shutdown", None, true)
+                        self.release_indexed_recovery(&claim, "shutdown", None)
                     }
                     RecoveryClaimHandle::Quarantined(handle) => {
                         let snapshot = self
@@ -617,7 +590,7 @@ impl AgentRuntime {
                             // rechecks every current owner and the writer proves
                             // all members unexecuted (including explicit Stop)
                             // in its FULL transaction. Never make this Retryable.
-                            self.release_indexed_recovery(&claim, "shutdown after Stop", None, true)
+                            self.release_indexed_recovery(&claim, "shutdown after Stop", None)
                         } else {
                             self.cleanup_recovery_claim(&handle)
                         }

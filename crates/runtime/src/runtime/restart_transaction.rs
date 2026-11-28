@@ -28,7 +28,6 @@ pub struct RestartRecipeMember {
     pub thread: Option<String>,
     pub role: String,
     pub conversation: bool,
-    pub permit_matches: bool,
     pub lane: bool,
     pub team: bool,
     pub goal: bool,
@@ -282,10 +281,7 @@ impl AgentRuntime {
     /// Matching a supplied permit is evidence only; this method cannot issue one.
     /// Call outside the host mutex. The ordinary preflight still binds and checks
     /// the runtime observation before any planned admission transition.
-    pub fn restart_recipe_inventory(
-        &self,
-        held: &BTreeMap<RunId, crate::ownership::OwnerPermit>,
-    ) -> Result<Vec<RestartRecipeMember>, RuntimeError> {
+    pub fn restart_recipe_inventory(&self) -> Result<Vec<RestartRecipeMember>, RuntimeError> {
         let observed = self.observe_restart_recipes();
         let mut members = Vec::with_capacity(observed.intents.len());
         {
@@ -315,17 +311,6 @@ impl AgentRuntime {
                     });
                 }
                 let config = &entry.config;
-                let permit_matches =
-                    config
-                        .ownership
-                        .as_ref()
-                        .zip(held.get(&root))
-                        .is_some_and(|(live, held)| {
-                            live.registry_path == held.registry_path
-                                && live.thread_id == held.thread_id
-                                && live.lease.owner_id == held.lease.owner_id
-                                && live.lease.generation == held.lease.generation
-                        });
                 members.push(RestartRecipeMember {
                     run: intent.run_id,
                     root,
@@ -334,7 +319,6 @@ impl AgentRuntime {
                     thread: None,
                     role: intent.role.clone(),
                     conversation: config.conversation,
-                    permit_matches,
                     lane: config.lane_scope.is_some(),
                     team: config.team.is_some()
                         || config.team_task.is_some()
@@ -422,7 +406,6 @@ impl AgentRuntime {
                         (
                             &entry.parent,
                             c.conversation,
-                            &c.ownership,
                             &c.lane_scope,
                             &c.team,
                             &c.team_task,
@@ -595,16 +578,6 @@ impl AgentRuntime {
                     .get(&intent.run_id)
                     .or_else(|| s.recipes.get(&root));
                 let descriptor = recipe.and_then(|r| r.descriptor.as_ref());
-                let (owner_id, owner_generation) = {
-                    let runs = lock_runs(&self.shared.runs);
-                    let owner = runs
-                        .get(&intent.run_id)
-                        .and_then(|e| e.config.ownership.as_ref());
-                    (
-                        owner.map(|p| p.lease.owner_id.clone()),
-                        owner.map(|p| p.lease.generation),
-                    )
-                };
                 members.push(RestartExpectedMember {
                     run_id: intent.run_id.to_string(),
                     incarnation: intent.incarnation.clone(),
@@ -617,8 +590,6 @@ impl AgentRuntime {
                         .map_err(error)?
                         .unwrap_or(0),
                     snapshot: super::recovery_graph::snapshot_receipt(intent),
-                    owner_id,
-                    owner_generation,
                     lane_id: recipe
                         .and_then(|r| r.lane.as_ref())
                         .map(|_| root.to_string()),

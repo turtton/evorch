@@ -1,10 +1,9 @@
 //! Current read-only recipe evidence. Installation belongs to V1b-2b.
-//! No owner is started/claimed and no binding is restored from a saved recipe.
+//! No binding or execution authority is restored from a saved recipe.
 #![cfg(target_os = "linux")]
 use crate::restart::public::{ObservedRecipes, RecipeSource, Recipes};
 use runtime::{
     AgentRuntime, RestartRecipeMember, RunId,
-    ownership::{OwnerHost, OwnerPermit},
     quiesce::{CORE_RECOVERY_SETTINGS_REFERENCE, RecoveryRecipe, ResumePolicy},
     restore::RunRestoreDescriptor,
 };
@@ -24,7 +23,6 @@ use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 pub struct HostRecipeSource {
     runtime: AgentRuntime,
     host: Arc<Mutex<CommandHost>>,
-    owner: Arc<OwnerHost>,
     storage: storage::StorageConfig,
     reader: Arc<AdminReader>,
 }
@@ -33,7 +31,6 @@ struct Bindings {
     chats: BTreeMap<String, RunId>,
     goals: BTreeMap<String, RunId>,
     projects: BTreeMap<String, String>,
-    permits: BTreeMap<String, OwnerPermit>,
     lanes: BTreeMap<String, (String, u64)>,
 }
 impl HostRecipeSource {
@@ -41,7 +38,6 @@ impl HostRecipeSource {
         Self {
             runtime: host.runtime.clone(),
             host: host.host.clone(),
-            owner: host.owner.clone(),
             storage: host.storage_config().clone(),
             reader: host.admin.reader().clone(),
         }
@@ -50,25 +46,19 @@ impl HostRecipeSource {
         let host = self.host.lock().map_err(|_| unavailable())?;
         let service = host.service();
         let observed = service.lane_bindings().observe();
-        // Only memory copies under CommandHost. permit_for_thread would open
-        // the owner database, so must never be called under this lock.
+        // Only memory copies under CommandHost; all storage I/O is outside.
         Ok(Bindings {
             observed,
             chats: service.bindings.chat_runs.clone(),
             goals: service.bindings.goal_runs.clone(),
             projects: service.bindings.goal_projects.clone(),
-            permits: service.bindings.chat_permits.clone(),
             lanes: BTreeMap::new(),
         })
     }
-    fn check_inventory(
-        &self,
-        held: &BTreeMap<RunId, OwnerPermit>,
-        expected: &[RestartRecipeMember],
-    ) -> Result<(), AdminFailure> {
+    fn check_inventory(&self, expected: &[RestartRecipeMember]) -> Result<(), AdminFailure> {
         let current = self
             .runtime
-            .restart_recipe_inventory(held)
+            .restart_recipe_inventory()
             .map_err(|error| match error {
                 runtime::RuntimeError::RestartRunUnavailable { run_id, .. } => conflict_for(run_id),
                 _ => conflict(),
@@ -77,15 +67,13 @@ impl HostRecipeSource {
     }
     async fn collect_current(&self) -> Result<ObservedRecipes, AdminFailure> {
         let bindings = self.bindings()?;
-        let held = held_permits(&bindings, None);
         let initial = self
             .runtime
-            .restart_recipe_inventory(&held)
+            .restart_recipe_inventory()
             .map_err(inventory_error)?;
-        // Lanes need not have a GUI/chat binding. Discover only permits already
-        // owned by this core, using the canonical ledger, outside CommandHost.
+        // Lanes need not have a GUI/chat binding. Validate the canonical
+        // root/generation ledger outside CommandHost.
         let storage = self.storage.clone();
-        let owner = self.owner.clone();
         let checked = initial.clone();
         let bindings = self
             .reader
@@ -107,12 +95,6 @@ impl HostRecipeSource {
                             (lane.root_run_id.unwrap(), lane.generation),
                         );
                     }
-                    if member.lane {
-                        let permit = owner
-                            .owned_permit(thread)
-                            .map_err(|_| unsupported(member.run, "foreign or fenced owner"))?;
-                        bindings.permits.insert(thread.to_owned(), permit);
-                    }
                 }
                 Ok(bindings)
             })
@@ -120,21 +102,15 @@ impl HostRecipeSource {
         let bindings = match bindings {
             Ok(bindings) => bindings,
             Err(failure) => {
-                self.check_inventory(&held, &initial)?;
+                self.check_inventory(&initial)?;
                 return Err(failure);
             }
         };
-        let held = held_permits(&bindings, Some(&initial));
         let members = self
             .runtime
-            .restart_recipe_inventory(&held)
+            .restart_recipe_inventory()
             .map_err(inventory_error)?;
-        // The new permits may change only the ownership match, not the run set.
-        let mut comparable = members.clone();
-        for (member, before) in comparable.iter_mut().zip(&initial) {
-            member.permit_matches = before.permit_matches;
-        }
-        inventory_unchanged(&initial, &comparable)?;
+        inventory_unchanged(&initial, &members)?;
         if !bindings.observed.is_current() {
             return Err(conflict());
         }
@@ -161,28 +137,26 @@ impl HostRecipeSource {
             {
                 return Err(unsupported(member.run, "goal"));
             }
-            if (!member.lane
+            if !member.lane
                 && (bindings.chats.get(thread) != Some(&member.root)
                     || bindings
                         .chats
                         .values()
                         .filter(|run| **run == member.root)
                         .count()
-                        != 1))
-                || !member.permit_matches
+                        != 1)
             {
-                return Err(unsupported(member.run, "unconfirmed core ownership"));
+                return Err(unsupported(member.run, "unconfirmed current root binding"));
             }
             if member.parent.is_none() && !member.conversation {
                 return Err(unsupported(member.run, "non-conversation root"));
             }
         }
         let storage = self.storage.clone();
-        let owner = self.owner.clone();
         let checked = members.clone();
         let recipes = self
             .reader
-            .read(move || read_recipes(&storage, &owner, &bindings, &checked))
+            .read(move || read_recipes(&storage, &bindings, &checked))
             .await;
         let recipes = match recipes {
             Ok(recipes) => recipes,
@@ -191,13 +165,13 @@ impl HostRecipeSource {
             // of the observation (observe again), not an unsupported run: only an
             // inventory that is still the same keeps the refusal.
             Err(failure) => {
-                self.check_inventory(&held, &members)?;
+                self.check_inventory(&members)?;
                 return Err(failure);
             }
         };
         // Evidence, not an admission reservation. Public preflight independently
         // binds this inventory to its opaque runtime observation.
-        self.check_inventory(&held, &members)?;
+        self.check_inventory(&members)?;
         if !recipes.bindings.is_current() {
             return Err(conflict());
         }
@@ -221,24 +195,6 @@ fn inventory_unchanged(
         return Err(conflict_for(member.run));
     }
     Ok(())
-}
-fn held_permits(
-    bindings: &Bindings,
-    members: Option<&[RestartRecipeMember]>,
-) -> BTreeMap<RunId, OwnerPermit> {
-    let mut held: BTreeMap<_, _> = bindings
-        .chats
-        .iter()
-        .filter_map(|(thread, run)| bindings.permits.get(thread).map(|p| (*run, p.clone())))
-        .collect();
-    if let Some(members) = members {
-        for member in members.iter().filter(|m| m.lane && m.parent.is_none()) {
-            if let Some(permit) = member.thread.as_ref().and_then(|t| bindings.permits.get(t)) {
-                held.insert(member.root, permit.clone());
-            }
-        }
-    }
-    held
 }
 fn inventory_error(error: runtime::RuntimeError) -> AdminFailure {
     match error {
@@ -275,15 +231,8 @@ fn check_lane(
 fn unavailable_for(run: RunId) -> AdminFailure {
     unsupported(run, "source unavailable")
 }
-fn same_permit(left: &OwnerPermit, right: &OwnerPermit) -> bool {
-    left.registry_path == right.registry_path
-        && left.thread_id == right.thread_id
-        && left.lease.owner_id == right.lease.owner_id
-        && left.lease.generation == right.lease.generation
-}
 fn read_recipes(
     storage: &storage::StorageConfig,
-    owner: &OwnerHost,
     bindings: &Bindings,
     members: &[RestartRecipeMember],
 ) -> Result<ObservedRecipes, AdminFailure> {
@@ -295,16 +244,6 @@ fn read_recipes(
             .thread
             .as_deref()
             .ok_or_else(|| unsupported(member.run, "unbound root"))?;
-        let held = bindings
-            .permits
-            .get(thread)
-            .ok_or_else(|| unsupported(member.run, "missing permit"))?;
-        let current = owner
-            .owned_permit(thread)
-            .map_err(|_| owner_changed(member))?;
-        if !same_permit(held, &current) {
-            return Err(owner_changed(member));
-        }
         let lane = db
             .lane_by_thread(thread)
             .map_err(|_| unavailable_for(member.run))?;
@@ -387,13 +326,6 @@ fn read_recipes(
         recipes,
         bindings: bindings.observed.clone(),
     })
-}
-fn owner_changed(member: &RestartRecipeMember) -> AdminFailure {
-    if member.lane {
-        conflict_for(member.run)
-    } else {
-        unsupported(member.run, "foreign or fenced owner")
-    }
 }
 fn conflict_for(run: RunId) -> AdminFailure {
     WorkbenchError::new(

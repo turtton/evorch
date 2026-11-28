@@ -15,10 +15,8 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::{Inner, KeyState, PullRequestError, Stage};
-use crate::ownership::OwnerPermit;
 use crate::pull_requests::checkout::{CheckoutMiss, CheckoutResolution};
 use crate::pull_requests::diff::{self, FactsChange};
-use crate::pull_requests::ownership::permit_holds;
 use crate::pull_requests::{FetchError, FetchedPullRequest};
 
 /// How long one look for a thread's checkout may take.
@@ -31,26 +29,16 @@ pub(crate) struct Target {
     pub(crate) key: PullRequestKey,
     pub(crate) link_id: u64,
     pub(crate) link_revision: u64,
-    pub(crate) permit: OwnerPermit,
 }
 
-/// Who a fetch is for. The fetch is committed only if some interested party still holds its
-/// thread when the answer arrives.
+/// Who a fetch is for. The fetch is committed unless the service stopped or tracking was
+/// switched off while it ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Interest {
     /// A thread that tracks the pull request: it gets the events and the local HEAD.
     Thread(Target),
     /// A derived thread waiting to learn whether the pull request is open.
-    Child { child: String, permit: OwnerPermit },
-}
-
-impl Interest {
-    fn permit(&self) -> &OwnerPermit {
-        match self {
-            Self::Thread(target) => &target.permit,
-            Self::Child { permit, .. } => permit,
-        }
-    }
+    Child { child: String },
 }
 
 /// How a fetch ended.
@@ -69,7 +57,7 @@ pub(crate) enum FlightOutcome {
     },
     /// The fetch failed; the failure was recorded.
     Failed { seq: u64, error: FetchError },
-    /// Nobody interested holds their thread any more, so nothing was stored.
+    /// The service stopped or tracking was switched off, so nothing was stored.
     Discarded,
     /// Storage failed.
     StorageFailed(String),
@@ -155,7 +143,7 @@ impl Inner {
     }
 
     /// Fetches `key`, stores what came back and tells the threads. The answer is used only
-    /// while some party it is for still owns its thread.
+    /// while the service runs with tracking on.
     async fn fetch_and_commit(&self, key: &PullRequestKey, flight: &Flight) -> FlightOutcome {
         let mut stopping = self.shutdown.subscribe();
         let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return FlightOutcome::Discarded, permit = self.producers.enter() => { let Some(permit) = permit else { return FlightOutcome::Discarded; }; permit } };
@@ -174,8 +162,7 @@ impl Inner {
         // The one place `gh` is started. Numbering the fetch waited, so what is true now is
         // looked at now, and nothing is awaited between this look and the start of the process
         // (`PullRequestSource::fetch` starts it before its first await).
-        let interests = flight.interests();
-        if !self.may_launch(interests.iter().map(Interest::permit)) {
+        if !self.may_launch() {
             return FlightOutcome::Discarded;
         }
         let deadline = Duration::from_secs(self.config().fetch_timeout_seconds);
@@ -189,25 +176,14 @@ impl Inner {
         if !self.config().enabled {
             return FlightOutcome::Discarded;
         }
-        let live = self.live_interests(flight.interests()).await;
-        if live.is_empty() {
+        let interests = flight.interests();
+        if interests.is_empty() {
             return FlightOutcome::Discarded;
         }
         match result {
-            Ok(fetched) => self.commit_success(key, seq, fetched, &live).await,
-            Err(error) => self.commit_failure(key, seq, error, &live).await,
+            Ok(fetched) => self.commit_success(key, seq, fetched, &interests).await,
+            Err(error) => self.commit_failure(key, seq, error, &interests).await,
         }
-    }
-
-    async fn live_interests(&self, interests: Vec<Interest>) -> Vec<Interest> {
-        self.blocking(move || {
-            interests
-                .into_iter()
-                .filter(|interest| permit_holds(interest.permit()))
-                .collect()
-        })
-        .await
-        .unwrap_or_default()
     }
 
     async fn previous_snapshot(&self, key: &PullRequestKey) -> Option<PullRequestSnapshot> {
@@ -233,7 +209,7 @@ impl Inner {
         key: &PullRequestKey,
         seq: u64,
         fetched: FetchedPullRequest,
-        live: &[Interest],
+        interests: &[Interest],
     ) -> FlightOutcome {
         let previous = self.previous_snapshot(key).await;
         let previous_facts = previous.as_ref().and_then(|s| s.facts.clone());
@@ -252,7 +228,7 @@ impl Inner {
         );
         let at_ns = fetched.fetched_at_ns;
         let commit = match self
-            .guarded_any(permits(live), move || {
+            .write(move || {
                 storage.commit_pull_request_fetch_with_display(
                     &commit_key,
                     seq,
@@ -265,7 +241,6 @@ impl Inner {
         {
             Ok(Ok(commit)) => commit,
             Ok(Err(error)) => return FlightOutcome::StorageFailed(error.to_string()),
-            Err(PullRequestError::NotOwner) => return FlightOutcome::Discarded,
             Err(error) => return FlightOutcome::StorageFailed(error.to_string()),
         };
         // Only facts that storage accepted as the newest describe the pull request. A refused
@@ -295,7 +270,7 @@ impl Inner {
             FactsChange::default()
         };
         let recovered = recovered && commit.attempt_recorded;
-        for interest in live {
+        for interest in interests {
             if let Interest::Thread(target) = interest {
                 self.deliver_success(
                     key,
@@ -316,7 +291,7 @@ impl Inner {
         key: &PullRequestKey,
         seq: u64,
         error: FetchError,
-        live: &[Interest],
+        interests: &[Interest],
     ) -> FlightOutcome {
         let previous = self.previous_snapshot(key).await;
         let previous_kind = previous
@@ -329,20 +304,17 @@ impl Inner {
         let (storage, fail_key) = (self.storage.clone(), key.clone());
         let at_ns = self.clock.now_ns();
         let commit = match self
-            .guarded_any(permits(live), move || {
-                storage.fail_pull_request_fetch(&fail_key, seq, failure, at_ns)
-            })
+            .write(move || storage.fail_pull_request_fetch(&fail_key, seq, failure, at_ns))
             .await
         {
             Ok(Ok(commit)) => commit,
             Ok(Err(storage_error)) => {
                 return FlightOutcome::StorageFailed(storage_error.to_string());
             }
-            Err(PullRequestError::NotOwner) => return FlightOutcome::Discarded,
             Err(storage_error) => return FlightOutcome::StorageFailed(storage_error.to_string()),
         };
         if commit.attempt_recorded && previous_kind != Some(kind) {
-            for interest in live {
+            for interest in interests {
                 if let Interest::Thread(target) = interest {
                     self.deliver(
                         key,
@@ -419,20 +391,13 @@ impl Inner {
         let resolution = if directories.is_empty() {
             CheckoutResolution::Missing(CheckoutMiss::NoCheckout)
         } else {
-            // The one place `git` is started. The look at tracking and at the thread's lease is
-            // the first thing the blocking closure does, immediately before the process, so
-            // neither the lookup of the directories nor the wait for the pool can outdate it.
-            let (environment, ownership, settings, permit) = (
-                Arc::clone(&self.env),
-                Arc::clone(&self.ownership),
-                self.settings.subscribe(),
-                target.permit.clone(),
-            );
+            // The one place `git` is started. The look at tracking is the first thing the
+            // blocking closure does, immediately before the process, so neither the lookup of
+            // the directories nor the wait for the pool can outdate it.
+            let (environment, settings) = (Arc::clone(&self.env), self.settings.subscribe());
             let resolved = self
                 .blocking_at(Stage::Checkout, move || {
-                    // The lease is confirmed first (that may wait on a busy registry) and tracking
-                    // is read after it, immediately before the process.
-                    if !ownership.confirms(&permit) || !settings.borrow().enabled {
+                    if !settings.borrow().enabled {
                         return None;
                     }
                     Some(environment.resolve_checkout(
@@ -453,21 +418,14 @@ impl Inner {
                 CheckoutResolution::Found(checkout) => Some(checkout.head_sha.as_str()),
                 CheckoutResolution::Missing(_) => None,
             };
-            if self
-                .check_permit(&target.thread_id, &target.permit)
-                .await
-                .is_ok()
-            {
-                self.lock().attribution.adopt(
-                    &target.thread_id,
-                    target.permit.lease.generation,
-                    target.link_revision,
-                    seq,
-                    &facts.head_sha,
-                    local,
-                );
-                self.wake.notify_one();
-            }
+            self.lock().attribution.adopt(
+                &target.thread_id,
+                target.link_revision,
+                seq,
+                &facts.head_sha,
+                local,
+            );
+            self.wake.notify_one();
         }
         let (storage, thread, revision) = (
             self.storage.clone(),
@@ -485,7 +443,7 @@ impl Inner {
                 }
                 let at_ns = self.clock.now_ns();
                 matches!(
-                    self.guarded(&target.permit, move || {
+                    self.write(move || {
                         storage.record_pull_request_local_head(
                             &thread,
                             revision,
@@ -502,20 +460,17 @@ impl Inner {
                     return false;
                 }
                 matches!(
-                    self.guarded(&target.permit, move || {
-                        storage.clear_pull_request_local_head(&thread, revision)
-                    })
-                    .await,
+                    self.write(move || storage.clear_pull_request_local_head(&thread, revision))
+                        .await,
                     Ok(Ok(true))
                 )
             }
         }
     }
 
-    /// Publishes one change for one thread, inside one guarded write for the thread: takes the
-    /// next transition number of the link it was made for (refused once the link ended), claims
-    /// each notification kind exactly once, and emits once all of that is stored. The thread's
-    /// generation is held fixed throughout, so a process that lost the thread cannot publish.
+    /// Publishes one change for one thread, inside one write: takes the next transition number
+    /// of the link it was made for (refused once the link ended), claims each notification
+    /// kind exactly once, and emits once all of that is stored.
     async fn deliver(
         &self,
         key: &PullRequestKey,
@@ -535,7 +490,7 @@ impl Inner {
         );
         let pull_request = Self::reference(key);
         let published = self
-            .guarded(&target.permit, move || -> Result<(), StorageError> {
+            .write(move || -> Result<(), StorageError> {
                 let seq = storage.next_pull_request_transition(&thread, revision)?;
                 let mut claimed = Vec::new();
                 for kind in notifications {
@@ -578,8 +533,7 @@ impl Inner {
                 | StorageError::PullRequest(
                     PullRequestRejection::NotLinked | PullRequestRejection::LinkNotActive,
                 ),
-            ))
-            | Err(PullRequestError::NotOwner) => {}
+            )) => {}
             Ok(Err(error)) => {
                 tracing::warn!(%error, thread = %target.thread_id, "a pull request change was not published");
             }
@@ -654,8 +608,8 @@ impl Inner {
                     entry.next_due = (!entry.terminal).then_some(retry);
                 }
                 FlightOutcome::Discarded => {
-                    // Nobody who waited could be confirmed (or tracking was switched off):
-                    // try again later, not in a tight loop against a busy registry.
+                    // Tracking was switched off or the service is stopping: try again later,
+                    // not in a tight loop.
                     entry.next_due = (!entry.terminal).then_some(now + pending);
                 }
             }
@@ -674,7 +628,6 @@ impl Inner {
     pub(crate) async fn resolve_child(
         self: &Arc<Self>,
         child: String,
-        permit: OwnerPermit,
     ) -> Result<InheritanceResolution, PullRequestError> {
         let (storage, thread) = (self.storage.clone(), child.clone());
         let Some(record) = self
@@ -690,10 +643,9 @@ impl Inner {
             record.key.clone(),
             vec![Interest::Child {
                 child: child.clone(),
-                permit: permit.clone(),
             }],
         );
-        self.settle_child(child, permit, &flight).await
+        self.settle_child(child, &flight).await
     }
 
     /// [`Self::resolve_child`] for a fetch the scheduler already started with the child as one of
@@ -702,24 +654,20 @@ impl Inner {
     pub(crate) async fn resolve_child_in(
         self: &Arc<Self>,
         child: String,
-        permit: OwnerPermit,
         flight: Arc<Flight>,
     ) -> Result<InheritanceResolution, PullRequestError> {
-        self.settle_child(child, permit, &flight).await
+        self.settle_child(child, &flight).await
     }
 
     async fn settle_child(
         self: &Arc<Self>,
         child: String,
-        permit: OwnerPermit,
         flight: &Flight,
     ) -> Result<InheritanceResolution, PullRequestError> {
         match flight.wait().await {
             FlightOutcome::Committed { seq, .. } => {
                 let mut stopping = self.shutdown.subscribe();
                 let _producer = tokio::select! { biased; _ = stopping.wait_for(|stop| *stop) => return Err(PullRequestError::ProducerStopped), permit = self.producers.enter() => { let Some(permit) = permit else { return Err(PullRequestError::ProducerStopped); }; permit } };
-                // The answer is shared, so it says nothing about the child's own authority:
-                // the decision is written under the child's lease.
                 let (storage, bus, thread, at_ns) = (
                     self.storage.clone(),
                     Arc::clone(&self.bus),
@@ -727,25 +675,22 @@ impl Inner {
                     self.clock.now_ns(),
                 );
                 let resolution = self
-                    .guarded(
-                        &permit,
-                        move || -> Result<InheritanceResolution, StorageError> {
-                            let resolution =
-                                storage.resolve_pull_request_inheritance(&thread, seq, at_ns)?;
-                            if let InheritanceResolution::Applied { link, .. } = &resolution {
-                                let seq = storage
-                                    .next_pull_request_transition(&thread, link.link_revision)?;
-                                bus.emit(Event::new(PullRequestEvent::Linked {
-                                    thread_id: thread,
-                                    link_revision: link.link_revision,
-                                    transition_seq: seq,
-                                    pull_request: Self::reference(&link.key),
-                                    origin: event_bus::PullRequestLinkOrigin::Inherited,
-                                }));
-                            }
-                            Ok(resolution)
-                        },
-                    )
+                    .write(move || -> Result<InheritanceResolution, StorageError> {
+                        let resolution =
+                            storage.resolve_pull_request_inheritance(&thread, seq, at_ns)?;
+                        if let InheritanceResolution::Applied { link, .. } = &resolution {
+                            let seq = storage
+                                .next_pull_request_transition(&thread, link.link_revision)?;
+                            bus.emit(Event::new(PullRequestEvent::Linked {
+                                thread_id: thread,
+                                link_revision: link.link_revision,
+                                transition_seq: seq,
+                                pull_request: Self::reference(&link.key),
+                                origin: event_bus::PullRequestLinkOrigin::Inherited,
+                            }));
+                        }
+                        Ok(resolution)
+                    })
                     .await??;
                 if matches!(resolution, InheritanceResolution::Applied { .. }) {
                     self.force(&child);
@@ -756,24 +701,22 @@ impl Inner {
                 let (storage, thread, at_ns) = (self.storage.clone(), child, self.clock.now_ns());
                 let note = error.failure().message;
                 let _ = self
-                    .guarded(&permit, move || {
+                    .write(move || {
                         storage.record_pull_request_inheritance_attempt(&thread, &note, at_ns)
                     })
                     .await;
                 Err(PullRequestError::Fetch(error))
             }
-            FlightOutcome::Discarded => Err(PullRequestError::OwnershipLost),
+            FlightOutcome::Discarded => Err(if self.config().enabled {
+                PullRequestError::ProducerStopped
+            } else {
+                PullRequestError::Disabled
+            }),
             FlightOutcome::StorageFailed(message) => {
                 Err(PullRequestError::Storage(StorageError::Io(message)))
             }
         }
     }
-}
-
-fn permits(live: &[Interest]) -> Vec<OwnerPermit> {
-    live.iter()
-        .map(|interest| interest.permit().clone())
-        .collect()
 }
 
 fn still_linked(

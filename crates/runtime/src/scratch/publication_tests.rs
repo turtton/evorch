@@ -1,6 +1,5 @@
 //! Snapshot + auxiliary observation -> real publication -> conditional reset.
 use super::*;
-use crate::ownership::Lease;
 type Notices = (
     HashMap<String, u64>,
     HashMap<String, u64>,
@@ -20,7 +19,6 @@ pub(crate) struct Observation {
     pub(crate) scratch: Arc<ThreadScratch>,
     thread: String,
     epoch: u64,
-    lease: Lease,
     before: Notices,
     _dir: tempfile::TempDir,
 }
@@ -28,24 +26,17 @@ impl Observation {
     pub(crate) fn new(runtime: &AgentRuntime, thread: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let scratch = Arc::new(ThreadScratch::at(dir.path().join("scratch")));
-        let lease = Lease {
-            owner_id: "owner".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        };
-        scratch.record_scratch_lease(thread, &lease);
         let key = ScratchKey::Thread(thread.into());
         std::fs::write(scratch.prepare(&key).unwrap().join("keep"), "keep").unwrap();
         assert!(!scratch.take_emptied_notice(&key, RunId::new(u64::MAX), true));
         assert!(!scratch.take_archived_notice(&key, RunId::new(u64::MAX)));
-        let (epoch, _) = scratch.archive_snapshot(thread).unwrap();
+        let epoch = scratch.archive_snapshot(thread).unwrap();
         let before = notices(&scratch);
         runtime.set_thread_scratch(scratch.clone());
         Self {
             scratch,
             thread: thread.into(),
             epoch,
-            lease,
             before,
             _dir: dir,
         }
@@ -59,12 +50,11 @@ impl Observation {
             "tx".into(),
             "capture".into(),
             self.thread.clone(),
-            1,
         )
         .unwrap();
         let outcome = self
             .scratch
-            .reset_thread_if_unused(&self.thread, self.epoch, &self.lease, &effect)
+            .reset_thread_if_unused(&self.thread, self.epoch, &effect)
             .unwrap();
         assert_eq!(
             outcome, None,
@@ -118,9 +108,7 @@ fn handoff_root_publication_invalidates_both_old_and_new_threads() {
         runtime.bind_thread_root("source", source).unwrap();
         let thread = event_bus::escalation_thread_id(&target.to_string());
         let observation = Observation::new(&runtime, if old { "source" } else { &thread });
-        runtime
-            .handoff_thread_goal(source, target, None, |_| {})
-            .unwrap();
+        runtime.handoff_thread_goal(source, target, || {}).unwrap();
         observation.assert_preserved();
     }
 }
@@ -182,7 +170,7 @@ fn unset_runtime_publication_does_not_initialize_scratch() {
         .unwrap();
     runtime.restore_thread_goal(goal).unwrap();
     runtime
-        .handoff_thread_goal(root, runtime.reserve_run_id(), None, |_| {})
+        .handoff_thread_goal(root, runtime.reserve_run_id(), || {})
         .unwrap();
     assert!(runtime.shared.thread_scratch.lock().unwrap().is_none());
 }

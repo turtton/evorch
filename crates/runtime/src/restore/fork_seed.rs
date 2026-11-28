@@ -41,7 +41,8 @@ impl RestoredState {
         // A consumed snapshot still holds valid history; the fork never resumes it.
         let history = descriptor.conversation_descriptor();
         let accepted = (record.restorable && history.restorable)
-            || history.renewable_ownership_only()
+            // Decided before the conversation view drops the interrupted calls.
+            || descriptor.renewable_ownership_only()
             || history.renewable_root_context()
             || history.non_restorable_reason.as_deref() == Some("snapshot_consumed");
         if !accepted {

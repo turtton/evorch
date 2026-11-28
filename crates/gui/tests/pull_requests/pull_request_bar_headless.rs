@@ -84,7 +84,6 @@ fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
         fetched_at_ns: Some(gui::model::pull_requests::now_ns()),
         failure: None,
         candidates: Vec::new(),
-        tracked_here: true,
         auto_fix: None,
     }
 }
@@ -476,30 +475,6 @@ fn an_unknown_state_is_never_drawn_as_success() {
     h.get_by_label("CI passing 1/1");
 }
 
-// Given: a window that does not poll the thread / Then: the bar says so as a status, with the
-// age of the last fetch
-#[test]
-fn a_window_that_does_not_track_the_thread_says_so() {
-    let mut shown = view(Some(failing()));
-    shown.tracked_here = false;
-    let (mut h, _) = harness(Bar {
-        view: shown,
-        expanded: false,
-        subagent: false,
-    });
-    h.run_steps(4);
-    let all = labels(&h);
-    assert!(
-        all.iter()
-            .any(|label| label == "Not tracked in this window"),
-        "{all:?}"
-    );
-    assert!(
-        all.iter().any(|label| label.starts_with("last fetched")),
-        "{all:?}"
-    );
-}
-
 // Given: a failed fetch / Then: the failure is a visible status
 #[test]
 fn a_failed_fetch_is_a_visible_status() {
@@ -663,9 +638,8 @@ fn representative_states_render_for_evidence() {
     };
     let directory = std::path::PathBuf::from(directory);
     std::fs::create_dir_all(&directory).unwrap();
-    let mut untracked = view(Some(failing()));
-    untracked.tracked_here = false;
-    untracked.fetched_at_ns = Some(gui::model::pull_requests::now_ns() - 312 * 1_000_000_000);
+    let mut stale = view(Some(failing()));
+    stale.fetched_at_ns = Some(gui::model::pull_requests::now_ns() - 312 * 1_000_000_000);
     let mut fetch_failed = view(Some(failing()));
     fetch_failed.failure = Some(FetchFailure {
         kind: FetchErrorKind::Unauthenticated,
@@ -693,7 +667,7 @@ fn representative_states_render_for_evidence() {
             view(Some(facts(PullRequestState::Merged, vec![], true))),
             false,
         ),
-        ("not-tracked", untracked, false),
+        ("stale", stale, false),
         ("fetch-failed", fetch_failed, false),
     ];
     for (name, state, expanded) in states {
@@ -710,12 +684,11 @@ fn representative_states_render_for_evidence() {
     }
 }
 
-// Given: a window that does not track the thread, with facts that are old, whose newest fetch
-// failed / Then: all three statuses are drawn, none hiding another
+// Given: facts that are old, whose newest fetch failed / Then: both statuses are drawn, none
+// hiding the other
 #[test]
-fn tracking_staleness_and_a_failed_fetch_are_all_shown_together() {
+fn staleness_and_a_failed_fetch_are_all_shown_together() {
     let mut shown = view(Some(failing()));
-    shown.tracked_here = false;
     shown.fetched_at_ns = Some(gui::model::pull_requests::now_ns() - 3_600 * 1_000_000_000);
     shown.failure = Some(FetchFailure {
         kind: FetchErrorKind::Network,
@@ -729,11 +702,7 @@ fn tracking_staleness_and_a_failed_fetch_are_all_shown_together() {
         });
         h.run_steps(4);
         let all = labels(&h);
-        for wanted in [
-            "Not tracked in this window",
-            "Stale",
-            "Fetch failed (network)",
-        ] {
+        for wanted in ["Stale", "Fetch failed (network)"] {
             assert!(
                 all.iter().any(|label| label == wanted),
                 "{wanted} in {all:?} (expanded {expanded})"
@@ -969,30 +938,6 @@ fn a_disabled_send_reports_nothing_and_says_why_on_hover() {
     h.get_by_label("Send to agent").hover();
     h.run_steps(6);
     h.get_by_label("Already sent for this commit");
-}
-
-// Given: a window that does not hold the thread / Then: both controls are disabled with the
-// reason, and nothing is reported
-#[test]
-fn a_bar_that_is_only_shown_has_disabled_controls() {
-    let mut shown = with_auto(failing(), auto_state(|_| {}), |_| {});
-    shown.tracked_here = false;
-    let (mut h, clicked) = bar_of(shown);
-    h.run_steps(4);
-    h.get_by_label("Auto fix").click();
-    h.get_by_label("Send to agent").click();
-    h.run_steps(3);
-    assert!(clicked.borrow().is_none());
-    let said = |h: &Harness<'_>| {
-        labels(h)
-            .iter()
-            .filter(|label| *label == "Not tracked in this window")
-            .count()
-    };
-    let before = said(&h);
-    h.get_by_label("Send to agent").hover();
-    h.run_steps(6);
-    assert_eq!(said(&h), before + 1, "the hover gives the reason");
 }
 
 // Given: a subagent's transcript / Then: the thread's bar is there with its controls

@@ -9,7 +9,7 @@ struct Hosts {
 impl LaneDeliveryHost for Hosts {
     fn resolve(&self, thread: &str) -> Result<LaneDeliveryTarget, LaneDeliveryNack> {
         if thread == "delivery-lead" && self.hold_lead.load(Ordering::SeqCst) {
-            return Err(LaneDeliveryNack::Readonly);
+            return Err(LaneDeliveryNack::UnknownThread);
         }
         self.targets
             .get(thread)

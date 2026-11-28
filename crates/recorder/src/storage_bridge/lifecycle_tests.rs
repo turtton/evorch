@@ -1,5 +1,5 @@
 use super::*;
-use event_bus::{Event, MessageEvent, OwnershipAction, OwnershipEvent};
+use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, MessageEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage::{Database, StorageConfig};
 
@@ -50,11 +50,14 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
     let producer_bus = bus.clone();
     let producer = std::thread::spawn(move || {
         while emit.load(Ordering::Relaxed) {
-            producer_bus.emit(Event::new(OwnershipEvent {
-                thread_id: "thread".into(),
-                owner_id: "owner".into(),
-                generation: 1,
-                action: OwnershipAction::Heartbeat,
+            producer_bus.emit(Event::new(DiagnosticEvent {
+                source: "test".into(),
+                severity: DiagnosticSeverity::Info,
+                code: "observation".into(),
+                detail: "a live observation the default policy does not store".into(),
+                run_id: None,
+                thread_id: None,
+                call_id: None,
             }));
             // Keep a producer alive until the subscriber explicitly closes.
             if producer_bus.receiver_count() == 0 {
@@ -74,7 +77,7 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
     result.expect("live producer must not prevent bounded shutdown");
     closer.join().unwrap();
     let stored = db.events_all_ordered().unwrap();
-    // Heartbeats are skipped and lag faults are not persisted, so only the
+    // Info diagnostics are skipped and lag faults are not persisted, so only the
     // pending fragment remains, exactly once.
     let events: Vec<_> = stored.iter().map(|row| &row.event).collect();
     assert_eq!(events, [&event]);
@@ -132,69 +135,6 @@ fn explicit_shutdown_is_idempotent_and_leaves_the_writer_available_until_drop() 
     owner.handle().flush_usage_now().unwrap();
     assert_eq!(db.events_all_ordered().unwrap().len(), 1);
     assert_eq!(bus.receiver_count(), 0);
-}
-
-#[test]
-fn real_owner_quiesce_preserves_a_queued_delta_until_owned_storage_shutdown() {
-    let (dir, storage, db) = fixture();
-    let bus = Arc::new(EventBus::new(64));
-    let host = runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
-        .unwrap();
-    let permit = host.start("thread").unwrap();
-    let fence = permit.clone();
-    bus.register_mutation_guard(
-        "run".into(),
-        Arc::new(move || {
-            fence
-                .mutation_guard()
-                .ok()
-                .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
-        }),
-    );
-    let mut owner = OwnedStorageBridge::spawn(
-        bus.clone(),
-        storage,
-        shutdown_only_bridge,
-        Duration::from_secs(60),
-    )
-    .unwrap();
-    let event = delta("last generation-fenced delta");
-    bus.emit(event.clone());
-    let monitor = owner.monitor();
-    monitor.wait_for_blocking(|state| state.pending_events >= 1);
-    assert_eq!(monitor.snapshot().persisted_events, 0);
-    assert!(!host.begin_quiesce().unwrap());
-    assert_eq!(
-        host.attach("thread").unwrap().state,
-        runtime::ownership::OwnerState::Quiescing
-    );
-    permit.validate_generation().unwrap();
-    owner.flush().unwrap();
-    assert!(!host.release_ready().unwrap());
-    owner.shutdown();
-    assert!(permit.validate_generation().is_err());
-    let messages: Vec<_> = db
-        .events_all_ordered()
-        .unwrap()
-        .into_iter()
-        .filter(|row| matches!(row.event.kind, event_bus::EventKind::Message(_)))
-        .map(|row| row.event)
-        .collect();
-    assert_eq!(messages, [event]);
-    let rows = db.events_all_ordered().unwrap();
-    let delta_index = rows
-        .iter()
-        .position(|row| matches!(&row.event.kind, event_bus::EventKind::Message(_)))
-        .unwrap();
-    let released_index = rows
-        .iter()
-        .position(|row| {
-            matches!(&row.event.kind,
-        event_bus::EventKind::Ownership(owner) if owner.action == OwnershipAction::Released)
-        })
-        .expect("release is persisted before subscriber exits");
-    assert!(delta_index < released_index);
-    assert_eq!(monitor.snapshot().failed_events, 0);
 }
 
 #[test]

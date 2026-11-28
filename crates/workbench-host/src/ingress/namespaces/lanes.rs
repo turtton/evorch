@@ -27,11 +27,7 @@ impl CommandHost {
                         RetryAdvice::Never,
                     ));
                 }
-                let resumed = resume_deliveries(
-                    self.service().runtime(),
-                    self.service().ownership(),
-                    &resume,
-                )?;
+                let resumed = resume_deliveries(self.service().runtime(), &resume)?;
                 if let Err(error) = self.projection().refresh_models() {
                     tracing::warn!(?error.code, "lane projection refresh failed");
                 }

@@ -22,7 +22,7 @@ use storage::lane_delivery::{
 use tokio::sync::{oneshot, watch};
 
 /// Current binding resolved by the host's authoritative thread registry. Identity
-/// is separate from authority: a stored owner DTO is never an ownership permit.
+/// is separate from authority: a stored root identity never grants execution rights.
 #[derive(Clone)]
 pub struct LaneDeliveryTarget {
     pub root_run_id: RunId,
@@ -34,16 +34,11 @@ impl LaneDeliveryTarget {
         LaneDeliveryOwner {
             root_run_id: self.root_run_id.to_string(),
             generation: self.generation,
-            ownership_generation: self
-                .authority
-                .ownership
-                .as_ref()
-                .map_or(0, |p| p.lease.generation),
         }
     }
 }
-/// Thin adapter for GUI today and a single core later. Unknown/read-only/foreign
-/// threads return a typed NACK. Resolve must use the current binding/generation,
+/// Thin adapter for the core. Unknown or stale bindings return a typed NACK.
+/// Resolve must use the current binding/generation,
 /// not names or a historical run list. Implementations must not retain runtime.
 pub trait LaneDeliveryHost: Send + Sync {
     fn resolve(&self, thread: &str) -> Result<LaneDeliveryTarget, LaneDeliveryNack>;
@@ -155,7 +150,7 @@ impl AgentRuntime {
             .clone()
     }
     /// Install once host thread bindings are available. Startup scans and expiry
-    /// retries are runtime-owned. Ownership acquisition may call schedule directly.
+    /// retries are runtime-owned. Binding changes may call schedule directly.
     /// Call inside the host Tokio executor (or its Handle::enter guard). Without
     /// one the host is not installed and binding remains Unbound. Dropping the
     /// returned task handle does not cancel its weak-runtime background worker.
@@ -262,7 +257,7 @@ impl AgentRuntime {
     pub fn subscribe_harness_delivery_resumes(&self) -> watch::Receiver<u64> {
         self.shared.lanes.delivery.harness_resumes.subscribe()
     }
-    /// Schedule the common Lane/PR outbox after ownership acquisition or a source commit.
+    /// Schedule the common Lane/PR outbox after a binding change or a source commit.
     pub fn schedule_lane_deliveries(&self, thread: &str) {
         #[cfg(test)]
         if tests::integration::MANUAL_SOURCES.try_with(|()| ()).is_ok() {
@@ -358,32 +353,10 @@ impl AgentRuntime {
         thread: &str,
         target: &LaneDeliveryTarget,
     ) -> Result<(), LaneDeliveryNack> {
-        if target
-            .authority
-            .ownership
-            .as_ref()
-            .is_some_and(|p| p.thread_id != thread || p.validate_generation().is_err())
+        if let Some(current_thread) = self.thread_of_live_run(target.root_run_id)
+            && current_thread != thread
         {
-            return Err(LaneDeliveryNack::OwnershipLost);
-        }
-        let current = self
-            .shared
-            .runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&target.root_run_id)
-            .and_then(|run| run.config.ownership.clone());
-        if let Some(current) = current
-            && !target.authority.ownership.as_ref().is_some_and(|p| {
-                // The heartbeat moves `expires_at` in the registry, so a permit resolved now
-                // never equals the run's own; the owner and its generation are the identity.
-                p.thread_id == current.thread_id
-                    && p.lease.owner_id == current.lease.owner_id
-                    && p.lease.generation == current.lease.generation
-                    && p.registry_path == current.registry_path
-            })
-        {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         let store = self
             .delivery_store()
@@ -395,8 +368,17 @@ impl AgentRuntime {
         let descriptor: crate::restore::RunRestoreDescriptor =
             serde_json::from_str(&record.config_json)
                 .map_err(|_| LaneDeliveryNack::UnknownThread)?;
-        if descriptor.renewable_ownership_only() && target.authority.ownership.is_none() {
-            return Err(LaneDeliveryNack::OwnershipLost);
+        // Restore eligibility applies only when saved history will be reused. A
+        // newly registered live incarnation legitimately has a consumed snapshot
+        // until its first checkpoint, and remains fenced by root/epoch below.
+        if !self.host_input_run_is_live(target.root_run_id)
+            && (descriptor.has_uncertain_effects()
+                || (!descriptor.restorable
+                    && !descriptor.renewable_ownership_only()
+                    && !descriptor.renewable_root_context()
+                    && !descriptor.renewable_team_root()))
+        {
+            return Err(LaneDeliveryNack::RestoreFailed);
         }
         if record.parent_run_id.is_some() || descriptor.thread_id.as_deref() != Some(thread) {
             return Err(LaneDeliveryNack::UnknownThread);
@@ -411,11 +393,20 @@ impl AgentRuntime {
             .handle
             .lane_by_thread(thread)
             .map_err(|_| LaneDeliveryNack::StorageFailed)?
-            && (lane.root_run_id.as_deref() != Some(&target.root_run_id.to_string())
-                || lane.generation != target.generation
-                || lane.is_operator_stopped())
         {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            if lane.is_operator_stopped() {
+                return Err(LaneDeliveryNack::Stopped);
+            }
+            if lane.root_run_id.as_deref() != Some(&target.root_run_id.to_string())
+                || lane.generation != target.generation
+            {
+                return Err(LaneDeliveryNack::BindingConflict);
+            }
+        } else if self
+            .current_thread_root(thread)
+            .is_some_and(|root| root != target.root_run_id)
+        {
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         Ok(())
     }
@@ -539,7 +530,9 @@ impl AgentRuntime {
                 let current = match host.resolve(thread) {
                     Ok(current) if current.owner() == target.owner() => current,
                     Ok(_) => {
-                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost));
+                        return Ok(LaneDeliveryOutcome::Nacked(
+                            LaneDeliveryNack::BindingConflict,
+                        ));
                     }
                     Err(reason) => return Ok(LaneDeliveryOutcome::Nacked(reason)),
                 };
@@ -547,13 +540,6 @@ impl AgentRuntime {
                     return Ok(LaneDeliveryOutcome::Nacked(reason));
                 }
                 let prepared = {
-                    let _guard = current
-                        .authority
-                        .ownership
-                        .as_ref()
-                        .map(|p| p.mutation_guard())
-                        .transpose()
-                        .map_err(|e| LaneError::new("ownership_lost", e.to_string()))?;
                     let destination = destination.as_ref().ok_or_else(|| {
                         LaneError::new("unknown_thread", "destination disappeared")
                     })?;
@@ -598,16 +584,6 @@ impl AgentRuntime {
                 .await?;
         }
         let claim = {
-            let _guard = match target
-                .authority
-                .ownership
-                .as_ref()
-                .map(|p| p.mutation_guard())
-                .transpose()
-            {
-                Ok(guard) => guard,
-                Err(_) => return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)),
-            };
             let destination = store.handle.lane_delivery_destination(thread.to_owned())?;
             if destination.as_ref().is_some_and(|d| d.stopped) {
                 return Ok(LaneDeliveryOutcome::Stopped);
@@ -667,7 +643,7 @@ impl AgentRuntime {
                     "lane_delivery_lease_expired",
                     claim.token(),
                 );
-                Err(LaneDeliveryNack::OwnershipLost)
+                Err(LaneDeliveryNack::BindingConflict)
             }
         };
         if claim.completed_root_wake()
@@ -725,7 +701,9 @@ impl AgentRuntime {
                         &error,
                         storage::StorageError::LaneDeliveryConflict("stale_claim")
                     ) {
-                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost));
+                        return Ok(LaneDeliveryOutcome::Nacked(
+                            LaneDeliveryNack::BindingConflict,
+                        ));
                     }
                     if let Err(nack) = claim.nack(
                         &store.handle,
@@ -797,17 +775,10 @@ impl AgentRuntime {
         host: &dyn LaneDeliveryHost,
         attempt: storage::lane_delivery::LaneRecoveryAttempt,
     ) -> Result<(), LaneDeliveryNack> {
-        let _guard = target
-            .authority
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
         let thread = &attempt.episode.destination_thread_id;
         let current = host.resolve(thread)?;
         if current.owner() != target.owner() {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         self.check_delivery_target(thread, &current)?;
         self.delivery_store()
@@ -827,16 +798,9 @@ impl AgentRuntime {
     ) {
         let thread = attempt.episode.destination_thread_id.clone();
         let recorded = (|| {
-            let _guard = target
-                .authority
-                .ownership
-                .as_ref()
-                .map(|p| p.mutation_guard())
-                .transpose()
-                .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
             let current = host.resolve(&thread)?;
             if current.owner() != target.owner() {
-                return Err(LaneDeliveryNack::OwnershipLost);
+                return Err(LaneDeliveryNack::BindingConflict);
             }
             self.check_delivery_target(&thread, &current)?;
             let store = self
@@ -911,7 +875,7 @@ impl AgentRuntime {
             .map_err(|_| LaneDeliveryNack::StorageFailed)?;
         let current = host.resolve(thread)?;
         if current.owner() != *claim.owner() {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         self.check_delivery_target(thread, &current)?;
         claim.check_nudge(self, &current, false)?;
@@ -965,13 +929,6 @@ impl AgentRuntime {
                         .iter()
                         .any(|n| !matches!(n.kind, LaneNotificationKind::Nudge { .. }))
                 }) {
-                    let _guard = current
-                        .authority
-                        .ownership
-                        .as_ref()
-                        .map(|p| p.mutation_guard())
-                        .transpose()
-                        .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
                     let prepared = store
                         .handle
                         .prepare_lane_recovery(batch.clone(), host.now_ns())
@@ -1058,7 +1015,7 @@ impl AgentRuntime {
             .validate_lane_delivery_claim(claim, host.now_ns())
             .map_err(|error| match error {
                 storage::StorageError::LaneDeliveryConflict(_)
-                | storage::StorageError::Tombstoned { .. } => LaneDeliveryNack::OwnershipLost,
+                | storage::StorageError::Tombstoned { .. } => LaneDeliveryNack::BindingConflict,
                 _ => LaneDeliveryNack::StorageFailed,
             })
     }
@@ -1247,42 +1204,131 @@ impl AgentRuntime {
         self.schedule_lane_deliveries(&thread);
         Ok(())
     }
-    pub(crate) fn persist_lane_delivery_stop(
-        &self,
-        run: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
-    ) -> Result<(), crate::RuntimeError> {
+    pub(crate) fn persist_lane_delivery_stop(&self, run: RunId) -> Result<(), crate::RuntimeError> {
+        // Threadless runs have no delivery destination. A known thread, however,
+        // must not silently skip its durable Stop when its store is unavailable.
+        let mut thread = self.goal_thread(run);
+        let requires_binding = self
+            .shared
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .is_some_and(|r| r.parent.is_none() && r.config.lane_scope.is_some());
+        let pending_lane = self
+            .shared
+            .lanes
+            .creation_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .cloned();
         let Some(store) = self.shared.run_store.get() else {
-            return Ok(());
+            return if thread.is_none() && !requires_binding && pending_lane.is_none() {
+                Ok(())
+            } else {
+                Err(Self::review_error(run, "delivery Stop requires storage"))
+            };
         };
-        let Some(thread) = self.goal_thread(run) else {
-            return Ok(());
+        if thread.is_none()
+            && let Some(lane_id) = pending_lane
+        {
+            let lane = store
+                .handle
+                .lane(&lane_id)
+                .map_err(|e| Self::review_error(run, e))?
+                .ok_or_else(|| Self::review_error(run, "delivery Stop lane binding is missing"))?;
+            thread = Some(lane.thread_id);
+        }
+        let thread = match thread {
+            Some(thread) => thread,
+            None => {
+                let Some(record) = store
+                    .restore_record(run)
+                    .map_err(|e| Self::review_error(run, e))?
+                else {
+                    return if requires_binding {
+                        Err(Self::review_error(
+                            run,
+                            "delivery Stop root snapshot is missing",
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                };
+                if record.parent_run_id.is_some() {
+                    return Ok(());
+                }
+                let descriptor: crate::restore::RunRestoreDescriptor =
+                    serde_json::from_str(&record.config_json)
+                        .map_err(|e| Self::review_error(run, e))?;
+                let Some(thread) = descriptor.thread_id else {
+                    return if requires_binding {
+                        Err(Self::review_error(
+                            run,
+                            "delivery Stop thread binding is missing",
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                };
+                thread
+            }
         };
-        let _guard = ownership
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| Self::review_error(run, e))?;
-        let destination = store
-            .handle
-            .lane_delivery_destination(thread.clone())
-            .map_err(|e| Self::review_error(run, e))?;
-        let owner = destination
-            .as_ref()
-            .and_then(|d| d.owner.clone())
-            .unwrap_or(LaneDeliveryOwner {
-                root_run_id: run.to_string(),
-                generation: 0,
-                ownership_generation: ownership.map_or(0, |p| p.lease.generation),
-            });
-        store
-            .handle
-            .bind_lane_delivery_destination(
+        loop {
+            let lane = store
+                .handle
+                .lane_by_thread(&thread)
+                .map_err(|e| Self::review_error(run, e))?;
+            let generation = if let Some(lane) = &lane {
+                let pending_matches = !lane.is_started()
+                    && serde_json::from_str::<super::lanes::StartSeed>(&lane.start_seed)
+                        .is_ok_and(|seed| seed.run_id == run);
+                if lane.root_run_id.as_deref() != Some(&run.to_string()) && !pending_matches {
+                    return Err(Self::review_error(
+                        run,
+                        "delivery Stop root binding changed",
+                    ));
+                }
+                lane.generation
+            } else {
+                if self.current_thread_root(&thread) != Some(run) {
+                    return Err(Self::review_error(
+                        run,
+                        "delivery Stop requires a current root binding",
+                    ));
+                }
+                0
+            };
+            let destination = store
+                .handle
+                .lane_delivery_destination(thread.clone())
+                .map_err(|e| Self::review_error(run, e))?;
+            #[cfg(test)]
+            if let Some(hook) = tests::BEFORE_STOP_CAS.with(|h| h.borrow_mut().take()) {
+                hook();
+            }
+            let result = store.handle.bind_lane_delivery_destination(
                 thread.clone(),
                 destination.as_ref().map_or(0, |d| d.epoch),
-                owner,
+                LaneDeliveryOwner {
+                    root_run_id: run.to_string(),
+                    generation,
+                },
                 LaneDestinationAction::Stop,
-            )
-            .map_err(|e| Self::review_error(run, e))?;
+            );
+            match result {
+                // A concurrent bind is not a failed Stop. Re-read both the trusted
+                // root and the destination epoch; never write through a stale CAS.
+                Err(storage::StorageError::LaneDeliveryConflict("stale_destination_epoch")) => {
+                    continue;
+                }
+                other => {
+                    other.map_err(|e| Self::review_error(run, e))?;
+                    break;
+                }
+            }
+        }
         self.lane_state_changed(
             &thread,
             event_bus::DiagnosticSeverity::Info,
@@ -1316,24 +1362,19 @@ impl AgentRuntime {
     /// for an agent- or timer-driven path; progress alone never resumes a stopped destination.
     /// A lead whose root the operator stopped still needs its chat resumed ([`Self::resume_chat`]).
     /// A run that belongs to no thread has nothing to resume and is not an error here.
-    pub fn explicitly_resume_lane_delivery(
-        &self,
-        run: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
-    ) -> Result<(), crate::RuntimeError> {
+    pub fn explicitly_resume_lane_delivery(&self, run: RunId) -> Result<(), crate::RuntimeError> {
         match self.saved_root_thread(run) {
-            Some(thread) => self.resume_thread_lane_delivery(&thread, run, ownership, false),
+            Some(thread) => self.resume_thread_lane_delivery(&thread, run, false),
             None => Ok(()),
         }
     }
     /// [`Self::explicitly_resume_lane_delivery`] for a host button: the host names the thread
-    /// and its current root, and a root that is not that thread's (or a permit for another
-    /// thread) is refused instead of silently doing nothing.
+    /// and its current root, and a root that is not that thread's
+    /// is refused instead of silently doing nothing.
     pub fn resume_lane_deliveries(
         &self,
         thread: &str,
         run: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), crate::RuntimeError> {
         let _retention_admission = self.retention_run_admission(run);
         let deleted = |reason| crate::RuntimeError::RunRestoreFailed {
@@ -1358,9 +1399,7 @@ impl AgentRuntime {
                 ),
             ));
         }
-        if self.saved_root_thread(run).as_deref() != Some(thread)
-            || ownership.is_some_and(|permit| permit.thread_id != thread)
-        {
+        if self.saved_root_thread(run).as_deref() != Some(thread) {
             return Err(Self::review_error(
                 run,
                 LaneError::new(
@@ -1369,7 +1408,7 @@ impl AgentRuntime {
                 ),
             ));
         }
-        self.resume_thread_lane_delivery(thread, run, ownership, true)
+        self.resume_thread_lane_delivery(thread, run, true)
     }
     /// The thread's current conversation root: the live binding when the thread has one, else
     /// the root recorded for the thread, else the newest root among its saved runs. A root
@@ -1407,18 +1446,13 @@ impl AgentRuntime {
         &self,
         thread: &str,
         run: RunId,
-        ownership: Option<&crate::ownership::OwnerPermit>,
         require_current_root: bool,
     ) -> Result<(), crate::RuntimeError> {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
         };
         let thread = thread.to_owned();
-        let _guard = ownership
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|e| Self::review_error(run, e))?;
-        // Inside the ownership fence, against the canonical current root: a root that is only
+        // Against the canonical current root: a root that is only
         // saved under this thread (a superseded one) must not rebind the destination.
         if require_current_root && self.current_thread_root(&thread) != Some(run) {
             return Err(Self::review_error(
@@ -1436,7 +1470,6 @@ impl AgentRuntime {
             && let Some(mut owner) = destination.owner
         {
             owner.root_run_id = run.to_string();
-            owner.ownership_generation = ownership.map_or(0, |p| p.lease.generation);
             store
                 .handle
                 .bind_lane_delivery_destination(
@@ -1447,7 +1480,6 @@ impl AgentRuntime {
                 )
                 .map_err(|e| Self::review_error(run, e))?;
         }
-        drop(_guard);
         self.lane_user_progress(&thread, LaneGuardSignal::ExplicitUserResume)
             .map_err(|e| Self::review_error(run, e))?;
         // Durable Stop clearance and both source guards committed successfully.
@@ -1474,7 +1506,6 @@ impl AgentRuntime {
         run: RunId,
         episode: &str,
         reason: &str,
-        authority: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), LaneError> {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
@@ -1482,12 +1513,6 @@ impl AgentRuntime {
         let Some(thread) = self.goal_thread(run) else {
             return Ok(());
         };
-        let ownership = authority.cloned();
-        let _guard = ownership
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-            .map_err(|error| LaneError::new("ownership_lost", error.to_string()))?;
         let Some(lane) = store.handle.lane_by_thread(&thread)? else {
             return Ok(());
         };
@@ -1595,7 +1620,7 @@ impl crate::agent_loop::LoopState {
             .ok_or(LaneDeliveryNack::UnknownThread)?;
         let current = host.resolve(thread)?;
         if current.owner() != claim.owner || current.root_run_id != self.task.run_id {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         let gate = runtime.stop_restore_gate(self.task.run_id);
         let _stop = gate
@@ -1603,13 +1628,6 @@ impl crate::agent_loop::LoopState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         runtime.check_delivery_target(thread, &current)?;
         runtime.check_nudge_target(&current, claim, true)?;
-        let _owner = current
-            .authority
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
         let store = runtime
             .delivery_store()
             .map_err(|_| LaneDeliveryNack::StorageFailed)?;

@@ -145,7 +145,10 @@ pub fn offline_question(
                 "thread-1",
                 Role::Worker,
                 "Prepare the output".into(),
-                runtime::RunConfig::default(),
+                runtime::RunConfig {
+                    project_root: Some(dir.to_path_buf()),
+                    ..Default::default()
+                },
             )
             .unwrap();
         model.reached.notified().await;
@@ -156,33 +159,6 @@ pub fn offline_question(
         requester.wait(run).await.unwrap();
         question
     })
-}
-
-/// Ownership of `thread` that moved to another host after `permit` was taken, so
-/// `owner` no longer owns it and `permit` is stale.
-pub struct LostOwnership {
-    pub owner: Arc<runtime::ownership::OwnerHost>,
-    pub permit: runtime::ownership::OwnerPermit,
-    _successor: runtime::ownership::OwnerHost,
-    _dir: test_socket_dir::SplitDir,
-}
-
-pub fn lost_ownership(thread: &str) -> LostOwnership {
-    let dir = test_socket_dir::SplitDir::new();
-    let bus = Arc::new(EventBus::new(64));
-    let owner = runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
-        .unwrap();
-    owner.start(thread).unwrap();
-    let permit = owner.owned_permit(thread).unwrap();
-    let successor =
-        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
-    owner.handoff(&permit, &successor).unwrap();
-    LostOwnership {
-        owner: Arc::new(owner),
-        permit,
-        _successor: successor,
-        _dir: dir,
-    }
 }
 
 pub fn other_project() -> ProjectId {

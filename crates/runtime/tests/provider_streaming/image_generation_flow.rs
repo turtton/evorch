@@ -436,34 +436,15 @@ async fn ac15_cancellation_drops_request_and_writes_no_images() {
 }
 
 #[tokio::test]
-async fn ac9_ownership_loss_during_generation_prevents_file_writes() {
-    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+async fn ac9_stop_during_generation_prevents_file_writes() {
     let server = MockServer::start().await;
     mount_image(&server, std::time::Duration::from_millis(300)).await;
     let (runtime, _, workspace, _) = harness(&server, false).await;
-    let registry_path = workspace.path().join("ownership.db");
-    let mut registry = Registry::open(&registry_path).unwrap();
-    let owner = ThreadOwner::new(
-        "thread".into(),
-        Lease {
-            owner_id: "first".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    );
-    registry.start(&owner).unwrap();
-    let permit = OwnerPermit {
-        registry_path,
-        thread_id: "thread".into(),
-        lease: owner.lease,
-        run_id: None,
-    };
     let run = runtime.delegate_background(
         Role::Worker,
         "material".into(),
         RunConfig {
             category: Some("visual".into()),
-            ownership: Some(permit),
             ..Default::default()
         },
     );
@@ -474,13 +455,7 @@ async fn ac9_ownership_loss_during_generation_prevents_file_writes() {
     })
     .await
     .unwrap();
-    registry
-        .update("thread", |owner| {
-            owner.lease.generation += 1;
-            owner.lease.owner_id = "second".into();
-            Ok(())
-        })
-        .unwrap();
+    runtime.cancel(run).unwrap();
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
     assert!(!workspace.path().join("hero.png").exists());
     assert!(!workspace.path().join("hero.64.jpg").exists());

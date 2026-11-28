@@ -13,20 +13,17 @@ impl AgentRuntime {
             run_id: record.run_id.clone(),
             reason: RunRestoreFailure::UnsupportedConfig(reason),
         };
-        if let Some(permit) = &authority.ownership {
-            permit
-                .validate_generation()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: record.run_id.clone(),
-                })?;
-        }
         // Current callers reuse history, not the old execution or tool jobs.
         // Retain the authority/identity gates while reporting lost outcomes to
         // the next model turn instead of refusing the entire conversation.
+        // The ownership-only exception is decided on the saved descriptor: the
+        // conversation view below drops the interrupted calls, so it could no
+        // longer tell that an effect of this record is unresolved.
+        let original_ownership_only = descriptor.renewable_ownership_only();
         let history_descriptor = descriptor.conversation_descriptor();
         let descriptor = &history_descriptor;
         if (record.restorable && descriptor.restorable)
-            || descriptor.renewable_ownership_only()
+            || original_ownership_only
             || descriptor.renewable_root_context()
         {
             self.validate_stopped_history_tree(record, "root")?;

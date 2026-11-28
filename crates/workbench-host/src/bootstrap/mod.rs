@@ -1,13 +1,10 @@
-//! GUI-free owner composition and reusable construction parts (ADR 0045).
+//! GUI-free runtime composition and reusable construction parts (ADR 0045).
 //! Learning, evaluation supervision and passive improvement/crash intake use
-//! the same factories on core and legacy GUI. Every task has a stop/drain owner.
+//! the core's factories. Every background task has a stop/drain lifetime.
 //!
-//! Remaining GUI/core differences:
 //! - Core loads strict explicit configuration, without environment overrides.
-//! - Unconfigured core exposes no tools; GUI/demo keeps production tools.
-//! - The core confirms and executes retention deletions (`retention`); a legacy
-//!   GUI runs its own phase only when it holds the exclusive leases.
-//! - GUI retains a 60s storage bridge tick; core retains its 5s tick.
+//! - Unconfigured core exposes no tools.
+//! - Core confirms retention deletions only with the existing exclusive leases.
 //! - Project declarations are read-only: saved state cannot manufacture trust.
 #[cfg(any(test, feature = "test-support"))]
 mod agent_observation_seam;
@@ -46,7 +43,7 @@ use crate::{CommandHost, commands::CommandService, projects::StaticProjects};
 use event_bus::AgentRunPhase;
 use event_bus::EventBus;
 use recorder::{pricing::UsagePricing, storage_bridge::OwnedStorageBridge};
-use runtime::{AgentRuntime, ModelSource, RunStore, RuntimeComposition, ownership::OwnerHost};
+use runtime::{AgentRuntime, ModelSource, RunStore, RuntimeComposition};
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
@@ -55,6 +52,14 @@ use std::{
 };
 
 pub type BootstrapError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The shared state root is not an owner registry. Its existing private layout
+/// must exist before deriving scratch/attachment identity or acquiring leases.
+fn prepare_state_root(root: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(root)?;
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+}
 
 #[derive(Clone, Debug)]
 pub struct BootstrapOptions {
@@ -128,7 +133,6 @@ pub struct BootstrappedHost {
     pub runtime: AgentRuntime,
     /// Central owner of core children and auxiliary workers (not GUI-owned children).
     pub spawn_ledger: sandbox::SpawnLedger,
-    pub owner: Arc<OwnerHost>,
     /// Shared by runtime, ownership cleanup and archive; scratch identity is unchanged.
     pub scratch: Arc<runtime::scratch::ThreadScratch>,
     /// Stop/join after producer/runtime drain and before bridge/writer/lease teardown.
@@ -284,8 +288,8 @@ impl BootstrappedHost {
         Self::open_staged(options, seams, mcp, adapters, observe, recovery, None).await
     }
 
-    pub async fn open_claimed_for_core(
-        claimed: planned::ClaimedBootstrap,
+    pub async fn open_adopted_for_core(
+        claimed: planned::AdoptedBootstrap,
     ) -> Result<Self, BootstrapError> {
         let options = claimed.storage.options.clone();
         Self::open_staged(options, None, None, None, None, None, Some(claimed)).await
@@ -299,7 +303,7 @@ impl BootstrappedHost {
         adapters: Option<lane_pr::PullRequestAdapters>,
         observe: Option<RuntimeObserver>,
         recovery: Option<&dyn core_startup::CoreStartupHook>,
-        claimed: Option<planned::ClaimedBootstrap>,
+        claimed: Option<planned::AdoptedBootstrap>,
     ) -> Result<Self, BootstrapError> {
         #[cfg(any(test, feature = "test-support"))]
         let manual_retention_fixture = seams.is_some();
@@ -316,8 +320,8 @@ impl BootstrappedHost {
             leases,
             writer_leases,
             seed,
-            claimed_owner,
-            claimed_scratch,
+            scratch,
+            claimed_archive,
             planned_collector,
         ) = if let Some(claimed) = claimed {
             let planned::PlannedStorage {
@@ -339,8 +343,8 @@ impl BootstrappedHost {
                 leases,
                 writer_leases,
                 Some(seed),
-                Some(claimed.owner),
-                Some((claimed.scratch, claimed.scratch_archive)),
+                claimed.scratch,
+                Some(claimed.scratch_archive),
                 Some(collector),
             )
         } else {
@@ -350,6 +354,7 @@ impl BootstrappedHost {
                 read_env: false,
                 ..Default::default()
             })?;
+            prepare_state_root(&options.ownership_root)?;
             let bus = Arc::new(EventBus::new(4096));
             let db_path = options.config_dir.join("evorch-events.db");
             // The core confirms the deletion of expired archived threads (see
@@ -361,6 +366,10 @@ impl BootstrappedHost {
                 artifacts_dir: Some(options.config_dir.join("artifacts")),
                 policy: runtime::thread_retention::policy_from_config(&config.storage),
             };
+            let scratch = Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(
+                &options.ownership_root,
+            )?);
+            let sweep_scratch = scratch.clone();
             let (writer_leases, leases) = tokio::task::spawn_blocking(move || {
                 let started = std::time::Instant::now();
                 let writer = Arc::new(storage::WriterLeases::acquire(
@@ -370,7 +379,7 @@ impl BootstrappedHost {
                 )?);
                 let remaining = storage::WRITER_LEASE_WAIT.saturating_sub(started.elapsed());
                 let maintenance = if writer.has_root_writer() {
-                    retention::acquire_leases(&plan, remaining)?
+                    retention::acquire_leases(&plan, remaining, &sweep_scratch)?
                 } else {
                     storage::shared_with_wait(&plan.db_path, &plan.ownership_root, remaining)?
                 };
@@ -391,7 +400,7 @@ impl BootstrappedHost {
                 leases,
                 writer_leases,
                 None,
-                None,
+                scratch,
                 None,
                 None,
             )
@@ -616,31 +625,28 @@ impl BootstrappedHost {
                 .set_tombstone_guard(guard.clone())
                 .map_err(|_| "runtime tombstone guard already set")?;
         }
-        let (owner, scratch, scratch_archive) = if let Some(owner) = claimed_owner {
-            let (scratch, archive) = claimed_scratch.ok_or("planned scratch resources missing")?;
-            (owner, scratch, archive)
+        let scratch_archive = if let Some(archive) = claimed_archive {
+            archive
         } else {
-            let scratch = Arc::new(runtime::scratch::ThreadScratch::for_ownership_root(
-                &options.ownership_root,
-            )?);
-            let owner = Arc::new(OwnerHost::open_with_shared_scratch(
-                &options.ownership_root,
-                config.ownership.clone(),
-                bus.clone(),
-                true,
-                Some(scratch.clone()),
-            )?);
-            owner
-                .set_tombstone_guard(guard.clone())
-                .map_err(|_| "owner tombstone guard already set")?;
             let archive = Arc::new(runtime::scratch::archive::ArchiveService::new(
                 &scratch,
-                owner.scratch_archive_authority(),
+                runtime::scratch::archive::authority(
+                    storage_config.clone(),
+                    options.ownership_root.clone(),
+                    options.config_dir.join("sidebar.json"),
+                    writer_leases.clone(),
+                    scratch.clone(),
+                ),
             )?);
             archive.set_guard(guard);
-            (owner, scratch, archive)
+            archive
         };
         runtime.set_thread_scratch(scratch.clone());
+        runtime.set_disposal_context(
+            writer_leases.clone(),
+            options.ownership_root.clone(),
+            options.config_dir.join("sidebar.json"),
+        );
         // Sidebar reads and fenced archive I/O stay on the dedicated worker.
         crate::scratch_archive::install(
             &scratch_archive,
@@ -675,7 +681,7 @@ impl BootstrappedHost {
             .with_event_bus(bus.clone())
             .with_memory_storage(storage_config.clone())
             .with_team_writer(handle.clone())
-            .with_ownership(owner.clone());
+            .with_sidebar_path(options.config_dir.join("sidebar.json"));
         service.bind_lane_delivery();
         let restart_gate = service.restart_gate();
         let projects = known_projects(&options)?;
@@ -685,10 +691,6 @@ impl BootstrappedHost {
         let recovery_projects = projects.directory.clone();
         let command_host = CommandHost::new_with_epoch(service, successor_epoch)
             .with_projects(projects.directory)
-            .with_legacy_import(
-                options.ownership_root.clone(),
-                options.config_dir.join("sidebar.json"),
-            )
             .with_lane_sidebar_path(options.config_dir.join("sidebar.json"));
         // The area services get the handles built above, never new ones, and
         // start their background work only through `area_tasks`, which the
@@ -723,7 +725,6 @@ impl BootstrappedHost {
             evaluations: evaluations.clone(),
             evaluator: evaluator.clone(),
             database: storage_config.db_path.clone(),
-            owner: owner.clone(),
             scratch_archive: scratch_archive.clone(),
             connections: Arc::default(),
             artifacts: artifacts.clone(),
@@ -745,8 +746,7 @@ impl BootstrappedHost {
         let graph_collector = if let Some(collector) = planned_collector {
             collector
         } else {
-            let collector =
-                recovery_disposal::LiveGraphCollector::new(&runtime, storage_config.clone());
+            let collector = recovery_disposal::LiveGraphCollector::new(storage_config.clone());
             runtime.install_graph_observer(collector.clone())?;
             runtime.rebuild_graph_observation()?;
             collector
@@ -754,6 +754,11 @@ impl BootstrappedHost {
         graph_collector
             .bind_epoch(command_host.projection().instance_epoch())
             .map_err(|_| "live graph collector epoch unavailable")?;
+        if planned {
+            // Adopted component membership must be observed under the successor's
+            // live epoch, not while the restricted storage seed is still unbound.
+            runtime.rebuild_graph_observation()?;
+        }
         let admin = crate::admin::AdminService::new(
             crate::admin::AdminAudit::new(
                 Arc::new(handle.clone()),
@@ -776,7 +781,6 @@ impl BootstrappedHost {
         let mut bootstrap = Self {
             host,
             runtime,
-            owner,
             scratch,
             scratch_archive,
             restart_storage: storage_config.clone(),
@@ -896,7 +900,6 @@ impl BootstrappedHost {
             return Err("planned activation requires durable Ready".into());
         }
         self.probe_after_ready().await?;
-        self.owner.enable_normal_shutdown();
         self.start_deferred(Some(recovery)).await?;
         self.host
             .lock()
@@ -933,7 +936,6 @@ impl BootstrappedHost {
                         host: self.host.clone(),
                         options: deferred.options.clone(),
                         runtime: self.runtime.clone(),
-                        owner: self.owner.clone(),
                         storage: deferred.storage.clone(),
                         writer: deferred.writer.clone(),
                         projects: deferred.projects,
@@ -984,7 +986,6 @@ impl BootstrappedHost {
         if let Err(error) = learning::start(
             &mut self.services,
             &self.runtime,
-            self.owner.clone(),
             &self.config,
             &deferred.storage,
             self.evaluations.clone(),
@@ -998,7 +999,6 @@ impl BootstrappedHost {
         if let Err(error) = lane_pr::start(
             &mut self.services,
             &self.runtime,
-            &self.owner,
             &self.scratch,
             self.config.pull_requests,
             deferred.adapters,
@@ -1047,7 +1047,7 @@ impl BootstrappedHost {
         self.runtime.quiesce().await.map_err(Into::into)
     }
 
-    /// Operator-stop drain (ADR 0024); not a planned safe-point restart.
+    /// Operator-stop drain; not a planned safe-point restart.
     pub async fn shutdown(&mut self) -> Result<(), BootstrapError> {
         // Publish unavailability before stopping successor/owner validity.
         self.graph_collector.invalidate();
@@ -1081,20 +1081,11 @@ impl BootstrappedHost {
             .take_background_tasks();
         lane_pr::remember(
             &mut failure,
-            lane_pr::stop_and_drain(
-                &mut self.services,
-                &self.runtime,
-                &self.owner,
-                &self.executor,
-            )
-            .await,
+            lane_pr::stop_and_drain(&mut self.services, &self.runtime, &self.executor).await,
         );
         for task in tasks {
             lane_pr::remember(&mut failure, task.await.map(|_| ()));
         }
-        // Whether the runtime drained decides if the owner may be released; an
-        // area task failing is reported but does not keep the owner.
-        let drained = failure.is_none();
         lane_pr::remember(&mut failure, self.area_tasks.shutdown().await);
         if let Some(mut owner) = self.auto_archive.take() {
             lane_pr::remember(
@@ -1113,17 +1104,6 @@ impl BootstrappedHost {
             lane_pr::remember(&mut failure, bridge.flush());
         }
         lane_pr::remember(&mut failure, self.cleanup_planned_exit().await);
-        if drained {
-            match self.owner.release_ready() {
-                Ok(true) => {
-                    failure.get_or_insert_with(|| {
-                        "owner still has active turns after runtime drain".into()
-                    });
-                }
-                Ok(false) => {}
-                Err(error) => lane_pr::remember(&mut failure, Err::<(), _>(error)),
-            }
-        }
         // Stop the archive worker and collector after producer/drain/release handling.
         lane_pr::remember(&mut failure, self.scratch_archive.stop_cleanup());
         if let Some(mut bridge) = self.bridge.take() {

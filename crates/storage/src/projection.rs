@@ -204,7 +204,6 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         EventKind::Orchestrator(_)
         | EventKind::Ledger(_)
         | EventKind::Diagnostic(_)
-        | EventKind::Ownership(_)
         | EventKind::PullRequest(_)
         | EventKind::ConversationPlan(_) => {}
     }

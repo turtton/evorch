@@ -1,10 +1,9 @@
-//! SIGKILL leaves Running owners, sockets and ordinary (non-manifest) snapshots.
-//! Only expiry is adjusted after reap; neither startup recovery nor explicit claim
-//! may supply authority. All completion waits use IPC/model/lifecycle signals.
+//! SIGKILL leaves ordinary non-manifest snapshots and durable lane bindings.
+//! A fresh core composition reuses them through Continue and lane_send, without
+//! registry edits, owner claims, or grace waits. Synchronization uses IPC/events.
 #![cfg(unix)]
 use event_bus::{AgentRunPhase, EventKind, ToolEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
-use runtime::ownership::{OwnerState, Registry, ThreadOwner};
 use runtime::{AgentModel, Role, RunConfig, RunId, RuntimeError};
 use serde_json::{Value, json};
 use std::{
@@ -21,7 +20,7 @@ use workbench_host::{
     commands::{ComposerRole, ContinueInput, HostCommand, HostEvent},
 };
 
-const TEXT: &str = "abandoned-owner durable supplement";
+const TEXT: &str = "crash-reuse durable supplement";
 #[derive(Default)]
 struct Model {
     source: bool,
@@ -29,6 +28,7 @@ struct Model {
     scripted: Mutex<HashMap<String, Value>>,
     seen: Mutex<HashMap<String, String>>,
     received: tokio::sync::Notify,
+    supplement_calls: Mutex<HashMap<String, usize>>,
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
@@ -57,6 +57,14 @@ impl AgentModel for Model {
             .lock()
             .unwrap()
             .insert(invocation.run_id.clone(), body.clone());
+        if body.contains(TEXT) {
+            *self
+                .supplement_calls
+                .lock()
+                .unwrap()
+                .entry(invocation.run_id.clone())
+                .or_default() += 1;
+        }
         self.received.notify_one();
         let script = self.scripted.lock().unwrap().remove(&invocation.run_id);
         // Both the lead and an independent lane root are Orchestrators. Identify
@@ -162,13 +170,15 @@ fn continue_thread(host: &BootstrappedHost, thread: &str, expected: RunId) {
         "ordinary Continue: {events:?}"
     );
 }
-fn expire(registry: &mut Registry, thread: &str) -> ThreadOwner {
-    registry
-        .update(thread, |row| {
-            row.lease.expires_at = 0;
-            Ok(())
-        })
-        .unwrap()
+fn assert_no_owner_artifacts(root: &Path) {
+    assert!(!root.join("owners.db").exists());
+    assert!(std::fs::read_dir(root).unwrap().all(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "sock")
+    }));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "private subprocess entry point"]
@@ -181,7 +191,6 @@ async fn abandoned_subprocess_worker() {
         ..Default::default()
     });
     let host = open(&root, &sockets, model.clone()).await;
-    let permit = host.owner.start("lead").unwrap();
     let lead = host
         .runtime
         .delegate_chat(
@@ -189,7 +198,6 @@ async fn abandoned_subprocess_worker() {
             Role::Orchestrator,
             "lead conversation".into(),
             RunConfig {
-                ownership: Some(permit),
                 project_root: Some(root.clone()),
                 conversation: true,
                 interactive: true,
@@ -243,14 +251,11 @@ async fn abandoned_subprocess_worker() {
             .checkpoint_phase,
         saved
     );
-    assert_eq!(
-        host.owner.attach(&lane.thread_id).unwrap().state,
-        OwnerState::Running
-    );
+    assert_no_owner_artifacts(&sockets);
     println!(
         "ABANDONED {}",
         json!({"lead":lead.to_string(), "lane":lane.lane_id,
-        "thread":lane.thread_id, "run":lane.root_run_id.to_string(), "owner":host.owner.owner_id()})
+        "thread":lane.thread_id, "run":lane.root_run_id.to_string()})
     );
     std::io::stdout().flush().unwrap();
     // Keep the real host alive without executing Drop, until the parent SIGKILLs it.
@@ -258,9 +263,19 @@ async fn abandoned_subprocess_worker() {
 }
 async fn killed_lane(saved: &str) {
     let dir = test_socket_dir::SplitDir::new();
+    let root = dir.path().canonicalize().unwrap();
+    let mut sidebar = workspace_state::SidebarState::default();
+    sidebar
+        .add_project(
+            workspace_state::ProjectId::new("fixture-project"),
+            "fixture",
+            &root,
+        )
+        .unwrap();
+    sidebar.projects[0].trust = workspace_state::TrustState::Approved;
     std::fs::write(
-        dir.path().join("config.toml"),
-        "[ownership]\ngrace_ms = 86400000\n",
+        root.join("sidebar.json"),
+        serde_json::to_vec(&sidebar).unwrap(),
     )
     .unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
@@ -297,42 +312,14 @@ async fn killed_lane(saved: &str) {
     let lane = checkpoint["lane"].as_str().unwrap();
     let lead: RunId = checkpoint["lead"].as_str().unwrap().parse().unwrap();
     let run: RunId = checkpoint["run"].as_str().unwrap().parse().unwrap();
-    let db = dir.sockets().join("owners.db");
-    let mut registry = Registry::open(&db).unwrap();
-    let killed = registry.attach(thread).unwrap();
-    assert_eq!(killed.state, OwnerState::Running);
-    assert_eq!(killed.lease.owner_id, checkpoint["owner"].as_str().unwrap());
-    let socket = dir
-        .sockets()
-        .join(format!("{}.sock", killed.lease.owner_id));
-    assert!(
-        socket.exists(),
-        "SIGKILL socket must not be removed by the fixture"
-    );
-    // Grace-period negative: move expiry just before the source lease began.
-    // The configured day-long grace avoids making test runtime a correctness condition;
-    // exact grace boundaries are checked separately with an explicit clock.
-    let before = if saved == "Checkpoint" {
-        registry
-            .update(thread, |row| {
-                row.lease.expires_at = killed.lease.expires_at.saturating_sub(5001);
-                Ok(())
-            })
-            .unwrap()
-    } else {
-        expire(&mut registry, thread)
-    };
+    assert_no_owner_artifacts(dir.sockets());
     let model = Arc::new(Model::default());
     let mut host = open(dir.path(), dir.sockets(), model.clone()).await;
     eprintln!("{saved}: successor opened");
-    // No committed manifest exists. Startup must NOT be the path that claims either row.
-    assert_eq!(registry.attach(thread).unwrap(), before);
-    assert_eq!(
-        registry.attach("lead").unwrap().lease.owner_id,
-        killed.lease.owner_id
-    );
+    // Cold startup does not auto-resurrect ordinary, non-manifest runs.
     assert!(host.runtime.inspect_agent(run).is_err());
-    expire(&mut registry, "lead");
+    assert!(host.runtime.inspect_agent(lead).is_err());
+    assert_no_owner_artifacts(dir.sockets());
     continue_thread(&host, "lead", lead);
     phase(&host.runtime, lead, AgentRunPhase::Waiting).await;
     eprintln!("{saved}: lead continued");
@@ -344,45 +331,10 @@ async fn killed_lane(saved: &str) {
         "expected_brief_revision":record.brief_revision}]});
     let mut delivery_events = host.runtime.event_bus().subscribe();
     if saved == "Checkpoint" {
-        // Set up a durable held instruction without scheduling an active receiver.
-        writer
-            .apply_lane_instruction(
-                storage::lane_instructions::LaneInstructionRequest {
-                    operation_id: "supplement".into(),
-                    lane_id: lane.into(),
-                    expected_management_revision: record.management_revision,
-                    expected_brief_revision: record.brief_revision,
-                    action: storage::lane_instructions::LaneInstructionAction::Supplement {
-                        message: TEXT.into(),
-                    },
-                },
-                storage::lane_instructions::LaneInstructionActor {
-                    thread_id: "lead".into(),
-                    root_run_id: lead.to_string(),
-                },
-                1,
-            )
-            .unwrap();
-        assert_eq!(
-            host.runtime.drive_lane_deliveries(thread).await.unwrap(),
-            runtime::lane_delivery::LaneDeliveryOutcome::Nacked(
-                storage::lane_delivery::LaneDeliveryNack::Readonly
-            )
-        );
-        assert_eq!(registry.attach(thread).unwrap(), before);
-        assert_eq!(
-            writer.lane_instruction_delivery(lane, 1).unwrap(),
-            Some(storage::lane_instructions::LaneInstructionDelivery::Queued)
-        );
-        assert!(
-            !writer
-                .lane_inbox(thread.into(), String::new())
-                .unwrap()
-                .is_empty()
-        );
-        expire(&mut registry, thread);
         continue_thread(&host, thread, run);
-    } else {
+        phase(&host.runtime, run, AgentRunPhase::Waiting).await;
+    }
+    {
         // Real model tool dispatch, not a direct claim or synthetic delivery host.
         model
             .scripted
@@ -432,16 +384,14 @@ async fn killed_lane(saved: &str) {
     eprintln!("{saved}: supplement observed");
     phase(&host.runtime, run, AgentRunPhase::Waiting).await;
     eprintln!("{saved}: receiver waiting");
-    let claimed = registry.attach(thread).unwrap();
-    assert_eq!(claimed.lease.owner_id, host.owner.owner_id());
-    assert_eq!(claimed.lease.generation, killed.lease.generation + 1);
-    let old = runtime::ownership::OwnerPermit {
-        registry_path: db,
-        thread_id: thread.into(),
-        lease: killed.lease.clone(),
-        run_id: None,
-    };
-    assert!(old.validate_generation().is_err());
+    assert_no_owner_artifacts(dir.sockets());
+    assert_eq!(
+        model.seen.lock().unwrap()[&run.to_string()]
+            .matches(TEXT)
+            .count(),
+        1,
+        "the durable supplement is present exactly once in receiver input"
+    );
     // Receiver snapshot and receipt commit precede observing the text.
     let notification = writer
         .lane_instruction(lane, 1)
@@ -475,20 +425,22 @@ async fn killed_lane(saved: &str) {
         [&notification], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(state, "acked");
     assert_eq!(receipt, "delivered");
-    assert!(
-        socket.exists(),
-        "successor must not unlink predecessor socket"
+    assert_no_owner_artifacts(dir.sockets());
+    assert_eq!(
+        model.supplement_calls.lock().unwrap().get(&run.to_string()),
+        Some(&1),
+        "one receiver request executes the supplement"
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn sigkill_done_lane_is_claimed_and_receives_lane_send() {
+async fn sigkill_done_lane_is_reused_and_receives_lane_send() {
     killed_lane("Done").await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn sigkill_error_lane_is_claimed_and_receives_lane_send() {
+async fn sigkill_error_lane_is_reused_and_receives_lane_send() {
     killed_lane("Error").await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn sigkill_checkpoint_lane_continue_claims_and_delivers_pending_instruction() {
+async fn sigkill_checkpoint_lane_continue_reuses_thread_and_receives_lane_send() {
     killed_lane("Checkpoint").await;
 }

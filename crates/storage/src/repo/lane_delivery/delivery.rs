@@ -100,7 +100,7 @@ pub(crate) fn claim<N: OutboxNotice>(
         .transpose()?
         .is_some_and(|owner| owner != request.owner)
     {
-        return Err(conflict("stale_owner"));
+        return Err(conflict("stale_binding"));
     }
     let deleted: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id=?1)",

@@ -1,8 +1,7 @@
 //! Conditional disposal reset, using the existing usage epoch and namespace.
 use super::*;
-use crate::ownership::Lease;
 
-/// Identity of one graph's disposal of one owner generation. Not an authority,
+/// Identity of one graph's disposal of one thread namespace. Not an authority,
 /// and deliberately independent of operation IDs (a new operation must not
 /// erase scratch created after an earlier reset whose ACK was lost).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -11,7 +10,6 @@ pub(crate) struct GraphDisposalKey {
     tx: String,
     capture: String,
     thread: String,
-    owner_generation: u64,
 }
 
 impl GraphDisposalKey {
@@ -20,7 +18,6 @@ impl GraphDisposalKey {
         tx: String,
         capture: String,
         thread: String,
-        owner_generation: u64,
     ) -> io::Result<Self> {
         if [&graph, &tx, &capture, &thread]
             .iter()
@@ -33,22 +30,21 @@ impl GraphDisposalKey {
             tx,
             capture,
             thread,
-            owner_generation,
         })
     }
 }
 
 impl ThreadScratch {
     /// Recheck an unused snapshot after runtime/main DB observations, while the
-    /// caller holds the existing owners-registry reservation. Never read runtime
-    /// locks from inside that reservation or this helper.
+    /// caller holds existing writer/binding authority. Never read runtime locks
+    /// from inside this helper.
     ///
-    /// None means changed epoch/users/lease (or saturated epoch): retain scratch.
+    /// None means changed epoch/users (or saturated epoch): retain scratch.
     /// Some(detached) means applied, including readback of the same key. An absent
-    /// namespace still advances the reset notice, just like reset_thread.
+    /// namespace does not generate a cleanup notification.
     /// Errors leave the ordinary namespace and bookkeeping unchanged.
     ///
-    /// Call wake_trash AFTER releasing registry/scratch locks, even on readback.
+    /// Call wake_trash AFTER releasing scratch locks, even on readback.
     /// Retain the key until durable progress has confirmed this step; unknown
     /// ACKs are not permission to forget it. At most 64 supervisors x 64 threads
     /// may be retained; capacity never evicts an unresolved result.
@@ -56,10 +52,9 @@ impl ThreadScratch {
         &self,
         thread: &str,
         epoch: u64,
-        lease: &Lease,
         effect: &GraphDisposalKey,
     ) -> io::Result<Option<bool>> {
-        if effect.thread != thread || effect.owner_generation != lease.generation {
+        if effect.thread != thread {
             return Err(io::Error::other("graph disposal identity mismatch"));
         }
         let mut state = self.lock();
@@ -71,13 +66,7 @@ impl ThreadScratch {
             .usage
             .get(&key)
             .map_or((0, false), |u| (u.epoch, !u.users.is_empty()));
-        if busy
-            || epoch == u64::MAX
-            || current_epoch != epoch
-            || state.leases.get(thread).is_none_or(|current| {
-                current.owner_id != lease.owner_id || current.generation != lease.generation
-            })
-        {
+        if busy || epoch == u64::MAX || current_epoch != epoch {
             return Ok(None);
         }
         if state.reset_effects.len() >= 64 * 64 {
@@ -92,7 +81,9 @@ impl ThreadScratch {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("scratch reset generation exhausted"))?;
         let detached = self.root.discard_deferred(&name)?;
-        state.resets.insert(name, next);
+        if detached {
+            state.resets.insert(name, next);
+        }
         state.reset_effects.insert(effect.clone(), detached);
         Ok(Some(detached))
     }

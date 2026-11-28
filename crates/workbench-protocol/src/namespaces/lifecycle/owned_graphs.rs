@@ -5,55 +5,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnerCas {
+pub struct ThreadCas {
     pub thread_ref: AdminId,
-    pub owner_identity: Option<AdminId>,
-    pub owner_generation: Option<Revision>,
-}
-impl OwnerCas {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.owner_identity.is_some() != self.owner_generation.is_some() {
-            return Err(inconsistent(
-                "owned_graphs.owner",
-                "identity and generation must both be present or absent",
-            ));
-        }
-        Ok(())
-    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedGraphBinding {
     pub graph: GraphCas,
-    /// Complete canonical thread inventory, not a subset. None/None expects absence.
-    pub owners: Vec<OwnerCas>,
-    /// Zero expects no control row. This is not the owner heartbeat revision.
+    /// Complete canonical thread inventory, not a subset.
+    pub threads: Vec<ThreadCas>,
+    /// Zero expects no control row.
     pub expected_control_revision: Revision,
 }
 impl OwnedGraphBinding {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.graph.validate()?;
-        items(&self.owners)?;
-        for owner in &self.owners {
-            owner.validate()?;
-        }
+        items(&self.threads)?;
         if self
-            .owners
+            .threads
             .windows(2)
             .any(|p| p[0].thread_ref >= p[1].thread_ref)
         {
             return Err(inconsistent(
-                "owned_graphs.owners",
+                "owned_graphs.threads",
                 "thread references must be strictly increasing",
-            ));
-        }
-        let anchor = self.owners.first();
-        if self.graph.owner_identity.as_ref() != anchor.and_then(|o| o.owner_identity.as_ref())
-            || self.graph.owner_generation != anchor.and_then(|o| o.owner_generation)
-        {
-            return Err(inconsistent(
-                "owned_graphs.anchor",
-                "graph owner must match the canonical first thread",
             ));
         }
         bounded(self)
@@ -131,7 +105,7 @@ impl IncompleteDisposals {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UndisposedGraphs {
-    /// Includes otherwise eligible graphs whose owner inventory exceeds 64.
+    /// Includes otherwise eligible graphs whose thread inventory exceeds 64.
     pub count: Revision,
     pub references: Vec<GraphReference>,
     pub snapshot_revision: Revision,
@@ -203,19 +177,6 @@ pub enum ClaimView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OwnershipView {
-    LiveSelf,
-    MixedSelfAndAbsent,
-    Absent,
-    Foreign,
-    GenerationChanged,
-    SuccessorUnavailable,
-    Cold,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum GraphEligibilityView {
     PreAdoption,
     AdoptedRetryPending,
@@ -245,7 +206,6 @@ pub enum GraphControlView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphAuthorityProblem {
-    OwnerBlocked,
     CurrentBindingRequired,
     CurrentSettingsRequired,
     CliContinuityRequired,
@@ -265,16 +225,12 @@ pub enum GraphProblemDetail {
     NeedsAttention,
     CatalogUnavailable,
     Cold,
-    SuccessorUnavailable,
-    OwnerAbsent,
-    ForeignOwner,
-    GenerationChanged,
     ThreadInUse,
     UseUnknown,
     ConcurrentOperation,
     EligibilityRevoked,
     ResultUnknown,
-    TooManyOwners,
+    TooManyThreads,
     CurrentBindingRequired,
     CurrentSettingsRequired,
     CliContinuityRequired,
@@ -307,7 +263,6 @@ pub enum DisposalCompletion {
 pub enum EffectStep {
     Eligibility,
     PreparedRelease,
-    Owners,
     Scratch,
     Activation,
     AuditFinalize,
@@ -329,7 +284,7 @@ pub enum NextAction {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationLimitView {
     WithinLimit,
-    TooManyOwners { limit: u32 },
+    TooManyThreads { limit: u32 },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -345,16 +300,8 @@ pub enum ActionAvailability {
 pub struct DisposalProgressView {
     pub eligibility: StepObservation,
     pub prepared_release: StepObservation,
-    pub owners: StepObservation,
     pub scratch: StepObservation,
     pub completion: DisposalCompletion,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OwnerView {
-    pub binding: OwnerCas,
-    pub ownership: OwnershipView,
-    pub cleanup: StepObservation,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -369,31 +316,25 @@ pub struct OwnedGraphView {
     pub restart_phase: RestartPhaseView,
     pub disposition: RestartDispositionView,
     pub claim: ClaimView,
-    pub ownership: OwnershipView,
     pub control: GraphControlView,
     pub eligibility: GraphEligibilityView,
     pub resume: ActionAvailability,
     pub release: ActionAvailability,
     pub progress: DisposalProgressView,
-    pub owner_count: Revision,
-    pub owner_refs: Vec<OwnerView>,
-    pub owner_refs_truncated: bool,
+    pub thread_count: Revision,
+    pub thread_refs: Vec<ThreadCas>,
+    pub thread_refs_truncated: bool,
     pub operation_limit: OperationLimitView,
 }
 impl OwnedGraphView {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.binding.validate()?;
         collection(
-            self.owner_count,
-            &self.owner_refs,
-            self.owner_refs_truncated,
+            self.thread_count,
+            &self.thread_refs,
+            self.thread_refs_truncated,
         )?;
-        if self.graph_ref != self.binding.graph.graph_id
-            || self
-                .owner_refs
-                .iter()
-                .map(|v| &v.binding)
-                .ne(self.binding.owners.iter())
+        if self.graph_ref != self.binding.graph.graph_id || self.thread_refs != self.binding.threads
         {
             return Err(inconsistent(
                 "owned_graphs.detail",
@@ -401,11 +342,11 @@ impl OwnedGraphView {
             ));
         }
         match self.operation_limit {
-            OperationLimitView::WithinLimit if self.owner_count.get() <= MAX_ADMIN_ITEMS as u64 => {
-            }
-            OperationLimitView::TooManyOwners { limit }
+            OperationLimitView::WithinLimit
+                if self.thread_count.get() <= MAX_ADMIN_ITEMS as u64 => {}
+            OperationLimitView::TooManyThreads { limit }
                 if limit == MAX_ADMIN_ITEMS as u32
-                    && self.owner_count.get() > limit as u64
+                    && self.thread_count.get() > limit as u64
                     && !matches!(self.release, ActionAvailability::Available)
                     && !matches!(self.resume, ActionAvailability::Available) => {}
             _ => {
@@ -466,52 +407,35 @@ mod tests {
                 capture_id: id("cap"),
                 expected_revision: Revision(1),
                 expected_core_epoch: InstanceEpoch(2),
-                owner_identity: None,
-                owner_generation: None,
                 operation_id: id("unassigned"),
             },
-            owners: (0..n)
-                .map(|n| OwnerCas {
+            threads: (0..n)
+                .map(|n| ThreadCas {
                     thread_ref: id(&format!("thread-{n:03}")),
-                    owner_identity: None,
-                    owner_generation: None,
                 })
                 .collect(),
             expected_control_revision: Revision(0),
         }
     }
     #[test]
-    fn owner_inventory_is_complete_sorted_bounded_and_has_paired_expectations() {
+    fn thread_inventory_is_complete_sorted_and_bounded() {
         assert!(binding(0).validate().is_ok());
         assert!(binding(64).validate().is_ok());
         assert!(binding(65).validate().is_err());
         let mut b = binding(2);
-        b.owners.swap(0, 1);
+        b.threads.swap(0, 1);
         assert!(b.validate().is_err());
         let mut b = binding(2);
-        b.owners[1] = b.owners[0].clone();
+        b.threads[1] = b.threads[0].clone();
         assert!(b.validate().is_err());
         let mut b = binding(1);
-        b.owners[0].owner_identity = Some(id("owner"));
-        assert!(b.validate().is_err());
-        let mut b = binding(1);
-        b.owners[0].owner_generation = Some(Revision(1));
-        assert!(b.validate().is_err());
-        let mut b = binding(1);
-        b.graph.owner_identity = Some(id("owner"));
-        b.graph.owner_generation = Some(Revision(1));
-        assert!(b.validate().is_err());
-        b.owners[0].owner_identity = Some(id("owner"));
-        b.owners[0].owner_generation = Some(Revision(1));
+        b.threads.clear();
         assert!(b.validate().is_ok());
-        b.owners.clear();
-        assert!(b.validate().is_err());
     }
     fn progress() -> DisposalProgressView {
         DisposalProgressView {
             eligibility: StepObservation::ConfirmedApplied,
             prepared_release: StepObservation::Unknown,
-            owners: StepObservation::NotStarted,
             scratch: StepObservation::NotStarted,
             completion: DisposalCompletion::Unknown,
         }
@@ -521,21 +445,11 @@ mod tests {
         OwnedGraphView {
             graph_ref: id("g"),
             snapshot_revision: Revision(1),
-            owner_refs: binding
-                .owners
-                .iter()
-                .cloned()
-                .map(|binding| OwnerView {
-                    binding,
-                    ownership: OwnershipView::Absent,
-                    cleanup: StepObservation::NotStarted,
-                })
-                .collect(),
+            thread_refs: binding.threads.clone(),
             binding,
             restart_phase: RestartPhaseView::Adopted,
             disposition: RestartDispositionView::RetryPending,
             claim: ClaimView::Absent,
-            ownership: OwnershipView::Absent,
             control: GraphControlView::ManualPending,
             eligibility: GraphEligibilityView::AdoptedRetryPending,
             resume: ActionAvailability::Blocked {
@@ -544,8 +458,8 @@ mod tests {
             },
             release: ActionAvailability::Available,
             progress: progress(),
-            owner_count: Revision(1),
-            owner_refs_truncated: false,
+            thread_count: Revision(1),
+            thread_refs_truncated: false,
             operation_limit: OperationLimitView::WithinLimit,
         }
     }
@@ -574,7 +488,7 @@ mod tests {
         });
         op.validate().unwrap();
         let json = serde_json::to_value(op).unwrap();
-        assert_eq!(json["payload"]["progress"].as_object().unwrap().len(), 5);
+        assert_eq!(json["payload"]["progress"].as_object().unwrap().len(), 4);
         assert_eq!(
             json["payload"]["progress"]["eligibility"],
             "confirmed_applied"
@@ -588,14 +502,14 @@ mod tests {
     #[test]
     fn view_limits_and_summary_counts_are_consistent() {
         let mut v = view();
-        v.owner_count = Revision(65);
-        v.owner_refs_truncated = true;
+        v.thread_count = Revision(65);
+        v.thread_refs_truncated = true;
         assert!(v.validate().is_err());
-        v.operation_limit = OperationLimitView::TooManyOwners { limit: 64 };
+        v.operation_limit = OperationLimitView::TooManyThreads { limit: 64 };
         assert!(v.validate().is_err()); // Over-limit diagnostic must not offer effects.
         v.release = v.resume.clone();
         v.validate().unwrap();
-        v.operation_limit = OperationLimitView::TooManyOwners { limit: 65 };
+        v.operation_limit = OperationLimitView::TooManyThreads { limit: 65 };
         assert!(v.validate().is_err());
         let mut g = UndisposedGraphs {
             count: Revision(1),

@@ -1,7 +1,6 @@
 use super::*;
 use crate::AgentRuntime;
 use crate::learning_jobs::*;
-use crate::ownership::{AdoptedOwnershipEvidence, PlannedHold};
 use std::sync::Arc;
 
 fn origin(instance: &str) -> LearningOrigin {
@@ -447,202 +446,6 @@ async fn cold_graph_then_learning_ends_only_dead_same_config_core_jobs() {
 }
 
 #[tokio::test]
-async fn ownership_evidence_requires_physical_adoption_full_idle_inventory_and_current_readback() {
-    let f = Fixture::new(0);
-    let mut session = session(&f, BTreeMap::new()).await;
-    f.runtime
-        .persist_restart_capture_expected(&mut session)
-        .unwrap();
-    let progress = RestartOwnerProgress {
-        thread_id: "idle".into(),
-        old_owner_id: "owner".into(),
-        old_generation: 7,
-        active_runs: BTreeSet::new(),
-        parked_runs: BTreeSet::new(),
-        hold_saved: true,
-        hold_read_back: true,
-        worker_joined: true,
-        socket_unlinked: true,
-        hold_removed: false,
-    };
-    // Owner progress is a post-capture journal independent of session revision.
-    f.runtime.commit_restart_capture(&mut session).unwrap();
-    step(&f, RestartMutation::OwnerProgress(progress.clone()));
-    step(
-        &f,
-        RestartMutation::Arm {
-            nonce_hash: "nonce".into(),
-        },
-    );
-    let runtime = successor(&f);
-    assert!(runtime.adopted_restart_ownership_evidence().is_err());
-    step(
-        &f,
-        RestartMutation::Adopt {
-            successor_epoch: 2,
-            config_identity: "config".into(),
-            successor_build: "new".into(),
-            nonce_hash: "nonce".into(),
-        },
-    );
-    assert!(runtime.adopted_restart_ownership_evidence().is_err());
-    adopt(&f, &runtime);
-    let evidence = runtime.adopted_restart_ownership_evidence().unwrap();
-    let hold = PlannedHold {
-        transaction_id: "restart".into(),
-        capture_id: "capture".into(),
-        thread_id: "idle".into(),
-        owner_id: "owner".into(),
-        generation: 7,
-        active_runs: BTreeSet::new(),
-        parked_runs: BTreeSet::new(),
-        orphaned: false,
-    };
-    evidence.validate_hold(&hold).unwrap();
-    for wrong in [
-        PlannedHold {
-            generation: 8,
-            ..hold.clone()
-        },
-        PlannedHold {
-            thread_id: "not-in-inventory".into(),
-            ..hold.clone()
-        },
-        PlannedHold {
-            active_runs: BTreeSet::from(["not-captured".into()]),
-            parked_runs: BTreeSet::new(),
-            ..hold.clone()
-        },
-        PlannedHold {
-            orphaned: true,
-            ..hold.clone()
-        },
-    ] {
-        assert!(evidence.validate_hold(&wrong).is_err());
-    }
-    step(
-        &f,
-        RestartMutation::OwnerProgress(RestartOwnerProgress {
-            hold_removed: true,
-            ..progress
-        }),
-    );
-    assert!(
-        evidence.validate_hold(&hold).is_err(),
-        "each validation must re-read durable state"
-    );
-}
-
-#[tokio::test]
-async fn active_and_parked_holds_require_the_same_partition_and_current_incarnation() {
-    for parked in [false, true] {
-        let f = Fixture::new(0);
-        let owners = crate::ownership::OwnerHost::open(
-            f._dir.sockets(),
-            Default::default(),
-            Arc::new(event_bus::EventBus::new(64)),
-        )
-        .unwrap();
-        let permit = owners.start("thread").unwrap();
-        let run = f
-            .runtime
-            .delegate_chat(
-                "thread",
-                Role::Worker,
-                "park".into(),
-                RunConfig {
-                    ownership: Some(permit.clone()),
-                    interactive: true,
-                    keep_alive: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        f.model.entered.notified().await;
-        let mut session = session(&f, BTreeMap::from([(run, recipe())])).await;
-        f.runtime
-            .persist_restart_capture_expected(&mut session)
-            .unwrap();
-        f.runtime.commit_restart_capture(&mut session).unwrap();
-        let member = tx(&f).expected[0].clone();
-        assert_eq!(member.thread_id.as_deref(), Some("thread"));
-        step(
-            &f,
-            RestartMutation::OwnerProgress(RestartOwnerProgress {
-                thread_id: "thread".into(),
-                old_owner_id: permit.lease.owner_id.clone(),
-                old_generation: permit.lease.generation,
-                active_runs: if parked {
-                    BTreeSet::new()
-                } else {
-                    BTreeSet::from([run.to_string()])
-                },
-                parked_runs: if parked {
-                    BTreeSet::from([run.to_string()])
-                } else {
-                    BTreeSet::new()
-                },
-                hold_saved: true,
-                hold_read_back: true,
-                worker_joined: true,
-                socket_unlinked: true,
-                hold_removed: false,
-            }),
-        );
-        step(
-            &f,
-            RestartMutation::Arm {
-                nonce_hash: "nonce".into(),
-            },
-        );
-        let runtime = successor(&f);
-        adopt(&f, &runtime);
-        let evidence = runtime.adopted_restart_ownership_evidence().unwrap();
-        let hold = PlannedHold {
-            transaction_id: "restart".into(),
-            capture_id: "capture".into(),
-            thread_id: "thread".into(),
-            owner_id: permit.lease.owner_id,
-            generation: permit.lease.generation,
-            active_runs: if parked {
-                BTreeSet::new()
-            } else {
-                BTreeSet::from([run.to_string()])
-            },
-            parked_runs: if parked {
-                BTreeSet::from([run.to_string()])
-            } else {
-                BTreeSet::new()
-            },
-            orphaned: false,
-        };
-        evidence.validate_hold(&hold).unwrap();
-        let mut wrong_partition = hold.clone();
-        std::mem::swap(
-            &mut wrong_partition.active_runs,
-            &mut wrong_partition.parked_runs,
-        );
-        assert!(
-            evidence.validate_hold(&wrong_partition).is_err(),
-            "same union is insufficient"
-        );
-        let mut row = db(&f).resume_intent(&run.to_string()).unwrap().unwrap();
-        let saved = row.clone();
-        row.incarnation = "different-incarnation".into();
-        f._storage
-            .handle()
-            .save_resume_intent(row, Some(saved.incarnation.clone()))
-            .unwrap();
-        assert!(evidence.validate_hold(&hold).is_err());
-        f._storage
-            .handle()
-            .save_resume_intent(saved, Some("different-incarnation".into()))
-            .unwrap();
-        f.cleanup(run).await;
-    }
-}
-
-#[tokio::test]
 async fn boot_receipt_adapter_records_diagnostics_without_granting_adoption() {
     use core_instance::handoff::{boot::BootFailure, receipt::*};
     let f = Fixture::new(0);
@@ -679,7 +482,7 @@ async fn boot_receipt_adapter_records_diagnostics_without_granting_adoption() {
         runtime.record_restart_boot_receipt(&receipt, 123).unwrap(),
         first
     );
-    assert!(runtime.adopted_restart_ownership_evidence().is_err());
+    assert!(runtime.adopted_restart_transaction().is_err());
     assert_eq!(tx(&f).phase, RestartPhase::Armed);
     receipt.config_identity = "stale".into();
     assert!(runtime.record_restart_boot_receipt(&receipt, 123).is_err());

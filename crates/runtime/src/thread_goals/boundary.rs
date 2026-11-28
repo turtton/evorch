@@ -159,7 +159,6 @@ impl LoopState {
                     epoch: snapshot.epoch,
                 },
                 budget: self.task.config.budget.clone(),
-                ownership: self.task.config.ownership.clone(),
                 name: Some("Goal completion review".into()),
                 ..Default::default()
             },

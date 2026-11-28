@@ -12,21 +12,6 @@ mod product;
 use product::Child;
 #[path = "runner_cleanup.rs"]
 mod runner_cleanup;
-fn owners(path: &Path) -> serde_json::Value {
-    let registry = runtime::ownership::Registry::open_existing(path).unwrap();
-    let rows = registry.list().unwrap();
-    assert!(!rows.is_empty());
-    serde_json::Value::Array(
-        rows.into_iter()
-            .map(|row| {
-                let mut value = serde_json::to_value(row).unwrap();
-                // Heartbeat renewal is permitted; ownership/release is not.
-                value["lease"].as_object_mut().unwrap().remove("expires_at");
-                value
-            })
-            .collect(),
-    )
-}
 pub(super) fn run(case: &str) -> Result<(), workbench_host::bootstrap::BootstrapError> {
     let product_case = case.starts_with("product_");
     if product_case {
@@ -94,27 +79,25 @@ pub(super) fn run(case: &str) -> Result<(), workbench_host::bootstrap::Bootstrap
         }
     }
     assert_eq!(adopted, case.starts_with("planned_"));
-    let db = if product_case {
-        sockets.path().join("evorch/threads/owners.db")
+    let thread_root = if product_case {
+        sockets.path().join("evorch/threads")
     } else {
-        sockets.path().join("owners/owners.db")
+        sockets.path().join("owners")
     };
+    assert!(!thread_root.join("owners.db").exists());
     let pending_only = matches!(
         case,
         "cold_executor" | "cold_host_lock" | "cold_stopped_join" | "cold_control_web"
     );
-    let mut before = pending_only.then(|| owners(&db));
     let pid = rustix::process::Pid::from_raw(child.0.id() as i32).unwrap();
     rustix::process::kill_process(pid, rustix::process::Signal::TERM)?;
-    // Ordinary shutdown may legitimately mark owners Quiescing before waiting
-    // for planned cleanup. Snapshot only after that event, not before SIGTERM.
+    // The outer shutdown announces cleanup before waiting for the pending
+    // planned resources. Observe that boundary before inspecting the transaction.
     if !pending_only {
         let mut line = String::new();
         assert_ne!(stdout.read_line(&mut line)?, 0);
         assert_eq!(line, "SHUTDOWN_CLEANUP\n");
-        before = Some(owners(&db));
     }
-    let before = before.unwrap();
     let transaction_before = transaction(root.path());
     let status = child.0.wait()?;
     let mut stderr = String::new();
@@ -128,7 +111,7 @@ pub(super) fn run(case: &str) -> Result<(), workbench_host::bootstrap::Bootstrap
         );
         assert!(!stderr.contains("planned shutdown exceeded 10s"));
         // Preserve the existing canceled-capture latch error, not a successful
-        // owner/scratch release. OUTER_COMPLETED proves Drop and watcher join.
+        // resource/scratch release. OUTER_COMPLETED proves Drop and watcher join.
         let mut output = String::new();
         stdout.read_to_string(&mut output)?;
         assert!(
@@ -138,13 +121,13 @@ pub(super) fn run(case: &str) -> Result<(), workbench_host::bootstrap::Bootstrap
     } else {
         assert_eq!(status.code(), Some(74), "{case}: {stderr}");
         assert!(stderr.contains("planned shutdown exceeded 10s"), "{stderr}");
-        assert_eq!(before, owners(&db), "expiry changed owner/generation/hold");
+        assert!(!thread_root.join("owners.db").exists());
         assert_transaction_retained(transaction_before, transaction(root.path()));
         assert_eq!(std::fs::read(&scratch)?, b"watchdog-retained");
     }
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
     if case == "product_after_expiry" {
-        cold_after_expiry(root.path(), sockets.path(), &scratch, &db, &before)?;
+        cold_after_expiry(root.path(), sockets.path(), &scratch)?;
     }
     println!(
         "{case}: exit {}; completion/expiry disposition checked",
@@ -206,8 +189,6 @@ fn cold_after_expiry(
     root: &Path,
     sockets: &Path,
     marker: &Path,
-    db: &Path,
-    before: &serde_json::Value,
 ) -> Result<(), workbench_host::bootstrap::BootstrapError> {
     let identity = core_instance::ConfigIdentity::new(&root.join("config"))?;
     let old = identity.read_record()?.unwrap();
@@ -216,6 +197,7 @@ fn cold_after_expiry(
         "expiry must retain the saved stale socket"
     );
     assert!(std::os::unix::net::UnixStream::connect(&old.socket).is_err());
+    let before = transaction(root);
     let (cold, _cold_cleanup) = runner_cleanup::spawn(&mut product::command(root, sockets))?;
     let mut cold = product::Child(cold);
     let (_out, ready) = product::ready(&mut cold);
@@ -223,11 +205,12 @@ fn cold_after_expiry(
     assert_ne!(old.epoch, new.epoch);
     assert_eq!(ready["socket"].as_str(), new.socket.to_str());
     product::hello(&new.socket, Some(new.epoch), identity.identity());
-    assert_eq!(
-        owners(db),
-        *before,
-        "cold recovery must not release/reexecute retained owners"
-    );
+    let after = transaction(root);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.expected, before.expected);
+    assert_eq!(after.adopted_epoch, None);
+    assert_eq!(after.ready_at_ms, None);
+    assert!(!sockets.join("evorch/threads/owners.db").exists());
     assert_eq!(std::fs::read(marker)?, b"watchdog-retained");
     product::term(&cold);
     product::wait(&mut cold, 0);
@@ -268,8 +251,5 @@ fn assert_transaction_retained(
         before.revision = after.revision;
         before.failure_reason = after.failure_reason.clone();
     }
-    assert_eq!(
-        before, after,
-        "expiry changed metadata/owner progress/checkpoints/Ready"
-    );
+    assert_eq!(before, after, "expiry changed metadata/checkpoints/Ready");
 }

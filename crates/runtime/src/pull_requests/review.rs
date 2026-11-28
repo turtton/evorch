@@ -75,8 +75,9 @@ pub enum ReviewRefresh {
     /// The fetch did not finish in `review_refresh_timeout_seconds`. It keeps running for
     /// the tracker; the review goes on with the stored facts.
     TimedOut,
-    /// This process does not own the thread, so it fetched nothing.
-    NotOwner,
+    /// The service is shutting down or tracking was switched off, so nothing was fetched
+    /// or stored.
+    Unavailable,
 }
 
 /// The result of [`PullRequestService::refresh_for_review`].

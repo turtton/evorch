@@ -128,7 +128,6 @@ fn each_operation_asks_for_the_capability_it_always_asked_for() {
         ("conversation/resolve_project", Conversation),
         ("conversation/create_execution", Conversation),
         ("conversation/create_goal", Conversation),
-        ("conversation/prepare_existing_thread", Conversation),
         ("conversation/begin_attachment", Conversation),
         ("conversation/append_attachment", Conversation),
         ("conversation/finish_attachment", Conversation),

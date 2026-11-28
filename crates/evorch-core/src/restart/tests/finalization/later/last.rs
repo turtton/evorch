@@ -7,7 +7,6 @@ use crate::{
 use core_instance::{ConfigIdentity, Instance, LaunchGuard};
 use std::{
     io::{BufRead, Write},
-    os::unix::fs::FileTypeExt,
     process::Stdio,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -44,8 +43,8 @@ async fn stage_ten_failure_stop_shutdown_matrix() {
     matrix("10", 5, 0).await;
 }
 #[tokio::test]
-async fn stage_eleven_partial_stop_failure_stop_shutdown_matrix() {
-    matrix("11", 5, 0).await;
+async fn stage_eleven_stop_shutdown_matrix() {
+    matrix("11", 2, 0).await;
 }
 #[tokio::test]
 async fn final_signal_restore_and_web_drain_matrix() {
@@ -124,7 +123,7 @@ async fn final_three_process_worker() {
         let stage = match group.as_str() {
             "9" => ExitStage::ExecPrepared,
             "10" => ExitStage::SignalsStopped,
-            "11" => ExitStage::OwnerStopped,
+            "11" => ExitStage::WorkersStopped,
             _ => panic!("unknown matrix group"),
         };
         for race in [
@@ -133,32 +132,36 @@ async fn final_three_process_worker() {
             Race::Shutdown,
             Race::FailureStop,
             Race::FailureShutdown,
-        ] {
+        ]
+        .into_iter()
+        .filter(|race| {
+            stage != ExitStage::WorkersStopped || matches!(race, Race::Stop | Race::Shutdown)
+        }) {
             cell(stage, Action::Race(race), false).await;
         }
         return;
     }
-    cell(ExitStage::OwnerStopped, Action::Success, true).await;
+    cell(ExitStage::WorkersStopped, Action::Success, true).await;
     web::cell(web::Mode::Release).await;
     web::cell(web::Mode::Deadline).await;
     web::cell(web::Mode::Shutdown).await;
     for (stage, after) in [
         (ExitStage::SignalsStopped, false),
-        (ExitStage::OwnerStopped, false),
-        (ExitStage::OwnerStopped, true),
+        (ExitStage::WorkersStopped, false),
+        (ExitStage::WorkersStopped, true),
     ] {
         for name in ["INT", "TERM"] {
             cell(stage, Action::Signal(name), after).await;
         }
     }
 }
-async fn cell(stage: ExitStage, action: Action, after_owner: bool) {
-    cell_loaded(stage, action, after_owner, None).await;
+async fn cell(stage: ExitStage, action: Action, after_workers: bool) {
+    cell_loaded(stage, action, after_workers, None).await;
 }
 async fn cell_loaded(
     stage: ExitStage,
     action: Action,
-    after_owner: bool,
+    after_workers: bool,
     load: Option<&composition::Load>,
 ) {
     let model = Arc::new(Model::default());
@@ -212,7 +215,7 @@ async fn cell_loaded(
     } else {
         None
     };
-    let runs = owner_runs(&host, if load.is_some() { 3 } else { 1 }).await;
+    let runs = parked_runs(&host, if load.is_some() { 3 } else { 1 }).await;
     if let Some(load) = load {
         load.prepare(&host).await;
     }
@@ -228,7 +231,7 @@ async fn cell_loaded(
             receive.recv().unwrap();
         }
     });
-    if after_owner {
+    if after_workers {
         target.after = Some(hook);
     } else {
         target.observe = Some(hook);
@@ -262,7 +265,7 @@ async fn cell_loaded(
         if let Some(after) = &previous_after {
             after(now);
         }
-        if now == ExitStage::OwnerStopped {
+        if now == ExitStage::WorkersStopped {
             std::fs::remove_file(&entry_path).unwrap();
         }
     }));
@@ -321,7 +324,7 @@ async fn cell_loaded(
         };
         assert!(
             ready.await.is_ok(),
-            "{stage:?}/{action:?}/{after_owner}: {:?}",
+            "{stage:?}/{action:?}/{after_workers}: {:?}",
             saved(&host)
         );
         assert_eq!(model.0.load(Ordering::SeqCst), runs.len());
@@ -332,11 +335,6 @@ async fn cell_loaded(
                 .unwrap()
         );
         let mut withheld_reader = None;
-        let socket = dir
-            .path()
-            .join("o")
-            .join(format!("{}.sock", host.owner.owner_id()));
-        let displaced = socket.with_extension("saved");
         let failure = matches!(
             action,
             Action::Race(Race::Failure | Race::FailureStop | Race::FailureShutdown)
@@ -347,10 +345,6 @@ async fn cell_loaded(
                     std::fs::create_dir(config.restart_receipt_path()).unwrap()
                 }
                 ExitStage::SignalsStopped => withheld_reader = Some(signals.stop().unwrap()),
-                ExitStage::OwnerStopped => {
-                    std::fs::rename(&socket, &displaced).unwrap();
-                    std::fs::write(&socket, "not the owned socket").unwrap();
-                }
                 _ => unreachable!(),
             }
         }
@@ -361,7 +355,7 @@ async fn cell_loaded(
                 host.runtime.wait(run).await.unwrap();
                 assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
             }
-            Action::Race(Race::Stop | Race::FailureStop) if !after_owner => {
+            Action::Race(Race::Stop | Race::FailureStop) if !after_workers => {
                 assert!(matches!(
                     host.runtime.stop(run, StopScope::SelfOnly),
                     Err(RuntimeError::RestartBusy)
@@ -395,7 +389,7 @@ async fn cell_loaded(
         if let Some(load) = load {
             load.verify(&host, &runs);
         }
-        reclaimed(&host, &core, true).await;
+        reclaimed(&host, &core).await;
         let completed = core.0.state.lock().unwrap().completed_stage.unwrap();
         let interrupted =
             failure || matches!(action, Action::Race(Race::Shutdown) | Action::Signal(_));
@@ -405,31 +399,31 @@ async fn cell_loaded(
             // Reader transfer completes before its prohibition checkpoint. The
             // factual stage is retained, but stage 11 must never be entered.
             ExitStage::SignalsStopped
-        } else if interrupted && !after_owner {
+        } else if interrupted && !after_workers {
             match stage {
                 ExitStage::ExecPrepared => ExitStage::Armed,
                 ExitStage::SignalsStopped => ExitStage::ExecPrepared,
-                ExitStage::OwnerStopped => ExitStage::SignalsStopped,
+                ExitStage::WorkersStopped => ExitStage::SignalsStopped,
                 _ => unreachable!(),
             }
         } else {
-            ExitStage::OwnerStopped
+            ExitStage::WorkersStopped
         };
-        assert_eq!(completed, expected, "{stage:?}/{action:?}/{after_owner}");
-        let last_reached = if interrupted && !after_owner {
+        assert_eq!(completed, expected, "{stage:?}/{action:?}/{after_workers}");
+        let last_reached = if interrupted && !after_workers {
             stage
         } else {
-            ExitStage::OwnerStopped
+            ExitStage::WorkersStopped
         };
         assert_eq!(
             *reached.lock().unwrap(),
             [
                 ExitStage::TargetChecked,
-                ExitStage::OwnersHeld,
+                ExitStage::TransactionChecked,
                 ExitStage::Armed,
                 ExitStage::ExecPrepared,
                 ExitStage::SignalsStopped,
-                ExitStage::OwnerStopped,
+                ExitStage::WorkersStopped,
             ]
             .into_iter()
             .filter(|now| *now <= last_reached)
@@ -437,13 +431,7 @@ async fn cell_loaded(
             "failure must not enter a later stage"
         );
         if matches!(action, Action::Race(Race::Stop) | Action::Success) {
-            assert_eq!(completed, ExitStage::OwnerStopped);
-            assert!(
-                std::fs::symlink_metadata(&socket)
-                    .unwrap()
-                    .file_type()
-                    .is_socket()
-            );
+            assert_eq!(completed, ExitStage::WorkersStopped);
             let receipt = config.read_restart_receipt().unwrap().unwrap();
             assert_eq!(receipt.transaction_id, "restart");
             assert_eq!(
@@ -453,7 +441,7 @@ async fn cell_loaded(
             if let Some(address) = web_address {
                 assert!(
                     std::net::TcpStream::connect(address).is_err(),
-                    "web listener was joined before owner stop"
+                    "web listener was joined before worker stop"
                 );
             }
             if let Some(client) = &mut control_client {
@@ -464,30 +452,6 @@ async fn cell_loaded(
                         .is_err()
                 );
             }
-        }
-        if failure && stage == ExitStage::OwnerStopped && displaced.exists() {
-            // Only remove our own injected replacement, never the worker's socket.
-            assert_eq!(
-                std::fs::read_to_string(&socket).unwrap(),
-                "not the owned socket"
-            );
-            std::fs::remove_file(&socket).unwrap();
-            std::fs::rename(&displaced, &socket).unwrap();
-        }
-        let partial_owner_stop = failure
-            && stage == ExitStage::OwnerStopped
-            && !matches!(action, Action::Race(Race::FailureShutdown));
-        if partial_owner_stop {
-            // The worker joined, but identity-guarded unlink refused our
-            // replacement. This is NOT a pre-stop failure: recovery must stay
-            // sticky/unconfirmed, without dropping lifetime or reopening gates.
-            assert!(matches!(
-                host.owner.restart_worker_failed_closed(),
-                Err(runtime::ownership::RegistryError::Preparation(_))
-            ));
-            assert_eq!(completed, ExitStage::SignalsStopped);
-        } else if completed < ExitStage::OwnerStopped {
-            heartbeat(&host).await;
         }
         assert_eq!(model.0.load(Ordering::SeqCst), runs.len());
         assert!(host.restart_producers().iter().all(|gate| !gate.is_open()));
@@ -514,27 +478,6 @@ async fn cell_loaded(
     assert_eq!(core.snapshot().phase, RestartPhase::ShuttingDown);
     assert!(host.shutdown().await.is_err());
     drop(instance);
-    println!("M2-CELL {stage:?} {action:?} {after_owner}");
+    println!("M2-CELL {stage:?} {action:?} {after_workers}");
     std::io::stdout().flush().unwrap();
-}
-
-async fn heartbeat(host: &BootstrappedHost) {
-    // Subscribe AFTER failure cleanup: a stale pre-failure event cannot prove
-    // that the worker continues to renew the same held generation.
-    let mut events = host.runtime.event_bus().subscribe();
-    let idle = host.owner.attach("idle").unwrap();
-    loop {
-        let event = match events.recv().await {
-            Ok(event) => event,
-            Err(event_bus::RecvError::Lagged(_)) => continue,
-            Err(error) => panic!("heartbeat stream ended: {error:?}"),
-        };
-        if matches!(event.kind, event_bus::EventKind::Ownership(event)
-            if event.thread_id == "idle" && event.owner_id == idle.lease.owner_id
-                && event.generation == idle.lease.generation
-                && event.action == event_bus::OwnershipAction::Heartbeat)
-        {
-            break;
-        }
-    }
 }

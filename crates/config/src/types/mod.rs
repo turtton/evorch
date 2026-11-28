@@ -11,7 +11,6 @@ pub mod eval;
 pub mod misc;
 pub mod model_preset;
 pub mod orchestration;
-pub mod ownership;
 pub mod panel;
 pub mod provider;
 pub mod pull_requests;
@@ -47,7 +46,6 @@ pub use misc::{
 };
 pub use model_preset::ModelPresetConfig;
 pub use orchestration::OrchestrationConfig;
-pub use ownership::OwnershipConfig;
 pub use panel::PanelConfig;
 pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig, ModelKind,
@@ -125,7 +123,6 @@ pub struct Config {
     pub budget: BudgetConfig,
     /// オーケストレーション設定。
     pub orchestration: OrchestrationConfig,
-    pub ownership: OwnershipConfig,
     pub team: TeamConfig,
     pub sandbox: SandboxConfig,
     /// Write/Edit 成功後の外部コメント検査。
@@ -161,7 +158,6 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             budget: BudgetConfig::default(),
             orchestration: OrchestrationConfig::default(),
-            ownership: OwnershipConfig::default(),
             team: TeamConfig::default(),
             sandbox: SandboxConfig::default(),
             comment_checker: CommentCheckerConfig::default(),

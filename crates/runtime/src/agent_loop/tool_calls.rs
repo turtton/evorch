@@ -781,8 +781,8 @@ impl LoopState {
             let mut validated = Vec::with_capacity(segment.len());
             for (id, name, mut input) in segment {
                 meta::drop_ignored_arguments(&name, &mut input);
-                if let Err(error) = self.validate_owner_mutation().await {
-                    self.finish_owner_error("validate", error);
+                if let Err(error) = self.validate_execution_mutation().await {
+                    self.finish_error(error.to_string());
                     return false;
                 }
                 // Outside every catalog, yet it must reach the fixed refusal below
@@ -928,9 +928,9 @@ impl LoopState {
                     let mut children = Vec::with_capacity(wave.len());
                     let mut spawned = Vec::with_capacity(wave.len());
                     for call in wave {
-                        if let Err(error) = self.validate_owner_mutation().await {
+                        if let Err(error) = self.validate_execution_mutation().await {
                             meta::cleanup_delegates(&runtime, spawned).await;
-                            self.finish_owner_error("validate", error);
+                            self.finish_error(error.to_string());
                             return false;
                         }
                         if let Some(kind) = self.interrupted() {
@@ -994,8 +994,8 @@ impl LoopState {
                         self.finish_interrupted(kind);
                         return false;
                     }
-                    if let Err(error) = self.validate_owner_mutation().await {
-                        self.finish_owner_error("validate", error);
+                    if let Err(error) = self.validate_execution_mutation().await {
+                        self.finish_error(error.to_string());
                         return false;
                     }
                     continue;
@@ -1013,8 +1013,8 @@ impl LoopState {
                 let mut prepared_wave = Vec::with_capacity(wave.len());
                 let search_usage = Arc::new(std::sync::Mutex::new(Vec::<providers::Usage>::new()));
                 for (index, call) in wave.into_iter().enumerate() {
-                    if let Err(error) = self.validate_owner_mutation().await {
-                        self.finish_owner_error("validate", error);
+                    if let Err(error) = self.validate_execution_mutation().await {
+                        self.finish_error(error.to_string());
                         return false;
                     }
                     if let Some(kind) = self.interrupted() {
@@ -1167,9 +1167,9 @@ impl LoopState {
                         self.identical_calls.end_stalled();
                     }
                     if matches!(&ready, ReadyCall::Local)
-                        && let Err(error) = self.validate_owner_mutation().await
+                        && let Err(error) = self.validate_execution_mutation().await
                     {
-                        self.finish_owner_error("validate", error);
+                        self.finish_error(error.to_string());
                         return false;
                     }
                     // Preflight rejections still report a lifecycle, except malformed
@@ -1414,8 +1414,8 @@ impl LoopState {
                     self.finish_interrupted(kind);
                     return false;
                 }
-                if let Err(error) = self.validate_owner_mutation().await {
-                    self.finish_owner_error("validate", error);
+                if let Err(error) = self.validate_execution_mutation().await {
+                    self.finish_error(error.to_string());
                     return false;
                 }
             }

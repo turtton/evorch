@@ -250,16 +250,6 @@ pub(super) fn run_writer_with_index(
                 record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
-            Ok(Command::AppendFencedEvent(session_id, event, validator, reply)) => {
-                let guards = validator.acquire(&event);
-                let result = if guards.is_none() {
-                    Err(StorageError::StaleMutation)
-                } else {
-                    append_event_to_conn(&mut state, &session_id, &event)
-                };
-                record_event_failure(&mut state, &result);
-                let _ = reply.send(result);
-            }
             Ok(Command::ConversationPlan(request, reply)) => {
                 let started = Instant::now();
                 let result = if state.writes_suspended {
@@ -327,13 +317,8 @@ pub(super) fn run_writer_with_index(
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }
-            Ok(Command::AppendStreamEvent(stream_id, event, validator, reply)) => {
-                let guards = validator
-                    .as_ref()
-                    .map(|validator| validator.acquire(&event));
-                let result = if matches!(guards, Some(None)) {
-                    Err(StorageError::StaleMutation)
-                } else {
+            Ok(Command::AppendStreamEvent(stream_id, event, reply)) => {
+                let result = {
                     let session_limit = state.config.hard_limits.max_session_bytes;
                     state.config.hard_limits.max_session_bytes = u64::MAX;
                     let result = append_event_to_conn(&mut state, &Some(stream_id), &event);

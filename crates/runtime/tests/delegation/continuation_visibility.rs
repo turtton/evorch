@@ -4,7 +4,6 @@ use crate::support;
 
 use event_bus::{AgentRunPhase, EventBus};
 use providers::FinishReason;
-use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
 use runtime::{AgentRuntime, Role, RunConfig, RunRestoreFailure, RunStore};
 use serde_json::json;
 use std::sync::Arc;
@@ -49,32 +48,9 @@ async fn parent_view_of_finished_child(stop_child: bool) -> serde_json::Value {
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_sequential_run_ids()
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-    let registry_path = dir.path().join("owners.db");
-    let owner = ThreadOwner::new(
-        "thread".into(),
-        Lease {
-            owner_id: "host".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    );
-    Registry::open(&registry_path)
-        .unwrap()
-        .start(&owner)
-        .unwrap();
-    let parent = runtime.delegate_background(
-        Role::Orchestrator,
-        "PARENT".into(),
-        RunConfig {
-            ownership: Some(OwnerPermit {
-                registry_path,
-                thread_id: owner.thread_id,
-                lease: owner.lease,
-                run_id: None,
-            }),
-            ..Default::default()
-        },
-    );
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    runtime.bind_thread_root("thread", parent).unwrap();
     model.wait_for_request(0).await;
     let child = runtime
         .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
@@ -109,7 +85,7 @@ async fn parent_view_of_finished_child(stop_child: bool) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn finished_owned_child_is_reported_as_continuable() {
+async fn finished_child_is_reported_as_continuable() {
     let view = parent_view_of_finished_child(false).await;
     assert_eq!(view["phase"], json!(AgentRunPhase::Done));
     assert_eq!(view["continuable"], true);

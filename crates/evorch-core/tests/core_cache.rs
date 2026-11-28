@@ -190,14 +190,21 @@ context_window_tokens = 1000000
     .unwrap()
     .runtime
     .with_run_store(runtime::RunStore::open(&storage_config, bridge.handle()).unwrap());
-    let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus.clone())
-            .unwrap(),
-    );
+    let mut sidebar = workspace_state::SidebarState::default();
+    sidebar
+        .add_project(
+            workspace_state::ProjectId::new("project"),
+            "cache-test",
+            dir.path(),
+        )
+        .unwrap();
+    sidebar.projects[0].trust = workspace_state::TrustState::Approved;
+    let sidebar_path = dir.path().join("sidebar.json");
+    std::fs::write(&sidebar_path, serde_json::to_vec(&sidebar).unwrap()).unwrap();
     let service = CommandService::new(runtime.clone(), tokio::runtime::Handle::current())
         .with_event_bus(bus.clone())
         .with_team_writer(bridge.handle())
-        .with_ownership(owner.clone());
+        .with_sidebar_path(sidebar_path);
     let mut projects = StaticProjects::default();
     projects.insert(&ProjectId::new("project").unwrap(), dir.path().into());
     let areas = Areas {
@@ -685,24 +692,12 @@ context_window_tokens = 1000000
     );
     drop(sse);
 
-    // An existing GUI owner cannot be adopted by this core ingress.
-    let other =
-        runtime::ownership::OwnerHost::open(dir.sockets(), Default::default(), bus).unwrap();
-    let _permit = other.start("foreign").unwrap();
-    let denied = client
-        .command(send("foreign", "foreign-sub", "must not run"))
-        .await
-        .unwrap_err();
-    assert!(format!("{denied:?}").contains("PermissionDenied"));
-
     stop.send(true).unwrap();
     socket_task.await.unwrap();
     backend.close();
     web.shutdown().await.unwrap();
-    owner.begin_quiesce().unwrap();
     runtime.stop(run, runtime::StopScope::Subtree).unwrap();
     runtime.wait(run).await.unwrap();
     bridge.flush().unwrap();
-    assert!(!owner.release_ready().unwrap());
     bridge.shutdown();
 }

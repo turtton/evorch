@@ -1,3 +1,37 @@
+# PR 20: current restart/recovery authority
+
+The ADR 0024 process-owner registry, permits, handoff holds, worker and
+owner-blocked retry loop have been removed. Historical measurement notes below
+record the earlier implementation; their owner-specific assertions are not
+current contracts or retained coverage.
+
+Current planned exec preserves capture/digests, transaction CAS, storage drain,
+Stop/lifecycle latches, signal/control drain, archive/collector joins and the
+inherited core lifetime FD. `TransactionChecked` reads the committed transaction;
+`RestartTransactionGuard` arms/readbacks and invalidates that same transaction.
+`WorkersStopped` joins archive and scratch cleanup, not an owner heartbeat.
+Failed exec restores FD flags, the signal reader and scratch cleanup; it never
+reopens business admission. Normal Stop/shutdown does not delete thread scratch.
+
+Only owner-free handoff format 2 is supported. Old handoffs are rejected before
+adoption; an old-to-new update requires stopping the old core and cold starting.
+Startup and management first read relational format/phase/revision headers.
+Old completed rows are not decoded by startup; old/unknown/mixed-format or
+corrupt rows cannot be prepared automatically. Explicit legacy graph disposal
+uses the existing writer's relational CAS and keeps snapshots, Stop, external
+resources and scratch intact. No compatibility decoder or replacement registry
+is involved. Current execution authority comes from trusted current thread/root,
+project/trust, tombstone, incarnation and recovery-claim checks.
+
+Owner-only heartbeat/socket/hold failure cells were removed. The retained core
+matrices cover capture, transaction/nonce readback, invalidation retry, Stop and
+shutdown races, real FD rollback, signals, control/web drain, durability and
+scratch retention. The header-scan fault tests supplement (do not replace) the
+real old-build cutover fixture required before merge. No owner removal is a
+provider-input cache boundary.
+
+---
+
 # D-3a2 B1/B2a: distribution and additive ownership API
 
 **D-7 未完了。** B1 delivers `evorch-process-guard` and immutable Linux

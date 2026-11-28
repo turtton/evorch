@@ -18,17 +18,14 @@ mod chat_restore;
 pub use chat_restore::ChatResumeObservation;
 mod child_renewal;
 mod completion_relay;
+mod disposal_authority;
 mod disposal_support;
 pub mod graph_observation;
 mod held_messages;
 mod host_prompt;
-mod physical_owners;
 mod recovery_activation;
 mod recovery_control;
-pub use physical_owners::{
-    DisposalAuthority, OwnedGraphOwnershipDiagnostic, OwnedGraphOwnershipState, OwnedThreadCas,
-    PhysicalClaimReport,
-};
+pub use disposal_authority::DisposalAuthority;
 pub use recovery_control::{
     ActivatedReservation, ActivationFailure, ActivationReservation, ActivationReservationProblem,
     AutomaticActivationReservation, ManualActivationReservation,
@@ -46,7 +43,7 @@ pub use recovery_activation::{
     CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryClaimHandle, RecoveryCleanupHandle,
     RecoveryCleanupState, RecoveryModels,
 };
-pub use restart_handoff::{PlannedToolSchemaBoundary, RestartOwnershipEvidence};
+pub use restart_handoff::PlannedToolSchemaBoundary;
 pub use restart_transaction::{
     RestartAdoptionError, RestartAdoptionFailure, RestartCaptureSession, RestartPreflight,
     RestartRecipeMember, RestartRecipeObservation,
@@ -221,8 +218,8 @@ pub(crate) struct Shared {
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) lanes: crate::lanes::LaneRuntime,
-    /// Contention budget of ownership checkpoints and turn starts; unset is the default.
-    pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
+    /// Existing root writer authority and retention binding used by scratch disposal.
+    pub(super) disposal_context: OnceLock<disposal_authority::DisposalContext>,
     /// Test-injected uncollected-lane creation threshold; unset is the default.
     pub(crate) uncollected_lane_open_limit: OnceLock<u32>,
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
@@ -268,7 +265,6 @@ pub(crate) struct Shared {
     planned_adoption: OnceLock<core_instance::InheritedHandoffProof>,
     graph_observer: OnceLock<Arc<dyn graph_observation::GraphObserver>>,
     graph_reservations: Mutex<recovery_control::GraphReservations>,
-    retained_physical_owners: Mutex<physical_owners::RetainedPhysicalOwners>,
     #[cfg(any(test, feature = "recovery-test-support"))]
     restart_builtin_catalog_fixture: OnceLock<Vec<providers::ToolSpec>>,
     recovery_message_ids_safe: AtomicBool,
@@ -893,7 +889,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
-                ownership_retry: OnceLock::new(),
+                disposal_context: OnceLock::new(),
                 uncollected_lane_open_limit: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -926,7 +922,6 @@ impl AgentRuntime {
                 planned_adoption: OnceLock::new(),
                 graph_observer: OnceLock::new(),
                 graph_reservations: Mutex::new(Default::default()),
-                retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]
                 restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
@@ -992,16 +987,6 @@ impl AgentRuntime {
             .handle
             .install_request_admission(Arc::new(move |scope| Box::new(gate.enter_scope(scope))));
         let _ = self.shared.run_store.set(store);
-        self
-    }
-
-    /// Override the ownership registry contention budget (deadline, per-attempt
-    /// wait, backoff). For tests only: they shorten the budget so contention
-    /// that outlasts it does not take the production 10 s. Production keeps
-    /// [`crate::ownership::RetryPolicy::default`]. First setting wins.
-    #[doc(hidden)]
-    pub fn with_ownership_retry_policy(self, policy: crate::ownership::RetryPolicy) -> Self {
-        let _ = self.shared.ownership_retry.set(policy);
         self
     }
 
@@ -1337,7 +1322,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 lanes: crate::lanes::LaneRuntime::default(),
-                ownership_retry: OnceLock::new(),
+                disposal_context: OnceLock::new(),
                 uncollected_lane_open_limit: OnceLock::new(),
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
@@ -1384,7 +1369,6 @@ impl AgentRuntime {
                 planned_adoption: OnceLock::new(),
                 graph_observer: OnceLock::new(),
                 graph_reservations: Mutex::new(Default::default()),
-                retained_physical_owners: Mutex::new(Default::default()),
                 #[cfg(any(test, feature = "recovery-test-support"))]
                 restart_builtin_catalog_fixture: OnceLock::new(),
                 recovery_message_ids_safe: AtomicBool::new(true),
@@ -1583,8 +1567,12 @@ impl AgentRuntime {
         if let Some(thread) = thread {
             permits.push(Box::new(self.retention_thread_admission(thread)));
         }
-        if let Some(owner) = &config.ownership {
-            permits.push(Box::new(self.retention_thread_admission(&owner.thread_id)));
+        let bound_thread =
+            self.registration_thread_context(run, parent, &lock_runs(&self.shared.runs));
+        if let Some(thread) = &bound_thread {
+            permits.push(Box::new(
+                self.retention_thread_admission(thread.thread_id()),
+            ));
         }
         self.deny_deleted_run(&run.to_string())?;
         if let Some(parent) = parent {
@@ -1593,8 +1581,8 @@ impl AgentRuntime {
         if let Some(thread) = thread {
             self.deny_deleted_thread(thread)?;
         }
-        if let Some(owner) = &config.ownership {
-            self.deny_deleted_thread(&owner.thread_id)?;
+        if let Some(thread) = &bound_thread {
+            self.deny_deleted_thread(thread.thread_id())?;
         }
         Ok(permits)
     }
@@ -1864,7 +1852,6 @@ impl AgentRuntime {
                 self.reserve_admission_for(
                     run_id,
                     parent,
-                    config.ownership.clone(),
                     Arc::clone(&execution),
                     parent.is_none() && config.lane_scope == Some(event_bus::LaneScope::Lane),
                 );
@@ -2039,16 +2026,13 @@ impl AgentRuntime {
             config.budget = config.budget.clone().with_unlimited_resources();
         }
         self.shared.bind_project(parent, &mut config);
-        if inherit_parent && let Some(parent) = parent {
-            if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
-                config.topology = entry.config.topology;
-                config.team = entry.config.team.clone();
-                config.delegation_value = entry.config.delegation_value.clone();
-            }
-            config.ownership = lock_runs(&self.shared.runs)
-                .get(&parent)
-                .and_then(|entry| entry.config.ownership.clone())
-                .or(config.ownership);
+        if inherit_parent
+            && let Some(parent) = parent
+            && let Some(entry) = lock_runs(&self.shared.runs).get(&parent)
+        {
+            config.topology = entry.config.topology;
+            config.team = entry.config.team.clone();
+            config.delegation_value = entry.config.delegation_value.clone();
         }
         if inherit_parent && parent.is_none() {
             config.team = None;
@@ -2085,9 +2069,6 @@ impl AgentRuntime {
             })),
             _ => None,
         };
-        if let Some(permit) = &mut config.ownership {
-            permit.run_id = Some(run_id.to_string());
-        }
         let start_capture = start_thread.zip(
             self.shared
                 .run_project(&config)
@@ -2282,7 +2263,6 @@ impl AgentRuntime {
         let parent = entry.parent;
         let role = entry.role;
         let name = entry.name.clone();
-        self.install_run_ownership_guard(run_id, &mut task.config);
         entry.config = task.config.clone();
         let config = entry.config.clone();
         let mailbox = Arc::clone(&entry.mailbox);
@@ -2360,10 +2340,7 @@ impl AgentRuntime {
                 .bus
                 .emit(Event::new(LifecycleEvent::AgentRunRestored {
                     run_id: run_id.to_string(),
-                    restored_by: config
-                        .ownership
-                        .as_ref()
-                        .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone()),
+                    restored_by: "user".into(),
                     message_id,
                 }));
         }
@@ -2544,7 +2521,7 @@ impl AgentRuntime {
         learning: Option<crate::memory_lifecycle::PendingLearning>,
     ) -> Option<Arc<crate::learning_suspend::LearningExecution>> {
         let run_id = task.run_id;
-        let plan_authority = (task.mailbox.clone(), task.config.ownership.clone());
+        let plan_authority = task.mailbox.clone();
         match crate::panic_capture::catch_panic(run_agent(weak.clone(), task, channels)).await {
             Ok(dispatch) => {
                 if let Some(learning) = learning {
@@ -2638,14 +2615,10 @@ impl AgentRuntime {
                 );
             }
         }
-        self.reserve_admission(target, None, None)
+        self.reserve_admission(target, None)
     }
 
-    pub(crate) fn spawn_prepared_handoff(
-        &self,
-        target: RunId,
-        ownership: Option<crate::ownership::OwnerPermit>,
-    ) -> Result<(), String> {
+    pub(crate) fn spawn_prepared_handoff(&self, target: RunId) -> Result<(), String> {
         let _retention_admission = self.retention_run_admission(target);
         if self.inspect_agent(target).is_ok() {
             return Ok(());
@@ -2663,9 +2636,6 @@ impl AgentRuntime {
         let descriptor: crate::restore::RunRestoreDescriptor =
             serde_json::from_str(&bundle.record.config_json).map_err(|e| e.to_string())?;
         let pending = descriptor.pending_escalation.ok_or("not a handoff seed")?;
-        if pending.requires_ownership && ownership.is_none() {
-            return Err("prepared handoff ownership is missing".into());
-        }
         let messages: Vec<providers::Message> =
             serde_json::from_str(&bundle.record.messages_json).map_err(|e| e.to_string())?;
         let prompt = messages
@@ -2682,7 +2652,6 @@ impl AgentRuntime {
         let thread = event_bus::escalation_thread_id(&target.to_string());
         self.bind_thread_root(&thread, target)?;
         let config = RunConfig {
-            ownership,
             budget: pending.budget.clone(),
             lane_scope: descriptor.lane_scope,
             interactive: descriptor.interactive,
@@ -3494,6 +3463,16 @@ impl AgentRuntime {
         if !between_turns_only {
             self.goal_work_stopped(run_id);
         }
+        // A failed durable Stop remains retryable after its admission settles.
+        // The existing creation-intent index is the stable lane identity, not
+        // a delayed-write queue.
+        let lane_intent_known = self
+            .shared
+            .lanes
+            .creation_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&run_id);
         let mut admissions = self
             .shared
             .admissions
@@ -3518,6 +3497,7 @@ impl AgentRuntime {
             entry.user_inbox.seal_serialized();
         }
         if !runs.contains_key(&run_id)
+            && !lane_intent_known
             && !paused.contains_key(&run_id)
             && !admissions
                 .get(&run_id)
@@ -3525,14 +3505,7 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
-        let durable = targets
-            .iter()
-            .map(|target| {
-                let ownership =
-                    Self::pending_lane_cancellation_ownership(*target, &runs, &admissions);
-                (*target, ownership)
-            })
-            .collect::<Vec<_>>();
+        let durable = targets.clone();
         let mut operator_stops = self
             .shared
             .operator_stops
@@ -3590,24 +3563,18 @@ impl AgentRuntime {
         drop(operator_stops);
         drop(runs);
         drop(admissions);
-        // A contended registry must not keep I/A/R locked or prevent Stop from
-        // interrupting a pending generation retry. The restore gates still pin
-        // the selected incarnation against a concurrent explicit resume.
+        // Never wait on durable I/O while holding admissions or runs. The
+        // restore gates still pin the selected incarnation against a concurrent
+        // explicit resume until both Stop writes have acknowledged.
         let mut failure = None;
-        for (target, ownership) in durable {
-            if let Err(error) = self.persist_lane_start_cancellation(
-                target,
-                ownership.as_ref(),
-                storage::lanes::LANE_START_OPERATOR_STOP,
-            ) {
+        for target in durable {
+            if let Err(error) = self
+                .persist_lane_start_cancellation(target, storage::lanes::LANE_START_OPERATOR_STOP)
+            {
                 failure.get_or_insert_with(|| cancellation::lane_cancellation_error(target, error));
             }
-            if let Err(error) = self.persist_lane_delivery_stop(target, ownership.as_ref()) {
-                self.lane_delivery_diagnostic(
-                    Some(target),
-                    "lane_stop_persistence_failed",
-                    &error.to_string(),
-                );
+            if let Err(error) = self.persist_lane_delivery_stop(target) {
+                failure.get_or_insert(error);
             }
         }
         failure.map_or(Ok(()), Err)
@@ -3709,7 +3676,6 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
-        let ownership = Self::pending_lane_cancellation_ownership(run_id, &runs, &admissions);
         let mut cancellations = Vec::new();
         let mut paused_stops = Vec::new();
         let subtree = Self::collect_subtree_ids(run_id, &intents, &runs);
@@ -3780,12 +3746,8 @@ impl AgentRuntime {
         if let Some(error) = paused_error {
             return Err(error);
         }
-        self.persist_lane_start_cancellation(
-            run_id,
-            ownership.as_ref(),
-            "cancelled before root start",
-        )
-        .map_err(|error| cancellation::lane_cancellation_error(run_id, error))
+        self.persist_lane_start_cancellation(run_id, "cancelled before root start")
+            .map_err(|error| cancellation::lane_cancellation_error(run_id, error))
     }
 
     /// 指定された run 自身を除き、実行中または admission 待機中の全子孫を ID 順で返す。
@@ -3981,20 +3943,12 @@ impl AgentRuntime {
 
     pub(crate) fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
         self.deny_deleted_run(&run_id.to_string())?;
-        let (permit, stopped) = {
-            let entry = self.entry(run_id)?;
-            (
-                entry.config.ownership.clone(),
-                matches!(*entry.execution.cancel_tx.borrow(), RunInterrupt::Stop),
-            )
-        };
-        if let Some(permit) = permit {
-            permit
-                .validate_generation()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: run_id.to_string(),
-                })?;
-        }
+        let stopped = self
+            .entry(run_id)?
+            .execution
+            .cancel_tx
+            .borrow()
+            .is_interrupted();
         if stopped {
             return Err(RuntimeError::RunTerminated {
                 run_id: run_id.to_string(),
@@ -4006,7 +3960,7 @@ impl AgentRuntime {
     fn bind_approval_owner(
         &self,
         run: RunId,
-        config: &RunConfig,
+        _config: &RunConfig,
         execution: &Arc<ExecutionControl>,
         thread: Option<crate::thread_context::TrustedThreadContext>,
     ) {
@@ -4016,30 +3970,6 @@ impl AgentRuntime {
             thread,
             &execution.approvals,
         );
-        if let Some(permit) = &config.ownership {
-            crate::ownership::authority::watch_approvals(permit, &execution.approvals);
-        }
-    }
-
-    /// Fence the run's events by the in-process authority record, never by a
-    /// registry transaction per event: contention must neither block an emitter
-    /// nor drop a live generation's events (for example its terminal state).
-    /// Registry accesses that observe a lost generation record it there.
-    fn install_run_ownership_guard(&self, run_id: RunId, config: &mut RunConfig) {
-        if let Some(permit) = &mut config.ownership {
-            permit.run_id = Some(run_id.to_string());
-            let token = permit.clone();
-            self.shared.bus.register_mutation_fence(
-                run_id.to_string(),
-                Arc::new(move || {
-                    !crate::ownership::authority::is_fenced(
-                        &token.registry_path,
-                        &token.thread_id,
-                        &token.lease,
-                    )
-                }),
-            );
-        }
     }
 
     pub(crate) fn lane_delivery_phase(&self, run: RunId) -> Option<watch::Receiver<AgentRunPhase>> {
@@ -5370,7 +5300,7 @@ mod review_registration_tests {
         let context = crate::escalation_review::ReviewRunContext::empty(&run.to_string());
         context.add_user_request(&run.to_string(), "prepared evidence");
         drop(storage);
-        runtime.reserve_admission(run, None, None);
+        runtime.reserve_admission(run, None);
         let execution = runtime.execution_snapshot(run).unwrap();
         {
             let intents = runtime.shared.spawn_intents.lock().unwrap();

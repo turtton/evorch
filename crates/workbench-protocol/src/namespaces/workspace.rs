@@ -379,8 +379,8 @@ pub enum RetentionBlock {
     FamilyUnresolved {
         thread: String,
     },
-    /// A running or recently running conversation holds the thread.
-    Owner {
+    /// A current binding, a recovery reservation or a runtime-use gate holds the thread.
+    SafetyHold {
         reason: String,
     },
     /// The database and the sidebar are not the pair they were bound as, so

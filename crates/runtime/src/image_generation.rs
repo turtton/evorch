@@ -222,15 +222,6 @@ async fn execute(
     }
     // Revalidate ownership after the long provider request and before any mutation.
     runtime.validate_artifact_mutation(state.caller_run_id())?;
-    let _ownership = state
-        .run_config()
-        .ownership
-        .as_ref()
-        .map(|permit| {
-            permit.validate_mutation().map_err(|e| e.to_string())?;
-            permit.mutation_guard().map_err(|e| e.to_string())
-        })
-        .transpose()?;
     if state.interrupted().is_some() {
         return Err("image generation interrupted; no files saved".into());
     }

@@ -127,7 +127,7 @@ pub(super) fn run(
         phase: match case.as_str() {
             "cold_final_usage" => "final_flush_begin",
             "cold_writer_barrier" => "writer_barrier_begin",
-            "cold_stopped_join" => "owner_stop_begin",
+            "cold_stopped_join" => "worker_stop_begin",
             "cold_control_web" => "web-only",
             _ => "flush_begin",
         },
@@ -177,6 +177,7 @@ pub(super) fn run(
         std::fs::create_dir_all(&project)?;
         let mut sidebar = workspace_state::SidebarState::default();
         sidebar.add_project(workspace_state::ProjectId::new("p"), "watchdog", &project)?;
+        sidebar.projects[0].trust = workspace_state::TrustState::Approved;
         std::fs::write(config.join("sidebar.json"), serde_json::to_vec(&sidebar)?)?;
         let launch = LaunchGuard::acquire(&identity)?;
         let instance = Arc::new(Instance::acquire(&launch, &ipc)?);
@@ -244,13 +245,10 @@ async fn operate(
         host.host.clone(),
         instance.identity.clone(),
     ));
-    if host.owner.attach("idle").is_err() {
-        host.owner.start("idle")?;
-    }
     let scratch = host.scratch.clone();
     let scratch_path = scratch.thread_dir("idle");
-    // Saved scratch is fixture data in the real owner's documented public path.
-    // OwnerHost::start has already recorded the real lease for this thread.
+    // Saved scratch is fixture data in the host's public thread-scratch path.
+    // Shutdown must retain it until the pending cleanup is actually complete.
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -263,7 +261,7 @@ async fn operate(
         .ok()
         .filter(|name| name.starts_with("expiry_"));
     if let Some(socket) = std::env::var_os("EVORCH_EXPIRY_PEER_SOCKET") {
-        // Owned through the typed owner API (guard-supervised, same PGID root +
+        // Spawned through the typed process-guard API (same PGID root +
         // grandchild) but in no ledger the host cleanup drains: they model owned
         // children that a stalled cleanup never reached. The session is
         // forgotten, never dropped: Drop would kill the group itself, while only
@@ -323,7 +321,7 @@ async fn operate(
         },
         &current,
         core_launcher::handoff::targets::TargetRequirements {
-            handoff: 1,
+            handoff: core_instance::handoff::HANDOFF_FORMAT_VERSION,
             snapshot: 1,
             storage_schema: schema,
             protocol: description.protocol,
@@ -395,7 +393,7 @@ async fn operate(
         old_build: build.clone(),
         successor_build: core_instance::handoff::elf_identity(&target_path)?,
         target_identity: "watchdog".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: schema,
         old_builtin_tool_names: host.runtime.restart_builtin_tool_names(),

@@ -19,7 +19,7 @@ FOCUSED_SELECTIONS = [
         "--test", "tools_shell",
         "--test", "delegation",
         "--test", "waits_messaging",
-        "--test", "escalation_ownership",
+        "--test", "escalation_runtime",
         "--test", "compaction_budget",
         "--",
         "restore_expansion::",

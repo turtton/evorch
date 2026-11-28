@@ -291,19 +291,7 @@ tool_body_delete_after_days = 7
     drop(core);
     let (mut core, mut usage) = open(&root, &config).await;
     assert_removed(&core);
-    // Normal explicit reopen: claim the cleanly released previous owner before
-    // SendChat. Reserving a new chat intentionally cannot claim an existing row.
-    core.host
-        .lock()
-        .unwrap()
-        .handle_command(
-            Command::Conversation(ConversationCommand::PrepareExistingThread {
-                project: ProjectId::new("p").unwrap(),
-                thread: ThreadId::new("t").unwrap(),
-            }),
-            workbench_host::provenance::local_desktop(),
-        )
-        .unwrap();
+    // Ordinary Send restores the current conversation without a takeover step.
     let mut resumed_events = core.runtime.event_bus().subscribe();
     assert_eq!(send(&core, "second", "continue after retention"), run);
     super::turn(&mut resumed_events, run).await;

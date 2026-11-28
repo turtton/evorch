@@ -38,24 +38,24 @@ fn verify_saved_wait_fixtures() {
     let db = storage::Database::open(&cfg).unwrap();
     let loads = db.recovery_manifests().unwrap();
     assert_eq!(loads.len(), 4);
-    let mut members = 0;
-    for load in &loads {
-        let manifest = load.record.as_ref().unwrap();
-        assert!(manifest.committed && !manifest.superseded);
-        assert_eq!(manifest.schema_version, 1);
-        members += manifest.members.len();
-        for member in &manifest.members {
-            assert!(redactor.detect(&member.record_json).is_none());
-            let record: RunRecoveryRecord = serde_json::from_str(&member.record_json).unwrap();
-            let snapshot = db.run_context(&member.run_id).unwrap().unwrap();
-            assert!(redactor.detect(&snapshot.config_json).is_none());
-            assert!(redactor.detect(&snapshot.messages_json).is_none());
-            let intent = db.resume_intent(&member.run_id).unwrap().unwrap();
-            assert!(redactor.detect(&intent.payload).is_none());
-            crate::restore::validate_recovery_waits(&snapshot, &record.waits).unwrap();
-        }
-    }
-    assert_eq!(members, 12);
+    assert!(loads.iter().all(|load| matches!(
+        load.record,
+        Err(storage::recovery::RecoveryProblem::UnsupportedFormat)
+    )));
+    let headers = db.recovery_graph_headers().unwrap();
+    assert_eq!(headers.len(), 4);
+    assert!(
+        headers
+            .iter()
+            .all(|header| header.schema_version == 1 && !header.is_current())
+    );
+    let sql = rusqlite::Connection::open(&cfg.db_path).unwrap();
+    assert_eq!(
+        sql.query_row("SELECT COUNT(*) FROM recovery_members", [], |row| row
+            .get::<_, usize>(0))
+            .unwrap(),
+        12
+    );
     for name in [
         "runs-legacy-true",
         "runs-legacy-false",

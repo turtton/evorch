@@ -32,7 +32,6 @@ fn read_of(thread: &ThreadId, linked: bool) -> ThreadPullRequest {
     ThreadPullRequest {
         thread: thread.clone(),
         tracking_enabled: true,
-        owned_here: true,
         lifecycle_revision: Revision(3),
         transition_seq: Sequence(1),
         link: linked.then(|| LinkView {

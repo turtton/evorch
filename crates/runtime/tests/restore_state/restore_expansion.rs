@@ -388,53 +388,6 @@ async fn team_workers_and_learning_state_are_not_blanket_renewed() {
     }
 }
 
-#[tokio::test]
-async fn stale_current_ownership_cannot_consume_a_valid_checkpoint() {
-    let fixture = Fixture::new();
-    let runtime = fixture.runtime();
-    let root = runtime.delegate_background(Role::Worker, "root".into(), RunConfig::default());
-    runtime.wait(root).await.unwrap();
-    let registry_path = fixture._dir.path().join("owners.sqlite3");
-    let current_lease = runtime::ownership::Lease {
-        owner_id: "new-owner".into(),
-        generation: 2,
-        expires_at: u64::MAX,
-    };
-    let owner = runtime::ownership::ThreadOwner::new("thread".into(), current_lease);
-    runtime::ownership::Registry::open(&registry_path)
-        .unwrap()
-        .start(&owner)
-        .unwrap();
-    let stale = runtime::ownership::OwnerPermit {
-        registry_path,
-        thread_id: "thread".into(),
-        run_id: None,
-        lease: runtime::ownership::Lease {
-            owner_id: "old-owner".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    };
-    assert!(matches!(
-        runtime.continue_goal(
-            root,
-            "continue".into(),
-            RunConfig {
-                ownership: Some(stale),
-                ..Default::default()
-            }
-        ),
-        Err(runtime::RuntimeError::StaleOwnership { .. })
-    ));
-    assert!(
-        runtime
-            .restore_diagnostics(root)
-            .unwrap()
-            .unwrap()
-            .disk_restorable
-    );
-}
-
 struct PendingChildAdmission {
     inner: Arc<ScriptedModel>,
     entered: tokio::sync::Notify,
@@ -538,33 +491,27 @@ async fn single_history_allows_live_children_and_concurrent_roots_for_all_descri
             name: Some(format!("chat:Worker:{marker}")),
             ..Default::default()
         };
-        match marker {
-            "context" => config.memory = Some(runtime::memory::MemoryBoundary::default()),
-            "ownership" => {
-                let registry_path = fixture._dir.path().join("owners.sqlite3");
-                let owner = runtime::ownership::ThreadOwner::new(
-                    marker.into(),
-                    runtime::ownership::Lease {
-                        owner_id: "current-owner".into(),
-                        generation: 1,
-                        expires_at: u64::MAX,
-                    },
-                );
-                runtime::ownership::Registry::open(&registry_path)
-                    .unwrap()
-                    .start(&owner)
-                    .unwrap();
-                config.ownership = Some(runtime::ownership::OwnerPermit {
-                    registry_path,
-                    thread_id: owner.thread_id.clone(),
-                    lease: owner.lease.clone(),
-                    run_id: None,
-                });
-            }
-            _ => {}
+        if marker == "context" {
+            config.memory = Some(runtime::memory::MemoryBoundary::default());
         }
         let root = runtime.delegate_background(Role::Worker, "single root history".into(), config);
         assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+        if marker == "ownership" {
+            // Focused legacy-descriptor fixture. Product migration never rewrites snapshots.
+            let database = storage::Database::open(&fixture.config).unwrap();
+            let mut record = database.run_context(&root.to_string()).unwrap().unwrap();
+            let mut descriptor: serde_json::Value =
+                serde_json::from_str(&record.config_json).unwrap();
+            descriptor["restorable"] = false.into();
+            descriptor["non_restorable_reason"] = "復元対象外の実行状態: ownership".into();
+            record.restorable = false;
+            record.config_json = serde_json::to_string(&descriptor).unwrap();
+            fixture
+                .storage
+                .handle()
+                .upsert_run_context(&record)
+                .unwrap();
+        }
         let before = runtime.restore_diagnostics(root).unwrap().unwrap();
         assert_eq!(before.disk_restorable, marker == "plain");
         assert!(before.history_available_with_current_authority);

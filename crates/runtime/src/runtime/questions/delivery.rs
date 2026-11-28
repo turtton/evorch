@@ -313,22 +313,16 @@ impl AgentRuntime {
     }
 
     /// Validate a delayed host wake again. Authority and Stop are also fenced by
-    /// wake_chat's existing restore/ownership gates, without changing its module.
+    /// wake_chat's existing restore/Stop gates, without changing its module.
     pub fn prepare_held_wake(
         &self,
         run: RunId,
-        authority: &crate::RunConfig,
+        _authority: &crate::RunConfig,
     ) -> Result<bool, crate::RuntimeError> {
         if self.operator_stopped(run) {
             return Ok(false);
         }
-        if let Some(permit) = &authority.ownership {
-            permit
-                .mutation_guard()
-                .map_err(|_| crate::RuntimeError::StaleOwnership {
-                    run_id: run.to_string(),
-                })?;
-        }
+
         let _runs = lock_runs(&self.shared.runs);
         if self.operator_stopped(run) {
             return Ok(false);

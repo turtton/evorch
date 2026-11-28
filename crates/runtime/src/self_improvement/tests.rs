@@ -105,7 +105,6 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ProviderUsageMissing", TransientOrExternal),
         ("CacheRegression", TransientOrExternal),
         ("ToolArgumentsMalformed", TransientOrExternal),
-        ("OwnershipRegistryWait", TransientOrExternal),
         ("CompactionFailed", TransientOrExternal),
         ("LaneUncollectedCreationSuppressed", HarnessImprovement),
         ("LaneRestoreRetrySuppressed", TransientOrExternal),
@@ -774,19 +773,6 @@ fn run_error_classification_uses_exclusions_and_falls_back() {
             "Cannot persist prepared context: database is locked",
             "storage_busy",
         ),
-        (
-            "thread has an active turn or needs a checkpoint",
-            "ownership",
-        ),
-        ("owner or generation no longer matches", "ownership"),
-        ("thread is not accepting new turns", "ownership"),
-        ("owner is not claimable", "ownership"),
-        ("generation exhausted", "ownership"),
-        (
-            "previous owner still responds or liveness could not be established",
-            "ownership",
-        ),
-        ("run ownership generation is stale: run-4", "ownership"),
         ("Cannot persist prepared context: disk full", "persist"),
         (
             "Cannot record tool intent before execution: disk full",

@@ -121,16 +121,7 @@ impl AgentRuntime {
                 "saved context is not an ordinary conversation root".into(),
             ));
         }
-        if let Some(permit) = &authority.ownership
-            && descriptor
-                .thread_id
-                .as_deref()
-                .is_some_and(|thread| thread != permit.thread_id)
-        {
-            return Err(RuntimeError::StaleOwnership {
-                run_id: run.to_string(),
-            });
-        }
+
         let restored = RestoredState::from_bundle(&bundle)?;
         authority.project_root = descriptor.project_root.clone();
         authority.category = descriptor.category.clone();
@@ -185,12 +176,6 @@ impl AgentRuntime {
             let _stop = gate
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _owner = authority
-                .ownership
-                .as_ref()
-                .map(|permit| permit.mutation_guard())
-                .transpose()
-                .map_err(|error| fail(error.to_string()))?;
             store
                 .handle
                 .save_snapshot_bundle(&write)

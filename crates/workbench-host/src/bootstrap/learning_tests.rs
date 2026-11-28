@@ -1,4 +1,4 @@
-//! Integration of the real bootstrap/factories without a GUI, paid model or bwrap.
+//! Integration of the real bootstrap/factories without a paid model or bwrap.
 use super::*;
 use async_trait::async_trait;
 use providers::{
@@ -241,7 +241,6 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
         "mcp",
         "catalog",
         "pull-requests",
-        "lane-stop-writes",
         "lane-recovery",
     ] {
         assert_eq!(
@@ -250,15 +249,9 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
             "service must be registered once: {required}"
         );
     }
-    let permit = boot.owner.start("learning-thread").unwrap();
-    let run = boot.runtime.delegate_background(
-        Role::Worker,
-        "evidence".into(),
-        RunConfig {
-            ownership: Some(permit),
-            ..Default::default()
-        },
-    );
+    let run =
+        boot.runtime
+            .delegate_background(Role::Worker, "evidence".into(), RunConfig::default());
     boot.runtime.wait(run).await.unwrap();
     boot.runtime.wait_learning(run).await.unwrap().unwrap();
     assert_eq!(model.extracts.load(Ordering::SeqCst), 1);
@@ -290,56 +283,65 @@ async fn headless_boot_runs_learning_evaluation_and_crash_intake_then_drains() {
 }
 
 #[tokio::test]
-async fn gui_factory_and_core_partition_thread_and_global_work_on_one_database() {
+async fn the_core_collects_each_diagnostic_once_for_its_own_work_only() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
     let model = Arc::new(Model::default());
     let mut core = open(&dir, model.clone()).await;
-    let (_store, gui, gui_owner, mut services) = gui_factory(&dir, &core, model.clone());
-    let bus = gui.event_bus();
-    let permit = core.owner.start("core-thread").unwrap();
-    assert!(gui_owner.start("core-thread").is_err());
-    let run = core.runtime.delegate_background(
-        Role::Worker,
-        "one owned source".into(),
-        RunConfig {
-            ownership: Some(permit),
-            ..Default::default()
-        },
-    );
+    // A background run supplies the learning source; a chat root makes the thread known.
+    let run =
+        core.runtime
+            .delegate_background(Role::Worker, "one source".into(), RunConfig::default());
     core.runtime.wait(run).await.unwrap();
     core.runtime.wait_learning(run).await.unwrap().unwrap();
     assert_eq!(model.extracts.load(Ordering::SeqCst), 1);
+    let chat = core
+        .runtime
+        .delegate_chat(
+            "core-thread",
+            Role::Worker,
+            "hello".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    core.runtime.wait(chat).await.unwrap();
     use eval::evaluator::EvaluatorHost;
-    let gui_evaluator = evaluation::EvaluatorHost::default();
-    gui_evaluator.runtime.set(gui.downgrade()).ok().unwrap();
-    assert!(gui_evaluator.authorize_run(&run.to_string()).is_err());
     core.evaluator.authorize_run(&run.to_string()).unwrap();
-    let _b = gui_owner.start("gui-thread").unwrap();
-    for thread in [None, Some("core-thread"), Some("gui-thread")] {
-        let event = diagnostic(thread);
-        core.runtime.event_bus().emit(event.clone());
-        bus.emit(event);
+    // A run this core never ran cannot be named by an evaluation.
+    assert!(core.evaluator.authorize_run("run-9999").is_err());
+    let bus = core.runtime.event_bus();
+    // Global events and the thread's own are kept, once each. A thread without a chat
+    // root here, and a run that is not a background run of this core, are not its work.
+    for thread in [None, Some("core-thread"), Some("unknown-thread")] {
+        bus.emit(diagnostic(thread));
     }
-    // A thread owned here cannot legitimize a run owned by the other host.
-    let mut mismatched = diagnostic(Some("gui-thread"));
-    if let event_bus::EventKind::Diagnostic(event) = &mut mismatched.kind {
-        event.run_id = Some(run.to_string());
+    let mut foreign = diagnostic(Some("core-thread"));
+    if let event_bus::EventKind::Diagnostic(event) = &mut foreign.kind {
+        event.run_id = Some("run-9999".into());
     }
-    bus.emit(mismatched);
-    services.shutdown().await.unwrap();
+    bus.emit(foreign);
+    bus.emit(event_bus::Event::new(
+        event_bus::FaultEvent::SkillDiagnostic {
+            kind: event_bus::SkillDiagnosticKind::ValidationError,
+            skill: "local-only".into(),
+            scope: "project".into(),
+            detail: "invalid metadata".into(),
+        },
+    ));
     core.shutdown().await.unwrap();
     let rows = candidates(root);
-    let rows: Vec<_> = rows
-        .into_iter()
-        .filter(|r| r.code == "NoProgress")
-        .collect();
-    assert_eq!(rows.len(), 1);
+    let no_progress: Vec<_> = rows.iter().filter(|r| r.code == "NoProgress").collect();
+    assert_eq!(no_progress.len(), 1);
     assert_eq!(
-        rows[0].occurrences, 3,
-        "one global + one per owned thread, not six"
+        no_progress[0].occurrences, 2,
+        "one global and one for the thread this core holds"
     );
+    let skill = rows
+        .iter()
+        .find(|r| r.code == "SkillDiagnostic:ValidationError")
+        .expect("the skill diagnostic is collected");
+    assert_eq!(skill.occurrences, 1);
 }
 
 #[tokio::test]
@@ -394,14 +396,10 @@ async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_re
     let model = Arc::new(Model::default());
     model.hold_review.store(true, Ordering::SeqCst);
     let mut boot = open(&dir, model.clone()).await;
-    let permit = boot.owner.start("draining-learning").unwrap();
     let run = boot.runtime.delegate_background(
         Role::Worker,
         "completed evidence".into(),
-        RunConfig {
-            ownership: Some(permit),
-            ..Default::default()
-        },
+        RunConfig::default(),
     );
     boot.runtime.wait(run).await.unwrap();
     model.reviewing.notified().await;
@@ -419,53 +417,28 @@ async fn shutdown_drains_an_inflight_lesson_review_before_collector_and_lease_re
     );
 }
 
-fn gui_factory(
-    dir: &test_socket_dir::SplitDir,
-    core: &BootstrappedHost,
-    model: Arc<Model>,
-) -> (
-    storage::StorageHandle,
-    AgentRuntime,
-    Arc<OwnerHost>,
-    services::BackgroundServices,
-) {
-    let db = components::storage_config(&core.config, dir.path().join("evorch-events.db"));
-    let writer = core.storage_writer().clone();
-    let (runtime, owner, services) =
-        learning_factory_with_writer(dir, &core.config, model, db, writer.clone());
-    (writer, runtime, owner, services)
-}
-
 fn learning_factory(
     dir: &test_socket_dir::SplitDir,
     config: &config::Config,
     model: Arc<Model>,
     db: storage::StorageConfig,
-) -> (
-    storage::Storage,
-    AgentRuntime,
-    Arc<OwnerHost>,
-    services::BackgroundServices,
-) {
+) -> (storage::Storage, AgentRuntime, services::BackgroundServices) {
     let store = storage::Storage::open(db.clone()).unwrap();
-    let (runtime, owner, services) =
-        learning_factory_with_writer(dir, config, model, db, store.handle());
-    (store, runtime, owner, services)
+    let (runtime, services) = learning_factory_with_writer(dir, config, model, db, store.handle());
+    (store, runtime, services)
 }
 
-// Resident logical runtimes use the core's existing writer, never a second DB writer.
+// The learning factories of the core on a runtime of its own, over a given writer:
+// never a second DB writer.
 fn learning_factory_with_writer(
     dir: &test_socket_dir::SplitDir,
     config: &config::Config,
     model: Arc<Model>,
     db: storage::StorageConfig,
     writer: storage::StorageHandle,
-) -> (AgentRuntime, Arc<OwnerHost>, services::BackgroundServices) {
-    // Construct precisely the factory the legacy GUI calls, on a second runtime.
+) -> (AgentRuntime, services::BackgroundServices) {
     let bus = Arc::new(EventBus::new(64));
-    let gui_owner =
-        Arc::new(OwnerHost::open(dir.sockets(), config.ownership.clone(), bus.clone()).unwrap());
-    let gui = learning::configure(
+    let runtime = learning::configure(
         AgentRuntime::new(
             bus.clone(),
             Arc::new(tools::ToolExecutor::new(bus.clone())),
@@ -486,16 +459,8 @@ fn learning_factory_with_writer(
             Ok(())
         }
     });
-    learning::start(
-        &mut services,
-        &gui,
-        gui_owner.clone(),
-        config,
-        &db,
-        evaluation,
-    )
-    .unwrap();
-    (gui, gui_owner, services)
+    learning::start(&mut services, &runtime, config, &db, evaluation).unwrap();
+    (runtime, services)
 }
 
 #[tokio::test]
@@ -507,7 +472,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
     config.self_improvement.enabled = true;
     let db = components::storage_config(&config, root.join("evorch-events.db"));
     let model = Arc::new(Model::default());
-    let (store, runtime, owner, mut services) = learning_factory(&dir, &config, model.clone(), db);
+    let (store, runtime, mut services) = learning_factory(&dir, &config, model.clone(), db);
     // The actual writer refuses candidate writes, not a mock persistence failure.
     let raw = rusqlite::Connection::open(root.join("evorch-events.db")).unwrap();
     raw.execute_batch(
@@ -535,7 +500,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
         "unacknowledged spool must survive the final drain"
     );
     assert!(candidates(root).is_empty());
-    drop((services, runtime, owner, store));
+    drop((services, runtime, store));
     raw.execute_batch("DROP TRIGGER fail_candidate").unwrap();
     drop(raw);
     let mut next = open(&dir, model).await;
@@ -548,36 +513,7 @@ async fn review_m4_halted_writer_drain_preserves_spool_for_next_healthy_host() {
 }
 
 #[tokio::test]
-async fn review_m1_non_elected_bus_diagnostics_are_collected_without_broadcasting() {
-    let dir = test_socket_dir::SplitDir::new();
-    let root = dir.path();
-    write_config(root);
-    let model = Arc::new(Model::default());
-    let mut core = open(&dir, model.clone()).await;
-    let (_store, gui, _owner, mut services) = gui_factory(&dir, &core, model);
-    gui.event_bus().emit(diagnostic(None));
-    gui.event_bus().emit(event_bus::Event::new(
-        event_bus::FaultEvent::SkillDiagnostic {
-            kind: event_bus::SkillDiagnosticKind::ValidationError,
-            skill: "local-only".into(),
-            scope: "project".into(),
-            detail: "invalid metadata".into(),
-        },
-    ));
-    services.shutdown().await.unwrap();
-    core.shutdown().await.unwrap();
-    let rows = candidates(root);
-    for code in ["NoProgress", "SkillDiagnostic:ValidationError"] {
-        let row = rows
-            .iter()
-            .find(|r| r.code == code)
-            .unwrap_or_else(|| panic!("missing local {code}"));
-        assert_eq!(row.occurrences, 1);
-    }
-}
-
-#[tokio::test]
-async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exits() {
+async fn review_m2_next_learning_service_collects_events_and_spool_after_the_first_exits() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
     write_config(root);
@@ -585,19 +521,19 @@ async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exi
     let mut config = config::Config::default();
     config.self_improvement.enabled = true;
     let db = components::storage_config(&config, root.join("evorch-events.db"));
-    // Collector election is independent of DB writer ownership. Exercise its
-    // handover between logical hosts while the one real writer remains alive.
-    let (store, first, first_owner, mut first_services) =
+    // The collector holds no lease while it runs, so the service that starts next over
+    // the same writer takes over events and the spool the first one left.
+    let (store, first, mut first_services) =
         learning_factory(&dir, &config, model.clone(), db.clone());
-    let (remaining, _owner, mut services) =
-        learning_factory_with_writer(&dir, &config, model, db, store.handle());
     first_services.shutdown().await.unwrap();
-    drop((first_services, first, first_owner));
+    drop((first_services, first));
+    let (remaining, mut services) =
+        learning_factory_with_writer(&dir, &config, model, db, store.handle());
     runtime::self_improvement::spool_fault(
         &root.join("self-improvement/drafts/crash-spool"),
         "StorageWriterHalted",
         "handover",
-        "recovered after first owner exited",
+        "recovered after the first service exited",
     )
     .unwrap();
     remaining.event_bus().emit(diagnostic(None));
@@ -606,7 +542,7 @@ async fn review_m2_remaining_host_collects_events_and_spool_after_first_host_exi
     for code in ["NoProgress", "StorageWriterHalted"] {
         assert!(
             rows.iter().any(|r| r.code == code),
-            "missing {code} after owner exit"
+            "missing {code} after the first service exited"
         );
     }
 }
@@ -652,6 +588,8 @@ async fn review_m3_evaluation_work_prevents_idle_exit_until_it_is_drained() {
 struct LateLaneAdmission {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    /// Only the lane admission waits; the turns admitted after it pass.
+    admitted: std::sync::atomic::AtomicBool,
     lessons: Model,
 }
 #[async_trait]
@@ -664,7 +602,7 @@ impl AgentModel for LateLaneAdmission {
         invocation: &AgentInvocationContext,
         _: Role,
     ) -> Result<(), RuntimeError> {
-        if invocation.run_id == "run-42" {
+        if invocation.run_id == "run-42" && !self.admitted.swap(true, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
@@ -687,7 +625,7 @@ impl AgentModel for LateLaneAdmission {
 }
 
 #[tokio::test]
-async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
+async fn review_m6_late_lane_root_is_stopped_by_the_drain_while_the_observer_runs() {
     use super::services::ServicePhase;
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path();
@@ -712,9 +650,7 @@ async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
                     "report_policy":"attached"
                 }))
                 .unwrap(),
-                start_seed:
-                    json!({"run_id":"run-42", "project_root":root, "requires_ownership":true})
-                        .to_string(),
+                start_seed: json!({"run_id":"run-42", "project_root":root}).to_string(),
                 project_id: None,
                 project_root: Some(root.to_string_lossy().into_owned()),
                 title: None,
@@ -739,7 +675,7 @@ async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
     // Real startup recovered the durable intent. Keep that producer's completion
     // gated while its provider admission is still outside the RunEntry snapshot.
     boot.services.join_named("lane-recovery").await.unwrap();
-    let mut observer = boot.services.lifecycle("self-improvement").unwrap();
+    let observer = boot.services.lifecycle("self-improvement").unwrap();
     let (recovery_stopped, recovery_stop) = tokio::sync::oneshot::channel();
     let (release_recovery, recovery_gate) = tokio::sync::oneshot::channel();
     let runtime = boot.runtime.clone();
@@ -747,14 +683,22 @@ async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
         stop.await?;
         recovery_stopped.send(()).unwrap();
         recovery_gate.await?;
+        let mut events = runtime.event_bus().subscribe();
         model.release.notify_one();
-        // Generation validation permits registration while quiescing, but the
-        // initial turn then fails the owner fence. Wait for that real terminal
-        // lifecycle event, not model entry (which must never happen here).
-        let outcome = runtime.wait(run).await;
+        // Registration is still permitted while the dispatch fence is closing. Wait for
+        // its real lifecycle event, not for the root's end: the fence holds the root
+        // until the drain stops it, after this producer has completed.
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(&event.kind, event_bus::EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. }) if run_id == "run-42")
+            {
+                break;
+            }
+        }
         assert!(
             runtime.inspect_agent(run).is_ok(),
-            "late root registration failed: {outcome:?}"
+            "late root registration failed"
         );
         Ok(())
     });
@@ -763,28 +707,18 @@ async fn review_m6_late_lane_admission_terminal_diagnostic_survives_shutdown() {
         boot
     });
     recovery_stop.await.unwrap();
-    // If shutdown already stopped the observer (the regression), wait for its
-    // actual completion before releasing either producer gate. Otherwise the
-    // held recovery join proves stop cannot yet have reached the observer.
-    // This drives the bad ordering without sleeps, yields, or timeouts.
-    let observer_was_stopped = *observer.borrow() != ServicePhase::Running;
-    if observer_was_stopped {
-        observer
-            .wait_for(|phase| *phase == ServicePhase::Completed)
-            .await
-            .unwrap();
-    }
+    // The held recovery join proves shutdown cannot have stopped the learning observer
+    // yet: it must outlive every producer that can still register a root. This is
+    // checked without sleeps, yields, or timeouts.
+    assert!(
+        *observer.borrow() == ServicePhase::Running,
+        "the learning observer must stay subscribed while a lane producer can register"
+    );
     release_recovery.send(()).unwrap();
     let boot = shutdown.await.unwrap();
     assert_eq!(
         boot.runtime.inspect_agent(run).unwrap().phase,
-        event_bus::AgentRunPhase::Error
-    );
-    assert!(
-        candidates(root)
-            .iter()
-            .any(|candidate| candidate.code.starts_with("RunError:")
-                && candidate.run_id.as_deref() == Some("run-42")),
-        "late registered root's terminal diagnostic must survive observer drain"
+        event_bus::AgentRunPhase::Stopped,
+        "the drain stops the root that registered while the producers were stopping"
     );
 }

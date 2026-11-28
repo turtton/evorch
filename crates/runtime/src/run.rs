@@ -209,7 +209,6 @@ pub struct RunConfig {
     pub conversation: bool,
     /// Trusted runtime authority; not accepted by model-facing delegation tools.
     pub purpose: RunPurpose,
-    pub ownership: Option<crate::ownership::OwnerPermit>,
     /// Explicit model selection for this run; absent means normal routing.
     pub model_preference: Option<crate::ModelPreference>,
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。

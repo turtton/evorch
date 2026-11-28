@@ -10,7 +10,7 @@ impl runtime::lane_delivery::LaneDeliveryHost for HeldHost {
         _: &str,
     ) -> Result<runtime::lane_delivery::LaneDeliveryTarget, storage::lane_delivery::LaneDeliveryNack>
     {
-        Err(storage::lane_delivery::LaneDeliveryNack::Readonly)
+        Err(storage::lane_delivery::LaneDeliveryNack::BindingConflict)
     }
 }
 fn request(lane_id: &str, revision: u64, action: LaneManagementAction) -> LaneManagementRequest {

@@ -33,16 +33,12 @@ fn statistics_count_committed_payloads_and_nonempty_usage_only() {
         delta: "日本語".into(),
         run_id: None,
     });
-    handle.append_stream_event("stream", &event, None).unwrap();
+    handle.append_stream_event("stream", &event).unwrap();
     let too_large = Event::new(MessageEvent::MessageDelta {
         delta: "x".repeat(handle.max_event_bytes() as usize),
         run_id: None,
     });
-    assert!(
-        handle
-            .append_stream_event("stream", &too_large, None)
-            .is_err()
-    );
+    assert!(handle.append_stream_event("stream", &too_large).is_err());
     handle.submit(vec![UsageBucket {
         key: BucketKey {
             window_start: 60,
@@ -69,30 +65,4 @@ fn statistics_count_committed_payloads_and_nonempty_usage_only() {
     assert_eq!(stats.usage_flushes, 1);
     assert_eq!(stats.usage_buckets_written, 1);
     assert!(stats.max_append_micros <= stats.append_total_micros);
-}
-
-#[test]
-fn statistics_include_fence_write_rejections() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = StorageConfig {
-        db_path: dir.path().join("fenced.db"),
-        ..StorageConfig::default()
-    };
-    let storage = Storage::open(config).unwrap();
-    let bus = event_bus::EventBus::new(8);
-    bus.register_mutation_fence("stale".into(), std::sync::Arc::new(|| false));
-    let event = Event::new(MessageEvent::MessageDelta {
-        delta: "text".into(),
-        run_id: Some("stale".into()),
-    });
-    assert!(
-        storage
-            .handle()
-            .append_stream_event("stream", &event, Some(bus.mutation_validator()))
-            .is_err()
-    );
-    assert_eq!(
-        storage.handle().statistics().unwrap().event_write_failures,
-        1
-    );
 }

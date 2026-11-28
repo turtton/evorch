@@ -5,7 +5,7 @@ use super::*;
 use std::{future::Future, task::Poll, time::Duration};
 
 #[tokio::test]
-async fn production_composition_storage_drain_budget_retains_cleanup_and_owner() {
+async fn production_composition_storage_drain_budget_retains_cleanup_and_scratch() {
     matrix("composition_drain_deadlines", 8, 0).await;
 }
 
@@ -48,7 +48,7 @@ async fn cell(
     let (_dir, mut host) = boot_composition(model.clone(), true).await;
     let core = RestartCoordinator::new(&host);
     // Active captured runs intentionally fail the shutdown durable-intent fence.
-    // The idle-owner cell exercises release_ready, rather than that earlier guard.
+    // The idle cell avoids that earlier guard.
     let shutdown_after_expiry = phase == "shutdown_after_expiry";
     let parked = if operator_shutdown && !shutdown_after_expiry {
         0
@@ -56,8 +56,6 @@ async fn cell(
         3
     };
     let runs = if parked == 0 {
-        let permit = host.owner.start("active").unwrap();
-        host.owner.start("idle").unwrap();
         // A completed turn creates the real identified scratch root, while
         // leaving no live captured run whose Stop would fail the drain fence.
         let run = host
@@ -67,7 +65,6 @@ async fn cell(
                 runtime::Role::Orchestrator,
                 "finish before restart".into(),
                 runtime::RunConfig {
-                    ownership: Some(permit),
                     ..Default::default()
                 },
             )
@@ -75,10 +72,9 @@ async fn cell(
         host.runtime.wait(run).await.unwrap();
         Vec::new()
     } else {
-        owner_runs(&host, parked).await
+        parked_runs(&host, parked).await
     };
     let id = seal_runs(&core, &runs).await;
-    let owner = host.owner.attach("active").unwrap();
     let shared = phase == "shared";
     let (entered, mut release) = trace.block(
         if shared || shutdown_after_expiry {
@@ -145,7 +141,7 @@ async fn cell(
             );
             let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
             assert!(resources.lock().await.cleanup().await.is_ok());
-            verify_checkpoints(&host, &runs, false);
+            verify_checkpoints(&host, &runs);
             core.transition_to_shutdown();
             assert!(host.shutdown().await.is_err());
             tokio::time::resume();
@@ -175,11 +171,7 @@ async fn cell(
     );
     assert!(host.restart_producers().iter().all(|gate| !gate.is_open()));
     assert!(core.cancel(id).is_err());
-    verify_checkpoints(&host, &runs, false);
-    let retained = host.owner.attach("active").unwrap();
-    assert_eq!(retained.lease.owner_id, owner.lease.owner_id);
-    assert_eq!(retained.lease.generation, owner.lease.generation);
-    assert_eq!(retained.state, runtime::ownership::OwnerState::Running);
+    verify_checkpoints(&host, &runs);
     host.composition.storage_writer.barrier().unwrap();
     if operator_shutdown {
         shutdown_while_pending(&mut host, &core, &trace, release, false).await;
@@ -195,7 +187,7 @@ async fn cell(
     .await;
     release.send(()).unwrap();
     drop(reclaimed.await);
-    verify_checkpoints(&host, &runs, false);
+    verify_checkpoints(&host, &runs);
     let mut cleanup = resources.lock().await;
     let result = cleanup.cleanup().await;
     assert_eq!(result.is_err(), unknown_ack);
@@ -226,7 +218,7 @@ async fn cell(
         let events = &trace.state.lock().unwrap().events;
         assert!(events.iter().any(|e| e.0 == "subscriber_join_end"));
         assert!(events.iter().any(|e| e.0 == "bridge_worker_joined"));
-        assert!(events.iter().all(|e| e.0 != "owner_stop_begin"));
+        assert!(events.iter().all(|e| e.0 != "worker_stop_begin"));
     }
     if !operator_shutdown {
         core.transition_to_shutdown();
@@ -243,11 +235,9 @@ async fn shutdown_while_pending(
     expect_release: bool,
 ) {
     let resources = core.0.state.lock().unwrap().finalization.clone().unwrap();
-    let owner = host.owner.attach("active").unwrap();
     let expected = saved(host).expected;
     core.transition_to_shutdown();
-    let owner_host = host.owner.clone();
-    let scratch = owner_host.thread_scratch().thread_dir("active");
+    let scratch = host.scratch.thread_dir("active");
     assert!(scratch.is_dir());
     let marker = scratch.join("pending-drain");
     std::fs::write(&marker, b"retained generation").unwrap();
@@ -258,10 +248,6 @@ async fn shutdown_while_pending(
     }
     // This checkpoint is after runtime drain, not merely before shutdown.
     // PlannedExit owns the bridge, so self.bridge.flush() cannot protect us.
-    let retained = owner_host.attach("active").unwrap();
-    assert_eq!(retained.state, runtime::ownership::OwnerState::Quiescing);
-    assert_eq!(retained.lease.owner_id, owner.lease.owner_id);
-    assert_eq!(retained.lease.generation, owner.lease.generation);
     assert_eq!(std::fs::read(&marker).unwrap(), b"retained generation");
     assert!(resources.try_lock().is_err());
     assert!(
@@ -284,23 +270,11 @@ async fn shutdown_while_pending(
             .iter()
             .any(|e| e.0 == "planned_shutdown_cleanup_end")
     );
-    let released = owner_host.attach("active").unwrap();
-    assert_eq!(
-        released.state,
-        if expect_release {
-            runtime::ownership::OwnerState::Released
-        } else {
-            runtime::ownership::OwnerState::Quiescing
-        },
-        "shutdown={outcome:?}; owner={released:?}"
-    );
-    assert_eq!(released.lease.owner_id, owner.lease.owner_id);
-    assert_eq!(released.lease.generation, owner.lease.generation);
-    if expect_release {
-        assert!(!marker.exists(), "scratch is reclaimed only after cleanup");
-    } else {
+    // Stop and normal shutdown retain thread scratch; only explicit disposal,
+    // retention/archive or a later exclusive cold sweep may remove it.
+    assert_eq!(std::fs::read(marker).unwrap(), b"retained generation");
+    if !expect_release {
         assert!(outcome.is_err());
-        assert_eq!(std::fs::read(marker).unwrap(), b"retained generation");
     }
     // Explicit operator shutdown can replace mutable run contexts with
     // stopped snapshots, but must not rewrite the captured manifest receipts.

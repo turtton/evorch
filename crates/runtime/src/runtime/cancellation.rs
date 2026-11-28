@@ -314,7 +314,6 @@ impl AgentRuntime {
             {
                 execution.track_terminal_dispatch(self.shared.dispatch_tails.register(true)?);
             }
-            let ownership = Self::pending_lane_cancellation_ownership(run, &runs, &admissions);
             if let Some(admission) = admissions.get_mut(&run)
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
@@ -342,29 +341,9 @@ impl AgentRuntime {
             drop(intents);
             drop(gate);
             return self
-                .persist_lane_start_cancellation(
-                    run,
-                    ownership.as_ref(),
-                    "cancelled before root start",
-                )
+                .persist_lane_start_cancellation(run, "cancelled before root start")
                 .map_err(|error| lane_cancellation_error(run, error));
         }
-    }
-
-    pub(super) fn pending_lane_cancellation_ownership(
-        run: RunId,
-        runs: &HashMap<RunId, RunEntry>,
-        admissions: &HashMap<RunId, admission::Admission>,
-    ) -> Option<crate::ownership::OwnerPermit> {
-        // Settlement does not unregister this incarnation's authority: a
-        // failed admission may never have had a RunEntry to carry its permit.
-        admissions
-            .get(&run)
-            .map(|admission| admission.snapshot().ownership)
-            .unwrap_or_else(|| {
-                runs.get(&run)
-                    .and_then(|entry| entry.config.ownership.clone())
-            })
     }
 
     pub(super) fn cancel_execution(&self, execution: &Arc<ExecutionControl>) {
@@ -450,18 +429,11 @@ impl AgentRuntime {
 }
 
 pub(super) fn lane_cancellation_error(run: RunId, error: crate::lanes::LaneError) -> RuntimeError {
-    if error.code == "lane_stop_pending" {
-        RuntimeError::LaneCancellationPending {
-            run_id: run.to_string(),
-            reason: error.to_string(),
-        }
-    } else {
-        RuntimeError::LaneCancellation {
-            run_id: run.to_string(),
-            reason: format!(
-                "live execution is stopped; durable cancellation was not recorded: {error}"
-            ),
-        }
+    RuntimeError::LaneCancellation {
+        run_id: run.to_string(),
+        reason: format!(
+            "live execution is stopped; durable cancellation was not recorded: {error}"
+        ),
     }
 }
 
@@ -478,10 +450,7 @@ pub(crate) enum HookPoint {
     SubtreeCollected,
     AdmissionReady,
     AdmissionRegistered,
-    LaneOwnershipValidated,
-    LaneStopWriteStarted,
-    LaneStopWriteFailed,
-    LaneStopPersisted,
+    LaneAdmissionValidated,
     AdmissionFailed,
     RootGoalUpdated,
     RootRestoreValidated,
@@ -510,12 +479,6 @@ type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send
 pub(super) struct TestHooks(Mutex<Vec<ExecutionHook>>);
 #[cfg(test)]
 impl AgentRuntime {
-    pub(crate) fn lane_stop_write_hook(&self, run: RunId, point: HookPoint) {
-        if let Ok(execution) = self.execution_snapshot(run) {
-            self.execution_hook(point, &execution);
-        }
-    }
-
     pub(super) fn lock_stop_test_gate<'a>(
         &self,
         run: RunId,

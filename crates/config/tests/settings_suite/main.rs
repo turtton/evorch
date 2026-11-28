@@ -17,7 +17,6 @@ mod model_kinds;
 mod model_speed;
 mod openai_compatible_schema;
 mod orchestration;
-mod ownership;
 mod pricing;
 mod provider_model_defaults;
 mod pull_requests;

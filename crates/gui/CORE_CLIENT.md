@@ -12,7 +12,7 @@ The snapshot is staged separately while a bounded 256-event/2 MiB buffer collect
 
 A lost command reply remains OutcomeUnknown. Reconnection uses the original receipt session and asks GetCommandReceipt; there is no unconditional retry. Unknown remains visible and retains its draft. Closing the window gives the client actor up to 500 ms to best-effort discard known unused attachment IDs, then aborts the actor/transport. It never sends StopRun/StopChat and does not own the core process. Reconnect is explicit after connection failure.
 
-The optional existing-thread import requires its canonical project already approved by the current host. The host rechecks tombstones and project identity/trust, and uses ADR0024 claim/restore only for a Released, demonstrably offline foreign owner. Live and uncertain owners are not acquired. The window never reads the owners registry, run DB or legacy sidebar itself.
+A thread stored by an earlier workbench has no separate import step: it is continued with the ordinary Send/Continue of its stored thread, after the host rechecks tombstone, project identity and trust. The window never reads the run DB or the sidebar itself.
 
 The execution, teams and lanes features (PR12) show, for the selected thread, its runs (roots, then the children of one run, with live/terminal/stopped/recovering and history-only told apart), goal and ledger, the team board and its tasks, and the lanes it leads (policy, detach, reattach, resume of held deliveries, and ending a managed lane by a person's decision). They read everything from the core with typed queries; an event only triggers a new read, so a late event never moves the screen back.
 
@@ -25,7 +25,7 @@ Management update operations of the old embedded window are available here, each
 ## Handoffs
 - PR08s: move conversation bootstrap/image operations into the planned protocol namespace. PR08 added only one top-level Command variant, Conversation, with nested operations.
 - PR09–16: replace the explicit Unsupported affordances with protocol capabilities; do not import an embedded runtime into this branch.
-- PR17: reuse ResolveProject/CreateExecution/CreateGoal/PrepareExistingThread and validated IDs. Keep receipt_session across reconnects; never interpret Unknown as permission to resend. Team carries the full delegation objective, not a named Reference.
+- PR17: reuse ResolveProject/CreateExecution/CreateGoal and validated IDs. Keep receipt_session across reconnects; never interpret Unknown as permission to resend. Team carries the full delegation objective, not a named Reference.
 - Attachment limits bound each file and the thread/store pending reservations. Committed attachments survive run completion and core restart; archive/delete synchronously removes them.
 
 ## Upload lifecycle and recovery

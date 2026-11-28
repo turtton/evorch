@@ -73,7 +73,6 @@ fn pull_request_read(thread: &ThreadId) -> ThreadPullRequest {
     serde_json::from_value(json!({
         "thread": thread.as_str(),
         "tracking_enabled": true,
-        "owned_here": true,
         "lifecycle_revision": "3",
         "transition_seq": "1",
         "candidates": [],

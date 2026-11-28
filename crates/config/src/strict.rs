@@ -27,7 +27,6 @@ const ROOT_KEYS: &[&str] = &[
     "compaction",
     "budget",
     "orchestration",
-    "ownership",
     "team",
     "sandbox",
     "comment_checker",
@@ -163,7 +162,6 @@ const BUDGET_KEYS: &[&str] = &[
     "max_file_rereads",
     "max_identical_tool_call_repeats",
 ];
-const OWNERSHIP_KEYS: &[&str] = &["heartbeat_ms", "lease_ms", "grace_ms"];
 const TEAM_KEYS: &[&str] = &["enabled", "max_workers"];
 const SANDBOX_KEYS: &[&str] = &[
     "web_tools_enabled",
@@ -225,6 +223,22 @@ const CREDENTIAL_LIKE_KEYS: &[&str] = &[
 ];
 const CREDENTIAL_MESSAGE: &str = "plaintext credential value must not be stored in config (ADR 0014); use the credential reference instead: credential = { type = \"keyring\", service = \"evorch\", account = \"...\" } or credential = { type = \"env\", var = \"...\" }";
 
+/// 廃止済みのセクションが残っていれば、削除が必要なことを示して拒否する。
+///
+/// `[ownership]` は ADR 0024 のプロセス間所有権の設定で、単一 core 化（ADR 0045）で
+/// 機構ごと廃止された。黙って無視も自動書き換えもしない。
+fn reject_removed_sections(root: &toml::value::Table) -> Result<(), ConfigError> {
+    if root.contains_key("ownership") {
+        return Err(ConfigError::InvalidField {
+            path: "ownership".to_owned(),
+            message: "the [ownership] section was removed together with inter-process thread \
+                      ownership (ADR 0045); delete the whole [ownership] section from the config file"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// マージ済み設定に未知キーまたは平文 credential がないことを検査する。
 ///
 /// # Errors
@@ -233,6 +247,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     let Some(root) = merged.as_table() else {
         return Ok(());
     };
+    reject_removed_sections(root)?;
     check_keys(root, "", ROOT_KEYS)?;
 
     if let Some(presets) = root.get("model_presets").and_then(toml::Value::as_table) {
@@ -268,7 +283,6 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
     validate_section(root, "budget", BUDGET_KEYS)?;
-    validate_section(root, "ownership", OWNERSHIP_KEYS)?;
     validate_section(root, "team", TEAM_KEYS)?;
     validate_section(root, "sandbox", SANDBOX_KEYS)?;
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
@@ -395,6 +409,9 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
     let Some(root) = merged.as_table_mut() else {
         return Ok(ignored);
     };
+    // A removed section is refused even where unknown keys are otherwise dropped:
+    // ignoring it would hide that the setting no longer does anything.
+    reject_removed_sections(root)?;
     retain_known(root, "", ROOT_KEYS, &mut ignored);
 
     if let Some(presets) = root
@@ -494,7 +511,6 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("rules", RULES_KEYS),
         ("compaction", COMPACTION_KEYS),
         ("budget", BUDGET_KEYS),
-        ("ownership", OWNERSHIP_KEYS),
         ("team", TEAM_KEYS),
         ("sandbox", SANDBOX_KEYS),
         ("comment_checker", COMMENT_CHECKER_KEYS),

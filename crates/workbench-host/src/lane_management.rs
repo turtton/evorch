@@ -2,10 +2,7 @@
 //! needed: SQL owns membership; the sidebar lock fences independent-family edits.
 use crate::CommandHost;
 use runtime::{AgentRuntime, lane_management as rt};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 use storage::lanes::LaneRecord;
 use workbench_protocol::{
     commands::{CommandDisposition, CommandReply, CommandResult},
@@ -18,18 +15,13 @@ use workbench_protocol::{
 };
 
 /// Install with the SAME runtime clone used by this host's delivery worker.
-/// An ingress without an ownership registry fails closed.
 #[derive(Clone)]
 pub struct HumanLaneManagement {
     runtime: AgentRuntime,
-    ownership: Option<Arc<runtime::ownership::OwnerHost>>,
 }
 impl HumanLaneManagement {
-    pub fn new(
-        runtime: AgentRuntime,
-        ownership: Option<Arc<runtime::ownership::OwnerHost>>,
-    ) -> Self {
-        Self { runtime, ownership }
+    pub fn new(runtime: AgentRuntime) -> Self {
+        Self { runtime }
     }
     /// A human ends a lane's ledger entry (ADR 0044): `human_closed`, or `discarded` when
     /// the request says so. Only the ledger changes: no run is stopped, no thread or
@@ -60,25 +52,9 @@ impl HumanLaneManagement {
         &self,
         request: runtime::lane_close::HumanLaneCloseRequest,
     ) -> Result<event_bus::lane::LaneCloseResult, WorkbenchError> {
-        let lane = read_lane(&self.runtime, &request.lane_id)?;
-        let mut threads = vec![lane.thread_id];
-        threads.extend(lane.lead_thread_id);
-        threads.sort();
-        threads.dedup();
-        let owner = self
-            .ownership
-            .as_ref()
-            .ok_or_else(|| failure("ownership_lost"))?;
-        let permits = threads
-            .iter()
-            .map(|thread| {
-                owner
-                    .owned_permit(thread)
-                    .map_err(|_| failure("ownership_lost"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        read_lane(&self.runtime, &request.lane_id)?;
         self.runtime
-            .close_lane_from_host(rt::LaneHumanContext, request, &permits)
+            .close_lane_from_host(rt::LaneHumanContext, request)
             .map_err(|e| failure(e.code))
     }
     /// Caller holds the authoritative family lock through this call and any save.
@@ -87,28 +63,9 @@ impl HumanLaneManagement {
         request: rt::LaneManagementRequest,
         guard: Option<rt::LaneAttachGuard>,
     ) -> Result<rt::LaneManagementOutcome, WorkbenchError> {
-        let lane = read_lane(&self.runtime, &request.lane_id)?;
-        let mut threads = vec![lane.thread_id];
-        threads.extend(lane.lead_thread_id);
-        if let rt::LaneManagementAction::Reattach { lead_thread_id, .. } = &request.action {
-            threads.push(lead_thread_id.clone());
-        }
-        threads.sort();
-        threads.dedup();
-        let owner = self
-            .ownership
-            .as_ref()
-            .ok_or_else(|| failure("ownership_lost"))?;
-        let permits = threads
-            .iter()
-            .map(|thread| {
-                owner
-                    .owned_permit(thread)
-                    .map_err(|_| failure("ownership_lost"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        read_lane(&self.runtime, &request.lane_id)?;
         self.runtime
-            .manage_lane_from_host(rt::LaneHumanContext, request, guard, &permits)
+            .manage_lane_from_host(rt::LaneHumanContext, request, guard)
             .map_err(|e| failure(e.code))
     }
 }
@@ -120,9 +77,7 @@ fn failure(code: &str) -> WorkbenchError {
         | "stale_request"
         | "stale_ready"
         | "stale_brief" => ErrorCode::StaleRevision,
-        "ownership_lost" | "not_current_lead" | "human_action_required" => {
-            ErrorCode::PermissionDenied
-        }
+        "not_current_lead" | "human_action_required" => ErrorCode::PermissionDenied,
         "storage_unavailable" => ErrorCode::StorageUnavailable,
         "lane_unavailable" => ErrorCode::NotFound,
         "invalid_input" => ErrorCode::InvalidRequest,
@@ -284,10 +239,7 @@ impl CommandHost {
         request: runtime::lane_close::HumanLaneCloseRequest,
         provenance: &Provenance,
     ) -> Result<event_bus::lane::LaneCloseResult, WorkbenchError> {
-        let adapter = HumanLaneManagement::new(
-            self.service().runtime().clone(),
-            self.service().ownership().cloned(),
-        );
+        let adapter = HumanLaneManagement::new(self.service().runtime().clone());
         let result = adapter.close_lane_as(request, provenance)?;
         if let Err(error) = self.projection().refresh_models() {
             tracing::warn!(?error.code, "lane projection refresh failed");
@@ -350,10 +302,7 @@ impl CommandHost {
         if provenance.actor != Actor::Human {
             return Err(failure("human_action_required"));
         }
-        let adapter = HumanLaneManagement::new(
-            self.service().runtime().clone(),
-            self.service().ownership().cloned(),
-        );
+        let adapter = HumanLaneManagement::new(self.service().runtime().clone());
         let request = request(input.request);
         let outcome = if matches!(request.action, rt::LaneManagementAction::Reattach { .. }) {
             if !matches!(

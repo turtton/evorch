@@ -1,8 +1,7 @@
 //! Which runs an event must be stored after.
 //!
 //! Reasoning rows are written ahead of every later event of the same run, so
-//! replay sees them where they happened. This is deliberately separate from the
-//! mutation fences' attribution, which keeps its own authority semantics. The
+//! replay sees them where they happened. The
 //! match names every variant of every event family, so adding one forces a
 //! decision here instead of silently reordering rows.
 
@@ -12,8 +11,8 @@ use event_bus::{
 };
 
 /// Run, session and task identifiers `event` belongs to; empty when it belongs
-/// to none. Session and task ids are included because the mutation fences key
-/// on them and an extra identifier only costs an early flush.
+/// to none. Session and task ids are included because an extra identifier only
+/// costs an early flush.
 pub(super) fn event_runs(event: &Event) -> Vec<&str> {
     let mut runs: Vec<&str> = Vec::new();
     match &event.kind {
@@ -110,7 +109,7 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
         EventKind::Fault(event) => match event {
             FaultEvent::SubscriberLagged { .. } | FaultEvent::SkillDiagnostic { .. } => {}
         },
-        EventKind::Ownership(_) | EventKind::PullRequest(_) | EventKind::ConversationPlan(_) => {}
+        EventKind::PullRequest(_) | EventKind::ConversationPlan(_) => {}
     }
     runs
 }

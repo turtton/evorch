@@ -84,7 +84,6 @@ fn by_number(process: &Process, number: u64) -> storage::pull_requests::PullRequ
 fn tracked_process(world: &World) -> Process {
     let process = world.process(enabled());
     process.environment.bind("r1", "t1");
-    process.permit("t1");
     process
 }
 
@@ -176,7 +175,6 @@ async fn a_job_is_read_across_chunks_and_offered_when_it_ends() {
 async fn decided_candidates_are_never_offered_again() {
     let world = World::new();
     let mut process = tracked_process(&world);
-    let permit = process.permit("t1");
     completed(
         &process,
         "shell",
@@ -189,21 +187,17 @@ async fn decided_candidates_are_never_offered_again() {
 
     process
         .service
-        .dismiss_candidate("t1", by_number(&process, 1).candidate_id, &permit)
+        .dismiss_candidate("t1", by_number(&process, 1).candidate_id)
         .await
         .unwrap();
     let revision = process.state("t1").lifecycle_revision;
     process
         .service
-        .confirm_candidate("t1", by_number(&process, 2).candidate_id, revision, &permit)
+        .confirm_candidate("t1", by_number(&process, 2).candidate_id, revision)
         .await
         .unwrap();
     let revision = process.state("t1").lifecycle_revision;
-    process
-        .service
-        .unlink("t1", revision, &permit)
-        .await
-        .unwrap();
+    process.service.unlink("t1", revision).await.unwrap();
     process.quiet_events().await;
     completed(
         &process,
@@ -227,7 +221,6 @@ async fn confirming_a_candidate_links_and_publishes_both() {
     let world = World::new();
     let mut process = tracked_process(&world);
     process.source.push_ok(&key(7), open_running(7));
-    let permit = process.permit("t1");
     completed(&process, "shell", "c1", &url(7), None, None);
     process.quiet_events().await;
     let candidate = presented(&process).remove(0);
@@ -235,7 +228,7 @@ async fn confirming_a_candidate_links_and_publishes_both() {
     let revision = process.state("t1").lifecycle_revision;
     process
         .service
-        .confirm_candidate("t1", candidate.candidate_id, revision, &permit)
+        .confirm_candidate("t1", candidate.candidate_id, revision)
         .await
         .unwrap();
     let events = process.quiet_events().await;
@@ -289,10 +282,9 @@ async fn a_full_thread_keeps_its_decisions_and_takes_no_new_candidate() {
     }
     process.quiet_events().await;
     assert_eq!(presented(&process).len(), 64);
-    let permit = process.permit("t1");
     process
         .service
-        .dismiss_candidate("t1", by_number(&process, 1).candidate_id, &permit)
+        .dismiss_candidate("t1", by_number(&process, 1).candidate_id)
         .await
         .unwrap();
     process.quiet_events().await;
@@ -400,26 +392,4 @@ async fn the_end_of_a_publishing_command_fetches_now() {
         4,
         "a poll that sees the job end counts"
     );
-}
-
-// Both hosts may observe an output stream, but only the current thread owner
-// writes a candidate and emits its announcement.
-#[tokio::test(start_paused = true)]
-async fn a_nonowner_observer_cannot_claim_the_owners_candidate_announcement() {
-    let world = World::new();
-    let mut owner = tracked_process(&world);
-    let observer = world.process(enabled());
-    observer.environment.bind("r1", "t1");
-    let (checked, observed) = tokio::sync::oneshot::channel();
-    observer
-        .hooks
-        .before_permit(move || checked.send(()).unwrap());
-    completed(&observer, "shell", "same-call", &url(7), None, None);
-    observed.await.unwrap();
-    observer.service.shutdown_and_drain().await.unwrap();
-    assert!(presented(&owner).is_empty());
-    completed(&owner, "shell", "same-call", &url(7), None, None);
-    let events = owner.quiet_events().await;
-    assert_eq!(presented(&owner).len(), 1);
-    assert_eq!(candidates_changed(&events).len(), 1);
 }

@@ -5,10 +5,10 @@
 //!
 //! - **Explicit decisions** — [`link`](PullRequestService::link),
 //!   [`unlink`](PullRequestService::unlink), [`refresh`](PullRequestService::refresh), and the
-//!   candidate decisions. Each takes the caller's [`OwnerPermit`]: only the process that holds
-//!   a thread's lease acts for it, so a thread shown in two windows is fetched by one of them.
-//! - **Tracking** — a scheduler task polls the pull requests of the threads this process owns:
-//!   quickly while checks run, slowly once they settled, with backoff on failure, and not at
+//!   candidate decisions. The core is the only process acting for a thread; the host decides
+//!   who may ask, and storage refuses what the thread's stored state does not allow.
+//! - **Tracking** — a scheduler task polls the pull requests of every thread with an active
+//!   link: quickly while checks run, slowly once they settled, with backoff on failure, and not at
 //!   all once the pull request is merged or closed (until a refresh finds it open again). It
 //!   also wakes for the end of a `git push` or `gh pr …` command.
 //! - **Candidates** — an observer reads command output for pull request URLs and offers them
@@ -23,8 +23,8 @@
 //!
 //! Every fetch is single-flight per pull request inside a process, holds no lock while `gh`
 //! runs, and is never cancelled by an Unlink: it ends in the snapshot for whoever else tracks
-//! the pull request. A result is delivered to a thread only if the process still owns the
-//! thread (checked at completion) and the thread still has the link the fetch was started for.
+//! the pull request. A result is delivered to a thread only if the thread still has the link
+//! the fetch was started for.
 
 mod coordinator;
 pub use coordinator::HeadAttribution;
@@ -49,13 +49,12 @@ use storage::{StorageError, StorageHandle};
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
+use super::environment::ThreadEnvironment;
 use super::locator::{LocatorError, parse_locator};
-use super::ownership::{OwnershipView, ThreadEnvironment, permit_holds};
 use super::review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
 };
 use super::{FetchError, PullRequestSource};
-use crate::ownership::OwnerPermit;
 
 pub(crate) use flight::{Flight, FlightOutcome, Interest, Target};
 
@@ -90,9 +89,6 @@ pub enum PullRequestError {
     /// The reference is not a github.com pull request.
     #[error("{0}")]
     Locator(#[from] LocatorError),
-    /// This process does not hold the thread's lease, or the permit is for another thread.
-    #[error("this process does not own the thread")]
-    NotOwner,
     /// The thread changed since the caller read it (a later link or unlink won).
     #[error("the thread's pull request changed since it was read")]
     StaleRevision,
@@ -114,13 +110,6 @@ pub enum PullRequestError {
     /// The fetch failed.
     #[error("fetch: {0}")]
     Fetch(FetchError),
-    /// Ownership was lost while the fetch ran, so its result was dropped.
-    #[error("ownership was lost before the result could be used")]
-    OwnershipLost,
-    /// The ownership registry stayed busy, so the lease could not be checked. Nothing was
-    /// done; try again.
-    #[error("the ownership registry is busy")]
-    OwnershipBusy,
 }
 
 impl From<StorageError> for PullRequestError {
@@ -160,7 +149,7 @@ pub enum InheritanceScheduling {
     NoParentLink,
     /// A lane thread never inherits.
     Lane,
-    /// The inheritance is stored (or already was) and will be resolved by the child's owner.
+    /// The inheritance is stored (or already was) and will be resolved in the background.
     Scheduled(Box<InheritanceRecord>),
 }
 
@@ -185,8 +174,6 @@ pub struct ServiceParts {
     pub storage: StorageHandle,
     /// How facts are fetched.
     pub source: Arc<dyn PullRequestSource>,
-    /// Who owns which thread.
-    pub ownership: Arc<dyn OwnershipView>,
     /// Facts about threads.
     pub environment: Arc<dyn ThreadEnvironment>,
     /// Where events are published and tool output is observed.
@@ -240,8 +227,8 @@ pub(crate) struct State {
     attribution: policy::Attribution,
     /// In-flight log preparation; never a second delivery queue.
     pub(crate) preparing: HashSet<String>,
-    /// Attempts are scoped to the notice, policy, owner and reservation generations.
-    pub(crate) attempted: HashSet<(String, u64, u64, u64)>,
+    /// Attempts are scoped to the notice, policy and reservation generations.
+    pub(crate) attempted: HashSet<(String, u64, u64)>,
     /// Children whose inheritance is being resolved.
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
@@ -257,8 +244,8 @@ pub(crate) enum Stage {
     Checkout,
     /// The scheduler has read its plan and has not yet applied it.
     Planned,
-    /// A write for a thread is about to take the registry guard (after its permit was checked).
-    Guarded,
+    /// A write for a thread is about to run in storage.
+    Write,
     /// An asynchronous PR preparation has released its single-flight slot.
     #[cfg(test)]
     PrPreparationFinished,
@@ -270,7 +257,6 @@ pub(crate) struct Inner {
     pub(crate) source: Arc<dyn PullRequestSource>,
     pub(crate) logs: Arc<dyn super::PullRequestLogSource>,
     delivery: Arc<dyn PrNoticeDelivery>,
-    pub(crate) ownership: Arc<dyn OwnershipView>,
     pub(crate) env: Arc<dyn ThreadEnvironment>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) clock: Arc<dyn WallClock>,
@@ -348,21 +334,11 @@ impl Inner {
         *self.settings.borrow()
     }
 
-    /// The last look before `gh` is started: tracking is on *now*, and some party that waits for
-    /// the answer holds its thread *now*. It is synchronous and does not wait for the registry
-    /// (a busy registry means "not confirmed"), so nothing can happen between it and the start
-    /// of the process; callers must not await between this and the launch.
-    pub(crate) fn may_launch<'a>(
-        &self,
-        permits: impl IntoIterator<Item = &'a OwnerPermit>,
-    ) -> bool {
-        // The permits first, tracking last: whatever the first took time over, the last look is
-        // the freshest.
-        permits
-            .into_iter()
-            .any(|permit| matches!(permit.try_mutation_guard(), Ok(Some(_))))
-            && self.config().enabled
-            && !*self.shutdown.borrow()
+    /// The last look before `gh` is started: tracking is on *now* and the service is not
+    /// shutting down. It is synchronous, so nothing can happen between it and the start of the
+    /// process; callers must not await between this and the launch.
+    pub(crate) fn may_launch(&self) -> bool {
+        self.config().enabled && !*self.shutdown.borrow()
     }
 
     pub(crate) fn enabled(&self) -> Result<PullRequestsConfig, PullRequestError> {
@@ -381,23 +357,6 @@ impl Inner {
     pub(crate) fn force(&self, thread_id: &str) {
         self.lock().forced.insert(thread_id.to_owned());
         self.wake.notify_one();
-    }
-
-    /// The caller must hold `thread_id`'s lease right now.
-    pub(crate) async fn check_permit(
-        &self,
-        thread_id: &str,
-        permit: &OwnerPermit,
-    ) -> Result<(), PullRequestError> {
-        if permit.thread_id != thread_id {
-            return Err(PullRequestError::NotOwner);
-        }
-        let permit = permit.clone();
-        if self.blocking(move || permit_holds(&permit)).await? {
-            Ok(())
-        } else {
-            Err(PullRequestError::NotOwner)
-        }
     }
 
     /// Pins the parent's active link for `child_thread_id`. Blocks on the database.
@@ -441,41 +400,14 @@ impl Inner {
         }
     }
 
-    /// Runs a short write for `permit`'s thread while its generation is held fixed by a registry
-    /// guard (ADR 0024): a claim or handoff cannot commit until the write and the event that
-    /// announces it are done. A check made earlier proves nothing about the write, so every write
-    /// that acts for a thread goes through here. Never hold it across a wait for `gh` or `git`.
-    pub(crate) async fn guarded<T: Send + 'static>(
+    /// Runs a short write (storage, plus the event that announces it) off the async threads.
+    /// The event follows the write in the same closure, so a reader that sees the event finds
+    /// the change stored. Never hold it across a wait for `gh` or `git`.
+    pub(crate) async fn write<T: Send + 'static>(
         &self,
-        permit: &OwnerPermit,
         write: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, PullRequestError> {
-        self.guarded_any(vec![permit.clone()], write).await
-    }
-
-    /// [`Self::guarded`] under the first of `permits` that still holds its thread, for a write
-    /// that serves several threads (the snapshot of a shared pull request).
-    pub(crate) async fn guarded_any<T: Send + 'static>(
-        &self,
-        permits: Vec<OwnerPermit>,
-        write: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<T, PullRequestError> {
-        self.blocking_at(Stage::Guarded, move || {
-            let mut refusal = PullRequestError::NotOwner;
-            for permit in &permits {
-                match permit.mutation_guard() {
-                    Ok(guard) => {
-                        let written = write();
-                        drop(guard);
-                        return Ok(written);
-                    }
-                    Err(error) if error.is_fenced() => refusal = PullRequestError::NotOwner,
-                    Err(_) => refusal = PullRequestError::OwnershipBusy,
-                }
-            }
-            Err(refusal)
-        })
-        .await?
+        self.blocking_at(Stage::Write, write).await
     }
 
     pub(crate) async fn link_key(
@@ -483,11 +415,9 @@ impl Inner {
         thread_id: &str,
         key: PullRequestKey,
         expected_revision: u64,
-        permit: &OwnerPermit,
         confirmed: Option<PullRequestCandidate>,
     ) -> Result<LinkReceipt, PullRequestError> {
         self.enabled()?;
-        self.check_permit(thread_id, permit).await?;
         let (storage, bus, thread) = (
             self.storage.clone(),
             Arc::clone(&self.bus),
@@ -500,7 +430,7 @@ impl Inner {
             at_ns: self.clock.now_ns(),
         };
         let receipt = self
-            .guarded(permit, move || -> Result<LinkReceipt, StorageError> {
+            .write(move || -> Result<LinkReceipt, StorageError> {
                 let receipt = storage.link_pull_request(request)?;
                 if receipt.changed {
                     let seq = storage
@@ -522,8 +452,7 @@ impl Inner {
                         origin: event_bus::PullRequestLinkOrigin::Explicit,
                     }));
                 }
-                // Announced inside the same guarded write: a process that lost the thread
-                // meanwhile publishes nothing.
+                // Announced inside the same write, after it is stored.
                 if let Some(candidate) = &confirmed {
                     Self::announce_candidate(
                         &storage,
@@ -537,11 +466,9 @@ impl Inner {
             })
             .await??;
         if receipt.changed {
-            self.lock().attribution.linked(
-                thread_id,
-                permit.lease.generation,
-                receipt.link.link_revision,
-            );
+            self.lock()
+                .attribution
+                .linked(thread_id, receipt.link.link_revision);
         }
         self.force(thread_id);
         Ok(receipt)
@@ -568,7 +495,7 @@ impl Inner {
     }
 
     /// Publishes a candidate decision with the thread's current revision and sequence. Called
-    /// inside a guarded write, after the decision is stored.
+    /// inside a write, after the decision is stored.
     fn announce_candidate(
         storage: &StorageHandle,
         bus: &EventBus,
@@ -692,7 +619,6 @@ impl PullRequestService {
             source: parts.source,
             logs,
             delivery,
-            ownership: parts.ownership,
             env: parts.environment,
             bus: parts.bus,
             clock: parts.clock,
@@ -755,7 +681,7 @@ impl PullRequestService {
     }
 
     /// Tells the scheduler that something it plans from changed: a thread was archived or
-    /// restored, a thread was deleted, or a thread's owner changed. Cheap and idempotent.
+    /// restored, or a thread was deleted. Cheap and idempotent.
     pub fn notify_changed(&self) {
         self.inner.wake.notify_one();
     }
@@ -766,17 +692,16 @@ impl PullRequestService {
     ///
     /// # Errors
     /// [`PullRequestError::Disabled`], [`PullRequestError::Locator`],
-    /// [`PullRequestError::NotOwner`], [`PullRequestError::StaleRevision`], storage errors.
+    /// [`PullRequestError::StaleRevision`], storage errors.
     pub async fn link(
         &self,
         thread_id: &str,
         locator: &str,
         expected_revision: u64,
-        permit: &OwnerPermit,
     ) -> Result<LinkReceipt, PullRequestError> {
         let key = parse_locator(locator)?;
         self.inner
-            .link_key(thread_id, key, expected_revision, permit, None)
+            .link_key(thread_id, key, expected_revision, None)
             .await
     }
 
@@ -790,11 +715,9 @@ impl PullRequestService {
         &self,
         thread_id: &str,
         expected_revision: u64,
-        permit: &OwnerPermit,
     ) -> Result<UnlinkReceipt, PullRequestError> {
         let inner = &self.inner;
         inner.enabled()?;
-        inner.check_permit(thread_id, permit).await?;
         let (storage, bus, thread, at_ns) = (
             inner.storage.clone(),
             Arc::clone(&inner.bus),
@@ -802,7 +725,7 @@ impl PullRequestService {
             inner.clock.now_ns(),
         );
         let receipt = inner
-            .guarded(permit, move || -> Result<UnlinkReceipt, StorageError> {
+            .write(move || -> Result<UnlinkReceipt, StorageError> {
                 let receipt = storage.unlink_pull_request(&thread, expected_revision, at_ns)?;
                 if let Some(ended) = &receipt.ended {
                     let state = storage.pull_request_thread_state(&thread)?;
@@ -824,20 +747,14 @@ impl PullRequestService {
     /// Asks for a fetch of the thread's pull request now (the "update" operation). Returns once
     /// the request is registered; the result arrives as stored facts and an event. Requests
     /// during an existing fetch coalesce into one follow-up after it, never into its old result.
-    /// A thread
-    /// whose owner is gone becomes owned by the process that got `permit` (the caller starts
-    /// or claims the lease first, as it does for chat), which resumes the polling.
+    /// A pull request whose polling stopped (merged or closed) is fetched again and resumes
+    /// polling when it is found open.
     ///
     /// # Errors
     /// As [`Self::link`], and [`PullRequestError::NotLinked`].
-    pub async fn refresh(
-        &self,
-        thread_id: &str,
-        permit: &OwnerPermit,
-    ) -> Result<(), PullRequestError> {
+    pub async fn refresh(&self, thread_id: &str) -> Result<(), PullRequestError> {
         let inner = &self.inner;
         inner.enabled()?;
-        inner.check_permit(thread_id, permit).await?;
         let Some(link) = inner.thread_state(thread_id).await?.active_link else {
             return Err(PullRequestError::NotLinked);
         };
@@ -854,21 +771,17 @@ impl PullRequestService {
     }
 
     /// Ignores a candidate chip. A decided candidate is not shown again, not even after an
-    /// Unlink. Dismissing changes the thread's stored state, so it needs the thread's permit like
-    /// the other decisions, and the write and its event are done under the registry guard.
+    /// Unlink. The write and its event are done together.
     ///
     /// # Errors
-    /// [`PullRequestError::Disabled`], [`PullRequestError::NotOwner`],
-    /// [`PullRequestError::CandidateNotFound`], storage errors.
+    /// [`PullRequestError::Disabled`], [`PullRequestError::CandidateNotFound`], storage errors.
     pub async fn dismiss_candidate(
         &self,
         thread_id: &str,
         candidate_id: u64,
-        permit: &OwnerPermit,
     ) -> Result<PullRequestCandidate, PullRequestError> {
         let inner = &self.inner;
         inner.enabled()?;
-        inner.check_permit(thread_id, permit).await?;
         let before = inner
             .candidates(thread_id)
             .await?
@@ -882,25 +795,21 @@ impl PullRequestService {
             inner.clock.now_ns(),
         );
         let after = inner
-            .guarded(
-                permit,
-                move || -> Result<PullRequestCandidate, StorageError> {
-                    let after =
-                        storage.dismiss_pull_request_candidate(&thread, candidate_id, at_ns)?;
-                    if before.state == CandidateState::Presented
-                        && after.state == CandidateState::Dismissed
-                    {
-                        Inner::announce_candidate(
-                            &storage,
-                            &bus,
-                            &thread,
-                            &after,
-                            event_bus::PullRequestCandidateState::Dismissed,
-                        )?;
-                    }
-                    Ok(after)
-                },
-            )
+            .write(move || -> Result<PullRequestCandidate, StorageError> {
+                let after = storage.dismiss_pull_request_candidate(&thread, candidate_id, at_ns)?;
+                if before.state == CandidateState::Presented
+                    && after.state == CandidateState::Dismissed
+                {
+                    Inner::announce_candidate(
+                        &storage,
+                        &bus,
+                        &thread,
+                        &after,
+                        event_bus::PullRequestCandidateState::Dismissed,
+                    )?;
+                }
+                Ok(after)
+            })
             .await??;
         Ok(after)
     }
@@ -915,7 +824,6 @@ impl PullRequestService {
         thread_id: &str,
         candidate_id: u64,
         expected_revision: u64,
-        permit: &OwnerPermit,
     ) -> Result<LinkReceipt, PullRequestError> {
         let inner = &self.inner;
         inner.enabled()?;
@@ -933,7 +841,6 @@ impl PullRequestService {
                 thread_id,
                 candidate.key.clone(),
                 expected_revision,
-                permit,
                 Some(candidate),
             )
             .await
@@ -942,8 +849,8 @@ impl PullRequestService {
     /// Records that `child_thread_id`, derived from `parent_thread_id`, may take the parent's
     /// active link once the pull request is confirmed open. The parent's link is pinned **now**:
     /// whatever the parent does afterwards (unlink, relink) does not change which pull request the
-    /// child may take. Idempotent; a lane never inherits. The child's owner resolves it (see
-    /// [`Self::resolve_inheritance`]); this process does so by itself when it owns the child.
+    /// child may take. Idempotent; a lane never inherits. The scheduler resolves it in the
+    /// background (see [`Self::resolve_inheritance`]).
     ///
     /// # Errors
     /// Storage errors.
@@ -985,18 +892,14 @@ impl PullRequestService {
     /// merged or closed, or still pending). An unconfirmed inheritance stays pending.
     ///
     /// # Errors
-    /// [`PullRequestError::NotOwner`] unless `permit` holds the child; [`PullRequestError::Fetch`]
-    /// when the fetch failed (the attempt is counted, the inheritance stays pending).
+    /// [`PullRequestError::Fetch`] when the fetch failed (the attempt is counted, the
+    /// inheritance stays pending).
     pub async fn resolve_inheritance(
         &self,
         child_thread_id: &str,
-        permit: &OwnerPermit,
     ) -> Result<InheritanceResolution, PullRequestError> {
         self.inner.enabled()?;
-        self.inner.check_permit(child_thread_id, permit).await?;
-        self.inner
-            .resolve_child(child_thread_id.to_owned(), permit.clone())
-            .await
+        self.inner.resolve_child(child_thread_id.to_owned()).await
     }
 
     /// What the review reads about the thread of `run_id`. Reads the database only: it starts
@@ -1049,7 +952,7 @@ impl PullRequestService {
     }
 
     /// [`Self::snapshot_for_review`], first fetching when the stored facts are older than
-    /// `review_max_age_seconds` (or failed or missing) and this process owns the thread. The
+    /// `review_max_age_seconds` (or failed or missing). The
     /// wait is bounded by `review_refresh_timeout_seconds`; a fetch that runs longer goes on
     /// for the tracker, and the review proceeds with what is stored, marked stale.
     ///
@@ -1071,22 +974,11 @@ impl PullRequestService {
                 refresh: ReviewRefresh::NotNeeded,
             });
         }
-        let (ownership, thread) = (Arc::clone(&inner.ownership), review.thread_id.clone());
-        let Some(permit) = inner
-            .blocking(move || ownership.owned_permit(&thread))
-            .await?
-        else {
-            return Ok(ReviewSupply {
-                lookup,
-                refresh: ReviewRefresh::NotOwner,
-            });
-        };
         let target = Target {
             thread_id: review.thread_id.clone(),
             key: review.link.key.clone(),
             link_id: review.link.link_id,
             link_revision: review.link.link_revision,
-            permit,
         };
         let flight = inner.start_or_join(review.link.key.clone(), vec![Interest::Thread(target)]);
         let waited = tokio::time::timeout(
@@ -1100,7 +992,7 @@ impl PullRequestService {
             Ok(FlightOutcome::Failed { .. } | FlightOutcome::StorageFailed(_)) => {
                 ReviewRefresh::FetchFailed
             }
-            Ok(FlightOutcome::Discarded) => ReviewRefresh::NotOwner,
+            Ok(FlightOutcome::Discarded) => ReviewRefresh::Unavailable,
         };
         let lookup = self.snapshot_for_review(run_id).await?;
         Ok(ReviewSupply { lookup, refresh })

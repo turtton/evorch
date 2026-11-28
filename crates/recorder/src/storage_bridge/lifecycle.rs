@@ -75,9 +75,9 @@ impl OwnedStorageBridge {
     }
 
     /// Persist the accepted queue and a finite bus snapshot without stopping
-    /// the subscriber. Quiesce producers first, then call this before releasing
-    /// generation fences; release transitions can still reach the final shutdown
-    /// snapshot. Reports the first write failure since the preceding barrier.
+    /// the subscriber. Quiesce producers first, then call this; events emitted
+    /// afterwards can still reach the final shutdown snapshot. Reports the first
+    /// write failure since the preceding barrier.
     /// This synchronous method waits for SQLite writes and usage flush to finish.
     pub fn flush(&mut self) -> io::Result<()> {
         tracing::debug!(target: "restart_drain", phase = "flush_begin", pending = self.monitor.snapshot().pending_events);

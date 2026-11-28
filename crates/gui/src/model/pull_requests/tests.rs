@@ -61,7 +61,6 @@ pub(crate) fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
         fetched_at_ns: Some(0),
         failure: None,
         candidates: Vec::new(),
-        tracked_here: true,
         auto_fix: None,
     }
 }
@@ -212,15 +211,13 @@ fn a_failure_seen_first_is_a_baseline_not_a_transition() {
     assert!(!bar.expanded);
 }
 
-// Given: a view that is untracked, old and failed at once / Then: each status holds on its own
+// Given: a view that is old and failed at once / Then: each status holds on its own
 #[test]
-fn tracking_staleness_and_a_failed_fetch_are_independent_statuses() {
+fn staleness_and_a_failed_fetch_are_independent_statuses() {
     let mut shown = view(Some(passing()));
     assert_eq!(statuses(&shown, 1), []);
     let later = (STALE_AFTER_SECONDS + 1) * NANOS_PER_SECOND;
     assert_eq!(statuses(&shown, later), [Status::Stale]);
-    shown.tracked_here = false;
-    assert_eq!(statuses(&shown, 1), [Status::NotTracked]);
     shown.failure = Some(FetchFailure {
         kind: storage::pull_requests::FetchErrorKind::Network,
         message: "offline".into(),
@@ -228,7 +225,6 @@ fn tracking_staleness_and_a_failed_fetch_are_independent_statuses() {
     assert_eq!(
         statuses(&shown, later),
         [
-            Status::NotTracked,
             Status::Stale,
             Status::FetchFailed {
                 kind: "network".into(),
@@ -461,11 +457,6 @@ fn the_limit_stops_the_toggle_and_offers_a_reset_in_every_tracking_thread() {
     let elsewhere = auto_fix_controls(&with_auto(failing(), limited("other"), |_| {}), 0).unwrap();
     assert_eq!(elsewhere.moves_from.as_deref(), Some("other"));
     assert!(elsewhere.reset.unwrap().enabled);
-
-    let mut untracked = with_auto(failing(), limited("other"), |_| {});
-    untracked.tracked_here = false;
-    let reset = auto_fix_controls(&untracked, 0).unwrap().reset.unwrap();
-    assert!(!reset.enabled && !reset.hover.is_empty());
 }
 
 // Given: auto fix is on for this thread and the failure still has checks running / Then: the
@@ -555,17 +546,6 @@ fn a_stopped_or_paused_thread_says_so_and_cannot_be_sent_to() {
     let controls = auto_fix_controls(&paused, 0).unwrap();
     assert_eq!(texts(&controls), ["Paused"]);
     assert!(!controls.send.enabled);
-}
-
-// Given: a window that does not hold the thread / Then: nothing can act and the hover says why
-#[test]
-fn a_window_that_does_not_track_the_thread_only_shows() {
-    let mut shown = with_auto(failing(), auto_state(|_| {}), |_| {});
-    shown.tracked_here = false;
-    let controls = auto_fix_controls(&shown, 0).unwrap();
-    assert!(!controls.toggle.enabled && !controls.send.enabled);
-    assert_eq!(controls.toggle.hover, "Not tracked in this window");
-    assert_eq!(controls.send.hover, "Not tracked in this window");
 }
 
 // Given: another thread has auto fix on / Then: this thread shows it is elsewhere, and turning

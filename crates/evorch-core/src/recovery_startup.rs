@@ -4,10 +4,9 @@
 //! issue startup evidence, attach RunStore (high watermarks), then preload catalog.
 use runtime::{
     AgentRuntime, CurrentRecoveryAuthority, PausedRecoveryComponent, RecoveryModels, RunId,
-    ownership::OwnerHost,
     quiesce::{RecoveryReport, RunRecoveryRecord},
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
 use storage::recovery::{RecoveryClaimState, RecoveryManifestRecord};
 use workbench_host::{
     bootstrap::{
@@ -46,7 +45,6 @@ pub struct StartupScan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupBlocked {
-    OwnerBlocked,
     CurrentBindingRequired,
     CurrentSettingsRequired,
     CliContinuityRequired,
@@ -60,7 +58,6 @@ pub enum StartupBlocked {
 impl From<CurrentAuthorityProblem> for StartupBlocked {
     fn from(value: CurrentAuthorityProblem) -> Self {
         match value {
-            CurrentAuthorityProblem::OwnerBlocked => Self::OwnerBlocked,
             CurrentAuthorityProblem::CurrentBindingRequired => Self::CurrentBindingRequired,
             CurrentAuthorityProblem::CurrentSettingsRequired => Self::CurrentSettingsRequired,
             CurrentAuthorityProblem::CliContinuityRequired => Self::CliContinuityRequired,
@@ -71,14 +68,13 @@ impl From<CurrentAuthorityProblem> for StartupBlocked {
 }
 pub struct StartupInputs<'a> {
     pub runtime: &'a AgentRuntime,
-    pub owner: &'a Arc<OwnerHost>,
     pub storage: &'a storage::StorageConfig,
     pub writer: &'a storage::StorageHandle,
     pub options: &'a BootstrapOptions,
     pub projects: &'a (dyn ProjectDirectory + Sync),
 }
 /// Owns the process-local lease proof and frozen lane exclusions. No polling task
-/// is detached; the core's managed service owns owner-blocked retries.
+/// is detached; the core's managed service owns bounded activation jobs.
 pub struct StartupCoordinator<'a> {
     inputs: StartupInputs<'a>,
     startup: storage::RecoveryStartupComplete,
@@ -88,7 +84,6 @@ pub struct StartupCoordinator<'a> {
 /// the lane exclusion fence. They do not grant any new recovery authority.
 pub struct StartupJobContext {
     pub runtime: AgentRuntime,
-    pub owner: Arc<OwnerHost>,
     pub storage: storage::StorageConfig,
     pub writer: storage::StorageHandle,
     pub options: BootstrapOptions,
@@ -117,7 +112,6 @@ impl StartupJobContext {
         Ok(StartupCoordinator {
             inputs: StartupInputs {
                 runtime: &self.runtime,
-                owner: &self.owner,
                 storage: &self.storage,
                 writer: &self.writer,
                 options: &self.options,
@@ -165,7 +159,6 @@ impl<'a> StartupCoordinator<'a> {
         }
         Ok(StartupJobContext {
             runtime: self.inputs.runtime.clone(),
-            owner: self.inputs.owner.clone(),
             storage: self.inputs.storage.clone(),
             writer: self.inputs.writer.clone(),
             options: self.inputs.options.clone(),
@@ -177,10 +170,13 @@ impl<'a> StartupCoordinator<'a> {
             catalog: self.catalog.clone(),
         })
     }
-    /// Payload-free observation. Activated is never treated as retryable and a
+    /// Header-first observation. Activated is never treated as retryable and a
     /// corrupt claim blocks mutation rather than disappearing behind its decoder.
     pub fn scan(&self) -> Result<StartupScan, StartupBlocked> {
         let db = storage::Database::open(self.inputs.storage)
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        let headers = db
+            .recovery_graph_headers()
             .map_err(|_| StartupBlocked::StorageUnavailable)?;
         let claims = db
             .recovery_claim_loads()
@@ -191,59 +187,62 @@ impl<'a> StartupCoordinator<'a> {
             .recovery_plan()
             .map_err(|_| StartupBlocked::NeedsAttention)?;
         let unreadable_claims = claims.iter().any(|(_, claim)| claim.is_err());
-        let mut components = vec![];
-        for load in db
+        let manifests = db
             .recovery_manifests()
-            .map_err(|_| StartupBlocked::StorageUnavailable)?
-        {
-            if db.restart_for_manifest(&load.manifest_id).is_ok_and(|t| {
-                t.is_some_and(|t| t.phase == storage::recovery::restart::RestartPhase::Completed)
+            .map_err(|_| StartupBlocked::StorageUnavailable)?;
+        let mut components = vec![];
+        // Decide format and terminal disposition before looking at any recipe.
+        // In particular, completed old transactions need no compatible decoder.
+        for header in headers {
+            if header.restart.as_ref().is_some_and(|restart| {
+                restart.phase == storage::recovery::restart::RestartPhase::Completed
             }) {
                 continue;
             }
-            let disposition = match &load.record {
-                Ok(record) => match claims
+            let id = &header.manifest_id;
+            let record = if header.is_current() {
+                manifests
                     .iter()
-                    .find(|(manifest, _)| manifest == &load.manifest_id)
-                    .map(|(_, claim)| claim.as_ref().map(|c| &c.state))
-                {
-                    Some(Ok(RecoveryClaimState::Prepared))
-                        if self
-                            .inputs
-                            .runtime
-                            .require_planned_manifest(&load.manifest_id)
-                            .is_ok() =>
-                    {
-                        Disposition::Prepared
-                    }
-                    Some(Ok(RecoveryClaimState::Prepared)) => Disposition::NeedsAttention,
-                    Some(Ok(RecoveryClaimState::Activated)) => Disposition::AlreadyActivated,
-                    Some(Ok(RecoveryClaimState::Released { .. })) => Disposition::Released,
-                    Some(Err(_)) => Disposition::NeedsAttention,
-                    None if record.superseded => Disposition::Superseded,
-                    None if plan
-                        .components
-                        .iter()
-                        .any(|c| c.manifest_id == load.manifest_id) =>
-                    {
-                        Disposition::AwaitingAuthority
-                    }
-                    None => Disposition::NeedsAttention,
-                },
-                Err(_) => Disposition::NeedsAttention,
+                    .find(|load| load.manifest_id == *id)
+                    .and_then(|load| load.record.as_ref().ok())
+            } else {
+                None
             };
-            let runs = load
-                .record
-                .as_ref()
-                .map(|m| {
-                    m.members
+            let disposition = if header.superseded {
+                Disposition::Superseded
+            } else {
+                match &record {
+                    Some(record) => match claims
                         .iter()
-                        .filter_map(|m| m.run_id.parse().ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+                        .find(|(manifest, _)| manifest == id)
+                        .map(|(_, claim)| claim.as_ref().map(|c| &c.state))
+                    {
+                        Some(Ok(RecoveryClaimState::Prepared))
+                            if self.inputs.runtime.require_planned_manifest(id).is_ok() =>
+                        {
+                            Disposition::Prepared
+                        }
+                        Some(Ok(RecoveryClaimState::Prepared)) => Disposition::NeedsAttention,
+                        Some(Ok(RecoveryClaimState::Activated)) => Disposition::AlreadyActivated,
+                        Some(Ok(RecoveryClaimState::Released { .. })) => Disposition::Released,
+                        Some(Err(_)) => Disposition::NeedsAttention,
+                        None if record.superseded => Disposition::Superseded,
+                        None if plan.components.iter().any(|c| c.manifest_id == *id) => {
+                            Disposition::AwaitingAuthority
+                        }
+                        None => Disposition::NeedsAttention,
+                    },
+                    None => Disposition::NeedsAttention,
+                }
+            };
+            let runs = db
+                .recovery_manifest_run_ids(id)
+                .map_err(|_| StartupBlocked::StorageUnavailable)?
+                .into_iter()
+                .filter_map(|run| run.parse().ok())
+                .collect();
             components.push(ComponentStatus {
-                manifest_id: load.manifest_id,
+                manifest_id: header.manifest_id,
                 runs,
                 disposition,
             });
@@ -290,7 +289,7 @@ impl<'a> StartupCoordinator<'a> {
         }
     }
     /// Conditional durable release even when adoption/descriptor validation failed.
-    /// Only current binding/owner grants mutation authority; the writer atomically
+    /// Only current binding grants mutation authority; the writer atomically
     /// proves every member unexecuted. Activated/mixed/corrupt claims stay quarantined.
     pub fn decline(&self, id: &str) -> Result<(), StartupBlocked> {
         let scan = self.scan()?;
@@ -324,7 +323,6 @@ impl<'a> StartupCoordinator<'a> {
             .map_err(|_| StartupBlocked::StorageUnavailable)?;
         let authority = CurrentAuthorityProvider {
             runtime: self.inputs.runtime,
-            owner: self.inputs.owner,
             bindings: &bindings,
             storage: self.inputs.storage,
             writer: self.inputs.writer,
@@ -332,41 +330,13 @@ impl<'a> StartupCoordinator<'a> {
         }
         .resolve_for_release(&records, &resume)?;
         let claim = self.claim(id)?.ok_or(StartupBlocked::NeedsAttention)?;
-        // One registry transaction per path; repeated child permits on the same
-        // registry must not deadlock by reacquiring its mutation lock.
-        let permits = authority
-            .members
-            .values()
-            .map(|c| c.ownership.as_ref().ok_or(StartupBlocked::OwnerBlocked))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut paths = std::collections::BTreeMap::new();
-        for permit in &permits {
-            paths.entry(permit.registry_path.clone()).or_insert(*permit);
-        }
-        {
-            let mut guards = paths
-                .values()
-                .map(|p| p.mutation_guard().map_err(|_| StartupBlocked::OwnerBlocked))
-                .collect::<Result<Vec<_>, _>>()?;
-            // All distinct generations, not just the first thread, are checked
-            // under the same registry guard before crossing the writer boundary.
-            for permit in &permits {
-                let position = paths
-                    .keys()
-                    .position(|path| path == &permit.registry_path)
-                    .ok_or(StartupBlocked::OwnerBlocked)?;
-                guards[position]
-                    .guard_generation(permit)
-                    .map_err(|_| StartupBlocked::OwnerBlocked)?;
-            }
-            self.inputs
-                .writer
-                .release_prepared_claim_if_unexecuted(
-                    claim.claim_id.clone(),
-                    "core_startup_declined".into(),
-                )
-                .map_err(|_| StartupBlocked::NeedsAttention)?;
-        }
+        self.inputs
+            .writer
+            .release_prepared_claim_if_unexecuted(
+                claim.claim_id.clone(),
+                "core_startup_declined".into(),
+            )
+            .map_err(|_| StartupBlocked::NeedsAttention)?;
         if let Ok(runtime::RecoveryClaimHandle::Quarantined(handle)) =
             self.inputs.runtime.recover_recovery_claim(
                 &claim.claim_id,
@@ -421,8 +391,7 @@ impl<'a> StartupCoordinator<'a> {
     }
 
     /// Stage only an existing Prepared claim for explicit, reserved Resume.
-    /// This never creates a claim, acquires an owner, or creates a thread-root
-    /// binding. Current execution authority and planned gates still apply.
+    /// This creates neither a claim nor a thread-root binding. Current execution authority and planned gates still apply.
     /// The startup proof and catalog remain private to this coordinator.
     pub fn prepare_existing(&self, id: &str) -> Result<PreparedStartupComponent, StartupBlocked> {
         self.prepare_current(id, true)
@@ -483,17 +452,12 @@ impl<'a> StartupCoordinator<'a> {
             .map_err(|_| StartupBlocked::StorageUnavailable)?;
         let provider = CurrentAuthorityProvider {
             runtime: self.inputs.runtime,
-            owner: self.inputs.owner,
             bindings: &bindings,
             storage: self.inputs.storage,
             writer: self.inputs.writer,
             config_dir: &self.inputs.options.config_dir,
         };
-        let authority = if existing_only {
-            provider.resolve_owned(&records, &resume)?
-        } else {
-            provider.resolve(&records, &resume)?
-        };
+        let authority = provider.resolve_current(&records, &resume)?;
         if authority.members.values().any(|config| {
             !self
                 .catalog
@@ -502,26 +466,25 @@ impl<'a> StartupCoordinator<'a> {
             return Err(StartupBlocked::CatalogUnavailable);
         }
         let mut command_bindings = Vec::new();
-        // This trusted binding comes from the current host directory/permit,
-        // never from a saved recipe. Install it before the run loop freezes its
-        // tools, or a restored conversation silently loses plan_read and plan_update.
+        // The current host directory (validated by the authority provider), not
+        // the saved recipe alone, grants the command binding.
         for record in records.iter().filter(|record| record.parent.is_none()) {
-            if let Some(config) = authority.members.get(&record.run_id) {
-                let permit = config
-                    .ownership
-                    .as_ref()
-                    .ok_or(StartupBlocked::OwnerBlocked)?;
-                let binding = bindings
-                    .get(&permit.thread_id)
+            if authority.members.contains_key(&record.run_id) {
+                let thread = record
+                    .thread
+                    .as_deref()
                     .ok_or(StartupBlocked::CurrentBindingRequired)?;
-                command_bindings.push((permit.thread_id.clone(), binding));
+                let binding = bindings
+                    .get(thread)
+                    .ok_or(StartupBlocked::CurrentBindingRequired)?;
+                if binding.root != record.run_id || binding.project_root != record.project {
+                    return Err(StartupBlocked::CurrentBindingRequired);
+                }
+                command_bindings.push((thread.to_owned(), binding));
                 if !existing_only {
-                    let _generation = permit
-                        .mutation_guard()
-                        .map_err(|_| StartupBlocked::OwnerBlocked)?;
                     self.inputs
                         .runtime
-                        .bind_thread_root(&permit.thread_id, record.run_id)
+                        .bind_thread_root(thread, record.run_id)
                         .map_err(|_| StartupBlocked::NeedsAttention)?;
                 }
             }

@@ -33,7 +33,7 @@ async fn ac15_handoff_failure_completes_only_reserved_execution_and_allows_retry
     assert!(runtime.shared.run_ids.use_sequential());
     let source = terminal(&runtime, None, Role::Worker).await;
     let target = RunId::new(2);
-    let execution = runtime.reserve_admission(target, None, None);
+    let execution = runtime.reserve_admission(target, None);
     let expected = runtime.execution_snapshot(target).unwrap();
     assert!(Arc::ptr_eq(&execution, &expected));
     let thread = event_bus::escalation_thread_id(&target.to_string());
@@ -70,7 +70,6 @@ async fn ac15_handoff_failure_completes_only_reserved_execution_and_allows_retry
     let b = runtime.execution_snapshot(retry).unwrap();
     assert!(!Arc::ptr_eq(&execution, &b));
     runtime.fail_reserved_admission(target, &execution, "late old failure".into());
-    runtime.update_admission_owner(target, &execution, None);
     b.publication().commit(|| Ok(())).unwrap();
     runtime.cancel(target).unwrap();
 }

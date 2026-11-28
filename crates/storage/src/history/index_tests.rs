@@ -293,6 +293,8 @@ fn trigger_classification_matches_committed_subkinds_and_undo_is_registered() {
     assert_eq!(triggers, 6);
     db.conn
         .execute_batch(concat!(
+            include_str!("../../undo/undo_v81.sql"),
+            include_str!("../../undo/undo_v80.sql"),
             include_str!("../../undo/undo_v79.sql"),
             include_str!("../../undo/undo_v78.sql"),
             include_str!("../../undo/undo_v77.sql"),

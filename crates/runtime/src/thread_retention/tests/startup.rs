@@ -5,31 +5,26 @@ use storage::thread_retention::{BlockReason, RetentionStatus};
 use super::super::startup::{Stage, StartupProgress, run_exclusive_phase_with_progress};
 use super::super::{BINDING_MISMATCH_BLOCK, BindingStatus, StartupBudget, ThreadRetention};
 use super::{NOW_NS, World, policy, ran};
-const NOW_MS: u64 = (NOW_NS / 1_000_000) as u64;
-const DAY_MS: u64 = 86_400_000;
 
-/// A world with archived thread `T` (run `rt`), a Released-style idle owner row and a
-/// scratch directory: everything a confirmation has to clean up outside the database.
+/// An archived thread and scratch directory to reclaim after durable confirmation.
 fn world_with_thread() -> World {
     let world = World::new();
     world.archived_thread("T", "rt");
-    world.owner_row("T", false, 1);
     world.scratch_dir("T");
     world
 }
 
 fn assert_outside_state_untouched(world: &World) {
     assert!(world.tombstones().is_empty(), "no tombstone");
-    assert_eq!(world.owner_rows(), ["T"], "owners.db unchanged");
     assert!(world.scratch_exists("T"), "scratch unchanged");
 }
 
-// Given: a long-archived thread with an idle owner row and scratch files
+// Given: a long-archived thread with scratch files
 // When: the exclusive phase runs
-// Then: the family is confirmed, both sides of the binding exist, and the owner row and
-// scratch directory of the deleted thread are gone; a second phase finds nothing to do.
+// Then: both bindings and tombstones survive, scratch and attachments are removed,
+// and a second phase finds nothing left to reclaim.
 #[test]
-fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
+fn a_confirmed_family_has_its_outside_state_reclaimed() {
     use std::io::Write;
     let world = world_with_thread();
     let attachments = crate::scratch::ThreadScratch::for_ownership_root(&world.root)
@@ -51,12 +46,10 @@ fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
     let view = ran(&report);
 
     assert!(view.confirmed.is_empty());
-    assert_eq!(view.owners_removed, 1);
     assert_eq!(view.scratch.removed, 1);
     assert!(view.errors.is_empty(), "{:?}", view.errors);
     assert!(report.tombstones.contains_thread("T"));
     assert!(report.tombstones.contains_run("rt"));
-    assert!(world.owner_rows().is_empty());
     assert!(!world.scratch_exists("T"));
     assert!(
         !files.path().exists(),
@@ -79,7 +72,7 @@ fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
 
 // Given: each condition that must keep a family from being confirmed
 // When: the phase runs
-// Then: no tombstone appears and owners.db and scratch are unchanged.
+// Then: no tombstone appears and scratch is unchanged.
 #[test]
 fn nothing_outside_the_database_changes_without_a_confirmation() {
     // Even a due and otherwise eligible family is not newly confirmed by startup.
@@ -95,15 +88,13 @@ fn nothing_outside_the_database_changes_without_a_confirmation() {
     }
 }
 
-// Given: a crash (panic) right after each stage
-// When: the phase runs again
-// Then: a confirmation survives a crash at or after its commit and the outside state is
-// reclaimed by the next start; a crash before it leaves everything unchanged.
+// Given: durable tombstones and a crash (panic) after each reclaim stage
+// When: the exclusive phase runs again
+// Then: tombstones survive and the remaining outside state is reclaimed idempotently.
 #[test]
 fn a_crash_after_any_stage_is_resumed_by_the_next_start() {
     for crash_at in [
         Stage::Backfill,
-        Stage::Owners,
         Stage::Scratch,
         Stage::Oversized,
         Stage::Vacuum,
@@ -134,17 +125,9 @@ fn a_crash_after_any_stage_is_resumed_by_the_next_start() {
         assert!(ran(&report).confirmed.is_empty());
         assert!(ran(&report).errors.is_empty(), "{crash_at:?}");
         assert!(report.tombstones.contains_thread("T"));
-        assert!(world.owner_rows().is_empty());
         assert!(!world.scratch_exists("T"));
     }
 }
-
-// Given: owner rows of each kind / When: the phase runs / Then: released and idle rows do
-// not hold a thread; a row claiming a turn holds it until its lease expired for the whole
-// retention period, and confirms (and is removed) after that.
-
-// Given: an owner row that cannot be parsed / When: the phase runs
-// Then: nothing is confirmed (who holds the thread is unknown) and the reason is reported.
 
 // Given: more scratch directories than the budget / When: the phase runs twice
 // Then: each start removes at most the budget and the next one continues.
@@ -175,32 +158,32 @@ fn scratch_removal_is_bounded_per_start_and_continues() {
     assert!(!world.scratch_exists("A") && !world.scratch_exists("B") && !world.scratch_exists("C"));
 }
 
-// Given: a family whose check exceeds the budget / When: retried with doubling
-// Then: it settles as soon as a round fits, and after the last round it waits for the
-// next start (a family is never split, and every round uses twice the previous budget).
-
 // Given: archived, recent, blocked and ordinary threads / When: displaying their status
-// Then: the host gets days left, next-startup, owner blocks and the binding-mismatch reason.
+// Then: the host gets days left, next-startup, pin protection and binding mismatch.
 #[test]
 fn schedule_reports_what_the_host_shows() {
     let world = World::new();
     world.archived_thread("OLD", "r1");
     world.archived_thread("NEW", "r2");
-    world.archived_thread("HELD", "r3");
-    world.owner_row("HELD", true, NOW_MS + DAY_MS);
-    let mut input = world.input(&["OLD", "NEW", "HELD"], &["LIVE"]);
+    world.archived_thread("PINNED", "r3");
+    let mut input = world.input(&["OLD", "NEW", "PINNED"], &["LIVE"]);
     let new = input
         .threads
         .iter_mut()
         .find(|thread| thread.thread_id == "NEW")
         .unwrap();
     new.archived_at_s = Some(NOW_NS / 1_000_000_000 - 86_400);
+    input
+        .threads
+        .iter_mut()
+        .find(|t| t.thread_id == "PINNED")
+        .unwrap()
+        .pinned = true;
     let database = world.database();
-    let registry = world.registry();
     let status = |binding: &BindingStatus,
                   policy: &storage::thread_retention::ThreadRetentionPolicy|
      -> std::collections::BTreeMap<String, RetentionStatus> {
-        ThreadRetention::schedule(&database, &input, policy, binding, Some(&registry))
+        ThreadRetention::schedule(&database, &input, policy, binding)
             .unwrap()
             .into_iter()
             .collect()
@@ -211,13 +194,13 @@ fn schedule_reports_what_the_host_shows() {
     assert_eq!(shown["OLD"], RetentionStatus::DueNextStartup);
     assert_eq!(shown["NEW"], RetentionStatus::DueIn { days: 6 });
     assert!(matches!(
-        shown["HELD"],
-        RetentionStatus::Blocked(BlockReason::Owner(_))
+        shown["PINNED"],
+        RetentionStatus::Blocked(BlockReason::Pinned)
     ));
     assert_eq!(shown["LIVE"], RetentionStatus::NotArchived);
 
     let mismatch = status(&BindingStatus::Mismatch("x".into()), &normal);
-    let blocked = RetentionStatus::Blocked(BlockReason::Owner(BINDING_MISMATCH_BLOCK.into()));
+    let blocked = RetentionStatus::Blocked(BlockReason::SafetyHold(BINDING_MISMATCH_BLOCK.into()));
     assert_eq!(mismatch["OLD"], blocked);
     assert_eq!(mismatch["NEW"], blocked);
     assert_eq!(mismatch["LIVE"], RetentionStatus::NotArchived);
@@ -280,8 +263,7 @@ fn oversized_left(world: &World, id: i64) -> (i64, i64) {
 
 // Given: a registered oversized row (as another change registers them) and a retention
 // period of 0 / When: the phase runs / Then: nothing new is confirmed but the row is
-// reclaimed; and the same holds when the binding does not match, where the owner rows
-// and scratch directories are left alone.
+// reclaimed; when the binding does not match, scratch directories are left alone.
 #[test]
 fn database_maintenance_does_not_depend_on_the_retention_period_or_the_binding() {
     let world = world_with_thread();
@@ -319,7 +301,7 @@ fn database_maintenance_does_not_depend_on_the_retention_period_or_the_binding()
 }
 
 // Given: a host observing a start / When: the phase runs / Then: it is told, in order and
-// before the phase returns, every stage and the confirmed family (public API only).
+// before the phase returns, every recovery stage (public API only).
 #[test]
 fn progress_is_delivered_to_an_external_observer_in_order() {
     let world = world_with_thread();
@@ -341,21 +323,11 @@ fn progress_is_delivered_to_an_external_observer_in_order() {
     let both = |stage| [StageStarted(stage), StageFinished(stage)];
     let mut expected = Vec::new();
     expected.extend(both(Stage::Backfill));
-    for stage in [
-        Stage::Owners,
-        Stage::Scratch,
-        Stage::Oversized,
-        Stage::Vacuum,
-    ] {
+    for stage in [Stage::Scratch, Stage::Oversized, Stage::Vacuum] {
         expected.extend(both(stage));
     }
     assert_eq!(events, expected);
 }
-
-// Given: two due families and a database failure after the first is confirmed
-// When: the phase runs / Then: it still returns a report that names the confirmed
-// family and the failure (and reclaims the confirmed one's owner row and scratch), instead
-// of an error that hides the committed deletion.
 
 fn scratch_dir_with_files(world: &World, thread: &str, files: usize) -> std::path::PathBuf {
     let dir = world.scratch_dir(thread);
@@ -520,10 +492,6 @@ fn entries_removed_before_a_failure_count_against_the_start_budget() {
     std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-// Given: an owners.db that cannot even be examined (a symlink loop)
-// When: the phase runs / Then: that is not "no registry": nothing is confirmed, no
-// tombstone is written, nothing outside the database changes and the reason is reported.
-
 // Given: a scratch parent that cannot be examined (a symlink loop) and a confirmed thread
 // When: the phase runs / Then: the failure to look is reported for the thread (not read as
 // "no directory"), and the next start with a readable parent finishes the removal.
@@ -627,7 +595,7 @@ fn index_blocks(world: &World) -> (i64, i64) {
 // Given: the archive purge handed an oversized index block of an archived thread to the
 // exclusive phase / When: the phase runs with a retention period of 0, or with a binding
 // that does not match / Then: the block is deleted and the registration dropped, while the
-// owner rows and scratch directory stay; and when the thread was unarchived in the
+// scratch directory stays; and when the thread was unarchived in the
 // meantime, nothing is deleted and only the registration is dropped.
 #[test]
 fn an_archived_threads_oversized_index_block_is_reclaimed_whatever_the_retention_period() {

@@ -32,36 +32,6 @@ fn record(process: &Process, child: &str) -> storage::pull_requests::Inheritance
         .unwrap()
 }
 
-// Given: a child whose lease moves to another process while a fetch it waits on is under way,
-// a fetch that stays valid for the parent / When: the answer arrives / Then: the shared answer
-// does not stand in for the child's own authority: nothing is inherited
-#[tokio::test(start_paused = true)]
-async fn a_child_that_lost_its_lease_during_the_fetch_does_not_take_the_link() {
-    let world = World::new();
-    let mut first = world.process(enabled());
-    let second = world.process(enabled());
-    linked_parent(&mut first, open_running(1)).await;
-    let gate = first.source.push_gate(&key(1));
-    let parent_permit = first.permit("t1");
-    let child_permit = first.permit("c1");
-    first
-        .service
-        .inherit("t1", "c1", DerivedThreadKind::Escalation)
-        .await
-        .unwrap();
-    gate.arrived().await;
-    first.service.refresh("t1", &parent_permit).await.unwrap();
-    settle().await;
-
-    first.host.handoff(&child_permit, &second.host).unwrap();
-    gate.release_ok(open_running(1));
-    settle().await;
-
-    assert_eq!(record(&first, "c1").state, InheritanceState::Pending);
-    assert!(first.state("c1").active_link.is_none());
-    drop(second);
-}
-
 // Given: a pull request that cannot be fetched and a pending inheritance / When: time passes /
 // Then: the attempts follow the pull request's backoff, shared with the parent's tracking
 #[tokio::test(start_paused = true)]
@@ -73,7 +43,6 @@ async fn a_pending_inheritance_waits_for_the_backoff_of_its_pull_request() {
         .source
         .push_err(&key(1), FetchError::Network("down".into()));
     process.source.repeat_last();
-    process.permit("c1");
 
     process
         .service
@@ -115,7 +84,6 @@ async fn an_open_pull_request_is_inherited() {
     linked_parent(&mut process, open_running(1)).await;
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    process.permit("c1");
 
     let scheduled = process
         .service
@@ -150,7 +118,6 @@ async fn a_merged_pull_request_is_not_inherited() {
     let merged = fetched(1, facts(PullRequestState::Merged, passing()));
     linked_parent(&mut process, merged.clone()).await;
     process.source.push_ok(&key(1), merged);
-    process.permit("c1");
 
     process
         .service
@@ -177,7 +144,6 @@ async fn an_unconfirmed_pull_request_stays_pending_until_it_can_be_confirmed() {
         .push_err(&key(1), FetchError::Network("down".into()));
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    process.permit("c1");
 
     process
         .service
@@ -217,7 +183,6 @@ async fn a_pending_inheritance_is_resolved_after_a_restart() {
 
     let mut second = world.process(enabled());
     second.source.push_ok(&key(1), open_running(1));
-    second.permit("c1");
 
     assert!(matches!(
         next_for(&mut second, "c1").await,
@@ -306,16 +271,15 @@ async fn an_unlink_before_the_resolution_is_never_undone() {
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
     let calls_before = process.source.calls().len();
-    let permit = process.permit("c1");
     process
         .service
         .inherit("t1", "c1", DerivedThreadKind::Escalation)
         .await
         .unwrap();
 
-    process.service.unlink("c1", 0, &permit).await.unwrap();
+    process.service.unlink("c1", 0).await.unwrap();
     settle().await;
-    let late = process.service.resolve_inheritance("c1", &permit).await;
+    let late = process.service.resolve_inheritance("c1").await;
 
     assert!(matches!(
         late,
@@ -339,7 +303,6 @@ async fn the_parent_unlinking_does_not_touch_the_child() {
     linked_parent(&mut process, open_running(1)).await;
     process.source.push_ok(&key(1), open_running(1));
     process.source.repeat_last();
-    process.permit("c1");
     process
         .service
         .inherit("t1", "c1", DerivedThreadKind::Escalation)
@@ -347,13 +310,8 @@ async fn the_parent_unlinking_does_not_touch_the_child() {
         .unwrap();
     next_for(&mut process, "c1").await;
 
-    let permit = process.permit("t1");
     let revision = process.state("t1").lifecycle_revision;
-    process
-        .service
-        .unlink("t1", revision, &permit)
-        .await
-        .unwrap();
+    process.service.unlink("t1", revision).await.unwrap();
 
     assert_eq!(process.state("c1").active_link.unwrap().key, key(1));
     assert_eq!(record(&process, "c1").state, InheritanceState::Applied);
@@ -369,7 +327,6 @@ async fn no_candidate_is_offered_for_the_merged_pull_request_of_a_derived_thread
     let merged = fetched(1, facts(PullRequestState::Merged, passing()));
     linked_parent(&mut process, merged.clone()).await;
     process.source.push_ok(&key(1), merged);
-    process.permit("c1");
     process
         .service
         .inherit("t1", "c1", DerivedThreadKind::Escalation)

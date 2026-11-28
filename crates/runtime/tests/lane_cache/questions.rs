@@ -31,7 +31,7 @@ impl runtime::lane_delivery::LaneDeliveryHost for Host {
     ) -> Result<runtime::lane_delivery::LaneDeliveryTarget, storage::lane_delivery::LaneDeliveryNack>
     {
         if self.held.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(storage::lane_delivery::LaneDeliveryNack::Readonly);
+            return Err(storage::lane_delivery::LaneDeliveryNack::BindingConflict);
         }
         if thread != "lead" {
             return Err(storage::lane_delivery::LaneDeliveryNack::UnknownThread);

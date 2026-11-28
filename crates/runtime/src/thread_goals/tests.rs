@@ -1031,32 +1031,8 @@ async fn restoring_handoff_snapshots_keeps_one_owner_and_removes_replaced_root_b
 }
 
 #[tokio::test]
-async fn failed_handoff_preparation_keeps_goal_and_source_ownership_unchanged() {
-    use crate::ownership::{Lease, OwnerPermit, OwnerState, Registry, ThreadOwner};
-    for failure in [
-        "stale",
-        "quiescing",
-        "target-owner",
-        "target-goal",
-        "handoff-limit",
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let registry_path = directory.path().join("owners.db");
-        let mut registry = Registry::open(&registry_path).unwrap();
-        let lease = Lease {
-            owner_id: "host".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        };
-        registry
-            .start(&ThreadOwner::new("thread".into(), lease.clone()))
-            .unwrap();
-        let permit = OwnerPermit {
-            registry_path,
-            thread_id: "thread".into(),
-            lease,
-            run_id: None,
-        };
+async fn failed_handoff_preparation_keeps_goal_and_source_binding_unchanged() {
+    for failure in ["target-goal", "handoff-limit"] {
         let (runtime, _, _) = harness(vec![], vec![]);
         let source = runtime.reserve_run_id();
         let target = runtime.reserve_run_id();
@@ -1071,27 +1047,6 @@ async fn failed_handoff_preparation_keeps_goal_and_source_ownership_unchanged() 
             )
             .unwrap();
         match failure {
-            "stale" => {
-                registry
-                    .update("thread", |owner| {
-                        owner.lease.generation += 1;
-                        Ok(())
-                    })
-                    .unwrap();
-            }
-            "quiescing" => {
-                registry
-                    .update("thread", |owner| {
-                        owner.state = OwnerState::Quiescing;
-                        Ok(())
-                    })
-                    .unwrap();
-            }
-            "target-owner" => {
-                registry
-                    .start(&ThreadOwner::new(child.clone(), permit.lease.clone()))
-                    .unwrap();
-            }
             "target-goal" => {
                 runtime.bind_thread_root(&child, target).unwrap();
             }
@@ -1111,10 +1066,9 @@ async fn failed_handoff_preparation_keeps_goal_and_source_ownership_unchanged() 
             _ => unreachable!(),
         }
         let previous = runtime.thread_goal("thread").unwrap();
-        let owners = registry.list().unwrap();
         assert!(
             runtime
-                .handoff_thread_goal(source, target, Some(&permit), |_| {
+                .handoff_thread_goal(source, target, || {
                     panic!("terminal state must not be published on {failure}");
                 })
                 .is_err(),
@@ -1122,7 +1076,6 @@ async fn failed_handoff_preparation_keeps_goal_and_source_ownership_unchanged() 
         );
         assert_eq!(runtime.thread_goal("thread").unwrap(), previous);
         assert_eq!(runtime.goal_thread(source).as_deref(), Some("thread"));
-        assert_eq!(registry.list().unwrap(), owners);
         assert!(runtime.thread_goal(&child).is_none());
     }
 }
@@ -1234,25 +1187,7 @@ async fn surviving_old_root_child_remains_accounted_and_fenced_after_handoff() {
 }
 
 #[tokio::test]
-async fn real_escalation_keeps_paused_chat_alive_and_fences_root_and_reviewer() {
-    use crate::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
-    let directory = tempfile::tempdir().unwrap();
-    let registry_path = directory.path().join("owners.db");
-    let mut registry = Registry::open(&registry_path).unwrap();
-    let lease = Lease {
-        owner_id: "host".into(),
-        generation: 1,
-        expires_at: u64::MAX,
-    };
-    registry
-        .start(&ThreadOwner::new("thread".into(), lease.clone()))
-        .unwrap();
-    let permit = OwnerPermit {
-        registry_path,
-        thread_id: "thread".into(),
-        lease,
-        run_id: None,
-    };
+async fn real_escalation_keeps_paused_goal_and_cancels_its_reviewer() {
     let review_started = Arc::new(Notify::new());
     let review_release = Arc::new(Notify::new());
     let (runtime, _, mut events) = harness(
@@ -1284,7 +1219,6 @@ async fn real_escalation_keeps_paused_chat_alive_and_fences_root_and_reviewer() 
             RunConfig {
                 interactive: true,
                 keep_alive: true,
-                ownership: Some(permit),
                 ..Default::default()
             },
         )
@@ -1316,43 +1250,24 @@ async fn real_escalation_keeps_paused_chat_alive_and_fences_root_and_reviewer() 
         .into_iter()
         .find(|run| run.role_name == Role::Reviewer.name())
         .unwrap();
-    assert!(
-        registry
-            .attach(&thread)
-            .unwrap()
-            .active_runs
-            .contains(&reviewer.run_id.to_string()),
-        "the independent reviewer must inherit the owner lease with its own run ID"
+    assert_eq!(runtime.goal_thread(source), None);
+    assert_eq!(
+        runtime.goal_thread(target).as_deref(),
+        Some(thread.as_str())
     );
+    let reviewer_config = runtime
+        .shared
+        .runs
+        .lock()
+        .unwrap()
+        .get(&reviewer.run_id)
+        .unwrap()
+        .config
+        .clone();
     assert!(
-        !registry
-            .attach("thread")
-            .unwrap()
-            .active_runs
-            .contains(&target.to_string())
+        matches!(reviewer_config.purpose, crate::RunPurpose::ThreadGoalReview { root_run_id, .. } if root_run_id == target)
     );
-    registry
-        .update("thread", |owner| {
-            owner.lease.generation += 1;
-            Ok(())
-        })
-        .unwrap();
-    runtime
-        .set_model_preference(target, None)
-        .expect("reclaiming the old worker thread cannot fence its independently owned child");
-    registry
-        .update(&thread, |owner| {
-            owner.lease.generation += 1;
-            Ok(())
-        })
-        .unwrap();
-    assert!(
-        matches!(
-            runtime.send_message(target, "stale host follow-up".into()),
-            Err(RuntimeError::StaleOwnership { .. })
-        ),
-        "the escalated root must retain owner-generation fencing"
-    );
+    runtime.cancel(target).unwrap();
     review_release.notify_one();
     assert_eq!(
         runtime.wait(reviewer.run_id).await.unwrap(),
@@ -1363,72 +1278,6 @@ async fn real_escalation_keeps_paused_chat_alive_and_fences_root_and_reviewer() 
         runtime.thread_goal(&thread).unwrap().phase,
         ThreadGoalPhase::Complete
     );
-}
-
-#[tokio::test]
-async fn handoff_waits_for_owner_readers_before_locking_goal_controls() {
-    use crate::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
-    let directory = tempfile::tempdir().unwrap();
-    let registry_path = directory.path().join("owners.db");
-    let mut registry = Registry::open(&registry_path).unwrap();
-    let lease = Lease {
-        owner_id: "host".into(),
-        generation: 1,
-        expires_at: u64::MAX,
-    };
-    registry
-        .start(&ThreadOwner::new("thread".into(), lease.clone()))
-        .unwrap();
-    let permit = OwnerPermit {
-        registry_path,
-        thread_id: "thread".into(),
-        lease,
-        run_id: None,
-    };
-    let (runtime, _, _) = harness(vec![], vec![]);
-    let source = runtime.reserve_run_id();
-    let target = runtime.reserve_run_id();
-    runtime.bind_thread_root("thread", source).unwrap();
-    let goal = runtime
-        .create_thread_goal(
-            "thread",
-            source,
-            "Objective".into(),
-            vec!["Evidence".into()],
-        )
-        .unwrap();
-    let reader = permit.mutation_guard().unwrap();
-    let (entered, observed) = std::sync::mpsc::sync_channel(0);
-    let (resume, released) = std::sync::mpsc::sync_channel(0);
-    let worker = std::thread::spawn({
-        let runtime = runtime.clone();
-        move || {
-            Registry::observe_writer_contention(entered, released);
-            runtime.handoff_thread_goal(source, target, Some(&permit), |_| {})
-        }
-    });
-    observed.recv().unwrap();
-    // This is the GUI's real ownership-read -> goal-control order, while the
-    // handoff is known to be waiting for that same SQLite generation reader.
-    runtime
-        .set_goal_checks_paused("thread", &goal.goal_id, true)
-        .unwrap();
-    runtime
-        .set_goal_review("thread", &goal.goal_id, true)
-        .unwrap();
-    let latest = runtime.thread_goal("thread").unwrap();
-    drop(reader);
-    resume.send(()).unwrap();
-    worker.join().unwrap().unwrap();
-    let child = event_bus::escalation_thread_id(&target.to_string());
-    let inherited = runtime.thread_goal(&child).unwrap();
-    assert!(inherited.checks_paused && inherited.review_enabled);
-    assert_eq!(inherited.goal_id, latest.goal_id);
-    assert!(inherited.epoch > latest.epoch);
-    runtime
-        .set_goal_checks_paused(&child, &goal.goal_id, false)
-        .unwrap();
-    assert!(!runtime.thread_goal(&child).unwrap().checks_paused);
 }
 
 #[tokio::test]

@@ -20,10 +20,7 @@ fn stream_append_preserves_session_identity_and_normal_session_limits() {
         delta: "answer".into(),
     });
     // When: a cross-session stream accepts the event.
-    writer
-        .handle()
-        .append_stream_event("gui", &event, None)
-        .unwrap();
+    writer.handle().append_stream_event("gui", &event).unwrap();
     // Then: session queries still work and ordinary appends remain bounded.
     let events = Database::open(&config)
         .unwrap()
@@ -78,7 +75,7 @@ fn stream_append_keeps_event_size_limit_but_only_warns_on_volume_limits() {
             delta: "answer".into(),
         });
         // When: the GUI stream attempts to persist an event.
-        let result = writer.handle().append_stream_event("gui", &event, None);
+        let result = writer.handle().append_stream_event("gui", &event);
         // Then: only the single-event limit rejects the write; the volume limits warn.
         let stored = Database::open(&config)
             .unwrap()

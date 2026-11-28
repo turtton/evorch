@@ -151,7 +151,6 @@ summarizer = "structural"
         .bind_thread_root("selection-cache-thread", run)
         .unwrap();
     let mut observed = vec![];
-    let mut recovered_owner = None;
     waiting(&mut events, run, &mut observed).await;
     for (turn, (profile, model, effort, explicit)) in choices[1..].iter().enumerate() {
         let update = if *explicit {
@@ -271,13 +270,6 @@ summarizer = "structural"
             runtime
                 .restore_relations_and_continuations(&mut paused)
                 .unwrap();
-            let sockets = test_socket_dir::SplitDir::new();
-            let owner = runtime::ownership::OwnerHost::open(
-                sockets.sockets(),
-                Default::default(),
-                Arc::new(EventBus::new(64)),
-            )
-            .unwrap();
             let authority = runtime::CurrentRecoveryAuthority {
                 members: BTreeMap::from([(
                     run,
@@ -285,7 +277,6 @@ summarizer = "structural"
                         interactive: true,
                         keep_alive: true,
                         model_preference: Some(preference(profile, model, effort.unwrap())),
-                        ownership: Some(owner.start("selection-cache-thread").unwrap()),
                         ..Default::default()
                     },
                 )]),
@@ -305,8 +296,6 @@ summarizer = "structural"
                 .1
                 .release();
             waiting(&mut events, run, &mut observed).await;
-            // The owner must outlive the restored run, not just activation.
-            recovered_owner = Some((sockets, owner));
         }
     }
     let requests = chat_requests(&mock);
@@ -357,5 +346,4 @@ summarizer = "structural"
     assert_eq!(mock.remaining_scripts(), 0);
     runtime.cancel(run).unwrap();
     runtime.wait(run).await.unwrap();
-    drop(recovered_owner);
 }

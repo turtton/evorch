@@ -33,125 +33,51 @@ impl AdminInspection {
         }
     }
 }
-/// One retained thread expectation and the currently observed row. The hold
-/// itself is not minted from these views; the later Q2 integration owns evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetainedOwner<'a> {
-    pub retained_identity: &'a str,
-    pub retained_generation: u64,
-    pub current_identity: Option<&'a str>,
-    pub current_generation: Option<u64>,
-}
-impl RetainedOwner<'_> {
-    fn matches(&self, live_owner: &str) -> bool {
-        self.retained_identity == live_owner
-            && self.current_identity == Some(live_owner)
-            && self.current_generation == Some(self.retained_generation)
-    }
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevocationObservation {
     NotApplied,
     Confirmed,
     Unknown,
 }
-/// ManualPending and owner-count overflow never make an eligible graph vanish.
-/// No owner limit is applied here: an over-limit graph remains a restart blocker.
+/// Persisted facts of one owned graph. ManualPending and thread-count overflow
+/// never make an eligible graph vanish: no thread limit is applied here, so an
+/// over-limit graph remains a restart blocker. Nothing here is authority.
+///
+/// ```compile_fail
+/// fn not_authority(facts: workbench_host::admin::GraphDisposalFacts) {
+///     let _: runtime::DisposalAuthority = facts.into();
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphOwnership<'a> {
+pub struct GraphDisposalFacts {
+    /// The graph was adopted by this core's own successor epoch.
     pub verified_live_adoption: bool,
-    pub owners: &'a [RetainedOwner<'a>],
+    /// Distinct threads of the graph, including members beyond the displayed 64.
+    pub thread_count: usize,
     pub resume_committed: bool,
     pub disposal_complete: bool,
     pub revocation: RevocationObservation,
 }
-/// Read-only aggregate of all members, including those beyond the displayed 64.
-/// Fields stay private and cannot be converted into owner CAS or authority.
-///
-/// ```no_run
-/// fn summary(view: &runtime::OwnedGraphOwnershipDiagnostic) {
-///     let summary = workbench_host::admin::GraphOwnershipSummary::try_from(view).unwrap();
-///     let _ = summary.is_undisposed(false, false,
-///         workbench_host::admin::RevocationObservation::NotApplied);
-/// }
-/// ```
-/// ```compile_fail
-/// fn not_authority(summary: workbench_host::admin::GraphOwnershipSummary) {
-///     let _: runtime::DisposalAuthority = summary.into();
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphOwnershipSummary {
-    verified_live_adoption: bool,
-    has_owners: bool,
-    all_retained_self: bool,
-    all_current_match: bool,
-}
-impl TryFrom<&runtime::OwnedGraphOwnershipDiagnostic> for GraphOwnershipSummary {
-    type Error = AdminFailure;
-    fn try_from(view: &runtime::OwnedGraphOwnershipDiagnostic) -> Result<Self, Self::Error> {
-        if view.state() == runtime::OwnedGraphOwnershipState::Unavailable {
-            return Err(failure(
-                ErrorCode::StorageUnavailable,
-                "ownership observation unavailable",
-            ));
-        }
-        Ok(Self {
-            verified_live_adoption: view.verified_adoption(),
-            has_owners: view.owner_count() > 0,
-            all_retained_self: view.retained_owner_count() == view.owner_count(),
-            all_current_match: view.state() == runtime::OwnedGraphOwnershipState::LiveSelf,
-        })
-    }
-}
-impl GraphOwnershipSummary {
-    fn from_slice(graph: &GraphOwnership<'_>, live_owner: &str) -> Self {
-        Self {
-            verified_live_adoption: graph.verified_live_adoption,
-            has_owners: !graph.owners.is_empty(),
-            all_retained_self: graph
-                .owners
-                .iter()
-                .all(|o| o.retained_identity == live_owner),
-            all_current_match: graph.owners.iter().all(|o| o.matches(live_owner)),
-        }
-    }
-    pub fn is_undisposed(
-        &self,
-        resume_committed: bool,
-        disposal_complete: bool,
-        revocation: RevocationObservation,
-    ) -> bool {
+impl GraphDisposalFacts {
+    /// A restart blocker: adopted, not resumed, and its durable revocation is
+    /// not yet confirmed (or its disposal is complete, which ends it).
+    pub fn is_undisposed(&self) -> bool {
         self.verified_live_adoption
-            && self.has_owners
-            && self.all_retained_self
-            && !resume_committed
-            && !disposal_complete
-            && (self.all_current_match || revocation == RevocationObservation::Unknown)
+            && self.thread_count > 0
+            && !self.resume_committed
+            && !self.disposal_complete
+            && self.revocation != RevocationObservation::Confirmed
     }
-    pub fn is_incomplete_disposal(
-        &self,
-        disposal_complete: bool,
-        revocation: RevocationObservation,
-    ) -> bool {
+    /// Durable revocation is confirmed and only physical cleanup is left. It is
+    /// a warning, never a restart blocker: a cleanup that cannot be proven
+    /// (shared or unknown scratch users) retains the scratch and must not hold
+    /// every later restart.
+    pub fn is_incomplete_disposal(&self) -> bool {
         self.verified_live_adoption
-            && self.has_owners
-            && self.all_retained_self
-            && revocation == RevocationObservation::Confirmed
-            && !disposal_complete
-            && !self.all_current_match
+            && self.thread_count > 0
+            && self.revocation == RevocationObservation::Confirmed
+            && !self.disposal_complete
     }
-}
-pub fn is_undisposed(graph: &GraphOwnership<'_>, live_owner: &str) -> bool {
-    GraphOwnershipSummary::from_slice(graph, live_owner).is_undisposed(
-        graph.resume_committed,
-        graph.disposal_complete,
-        graph.revocation,
-    )
-}
-pub fn is_incomplete_disposal(graph: &GraphOwnership<'_>, live_owner: &str) -> bool {
-    GraphOwnershipSummary::from_slice(graph, live_owner)
-        .is_incomplete_disposal(graph.disposal_complete, graph.revocation)
 }
 
 /// Snapshot-local alias collision detector. Raw identities stay server-side;

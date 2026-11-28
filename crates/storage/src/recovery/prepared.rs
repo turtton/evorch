@@ -78,7 +78,7 @@ pub(super) fn membership(
     }
     let manifest =
         load(conn, &claim.manifest_id).map_err(|_| invalid("corrupt recovery manifest"))?;
-    if !manifest.committed || manifest.superseded || manifest.schema_version != 1 {
+    if !manifest.committed || manifest.superseded || manifest.schema_version != 2 {
         return Err(invalid("recovery manifest is not current"));
     }
     let resume = manifest

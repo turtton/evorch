@@ -62,14 +62,13 @@ fn adopt_for_stop(
     f: &Fixture,
     runtime: &AgentRuntime,
     paused: crate::PausedRecoveryComponent,
-) -> (crate::ownership::OwnerHost, crate::PausedRecoveryComponent) {
+) -> crate::PausedRecoveryComponent {
     let run = paused.claim().members[0].run_id.parse().unwrap();
-    let (owner, authority) = prepared_adoption::authority(f, run);
+    let authority = prepared_adoption::authority(f, run);
     let (proof, startup, root) = prepared_adoption::evidence(f, &paused.claim().claim_id);
-    let adopted = runtime
+    runtime
         .adopt_prepared_claim(proof, startup, &root, &authority)
-        .unwrap();
-    (owner, adopted)
+        .unwrap()
 }
 
 #[test]
@@ -112,7 +111,7 @@ async fn activation_ack_keeps_manual_reservation_contended_until_binding_publica
         let run = saved(&f).await;
         let runtime = new_process(&f);
         let prepared = prepare(&f, &runtime);
-        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let authority = prepared_adoption::authority(&f, run);
         let (proof, startup, root) = prepared_adoption::evidence(&f, &prepared.claim().claim_id);
         let mut paused = runtime
             .adopt_prepared_claim(proof, startup, &root, &authority)
@@ -161,7 +160,7 @@ async fn known_activation_failure_retains_reservation_until_caller_cleanup_finis
     let run = saved(&f).await;
     let runtime = new_process(&f);
     let paused = prepare(&f, &runtime);
-    let (_owner, authority) = prepared_adoption::authority(&f, run);
+    let authority = prepared_adoption::authority(&f, run);
     let manifest = paused.claim().manifest_id.clone();
     let reservation = runtime.reserve_automatic_activation(&manifest).unwrap();
     // Missing relations is a definite pre-writer failure, not an uncertain ACK.
@@ -206,7 +205,7 @@ async fn automatic_ack_supervisor_reconciles_only_known_results_without_new_effe
         let run = saved(&f).await;
         let runtime = new_process(&f);
         let paused = prepare(&f, &runtime);
-        let (_owner, authority) = prepared_adoption::authority(&f, run);
+        let authority = prepared_adoption::authority(&f, run);
         let (proof, startup, root) = prepared_adoption::evidence(&f, &paused.claim().claim_id);
         let mut paused = runtime
             .adopt_prepared_claim(proof, startup, &root, &authority)
@@ -452,12 +451,6 @@ async fn startup_message_ids(retain_correlations: bool) {
     let leases =
         storage::shared_with_wait(&f.config.db_path, &ownership, std::time::Duration::ZERO)
             .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
     for component in &plan.components {
         let startup = leases
             .recovery_startup_complete(&f.config.db_path, &ownership)
@@ -482,7 +475,6 @@ async fn startup_message_ids(retain_correlations: bool) {
                             (
                                 *id,
                                 RunConfig {
-                                    ownership: Some(owner.start(&id.to_string()).unwrap()),
                                     interactive: *id != child,
                                     keep_alive: *id != child,
                                     ..Default::default()
@@ -557,7 +549,7 @@ async fn prepare_and_drop_leave_exact_snapshot_and_pending_claim_without_executi
         .unwrap()
         .unwrap();
     let paused = prepare(&f, &runtime);
-    let (_owner, paused) = adopt_for_stop(&f, &runtime, paused);
+    let paused = adopt_for_stop(&f, &runtime, paused);
     assert!(runtime.has_paused_recovery());
     assert!(runtime.list_agents().is_empty());
     assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
@@ -608,7 +600,7 @@ async fn paused_stop_cancel_and_subtree_cancel_fence_the_old_incarnation() {
         let runtime = new_process(&f);
         let db = storage::Database::open(&f.config).unwrap();
         let paused = prepare(&f, &runtime);
-        let (_owner, paused) = adopt_for_stop(&f, &runtime, paused);
+        let paused = adopt_for_stop(&f, &runtime, paused);
         let old = paused.claim().members[0].old_incarnation.clone();
         let revision = paused.claim().members[0].reserved_revision;
         let reason = if mode == 0 {
@@ -915,13 +907,6 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
-    let permit = owner.start("current").unwrap();
     let authority = crate::CurrentRecoveryAuthority {
         members: [root, child]
             .into_iter()
@@ -929,7 +914,6 @@ async fn activation_commits_once_and_publishes_the_whole_family_before_starting(
                 (
                     id,
                     RunConfig {
-                        ownership: Some(permit.clone()),
                         interactive: true,
                         keep_alive: true,
                         ..Default::default()
@@ -1068,17 +1052,10 @@ async fn post_activation_fault(point: crate::runtime::HookPoint, published: bool
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
     let authority = crate::CurrentRecoveryAuthority {
         members: BTreeMap::from([(
             run,
             RunConfig {
-                ownership: Some(owner.start("current").unwrap()),
                 interactive: true,
                 keep_alive: true,
                 ..Default::default()
@@ -1194,12 +1171,6 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
     let execution = runtime.execution_snapshot(run).unwrap();
     let model = f.model.clone();
     runtime.on_execution(
@@ -1220,7 +1191,6 @@ async fn recovery_provider_admission_is_also_behind_the_component_gate() {
                 members: BTreeMap::from([(
                     run,
                     RunConfig {
-                        ownership: Some(owner.start("current").unwrap()),
                         interactive: true,
                         keep_alive: true,
                         ..Default::default()

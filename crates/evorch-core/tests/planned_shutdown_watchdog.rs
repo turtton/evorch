@@ -85,10 +85,12 @@ fn cold_listener_accept_error_without_capture_keeps_original_error() {
     .unwrap();
     let _connection = std::os::unix::net::UnixStream::connect(record.socket).unwrap();
     let error = support::wait(&mut child, 1);
-    // The same FD limit also makes the existing cleanup open fail. Keep that
-    // original product error/code1; this change must not replace it with 74.
+    // Previously OwnerHost::begin_quiesce reopened owners.db during cleanup:
+    // that EMFILE failure was wrapped as "durable intent" and masked accept's
+    // error. No owner DB is opened now, so preserve the original accept EMFILE
+    // and code 1 (checked above), not the planned-watchdog exit code 74.
     assert!(
-        error.contains("durable intent: unable to open database file"),
+        error.contains("evorch-core: Too many open files (os error 24)"),
         "{error}"
     );
 }

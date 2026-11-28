@@ -114,8 +114,6 @@ fn discard(request_id: &str, item: &QuarantineItem, epoch: u64) -> RequestEnvelo
                     capture_id: item.capture_id.clone(),
                     expected_revision: item.revision,
                     expected_core_epoch: workbench_protocol::wire::InstanceEpoch(epoch),
-                    owner_identity: None,
-                    owner_generation: None,
                     operation_id: id(request_id),
                 },
                 confirmed: true,

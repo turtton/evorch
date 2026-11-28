@@ -1,33 +1,20 @@
 //! Prepared adoption exercises the production writer proof, not invented IDs.
 #[path = "recovery_model_tests.rs"]
 mod models;
-#[path = "recovery_owner_tests.rs"]
-mod prepared_owner;
 use super::*;
 use crate::CurrentRecoveryAuthority;
 
-pub(super) fn authority(
-    f: &Fixture,
-    run: RunId,
-) -> (crate::ownership::OwnerHost, CurrentRecoveryAuthority) {
-    let owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
-    let authority = CurrentRecoveryAuthority {
+pub(super) fn authority(_f: &Fixture, run: RunId) -> CurrentRecoveryAuthority {
+    CurrentRecoveryAuthority {
         members: BTreeMap::from([(
             run,
             RunConfig {
-                ownership: Some(owner.start(&run.to_string()).unwrap()),
                 interactive: true,
                 keep_alive: true,
                 ..Default::default()
             },
         )]),
-    };
-    (owner, authority)
+    }
 }
 pub(super) fn evidence(
     f: &Fixture,
@@ -62,7 +49,7 @@ async fn same_adopted_successor_reattaches_the_same_prepared_claim_before_activa
     let db = storage::Database::open(&f.config).unwrap();
     let before = db.run_context(&run.to_string()).unwrap().unwrap();
     let runtime = new_process(&f);
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let (proof, startup, root) = evidence(&f, &claim.claim_id);
     let mut adopted = runtime
         .adopt_prepared_claim(proof, startup, &root, &authority)
@@ -113,7 +100,7 @@ async fn failed_activation_can_reacquire_the_exact_local_control() {
     let paused = prepare(&f, &runtime);
     let id = paused.claim().claim_id.clone();
     let control = runtime.execution_snapshot(run).unwrap();
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     // Missing relations is an ordinary, pre-transaction activation failure.
     assert!(
         ({
@@ -175,7 +162,7 @@ async fn adoption_rechecks_stale_evidence_and_current_authority_without_registra
     );
     assert!(!runtime.has_paused_recovery());
     let (proof, startup, root) = evidence(&f, &id);
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let (current_proof, current_startup, current_root) = evidence(&f, &id);
     let _bound = first
         .adopt_prepared_claim(current_proof, current_startup, &current_root, &authority)
@@ -260,7 +247,7 @@ async fn committed_ack_loss_cleanup_keeps_durable_activation_and_restores_manual
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let runtime = new_process(&f);
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let id = lose_ack(&f, &runtime, authority);
     let handle = cleanup_handle(&f, &runtime, &id);
     assert_eq!(
@@ -295,7 +282,7 @@ async fn shutdown_cleans_activated_ack_loss_without_releasing_the_claim() {
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let runtime = new_process(&f);
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let id = lose_ack(&f, &runtime, authority);
     let db = storage::Database::open(&f.config).unwrap();
     let before = db.recovery_claim_snapshot(&id).unwrap();
@@ -311,51 +298,19 @@ async fn shutdown_cleans_activated_ack_loss_without_releasing_the_claim() {
 }
 
 #[tokio::test]
-async fn old_cleanup_and_shutdown_never_mutate_a_successor_after_owner_handoff() {
+async fn old_cleanup_and_shutdown_never_mutate_a_successor_after_incarnation_change() {
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let runtime = new_process(&f);
-    let (owner, authority) = authority(&f, run);
-    let old_permit = authority.members[&run].ownership.clone().unwrap();
+    let authority = authority(&f, run);
     let stale_authority = CurrentRecoveryAuthority {
         members: authority.members.clone(),
     };
     let id = lose_ack(&f, &runtime, authority);
     let handle = cleanup_handle(&f, &runtime, &id);
-    let next_owner = crate::ownership::OwnerHost::open(
-        f._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(64)),
-    )
-    .unwrap();
-    let next_permit = owner.handoff(&old_permit, &next_owner).unwrap();
-    assert!(old_permit.mutation_guard().is_err());
-    assert!(
-        runtime
-            .stop_quarantined_recovery(&handle, &stale_authority, StopReason::OperatorStopped)
-            .is_err()
-    );
-    let current_authority = CurrentRecoveryAuthority {
-        members: BTreeMap::from([(
-            run,
-            RunConfig {
-                ownership: Some(next_permit.clone()),
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
-        )]),
-    };
     let successor = new_process(&f);
     successor
-        .continue_goal(
-            run,
-            "new owner input".into(),
-            RunConfig {
-                ownership: Some(next_permit),
-                ..Default::default()
-            },
-        )
+        .continue_goal(run, "new incarnation input".into(), RunConfig::default())
         .unwrap();
     let db = storage::Database::open(&f.config).unwrap();
     let third = db.resume_intent(&run.to_string()).unwrap().unwrap();
@@ -365,7 +320,7 @@ async fn old_cleanup_and_shutdown_never_mutate_a_successor_after_owner_handoff()
     assert!(runtime.stop(run, StopScope::SelfOnly).is_err());
     assert!(
         runtime
-            .stop_quarantined_recovery(&handle, &current_authority, StopReason::OperatorStopped)
+            .stop_quarantined_recovery(&handle, &stale_authority, StopReason::OperatorStopped)
             .is_err()
     );
     assert!(runtime.cleanup_recovery_claim(&handle).is_err());
@@ -412,11 +367,11 @@ async fn released_cleanup_uses_readback_without_a_second_release_write() {
 }
 
 #[tokio::test]
-async fn unresolved_stop_requires_live_owner_and_exact_claim_new_identity() {
+async fn unresolved_stop_requires_current_authority_and_exact_claim_new_identity() {
     let f = Fixture::new(0);
     let run = saved(&f).await;
     let runtime = new_process(&f);
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let current = CurrentRecoveryAuthority {
         members: authority.members.clone(),
     };
@@ -489,7 +444,7 @@ async fn storage_prepared_proof_does_not_authorize_a_corrupt_runtime_root() {
                 old_build: "fixture-build".into(),
                 successor_build: "fixture-build".into(),
                 target_identity: "fixture-target".into(),
-                handoff_version: 1,
+                handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
                 snapshot_version: 1,
                 storage_version: 62,
                 old_builtin_tool_names: Default::default(),
@@ -511,8 +466,6 @@ async fn storage_prepared_proof_does_not_authorize_a_corrupt_runtime_root() {
                 thread_id: record.thread.clone(),
                 intent_revision: member.intent_revision,
                 snapshot: member.snapshot.clone(),
-                owner_id: None,
-                owner_generation: None,
                 lane_id: None,
             }]),
         )
@@ -583,7 +536,7 @@ async fn storage_prepared_proof_does_not_authorize_a_corrupt_runtime_root() {
         .unwrap();
     let (proof, startup, root) = evidence(&f, &claim.claim_id);
     let before = db.recovery_claim_snapshot(&claim.claim_id).unwrap();
-    let (_owner, authority) = authority(&f, run);
+    let authority = authority(&f, run);
     let error = successor
         .adopt_prepared_claim(proof, startup, &root, &authority)
         .err()
@@ -642,7 +595,7 @@ async fn adopt_publication_invalidates_unused_scratch_observation() {
         let runtime = new_process(&f);
         let thread = run.to_string();
         runtime.bind_thread_root(&thread, run).unwrap();
-        let (_owner, authority) = authority(&f, run);
+        let authority = authority(&f, run);
         let (proof, startup, root) = evidence(&f, &claim);
         let observation = configured
             .then(|| crate::scratch::publication_tests::Observation::new(&runtime, &thread));

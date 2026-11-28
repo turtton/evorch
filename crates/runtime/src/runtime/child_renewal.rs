@@ -32,7 +32,6 @@ impl AgentRuntime {
         &self,
         bundle: &storage::thread_index::SnapshotBundle,
         descriptor: &RunRestoreDescriptor,
-        ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<RestoredState, RuntimeError> {
         let record = &bundle.record;
         self.deny_deleted_run(&record.run_id).map_err(|deleted| {
@@ -42,9 +41,7 @@ impl AgentRuntime {
             }
         })?;
         let history = descriptor.conversation_descriptor();
-        if !(record.restorable && history.restorable)
-            && !(history.renewable_ownership_only() && ownership.is_some())
-        {
+        if !(record.restorable && history.restorable) && !descriptor.renewable_ownership_only() {
             return Err(RuntimeError::RunRestoreFailed {
                 run_id: record.run_id.clone(),
                 reason: RunRestoreFailure::UnsupportedConfig(
@@ -53,13 +50,6 @@ impl AgentRuntime {
                         .unwrap_or_else(|| "実行設定".into()),
                 ),
             });
-        }
-        if let Some(permit) = ownership {
-            permit
-                .validate_generation()
-                .map_err(|_| RuntimeError::StaleOwnership {
-                    run_id: record.run_id.clone(),
-                })?;
         }
         RestoredState::for_conversation_bundle(bundle)
     }
@@ -73,14 +63,18 @@ impl AgentRuntime {
     ) -> Result<(), String> {
         self.deny_deleted_run(&child.to_string())
             .map_err(|deleted| deleted.to_string())?;
-        let ownership = {
+        {
             let runs = lock_runs(&self.shared.runs);
             if let Some(reason) = self.continuation_refusal(child, runs.get(&child)) {
                 return Err(reason.to_string());
             }
-            runs.get(&parent)
-                .and_then(|entry| entry.config.ownership.clone())
-        };
+            if runs
+                .get(&child)
+                .is_some_and(|entry| entry.parent != Some(parent))
+            {
+                return Err("child belongs to another parent".into());
+            }
+        }
         let store = self
             .shared
             .run_store
@@ -93,9 +87,7 @@ impl AgentRuntime {
         let descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
         let history = descriptor.conversation_descriptor();
-        if (record.restorable && history.restorable)
-            || (history.renewable_ownership_only() && ownership.is_some())
-        {
+        if (record.restorable && history.restorable) || descriptor.renewable_ownership_only() {
             Ok(())
         } else {
             Err(history

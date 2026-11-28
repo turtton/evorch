@@ -1,4 +1,4 @@
-//! Real core bootstrap/SQLite/ownership. No GUI, provider, gh or wall-clock waits.
+//! Real core bootstrap/SQLite. No GUI, provider, gh or wall-clock waits.
 use event_bus::{Event, EventKind, EventReceiver, PullRequestEvent, ToolEvent};
 use runtime::pull_requests::*;
 use runtime::{AgentInvocationContext, AgentModel, Role, RunId, RuntimeError};
@@ -11,7 +11,7 @@ use std::{
 };
 use storage::pull_requests::*;
 use storage::{Storage, StorageConfig};
-use tokio::sync::{Barrier, Notify};
+use tokio::sync::Notify;
 use workbench_host::bootstrap::{
     BootstrapOptions, BootstrappedHost, TestSeams, lane_pr::PullRequestAdapters,
 };
@@ -22,7 +22,6 @@ struct Model {
     calls: AtomicUsize,
     hold_admission: AtomicBool,
     admission: Notify,
-    admission_barrier: std::sync::Mutex<Option<Arc<Barrier>>>,
     release_admission: Notify,
     admitting: AtomicBool,
     skip_admission: AtomicBool,
@@ -49,10 +48,6 @@ impl AgentModel for Model {
         if self.hold_admission.load(Ordering::SeqCst) {
             self.admitting.store(true, Ordering::SeqCst);
             let _active = Active(&self.admitting);
-            let barrier = self.admission_barrier.lock().unwrap().take();
-            if let Some(barrier) = barrier {
-                barrier.wait().await;
-            }
             self.admission.notify_one();
             self.release_admission.notified().await;
         }
@@ -100,7 +95,6 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        // Both executors bind an owner socket below this root.
         let dir = test_socket_dir::SplitDir::new();
         let root = dir.path().to_path_buf();
         std::fs::write(
@@ -315,8 +309,7 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     let gate = source.push_gate(&key());
     let logs = Arc::new(Logs::default());
     let mut core = f.core(model.clone(), source.clone(), logs.clone()).await;
-    // Initial recovery already acquired authority before the ready host escaped.
-    let permit = core.owner.owned_permit("lane-thread").unwrap();
+    // Initial recovery reserved the lane before the ready host escaped.
     model.entered.notified().await;
     assert_eq!(
         core.runtime.inspect_agent(RunId::new(42)).unwrap().run_id,
@@ -325,7 +318,7 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     let service = core.runtime.pull_requests().unwrap();
     let mut events = core.runtime.event_bus().subscribe();
     service
-        .link("lane-thread", "owner/repo#7", 0, &permit)
+        .link("lane-thread", "owner/repo#7", 0)
         .await
         .unwrap();
     gate.arrived().await;
@@ -333,7 +326,7 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     candidate(&mut events).await;
     let policy = core.storage_writer().pr_auto_fix_state(key()).unwrap();
     service
-        .set_auto_fix("lane-thread", 1, policy.policy_revision, true, &permit)
+        .set_auto_fix("lane-thread", 1, policy.policy_revision, true)
         .await
         .unwrap();
     gate.release_ok(fetched(&head));
@@ -363,13 +356,10 @@ async fn core_alone_recovers_before_ready_and_runs_monitor_autofix_then_drains()
     assert!(!logs.active.load(Ordering::SeqCst));
     assert_eq!(core.services.names().count(), 0);
     assert!(matches!(
-        service.refresh("lane-thread", &permit).await,
+        service.refresh("lane-thread").await,
         Err(PullRequestError::Disabled)
     ));
-    assert_eq!(
-        core.owner.attach("lane-thread").unwrap().state,
-        runtime::ownership::OwnerState::Released
-    );
+    assert!(!f.dir.sockets().join("owners.db").exists());
 }
 
 #[tokio::test]
@@ -425,108 +415,45 @@ async fn a_second_core_is_rejected_while_the_first_has_a_pending_lane_and_drain_
 }
 
 #[tokio::test]
-async fn an_unowned_seed_keeps_the_handoff_fence_while_admission_is_pending() {
-    unowned_seed_handoff(true, false, false).await;
-}
-
-#[tokio::test]
-async fn an_unowned_seed_cancels_pending_admission_after_handoff() {
-    unowned_seed_handoff(false, false, false).await;
-}
-
-#[tokio::test]
-async fn an_unowned_seed_stops_only_its_admission_after_handoff() {
-    unowned_seed_handoff(false, true, false).await;
-}
-
-#[tokio::test]
-async fn manual_and_background_lane_retries_share_the_handoff_fence() {
-    unowned_seed_handoff(true, false, true).await;
-}
-
-async fn unowned_seed_handoff(finish_admission: bool, stop_first: bool, manual_retry: bool) {
+async fn manual_and_background_lane_retries_share_one_core_admission_reservation() {
     let f = Fixture::new();
-    f.seed_with_ownership(false);
-    let store = f.seed_storage();
-    let writer = store.handle();
-    let old_admission = Arc::new(Barrier::new(2));
-    let old_model = Arc::new(Model {
-        hold_admission: AtomicBool::new(true),
-        admission_barrier: std::sync::Mutex::new(Some(old_admission.clone())),
-        ..Default::default()
-    });
-    let mut old = f.logical_runtime(old_model.clone(), writer.clone());
-    old_admission.wait().await;
-    assert!(old_model.admitting.load(Ordering::SeqCst));
-    let next_admission = Arc::new(Barrier::new(2));
-    let next_model = Arc::new(Model {
-        hold_admission: AtomicBool::new(true),
-        admission_barrier: std::sync::Mutex::new(Some(next_admission.clone())),
-        ..Default::default()
-    });
-    let mut next = f.logical_runtime(next_model.clone(), writer.clone());
-    let permit = old.owner.owned_permit("lane-thread").unwrap();
-    old.owner.handoff(&permit, &next.owner).unwrap();
-    if finish_admission {
-        old_model.release_admission.notify_one();
-        // Provider completion is not authority to register after handoff.
-        assert!(matches!(
-            old.runtime.wait(RunId::new(42)).await,
-            Err(RuntimeError::StaleOwnership { .. })
-        ));
+    f.seed();
+    let model = Arc::new(Model::default());
+    model.hold_admission.store(true, Ordering::SeqCst);
+    let mut core = f
+        .core(
+            model.clone(),
+            Arc::new(FakePullRequestSource::new()),
+            Arc::new(Logs::default()),
+        )
+        .await;
+    model.admission.notified().await;
+    assert!(model.admitting.load(Ordering::SeqCst));
+    assert_eq!(core.runtime.pending_lane_admissions().len(), 1);
+    for _ in 0..3 {
+        core.runtime.recover_unstarted_lanes().unwrap();
     }
-    assert!(old.runtime.list_agents().is_empty());
-    assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
-    // Admission entry proves the successor reservation exists. Waiting on the
-    // run before this barrier raced background retry and could return UnknownRun.
-    next_admission.wait().await;
-    assert!(next_model.admitting.load(Ordering::SeqCst));
-    if manual_retry {
-        next.runtime
-            .recover_unstarted_lanes(Some(&next.owner))
-            .unwrap();
-    }
-    next_model.release_admission.notify_one();
-    next_model.entered.notified().await;
-    assert_eq!(next_model.calls.load(Ordering::SeqCst), 1);
-    if stop_first {
-        // The old owner can stop its local admission, not the successor's lane.
-        assert!(matches!(
-            old.runtime
-                .stop(RunId::new(42), runtime::StopScope::SelfOnly),
-            Err(RuntimeError::LaneCancellation { .. })
-        ));
-    }
-    let shutdown = old.shutdown().await;
-    if stop_first {
-        assert!(matches!(
-            shutdown.unwrap_err().downcast_ref::<RuntimeError>(),
-            Some(RuntimeError::LaneCancellation { .. })
-        ));
-        old.runtime.drain_lane_admissions().await.unwrap();
-        assert_eq!(
-            old.runtime.quiesce_state(),
-            runtime::quiesce::QuiesceState::Running
-        );
-    } else {
-        shutdown.unwrap();
-    }
-    assert!(!old_model.admitting.load(Ordering::SeqCst));
-    assert!(old.runtime.pending_lane_admissions().is_empty());
-    assert!(old.runtime.list_agents().is_empty());
-    assert_eq!(old_model.calls.load(Ordering::SeqCst), 0);
-    if !finish_admission {
-        assert!(old.runtime.wait(RunId::new(42)).await.is_err());
-    }
-    next.shutdown().await.unwrap();
-    let lane = writer.lane_by_thread("lane-thread").unwrap().unwrap();
-    assert_eq!(lane.generation, 1);
+    assert_eq!(model.admissions_requested.load(Ordering::SeqCst), 1);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+    model.release_admission.notify_one();
+    model.entered.notified().await;
+    core.runtime.recover_unstarted_lanes().unwrap();
+    assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    let writer = core.storage_writer();
+    assert_eq!(
+        writer
+            .lane_by_thread("lane-thread")
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
     assert!(writer.unstarted_lanes(10).unwrap().is_empty());
-    drop((old, next));
-    store.close();
+    core.shutdown().await.unwrap();
+    drop(core);
+
     let restarted_model = Arc::new(Model::default());
-    // A new core uses the graph-aware bootstrap; already-started legacy seeds
-    // are still NoCommittedManifest and must never acquire a second admission.
+    // A started seed with no committed recovery graph is not restart authority.
     let mut restarted = BootstrappedHost::open_for_core_with_test_seams(
         BootstrapOptions {
             config_dir: f.root.clone(),
@@ -596,84 +523,5 @@ async fn partial_recovery_failure_drains_registered_roots_and_reserved_admission
             weak.upgrade().is_none(),
             "failed bootstrap retains no runtime task"
         );
-    }
-}
-
-// Ownership/admission races are logical-runtime contracts, not permission for two
-// production cores. Keep them on one real shared-mode writer, without any lease bypass.
-struct LogicalHost {
-    runtime: runtime::AgentRuntime,
-    owner: Arc<runtime::ownership::OwnerHost>,
-    scratch_archive: runtime::scratch::archive::ArchiveService,
-    services: workbench_host::bootstrap::services::BackgroundServices,
-    executor: Arc<tools::ToolExecutor>,
-    _service: workbench_host::commands::CommandService,
-}
-impl LogicalHost {
-    async fn shutdown(&mut self) -> Result<(), workbench_host::bootstrap::BootstrapError> {
-        workbench_host::bootstrap::lane_pr::stop_and_drain(
-            &mut self.services,
-            &self.runtime,
-            &self.owner,
-            &self.executor,
-        )
-        .await?;
-        self.owner.release_ready()?;
-        self.scratch_archive.stop_cleanup()?;
-        Ok(())
-    }
-}
-impl Fixture {
-    fn logical_runtime(&self, model: Arc<Model>, writer: storage::StorageHandle) -> LogicalHost {
-        let bus = Arc::new(event_bus::EventBus::new(4096));
-        let executor = Arc::new(tools::ToolExecutor::new(bus.clone()));
-        let config = StorageConfig {
-            db_path: self.root.join("evorch-events.db"),
-            ..Default::default()
-        };
-        let runtime = runtime::AgentRuntime::with_sandbox_factory(
-            bus.clone(),
-            executor.clone(),
-            model,
-            Arc::new(Direct),
-        )
-        .with_run_store(runtime::RunStore::open(&config, writer.clone()).unwrap());
-        let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(self.dir.sockets(), Default::default(), bus)
-                .unwrap(),
-        );
-        let service = workbench_host::commands::CommandService::new(
-            runtime.clone(),
-            tokio::runtime::Handle::current(),
-        )
-        .with_team_writer(writer)
-        .with_ownership(owner.clone());
-        service.bind_lane_delivery();
-        let mut services = workbench_host::bootstrap::services::BackgroundServices::default();
-        workbench_host::bootstrap::lane_pr::start(
-            &mut services,
-            &runtime,
-            &owner,
-            &owner.thread_scratch(),
-            Default::default(),
-            PullRequestAdapters {
-                source: Arc::new(FakePullRequestSource::new()),
-                logs: Arc::new(Logs::default()),
-            },
-        )
-        .unwrap();
-        let scratch_archive = runtime::scratch::archive::ArchiveService::new(
-            &owner.thread_scratch(),
-            owner.scratch_archive_authority(),
-        )
-        .unwrap();
-        LogicalHost {
-            runtime,
-            owner,
-            scratch_archive,
-            services,
-            executor,
-            _service: service,
-        }
     }
 }

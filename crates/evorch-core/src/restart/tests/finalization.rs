@@ -113,10 +113,6 @@ async fn atomic_capture_owns_sealed_rejects_both_stop_entries_and_never_grants_e
         "Commit really completed, but is not exec authority"
     );
     assert_eq!(tx.expected.len(), 1);
-    assert!(
-        tx.owner_progress.is_empty(),
-        "the targetless fixture must not install holds"
-    );
     assert!(host.spawn_ledger.is_fenced());
     assert!(core.request().is_err());
     assert!(

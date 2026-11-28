@@ -139,14 +139,8 @@ impl AgentRuntime {
                 .to_owned(),
             );
         }
-        // Reauthorize after awaits; do not hold an ownership guard during fetch/hash/git.
-        let (_, config_now, _) = self.verification_lead(caller, lane_id)?;
-        let _guard = config_now
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|_| operation(LaneOperationError::OwnershipLost))?;
+        // Revalidate the current root after fetch/hash/git awaits.
+        let _ = self.verification_lead(caller, lane_id)?;
         let reviewer = self
             .reserve_child_run_id(caller)
             .map_err(|e| LaneError::new("reviewer_incomplete", e))?;
@@ -187,7 +181,6 @@ impl AgentRuntime {
                 .map(|f| serde_json::to_string(f).unwrap_or_default())
                 .unwrap_or_else(|| "not available".into())
         );
-        drop(_guard);
         self.spawn_lane_reviewer(
             caller,
             reviewer,
@@ -198,7 +191,6 @@ impl AgentRuntime {
                     lead_root: caller,
                 },
                 budget: config.budget,
-                ownership: config.ownership,
                 name: Some("Lane verification".into()),
                 ..Default::default()
             },

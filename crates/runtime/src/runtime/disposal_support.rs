@@ -6,8 +6,8 @@ use storage::recovery::graph_control::{
 };
 
 impl AgentRuntime {
-    /// The owner snapshot remains reserved until FULL commit/readback finishes.
-    /// Lock order: Stop -> publication -> index -> owners -> main writer.
+    /// Logical revocation precedes every physical mutation.
+    /// Lock order: Stop -> publication -> index -> main writer.
     pub fn release_owned_graph_eligibility(
         &self,
         authority: &DisposalAuthority,
@@ -89,8 +89,6 @@ impl AgentRuntime {
                 }
             }
         }
-        let _owners = crate::ownership::disposal_support::guard(authority)
-            .map_err(|_| RuntimeError::GraphControlConflict)?;
         let store = self
             .shared
             .run_store
@@ -139,33 +137,10 @@ impl AgentRuntime {
         }
         Ok(result)
     }
-    pub fn cleanup_owned_graph_receipts(
+    pub(super) fn validate_disposal_runtime(
         &self,
         authority: &DisposalAuthority,
-        effect: GraphEffectKey,
-        shared_threads: &BTreeSet<String>,
-    ) -> Result<crate::ownership::DisposalOwnerReceipt, RuntimeError> {
-        #[cfg(test)]
-        self.record_graph_effect(2);
-        self.validate_disposal_runtime(authority)?;
-        let store = self
-            .shared
-            .run_store
-            .get()
-            .ok_or_else(|| error("no run store"))?;
-        if !store
-            .with_database(|db| {
-                db.recovery_graph_control(&authority.expected().manifest.manifest_id)
-            })
-            .map_err(error)?
-            .is_some_and(|c| c.revoked)
-        {
-            return Err(error("eligibility revocation not confirmed"));
-        }
-        crate::ownership::disposal_support::cleanup(authority, effect, shared_threads)
-            .map_err(error)
-    }
-    fn validate_disposal_runtime(&self, authority: &DisposalAuthority) -> Result<(), RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         if !Weak::ptr_eq(authority.runtime(), &Arc::downgrade(&self.shared)) {
             return Err(error("foreign disposal authority"));
         }
@@ -176,7 +151,7 @@ fn error(reason: impl ToString) -> RuntimeError {
     crate::quiesce::runtime::error(reason)
 }
 
-// One operation-independent tuple in both the durable journal and scratch memory.
+// One operation-independent tuple in both durable progress and scratch memory.
 impl TryFrom<&storage::recovery::graph_progress::GraphDisposalProgressKey>
     for crate::scratch::GraphDisposalKey
 {
@@ -189,7 +164,6 @@ impl TryFrom<&storage::recovery::graph_progress::GraphDisposalProgressKey>
             key.restart_id.clone(),
             key.capture_id.clone(),
             key.thread_id.clone(),
-            key.owner_generation,
         )
     }
 }

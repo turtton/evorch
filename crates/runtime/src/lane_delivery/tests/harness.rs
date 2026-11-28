@@ -220,14 +220,14 @@ async fn commit_failure_retries_same_id_and_ack_failure_never_reappends() {
     f.runtime.wait(run).await.unwrap();
 }
 #[tokio::test]
-async fn readonly_unknown_and_flush_time_owner_loss_keep_notice_pending() {
+async fn unknown_thread_and_flush_time_binding_conflict_keep_notice_pending() {
     let mut f = Fixture::new();
     let (run, host) = f.lead().await;
     let n = notice(&f, 1, 42, PrNoticeMode::Manual);
     for reason in [
-        LaneDeliveryNack::Readonly,
         LaneDeliveryNack::UnknownThread,
-        LaneDeliveryNack::OwnershipLost,
+        LaneDeliveryNack::UnknownThread,
+        LaneDeliveryNack::BindingConflict,
     ] {
         *host.deny.lock().unwrap() = Some(reason);
         assert_eq!(
@@ -247,11 +247,11 @@ async fn readonly_unknown_and_flush_time_owner_loss_keep_notice_pending() {
         runtime.drive_lane_deliveries("delivery-lead").await
     }));
     barrier.wait().await;
-    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::OwnershipLost);
+    *host.deny.lock().unwrap() = Some(LaneDeliveryNack::BindingConflict);
     barrier.wait().await;
     assert_eq!(
         task.await.unwrap().unwrap(),
-        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::BindingConflict)
     );
     assert_eq!(occurrences(&f, run, 1), 0);
     *host.deny.lock().unwrap() = None;
@@ -356,7 +356,7 @@ async fn stop_is_durable_across_policy_changes_and_requires_explicit_resume() {
             );
             assert!(
                 f.runtime
-                    .resume_lane_deliveries("foreign-thread", run, None)
+                    .resume_lane_deliveries("foreign-thread", run)
                     .is_err()
             );
             assert!(
@@ -927,9 +927,7 @@ async fn stable_pr_guard_is_independent_of_lane_progress_and_budget_policy() {
             );
             assert_eq!(phase(&f, &first), PrNoticePhase::Ready);
             assert_eq!(phase(&f, &second), PrNoticePhase::Ready);
-            f.runtime
-                .explicitly_resume_lane_delivery(run, None)
-                .unwrap();
+            f.runtime.explicitly_resume_lane_delivery(run).unwrap();
             delivered(&f).await;
             f.runtime.wait(run).await.unwrap();
             delivered(&f).await;

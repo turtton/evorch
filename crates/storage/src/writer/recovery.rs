@@ -1,6 +1,16 @@
 use super::{Command, StorageHandle};
 use crate::{StorageError, recovery::*};
 impl StorageHandle {
+    /// Explicit unsupported-graph disposal, FULL durable and relational-CAS checked.
+    /// No old payload or external resource is interpreted as executable evidence.
+    pub fn discard_legacy_recovery_graph(
+        &self,
+        expected: RecoveryGraphHeader,
+    ) -> Result<(), StorageError> {
+        self.recovery_write(Write::DiscardLegacy(expected))
+            .map(|_| ())
+    }
+
     /// Explicit manual supervisor completion; queries and automatic recovery never call this.
     pub fn finish_recovery_graph_control(
         &self,

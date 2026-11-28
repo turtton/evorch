@@ -125,7 +125,6 @@ pub(crate) fn validate_config(config: &crate::RunConfig, role: Role) -> Result<(
         || config.interactive
         || config.keep_alive
         || config.team.is_some()
-        || config.ownership.is_some()
         || config.topology != crate::CoordinationTopology::Single
         || config.learning_internal
         || config.initial_thread_goal.is_some()

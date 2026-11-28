@@ -358,7 +358,6 @@ async fn scenario(manual: bool) {
     cache::through(&mut h.receiver, run, AgentRunPhase::Waiting).await;
     assert_eq!(provider.requests().len(), 1);
     let before = read(&core);
-    assert!(before.owned_here, "the core owns the conversation it runs");
 
     // Link under a held fetch; the run's push is observed while it is held.
     let gate = source.push_gate(&key());

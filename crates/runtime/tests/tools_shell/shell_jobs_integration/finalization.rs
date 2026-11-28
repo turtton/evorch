@@ -354,122 +354,70 @@ async fn running_job_allows_mutation_reads_and_all_continuations() {
     assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
 }
 
+/// The run is still the live holder of an effect nobody has observed: it is
+/// listed as running and its shell job is neither observed nor torn down.
 #[cfg(unix)]
-fn assert_handoff_blocked(permit: &runtime::ownership::OwnerPermit, socket: &std::path::Path) {
-    use runtime::ownership::Registry;
-    use runtime::ownership::ipc::{Request, Response, request_with_timeout, serve_connection};
-    let _ = std::fs::remove_file(socket);
-    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
-    let path = permit.registry_path.clone();
-    let server = std::thread::spawn(move || {
-        let mut registry = Registry::open_existing(&path).unwrap();
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            serve_connection(&mut stream, &mut registry, 20).unwrap();
-        }
-    });
-    // Ownership, not IPC speed: slow registry I/O must not close the client
-    // before the server responds (which turns its reply into BrokenPipe).
-    let ipc_timeout = Duration::from_secs(30);
-    assert!(matches!(request_with_timeout(socket, &Request::Quiesce {
-        thread_id: permit.thread_id.clone(), token: permit.lease.clone(),
-    }, ipc_timeout).unwrap(), Response::Status(owner) if owner.active_turn && owner.active_runs.len() == 1));
-    assert!(matches!(
-        request_with_timeout(
-            socket,
-            &Request::Handoff {
-                thread_id: permit.thread_id.clone(),
-                token: permit.lease.clone(),
-                successor_id: "successor".into(),
-                settings: config::OwnershipConfig::default(),
-            },
-            ipc_timeout,
-        )
-        .unwrap(),
-        Response::Rejected(_)
-    ));
-    server.join().unwrap();
+fn assert_run_retained_active(runtime: &AgentRuntime, executor: &ToolExecutor, run: RunId) {
+    let live = runtime
+        .list_agents()
+        .into_iter()
+        .filter(|agent| agent.run_id == run)
+        .collect::<Vec<_>>();
+    assert_eq!(live.len(), 1, "the run is still registered");
+    assert_eq!(live[0].phase, AgentRunPhase::Running);
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrecorded_shell_round_retains_active_before_and_after_finalization() {
     test_support::isolated_state_dir();
-    use runtime::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
-    for mode in ["absent", "failed"] {
-        let dir = test_socket_dir::SplitDir::new();
-        let config = StorageConfig {
-            db_path: dir.path().join("events.db"),
-            ..Default::default()
-        };
-        let storage = Storage::open(config.clone()).unwrap();
-        let permit = OwnerPermit {
-            registry_path: dir.path().join("owners.db"),
-            thread_id: "thread".into(),
-            lease: Lease {
-                owner_id: "owner".into(),
-                generation: 1,
-                expires_at: u64::MAX,
-            },
-            run_id: None,
-        };
-        Registry::open(&permit.registry_path)
-            .unwrap()
-            .start(&ThreadOwner::new("thread".into(), permit.lease.clone()))
-            .unwrap();
-        let bus = Arc::new(EventBus::new(256));
-        let (executed, mut executing) = mpsc::unbounded_channel();
-        let (started, mut draining) = mpsc::unbounded_channel();
-        let shell = Arc::new(GatedShell {
-            shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
-            after_execute: Some((executed, tokio::sync::Semaphore::new(0))),
-            drains: AtomicUsize::new(0),
-            started,
-            gate: tokio::sync::Semaphore::new(0),
-        });
-        let mut executor = ToolExecutor::new(bus.clone());
-        executor.register(shell.clone()).unwrap();
-        let executor = Arc::new(executor);
-        let (model, mut calls) = model();
-        let mut runtime = AgentRuntime::new(bus, executor.clone(), model);
-        if mode == "failed" {
-            runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
-        }
-        let run = runtime.delegate_background(
-            Role::Worker,
-            "unknown effects".into(),
-            RunConfig {
-                ownership: Some(permit.clone()),
-                ..Default::default()
-            },
-        );
-        next(&mut calls).await.respond(tool_response(
-            "start",
-            "shell",
-            json!({"command":"read reply", "yield_ms":0}),
-        ));
-        executing.recv().await.unwrap();
-        if mode == "failed" {
-            rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER reject_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(ABORT, 'reject round and terminal'); END;").unwrap();
-        }
-        shell.after_execute.as_ref().unwrap().1.add_permits(1);
-        draining.recv().await.unwrap();
-        assert!(
-            executor.has_unobserved_shell_jobs(&run.to_string()),
-            "{mode}"
-        );
-        // Crucial: finalization has not persisted or released anything yet.
-        assert_handoff_blocked(&permit, &dir.sockets().join("owner.sock"));
-        shell.gate.add_permits(1);
-        assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error, "{mode}");
-        assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
-        assert!(!executor.has_running_shell_jobs(&run.to_string()));
-        assert_handoff_blocked(&permit, &dir.sockets().join("owner.sock"));
-        assert!(
-            calls.try_recv().is_err(),
-            "no next model round after failed checkpoint"
-        );
-    }
+    // A store that rejects the round and terminal snapshots: the unknown effect
+    // cannot be recorded, so the run stops and keeps the unobserved handle.
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let (executed, mut executing) = mpsc::unbounded_channel();
+    let (started, mut draining) = mpsc::unbounded_channel();
+    let shell = Arc::new(GatedShell {
+        shell: tools::tools::Shell::new(Arc::new(sandbox::DirectSandbox::new_unchecked())),
+        after_execute: Some((executed, tokio::sync::Semaphore::new(0))),
+        drains: AtomicUsize::new(0),
+        started,
+        gate: tokio::sync::Semaphore::new(0),
+    });
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(shell.clone()).unwrap();
+    let executor = Arc::new(executor);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model)
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let run =
+        runtime.delegate_background(Role::Worker, "unknown effects".into(), RunConfig::default());
+    next(&mut calls).await.respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read reply", "yield_ms":0}),
+    ));
+    executing.recv().await.unwrap();
+    rusqlite::Connection::open(&config.db_path).unwrap().execute_batch("CREATE TRIGGER reject_snapshot BEFORE UPDATE ON run_contexts BEGIN SELECT RAISE(ABORT, 'reject round and terminal'); END;").unwrap();
+    shell.after_execute.as_ref().unwrap().1.add_permits(1);
+    draining.recv().await.unwrap();
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    // Crucial: finalization has not persisted or released anything yet.
+    assert_run_retained_active(&runtime, &executor, run);
+    shell.gate.add_permits(1);
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Error);
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    assert!(!executor.has_running_shell_jobs(&run.to_string()));
+    assert!(
+        calls.try_recv().is_err(),
+        "no next model round after failed checkpoint"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

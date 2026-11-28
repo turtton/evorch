@@ -56,6 +56,54 @@ fn resolve_known_project_without_inventing_trust_or_registering_paths() {
 }
 
 #[test]
+fn thread_scoped_controls_preserve_the_shared_tombstone_fence() {
+    use workbench_host::commands::{HostCommand, HostEvent, RejectKind};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime();
+    let mut tombstones = storage::thread_retention::TombstoneSet::default();
+    tombstones.threads.insert("thread-1".into());
+    runtime
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
+        .unwrap();
+    let mut host = host_with_project(&rt, runtime, dir.path());
+    for command in [
+        HostCommand::SetGoalReview {
+            thread_id: "thread-1".into(),
+            goal_id: "missing".into(),
+            enabled: true,
+        },
+        HostCommand::SetGoalChecksPaused {
+            thread_id: "thread-1".into(),
+            goal_id: "missing".into(),
+            paused: false,
+        },
+        HostCommand::CompactChat {
+            thread_id: "thread-1".into(),
+        },
+        HostCommand::DeliverFollowUpsNextTurn {
+            thread_id: "thread-1".into(),
+        },
+        HostCommand::ResumeLaneDeliveries {
+            thread_id: "thread-1".into(),
+        },
+        HostCommand::AnswerUserQuestion {
+            thread_id: "thread-1".into(),
+            question_id: "missing".into(),
+            answer: "must not be recorded".into(),
+        },
+    ] {
+        assert!(matches!(
+            host.submit_local(command, &local_desktop()).as_slice(),
+            [HostEvent::ChatRejected {
+                kind: RejectKind::NotFound,
+                ..
+            }]
+        ));
+    }
+}
+
+#[test]
 fn generic_attachments_are_scoped_and_commands_are_correlatable_by_receipt() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -139,21 +187,32 @@ fn generic_attachments_are_scoped_and_commands_are_correlatable_by_receipt() {
 }
 
 fn save_access(path: &Path, root: &Path, trust: &str) {
-    std::fs::write(
-        path,
-        serde_json::to_vec(&serde_json::json!({
-            "projects":[{"id":project(),"repo_root":root,"trust":trust}]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut document = workspace_state::SidebarDocument::default();
+    let project = workspace_state::ProjectId::new(project().as_str());
+    document
+        .sidebar
+        .add_project(project.clone(), "Project", root)
+        .unwrap();
+    document
+        .sidebar
+        .set_project_trust(
+            &project,
+            if trust == "approved" {
+                workspace_state::TrustState::Approved
+            } else {
+                workspace_state::TrustState::Unapproved
+            },
+        )
+        .unwrap();
+    std::fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
 }
 
 #[test]
-fn released_offline_legacy_thread_claims_canonically_and_restores_on_continue() {
+fn unapproved_conversations_allow_send_and_continue_but_preserve_the_project_binding() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = test_socket_dir::SplitDir::new();
-    let owners = test_socket_dir::SocketDir::new();
+    let other = tempfile::tempdir().unwrap();
+    let other_project = workbench_protocol::ids::ProjectId::new("other-project").unwrap();
     let (_, store) = runtime_with_store(dir.path());
     let question = offline_question(&rt, dir.path(), &store);
     store
@@ -165,67 +224,167 @@ fn released_offline_legacy_thread_claims_canonically_and_restores_on_continue() 
             ..Default::default()
         }])
         .unwrap();
-    let bus = Arc::new(event_bus::EventBus::new(64));
-    let old = runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus.clone())
-        .unwrap();
-    let before = old.start("thread-1").unwrap();
-    old.quiesce().unwrap();
-    let successor = Arc::new(
-        runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap(),
-    );
     let runtime = runtime_on_store(dir.path(), &store);
-    let mut host = host_with_project(&rt, runtime.clone(), dir.path())
-        .with_legacy_import(owners.path().into(), dir.path().join("sidebar.json"));
-    host.service_mut().set_ownership(Some(successor.clone()));
-    let prepare = || {
-        Command::Conversation(Conversation::PrepareExistingThread {
+    let access = dir.path().join("sidebar.json");
+    let service =
+        workbench_host::commands::CommandService::new(runtime.clone(), rt.handle().clone())
+            .with_sidebar_path(access.clone());
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(&project(), dir.path().into());
+    projects.insert(&other_project, other.path().into());
+    let mut host = workbench_host::CommandHost::new(service).with_projects(projects);
+    let continuation = || {
+        Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
             project: project(),
             thread: thread("thread-1"),
-        })
+            composer_role: ComposerRole::Worker,
+            model_preference: None,
+        }))
     };
-    let access = dir.path().join("sidebar.json");
+    let wrong_project = || {
+        Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
+            project: other_project.clone(),
+            thread: thread("thread-1"),
+            composer_role: ComposerRole::Worker,
+            model_preference: None,
+        }))
+    };
     save_access(&access, dir.path(), "unapproved");
-    assert_eq!(
-        host.handle_command(prepare(), local_desktop())
-            .unwrap_err()
-            .code,
-        ErrorCode::PermissionDenied
+    for previous in [None, Some(project().to_string())] {
+        host.service_mut().bindings.goal_projects.remove("thread-1");
+        if let Some(previous) = &previous {
+            host.service_mut()
+                .bindings
+                .goal_projects
+                .insert("thread-1".into(), previous.clone());
+        }
+        let wrong_goal = Command::Execution(
+            workbench_protocol::namespaces::ExecutionCommand::SubmitGoal(
+                workbench_protocol::commands::SubmitGoal {
+                    project: other_project.clone(),
+                    thread: thread("thread-1"),
+                    objective: "must not replace the goal binding".into(),
+                    references: Vec::new(),
+                    constraints: Vec::new(),
+                    delegation: Some(workbench_protocol::commands::Delegation::Direct),
+                },
+            ),
+        );
+        assert_eq!(
+            host.handle_command(wrong_goal, web()).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            host.service().bindings.goal_projects.get("thread-1"),
+            previous.as_ref()
+        );
+    }
+    let mut wrong_send = send("thread-1", "wrong-project", "Must not change the binding");
+    wrong_send.project = other_project.clone();
+    for command in [
+        wrong_project(),
+        Command::Conversation(ConversationCommand::SendChat(wrong_send)),
+    ] {
+        assert_eq!(
+            host.handle_command(command, web()).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+    }
+    assert!(
+        !host
+            .service()
+            .bindings
+            .thread_roots
+            .contains_key("thread-1")
     );
-    save_access(&access, dir.path(), "approved");
-    // Released is not enough: the old endpoint is still reachable.
-    assert_eq!(
-        host.handle_command(prepare(), local_desktop())
-            .unwrap_err()
-            .code,
-        ErrorCode::PermissionDenied
-    );
-    drop(old);
-    host.handle_command(prepare(), local_desktop()).unwrap();
-    let after = successor.owned_permit("thread-1").unwrap();
-    assert_eq!(after.lease.generation, before.lease.generation + 1);
-    let reply = host
+    let reply = host.handle_command(continuation(), web()).unwrap();
+    assert_eq!(reply.run_id.unwrap().as_str(), question.run_id);
+    let sent = host
         .handle_command(
-            Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
-                project: project(),
-                thread: thread("thread-1"),
-                composer_role: ComposerRole::Worker,
-                model_preference: None,
-            })),
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1",
+                "unapproved-existing",
+                "Continue in the unapproved project",
+            ))),
             web(),
         )
         .unwrap();
-    assert_eq!(reply.run_id.unwrap().as_str(), question.run_id);
+    assert_eq!(sent.run_id.unwrap().as_str(), question.run_id);
     let run = question.run_id.parse().unwrap();
     runtime.cancel(run).unwrap();
     rt.block_on(runtime.wait(run)).unwrap();
-    // Re-read trust rather than caching a previous successful import.
-    save_access(&access, dir.path(), "unapproved");
+    let root = host.service().bindings.thread_roots["thread-1"].clone();
     assert_eq!(
-        host.handle_command(prepare(), local_desktop())
+        host.handle_command(wrong_project(), web())
             .unwrap_err()
             .code,
         ErrorCode::PermissionDenied
     );
+    assert_eq!(host.service().bindings.thread_roots["thread-1"], root);
+    let mut tombstones = storage::thread_retention::TombstoneSet::default();
+    tombstones.threads.insert("thread-1".into());
+    runtime
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
+        .unwrap();
+    for command in [
+        continuation(),
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1",
+            "deleted-existing",
+            "Must not revive the deleted thread",
+        ))),
+    ] {
+        assert_eq!(
+            host.handle_command(command, web()).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+}
+
+#[test]
+fn new_unapproved_conversations_start_with_a_reserved_thread_row() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, store) = runtime_with_store(dir.path());
+    // Sidebar registration reserves the thread's metadata before its first run.
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "new-thread".into(),
+            project_id: Some(project().to_string()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let sidebar = dir.path().join("sidebar.json");
+    save_access(&sidebar, dir.path(), "unapproved");
+    let service =
+        workbench_host::commands::CommandService::new(runtime.clone(), rt.handle().clone())
+            .with_sidebar_path(sidebar);
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(&project(), dir.path().into());
+    let mut host = workbench_host::CommandHost::new(service).with_projects(projects);
+    let reply = host
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "new-thread",
+                "new-unapproved",
+                "Start the first conversation",
+            ))),
+            web(),
+        )
+        .unwrap();
+    let run: runtime::RunId = reply.run_id.unwrap().as_str().parse().unwrap();
+    assert_eq!(
+        runtime.thread_of_live_run(run).as_deref(),
+        Some("new-thread")
+    );
+    assert_eq!(
+        host.service().bindings.thread_roots["new-thread"],
+        dir.path().canonicalize().unwrap()
+    );
+    runtime.cancel(run).unwrap();
+    rt.block_on(runtime.wait(run)).unwrap();
 }
 
 #[test]
@@ -281,37 +440,15 @@ fn conversation_result(reply: workbench_protocol::commands::CommandReply) -> Con
 }
 
 #[test]
-fn ordinary_continue_claims_abandoned_running_thread_without_prepare_existing() {
+fn ordinary_continue_does_not_open_or_modify_a_corrupt_legacy_registry() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = test_socket_dir::SplitDir::new();
-    let owners = test_socket_dir::SocketDir::new();
     let (_, store) = runtime_with_store(dir.path());
     let question = offline_question(&rt, dir.path(), &store);
-    let successor = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            owners.path(),
-            Default::default(),
-            Arc::new(event_bus::EventBus::new(64)),
-        )
-        .unwrap(),
-    );
-    let original = runtime::ownership::ThreadOwner::new(
-        "thread-1".into(),
-        runtime::ownership::Lease {
-            owner_id: "a".repeat(32),
-            generation: 4,
-            expires_at: 0,
-        },
-    );
-    let mut registry =
-        runtime::ownership::Registry::open(&owners.path().join("owners.db")).unwrap();
-    registry.start(&original).unwrap();
+    let legacy = dir.path().join("owners.db");
+    std::fs::write(&legacy, b"legacy corrupt registry").unwrap();
     let runtime = runtime_on_store(dir.path(), &store);
     let mut host = host_with_project(&rt, runtime.clone(), dir.path());
-    host.service_mut().set_ownership(Some(successor.clone()));
-    // Read-only permit lookup remains read-only; execution authorization may claim.
-    assert!(host.service().permit_for_thread(Some("thread-1")).is_err());
-    assert_eq!(registry.attach("thread-1").unwrap(), original);
     let reply = host
         .handle_command(
             Command::Conversation(ConversationCommand::ContinueChat(ContinueChat {
@@ -324,10 +461,7 @@ fn ordinary_continue_claims_abandoned_running_thread_without_prepare_existing() 
         )
         .unwrap();
     assert_eq!(reply.run_id.unwrap().as_str(), question.run_id);
-    assert_eq!(
-        successor.owned_permit("thread-1").unwrap().lease.generation,
-        5
-    );
+    assert_eq!(std::fs::read(legacy).unwrap(), b"legacy corrupt registry");
     let run = question.run_id.parse().unwrap();
     runtime.cancel(run).unwrap();
     rt.block_on(runtime.wait(run)).unwrap();

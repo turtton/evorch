@@ -11,7 +11,6 @@ impl CommandService {
     pub(super) fn compact_chat(
         &mut self,
         thread_id: String,
-        permit: Option<runtime::ownership::OwnerPermit>,
         restart: Option<crate::bootstrap::restart::HostCommandPermit>,
     ) -> Vec<HostEvent> {
         let result: Result<String, String> = (|| {
@@ -45,7 +44,6 @@ impl CommandService {
                 );
             }
             let mut authority = RunConfig {
-                ownership: permit,
                 ..Default::default()
             };
             self.renew_team_authority(&thread_id, run, None, &mut authority)?;

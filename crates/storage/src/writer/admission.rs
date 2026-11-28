@@ -37,9 +37,9 @@ pub(super) fn scope(command: &Command) -> Option<Option<String>> {
         | Command::DeleteEvalSample(..)
         | Command::UpsertThreads(..)
         | Command::Reconcile(..) => Some(None),
-        Command::AppendEvent(_, event, _)
-        | Command::AppendFencedEvent(_, event, ..)
-        | Command::AppendStreamEvent(_, event, ..) => event_scope(event),
+        Command::AppendEvent(_, event, _) | Command::AppendStreamEvent(_, event, ..) => {
+            event_scope(event)
+        }
         // Notes, usage, index/diagnostic/reclaim maintenance and reads do not
         // admit execution, change membership or alter canonical protections.
         // Snapshot and lane commands have their own ACK-scoped wrappers.

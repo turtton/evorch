@@ -318,13 +318,8 @@ impl workbench_host::bootstrap::core_startup::CoreStartupHook for ProbeHook {
             _ => None,
         };
         if let Some(target) = target {
-            let owner = inputs.owner.clone();
             inputs.runtime.set_recovery_activation_probe(move |boundary| {
                 if boundary == target {
-                    if boundary == Boundary::Prepared {
-                        assert!(!owner.begin_quiesce().unwrap());
-                        assert!(!owner.release_ready().unwrap());
-                    }
                     emit(json!({"phase":"crash_boundary", "boundary":format!("{boundary:?}"), "pid":std::process::id()}));
                     // The parent kills this exact OS process after seeing the
                     // checkpoint. No time-based completion or global fault env.
@@ -418,6 +413,7 @@ async fn open(
     )
     .await
     .unwrap();
+    assert!(!sockets.join("owners.db").exists());
     (host, events, waiting_model)
 }
 fn recipe() -> RecoveryRecipe {
@@ -442,7 +438,6 @@ async fn startup_subprocess_worker() {
     let mode = std::env::var("EVORCH_STARTUP_MODE").unwrap();
     let (mut host, mut provider_events, waiting_model) = open(&root, &sockets, &mode).await;
     if mode.starts_with("capture") {
-        let permit = host.owner.start("thread").unwrap();
         let run = host
             .runtime
             .delegate_chat(
@@ -450,7 +445,6 @@ async fn startup_subprocess_worker() {
                 Role::Orchestrator,
                 "Preserve the already-sent provider prefix".into(),
                 RunConfig {
-                    ownership: Some(permit),
                     project_root: Some(root.clone()),
                     memory: workbench_host::lane::memory_boundary(
                         &host.runtime,
@@ -475,7 +469,6 @@ async fn startup_subprocess_worker() {
                         "Registered child waits for capture",
                         RunConfig {
                             project_root: Some(root.clone()),
-                            ownership: Some(host.owner.owned_permit("thread").unwrap()),
                             ..RunConfig::default()
                         },
                     )
@@ -535,46 +528,19 @@ async fn startup_subprocess_worker() {
         .await
         .unwrap();
         std::fs::write(root.join("captured-run"), run.to_string()).unwrap();
-        host.owner.begin_quiesce().unwrap();
-        // An unfinished wait may still own an active turn. A real crash leaves
-        // that lease intact; process B must use managed expiry retry, never steal it.
-        host.owner.release_ready().unwrap();
-        let lane_owner = if mode == "capture_lane" || mode == "capture_catalog_lane" {
+        if mode == "capture_lane" || mode == "capture_catalog_lane" {
             let orphan = host.runtime.reserve_run_id();
             store.create_lane(storage::lanes::NewLane {
                 lane_id:"orphan".into(), thread_id:"orphan-thread".into(), origin_thread_id:"thread".into(), origin_run_id:run.to_string(), creation_key:"before-crash".into(),
                 brief:serde_json::from_value(json!({"objective":"Recover the unowned seed once", "inputs":[], "deliverables":["result"], "acceptance_criteria":["observed"], "constraints":[], "workspace":{}, "report_policy":"attached"})).unwrap(),
-                start_seed:json!({"run_id":orphan, "project_root":root, "requires_ownership":false}).to_string(),
+                start_seed:json!({"run_id":orphan, "project_root":root}).to_string(),
                 project_id:None, project_root:Some(root.to_string_lossy().into_owned()), title:None, at_ns:1,
             }).unwrap();
             std::fs::write(root.join("orphan-run"), orphan.to_string()).unwrap();
-            let owner = runtime::ownership::OwnerHost::open(
-                &sockets,
-                Default::default(),
-                Arc::new(event_bus::EventBus::new(64)),
-            )
-            .unwrap();
-            if mode == "capture_lane" {
-                owner.start("orphan-thread").unwrap();
-                Some(owner)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        }
         emit(
             json!({"phase":"captured", "pid":std::process::id(), "run":run, "manifests":manifests}),
         );
-        if let Some(owner) = lane_owner {
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).unwrap();
-            assert_eq!(line.trim(), "handoff");
-            assert!(!owner.begin_quiesce().unwrap());
-            assert!(!owner.release_ready().unwrap());
-            emit(json!({"phase":"handed_off", "pid":std::process::id()}));
-            std::future::pending::<()>().await;
-        }
         std::future::pending::<()>().await;
     } else {
         if mode == "empty" {
@@ -597,7 +563,7 @@ async fn startup_subprocess_worker() {
         {
             assert!(
                 host.busy(),
-                "owner retry must survive core idle grace without local runs"
+                "pending graph recovery must survive core idle grace without local runs"
             );
         }
         emit(json!({"phase":"bootstrapped", "pid":std::process::id(), "report":report}));
@@ -655,13 +621,11 @@ async fn startup_subprocess_worker() {
             std::io::stdin().read_line(&mut line).unwrap();
             assert_eq!(line.trim(), "continue");
             assert_eq!(db.recovery_claim_snapshot(&claim.claim_id).unwrap(), before);
-            let permit = host.owner.owned_permit("thread").unwrap();
             host.runtime
                 .continue_goal(
                     run,
                     "Explicit human Continue after ACK loss".into(),
                     RunConfig {
-                        ownership: Some(permit),
                         project_root: Some(root.clone()),
                         interactive: true,
                         conversation: true,
@@ -720,14 +684,7 @@ async fn startup_subprocess_worker() {
                 .unwrap()
                 .parse()
                 .unwrap();
-            assert!(
-                host.runtime.inspect_agent(orphan).is_err(),
-                "live external owner must block initial lane admission"
-            );
-            emit(json!({"phase":"owner_blocked", "pid":std::process::id()}));
             waiting(&host.runtime, orphan).await;
-            let permit = host.owner.owned_permit("orphan-thread").unwrap();
-            assert_eq!(permit.lease.owner_id, host.owner.owner_id());
             emit(json!({"phase":"lane_restored", "pid":std::process::id(), "run":orphan}));
             host.shutdown().await.unwrap();
             return;
@@ -875,6 +832,20 @@ context_window_tokens = 1000000
         ),
     )
     .unwrap();
+    let mut sidebar = workspace_state::SidebarState::default();
+    sidebar
+        .add_project(
+            workspace_state::ProjectId::new("fixture"),
+            "fixture",
+            &dir.path().canonicalize().unwrap(),
+        )
+        .unwrap();
+    sidebar.projects[0].trust = workspace_state::TrustState::Approved;
+    std::fs::write(
+        dir.path().join("sidebar.json"),
+        serde_json::to_vec(&sidebar).unwrap(),
+    )
+    .unwrap();
     let xdg_catalog = dir.path().join("xdg-cache/evorch");
     std::fs::create_dir_all(&xdg_catalog).unwrap();
     std::fs::copy(
@@ -945,7 +916,7 @@ async fn startup_same_build_tools_difference_is_needs_attention_without_provider
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_owner_blocked_retry_binds_the_captured_root_before_ordinary_send() {
+async fn startup_recovery_binds_the_captured_root_before_ordinary_send() {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         ScriptedResponse::text_stream("before", "mock-model", ["Waiting"]),
         ScriptedResponse::text_stream("after", "mock-model", ["Same recovered conversation"]),
@@ -954,29 +925,9 @@ async fn startup_owner_blocked_retry_binds_the_captured_root_before_ordinary_sen
     let mut source = Process::spawn(&dir, "capture");
     let captured = source.checkpoint("captured").await;
     source.kill().await;
-    // Capture has already released its idle owner. A distinct live owner claims
-    // that generation before successor startup; its explicit quiesce/release is
-    // the semantic retry trigger, never a sleep or an expiry assumption.
-    let blocker = runtime::ownership::OwnerHost::open(
-        dir.sockets(),
-        Default::default(),
-        Arc::new(event_bus::EventBus::new(64)),
-    )
-    .unwrap();
-    blocker.claim(&blocker.attach("thread").unwrap()).unwrap();
     let mut successor = Process::spawn(&dir, "restore");
     let ready = successor.checkpoint("bootstrapped").await;
-    assert_eq!(ready["report"]["components"][0]["state"], "blocked");
-    assert_eq!(ready["report"]["components"][0]["reason"], "owner_blocked");
-    assert_eq!(
-        mock.recorded_requests()
-            .iter()
-            .filter(|r| r.path == "/v1/chat/completions")
-            .count(),
-        1
-    );
-    assert!(!blocker.begin_quiesce().unwrap());
-    assert!(!blocker.release_ready().unwrap());
+    assert_eq!(ready["report"]["components"][0]["state"], "activated");
     let continued = successor.checkpoint("restored").await;
     assert_eq!(continued["run"], captured["run"]);
     assert!(successor.child.wait().await.unwrap().success());
@@ -1366,7 +1317,7 @@ async fn startup_question_is_durable_across_capture_kill_and_new_process_answer(
     assert_append_only(CacheProtocol::OpenAi, &chat[0].body, &chat[1].body).unwrap();
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once() {
+async fn startup_orphan_seed_starts_once_without_process_ownership() {
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         ScriptedResponse::text_stream("before", "mock-model", ["Waiting"]),
         ScriptedResponse::text_stream("lane", "mock-model", ["Recovered lane"]),
@@ -1374,38 +1325,9 @@ async fn startup_orphan_unowned_seed_waits_for_external_owner_then_starts_once()
     let dir = fixture(&mock);
     let mut source = Process::spawn(&dir, "capture_lane");
     source.checkpoint("captured").await;
-    source
-        .child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"handoff\n")
-        .await
-        .unwrap();
-    source.checkpoint("handed_off").await;
     source.kill().await;
-    // Keep an external ownership claim, not a second core's forbidden DB writer.
-    let blocker = runtime::ownership::OwnerHost::open(
-        dir.sockets(),
-        Default::default(),
-        Arc::new(event_bus::EventBus::new(64)),
-    )
-    .unwrap();
-    blocker
-        .claim(&blocker.attach("orphan-thread").unwrap())
-        .unwrap();
     let mut recovered = Process::spawn(&dir, "restore_lane");
     recovered.checkpoint("bootstrapped").await;
-    recovered.checkpoint("owner_blocked").await;
-    assert_eq!(
-        mock.recorded_requests()
-            .iter()
-            .filter(|r| r.path == "/v1/chat/completions")
-            .count(),
-        1
-    );
-    assert!(!blocker.begin_quiesce().unwrap());
-    assert!(!blocker.release_ready().unwrap());
     recovered.checkpoint("lane_restored").await;
     assert!(recovered.child.wait().await.unwrap().success());
     let db = storage::Database::open(&storage::StorageConfig {

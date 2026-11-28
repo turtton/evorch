@@ -49,8 +49,6 @@ pub struct ThreadPullRequest {
     /// Candidates the thread's tool outputs suggested, oldest first (decided ones included, so
     /// a confirmed one can be shown as linked).
     pub candidates: Vec<PullRequestCandidate>,
-    /// Whether this process holds the thread's lease and so polls its pull request.
-    pub tracked_here: bool,
     /// The PR-wide auto fix as the same read found it; `None` when nothing is linked.
     pub auto_fix: Option<AutoFixView>,
 }
@@ -231,7 +229,6 @@ pub fn is_stale(view: &ThreadPullRequest, now_ns: i64) -> bool {
 #[must_use]
 pub fn statuses(view: &ThreadPullRequest, now_ns: i64) -> Vec<Status> {
     widgets::statuses_of(
-        view.tracked_here,
         view.fetched_at_ns,
         view.failure
             .as_ref()
@@ -310,7 +307,6 @@ pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFi
     let input = AutoFixInput {
         thread: &view.thread_id,
         link_revision: link.link_revision,
-        tracked: view.tracked_here,
         open,
         failing: is_failing(view),
         checks_pending: is_pending(view.facts.as_ref()),

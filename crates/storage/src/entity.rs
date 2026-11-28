@@ -249,11 +249,7 @@ impl SecretGuard {
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { body, .. }) => {
                 self.check_text("event", "RunLedgerAppended.body", body)
             }
-            EventKind::Ownership(event) => {
-                let payload = serde_json::to_string(event)
-                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
-                self.check_text("event", "Ownership.payload", &payload)
-            }
+
             EventKind::Diagnostic(event) => {
                 let payload = serde_json::to_string(event)
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;

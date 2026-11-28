@@ -83,7 +83,7 @@ pub async fn launcher_chain(
         },
         current,
         TargetRequirements {
-            handoff: 1,
+            handoff: core_instance::handoff::HANDOFF_FORMAT_VERSION,
             snapshot: 1,
             storage_schema: schema,
             protocol: description.protocol,
@@ -177,36 +177,19 @@ pub fn cold_spawn_to_ready(rec: &mut Recorder, n: usize, artifact: &ProductArtif
     assert!(footprint.remains().is_empty());
 }
 
-/// One harness old-core -> exec -> product cycle: `exec_to_ready` and
-/// `exec_to_claim`.
+/// One harness old-core -> exec -> product readiness cycle.
 pub fn exec_cycle(rec: &mut Recorder, n: usize, artifact: &ProductArtifact, harness: &Path) {
     match old_core::exec_cycle(artifact, harness) {
-        Ok(c) => {
-            let note = format!(
-                "claim_stable={} lease_ms={} grace_ms={} exe_replaced={}",
-                c.claim_stable, c.lease_ms, c.grace_ms, c.exe_replaced
-            );
-            rec.push(
-                n,
-                "exec_to_ready",
-                c.exec_to_ready,
-                Outcome::Ok,
-                note.clone(),
-            );
-            rec.push(
-                n,
-                "exec_to_claim",
-                Duration::from_secs_f64(c.exec_to_claim_ms.max(0) as f64 / 1000.0),
-                Outcome::Ok,
-                format!("{note} raw_ms={}", c.exec_to_claim_ms),
-            );
-        }
+        Ok(c) => rec.push(
+            n,
+            "exec_to_ready",
+            c.exec_to_ready,
+            Outcome::Ok,
+            format!("exe_replaced={}", c.exe_replaced),
+        ),
         Err((error, elapsed)) => {
-            // A failure keeps its own duration and the interval that was not
-            // reached stays visible as a failure, never as a missing row.
-            let note = format!("after_ms={:.3}", ms(elapsed));
-            let invalid = matches!(error, old_core::CycleError::Invalid(_));
-            let why = if invalid {
+            // A failure retains the measured readiness interval as a failure.
+            let why = if matches!(error, old_core::CycleError::Invalid(_)) {
                 format!("invalid: {error}")
             } else {
                 error.to_string()
@@ -216,14 +199,7 @@ pub fn exec_cycle(rec: &mut Recorder, n: usize, artifact: &ProductArtifact, harn
                 "exec_to_ready",
                 elapsed,
                 Outcome::Failed(why),
-                note.clone(),
-            );
-            rec.push(
-                n,
-                "exec_to_claim",
-                elapsed,
-                Outcome::Failed("not reached: the exec cycle failed".into()),
-                note,
+                format!("after_ms={:.3}", ms(elapsed)),
             );
         }
     }

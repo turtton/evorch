@@ -230,10 +230,6 @@ pub fn commands() -> Vec<Command> {
                 value: "review".into(),
             }),
         })),
-        Command::Conversation(ConversationCommand::PrepareExistingThread {
-            project: project(),
-            thread: thread(),
-        }),
         Command::Conversation(ConversationCommand::BeginAttachment {
             project: project(),
             thread: thread(),

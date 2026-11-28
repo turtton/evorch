@@ -189,20 +189,13 @@ impl crate::agent_loop::LoopState {
             .ok_or(LaneDeliveryNack::UnknownThread)?;
         let current = host.resolve(thread)?;
         if current.owner() != claim.owner || current.root_run_id != self.task.run_id {
-            return Err(LaneDeliveryNack::OwnershipLost);
+            return Err(LaneDeliveryNack::BindingConflict);
         }
         let gate = runtime.stop_restore_gate(self.task.run_id);
         let _stop = gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         runtime.check_delivery_target(thread, &current)?;
-        let _owner = current
-            .authority
-            .ownership
-            .as_ref()
-            .map(|p| p.mutation_guard())
-            .transpose()
-            .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
         let store = runtime
             .delivery_store()
             .map_err(|_| LaneDeliveryNack::StorageFailed)?;

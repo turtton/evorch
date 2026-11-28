@@ -1484,7 +1484,6 @@ fn queue_lane(
         owner: storage::lane_delivery::LaneDeliveryOwner {
             root_run_id: root.to_string(),
             generation: 1,
-            ownership_generation: 0,
         },
         completed_root_wake: false,
         notifications: vec![event_bus::lane::LaneNotification {

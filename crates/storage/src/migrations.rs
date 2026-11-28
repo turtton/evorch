@@ -97,6 +97,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v78.sql"),
     include_str!("migrations/v79.sql"),
     include_str!("migrations/v80.sql"),
+    include_str!("migrations/v81.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -274,10 +275,11 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
     }
 }
 
-/// Reverts migrations v80, v79, v78, v77, v76, v75, v74, v73, v72, v71, v70, v69, v68, v67, v66, v65, v64, v63, v62, v61, v60, v59, v58, v57, v56, v55, v54, v53, v52, v51, v50, v49, v48, v47 and v46 (see `undo/undo_v46.sql`); apply it before [`UNDO_V45`].
+/// Reverts migrations v81, v80, v79, v78, v77, v76, v75, v74, v73, v72, v71, v70, v69, v68, v67, v66, v65, v64, v63, v62, v61, v60, v59, v58, v57, v56, v55, v54, v53, v52, v51, v50, v49, v48, v47 and v46 (see `undo/undo_v46.sql`); apply it before [`UNDO_V45`].
 #[cfg(test)]
 pub(crate) const UNDO_V46: &str = concat!(
     concat!(
+        include_str!("../undo/undo_v81.sql"),
         include_str!("../undo/undo_v80.sql"),
         include_str!("../undo/undo_v79.sql"),
         include_str!("../undo/undo_v78.sql"),
@@ -419,3 +421,7 @@ mod v79_tests;
 #[cfg(test)]
 #[path = "migrations/v80_tests.rs"]
 mod v80_tests;
+
+#[cfg(test)]
+#[path = "migrations/v81_tests.rs"]
+mod v81_tests;

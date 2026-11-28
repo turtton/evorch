@@ -162,49 +162,6 @@ fn a_thread_cannot_become_a_second_lane() {
 }
 
 #[test]
-fn a_stale_saved_copy_does_not_bring_back_a_ended_management() {
-    // Given: the base both sides started from has the lane attached (revision 1)
-    let dir = tempfile::tempdir().unwrap();
-    let mut base = sidebar(&dir);
-    base.apply_lane_link(&id("lane"), link(Some("lead"), LanePolicy::Attached, 1))
-        .unwrap();
-
-    // And: this process saw it detached (revision 2) while the file still says attached
-    let mut local = base.clone();
-    local
-        .apply_lane_link(&id("lane"), link(None, LanePolicy::Detached, 2))
-        .unwrap();
-    let disk = base.clone();
-
-    // When: the two are merged in either role
-    for merged in [
-        SidebarState::merge_three_way(&base, &local, &disk),
-        SidebarState::merge_three_way(&disk, &disk, &local),
-        SidebarState::merge_three_way(&local, &local, &disk),
-    ] {
-        // Then: the higher revision wins and the lane stays independent
-        let lane = lane_of(&merged, "lane");
-        assert_eq!(lane.lane.as_ref().unwrap().management_revision, 2);
-        assert_eq!(lane.tree_parent(), None);
-        assert_eq!(merged.family_key(&id("lane")).unwrap(), id("lane"));
-    }
-}
-
-#[test]
-fn a_lane_added_on_one_side_survives_a_side_that_never_heard_of_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = sidebar(&dir);
-    let mut local = base.clone();
-    local
-        .apply_lane_link(&id("lane"), link(Some("lead"), LanePolicy::Attached, 1))
-        .unwrap();
-
-    let merged = SidebarState::merge_three_way(&base, &local, &base);
-
-    assert_eq!(merged.family_key(&id("lane")).unwrap(), id("lead"));
-}
-
-#[test]
 fn a_managed_lane_sorts_by_its_activity_not_by_a_running_run() {
     // Given: two attached lanes of one lead; the older one has a running run
     let dir = tempfile::tempdir().unwrap();
@@ -260,7 +217,7 @@ fn the_lane_projection_survives_saving_and_loading_the_sidebar() {
 }
 
 #[test]
-fn each_detach_resets_state_but_repair_and_merge_keep_edits_in_the_same_epoch() {
+fn each_detach_resets_state_but_a_repeated_link_keeps_edits_in_the_same_epoch() {
     let dir = tempfile::tempdir().unwrap();
     let mut current = sidebar(&dir);
     current
@@ -268,7 +225,6 @@ fn each_detach_resets_state_but_repair_and_merge_keep_edits_in_the_same_epoch() 
         .unwrap();
     current.set_family_pinned(&id("lane"), true).unwrap();
     current.set_family_archived(&id("lane"), true, 100).unwrap();
-    let old_independent = current.clone();
     current
         .apply_lane_link(&id("lane"), link(Some("lead"), LanePolicy::Summary, 3))
         .unwrap();
@@ -281,36 +237,23 @@ fn each_detach_resets_state_but_repair_and_merge_keep_edits_in_the_same_epoch() 
         .unwrap();
     assert!(!lane_of(&current, "lane").pinned);
     assert!(!lane_of(&current, "lane").archived);
-    let initial = current.clone();
-    // Even much higher edit revisions in an older independent period lose.
-    let mut stale = old_independent.clone();
-    stale.families.iter_mut().for_each(|state| {
-        state.pin_revision = 999;
-        state.archive_revision = 999;
-    });
-    current = SidebarState::merge_three_way(&old_independent, &stale, &current);
-    assert!(!lane_of(&current, "lane").pinned);
-    assert!(!lane_of(&current, "lane").archived);
     current.set_family_pinned(&id("lane"), true).unwrap();
     current.set_family_archived(&id("lane"), true, 300).unwrap();
     current
         .apply_lane_link(&id("lane"), link(None, LanePolicy::Detached, 4))
         .unwrap();
-    let reloaded: SidebarState =
-        serde_json::from_slice(&serde_json::to_vec(&current).unwrap()).unwrap();
-    for (local, disk) in [(&initial, &reloaded), (&reloaded, &initial)] {
-        let merged = SidebarState::merge_three_way(&initial, local, disk);
-        assert!(lane_of(&merged, "lane").pinned);
-        assert!(lane_of(&merged, "lane").archived);
-        assert_eq!(lane_of(&merged, "lane").archived_at, Some(300));
-    }
+    let reloaded =
+        workspace_state::sidebar_from_json(&workspace_state::sidebar_to_json(&current).unwrap())
+            .unwrap();
+    assert!(lane_of(&reloaded, "lane").pinned);
+    assert!(lane_of(&reloaded, "lane").archived);
+    assert_eq!(lane_of(&reloaded, "lane").archived_at, Some(300));
     current
         .apply_lane_link(&id("lane"), link(Some("other"), LanePolicy::Summary, 5))
         .unwrap();
-    let merged = SidebarState::merge_three_way(&old_independent, &stale, &current);
-    assert_eq!(merged.family_key(&id("lane")).unwrap(), id("other"));
-    assert!(!lane_of(&merged, "lane").pinned);
-    assert!(!lane_of(&merged, "lane").archived);
+    assert_eq!(current.family_key(&id("lane")).unwrap(), id("other"));
+    assert!(!lane_of(&current, "lane").pinned);
+    assert!(!lane_of(&current, "lane").archived);
 }
 
 #[test]

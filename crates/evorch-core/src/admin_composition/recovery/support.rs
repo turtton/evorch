@@ -90,7 +90,7 @@ pub(in crate::admin_composition) fn seed(
     handle
         .prepare_recovery_manifest(RecoveryManifestRecord {
             manifest_id: MANIFEST.into(),
-            schema_version: 1,
+            schema_version: storage::recovery::RECOVERY_SCHEMA_VERSION,
             committed: false,
             superseded: false,
             edges: vec![RecoveryEdge {
@@ -111,7 +111,7 @@ pub(in crate::admin_composition) fn seed(
         old_build: "old".into(),
         successor_build: "new".into(),
         target_identity: "target".into(),
-        handoff_version: 1,
+        handoff_version: core_instance::handoff::HANDOFF_FORMAT_VERSION,
         snapshot_version: 1,
         storage_version: 71,
         old_builtin_tool_names: Default::default(),
@@ -137,8 +137,6 @@ pub(in crate::admin_composition) fn seed(
             thread_id: threads.then(|| run.into()),
             intent_revision: 0,
             snapshot: None,
-            owner_id: None,
-            owner_generation: None,
             lane_id: None,
         };
         sql.execute(

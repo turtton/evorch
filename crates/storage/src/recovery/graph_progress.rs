@@ -10,7 +10,6 @@ pub struct GraphDisposalProgressKey {
     pub restart_id: String,
     pub capture_id: String,
     pub thread_id: String,
-    pub owner_generation: u64,
 }
 impl GraphDisposalProgressKey {
     fn encoded(&self) -> Result<String, StorageError> {
@@ -72,7 +71,6 @@ pub struct GraphThreadProgress {
     pub key: GraphDisposalProgressKey,
     pub revision: u64,
     pub effect: GraphEffectKey,
-    pub owners: GraphDisposalStep,
     pub scratch: GraphDisposalStep,
 }
 #[derive(Debug, Clone)]
@@ -80,18 +78,17 @@ pub struct GraphThreadProgressWrite {
     pub key: GraphDisposalProgressKey,
     pub expected_revision: u64,
     pub control: GraphControlRecord,
-    pub owners: GraphDisposalStep,
     pub scratch: GraphDisposalStep,
 }
 fn read(
     conn: &Connection,
     key: &GraphDisposalProgressKey,
 ) -> Result<Option<GraphThreadProgress>, StorageError> {
-    let row: Option<(u64,String,String,String,String)> = conn.query_row(
-        "SELECT revision,operation_id,attempt_nonce,owners,scratch FROM recovery_graph_thread_progress WHERE disposal_key=?1",
-        [key.encoded()?],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    let row: Option<(u64,String,String,String)> = conn.query_row(
+        "SELECT revision,operation_id,attempt_nonce,scratch FROM recovery_graph_thread_progress WHERE disposal_key=?1",
+        [key.encoded()?],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional()?;
-    row.map(|(revision, operation_id, attempt_nonce, owners, scratch)| {
+    row.map(|(revision, operation_id, attempt_nonce, scratch)| {
         Ok(GraphThreadProgress {
             key: key.clone(),
             revision,
@@ -99,7 +96,6 @@ fn read(
                 operation_id,
                 attempt_nonce,
             },
-            owners: GraphDisposalStep::parse(&owners)?,
             scratch: GraphDisposalStep::parse(&scratch)?,
         })
     })
@@ -143,9 +139,9 @@ pub(super) fn write(
     }
     let prior = read(conn, key)?;
     if prior.as_ref().map_or(0, |p| p.revision) != request.expected_revision
-        || prior.as_ref().is_some_and(|p| {
-            !p.owners.may_advance(request.owners) || !p.scratch.may_advance(request.scratch)
-        })
+        || prior
+            .as_ref()
+            .is_some_and(|p| !p.scratch.may_advance(request.scratch))
     {
         return Err(invalid("graph progress CAS conflict"));
     }
@@ -153,13 +149,12 @@ pub(super) fn write(
         .expected_revision
         .checked_add(1)
         .ok_or_else(|| invalid("progress revision exhausted"))?;
-    conn.execute("INSERT INTO recovery_graph_thread_progress(disposal_key,manifest_id,restart_id,capture_id,thread_id,owner_generation,revision,operation_id,attempt_nonce,owners,scratch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(disposal_key) DO UPDATE SET revision=excluded.revision,operation_id=excluded.operation_id,attempt_nonce=excluded.attempt_nonce,owners=excluded.owners,scratch=excluded.scratch",
-        params![encoded,key.manifest_id,key.restart_id,key.capture_id,key.thread_id,key.owner_generation,revision,current.effect.operation_id,current.effect.attempt_nonce,request.owners.name(),request.scratch.name()])?;
+    conn.execute("INSERT INTO recovery_graph_thread_progress(disposal_key,manifest_id,restart_id,capture_id,thread_id,revision,operation_id,attempt_nonce,scratch) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(disposal_key) DO UPDATE SET revision=excluded.revision,operation_id=excluded.operation_id,attempt_nonce=excluded.attempt_nonce,scratch=excluded.scratch",
+        params![encoded,key.manifest_id,key.restart_id,key.capture_id,key.thread_id,revision,current.effect.operation_id,current.effect.attempt_nonce,request.scratch.name()])?;
     Ok(GraphThreadProgress {
         key: key.clone(),
         revision,
         effect: current.effect,
-        owners: request.owners,
         scratch: request.scratch,
     })
 }
@@ -174,7 +169,6 @@ mod tests {
             restart_id: "tx".into(),
             capture_id: "capture".repeat(30),
             thread_id: "thread".repeat(30),
-            owner_generation: 1,
         };
         assert!(key.manifest_id.len() > 128);
         assert_eq!(key.encoded().unwrap().len(), 64);

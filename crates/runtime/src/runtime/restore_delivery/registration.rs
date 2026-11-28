@@ -19,7 +19,7 @@ impl AgentRuntime {
         durable_parent: Option<(RunId, bool)>,
         intent_admitted: bool,
     ) -> Result<(), RuntimeError> {
-        let (run_id, parent, role, mut config, sender) = identity;
+        let (run_id, parent, role, config, sender) = identity;
         if execution.cancelled()
             || intents.get(&run_id).is_none_or(|i| {
                 i.cancelled
@@ -35,7 +35,6 @@ impl AgentRuntime {
                 run_id: run_id.to_string(),
             });
         }
-        self.install_run_ownership_guard(run_id, &mut config);
         // Durable question answers are flushed by the loop. They need neither
         // a synthetic message nor a rewrite of the saved provider prefix.
         let history_only = restored.trigger.is_none();

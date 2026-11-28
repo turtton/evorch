@@ -1,9 +1,9 @@
-//! Planned exit retains thread runtime owners and the SQLite writer. The index
+//! Planned exit retains runtime resources and the SQLite writer. The index
 //! owner alone stops at StopRequested, before the storage barrier. The coordinator
 //! retains this object even on failure.
 use super::*;
 mod holds;
-pub use holds::RestartHolds;
+pub use holds::RestartTransactionGuard;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -23,11 +23,11 @@ pub enum ExitStage {
     WorkersJoined = 4,
     StorageDrained = 5,
     TargetChecked = 6,
-    OwnersHeld = 7,
+    TransactionChecked = 7,
     Armed = 8,
     ExecPrepared = 9,
     SignalsStopped = 10,
-    OwnerStopped = 11,
+    WorkersStopped = 11,
 }
 struct Workers {
     services: services::BackgroundServices,
@@ -52,12 +52,12 @@ pub struct PlannedExit {
     failure: Option<String>,
     workers_result: Option<Result<(), String>>,
     cleanup_result: Option<Result<(), String>>,
-    holds: Arc<RestartHolds>,
+    holds: Arc<RestartTransactionGuard>,
     scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
 }
 impl BootstrappedHost {
     /// The bridge moved here, so ordinary shutdown must reclaim it before
-    /// releasing owners/scratch. As before, this cleanup wait has no deadline.
+    /// releasing storage/scratch resources. As before, this cleanup wait has no deadline.
     pub(super) async fn cleanup_planned_exit(&mut self) -> Result<(), String> {
         if let Some(resources) = &self.planned_exit {
             tracing::debug!(target: "restart_drain", phase = "planned_shutdown_cleanup_begin");
@@ -135,8 +135,7 @@ impl BootstrappedHost {
             failure: None,
             workers_result: None,
             cleanup_result: None,
-            holds: Arc::new(RestartHolds::new(
-                self.owner.clone(),
+            holds: Arc::new(RestartTransactionGuard::new(
                 self.restart_storage.clone(),
                 writer,
             )),
@@ -208,17 +207,17 @@ impl PlannedExit {
         self.cleanup_result = Some(result.clone());
         result
     }
-    pub fn restart_holds(&self) -> Arc<RestartHolds> {
+    pub fn restart_transaction_guard(&self) -> Arc<RestartTransactionGuard> {
         self.holds.clone()
     }
     async fn run_stage(&mut self, stage: ExitStage, bounded: bool) -> Result<(), String> {
         match stage {
             ExitStage::TargetChecked
-            | ExitStage::OwnersHeld
+            | ExitStage::TransactionChecked
             | ExitStage::Armed
             | ExitStage::ExecPrepared
             | ExitStage::SignalsStopped
-            | ExitStage::OwnerStopped => {
+            | ExitStage::WorkersStopped => {
                 return Err("later stages belong to the coordinator".into());
             }
             ExitStage::SpawnFenceClosed => {

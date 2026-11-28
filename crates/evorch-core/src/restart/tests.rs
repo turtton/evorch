@@ -68,6 +68,7 @@ async fn boot_composition(
     sidebar
         .add_project(workspace_state::ProjectId::new("p"), "repo", &root)
         .unwrap();
+    sidebar.projects[0].trust = workspace_state::TrustState::Approved;
     std::fs::write(
         root.join("sidebar.json"),
         serde_json::to_vec(&sidebar).unwrap(),
@@ -93,23 +94,24 @@ async fn boot_composition(
         BootstrappedHost::open_with_test_seams(options, seams).await
     }
     .unwrap();
-    assert_owner_socket_paths(&root.join("o"));
+    assert_no_owner_registry_artifacts(&root.join("o"));
     (dir, boot)
 }
-fn assert_owner_socket_paths(root: &std::path::Path) {
-    let sockets: Vec<_> = std::fs::read_dir(root)
+fn assert_no_owner_registry_artifacts(root: &std::path::Path) {
+    let obsolete: Vec<_> = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "sock")
+                || path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("owners.db"))
         })
         .collect();
-    assert!(!sockets.is_empty());
     assert!(
-        sockets
-            .iter()
-            .all(|path| path.as_os_str().as_encoded_bytes().len() < 108)
+        obsolete.is_empty(),
+        "owner registry artifacts: {obsolete:?}"
     );
 }
 async fn phase(core: &RestartCoordinator, expected: RestartPhase) {

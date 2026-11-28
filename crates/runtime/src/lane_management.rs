@@ -2,12 +2,8 @@
 //! Hosts authenticate human input and hold their sidebar/family lock across reattach
 //! and projection save. Management does not change execution authority or wake runs.
 //!
-//! Human ingress MUST use the delivery runtime's clone (the same RunStore and
-//! restore gate), and must own the lane, its current lead and any new lead.
-//! Never route a request to a second runtime merely because it opens the same
-//! SQLite file. A host without that ownership rejects it rather than claiming
-//! execution authority. `manage_lane_from_host` fences the supplied permits
-//! under the completion gate, in the same lock order as delivery and restore.
+//! Human ingress uses the delivery runtime (the same RunStore and restore gate).
+//! The trusted host family binding and storage revisions fence mutations.
 use crate::{AgentRuntime, RunId, lanes::LaneError};
 use event_bus::{Event, ToolEvent};
 use storage::lane_management::LaneManagementActor;
@@ -95,23 +91,20 @@ impl AgentRuntime {
         request: LaneManagementRequest,
         attach_guard: Option<LaneAttachGuard>,
     ) -> Result<LaneManagementOutcome, LaneError> {
-        self.manage_lane_with_permits(context, request, attach_guard, &[])
+        self.manage_lane_inner(context, request, attach_guard)
     }
 
-    /// Trusted human ingress only. Permits are resolved by the host for the
-    /// lane, current lead and reattach target; never decoded from client JSON.
+    /// Trusted human ingress only; the family guard is never client-supplied.
     pub fn manage_lane_from_host(
         &self,
         _: LaneHumanContext,
         request: LaneManagementRequest,
         attach_guard: Option<LaneAttachGuard>,
-        permits: &[crate::ownership::OwnerPermit],
     ) -> Result<LaneManagementOutcome, LaneError> {
-        self.manage_lane_with_permits(
+        self.manage_lane_inner(
             LaneManagementContext::User(LaneHumanContext),
             request,
             attach_guard,
-            permits,
         )
     }
 
@@ -156,12 +149,11 @@ impl AgentRuntime {
         ))
     }
 
-    fn manage_lane_with_permits(
+    fn manage_lane_inner(
         &self,
         context: LaneManagementContext,
         request: LaneManagementRequest,
         attach_guard: Option<LaneAttachGuard>,
-        permits: &[crate::ownership::OwnerPermit],
     ) -> Result<LaneManagementOutcome, LaneError> {
         let _manual = self
             .shared
@@ -174,29 +166,15 @@ impl AgentRuntime {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
-        // Same lock order as question resolution/restore: completion, then owner.
+        // Serialize with question resolution and restore.
         let completion = store
             .restore_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (actor, config) = match context {
-            LaneManagementContext::User(_) => (LaneManagementActor::User, None),
-            LaneManagementContext::Run(caller) => {
-                let (actor, config) = self.lane_lead_actor(store, caller)?;
-                (actor, Some(config))
-            }
+        let actor = match context {
+            LaneManagementContext::User(_) => LaneManagementActor::User,
+            LaneManagementContext::Run(caller) => self.lane_lead_actor(store, caller)?.0,
         };
-        let permits = config
-            .as_ref()
-            .and_then(|c| c.ownership.as_ref())
-            .into_iter()
-            .chain(permits)
-            .cloned()
-            .collect::<Vec<_>>();
-        // One snapshot per registry: a heartbeat's PENDING commit between two
-        // read connections otherwise waits on the first while blocking the second.
-        let authority = crate::ownership::OwnerPermit::mutation_guards(&permits)
-            .map_err(|e| LaneError::new("ownership_lost", e))?;
         let operation = store
             .handle
             .apply_lane_management_transition(
@@ -206,7 +184,6 @@ impl AgentRuntime {
                 crate::run_store::review_time_ns(),
             )
             .map_err(management_error)?;
-        drop(authority);
         // Do not turn a committed mutation into a retryable write failure. Pending
         // projections are durable; a lost event is repaired by re-reading the ledger.
         let current_lane = store.handle.lane(&operation.lane.lane_id).ok().flatten();

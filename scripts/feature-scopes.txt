@@ -155,8 +155,6 @@ pr07b5aq2 crates/workbench-host/src/bootstrap/recovery_disposal.rs
 pr07b5aq2 crates/workbench-host/src/bootstrap/recovery_disposal/*
 pr07b5aq2 crates/runtime/src/runtime/recovery_disposal.rs
 pr07b5aq2 crates/runtime/src/runtime/recovery_disposal/*
-pr07b5aq2 crates/runtime/src/ownership/disposal.rs
-pr07b5aq2 crates/runtime/src/ownership/disposal/*
 pr07b5aq2 crates/evorch-core/src/recovery_admin.rs
 pr07b5aq2 crates/evorch-core/src/recovery_admin/*
 pr07b5aq2 crates/storage/src/recovery/owned_graphs.rs

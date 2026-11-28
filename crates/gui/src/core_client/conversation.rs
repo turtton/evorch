@@ -450,21 +450,6 @@ fn header(
                             ))));
                             ui.close();
                         }
-                        if ui
-                            .button("Take over stopped legacy thread")
-                            .on_hover_text(
-                                "Let the core continue a stopped thread the embedded workbench ran",
-                            )
-                            .clicked()
-                        {
-                            effects.push(Effect::send(command(Command::Conversation(
-                                ConversationCommand::PrepareExistingThread {
-                                    project: project.clone(),
-                                    thread: thread.clone(),
-                                },
-                            ))));
-                            ui.close();
-                        }
                     })
                     .response
                     .on_hover_text("More");

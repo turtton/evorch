@@ -91,14 +91,13 @@ fn build(conn: &Connection, row: Row) -> Result<QuarantinedGraph, StorageError> 
     let claim = claim_state(conn, &row.manifest_id)?;
     let progress: Vec<Progress> = conn
         .prepare(
-            "SELECT thread_id,owners,scratch,revision FROM recovery_graph_thread_progress WHERE manifest_id=?1",
+            "SELECT thread_id,scratch,revision FROM recovery_graph_thread_progress WHERE manifest_id=?1",
         )?
         .query_map([&row.manifest_id], |r| {
             Ok(Progress {
                 thread: r.get(0)?,
-                owners: r.get(1)?,
-                scratch: r.get(2)?,
-                revision: r.get(3)?,
+                scratch: r.get(1)?,
+                revision: r.get(2)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -140,7 +139,6 @@ fn build(conn: &Connection, row: Row) -> Result<QuarantinedGraph, StorageError> 
 
 struct Progress {
     thread: String,
-    owners: String,
     scratch: String,
     revision: u64,
 }
@@ -192,7 +190,7 @@ fn completion(
     let Ok(threads) = threads else {
         return QuarantineCompletion::Unknown;
     };
-    for step in progress.iter().flat_map(|p| [&p.owners, &p.scratch]) {
+    for step in progress.iter().map(|p| &p.scratch) {
         match step.as_str() {
             "applied" | "not_applicable" => {}
             "not_started" => result = QuarantineCompletion::Partial,

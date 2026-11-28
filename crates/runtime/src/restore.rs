@@ -158,12 +158,8 @@ impl RestoredState {
     }
 }
 
-/// ownership だけを理由に復元不可とした記録へ書き込むマーカー。
-///
-/// GUI の chat 系入口 (`delegate_chat` / `continue_goal`) はスナップショットから
-/// ownership を復元せず、呼び出し側の現在の permit を常に再付与するため、
-/// このマーカーを持つ記録は history 復元を許可する。復元判定の両ゲートと
-/// `write_snapshot` は必ずこの定数を経由して文字列を一致させること。
+/// Legacy snapshots with this exact sole reason may reuse history after all
+/// current non-owner guards pass. New snapshots never produce this marker.
 pub(crate) const OWNERSHIP_ONLY_UNRESTORABLE_REASON: &str = "復元対象外の実行状態: ownership";
 
 /// A team root may reuse history only with an explicit current team authority.
@@ -336,7 +332,7 @@ pub(crate) enum SnapshotError {
     ResumeIntent(String),
     #[error("invalid replay snapshot: {0}")]
     Replay(String),
-    #[error("unobserved shell effects require a durable checkpoint; ownership retained")]
+    #[error("unobserved shell effects require a durable checkpoint; resources retained")]
     UnrecordedShellEffects,
     #[error("assistant reference cannot be persisted: {0}")]
     AssistantReference(String),
@@ -583,7 +579,6 @@ fn write_snapshot_with_context(
             config.purpose != crate::RunPurpose::General,
             "learning_purpose",
         ),
-        (config.ownership.is_some(), "ownership"),
     ] {
         if present {
             unsupported.push(field);
@@ -603,7 +598,6 @@ fn write_snapshot_with_context(
                             | "team"
                             | "team_store"
                             | "delegation_value"
-                            | "ownership"
                             | "memory"
                             | "finding_store"
                     )
@@ -651,13 +645,12 @@ fn write_snapshot_with_context(
             .any(|field| matches!(*field, "memory" | "finding_store"))
         && unsupported
             .iter()
-            .all(|field| matches!(*field, "memory" | "finding_store" | "ownership"))
+            .all(|field| matches!(*field, "memory" | "finding_store"))
     {
         Some(ROOT_CONTEXT_RENEWAL_REQUIRED_REASON.into())
     } else {
         match unsupported.as_slice() {
             [] => None,
-            ["ownership"] => Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON.to_owned()),
             _ => Some(format!("復元対象外の実行状態: {}", unsupported.join(", "))),
         }
     };

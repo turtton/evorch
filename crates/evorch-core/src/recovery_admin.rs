@@ -3,8 +3,11 @@ use crate::{
     recovery_service::admin::{RecoveryAdminContext, RecoveryAdminHandler},
     recovery_startup::StartupBlocked,
 };
-use runtime::{ActivationReservation, OwnedGraphOwnershipState};
-use std::{collections::BTreeMap, sync::Mutex};
+use runtime::ActivationReservation;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 use storage::recovery::{
     RecoveryClaimState,
     graph_control::{GraphControlRecord, GraphEffectKey},
@@ -173,14 +176,17 @@ impl ExistingPreparedResume {
             Ok(graph)
         })
         .map_err(|_| RecoveryAdminError::Unavailable)?;
-        let (current, owners) = binding_for(
-            &context.startup.owner,
-            &graph.cas,
-            request.binding.graph.operation_id.clone(),
-        )
-        .map_err(|_| RecoveryAdminError::Unavailable)?;
+        let current = binding_for(&graph.cas, request.binding.graph.operation_id.clone())
+            .map_err(|_| RecoveryAdminError::Unavailable)?;
+        let thread_count = graph
+            .cas
+            .membership
+            .iter()
+            .filter_map(|member| member.thread_id.as_deref())
+            .collect::<BTreeSet<_>>()
+            .len();
         if current != request.binding
-            || owners.len() > 64
+            || thread_count > 64
             || request.effect.operation_id != current.graph.operation_id.as_str()
             || graph.cas.phase != storage::recovery::restart::RestartPhase::Adopted
             || !graph
@@ -192,25 +198,7 @@ impl ExistingPreparedResume {
             return Err(blocked(GraphProblemDetail::NeedsAttention));
         }
         let reservation: ActivationReservation = request.reservation.into();
-        if runtime
-            .reserved_owned_graph_ownership_diagnostic(&graph.cas, &reservation)
-            .map_err(|_| RecoveryAdminError::Unavailable)?
-            .state()
-            != OwnedGraphOwnershipState::LiveSelf
-        {
-            return Err(blocked(GraphProblemDetail::OwnerAbsent));
-        }
-        let permits = owners
-            .iter()
-            .map(|o| {
-                context
-                    .startup
-                    .owner
-                    .owned_permit(&o.thread_id)
-                    .map_err(|_| blocked(GraphProblemDetail::ForeignOwner))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let control = match runtime.begin_owned_graph_resume(&graph.cas, &permits, &reservation) {
+        let control = match runtime.begin_owned_graph_resume(&graph.cas, &reservation) {
             Ok(control) => control,
             Err(error) => {
                 return Err(self.policy_write_failed(
@@ -290,7 +278,6 @@ pub fn map_startup_blocked(reason: StartupBlocked) -> RecoveryAdminError {
     use GraphAuthorityProblem as P;
     use GraphProblemDetail as D;
     let (problem, detail) = match reason {
-        StartupBlocked::OwnerBlocked => (P::OwnerBlocked, D::OwnerAbsent),
         StartupBlocked::CurrentBindingRequired => {
             (P::CurrentBindingRequired, D::CurrentBindingRequired)
         }

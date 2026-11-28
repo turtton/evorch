@@ -392,9 +392,9 @@ async fn without_a_registered_leaf_every_management_request_is_unsupported_befor
     let graph: ConfirmedOwnedGraph = serde_json::from_value(json!({
         "binding": {
             "graph": {"graph_id":"graph", "restart_tx_id":"tx", "capture_id":"capture",
-                "expected_revision":"1", "expected_core_epoch":epoch, "owner_identity":null,
-                "owner_generation":null, "operation_id":"unsupported-owned"},
-            "owners":[], "expected_control_revision":"0"
+                "expected_revision":"1", "expected_core_epoch":epoch,
+                "operation_id":"unsupported-owned"},
+            "threads":[], "expected_control_revision":"0"
         }, "confirmed":true
     }))
     .unwrap();

@@ -8,7 +8,6 @@
 //! a lane has no gate of its own here, and a Ready is shown against the brief
 //! revision the lane had received when it reported.
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use event_bus::RecvError;
 use event_bus::lane::{
@@ -617,8 +616,8 @@ fn close_preview(
 fn refusal(code: &str) -> WorkbenchError {
     let kind = match code {
         "stale_management_revision" | "not_the_threads_root" => ErrorCode::StaleRevision,
-        "ownership_lost" | "not_current_lead" => ErrorCode::PermissionDenied,
-        "lane_unavailable" => ErrorCode::NotFound,
+        "not_current_lead" => ErrorCode::PermissionDenied,
+        "lane_unavailable" | "thread_deleted" => ErrorCode::NotFound,
         "storage_unavailable" => ErrorCode::StorageUnavailable,
         _ => ErrorCode::Conflict,
     };
@@ -640,12 +639,11 @@ fn refusal(code: &str) -> WorkbenchError {
 ///
 /// # Errors
 /// `StaleRevision` for a management revision or a root run that is no longer
-/// current, `PermissionDenied` for a lead that is not the lane's or an
-/// ownership the host lost, `Conflict` when the runtime refuses (for example
-/// the lead was stopped and must be continued first), `NotFound`.
+/// current, `PermissionDenied` for a lead that is not the lane's, `Conflict`
+/// when the runtime refuses (for example the lead was stopped and must be
+/// continued first), `NotFound` for an unknown lane or a deleted lead thread.
 pub fn resume_deliveries(
     runtime: &AgentRuntime,
-    ownership: Option<&Arc<runtime::ownership::OwnerHost>>,
     request: &ResumeLaneDeliveries,
 ) -> Result<LaneDeliveriesResumed, WorkbenchError> {
     let lane = runtime
@@ -664,13 +662,18 @@ pub fn resume_deliveries(
         .as_str()
         .parse::<runtime::RunId>()
         .map_err(|_| refusal("not_the_threads_root"))?;
-    let owner = ownership.ok_or_else(|| refusal("ownership_lost"))?;
-    let permit = owner
-        .owned_permit(request.lead_thread_id.as_str())
-        .map_err(|_| refusal("ownership_lost"))?;
     runtime
-        .resume_lane_deliveries(request.lead_thread_id.as_str(), run, Some(&permit))
+        .resume_lane_deliveries(request.lead_thread_id.as_str(), run)
         .map_err(|error| {
+            if matches!(
+                error,
+                runtime::RuntimeError::RunRestoreFailed {
+                    reason: runtime::RunRestoreFailure::ThreadDeleted(_),
+                    ..
+                }
+            ) {
+                return refusal("thread_deleted");
+            }
             let reason = error.to_string();
             if reason.contains("not_the_threads_root") {
                 refusal("not_the_threads_root")

@@ -107,9 +107,6 @@ impl Fixture {
             storage::learning_jobs::LearningOriginKind::Core,
             Some("service-test".into()),
         ));
-        let owner = Arc::new(
-            runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap(),
-        );
         let host = Arc::new(std::sync::Mutex::new(workbench_host::CommandHost::new(
             workbench_host::commands::CommandService::new(
                 runtime.clone(),
@@ -119,7 +116,6 @@ impl Fixture {
         let inputs = CoreStartupInputs {
             host,
             runtime,
-            owner,
             options,
             storage: config.clone(),
             writer,
@@ -143,7 +139,6 @@ impl Fixture {
         CoreStartupInputs {
             host: i.host.clone(),
             runtime: i.runtime.clone(),
-            owner: i.owner.clone(),
             options: i.options.clone(),
             storage: i.storage.clone(),
             writer: i.writer.clone(),
@@ -162,10 +157,11 @@ impl Fixture {
             "graph": {
                 "graph_id": id, "restart_tx_id": "tx", "capture_id": "capture",
                 "expected_revision": "1", "expected_core_epoch": "1",
-                "owner_identity": null, "owner_generation": null, "operation_id": effect.operation_id,
+                "operation_id": effect.operation_id,
             },
-            "owners": [], "expected_control_revision": "0",
-        })).unwrap();
+            "threads": [], "expected_control_revision": "0",
+        }))
+        .unwrap();
         RecoveryResumeRequest {
             manifest_id: id.into(),
             binding,
@@ -359,7 +355,6 @@ async fn automatic_attempt_cannot_prepare_or_decline_a_manual_reserved_graph() {
     let coordinator = StartupCoordinator::new(
         StartupInputs {
             runtime: &fixture.inputs.runtime,
-            owner: &fixture.inputs.owner,
             storage: &fixture.inputs.storage,
             writer: &fixture.inputs.writer,
             options: &fixture.inputs.options,
@@ -482,7 +477,7 @@ fn pending_work_counts_retry_and_running_jobs_not_historical_manual_display() {
                 manifest_id: "manual-idle".into(),
                 runs: vec![],
                 state: RecoveryState::Blocked,
-                reason: Some(StartupBlocked::OwnerBlocked),
+                reason: Some(StartupBlocked::NeedsAttention),
                 manual_continue: false,
             }],
         })),
@@ -513,7 +508,6 @@ async fn consecutive_job_contexts_reuse_the_initial_fence_without_reinstalling_i
     let coordinator = StartupCoordinator::new(
         StartupInputs {
             runtime: &fixture.inputs.runtime,
-            owner: &fixture.inputs.owner,
             storage: &fixture.inputs.storage,
             writer: &fixture.inputs.writer,
             options: &fixture.inputs.options,
@@ -531,5 +525,153 @@ async fn consecutive_job_contexts_reuse_the_initial_fence_without_reinstalling_i
     assert!(
         fixture.inputs.runtime.fence_graph_lane_recovery().is_err(),
         "original immutable fence is still installed"
+    );
+}
+
+// Deliberate corruption/format fault injection, not the real old-build cutover
+// fixture. None of these unsupported payloads should need a compatible decoder.
+fn insert_unsupported_graph(fixture: &Fixture, id: &str, phase: Option<&str>, version: u32) {
+    let db = rusqlite::Connection::open(&fixture.inputs.storage.db_path).unwrap();
+    db.execute(
+        "INSERT INTO recovery_manifests(manifest_id,schema_version,committed,superseded,member_count,edge_count,edges_json) VALUES(?1,?2,1,0,1,0,'invalid JSON')",
+        rusqlite::params![id, version],
+    ).unwrap();
+    db.execute("INSERT INTO recovery_members(manifest_id,run_id,incarnation,intent_revision,resume,record_json) VALUES(?1,?2,'old',0,1,'invalid JSON')", rusqlite::params![id, fixture.inputs.runtime.reserve_run_id().to_string()]).unwrap();
+    if let Some(phase) = phase {
+        db.execute(
+            "INSERT INTO restart_transactions(restart_id,capture_id,revision,phase,metadata_json,old_builtin_tool_names_json,format_version) VALUES(?1,?2,7,?3,'invalid JSON','invalid JSON',1)",
+            rusqlite::params![format!("tx-{id}"), format!("capture-{id}"), phase],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO restart_components(restart_id,manifest_id,disposition,revision) VALUES(?1,?2,'quarantined',3)",
+            rusqlite::params![format!("tx-{id}"), id],
+        ).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cold_scan_isolates_unsupported_and_corrupt_rows_without_decoding_old_completed() {
+    let fixture = Fixture::new();
+    insert_unsupported_graph(&fixture, "completed", Some("completed"), 1);
+    insert_unsupported_graph(&fixture, "quarantined", Some("invalidated"), 1);
+    insert_unsupported_graph(&fixture, "standalone", None, 1);
+    insert_unsupported_graph(
+        &fixture,
+        "corrupt-current",
+        None,
+        storage::recovery::RECOVERY_SCHEMA_VERSION,
+    );
+    insert_unsupported_graph(
+        &fixture,
+        "mixed-format",
+        Some("invalidated"),
+        storage::recovery::RECOVERY_SCHEMA_VERSION,
+    );
+    let mut services = BackgroundServices::default();
+    let diagnostics = CoreGraphRecovery
+        .start(fixture.startup_inputs(), &mut services)
+        .await
+        .unwrap();
+    let report = diagnostics.snapshot();
+    let components = report["scan"]["components"].as_array().unwrap();
+    assert_eq!(components.len(), 4);
+    assert!(!components.iter().any(|c| c["manifest_id"] == "completed"));
+    for id in [
+        "quarantined",
+        "standalone",
+        "corrupt-current",
+        "mixed-format",
+    ] {
+        let component = components.iter().find(|c| c["manifest_id"] == id).unwrap();
+        assert_eq!(component["disposition"], "needs_attention", "{id}");
+        assert!(!diagnostics.automatic_retry_pending(id));
+    }
+    assert!(!diagnostics.has_pending_work());
+    assert!(fixture.inputs.runtime.list_agents().is_empty());
+    services.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_legacy_discard_releases_prepared_reservation_and_scan_observes_superseded() {
+    let fixture = Fixture::new();
+    insert_unsupported_graph(&fixture, "completed-peer", Some("completed"), 1);
+    insert_unsupported_graph(&fixture, "standalone", None, 1);
+    let sql = rusqlite::Connection::open(&fixture.inputs.storage.db_path).unwrap();
+    sql.execute("INSERT INTO recovery_claims(claim_id,manifest_id,state) VALUES('legacy-claim','standalone','prepared')", []).unwrap();
+    sql.execute("INSERT INTO recovery_claim_members(claim_id,run_id,old_incarnation,reserved_revision,new_incarnation) SELECT 'legacy-claim',run_id,incarnation,0,'reserved' FROM recovery_members WHERE manifest_id='standalone'", []).unwrap();
+    let coordinator = StartupCoordinator::new(
+        StartupInputs {
+            runtime: &fixture.inputs.runtime,
+            storage: &fixture.inputs.storage,
+            writer: &fixture.inputs.writer,
+            options: &fixture.inputs.options,
+            projects: &fixture.inputs.projects,
+        },
+        fixture.inputs.startup.try_clone().unwrap(),
+        RecoveryCatalog::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        coordinator.scan().unwrap().components[0].disposition,
+        Disposition::NeedsAttention
+    );
+    assert_eq!(
+        coordinator.prepare_existing("standalone").err(),
+        Some(StartupBlocked::NeedsAttention)
+    );
+    let headers = storage::Database::open(&fixture.inputs.storage)
+        .unwrap()
+        .recovery_graph_headers()
+        .unwrap();
+    let expected = headers
+        .into_iter()
+        .find(|h| h.manifest_id == "standalone")
+        .unwrap();
+    fixture
+        .inputs
+        .writer
+        .discard_legacy_recovery_graph(expected.clone())
+        .unwrap();
+    fixture
+        .inputs
+        .writer
+        .discard_legacy_recovery_graph(expected)
+        .unwrap();
+    assert_eq!(
+        coordinator.scan().unwrap().components[0].disposition,
+        Disposition::Superseded
+    );
+    let state: String = sql
+        .query_row(
+            "SELECT state FROM recovery_claims WHERE claim_id='legacy-claim'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "released");
+    assert!(fixture.inputs.runtime.list_agents().is_empty());
+}
+
+#[tokio::test]
+async fn scan_does_not_report_an_unreadable_database_as_an_empty_inventory() {
+    let fixture = Fixture::new();
+    let coordinator = StartupCoordinator::new(
+        StartupInputs {
+            runtime: &fixture.inputs.runtime,
+            storage: &fixture.inputs.storage,
+            writer: &fixture.inputs.writer,
+            options: &fixture.inputs.options,
+            projects: &fixture.inputs.projects,
+        },
+        fixture.inputs.startup.try_clone().unwrap(),
+        RecoveryCatalog::default(),
+    )
+    .unwrap();
+    let sql = rusqlite::Connection::open(&fixture.inputs.storage.db_path).unwrap();
+    sql.execute_batch("ALTER TABLE recovery_manifests RENAME TO unavailable_manifests")
+        .unwrap();
+    assert_eq!(
+        coordinator.scan().err(),
+        Some(StartupBlocked::StorageUnavailable)
     );
 }

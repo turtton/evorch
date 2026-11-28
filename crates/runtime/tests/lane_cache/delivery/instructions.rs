@@ -340,7 +340,7 @@ async fn an_instruction_held_by_a_suppressed_wake_guard_is_delivered_once_after_
         });
         n.f.h
             .runtime
-            .resume_lane_deliveries(&n.f.host.thread, n.f.lead, None)
+            .resume_lane_deliveries(&n.f.host.thread, n.f.lead)
             .unwrap();
         if done {
             n.f.events
@@ -760,7 +760,7 @@ async fn an_instruction_held_by_suppressed_recovery_is_delivered_once_after_resu
         .enqueue(vec![text_response("read after the resume")]);
     n.f.h
         .runtime
-        .resume_lane_deliveries(&n.f.host.thread, n.f.lead, None)
+        .resume_lane_deliveries(&n.f.host.thread, n.f.lead)
         .unwrap();
     n.f.delivered_request().await;
     assert_eq!(n.receipts(), 1);

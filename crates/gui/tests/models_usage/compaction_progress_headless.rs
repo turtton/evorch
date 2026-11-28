@@ -211,29 +211,3 @@ fn dedicated_card_renders_progress_then_one_completed_entry() {
     assert!(harness.query_by_label("Compacting context…").is_some());
     assert!(harness.query_by_label("live summary preview").is_some());
 }
-
-#[test]
-fn ownership_loss_settles_saved_progress_in_only_its_thread_and_run() {
-    use gui::model::transcript_registry::TranscriptRegistry;
-    let mut registry = TranscriptRegistry::new();
-    registry.bind_thread_root("thread-a", "run-a");
-    registry.bind_thread_root("thread-b", "run-b");
-    registry.apply(&start("run-a", "op-a"));
-    registry.apply(&start("run-b", "op-b"));
-    registry.apply(&Event::new(event_bus::OwnershipEvent {
-        thread_id: "thread-a".into(),
-        owner_id: "old".into(),
-        generation: 1,
-        action: event_bus::OwnershipAction::Released,
-    }));
-    assert!(
-        matches!(&registry.run("run-a").unwrap().entries()[0], TranscriptEntry::CompactionProgress { progress } if !progress.active)
-    );
-    assert!(
-        matches!(&registry.run("run-b").unwrap().entries()[0], TranscriptEntry::CompactionProgress { progress } if progress.active)
-    );
-    registry.select_thread(Some("thread-a".into()));
-    assert!(
-        matches!(&registry.thread().entries()[0], TranscriptEntry::CompactionProgress { progress } if !progress.active)
-    );
-}

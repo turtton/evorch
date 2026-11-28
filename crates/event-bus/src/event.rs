@@ -68,8 +68,7 @@ impl Event {
     /// diagnostic events, the requesting run of a user question, the session
     /// of a fallback (which names the run), and the recipient of an agent
     /// message. Events with no single owning run — approvals and denials
-    /// (attributed through their call ID), faults, ownership
-    /// and usage events — have none. Task progress and checkpoints
+    /// (attributed through their call ID), faults and usage events — have none. Task progress and checkpoints
     /// belong to the reporting run, and a thread goal to its root run.
     #[must_use]
     pub fn primary_run_id(&self) -> Option<&str> {
@@ -79,8 +78,7 @@ impl Event {
 
 impl EventKind {
     /// The inner `kind` tag of the category's own tagged enum, as written in the
-    /// serialized payload, or `""` for categories without one (diagnostic and
-    /// ownership events). Complements the category name stored as the event's
+    /// serialized payload, or `""` for categories without one (diagnostic events). Complements the category name stored as the event's
     /// `kind` column.
     #[must_use]
     pub const fn subkind_name(&self) -> &'static str {
@@ -169,7 +167,7 @@ impl EventKind {
             },
             Self::PullRequest(event) => event.subkind_name(),
             Self::ConversationPlan(event) => event.subkind_name(),
-            Self::Diagnostic(_) | Self::Ownership(_) => "",
+            Self::Diagnostic(_) => "",
         }
     }
 
@@ -255,11 +253,9 @@ impl EventKind {
                 | OrchestratorEvent::TaskCheckpoint { run_id, .. } => Some(run_id),
                 OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
             },
-            Self::Usage(_)
-            | Self::Fault(_)
-            | Self::Ownership(_)
-            | Self::PullRequest(_)
-            | Self::ConversationPlan(_) => None,
+            Self::Usage(_) | Self::Fault(_) | Self::PullRequest(_) | Self::ConversationPlan(_) => {
+                None
+            }
         }
     }
 }
@@ -288,7 +284,6 @@ pub enum EventKind {
     Orchestrator(OrchestratorEvent),
     /// Structured diagnostics persisted in the event ledger.
     Diagnostic(DiagnosticEvent),
-    Ownership(crate::OwnershipEvent),
     /// run 台帳への追記イベント。
     Ledger(LedgerEvent),
     /// A change to the pull request a thread tracks (ADR 0043). Thread-scoped: it has no run.
@@ -448,11 +443,6 @@ pub mod diagnostic_codes {
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
     pub const TOOL_ARGUMENTS_MALFORMED: &str = "ToolArgumentsMalformed";
-    /// A run waited noticeably for a contended thread owner registry. It keeps
-    /// its authority and continues once the registry is available.
-    pub const OWNERSHIP_REGISTRY_WAIT: &str = "OwnershipRegistryWait";
-    /// A fenced owner finished draining its MCP sessions.
-    pub const MCP_OWNER_DRAINED: &str = "mcp.owner_drained";
     /// An attempted context compaction failed (provider call, summary, or limits).
     pub const COMPACTION_FAILED: &str = "CompactionFailed";
     /// Post-run lesson extraction or review failed.
@@ -548,8 +538,6 @@ pub mod diagnostic_codes {
         PROVIDER_USAGE_MISSING,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
-        OWNERSHIP_REGISTRY_WAIT,
-        MCP_OWNER_DRAINED,
         COMPACTION_FAILED,
         LEARNING_PIPELINE_FAILED,
         CONTEXT_CHECKPOINT_SAVED,
@@ -804,8 +792,6 @@ pub enum RunActivity {
     User,
     Compaction,
     Idle,
-    /// Waiting for a contended thread owner registry; the run keeps its authority.
-    Ownership,
 }
 
 /// Estimated request composition in serialized UTF-8 bytes / 4 (not billed tokens).
@@ -2039,7 +2025,6 @@ pub enum CompactionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OwnershipAction, OwnershipEvent};
 
     fn answered_question(origin: Option<AnswerOrigin>) -> UserQuestion {
         UserQuestion {
@@ -2353,16 +2338,6 @@ mod tests {
                 }
                 .into(),
             ),
-            (
-                "Ownership",
-                OwnershipEvent {
-                    thread_id: "thread-1".into(),
-                    owner_id: "owner-1".into(),
-                    generation: 3,
-                    action: OwnershipAction::Claimed,
-                }
-                .into(),
-            ),
         ];
 
         for (category, kind) in cases {
@@ -2385,18 +2360,14 @@ mod tests {
                 "subkind must be the serialized inner tag: category={category}"
             );
             // 内側 enum レベルの隣接タグ（{"kind", "payload"}）
-            if category != "Ownership" {
-                assert!(
-                    value["kind"]["payload"]["kind"].is_string(),
-                    "inner tag missing: category={category}"
-                );
-            }
-            if category != "Ownership" {
-                assert!(
-                    value["kind"]["payload"]["payload"].is_object(),
-                    "inner payload missing: category={category}"
-                );
-            }
+            assert!(
+                value["kind"]["payload"]["kind"].is_string(),
+                "inner tag missing: category={category}"
+            );
+            assert!(
+                value["kind"]["payload"]["payload"].is_object(),
+                "inner payload missing: category={category}"
+            );
         }
     }
 

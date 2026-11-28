@@ -10,8 +10,8 @@
 //!   lane now. This alone decides where the lane hangs in the tree and which family it
 //!   belongs to, through [`crate::ThreadRecord::tree_parent`].
 //!
-//! `management_revision` is the ledger's counter. Every merge or repair keeps the higher
-//! one, so a stale sidebar file can never bring a ended management relation back.
+//! `management_revision` is the ledger's counter. A repair keeps the higher one, so a
+//! stale link can never bring a ended management relation back.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,19 +80,4 @@ impl LaneLink {
     pub fn supersedes(&self, current: &Self) -> bool {
         self.lane_id == current.lane_id && self.management_revision >= current.management_revision
     }
-}
-
-/// The projection to keep when two copies of one thread disagree: the higher management
-/// revision, `first` on a tie. A lane is never un-made by a copy that has none.
-#[must_use]
-pub(crate) fn newest<'a>(
-    candidates: impl IntoIterator<Item = Option<&'a LaneLink>>,
-) -> Option<&'a LaneLink> {
-    candidates
-        .into_iter()
-        .flatten()
-        .fold(None, |best: Option<&LaneLink>, candidate| match best {
-            Some(best) if best.management_revision >= candidate.management_revision => Some(best),
-            _ => Some(candidate),
-        })
 }

@@ -141,9 +141,6 @@ impl PullRequestsFeature {
         if !view.tracking_enabled {
             return muted("Pull request tracking is off");
         }
-        if !view.owned_here {
-            return muted("Not tracked in this window");
-        }
         if dialog
             .operation
             .as_ref()

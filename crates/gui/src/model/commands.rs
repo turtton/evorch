@@ -358,17 +358,13 @@ pub trait CommandSink: Send {
     /// Rebind a thread to a root run (escalation handoff), without spawning work.
     fn bind_goal_context(&mut self, _thread: &str, _project: &str, _run: &str) {}
     /// Point a lane thread at the root run the runtime itself started, without spawning
-    /// work. Stop and follow-ups then reach it like any other conversation root; every
-    /// ownership check still applies to the command that uses the binding.
+    /// work. Stop and follow-ups then reach it like any other conversation root.
     fn bind_lane_root(&mut self, _thread: &str, _run: &str) {}
     /// Whether the runtime's durable lane delivery is installed behind this sink. The lane
     /// card words question routing by it; fixtures and demos have none.
     fn lane_delivery_bound(&self) -> bool {
         false
     }
-    /// Ask the runtime to drive the lane deliveries of `thread` (ownership was just
-    /// acquired). The runtime owns the outbox, lease and retries; this is only a trigger.
-    fn schedule_lane_deliveries(&mut self, _thread: &str) {}
     fn restore_diagnostics(
         &self,
         _run: &str,
@@ -443,25 +439,6 @@ pub trait CommandSink: Send {
     }
 
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent>;
-    fn submit_chat_with_permit(
-        &mut self,
-        chat: ChatSubmission,
-        permit: runtime::ownership::OwnerPermit,
-    ) -> Vec<LoopEvent> {
-        if permit.thread_id != chat.thread_id {
-            return vec![LoopEvent::ChatRejected {
-                thread_id: chat.thread_id,
-                reason: "write-mode permit belongs to another thread".into(),
-            }];
-        }
-        if let Err(error) = permit.validate_generation() {
-            return vec![LoopEvent::ChatRejected {
-                thread_id: chat.thread_id,
-                reason: error.to_string(),
-            }];
-        }
-        self.submit(WorkbenchCommand::SendChat(chat))
-    }
     fn poll(&mut self) -> Vec<LoopEvent> {
         Vec::new()
     }

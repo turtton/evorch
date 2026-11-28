@@ -355,45 +355,30 @@ async fn snapshot_revision_conflict_does_not_overwrite_an_external_update() {
 }
 
 #[tokio::test]
-async fn ownership_lost_during_summary_cannot_commit_the_prepared_checkpoint() {
+async fn stop_during_summary_is_serialized_and_success_is_published_once() {
     let model = Arc::new(Model::default());
     let fixture = configured(model.clone(), 16_384);
     let run = seed(&fixture).await;
     let mut events = fixture.runtime.shared.bus.subscribe();
-    let before = snapshot(&fixture, run);
-    let host = crate::ownership::OwnerHost::open(
-        fixture._dir.sockets(),
-        Default::default(),
-        Arc::new(EventBus::new(128)),
-    )
-    .unwrap();
-    let permit = host.start("thread").unwrap();
-    let runtime = fixture.runtime.clone();
-    let job = tokio::spawn(async move {
-        runtime
-            .compact_saved_chat(
-                run,
-                RunConfig {
-                    ownership: Some(permit),
-                    ..Default::default()
-                },
-            )
-            .await
-    });
+    let job = compact(&fixture.runtime, run);
     model.summarizing.notified().await;
-    assert!(!host.begin_quiesce().unwrap());
-    assert!(!host.release_ready().unwrap());
+    assert!(fixture.runtime.stop(run, StopScope::SelfOnly).is_err());
     model.release.notify_one();
-    assert!(job.await.unwrap().is_err());
-    assert_eq!(snapshot(&fixture, run), before);
+    job.await.unwrap().unwrap();
     let events = events.drain_pending_snapshot();
-    assert!(events.iter().any(|event| matches!(
-        event.kind,
-        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
-    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.kind,
+                event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+            ))
+            .count(),
+        1
+    );
     assert!(!events.iter().any(|event| matches!(
         event.kind,
-        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
     )));
     fixture.runtime.ensure_no_saved_compaction(run).unwrap();
 }

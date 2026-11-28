@@ -151,7 +151,6 @@ struct Fixture {
     events: EventReceiver,
     storage: storage::Storage,
     _service: Option<PullRequestService>,
-    _owner: Arc<runtime::ownership::OwnerHost>,
     _directory: test_socket_dir::SplitDir,
 }
 
@@ -163,11 +162,6 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
     })
     .unwrap();
     let bus = Arc::new(EventBus::new(4096));
-    let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(directory.sockets(), Default::default(), bus.clone())
-            .unwrap(),
-    );
-    owner.start(THREAD).unwrap();
     let events = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor
@@ -178,7 +172,6 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
         PullRequestService::start(ServiceParts {
             storage: storage.handle(),
             source: Arc::new(FakePullRequestSource::new()),
-            ownership: owner.clone(),
             environment: Arc::new(EveryRunIsInOneThread),
             bus,
             settings: config::PullRequestsConfig {
@@ -194,7 +187,6 @@ fn fixture(model: Arc<dyn AgentModel>, observed: bool) -> Fixture {
         events,
         storage,
         _service: service,
-        _owner: owner,
         _directory: directory,
     }
 }

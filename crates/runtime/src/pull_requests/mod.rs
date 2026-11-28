@@ -1,6 +1,6 @@
 //! GitHub PR tracking and bounded CI-notice preparation (ADR 0043).
 //!
-//! Structured facts come from [`PullRequestSource`]; [`service`] schedules owned links
+//! Structured facts come from [`PullRequestSource`]; [`service`] schedules the links of every thread
 //! and prepares eligible failure notices in the shared durable outbox. Delivery belongs
 //! to the common runtime driver, never to a second PR queue or direct history editing.
 //!
@@ -11,10 +11,10 @@
 pub mod candidates;
 pub mod checkout;
 pub mod diff;
+pub mod environment;
 pub mod fake;
 pub mod locator;
 pub mod log_source;
-pub mod ownership;
 pub mod review;
 mod runtime;
 pub mod service;
@@ -29,13 +29,13 @@ use storage::pull_requests::{
 };
 
 pub use checkout::{CheckoutMiss, CheckoutResolution, resolve_checkout};
+pub use environment::ThreadEnvironment;
 pub use fake::{FakeProcessRunner, FakePullRequestSource, FetchGate};
 pub use locator::{LocatorError, parse_locator};
 pub use log_source::{
     CiLogBundle, CiLogRun, CiLogSkip, FakePullRequestLogSource, GhLogSource, LogLimits, LogRequest,
     LogSkipKind, LogSkipReason, PullRequestLogSource, minimal_ci_log_data, render_ci_log_data,
 };
-pub use ownership::{OwnershipView, ThreadEnvironment};
 pub use review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
 };
@@ -72,7 +72,7 @@ pub struct FetchedPullRequest {
 pub trait PullRequestSource: Send + Sync {
     /// Fetches `key`, giving up after `deadline`.
     ///
-    /// The service confirms that tracking is on and that the thread still has its lease
+    /// The service confirms that tracking is on and that the thread still has its link
     /// immediately before this call and waits for nothing after it, so an implementation that
     /// starts a process starts it before its first `await`.
     ///

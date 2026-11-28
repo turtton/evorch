@@ -175,7 +175,12 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
         "recovery_graph_thread_progress",
         Keep,
-        "cross-database graph owner and scratch cleanup readback progress",
+        "owner-free graph scratch cleanup readback progress",
+    ),
+    (
+        "recovery_graph_thread_progress_v1",
+        Keep,
+        "legacy owner-generation progress is diagnostic only, never reused as cleanup evidence",
     ),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
     (

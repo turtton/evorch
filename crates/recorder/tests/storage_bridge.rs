@@ -144,41 +144,23 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
     // Given: SQLite cannot accept the bridge's writes until another durable write finishes.
     let (_dir, storage, db) = fixture();
     let bus = Arc::new(EventBus::new(32));
+    let bridge = StorageBridge::new(storage.handle(), "session");
+    let monitor = bridge.monitor();
     let task = tokio::spawn(storage_bridge::run(
         bus.clone(),
-        StorageBridge::new(storage.handle(), "session"),
+        bridge,
         Duration::from_millis(10),
     ));
     wait_for_subscription(&bus).await;
-    let entered = Arc::new(tokio::sync::Notify::new());
+    let (entered, entered_rx) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
-    let released = std::sync::Mutex::new(released);
-    let blocker_bus = EventBus::new(1);
-    let started = entered.clone();
-    blocker_bus.register_mutation_fence(
-        "blocked".into(),
-        Arc::new(move || {
-            started.notify_one();
-            released
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .is_ok()
-        }),
-    );
-    let writer = storage.handle();
-    let validator = blocker_bus.mutation_validator();
-    let blocked = tokio::task::spawn_blocking(move || {
-        writer.append_fenced_event(
-            Some("blocked"),
-            &Event::new(LifecycleEvent::Started {
-                session_id: "blocked".into(),
-            }),
-            validator,
-        )
-    });
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+    storage
+        .handle()
+        .pause_writer_for_test(entered, released)
+        .unwrap();
+    tokio::task::spawn_blocking(move || entered_rx.recv())
         .await
+        .unwrap()
         .unwrap();
 
     // When: many broadcast-ring capacities arrive while storage remains blocked.
@@ -192,15 +174,15 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
             bus.emit(event.clone());
             expected.push(event);
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        // Observe intake while SQLite is blocked, rather than guessing that a
+        // scheduling delay drained the broadcast ring. Nextest detects hangs.
+        while monitor.snapshot().pending_events < expected.len() {
+            tokio::task::yield_now().await;
+        }
     }
     release.send(()).unwrap();
-    blocked.await.unwrap().unwrap();
     drop(bus);
-    tokio::time::timeout(Duration::from_secs(10), task)
-        .await
-        .unwrap()
-        .unwrap();
+    task.await.unwrap();
 
     // Then: orderly shutdown preserves every token and its run, with fewer rows and no subscriber lag.
     let stored = db.events_all_ordered().unwrap();

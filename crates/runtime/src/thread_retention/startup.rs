@@ -18,7 +18,6 @@ use storage::{BackfillProgress, Database, ExclusiveLeases, StorageConfig};
 use super::binding::{BindingPaths, BindingStatus, canonical_string};
 use super::{RetentionError, check_binding};
 use crate::artifacts::{GcBudget, GcReport};
-use crate::ownership::Registry;
 use crate::scratch::ThreadScratch;
 
 /// Where the phase finds its inputs.
@@ -163,9 +162,7 @@ pub enum StartupOutcome {
         /// The database is not `auto_vacuum = INCREMENTAL`, so no space was returned.
         vacuum_skipped: bool,
         scratch: ScratchReport,
-        owners_removed: usize,
         /// Why the owner registry could not be read; nothing was confirmed then.
-        owner_registry_error: Option<String>,
         /// The artifact blob collection; `None` when it did not run (no artifacts
         /// directory, or it could not be examined: see `errors`).
         gc: Option<GcReport>,
@@ -206,7 +203,6 @@ pub enum Stage {
     Backfill,
     Explore,
     Finalize,
-    Owners,
     Scratch,
     Oversized,
     Vacuum,
@@ -219,7 +215,6 @@ impl Stage {
             Self::Backfill => "backfill",
             Self::Explore => "explore",
             Self::Finalize => "finalize",
-            Self::Owners => "owner rows",
             Self::Scratch => "scratch",
             Self::Oversized => "oversized rows",
             Self::Vacuum => "vacuum",
@@ -374,9 +369,6 @@ pub fn run_exclusive_phase_with_progress(
     let tombstones = read_tombstones(&database, &mut ran)?;
     let mut threads = tombstones.threads.iter().cloned().collect::<Vec<_>>();
     threads.sort_unstable();
-    stage(&mut notify, Stage::Owners, || {
-        remove_owners(paths, &threads, &mut ran);
-    });
     stage(&mut notify, Stage::Scratch, || {
         remove_scratch(paths, &threads, budget, &mut ran);
     });
@@ -441,8 +433,6 @@ struct Ran {
     vacuum_pages: u64,
     vacuum_skipped: bool,
     scratch: ScratchReport,
-    owners_removed: usize,
-    owner_registry_error: Option<String>,
     gc: Option<GcReport>,
     errors: Vec<String>,
 }
@@ -460,42 +450,9 @@ impl Ran {
             vacuum_pages: self.vacuum_pages,
             vacuum_skipped: self.vacuum_skipped,
             scratch: self.scratch,
-            owners_removed: self.owners_removed,
-            owner_registry_error: self.owner_registry_error,
             gc: self.gc,
             errors: self.errors,
         }
-    }
-}
-
-fn owners_db(ownership_root: &Path) -> PathBuf {
-    ownership_root.join("owners.db")
-}
-
-/// The owner registry, or `None` when this root has none yet.
-///
-/// Only an explicit "not found" means there is none. A path that cannot be examined (a
-/// loop, a permission error) is an error: who holds the threads is then unknown.
-fn open_registry(ownership_root: &Path) -> Result<Option<Registry>, RetentionError> {
-    let path = owners_db(ownership_root);
-    match std::fs::symlink_metadata(&path) {
-        Ok(_) => Ok(Some(Registry::open_existing(&path)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(RetentionError::Io(error)),
-    }
-}
-
-fn remove_owners(paths: &StartupPaths, threads: &[String], ran: &mut Ran) {
-    if threads.is_empty() {
-        return;
-    }
-    match open_registry(&paths.ownership_root) {
-        Ok(Some(mut registry)) => match registry.remove_threads(threads) {
-            Ok(removed) => ran.owners_removed = removed,
-            Err(error) => ran.errors.push(format!("owner rows: {error}")),
-        },
-        Ok(None) => {}
-        Err(error) => ran.errors.push(format!("owner rows: {error}")),
     }
 }
 

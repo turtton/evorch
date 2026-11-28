@@ -45,7 +45,6 @@ impl Execution {
                     event_bus::RunActivity::Model
                         | event_bus::RunActivity::Tools
                         | event_bus::RunActivity::Compaction
-                        | event_bus::RunActivity::Ownership
                 )
             })
     }
@@ -216,13 +215,6 @@ impl AgentRuntime {
                 continue;
             }
             let Ok(target) = host.resolve(&thread) else {
-                continue;
-            };
-            // Stored ownership DTOs and absence of local activity are not authority.
-            let Some(permit) = target.authority.ownership.as_ref() else {
-                continue;
-            };
-            let Ok(_owner) = permit.mutation_guard() else {
                 continue;
             };
             if self.check_delivery_target(&thread, &target).is_err() {
@@ -455,12 +447,6 @@ impl AgentRuntime {
         claim: &LaneDeliveryClaim,
         at_ns: i64,
     ) {
-        let Some(permit) = target.authority.ownership.as_ref() else {
-            return;
-        };
-        let Ok(_owner) = permit.mutation_guard() else {
-            return;
-        };
         let Ok(store) = self.delivery_store() else {
             return;
         };
@@ -566,14 +552,7 @@ impl AgentRuntime {
         {
             return Ok(());
         }
-        let permit = target
-            .authority
-            .ownership
-            .as_ref()
-            .ok_or(LaneDeliveryNack::OwnershipLost)?;
-        permit
-            .validate_generation()
-            .map_err(|_| LaneDeliveryNack::OwnershipLost)?;
+        self.check_delivery_target(&claim.destination_thread_id, target)?;
         let store = self
             .delivery_store()
             .map_err(|_| LaneDeliveryNack::StorageFailed)?;

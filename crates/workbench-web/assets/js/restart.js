@@ -701,8 +701,8 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
           key: ref.graph_id,
           title: `graph「${ref.graph_id}」を${verb}します`,
           lines: [
-            `リビジョン ${view.snapshot_revision}・所有者 ${view.owner_count} 件`,
-            kind === "release" ? "所有権を解除します（再開はしません）。" : "明示的に再開します。",
+            `リビジョン ${view.snapshot_revision}・スレッド ${view.thread_count} 件`,
+            kind === "release" ? "復旧の継続予約を解除します（再開はしません）。" : "明示的に再開します。",
           ],
           build: ((binding) => (operationId) => adminCommands[kind](binding, operationId))(structuredClone(view.binding)),
         });
@@ -716,10 +716,10 @@ export function adminView(ctx, { streamFactory = (options) => new EventStream(op
             "span",
             { class: "row-main" },
             h("span", { class: "row-title", text: ref.graph_id }),
-            h("span", { class: "row-sub", text: view ? `${view.eligibility}・${view.ownership}` : `リビジョン ${ref.revision}` }),
+            h("span", { class: "row-sub", text: view ? view.eligibility : `リビジョン ${ref.revision}` }),
           ),
           button("詳細を読む", () => refreshDetail(ref.graph_id), { disabled: !enabled }),
-          button("所有権を解除", () => act("release", "解除"), {
+          button("継続予約を解除", () => act("release", "解除"), {
             disabled: !enabled || !available("release"),
             reason: "詳細を読み、解除できる状態のときだけ使えます",
           }),

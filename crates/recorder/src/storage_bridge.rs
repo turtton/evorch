@@ -4,7 +4,7 @@ use std::{future::Future, sync::Arc, task::Poll, time::Duration};
 
 use event_bus::{
     DiagnosticSeverity, Event, EventBus, EventKind, FaultEvent, LifecycleEvent, MessageEvent,
-    OwnershipAction, RecvError, ToolEvent, UsageAggregator,
+    RecvError, ToolEvent, UsageAggregator,
 };
 use storage::{StorageError, StorageHandle};
 
@@ -50,10 +50,6 @@ impl PersistencePolicy {
                 event_bus::CompactionEvent::Progress { .. }
                 | event_bus::CompactionEvent::Aborted { .. },
             ) => true,
-            EventKind::Ownership(event) if event.action == OwnershipAction::Heartbeat => {
-                monitor.skipped_heartbeat();
-                true
-            }
             EventKind::Diagnostic(event)
                 if !event.is_escalation_audit()
                     && (self.diagnostics == DiagnosticPersistence::Off
@@ -113,7 +109,6 @@ pub struct StorageBridge {
     session_id: String,
     usage: UsageAggregator,
     usage_dirty: bool,
-    validator: Option<event_bus::MutationValidator>,
     policy: PersistencePolicy,
     monitor: StorageBridgeMonitor,
     redactor: secret_guard::SecretRedactor,
@@ -133,7 +128,6 @@ impl StorageBridge {
             session_id: session_id.into(),
             usage: UsageAggregator::new(),
             usage_dirty: false,
-            validator: None,
             policy: PersistencePolicy::default(),
             monitor: StorageBridgeMonitor::default(),
             redactor: secret_guard::SecretRedactor::from_env(),
@@ -210,9 +204,7 @@ impl StorageBridge {
             self.monitor
                 .warn(&format!("failed to record usage ledger row: {error}"));
         }
-        let result =
-            self.storage
-                .append_stream_event(&self.session_id, event, self.validator.clone());
+        let result = self.storage.append_stream_event(&self.session_id, event);
         match &result {
             Ok(()) => {
                 self.monitor.persisted();
@@ -322,7 +314,6 @@ async fn run_subscribed(
     let automatic_flush_enabled = bridge.automatic_flush_enabled;
     #[cfg(not(test))]
     let automatic_flush_enabled = true;
-    bridge.validator = Some(subscriber.mutation_validator());
     tokio::pin!(shutdown);
     let (requests, mut pending) = tokio::sync::mpsc::channel(WRITE_QUEUE_CAPACITY);
     let monitor = bridge.monitor();
@@ -367,8 +358,7 @@ async fn run_subscribed(
                             failure.get_or_insert_with(|| error.to_string());
                         }
                         // This FIFO barrier runs only after preceding appends
-                        // return from SQLite. Keep the subscriber alive for the
-                        // final ownership Released event before shutdown.
+                        // return from SQLite.
                         tracing::debug!(target: "restart_drain", phase = "flush_reply", ok = failure.is_none());
                         let _ = reply.send(failure.take().map_or(Ok(()), Err));
                         continue;

@@ -1,4 +1,4 @@
-//! Q2: the owned-graphs leaf, built from the host's own runtime, owner,
+//! Q2: the owned-graphs leaf, built from the host's own runtime,
 //! storage, reader and the one live collector, and registered with the common
 //! admin service. Registering is not publishing: the service refuses every
 //! operation until `capability` publishes a complete composition (the switch is
@@ -17,8 +17,8 @@ pub(super) fn install(inputs: &Inputs<'_>) {
     };
     let facade = OwnedGraphsFacade::new(
         inputs.host.runtime.clone(),
-        inputs.host.owner.clone(),
         inputs.storage_config().clone(),
+        inputs.storage_writer().clone(),
         inputs.host.admin.reader().clone(),
         diagnostics,
         // Shared with restart admission; a second collector would not see the

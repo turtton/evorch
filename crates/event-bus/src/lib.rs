@@ -7,11 +7,6 @@ mod persistence;
 pub use persistence::{PersistenceNotifications, PersistenceObserver, PersistenceStage};
 mod message_parts;
 pub use message_parts::MessagePartAssembler;
-mod fencing;
-pub use fencing::{
-    MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
-    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
-};
 pub mod conversation_plan;
 pub use conversation_plan::{
     ConversationPlanEvent, PLAN_PPM_SCALE, PLAN_WEIGHT_DEFAULT, PLAN_WEIGHT_MAX, PLAN_WEIGHT_MIN,
@@ -32,8 +27,6 @@ pub use lane::{
     LaneWorkspaceDeclaration,
 };
 pub mod orchestrator;
-pub mod ownership;
-pub use ownership::{OwnershipAction, OwnershipEvent};
 pub mod otel;
 pub mod pull_request;
 pub use pull_request::{

@@ -1,4 +1,5 @@
-//! Pure eligibility and in-memory publishing attribution. No push ledger is persisted.
+//! Pure eligibility and in-memory publishing attribution. No push ledger is persisted: a core
+//! restart starts every thread's attribution as unknown.
 use super::super::diff::{self, ChecksVerdict};
 use std::collections::HashMap;
 use storage::pull_requests::{PullRequestFacts, PullRequestState};
@@ -16,7 +17,6 @@ pub(super) struct Attribution {
 }
 #[derive(Default)]
 struct Publishing {
-    generation: u64,
     success: u64,
     consumed: u64,
     interval: Option<Interval>,
@@ -28,33 +28,19 @@ struct Interval {
     agent: bool,
 }
 impl Attribution {
-    fn thread(&mut self, thread: &str, generation: u64) -> &mut Publishing {
-        let entry = self.threads.entry(thread.to_owned()).or_default();
-        if entry.generation != generation {
-            *entry = Publishing {
-                generation,
-                ..Default::default()
-            };
-        }
-        entry
+    fn thread(&mut self, thread: &str) -> &mut Publishing {
+        self.threads.entry(thread.to_owned()).or_default()
     }
-    pub(super) fn linked(&mut self, thread: &str, generation: u64, revision: u64) {
-        self.thread(thread, generation).interval = None;
+    pub(super) fn linked(&mut self, thread: &str, revision: u64) {
+        self.thread(thread).interval = None;
         self.baseline_links.retain(|(id, _)| id != thread);
         self.baseline_links.insert((thread.to_owned(), revision));
     }
-    pub(super) fn seed(
-        &mut self,
-        thread: &str,
-        generation: u64,
-        revision: u64,
-        seq: u64,
-        head: &str,
-    ) {
+    pub(super) fn seed(&mut self, thread: &str, revision: u64, seq: u64, head: &str) {
         if self.baseline_links.contains(&(thread.to_owned(), revision)) {
             return;
         }
-        let entry = self.thread(thread, generation);
+        let entry = self.thread(thread);
         if entry.interval.is_none() {
             entry.consumed = entry.success;
             entry.interval = Some(Interval {
@@ -65,8 +51,8 @@ impl Attribution {
             });
         }
     }
-    pub(super) fn succeeded(&mut self, thread: &str, generation: u64) {
-        let entry = self.thread(thread, generation);
+    pub(super) fn succeeded(&mut self, thread: &str) {
+        let entry = self.thread(thread);
         entry.success = entry.success.saturating_add(1);
     }
     /// Called only for an accepted fetch, with that fetch's fresh checkout resolution.
@@ -74,14 +60,13 @@ impl Attribution {
     pub(super) fn adopt(
         &mut self,
         thread: &str,
-        generation: u64,
         revision: u64,
         seq: u64,
         head: &str,
         local: Option<&str>,
     ) {
         self.baseline_links.remove(&(thread.to_owned(), revision));
-        let entry = self.thread(thread, generation);
+        let entry = self.thread(thread);
         if let Some(interval) = &mut entry.interval {
             if interval.revision == revision && interval.seq >= seq {
                 return;
@@ -100,19 +85,11 @@ impl Attribution {
             agent,
         });
     }
-    pub(super) fn agent(
-        &self,
-        thread: &str,
-        generation: u64,
-        revision: u64,
-        seq: u64,
-        head: &str,
-    ) -> bool {
+    pub(super) fn agent(&self, thread: &str, revision: u64, seq: u64, head: &str) -> bool {
         self.threads.get(thread).is_some_and(|p| {
-            p.generation == generation
-                && p.interval.as_ref().is_some_and(|i| {
-                    i.revision == revision && i.seq == seq && i.head == head && i.agent
-                })
+            p.interval.as_ref().is_some_and(|i| {
+                i.revision == revision && i.seq == seq && i.head == head && i.agent
+            })
         })
     }
 }
@@ -140,20 +117,20 @@ mod tests {
     #[test]
     fn signal_is_consumed_per_head_not_per_poll_and_never_falls_back_to_saved_local() {
         let mut a = Attribution::default();
-        a.succeeded("t", 1);
-        a.adopt("t", 1, 1, 1, "a", Some("a"));
-        assert!(a.agent("t", 1, 1, 1, "a"));
+        a.succeeded("t");
+        a.adopt("t", 1, 1, "a", Some("a"));
+        assert!(a.agent("t", 1, 1, "a"));
         // Pending -> complete keeps attribution even if the checkout disappears.
-        a.adopt("t", 1, 1, 2, "a", None);
-        assert!(a.agent("t", 1, 1, 2, "a"));
-        a.adopt("t", 1, 1, 3, "b", Some("b"));
-        assert!(!a.agent("t", 1, 1, 3, "b"));
-        a.succeeded("t", 1);
-        a.adopt("t", 1, 1, 4, "c", None);
-        assert!(!a.agent("t", 1, 1, 4, "c"));
+        a.adopt("t", 1, 2, "a", None);
+        assert!(a.agent("t", 1, 2, "a"));
+        a.adopt("t", 1, 3, "b", Some("b"));
+        assert!(!a.agent("t", 1, 3, "b"));
+        a.succeeded("t");
+        a.adopt("t", 1, 4, "c", None);
+        assert!(!a.agent("t", 1, 4, "c"));
         // Resolving it on a later same-head poll cannot rewrite unknown attribution.
-        a.adopt("t", 1, 1, 5, "c", Some("c"));
-        assert!(!a.agent("t", 1, 1, 5, "c"));
+        a.adopt("t", 1, 5, "c", Some("c"));
+        assert!(!a.agent("t", 1, 5, "c"));
     }
     #[test]
     fn link_relaxation_needs_unconsumed_success_and_a_fresh_matching_head() {
@@ -161,30 +138,29 @@ mod tests {
             for success in [false, true] {
                 let mut a = Attribution::default();
                 if success {
-                    a.succeeded("t", 1);
+                    a.succeeded("t");
                 }
-                a.linked("t", 1, 3);
-                a.seed("t", 1, 3, 1, "head");
-                a.adopt("t", 1, 3, 2, "head", local);
-                assert_eq!(
-                    a.agent("t", 1, 3, 2, "head"),
-                    success && local == Some("head")
-                );
+                a.linked("t", 3);
+                a.seed("t", 3, 1, "head");
+                a.adopt("t", 3, 2, "head", local);
+                assert_eq!(a.agent("t", 3, 2, "head"), success && local == Some("head"));
             }
         }
     }
     #[test]
-    fn restart_and_owner_change_start_unknown_and_older_adoptions_cannot_replace_newer() {
+    fn restart_starts_unknown_and_older_adoptions_cannot_replace_newer() {
         let mut a = Attribution::default();
-        a.seed("t", 1, 1, 5, "a");
-        a.succeeded("t", 1);
-        a.adopt("t", 1, 1, 6, "a", Some("a"));
-        assert!(!a.agent("t", 1, 1, 6, "a"));
-        a.adopt("t", 1, 1, 7, "b", Some("b"));
-        assert!(a.agent("t", 1, 1, 7, "b"));
-        a.adopt("t", 1, 1, 6, "a", Some("a"));
-        assert!(a.agent("t", 1, 1, 7, "b"));
-        a.seed("t", 2, 1, 7, "b");
-        assert!(!a.agent("t", 2, 1, 7, "b"));
+        a.seed("t", 1, 5, "a");
+        a.succeeded("t");
+        a.adopt("t", 1, 6, "a", Some("a"));
+        assert!(!a.agent("t", 1, 6, "a"));
+        a.adopt("t", 1, 7, "b", Some("b"));
+        assert!(a.agent("t", 1, 7, "b"));
+        a.adopt("t", 1, 6, "a", Some("a"));
+        assert!(a.agent("t", 1, 7, "b"));
+        // A fresh attribution (a core restart) has no history: it reads unknown.
+        let mut restarted = Attribution::default();
+        restarted.seed("t", 1, 7, "b");
+        assert!(!restarted.agent("t", 1, 7, "b"));
     }
 }

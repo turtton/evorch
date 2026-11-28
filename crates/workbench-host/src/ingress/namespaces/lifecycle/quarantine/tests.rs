@@ -93,7 +93,7 @@ fn seed(storage: &Storage, config: &StorageConfig, claimed: bool, threads: bool)
     handle
         .prepare_recovery_manifest(RecoveryManifestRecord {
             manifest_id: MANIFEST.into(),
-            schema_version: 1,
+            schema_version: storage::recovery::RECOVERY_SCHEMA_VERSION,
             committed: false,
             superseded: false,
             edges: vec![RecoveryEdge {
@@ -149,8 +149,6 @@ fn seed(storage: &Storage, config: &StorageConfig, claimed: bool, threads: bool)
             thread_id: threads.then(|| run.into()),
             intent_revision: 0,
             snapshot: None,
-            owner_id: None,
-            owner_generation: None,
             lane_id: None,
         };
         sql.execute(
@@ -256,7 +254,7 @@ impl Harness {
     fn new(claimed: bool) -> (tempfile::TempDir, Self) {
         Self::build(claimed, false)
     }
-    /// Members on threads whose owner and scratch this leaf can neither see nor clean.
+    /// Members on threads whose scratch this leaf can neither see nor clean.
     fn with_threads(claimed: bool) -> (tempfile::TempDir, Self) {
         Self::build(claimed, true)
     }
@@ -326,8 +324,6 @@ impl Harness {
             capture_id: item.capture_id.clone(),
             expected_revision: item.revision,
             expected_core_epoch: EPOCH,
-            owner_identity: None,
-            owner_generation: None,
             operation_id: id(operation),
         }
     }
@@ -559,17 +555,8 @@ async fn a_lost_acknowledgement_is_settled_from_storage_without_a_second_write()
 }
 
 #[tokio::test]
-async fn an_owner_expectation_or_an_adopted_graph_is_not_this_leafs_to_discard() {
+async fn an_adopted_graph_is_not_this_leafs_to_discard() {
     let (_dir, h) = Harness::new(false);
-    let item = h.item().await;
-    let mut owned = Harness::binding(&item, "op-owner");
-    owned.owner_identity = Some(id("owner"));
-    owned.owner_generation = Some(Revision(1));
-    assert_eq!(
-        h.discard(owned).await.unwrap_err().code,
-        ErrorCode::Conflict
-    );
-
     h.sql("UPDATE restart_transactions SET adopted_epoch=2");
     let adopted = h.item().await;
     assert!(!adopted.cold);
@@ -617,7 +604,7 @@ async fn threads_with_no_disposal_record_are_never_reported_as_a_successful_disc
     let (_dir, h) = Harness::with_threads(false);
     let item = h.item().await;
     h.discard(Harness::binding(&item, "op-1")).await.unwrap();
-    // The eligibility is revoked, yet an owner or scratch may remain and nothing
+    // The eligibility is revoked, yet scratch may remain and nothing
     // recorded that they were handled: that is not success.
     assert_ne!(h.audit_outcome("op-1"), Some(AuditOutcome::Succeeded));
     assert_eq!(h.audit_outcome("op-1"), Some(AuditOutcome::Failed));
@@ -641,11 +628,9 @@ async fn threads_with_no_disposal_record_are_never_reported_as_a_successful_disc
                     restart_id: TX.into(),
                     capture_id: CAPTURE.into(),
                     thread_id: thread.into(),
-                    owner_generation: 1,
                 },
                 expected_revision: 0,
                 control: control.clone(),
-                owners: GraphDisposalStep::NotApplicable,
                 scratch: GraphDisposalStep::Applied,
             })
             .unwrap();

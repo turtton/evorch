@@ -1,5 +1,3 @@
-mod ownership_contention;
-
 use super::*;
 #[path = "recovery_tests.rs"]
 mod recovery;
@@ -328,7 +326,6 @@ async fn unstarted_intent_survives_and_recovery_is_idempotent() {
             start_seed: serde_json::to_string(&StartSeed {
                 run_id: id,
                 project_root: None,
-                requires_ownership: false,
             })
             .unwrap(),
             project_id: None,
@@ -337,8 +334,8 @@ async fn unstarted_intent_survives_and_recovery_is_idempotent() {
             at_ns: 1,
         })
         .unwrap();
-    assert_eq!(f.runtime.recover_unstarted_lanes(None).unwrap(), vec![id]);
-    assert!(f.runtime.recover_unstarted_lanes(None).unwrap().is_empty());
+    assert_eq!(f.runtime.recover_unstarted_lanes().unwrap(), vec![id]);
+    assert!(f.runtime.recover_unstarted_lanes().unwrap().is_empty());
     f.phase(id, AgentRunPhase::Waiting).await;
     assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
     f.cancel(id).await;
@@ -611,51 +608,22 @@ async fn failed_admission_does_not_earn_credit_or_duplicate_intent_on_retry() {
     f.cancel(lead).await;
 }
 #[tokio::test]
-async fn independent_lane_lease_remains_authoritative_after_lead_stops() {
-    use crate::ownership::{Lease, OwnerPermit, Registry, ThreadOwner};
+async fn independent_lane_binding_remains_current_after_lead_stops() {
     let mut f = Fixture::new();
-    let path = f._dir.path().join("owners.db");
-    let mut registry = Registry::open(&path).unwrap();
-    let owner = ThreadOwner::new(
-        "owned-lead".into(),
-        Lease {
-            owner_id: "test-host".into(),
-            generation: 1,
-            expires_at: u64::MAX,
-        },
-    );
-    registry.start(&owner).unwrap();
-    let permit = OwnerPermit {
-        registry_path: path,
-        thread_id: owner.thread_id.clone(),
-        lease: owner.lease.clone(),
-        run_id: None,
-    };
-    let lead = f
+    let lead = f.lead().await;
+    let lane = f
         .runtime
-        .delegate_chat(
-            "owned-lead",
-            Role::Orchestrator,
-            "coordinate".into(),
-            RunConfig {
-                ownership: Some(permit.clone()),
-                conversation: true,
-                interactive: true,
-                keep_alive: true,
-                ..Default::default()
-            },
-        )
+        .open_lane(lead, "independent-lane", brief())
         .unwrap();
-    f.phase(lead, AgentRunPhase::Waiting).await;
-    let lane = f.runtime.open_lane(lead, "owned-lane", brief()).unwrap();
     f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
-    let lane_permit = f.config(lane.root_run_id).ownership.clone().unwrap();
-    assert_eq!(lane_permit.thread_id, lane.thread_id);
-    assert_ne!(lane_permit.thread_id, permit.thread_id);
-    assert_eq!(registry.attach("owned-lead").unwrap().lease, owner.lease);
+    assert_eq!(
+        f.runtime.goal_thread(lane.root_run_id).as_deref(),
+        Some(lane.thread_id.as_str())
+    );
+    assert_ne!(f.runtime.goal_thread(lead), Some(lane.thread_id.clone()));
     f.runtime.stop(lead, crate::StopScope::Subtree).unwrap();
     f.runtime.wait(lead).await.unwrap();
-    lane_permit.validate_generation().unwrap();
+    assert!(f.runtime.is_lane_root(&lane.thread_id, lane.root_run_id));
     assert_eq!(
         f.runtime.inspect_agent(lane.root_run_id).unwrap().phase,
         AgentRunPhase::Waiting
@@ -998,4 +966,22 @@ async fn a_lane_thread_continues_at_the_ledgers_root_and_any_other_thread_has_no
     for id in [lane.root_run_id, lead] {
         f.cancel(id).await;
     }
+}
+
+#[test]
+fn old_start_seed_ignores_requires_ownership_without_reemitting_it() {
+    let seed = StartSeed {
+        run_id: RunId::new(7),
+        project_root: None,
+    };
+    let mut old = serde_json::to_value(&seed).unwrap();
+    old["requires_ownership"] = serde_json::json!(true);
+    let decoded: StartSeed = serde_json::from_value(old).unwrap();
+    assert_eq!(decoded.run_id, seed.run_id);
+    assert!(
+        serde_json::to_value(decoded)
+            .unwrap()
+            .get("requires_ownership")
+            .is_none()
+    );
 }

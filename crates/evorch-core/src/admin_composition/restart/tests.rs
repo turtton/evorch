@@ -65,7 +65,6 @@ fn untouched(core: &ComposedCore) -> serde_json::Value {
         .observe();
     serde_json::json!({
         "transactions": db.restart_transactions().unwrap().iter().map(|t| (&t.metadata, t.phase, t.revision)).collect::<Vec<_>>(),
-        "owners": format!("{:?}", core.host.owner.restart_inventory().unwrap()),
         "gate": format!("{:?}", core.host.runtime.quiesce_state()),
         "core": format!("{:?}", core.driver.restart.snapshot()),
         "bindings_current": binding.is_current(),
@@ -121,7 +120,6 @@ async fn binding(conn: &mut Conn, operation: &str) -> RestartBinding {
 }
 
 async fn chat(core: &ComposedCore) -> runtime::RunId {
-    core.host.owner.start("plain").unwrap();
     let mut events = core.host.runtime.event_bus().subscribe();
     let replies = core.host.host.lock().unwrap().submit_local(
         workbench_host::commands::HostCommand::SendChat(workbench_host::commands::ChatInput {
@@ -392,9 +390,8 @@ async fn live_undisposed_in_the_composed_physical_host_refuses_before_gate_or_tr
         .runtime()
         .adopt_restart_handoff(entry.proof)
         .unwrap();
-    let claimed = storage.claim(physical_bootstrap::TX).unwrap();
-    assert!(claimed.blocked_threads.is_empty());
-    let mut host = workbench_host::bootstrap::BootstrappedHost::open_claimed_for_core(claimed)
+    let adopted = storage.prepare_adopted(physical_bootstrap::TX).unwrap();
+    let mut host = workbench_host::bootstrap::BootstrappedHost::open_adopted_for_core(adopted)
         .await
         .unwrap();
     let old = host.runtime.adopted_restart_transaction().unwrap();
@@ -428,18 +425,24 @@ async fn live_undisposed_in_the_composed_physical_host_refuses_before_gate_or_tr
     assert!(host.admin.installed_facades().all());
     host.admin.publish_for_test();
     let collector = host.graph_collector().clone();
-    assert_eq!(collector.snapshot().unwrap().count, Revision(1));
-    let heartbeat_rows =
-        runtime::ownership::HeartbeatObservations::install_for_test(&host.runtime.event_bus());
-    let mut owner_events = host.runtime.event_bus().subscribe();
+    assert_eq!(
+        collector.epoch(),
+        Some(workbench_protocol::wire::InstanceEpoch(2))
+    );
+    // Snapshot refuses Rebuilding/Unknown. A successful, nonempty read before
+    // the management query proves the planned collector is Ready under epoch 2.
+    let ready_graphs = collector
+        .snapshot()
+        .expect("planned collector must be Ready");
+    assert_eq!(ready_graphs.count, Revision(1));
+    assert_eq!(ready_graphs.references.len(), 1);
     let before = physical_bootstrap::state(&host, &driver);
-    let renewals = physical_bootstrap::wait_for_renewal(&host, &before, &mut owner_events).await;
     let socket = sockets.join("wire");
     let (stop, server) = serve(tokio::net::UnixListener::bind(&socket).unwrap(), backend);
     let mut conn = Conn::open(&socket, "physical-collector").await;
     let aggregate = conn.call(&envelope("owned", RequestBody::Query(Query::Lifecycle(workbench_protocol::namespaces::lifecycle::LifecycleQuery::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsQuery::Undisposed))))).await;
     assert!(
-        matches!(&aggregate.result, ReplyResult::Success(ReplyPayload::Query(QueryReply::Lifecycle(LifecycleReply::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsReply::Undisposed(graphs))))) if graphs.count == Revision(1))
+        matches!(&aggregate.result, ReplyResult::Success(ReplyPayload::Query(QueryReply::Lifecycle(LifecycleReply::OwnedGraphs(workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsReply::Undisposed(graphs))))) if graphs.count == Revision(1) && graphs.references == ready_graphs.references)
     );
     let binding = binding(&mut conn, "blocked-by-owned").await;
     let reply = conn
@@ -453,9 +456,7 @@ async fn live_undisposed_in_the_composed_physical_host_refuses_before_gate_or_tr
         .await;
     assert_eq!(error_of(&reply).0, ErrorCode::Conflict);
     let after = physical_bootstrap::state(&host, &driver);
-    let renewals =
-        physical_bootstrap::finish_renewals(&sockets, &before, &mut owner_events, renewals).await;
-    before.assert_unchanged_except_lease_renewal(&after, &renewals, &heartbeat_rows.drain());
+    assert_eq!(before, after);
     assert_eq!(collector.snapshot().unwrap().count, Revision(1));
     stop.send(true).unwrap();
     server.abort();

@@ -11,11 +11,9 @@
               "expected_revision": "1",
               "graph_id": "g1",
               "operation_id": "op1",
-              "owner_generation": null,
-              "owner_identity": null,
               "restart_tx_id": "tx1"
             },
-            "owners": []
+            "threads": []
           },
           "confirmed": true
         },
@@ -35,8 +33,6 @@
             "expected_revision": "1",
             "graph_id": "g1",
             "operation_id": "op1",
-            "owner_generation": null,
-            "owner_identity": null,
             "restart_tx_id": "tx1"
           },
           "confirmed": true
@@ -170,11 +166,9 @@
               "expected_revision": "1",
               "graph_id": "g1",
               "operation_id": "unassigned",
-              "owner_generation": null,
-              "owner_identity": null,
               "restart_tx_id": "tx1"
             },
-            "owners": []
+            "threads": []
           },
           "claim": "absent",
           "control": "manual_pending",
@@ -184,14 +178,9 @@
           "operation_limit": {
             "type": "within_limit"
           },
-          "owner_count": "0",
-          "owner_refs": [],
-          "owner_refs_truncated": false,
-          "ownership": "absent",
           "progress": {
             "completion": "unknown",
             "eligibility": "confirmed_applied",
-            "owners": "not_started",
             "prepared_release": "unknown",
             "scratch": "not_started"
           },
@@ -204,7 +193,10 @@
             "problem": "current_binding_required",
             "type": "blocked"
           },
-          "snapshot_revision": "1"
+          "snapshot_revision": "1",
+          "thread_count": "0",
+          "thread_refs": [],
+          "thread_refs_truncated": false
         },
         "type": "detail"
       },
@@ -222,7 +214,6 @@
           "progress": {
             "completion": "unknown",
             "eligibility": "confirmed_applied",
-            "owners": "not_started",
             "prepared_release": "unknown",
             "scratch": "not_started"
           },

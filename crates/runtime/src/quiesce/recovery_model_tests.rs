@@ -102,10 +102,10 @@ fn project_authority(
     f: &Fixture,
     run: RunId,
     project: std::path::PathBuf,
-) -> (crate::ownership::OwnerHost, CurrentRecoveryAuthority) {
-    let (owner, mut current) = authority(f, run);
+) -> CurrentRecoveryAuthority {
+    let mut current = authority(f, run);
     current.members.get_mut(&run).unwrap().project_root = Some(project);
-    (owner, current)
+    current
 }
 
 #[tokio::test]
@@ -117,7 +117,7 @@ async fn project_catalog_validation_adoption_admission_and_execution_share_one_p
     let wrapper = crate::compose::SwitchableModel::new(selected.clone());
     let runtime = project_runtime(&f, wrapper.clone());
     let mut paused = prepare(&f, &runtime);
-    let (_owner, authority) = project_authority(&f, run, project);
+    let authority = project_authority(&f, run, project);
     let models = runtime.pin_recovery_models(&authority);
     publish(&models, run).await;
     runtime
@@ -163,7 +163,7 @@ async fn inner_reload_at_the_last_pre_ack_boundary_rejects_without_writes_or_req
     let id = paused.claim().claim_id.clone();
     let db = storage::Database::open(&f.config).unwrap();
     let before = db.recovery_claim_snapshot(&id).unwrap();
-    let (_owner, authority) = project_authority(&f, run, project);
+    let authority = project_authority(&f, run, project);
     let models = runtime.pin_recovery_models(&authority);
     publish(&models, run).await;
     runtime
@@ -200,7 +200,7 @@ async fn a_retained_context_cannot_cross_an_activation_retry_with_inner_reload()
     let runtime = project_runtime(&f, wrapper.clone());
     let paused = prepare(&f, &runtime);
     let id = paused.claim().claim_id.clone();
-    let (_owner, authority) = project_authority(&f, run, project);
+    let authority = project_authority(&f, run, project);
     let old_models = runtime.pin_recovery_models(&authority);
     publish(&old_models, run).await;
     // Missing relations consumes the handle but never activates the claim.
@@ -259,7 +259,7 @@ async fn missing_project_catalog_never_falls_back_to_the_main_model() {
     let id = paused.claim().claim_id.clone();
     let db = storage::Database::open(&f.config).unwrap();
     let before = db.recovery_claim_snapshot(&id).unwrap();
-    let (_owner, authority) = project_authority(&f, run, project);
+    let authority = project_authority(&f, run, project);
     runtime
         .restore_relations_and_continuations(&mut paused)
         .unwrap();

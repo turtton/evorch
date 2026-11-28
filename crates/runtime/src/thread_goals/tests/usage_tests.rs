@@ -652,9 +652,7 @@ async fn old_ack_follows_a_move_without_republishing_a_stale_snapshot() {
         let saving =
             scope.spawn(|| runtime.goal_usage(root, crate::RunPurpose::General, charge(100)));
         entered_rx.recv().unwrap();
-        runtime
-            .handoff_thread_goal(root, target, None, |_| {})
-            .unwrap();
+        runtime.handoff_thread_goal(root, target, || {}).unwrap();
         let moved = runtime.thread_goal(&thread).unwrap();
         events.drain_pending_snapshot();
         release_tx.send(()).unwrap();

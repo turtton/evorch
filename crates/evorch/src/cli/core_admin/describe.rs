@@ -73,15 +73,35 @@ pub(super) fn describe_undisposed(graphs: &UndisposedGraphs) -> Vec<String> {
     }
     if graphs.over_limit_count.get() > 0 {
         lines.push(format!(
-            "  {} of them have too many owners to act on here",
+            "  {} of them have too many threads to act on here",
             graphs.over_limit_count.get()
         ));
     }
     if graphs.incomplete_disposals.count.get() > 0 {
         lines.push(format!(
-            "  {} disposal(s) did not finish and are listed above or in `evorch core quarantine list`",
+            "  {} incomplete or unsupported disposal(s); inspect a graph before releasing it:",
             graphs.incomplete_disposals.count.get()
         ));
+        // Unsupported graphs are warnings, not live restart blockers. Their
+        // public references still have to be usable for explicit inspection and
+        // release; counting them alone left legacy records impossible to find.
+        for graph in &graphs.incomplete_disposals.references {
+            if !graphs
+                .references
+                .iter()
+                .any(|listed| listed.graph_id == graph.graph_id)
+            {
+                lines.push(format!(
+                    "  {} (restart {}, revision {})",
+                    graph.graph_id.as_str(),
+                    graph.restart_tx_id.as_str(),
+                    graph.revision.get()
+                ));
+            }
+        }
+        if graphs.incomplete_disposals.truncated {
+            lines.push("  (the disposal list was cut off)".into());
+        }
     }
     lines
 }
@@ -105,15 +125,14 @@ pub(super) fn describe_graph(view: &OwnedGraphView) -> Vec<String> {
             view.binding.graph.expected_core_epoch.get()
         ),
         format!(
-            "  restart {}, disposition {}, claim {}, ownership {}, control {}, eligibility {}",
+            "  restart {}, disposition {}, claim {}, control {}, eligibility {}",
             name(&view.restart_phase),
             name(&view.disposition),
             name(&view.claim),
-            name(&view.ownership),
             name(&view.control),
             name(&view.eligibility),
         ),
-        format!("  {} owner thread(s)", view.owner_count.get()),
+        format!("  {} thread(s)", view.thread_count.get()),
         format!("  resume: {}", availability(&view.resume)),
         format!("  release: {}", availability(&view.release)),
     ]
