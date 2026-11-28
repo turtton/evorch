@@ -500,3 +500,51 @@ pub(super) fn is_host_input_notice(event: &event_bus::Event) -> bool {
         )
     )
 }
+
+#[tokio::test]
+async fn ownership_only_record_with_an_uncertain_effect_is_not_restored() {
+    // Given: a legacy ownership-only record that also lost a side-effecting call.
+    let fixture = Fixture::new();
+    let run = fixture.terminal().await;
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let mut record = store.restore_record(run).unwrap().unwrap();
+    let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    descriptor.restorable = false;
+    descriptor.non_restorable_reason = Some("復元対象外の実行状態: ownership".into());
+    record.restorable = false;
+    let save = |record: &mut storage::RunContextRecord, descriptor: &RunRestoreDescriptor| {
+        record.config_json = serde_json::to_string(descriptor).unwrap();
+        fixture.storage.handle().upsert_run_context(record).unwrap();
+    };
+    save(&mut record, &descriptor);
+    let renewable = |fixture: &Fixture| {
+        fixture
+            .runtime
+            .restore_diagnostics(run)
+            .unwrap()
+            .unwrap()
+            .history_available_with_current_authority
+    };
+    assert!(
+        renewable(&fixture),
+        "without an unresolved effect the legacy marker still renews"
+    );
+    descriptor.interrupted_tool_calls = vec![crate::restore::InterruptedToolCall {
+        call_id: "call-1".into(),
+        tool_name: "bash".into(),
+        result_observed: false,
+        may_have_side_effects: true,
+    }];
+    save(&mut record, &descriptor);
+    // When: history is reused, inspected, or forked from this record.
+    let result = fixture
+        .runtime
+        .continue_goal(run, "continue".into(), RunConfig::default());
+    // Then: the unresolved effect still refuses it; the marker is not an exception.
+    assert!(
+        matches!(result, Err(RuntimeError::RunRestoreFailed { reason: RunRestoreFailure::UnsupportedConfig(ref reason), .. }) if reason == "復元対象外の実行状態: ownership"),
+        "{result:?}"
+    );
+    assert!(!renewable(&fixture));
+    assert!(descriptor.has_uncertain_effects() && !descriptor.renewable_ownership_only());
+}

@@ -41,7 +41,7 @@ impl AgentRuntime {
             }
         })?;
         let history = descriptor.conversation_descriptor();
-        if !(record.restorable && history.restorable) && !(history.renewable_ownership_only()) {
+        if !(record.restorable && history.restorable) && !descriptor.renewable_ownership_only() {
             return Err(RuntimeError::RunRestoreFailed {
                 run_id: record.run_id.clone(),
                 reason: RunRestoreFailure::UnsupportedConfig(
@@ -87,7 +87,7 @@ impl AgentRuntime {
         let descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
         let history = descriptor.conversation_descriptor();
-        if (record.restorable && history.restorable) || (history.renewable_ownership_only()) {
+        if (record.restorable && history.restorable) || descriptor.renewable_ownership_only() {
             Ok(())
         } else {
             Err(history

@@ -164,7 +164,7 @@ impl Database {
         let mut shared = BTreeSet::new();
         // Inspect other graphs relationally, including old/corrupt recipes. Unknown
         // correspondence retains every target scratch instead of blocking disposal.
-        let unknown: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM recovery_manifests g WHERE g.manifest_id!=?1 AND g.superseded=0 AND (g.member_count<1 OR g.member_count!=(SELECT count(*) FROM recovery_members m WHERE m.manifest_id=g.manifest_id)))", [&target.manifest.manifest_id], |r| r.get(0))?;
+        let unknown: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM recovery_manifests g WHERE g.manifest_id!=?1 AND g.superseded=0 AND (g.member_count<1 OR g.member_count!=(SELECT count(*) FROM recovery_members m WHERE m.manifest_id=g.manifest_id))) OR EXISTS(SELECT 1 FROM recovery_manifests g WHERE g.manifest_id!=?1 AND g.superseded=0 AND NOT EXISTS(SELECT 1 FROM restart_components c WHERE c.manifest_id=g.manifest_id) AND EXISTS(SELECT 1 FROM recovery_members m WHERE m.manifest_id=g.manifest_id AND NOT EXISTS(SELECT 1 FROM thread_runs r WHERE r.run_id=m.run_id OR r.root_run_id=m.run_id) AND NOT EXISTS(SELECT 1 FROM threads t WHERE t.root_run_id=m.run_id)))", [&target.manifest.manifest_id], |r| r.get(0))?;
         if unknown {
             return Ok(OwnedGraphScratchUsers {
                 shared_threads: BTreeSet::new(),
@@ -173,7 +173,7 @@ impl Database {
         }
         for thread in &threads {
             let other: bool = self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM recovery_members m JOIN recovery_manifests g USING(manifest_id) WHERE g.manifest_id!=?1 AND g.superseded=0 AND m.run_id IN (SELECT root_run_id FROM threads WHERE thread_id=?2 UNION SELECT root_run_id FROM thread_runs WHERE thread_id=?2)) OR EXISTS(SELECT 1 FROM restart_expected_members e JOIN restart_transactions t USING(restart_id) WHERE t.restart_id!=?3 AND e.root_run_id IN (SELECT root_run_id FROM threads WHERE thread_id=?2 UNION SELECT root_run_id FROM thread_runs WHERE thread_id=?2))",
+                "SELECT EXISTS(SELECT 1 FROM recovery_members m JOIN recovery_manifests g USING(manifest_id) WHERE g.manifest_id!=?1 AND g.superseded=0 AND m.run_id IN (SELECT root_run_id FROM threads WHERE thread_id=?2 UNION SELECT root_run_id FROM thread_runs WHERE thread_id=?2 UNION SELECT run_id FROM thread_runs WHERE thread_id=?2)) OR EXISTS(SELECT 1 FROM restart_expected_members e JOIN restart_transactions t USING(restart_id) WHERE t.restart_id!=?3 AND (e.root_run_id IN (SELECT root_run_id FROM threads WHERE thread_id=?2 UNION SELECT root_run_id FROM thread_runs WHERE thread_id=?2) OR e.run_id IN (SELECT run_id FROM thread_runs WHERE thread_id=?2)))",
                 params![target.manifest.manifest_id, thread, target.restart_id], |r| r.get(0))?;
             if other {
                 shared.insert(thread.clone());
@@ -266,5 +266,66 @@ mod scratch_membership_tests {
             assert_eq!(users.unknown, source != "none", "{source}");
             assert!(users.shared_threads.is_empty());
         }
+    }
+    fn bound_thread(db: &Database) {
+        db.conn.execute("INSERT INTO threads(thread_id,project_root,root_run_id,created_at_ns,updated_at_ns,source) VALUES ('thread','/p','root',1,1,'host')", []).unwrap();
+        for (run, depth) in [("root", 0), ("child", 1)] {
+            db.conn.execute("INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES (?1,'thread','root',?2)", params![run, depth]).unwrap();
+        }
+    }
+    fn target_of(run: &str) -> GraphControlCas {
+        let mut target = target();
+        target.membership[0].run_id = run.into();
+        target.membership[0].root_run_id = "root".into();
+        target.membership[0].thread_id = Some("thread".into());
+        target
+    }
+    fn standalone(db: &Database, manifest: &str, run: &str, superseded: bool) {
+        db.conn
+            .execute(
+                "INSERT INTO recovery_manifests VALUES(?1,1,1,?2,1,0,'[]')",
+                params![manifest, superseded],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO recovery_members VALUES(?1,?2,'old',0,NULL,1,'{}')",
+                params![manifest, run],
+            )
+            .unwrap();
+    }
+    #[test]
+    fn a_standalone_graph_sharing_a_thread_through_a_child_or_root_keeps_its_scratch() {
+        // (the target's run, the old standalone graph's run, expected shared)
+        for (mine, theirs) in [("root", "child"), ("child", "root"), ("root", "root")] {
+            let db = Database::open_in_memory().unwrap();
+            bound_thread(&db);
+            standalone(&db, "old", theirs, false);
+            let users = db.owned_graph_scratch_users(&target_of(mine)).unwrap();
+            assert!(!users.unknown, "{mine}/{theirs}");
+            assert_eq!(
+                users.shared_threads,
+                BTreeSet::from(["thread".to_owned()]),
+                "{mine}/{theirs}"
+            );
+        }
+    }
+    #[test]
+    fn an_old_member_that_cannot_be_placed_retains_the_scratch_but_a_finished_graph_does_not() {
+        let db = Database::open_in_memory().unwrap();
+        bound_thread(&db);
+        standalone(&db, "old", "ghost", false);
+        let users = db.owned_graph_scratch_users(&target_of("root")).unwrap();
+        assert!(users.unknown && users.shared_threads.is_empty());
+        // The logical result is untouched: only the physical step is retained.
+        assert_eq!(
+            db.owned_graph_shared_threads(&target_of("root")).unwrap(),
+            BTreeSet::from(["thread".to_owned()])
+        );
+        let db = Database::open_in_memory().unwrap();
+        bound_thread(&db);
+        standalone(&db, "old", "ghost", true);
+        let users = db.owned_graph_scratch_users(&target_of("root")).unwrap();
+        assert!(!users.unknown && users.shared_threads.is_empty());
     }
 }

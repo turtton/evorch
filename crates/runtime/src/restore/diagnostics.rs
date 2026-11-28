@@ -56,7 +56,7 @@ impl AgentRuntime {
             record.restorable && descriptor.restorable && !descriptor.has_uncertain_effects();
         let renewable = descriptor.conversation_descriptor();
         let history_available_with_current_authority = (record.restorable && renewable.restorable)
-            || renewable.renewable_ownership_only()
+            || descriptor.renewable_ownership_only()
             || renewable.renewable_root_context()
             || renewable.renewable_team_root();
         Ok(Some(RunRestoreDiagnostics {
