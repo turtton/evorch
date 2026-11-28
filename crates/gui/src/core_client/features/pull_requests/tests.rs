@@ -15,7 +15,7 @@ use workbench_protocol::{
     commands::CommandReply,
     errors::RetryAdvice,
     namespaces::pull_requests::{
-        AutoFixView, CheckView, FactsView, HeadAttribution, LinkOrigin, LinkView,
+        AutoFixView, CheckView, FactsView, FetchFailureView, HeadAttribution, LinkOrigin, LinkView,
         PullRequestChange, PullRequestState, ReviewDecision, SnapshotView,
     },
     wire::{Sequence, UnixMillis},
@@ -1001,4 +1001,100 @@ fn a_bar_press_is_dropped_when_a_newer_read_lands_before_it_is_applied() {
         "turning auto fix off is never sent as turning it on"
     );
     screen.get_by_label(failure_label(ErrorCode::StaleRevision, false));
+}
+
+fn drawn_bar(shown: ThreadPullRequest, expanded: bool) -> Harness<'static> {
+    let mut harness = Harness::new_ui(move |ui| {
+        crate::theme::install(ui.ctx());
+        let bar = view::bar_view(
+            &shown,
+            view::BarShape {
+                expanded,
+                collapsible: true,
+                actions_enabled: true,
+                now_ns: now_ns(),
+            },
+        )
+        .expect("a linked thread has a bar");
+        widgets::bar(ui, &bar, 800.0);
+    });
+    harness.run_steps(4);
+    harness
+}
+
+fn changed_snapshot(shape: impl FnOnce(&mut SnapshotView)) -> ThreadPullRequest {
+    let mut shown = view(true);
+    shape(shown.snapshot.as_mut().unwrap());
+    shown
+}
+
+fn fetch_failure() -> Option<FetchFailureView> {
+    Some(FetchFailureView {
+        kind: "network".into(),
+        message: "offline".into(),
+    })
+}
+
+// Given: states that do not establish success: nothing fetched yet, no checks, a partial list
+// of passing checks, and a newest fetch that failed over passing facts
+// When: the thread's bar is built and drawn collapsed
+// Then: the glyph is not passing, and neither the CI words nor any drawn label say passing;
+// a complete passing list with a working fetch still reads `CI passing 1/1`
+#[test]
+fn an_unknown_state_is_never_drawn_as_success() {
+    let cases = [
+        changed_snapshot(|snapshot| snapshot.facts = None),
+        changed_snapshot(|snapshot| snapshot.facts.as_mut().unwrap().checks.clear()),
+        changed_snapshot(|snapshot| snapshot.facts.as_mut().unwrap().checks_complete = false),
+        changed_snapshot(|snapshot| {
+            snapshot.last_failure = fetch_failure();
+            snapshot.consecutive_failures = 1;
+        }),
+    ];
+    for case in cases {
+        assert_ne!(view::glyph(&case), Some(PrGlyph::Passing));
+        assert!(!view::ci(&case).contains("passing"), "{}", view::ci(&case));
+        let harness = drawn_bar(case, false);
+        assert_eq!(harness.query_all_by_label_contains("passing").count(), 0);
+        assert!(harness.query_by_label(icons::CHECK).is_none());
+    }
+    let complete = view(true);
+    assert_eq!(view::glyph(&complete), Some(PrGlyph::Passing));
+    drawn_bar(complete, false).get_by_label("CI passing 1/1");
+}
+
+// Given: an expanded bar whose facts cannot vouch for success (a partial list, a failed fetch)
+// Then: the passed checks are a neutral count, never the success line; a complete list with a
+// working fetch keeps the success line
+#[test]
+fn passed_checks_are_not_drawn_as_success_when_the_facts_cannot_vouch_for_it() {
+    let success_line = format!("{} 1 passed", icons::CHECK);
+    let cannot_vouch = [
+        changed_snapshot(|snapshot| snapshot.facts.as_mut().unwrap().checks_complete = false),
+        changed_snapshot(|snapshot| {
+            snapshot.last_failure = fetch_failure();
+            snapshot.consecutive_failures = 1;
+        }),
+    ];
+    for shown in cannot_vouch {
+        let harness = drawn_bar(shown, true);
+        harness.get_by_label_contains("1 passed");
+        assert!(harness.query_by_label(&success_line).is_none());
+    }
+    drawn_bar(view(true), true).get_by_label(&success_line);
+}
+
+// Given: a fetch that failed after an earlier success
+// Then: the failure is a visible status of the bar, and the CI words stop claiming a state
+#[test]
+fn a_failed_fetch_is_a_visible_status() {
+    let shown = changed_snapshot(|snapshot| {
+        snapshot.last_failure = Some(FetchFailureView {
+            kind: "unauthenticated".into(),
+            message: "gh auth".into(),
+        });
+        snapshot.consecutive_failures = 1;
+    });
+    assert_eq!(view::ci(&shown), "CI unknown");
+    drawn_bar(shown, false).get_by_label("Fetch failed (unauthenticated)");
 }

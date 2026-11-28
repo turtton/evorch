@@ -531,4 +531,46 @@ mod tests {
         assert_eq!(model.route_users["shared"], vec!["explorer"]);
         assert!(!model.routes_empty);
     }
+
+    fn two_routes() -> Config {
+        let mut config = Config::default();
+        config.providers.insert("local".into(), Default::default());
+        for (route, model) in [("worker", "custom"), ("other", "external")] {
+            config.routing.routes.insert(
+                route.into(),
+                vec![RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: Some(model.into()),
+                    auto: false,
+                }],
+            );
+        }
+        config
+    }
+
+    // Given: a route that already has a pending rename
+    // When: it is renamed again, another route asks for that name, and a clash is typed
+    // Then: only the latest draft is kept, no other route can take it, a refused name leaves the
+    // draft as it was, and typing the original name back drops the draft
+    #[test]
+    fn renaming_the_same_route_again_keeps_only_the_latest_draft() {
+        let mut model = RoutingSettingsModel::seed_from_config(&two_routes());
+        model.set_route_name("worker", "first").expect("first");
+        model.set_route_name("worker", "latest").expect("latest");
+        assert_eq!(model.shown_name("worker"), "latest");
+        assert_eq!(model.route_name_edits.len(), 1);
+        assert!(model.route_is_dirty("worker"));
+
+        assert!(model.set_route_name("other", "latest").is_err());
+        assert_eq!(model.shown_name("other"), "other");
+        assert_eq!(model.route_name_edits.len(), 1);
+
+        assert!(model.set_route_name("worker", "other").is_err());
+        assert_eq!(model.shown_name("worker"), "latest");
+
+        model.set_route_name("worker", "worker").expect("back");
+        assert_eq!(model.shown_name("worker"), "worker");
+        assert!(model.route_name_edits.is_empty());
+        assert!(!model.route_is_dirty("worker"));
+    }
 }

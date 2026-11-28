@@ -64,7 +64,7 @@ gui group のテストは、PR でも main push でも同じものを実行す�
 ### L4: ブラウザ fake-source テスト
 
 - 役割: Chromium を起動せず、注入したフェイクビューで Agent browser タブの描画・操作履歴の重ね表示・
-  スレッドごとのタブ表示を検証する（`crates/gui/tests/workbench_shell/browser.rs` ほか）。
+  スレッドごとのタブ表示を検証する（`crates/gui/src/core_client/features/browser/tests.rs` と `browser/observation/tests.rs`）。
 - `cef` と `browser` は `gui` の既定 feature。`gui` は CEF なしのビルドを `compile_error!` で拒否し、
   `lint` ジョブは `--no-default-features` が拒否されることを確認する。
 

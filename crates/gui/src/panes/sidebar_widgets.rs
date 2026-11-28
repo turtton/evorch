@@ -1063,9 +1063,179 @@ mod tests {
     use workspace_ui::ProjectSort;
 
     use super::{
-        Attention, Hidden, RowStatus, ToolbarAction, ToolbarView, TrailingView, nest,
-        sidebar_toolbar, trailing_controls,
+        Attention, Hidden, RowAttention, RowStatus, ToolbarAction, ToolbarView, TrailingView,
+        TreeRails, attention_note, family_gap_before, nest, sidebar_toolbar, trailing_controls,
     };
+
+    fn rows_at(depths: &[usize]) -> Vec<(usize, usize)> {
+        depths.iter().copied().enumerate().collect()
+    }
+
+    /// The definition: a level continues when the first later row at or above
+    /// it sits exactly at it.
+    fn brute_force_rails(depths: &[usize], index: usize) -> Vec<bool> {
+        (1..=depths[index])
+            .map(|level| {
+                depths[index + 1..]
+                    .iter()
+                    .find(|&&next| next <= level)
+                    .is_some_and(|&next| next == level)
+            })
+            .collect()
+    }
+
+    /// The sparse reads as one flag per level, shallowest first.
+    fn dense_rails(rails: &TreeRails, depth: usize, index: usize) -> Vec<bool> {
+        let ancestors: Vec<usize> = rails.continuing_ancestors(index).collect();
+        (1..=depth)
+            .map(|level| {
+                if level == depth {
+                    rails.own_continues(index)
+                } else {
+                    ancestors.contains(&level)
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rails_match_the_definition_on_deep_wide_and_irregular_trees() {
+        let mut shapes: Vec<Vec<usize>> = vec![
+            // A single chain, and a chain followed by siblings at every level.
+            (0..300).collect(),
+            (0..150).chain((0..150).rev()).collect(),
+            // Wide families with children.
+            (0..40).flat_map(|_| [0, 1, 2, 2, 1]).collect(),
+        ];
+        // Depth jumps no tree walk produces still follow the definition.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        for _ in 0..40 {
+            let shape = (0..30)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    usize::try_from(state % 6).unwrap()
+                })
+                .collect();
+            shapes.push(shape);
+        }
+        for depths in shapes {
+            let rows = rows_at(&depths);
+            let rails = TreeRails::new(&rows);
+            for index in 0..rows.len() {
+                assert_eq!(
+                    dense_rails(&rails, depths[index], index),
+                    brute_force_rails(&depths, index),
+                    "row {index} of {depths:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rails_continue_only_while_a_later_sibling_follows() {
+        // root / a / a1 / a2 / b / b1 / other
+        let rows = rows_at(&[0, 1, 2, 2, 1, 2, 0]);
+        let rails = TreeRails::new(&rows);
+        assert_eq!(
+            (0..rows.len())
+                .map(|index| dense_rails(&rails, rows[index].1, index))
+                .collect::<Vec<_>>(),
+            [
+                vec![],
+                // a continues to its sibling b.
+                vec![true],
+                // a1: level 1 passes through toward b; a2 follows at level 2.
+                vec![true, true],
+                // a2 is a's last child, while level 1 still runs to b.
+                vec![true, false],
+                // b is the root's last child.
+                vec![false],
+                // b1 is b's last child, and nothing continues past it.
+                vec![false, false],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn family_gap_sets_apart_only_families_with_children() {
+        // solo / solo / family(root, child) / solo / solo
+        let rows = rows_at(&[0, 0, 0, 1, 0, 0]);
+        let gaps: Vec<_> = (0..rows.len())
+            .map(|index| family_gap_before(&rows, index))
+            .collect();
+        assert_eq!(gaps, [false, false, true, false, true, false]);
+        // A leading family needs no gap above the first row.
+        let rows = rows_at(&[0, 1, 0]);
+        assert!(!family_gap_before(&rows, 0));
+        assert!(family_gap_before(&rows, 2));
+    }
+
+    fn flags(question: bool, approval: bool, unread: bool, external: bool) -> Attention {
+        Attention {
+            question,
+            approval,
+            unread,
+            external,
+        }
+    }
+
+    #[test]
+    fn a_row_takes_the_strongest_of_its_states() {
+        // Given: every combination of the four states
+        for bits in 0..16u8 {
+            let has = |bit: u8| bits & (1 << bit) != 0;
+            let attention = flags(has(0), has(1), has(2), has(3));
+
+            // When: the row's state is resolved
+            let expected = if has(0) {
+                RowAttention::Question
+            } else if has(1) {
+                RowAttention::Approval
+            } else if has(2) {
+                RowAttention::Unread
+            } else if has(3) {
+                RowAttention::ExternalWorking
+            } else {
+                RowAttention::Normal
+            };
+
+            // Then: question > approval > unread > external work > normal
+            assert_eq!(attention.resolve(), expected, "{attention:?}");
+        }
+    }
+
+    #[test]
+    fn the_note_names_the_strongest_state_and_where_it_comes_from() {
+        let none = Attention::default();
+        assert_eq!(attention_note(none, none), None);
+        assert_eq!(
+            attention_note(flags(false, false, false, true), none),
+            Some("Working in another window or process")
+        );
+        assert_eq!(
+            attention_note(none, flags(false, false, false, true)),
+            Some("A collapsed child thread is working in another window or process")
+        );
+        // A stronger child state beats a weaker one of the row itself only when
+        // it is stronger; the row's own state wins at the same level.
+        assert_eq!(
+            attention_note(
+                flags(false, false, false, true),
+                flags(false, false, true, false)
+            ),
+            Some("Unread report in a collapsed child thread")
+        );
+        assert_eq!(
+            attention_note(
+                flags(true, false, false, true),
+                flags(true, false, false, false)
+            ),
+            Some("Answer needed: this thread has an unanswered question")
+        );
+    }
 
     #[test]
     fn nest_keeps_orphans_and_cycles_reachable_with_string_ids() {
