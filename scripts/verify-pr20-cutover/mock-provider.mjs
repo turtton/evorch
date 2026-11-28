@@ -59,6 +59,16 @@ export function wireTexts(body) {
   return (body.messages ?? []).map((m) => ({ role: m.role, text: textOf(m.content) }));
 }
 
+/** Failure watchdog only: a wait that never ends is reported as an error, never taken as success. */
+function watchdog(promise, what) {
+  const ms = Number(process.env.PR20_CUTOVER_WATCHDOG_MS ?? 300_000);
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`watchdog (${ms} ms) expired while waiting for: ${what}`)), ms);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
 export class MockProvider {
   /** @param {{port?: number, mode: "generate"|"verify", logFile?: string}} options */
   constructor(options) {
@@ -113,7 +123,7 @@ export class MockProvider {
   async arrived(key) {
     const hold = this.#hold(key);
     if (hold.arrived) return;
-    await new Promise((resolve) => hold.waiters.push(resolve));
+    await watchdog(new Promise((resolve) => hold.waiters.push(resolve)), `a provider request holding ${key}`);
   }
 
   release(key) {
@@ -134,16 +144,19 @@ export class MockProvider {
   }
 
   async until(predicate) {
-    for (;;) {
-      if (predicate(this.requests)) return;
-      await new Promise((resolve) => {
-        const waiter = () => {
-          this.waiters.delete(waiter);
-          resolve();
-        };
-        this.waiters.add(waiter);
-      });
-    }
+    const loop = async () => {
+      for (;;) {
+        if (predicate(this.requests)) return;
+        await new Promise((resolve) => {
+          const waiter = () => {
+            this.waiters.delete(waiter);
+            resolve();
+          };
+          this.waiters.add(waiter);
+        });
+      }
+    };
+    await watchdog(loop(), "a provider request matching the predicate");
   }
 
   async #handle(req, res) {
@@ -209,7 +222,15 @@ export class MockProvider {
     if (last.role !== "user") {
       return { text: "mock-ok", summary: `text(after ${last.role})` };
     }
-    const text = textOf(last.content);
+    // The core may append notices (project rules, scratch/cutover notes) after the user's own
+    // message, so the directives are read from the whole trailing run of user messages.
+    const messages = record.body.messages ?? [];
+    let first = messages.length - 1;
+    while (first > 0 && messages[first - 1].role === "user") first--;
+    const text = messages
+      .slice(first)
+      .map((m) => textOf(m.content))
+      .join("\n");
     const calls = [];
     let hold = null;
     for (const m of text.matchAll(DIRECTIVE)) {

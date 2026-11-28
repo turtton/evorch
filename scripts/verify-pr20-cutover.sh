@@ -10,7 +10,7 @@
 #     --new-core PATH --new-evorch PATH --new-sha SHA40 \
 #     [--old-helper PATH] [--new-helper PATH] \
 #     [--old-guard-profile dev|release] [--new-guard-profile dev|release] \
-#     [--evidence DIR] [--base DIR] [--fixtures main,graph] [--keep]
+#     [--evidence DIR] [--base DIR] [--fixtures main,graph] [--approve] [--keep]
 #
 #   --old-*    the build immediately before PR C (for example the clean detached
 #              checkout .worktrees/pr20-old-build: target/debug/{evorch-core,evorch}).
@@ -36,6 +36,9 @@
 #              attachment, ownership-only snapshots, owner-generation destinations,
 #              two un-ACKed notifications, Stop destination, CLI run, scratch marker).
 #              "graph" = an unfinished old restart graph.
+#   --approve  the OLD core approves the project (workspace.set_project_trust) while it creates the
+#              data. Default: the project keeps the trust the old core gave it (unapproved), and
+#              the new core must keep serving the existing threads and a new thread of it.
 #   --keep     keep the work roots (the evidence directory is always kept).
 #
 # How the check is done (nothing is edited by hand):
@@ -75,7 +78,7 @@ usage() { sed -n '2,/^set -eu/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 die() { echo "verify-pr20-cutover: $*" >&2; exit 64; }
 
 old_core= old_evorch= old_sha= old_helper= old_profile= new_core= new_evorch= new_sha= new_helper= new_profile=
-evidence= base=/tmp fixtures=main,graph keep=0
+evidence= base=/tmp fixtures=main,graph keep=0 approve=no
 while [ $# -gt 0 ]; do
   case "$1" in
     --old-core) old_core=$2; shift 2 ;;
@@ -92,6 +95,7 @@ while [ $# -gt 0 ]; do
     --base) base=$2; shift 2 ;;
     --fixtures) fixtures=$2; shift 2 ;;
     --keep) keep=1; shift ;;
+    --approve) approve=yes; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument $1" ;;
   esac
@@ -143,6 +147,23 @@ cleanup() {
 trap cleanup EXIT INT TERM
 : > "$work/roots"
 
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+
+# The source delivery (product-manifest.json, guard-bundle.json, binaries) is only ever READ and
+# copied. Its hashes are taken before sealing and again after the run so that the summary can
+# show it was not changed.
+record_sources() { # label core evorch phase
+  rs_dir=$(dirname "$2")
+  {
+    for n in product-manifest.json guard-bundle.json evorch-core evorch-process-guard; do
+      [ -f "$rs_dir/$n" ] && printf '%s\t%s\n' "$rs_dir/$n" "$(sha "$rs_dir/$n")"
+    done
+    printf '%s\t%s\n' "$3" "$(sha "$3")"
+  } | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add' > "$work/src-$1.$4.json"
+}
+record_sources old "$old_core" "$old_evorch" before
+record_sources new "$new_core" "$new_evorch" before
+
 # --- seal a private copy of one build: binaries + a guard bundle naming core and CLI
 seal_build() { # label core evorch helper profile sha
   label=$1 core=$2 evo=$3 helper=$4 profile=$5 sha_of_build=$6
@@ -192,16 +213,35 @@ seal_build() { # label core evorch helper profile sha
       fi
     fi
     cp -p "$core" "$out/evorch-core"; cp -p "$evo" "$out/evorch"
-    GITHUB_SHA=$sha_of_build "$repo/scripts/guard-artifact.sh" seal "$helper" "$out" development "$profile" "$recipe" \
-      "core:$out/evorch-core" "cli:$out/evorch" >/dev/null || die "could not seal the $label build (profile $profile, $how)"
+    recipe_note="recipe as decided by how_decided (source bundle, or the canonical recipe of the profile)"
+    if ! GITHUB_SHA=$sha_of_build "$repo/scripts/guard-artifact.sh" seal "$helper" "$out" development "$profile" "$recipe" \
+      "core:$out/evorch-core" "cli:$out/evorch" >/dev/null; then
+      [ "$how" = source-bundle ] || die "could not seal the $label build (profile $profile, $how)"
+      # The helper accepts a private (development) bundle only with the helper-only recipe; the combined
+      # distribution recipe of a product bundle is valid only for purpose=distribution with the shipped
+      # caller set. The real recipe stays recorded below (source_*); nothing is hidden.
+      rm -f "$out/guard-bundle.json"
+      if [ "$profile" = release ]; then
+        recipe='["build","--locked","--release","-p","process-guard","--bin","evorch-process-guard"]'
+      else
+        recipe='["build","--locked","-p","process-guard","--bin","evorch-process-guard"]'
+      fi
+      GITHUB_SHA=$sha_of_build "$repo/scripts/guard-artifact.sh" seal "$helper" "$out" development "$profile" "$recipe" \
+        "core:$out/evorch-core" "cli:$out/evorch" >/dev/null || die "could not seal the $label build (profile $profile, $how)"
+      recipe_note="the PRIVATE bundle (work dir copy, evidence guard-bundle-*.private.json) carries the helper-only recipe because the helper accepts nothing else for a private core+cli bundle; the source product-manifest.json and guard-bundle.json are not modified and keep the real combined recipe (source_build_args; hashes in sourceFiles)"
+    fi
   fi
-  jq -c --arg how "$how" '{purpose, how_decided: $how, profile: .helper.profile, build_args: .helper.build_args, helper_sha256: .helper.sha256, source_sha, callers: [.callers[].file]}' "$out/guard-bundle.json" > "$work/guard-$label.json"
+  src_purpose=null src_args=null
+  if [ -n "$source_bundle" ]; then
+    src_purpose=$(jq -c .purpose "$source_bundle"); src_args=$(jq -c .helper.build_args "$source_bundle")
+  fi
+  jq -c --arg how "$how" --arg note "${recipe_note:-n/a}" --argjson sp "$src_purpose" --argjson sa "$src_args" --arg helper_path "$helper" \
+    '{purpose, how_decided: $how, recipe_note: $note, profile: .helper.profile, build_args: .helper.build_args, source_purpose: $sp, source_build_args: $sa, helper_sha256: .helper.sha256, source_sha, callers: [.callers[].file]}' "$out/guard-bundle.json" > "$work/guard-$label.json"
   echo "guard bundle of the $label build: $(cat "$work/guard-$label.json")"
 }
 seal_build old "$old_core" "$old_evorch" "$old_helper" "$old_profile" "$old_sha"
 seal_build new "$new_core" "$new_evorch" "$new_helper" "$new_profile" "$new_sha"
 
-sha() { sha256sum "$1" | cut -d' ' -f1; }
 old_tree_sha=$(git -C "$(dirname "$old_core")" rev-parse HEAD 2>/dev/null || echo unknown)
 new_tree_sha=$(git -C "$(dirname "$new_core")" rev-parse HEAD 2>/dev/null || echo unknown)
 echo "old build: $old_sha (checkout HEAD of the binary: $old_tree_sha)"
@@ -222,7 +262,7 @@ run_fixture() { # fixture
     chmod 700 "$root/run" "$root/state"
     echo "== [$fx] attempt $attempts: OLD build creates the data in $root"
     set +e
-    node "$driver" --phase gen --fixture "$fx" --root "$root" --artifact "$work/art-old"
+    node "$driver" --phase gen --fixture "$fx" --root "$root" --artifact "$work/art-old" --approve "$approve"
     rc=$?
     set -e
     if [ "$rc" = 3 ] && [ "$attempts" -lt 5 ]; then
@@ -253,13 +293,27 @@ cat > "$work/meta.json" <<EOF
   "old": {"sha":"$old_sha","coreSha256":"$(sha "$work/art-old/evorch-core")","evorchSha256":"$(sha "$work/art-old/evorch")"},
   "new": {"sha":"$new_sha","coreSha256":"$(sha "$work/art-new/evorch-core")","evorchSha256":"$(sha "$work/art-new/evorch")"},
   "guard": {"old": $(cat "$work/guard-old.json"), "new": $(cat "$work/guard-new.json")},
+  "approveProject": "$approve",
   "environment": {"uid":$(id -u),"uname":"$(uname -srm)","node":"$(node -v)","utc":"$stamp","base":"$base"},
   "fixtures": [$fixture_json]
 }
 EOF
+record_sources old "$old_core" "$old_evorch" after
+record_sources new "$new_core" "$new_evorch" after
+for label in old new; do
+  jq -n --slurpfile b "$work/src-$label.before.json" --slurpfile a "$work/src-$label.after.json" \
+    '{before: $b[0], after: $a[0], unchanged: ($b[0] == $a[0])}' > "$work/src-$label.json"
+done
+tmp_meta=$(mktemp "$work/meta.XXXXXX")
+jq --slurpfile o "$work/src-old.json" --slurpfile n "$work/src-new.json" '. + {sourceFiles: {old: $o[0], new: $n[0]}}' "$work/meta.json" > "$tmp_meta" && mv "$tmp_meta" "$work/meta.json"
 cp "$work/meta.json" "$evidence/meta.json"
-cp "$work/art-old/guard-bundle.json" "$evidence/guard-bundle-old.json"
-cp "$work/art-new/guard-bundle.json" "$evidence/guard-bundle-new.json"
+src_dir_new=$(dirname "$new_core")
+[ -f "$src_dir_new/product-manifest.json" ] && cp "$src_dir_new/product-manifest.json" "$evidence/product-manifest-source.json"
+[ -f "$src_dir_new/guard-bundle.json" ] && cp "$src_dir_new/guard-bundle.json" "$evidence/guard-bundle-source-new.json"
+cp "$work/guard-new.json" "$evidence/guard-new.receipt.json"
+cp "$work/guard-old.json" "$evidence/guard-old.receipt.json"
+cp "$work/art-old/guard-bundle.json" "$evidence/guard-bundle-old.private.json"
+cp "$work/art-new/guard-bundle.json" "$evidence/guard-bundle-new.private.json"
 set +e
 node "$report" --meta "$work/meta.json" --out "$evidence"
 rc=$?

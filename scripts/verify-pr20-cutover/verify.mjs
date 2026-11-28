@@ -4,9 +4,10 @@
 // surface it depends on) and a state the old build never produced ends as
 // `unverified`. Neither is success.
 import crypto from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { MockProvider, wireTexts } from "./mock-provider.mjs";
+import { MockProvider, tagMarker, wireTexts } from "./mock-provider.mjs";
 import * as H from "./harness.mjs";
 import { Session } from "./gen.mjs";
 import { driverDir, log, readJson } from "./common.mjs";
@@ -92,7 +93,13 @@ async function step(results, id, fn) {
 
 /** Wait for a durable fact, failing (not hanging) when the failure watchdog expires. */
 function waitFact(s, description, fn) {
-  return H.waitFor(description, fn, { watchdogMs: STEP_WATCHDOG_MS, alive: () => !s.core.exited });
+  return H.waitFor(description, fn, {
+    watchdogMs: STEP_WATCHDOG_MS,
+    alive: () => {
+      if (s.core.exited) throw new Error(`the core process exited (${JSON.stringify(s.core.exited)}) while waiting for: ${description}; stderr tail: ${JSON.stringify(s.core.stderr.join("").slice(-600))}`);
+      return true;
+    },
+  });
 }
 
 /**
@@ -173,6 +180,12 @@ export async function verifyMain({ env, artifactDir, results, manifest, newIdent
     log(`new ServerHello: ${JSON.stringify({ build: s.wire.server.server_build, capabilities: s.wire.server.capabilities })}`);
     await s.resolveProject();
     results.check("project:same-id-as-old-build", s.project === manifest.project, `${manifest.project} -> ${s.project}`);
+    const trustMode = (await s.projectAccess()).trust;
+    results.check(
+      "project:trust-as-generated",
+      trustMode === manifest.projectTrust?.trust,
+      JSON.stringify({ generatedByOldCore: manifest.projectTrust?.trust, seenByNewCore: trustMode }),
+    );
 
     const markerAtReady = manifest.scratch?.marker && fs.existsSync(manifest.scratch.marker);
 
@@ -196,6 +209,18 @@ export async function verifyMain({ env, artifactDir, results, manifest, newIdent
         messagesWith(last, earlier) >= 1,
         JSON.stringify({ messageCount: last.messageCount, messagesCarryingEarlierTurn: messagesWith(last, earlier) }),
       );
+    });
+
+    // ---- Send and CreateExecution keep working on the project as the old core left it (unapproved by default)
+    await step(results, `${trustMode}-project:existing-thread-send-usable`, async () => {
+      const carrying = requestsWith(mock, "VERIFY-MAIN-INPUT");
+      results.check(`${trustMode}-project:existing-thread-send-usable`, carrying.length > 0, `send_chat to an existing thread of a ${trustMode} project reached the provider (${carrying.length} request(s))`);
+    });
+    await step(results, `${trustMode}-project:create-execution-usable`, async () => {
+      const mk = "VERIFY-NEW-THREAD";
+      await s.chat("create_execution", "vfy-new-thread", `${tagMarker("vfy-new-thread")} ${mk} a new thread on the cutover project`);
+      await waitFact(s, "provider saw the new thread", () => requestsWith(mock, mk).length > 0);
+      results.pass(`${trustMode}-project:create-execution-usable`, `create_execution on a ${trustMode} project reached the provider`);
     });
 
     // ---- the attachment: the stored file is intact and the restored history still references it
@@ -227,14 +252,23 @@ export async function verifyMain({ env, artifactDir, results, manifest, newIdent
         const alreadyAcked = s.db.get("SELECT state FROM lane_notifications WHERE notification_id=?", before.notification_id).state === "acked";
         await s.chat("send_chat", c.thread, `VERIFY-LANE-${c.label} input after the cutover`);
         await waitFact(s, `${c.label} notification acked`, () => s.db.get("SELECT state FROM lane_notifications WHERE notification_id=?", before.notification_id).state === "acked");
+        await waitFact(s, `provider saw the ${c.label} input`, () => requestsWith(mock, `VERIFY-LANE-${c.label}`).length > 0);
+        // The turn the report lands in does not matter. receipt-absent: the report must reach the model
+        // (in this turn or a later one) and must be acknowledged. receipt-present: the old core already
+        // accepted it, so only the ACK is repaired. Either way no request may carry it twice.
+        if (!expectReceiptPresent) {
+          await waitFact(s, `the ${c.label} report reaches the provider`, () => requestsWith(mock, c.marker).length > 0);
+        }
         const receipt = s.db.get("SELECT status FROM host_input_receipts WHERE prompt_id=?", `lane-notification:${before.notification_id}`);
-        const forThread = requestsWith(mock, `VERIFY-LANE-${c.label}`);
-        const worst = Math.max(0, ...forThread.map((r) => messagesWith(r, c.marker)));
-        const carriers = forThread.length ? describeCarriers(forThread[forThread.length - 1], c.marker) : [];
+        const carrying = requestsWith(mock, c.marker);
+        const worst = Math.max(0, ...carrying.map((r) => messagesWith(r, c.marker)));
+        const carriers = carrying.length ? describeCarriers(carrying[carrying.length - 1], c.marker) : [];
+        const acked = s.db.get("SELECT state FROM lane_notifications WHERE notification_id=?", before.notification_id).state === "acked";
+        const countOk = expectReceiptPresent ? worst <= 1 : worst === 1;
         results.check(
           `lane-delivery:${c.label}`,
-          receipt?.status === "delivered" && worst === 1,
-          JSON.stringify({ autoDeliveredBeforeInput: alreadyAcked, receipt: receipt?.status, maxMessagesCarryingReport: worst, providerRequests: forThread.length, carriers }),
+          acked && receipt?.status === "delivered" && countOk,
+          JSON.stringify({ acked, autoDeliveredBeforeInput: alreadyAcked, receipt: receipt?.status, maxMessagesCarryingReport: worst, providerRequestsCarryingReport: carrying.length, carriers }),
         );
       });
     }
@@ -261,21 +295,54 @@ export async function verifyMain({ env, artifactDir, results, manifest, newIdent
       results.check("scratch:history-prefix-preserved", isPrefix(first.body.messages, second.body.messages), `${first.body.messages.length} -> ${second.body.messages.length} messages`);
     });
 
-    // ---- a new planned restart is not blocked by the completed old one
-    await step(results, "restart:not-blocked-by-old-completed-restart", async () => {
+    // ---- a new planned restart: (1) the completed old restart does not block its start and adoption,
+    //      (2) the new restart completes. Two results; (2) is a known baseline-shared issue (see report.mjs).
+    {
       const completedBefore = s.db.count("restart_transactions", "phase='completed'");
       const knownBefore = new Set(s.db.all("SELECT restart_id FROM restart_transactions").map((r) => r.restart_id));
       const readyCount = s.core.readyLines.length;
       const cli = s.cli(["core", "restart", "request", "--yes"], { async: true });
       const cliExit = await cli.wait(); // ends when the core execs, or when the request fails
       const fresh = () => s.db.all("SELECT restart_id, phase, revision FROM restart_transactions").filter((r) => !knownBefore.has(r.restart_id));
-      const detail = () => JSON.stringify({ cliExit, newRestarts: fresh(), cliStderr: cli.stderr.join("").slice(-400) });
-      await waitFact(s, "a new restart finished or failed", () => fresh().some((r) => ["completed", "aborted", "invalidated", "superseded", "failed"].includes(r.phase)));
-      if (!fresh().some((r) => r.phase === "completed")) throw new Error(`the new restart did not complete: ${detail()}`);
-      await Promise.race([s.core.ready(readyCount + 1), s.core.wait().then(() => { throw new Error("the new core exited during the restart"); })]);
-      await s.connect();
-      results.pass("restart:not-blocked-by-old-completed-restart", `completed restarts ${completedBefore} -> ${s.db.count("restart_transactions", "phase='completed'")}; ${detail()}`);
-    });
+      const detail = () => JSON.stringify({ cliExit, newRestarts: fresh(), cliStderr: cli.stderr.join("").slice(-400), coreExit: s.core.exited });
+      const ids = () => fresh().map((r) => r.restart_id);
+      const FAILED = ["aborted", "invalidated", "superseded", "failed"];
+      const A = "restart:old-completed-does-not-block-new-restart";
+      const B = "restart:new-restart-completes";
+      let adopted = false;
+      try {
+        await waitFact(s, "a new restart adopted, finished or failed", () => fresh().some((r) => r.phase === "adopted" || r.phase === "completed" || FAILED.includes(r.phase)));
+        adopted = fresh().some((r) => r.phase === "adopted" || r.phase === "completed");
+        if (adopted) {
+          results.pass(A, `a new restart started and was adopted although ${completedBefore} old completed restart(s) exist: ${detail()}`);
+          if (!fresh().some((r) => r.phase === "completed")) {
+            // Adopted but not complete: keep the evidence of this moment while the core is alive.
+            await captureRestartEvidence({ env, s, tag: "adopted", newRestartIds: ids() }).catch((e) => log(`evidence capture failed: ${e.message}`));
+          }
+        } else {
+          results.fail(A, `the new restart ended before it was adopted: ${detail()}`);
+        }
+      } catch (error) {
+        results.fail(A, `${error.message}; ${detail()}`);
+        results.fail(B, "not reached: the new restart was not adopted");
+        await captureRestartEvidence({ env, s, tag: "final", newRestartIds: ids() }).catch((e) => log(`evidence capture failed: ${e.message}`));
+        copyMainCoreLogs(env);
+      }
+      if (!results.items.some((i) => i.id === B)) {
+        try {
+          if (!adopted) throw new Error("not reached: the new restart was not adopted");
+          await waitFact(s, "a new restart finished or failed", () => fresh().some((r) => r.phase === "completed" || FAILED.includes(r.phase)));
+          if (!fresh().some((r) => r.phase === "completed")) throw new Error(`the new restart did not complete: ${detail()}`);
+          await Promise.race([s.core.ready(readyCount + 1), s.core.wait().then(() => { throw new Error("the new core exited during the restart"); })]);
+          await s.connect();
+          results.pass(B, `completed restarts ${completedBefore} -> ${s.db.count("restart_transactions", "phase='completed'")}; ${detail()}`);
+        } catch (error) {
+          results.fail(B, `${error.message}; ${detail()}`);
+          await captureRestartEvidence({ env, s, tag: "final", newRestartIds: ids() }).catch((e) => log(`evidence capture failed: ${e.message}`));
+          copyMainCoreLogs(env);
+        }
+      }
+    }
 
     // ---- stopped destination, interrupted runs, CLI run: nothing is revived by itself
     await step(results, "stop:destination-not-resumed", async () => {
@@ -344,6 +411,7 @@ export async function verifyGraph({ env, artifactDir, results, manifest }) {
     const dbFile = H.findDatabases(env).find((f) => !f.endsWith("owners.db"));
     s.db = new H.Db(dbFile);
     const pre = s.db.all("SELECT restart_id, phase FROM restart_transactions");
+    snapshotHeaders({ env, tag: "before", results });
     await debugPreStartDelay(results);
     startNewCore(s);
     try {
@@ -355,6 +423,7 @@ export async function verifyGraph({ env, artifactDir, results, manifest }) {
     }
     await s.connect();
     await s.resolveProject();
+    snapshotHeaders({ env, tag: "started", results });
     log(`graph rows after cold start: ${JSON.stringify(s.db.all("SELECT restart_id, phase FROM restart_transactions"))} ${JSON.stringify(s.db.all("SELECT disposition, reason FROM restart_components"))}`);
 
     // The old graph is isolated locally: unrelated threads keep working.
@@ -409,5 +478,131 @@ export async function verifyGraph({ env, artifactDir, results, manifest }) {
     await stopGracefully(s, results, "graph:new-core-graceful-stop");
     s.wire?.close();
     await mock.stop();
+    try {
+      snapshotHeaders({ env, tag: "final", results });
+    } catch (error) {
+      results.fail("graph:header-snapshot:final", error.message);
+    }
   }
+}
+
+// ============================================================ header snapshots
+
+const HEADER_TABLES = [
+  ["restart_transactions", ["restart_id", "capture_id", "revision", "phase", "format_version", "superseded", "adopted_epoch", "ready_at_ms", "failure_reason", "expected_digest", "manifest_digest"]],
+  ["restart_components", ["restart_id", "manifest_id", "disposition", "claim_id", "reason", "revision"]],
+  ["restart_expected_members", ["restart_id", "run_id", "root_run_id", "manifest_id"], "CASE WHEN json_valid(member_json) THEN json_extract(member_json, '$.thread_id') END AS thread_id"],
+  ["recovery_manifests", ["manifest_id", "schema_version", "committed", "superseded", "member_count", "edge_count"]],
+  ["recovery_claims", null],
+  ["recovery_graph_control", null],
+  ["recovery_graph_effects", ["operation_id", "attempt_nonce", "manifest_id", "request_digest"]],
+  ["recovery_graph_thread_progress", null],
+  ["restart_owner_progress", ["restart_id", "thread_id"]],
+];
+
+/**
+ * Relational headers of the recovery/restart tables (never a JSON body of a restart or manifest),
+ * read with SELECT only, and a self-contained copy of the database at \$TMPDIR/ev-graph-db-<tag>.db.
+ * A column the schema does not have (the old build has no format_version) is reported as missing.
+ */
+export function snapshotHeaders({ env, tag, results }) {
+  const dbFile = H.findDatabases(env).find((f) => !f.endsWith("owners.db"));
+  const db = new H.Db(dbFile);
+  const out = { tag, db: dbFile, at: new Date().toISOString(), tables: {} };
+  const existing = new Set(db.tables());
+  for (const [table, wanted, extra] of HEADER_TABLES) {
+    if (!existing.has(table)) {
+      out.tables[table] = { missingTable: true };
+      continue;
+    }
+    const have = db.all(`SELECT name FROM pragma_table_info('${table}')`).map((r) => r.name);
+    const columns = wanted ? wanted.filter((c) => have.includes(c)) : have;
+    const missing = wanted ? wanted.filter((c) => !have.includes(c)) : [];
+    const select = [...columns.map((c) => `"${c}"`), ...(extra && have.includes("member_json") ? [extra] : [])].join(", ");
+    out.tables[table] = { missingColumns: missing, rows: db.all(`SELECT ${select} FROM ${table}`) };
+  }
+  const dir = driverDir(env.root);
+  fs.writeFileSync(path.join(dir, `headers-${tag}.json`), JSON.stringify(out, null, 2));
+  const copy = path.join(process.env.TMPDIR ?? "/tmp", `ev-graph-db-${tag}.db`);
+  fs.rmSync(copy, { force: true });
+  // VACUUM INTO writes only the new file; the fixture database is opened read-only.
+  const source = new DatabaseSync(dbFile, { readOnly: true });
+  try {
+    source.exec(`VACUUM INTO '${copy.replaceAll("'", "''")}'`);
+  } finally {
+    source.close();
+  }
+  log(`header snapshot ${tag}: ${path.join(dir, `headers-${tag}.json`)} database copy ${copy}`);
+  return out;
+}
+
+// ====================================================== restart evidence (main)
+
+/**
+ * Evidence for a planned restart that does not complete: a one-file copy of the database
+ * (VACUUM INTO from a read-only connection), the relational rows of the newest restart
+ * (components with reason/claim, expected members, runs of the threads), and, while the core is
+ * alive, `quarantine list` and `graphs show ID` for every listed ID. Everything is SELECT or a
+ * read-only CLI call; the fixture is never modified.
+ */
+export async function captureRestartEvidence({ env, s, tag, newRestartIds }) {
+  const tmp = process.env.TMPDIR ?? "/tmp";
+  const dbFile = H.findDatabases(env).find((f) => !f.endsWith("owners.db"));
+  const db = new H.Db(dbFile);
+  const copy = path.join(tmp, `ev-main-db-${tag}.db`);
+  fs.rmSync(copy, { force: true });
+  const source = new DatabaseSync(dbFile, { readOnly: true });
+  try {
+    source.exec(`VACUUM INTO '${copy.replaceAll("'", "''")}'`);
+  } finally {
+    source.close();
+  }
+  const ids = newRestartIds.map((id) => `'${String(id).replaceAll("'", "''")}'`).join(",") || "''";
+  const threadCols = db.all("SELECT name FROM pragma_table_info('threads')").map((r) => r.name);
+  const wantedThreadCols = threadCols.filter((c) => /thread_id|^id$|root|current|binding/.test(c));
+  const restartCols = db.all("SELECT name FROM pragma_table_info('restart_transactions')").map((r) => r.name);
+  const evidence = {
+    tag,
+    at: new Date().toISOString(),
+    coreExited: s.core?.exited ?? null,
+    databaseCopy: copy,
+    restarts: db.all(`SELECT ${["restart_id", "capture_id", "revision", "phase", "format_version", "adopted_epoch", "ready_at_ms", "failure_reason"].filter((c) => restartCols.includes(c)).join(", ")} FROM restart_transactions`),
+    newRestartIds,
+    components: db.all(`SELECT restart_id, manifest_id, disposition, reason, claim_id, revision FROM restart_components WHERE restart_id IN (${ids})`),
+    expectedMembers: db.all(
+      `SELECT restart_id, run_id, root_run_id, manifest_id, CASE WHEN json_valid(member_json) THEN json_extract(member_json, '$.thread_id') END AS thread_id FROM restart_expected_members WHERE restart_id IN (${ids})`,
+    ),
+    manifests: db.all("SELECT manifest_id, schema_version, committed, superseded, member_count, edge_count FROM recovery_manifests"),
+    claims: db.all("SELECT claim_id, manifest_id, state, release_reason FROM recovery_claims"),
+    threadRuns: db.all("SELECT thread_id, run_id, root_run_id, depth FROM thread_runs"),
+    threadBindingColumns: wantedThreadCols.length ? db.all(`SELECT ${wantedThreadCols.map((c) => `"${c}"`).join(", ")} FROM threads`) : [],
+    runContexts: db.all("SELECT run_id, role, terminal_phase, restorable, non_restorable_reason FROM run_contexts"),
+  };
+  let quarantineText = "(core not running: not listed)\n";
+  evidence.graphsShow = [];
+  if (s.core && !s.core.exited) {
+    const list = await s.cli(["core", "quarantine", "list"]);
+    quarantineText = `exit ${list.code}\n--- stdout\n${list.stdout}\n--- stderr\n${list.stderr}\n`;
+    const listed = [...new Set(list.stdout.split("\n").map((l) => /^ {2}(\S+) \(revision \d+\)/.exec(l)?.[1]).filter(Boolean))];
+    for (const id of listed) {
+      const shown = await s.cli(["core", "graphs", "show", id]);
+      evidence.graphsShow.push({ id, code: shown.code, stdout: shown.stdout, stderr: shown.stderr });
+    }
+  }
+  fs.writeFileSync(path.join(tmp, `ev-main-restart-${tag}.json`), JSON.stringify(evidence, null, 2));
+  fs.writeFileSync(path.join(tmp, `ev-main-quarantine-${tag}.txt`), quarantineText);
+  log(`restart evidence ${tag}: ${path.join(tmp, `ev-main-restart-${tag}.json`)} database copy ${copy}`);
+  return evidence;
+}
+
+/** Core logs of the main fixture, copied to \$TMPDIR/ev-main-core-logs for inspection. */
+export function copyMainCoreLogs(env) {
+  const dest = path.join(process.env.TMPDIR ?? "/tmp", "ev-main-core-logs");
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+  const logs = path.join(env.stateDir, "evorch", "logs");
+  if (fs.existsSync(logs)) for (const f of fs.readdirSync(logs)) fs.copyFileSync(path.join(logs, f), path.join(dest, f));
+  const driverLog = path.join(driverDir(env.root), "core.log");
+  if (fs.existsSync(driverLog)) fs.copyFileSync(driverLog, path.join(dest, "driver-core-stdout.log"));
+  return dest;
 }

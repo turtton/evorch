@@ -140,7 +140,8 @@ export class Proc {
     this.child = spawn(file, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: false });
     this.exitPromise = new Promise((resolve) => {
       this.child.once("exit", (code, signal) => {
-        this.exited = { code, signal };
+        this.exited = { code, signal, atMs: Date.now() };
+        this.#log(`[exit] code=${code} signal=${signal}`);
         resolve(this.exited);
         for (const w of this.readyWaiters.splice(0)) w();
       });

@@ -78,6 +78,38 @@ export class Session {
     return this.project;
   }
 
+  /** The core's own view of the project (trust, revision), through the protocol. */
+  async projectAccess() {
+    const reply = H.expectSuccess(
+      "get_project_access",
+      await this.wire.query("workspace", "get_project_access", { project: this.project }),
+    );
+    const access = reply.payload?.payload ?? null;
+    if (!access) throw new Error("get_project_access: unexpected reply shape");
+    return access;
+  }
+
+  /**
+   * Only with --approve: what a user does when a project is approved in the GUI. The OLD core
+   * records it in its own sidebar through the protocol (workspace.set_project_trust); nothing is
+   * edited by hand. The project exists in the sidebar only after its first thread, so this runs
+   * after the first create_execution. Without --approve the project keeps the trust the old core
+   * gave it (unapproved), which is what an existing user of an unapproved project has.
+   */
+  async approveProject() {
+    const access = await this.projectAccess();
+    if (access.trust === "approved") return access;
+    H.expectSuccess(
+      "set_project_trust",
+      await this.wire.command("workspace", "set_project_trust", {
+        project: this.project,
+        trust: "approved",
+        expected_revision: access.revision,
+      }),
+    );
+    return { ...access, trust: "approved" };
+  }
+
   chat(op, thread, text, attachments = []) {
     return this.wire
       .command("conversation", op, {
@@ -156,7 +188,7 @@ const sql = {
  * attachment, a completed planned restart) and is then killed while three lane
  * destinations are in three different states.
  */
-export async function generateMain({ env, artifactDir, results }) {
+export async function generateMain({ env, artifactDir, results, approve = false }) {
   const dir = driverDir(env.root);
   const mock = await new MockProvider({ mode: "generate", logFile: path.join(dir, "mock-generate.jsonl") }).start();
   env.writeConfig({ baseUrl: mock.baseUrl, keyEnv: H.KEY_ENV });
@@ -173,6 +205,8 @@ export async function generateMain({ env, artifactDir, results }) {
 
     // ---- ordinary thread with an acknowledged lane report and an image attachment
     await s.chat("create_execution", "lead-main", leadWithLane("lead-main", "lane-main", "RPT-MAIN lane report"));
+    manifest.projectTrust = approve ? await s.approveProject() : await s.projectAccess();
+    log(`project trust at generation (${approve ? "approved through workspace.set_project_trust" : "left as the old core set it"}): ${JSON.stringify(manifest.projectTrust)}`);
     await waitDb("lead-main report acked", () => s.db.count("lane_notifications", "state='acked' AND destination_thread_id='lead-main'") >= 1);
     log("lead-main: lane report delivered and acknowledged");
     const attachment = await s.uploadImage("lead-main", "pr20-cutover.png");
@@ -200,7 +234,7 @@ export async function generateMain({ env, artifactDir, results }) {
       "lead-scratch",
       `${TM("lead-scratch")} delegate ${TD("delegate", { target: { role: "worker" }, prompt: `${TM("worker-scratch")} ${worker}`, background: false })}`,
     );
-    await mock.until((rs) => rs.some((r) => r.tag === "worker-scratch" && r.lastRole === "tool"));
+    await mock.until((rs) => rs.some((r) => r.tag === "worker-scratch" && r.body.messages.some((m) => m.role === "tool")));
     const scratchDir = (await import("./mock-provider.mjs")).scratchDirOf(
       mock.requests.find((r) => r.tag === "worker-scratch").body.messages,
     );
@@ -351,7 +385,7 @@ export function inventory(env, db, manifest) {
  * fixture is NOT generated (`race: "completed-first"`) and the caller retries
  * with a fresh root.
  */
-export async function generateGraph({ env, artifactDir }) {
+export async function generateGraph({ env, artifactDir, approve = false }) {
   const dir = driverDir(env.root);
   const mock = await new MockProvider({ mode: "generate", logFile: path.join(dir, "mock-generate.jsonl") }).start();
   env.writeConfig({ baseUrl: mock.baseUrl, keyEnv: H.KEY_ENV });
@@ -365,6 +399,8 @@ export async function generateGraph({ env, artifactDir }) {
     await s.resolveProject();
     const waitDb = (description, fn) => H.waitFor(description, fn, { alive: () => !s.core.exited });
     await s.chat("create_execution", "lead-graph", leadWithLane("lead-graph", "lane-graph", "RPT-GRAPH lane report"));
+    manifest.projectTrust = approve ? await s.approveProject() : await s.projectAccess();
+    log(`project trust at generation (${approve ? "approved through workspace.set_project_trust" : "left as the old core set it"}): ${JSON.stringify(manifest.projectTrust)}`);
     await waitDb("lead-graph report acked", () => s.db.count("lane_notifications", "state='acked' AND destination_thread_id='lead-graph'") >= 1);
     await s.chat("create_execution", "lead-other", `${TM("lead-other")} an unrelated ordinary thread`);
     await mock.until((rs) => rs.some((r) => r.tag === "lead-other"));

@@ -5,7 +5,7 @@ import path from "node:path";
 import { Results, driverDir, log, readJson, setLogFile } from "./common.mjs";
 import { Env } from "./harness.mjs";
 import { generateGraph, generateMain } from "./gen.mjs";
-import { verifyGraph, verifyMain } from "./verify.mjs";
+import { snapshotHeaders, verifyGraph, verifyMain } from "./verify.mjs";
 
 function parse(argv) {
   const out = {};
@@ -20,19 +20,22 @@ function parse(argv) {
 const args = parse(process.argv.slice(2));
 const phase = args.phase;
 const root = args.root;
-if (!phase || !root) throw new Error("usage: driver.mjs --phase gen|verify --root DIR --artifact DIR [--fixture main|graph] [--identity FILE]");
+if (!phase || !root) throw new Error("usage: driver.mjs --phase gen|verify --root DIR --artifact DIR [--fixture main|graph] [--identity FILE] [--approve yes]");
 const env = Env.open(root);
 setLogFile(path.join(driverDir(root), `${phase}.log`));
 const results = new Results(path.join(driverDir(root), `${phase}-results.json`));
 try {
   if (phase === "gen") {
     const generate = args.fixture === "graph" ? generateGraph : generateMain;
-    const manifest = await generate({ env, artifactDir: args.artifact, results });
+    const manifest = await generate({ env, artifactDir: args.artifact, results, approve: args.approve === "yes" });
     if (manifest.race === "completed-first") process.exitCode = 3; // the caller retries with a fresh root
     for (const item of manifest.inventory) {
       if (item.generated) results.pass(`generated:${item.name}`, `count=${item.count}`);
       else results.unverified(`generated:${item.name}`, "the old build did not produce this (generated missing)");
     }
+  } else if (phase === "snapshot") {
+    // Standalone: headers + database copy of an already generated fixture (no new core needed).
+    snapshotHeaders({ env, tag: args.tag ?? "before", results });
   } else if (phase === "verify") {
     const fixture = args.fixture === "graph" ? "graph" : "main";
     const manifest = readJson(path.join(driverDir(root), `fixture-${fixture}.json`));
