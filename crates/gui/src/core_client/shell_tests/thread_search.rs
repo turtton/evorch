@@ -559,12 +559,17 @@ fn reply_search(screen: &Screen, tag: u64, page: ThreadSearchResults) {
 
 /// The window with `count` more threads in proj-1: "thr-<kind>-N" titled "<Kind> N".
 fn screen_with_threads(kind: &str, count: usize) -> Screen {
+    screen_with_sized_threads(kind, count, egui::vec2(1440.0, 900.0))
+}
+
+/// As [`screen_with_threads`], in a window of `size`.
+fn screen_with_sized_threads(kind: &str, count: usize, size: egui::Vec2) -> Screen {
     let local = super::super::local::LocalPanes::new(
         Arc::new(crate::diff::FixtureDiffSource::empty()),
         None,
     );
     let title = format!("{}{}", kind[..1].to_uppercase(), &kind[1..]);
-    let mut screen = screen_from(egui::vec2(1440.0, 900.0), local, |shared| {
+    let mut screen = screen_from(size, local, |shared| {
         for number in 0..count {
             let thread: ThreadSummary = view(json!({
                 "id": format!("thr-{kind}-{number}"), "project": "proj-1",
@@ -642,5 +647,45 @@ fn text_matches_continued_past_fifty_rows_can_be_reached_and_opened() {
     assert_eq!(
         state.selected.as_ref().map(|t| t.as_str()),
         Some("thr-pool-59")
+    );
+}
+
+// Given: forty threads whose hundred-character titles are far wider than a narrow window
+// When: the person moves down through them one by one
+// Then: the chosen row is always inside the scrolled view, so Enter opens a thread that
+//       can be seen, and it is the one the person moved to
+#[test]
+fn the_chosen_row_stays_in_view_when_titles_are_longer_than_the_window() {
+    let mut screen = screen_with_sized_threads("long", 40, egui::vec2(640.0, 700.0));
+    open(&mut screen);
+    screen.type_query("long");
+    screen.harness.run_steps(3);
+    // The sidebar lists the same titles; the modal is the one further right.
+    let row_rect = |screen: &Screen, title: &str| {
+        screen
+            .harness
+            .query_all_by_label_contains(title)
+            .map(|node| node.rect())
+            .max_by(|a, b| a.min.x.total_cmp(&b.min.x))
+            .unwrap_or_else(|| panic!("no row {title}"))
+    };
+    let first = row_rect(&screen, "Long 39 ").min.y;
+    for step in 1..40 {
+        press_down(&mut screen, 1);
+        screen.harness.run_steps(2);
+        let (_, view_height) = screen.harness.state().thread_search.scroll_view();
+        // Newest first: row `step` is "Long <39 - step>".
+        let rect = row_rect(&screen, &format!("Long {} ", 39 - step));
+        assert!(
+            rect.min.y >= first - 2.0 && rect.max.y <= first + view_height + 2.0,
+            "row {step} is at {rect:?}, outside the view of {view_height} from {first}"
+        );
+    }
+    screen.harness.key_press(Key::Enter);
+    screen.settle();
+    let state = screen.harness.state();
+    assert_eq!(
+        state.selected.as_ref().map(|t| t.as_str()),
+        Some("thr-long-0")
     );
 }

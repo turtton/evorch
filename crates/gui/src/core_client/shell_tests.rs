@@ -157,6 +157,15 @@ fn extra_lane(id: &str) -> Option<Fixture> {
         });
     }
     // Plain threads of the thread search tests: "thr-bulk-7" is "Bulk 7", "thr-pool-7" is "Pool 7".
+    if let Some(number) = id.strip_prefix("thr-long-") {
+        // A title of about a hundred characters, as an automatic one can be.
+        let title = format!(
+            "Long {number} and then some words that make this title a hundred characters long ...."
+        );
+        let title: &'static str = Box::leak(title.into_boxed_str());
+        let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+        return Some(thread(id, title, 0));
+    }
     for (prefix, name) in [("thr-bulk-", "Bulk"), ("thr-pool-", "Pool")] {
         if let Some(number) = id.strip_prefix(prefix) {
             let title: &'static str = Box::leak(format!("{name} {number}").into_boxed_str());

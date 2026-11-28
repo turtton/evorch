@@ -192,6 +192,12 @@ impl ThreadSearch {
         self.request.take()
     }
 
+    /// Where the rows are scrolled to and how tall their view is, for the tests.
+    #[cfg(test)]
+    pub(super) fn scroll_view(&self) -> (f32, f32) {
+        (self.scroll_y, self.view_height)
+    }
+
     fn settle_query(&mut self) {
         if !self.composing {
             self.settled.clone_from(&self.query);
@@ -342,7 +348,13 @@ impl ThreadSearch {
                             } else {
                                 row.title.clone()
                             };
-                            if ui.selectable_label(index == selected, &label).clicked() {
+                            // One line, cut with an ellipsis: a wrapped title would be taller
+                            // than the fixed row the scroll position is worked out from, and
+                            // the chosen row could stay below the view.
+                            let title = egui::Button::selectable(index == selected, label)
+                                .truncate()
+                                .min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add(title).clicked() {
                                 clicked = Some(row.clone());
                             }
                             if let Some(snippet) = &row.snippet {
