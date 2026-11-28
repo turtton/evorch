@@ -1,7 +1,7 @@
 {
   "groups": {
     "runtime": {
-      "shards": 4,
+      "shards": 8,
       "packages": [
         "runtime",
         "evorch",

@@ -403,10 +403,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { group: runtime, shard: 1, shards: 4, cef: false }
-          - { group: runtime, shard: 2, shards: 4, cef: false }
-          - { group: runtime, shard: 3, shards: 4, cef: false }
-          - { group: runtime, shard: 4, shards: 4, cef: false }
+          - { group: runtime, shard: 1, shards: 8, cef: false }
+          - { group: runtime, shard: 2, shards: 8, cef: false }
+          - { group: runtime, shard: 3, shards: 8, cef: false }
+          - { group: runtime, shard: 4, shards: 8, cef: false }
+          - { group: runtime, shard: 5, shards: 8, cef: false }
+          - { group: runtime, shard: 6, shards: 8, cef: false }
+          - { group: runtime, shard: 7, shards: 8, cef: false }
+          - { group: runtime, shard: 8, shards: 8, cef: false }
           - { group: gui, shard: 1, shards: 1, cef: true }
           - { group: storage-tools, shard: 1, shards: 2, cef: false }
           - { group: storage-tools, shard: 2, shards: 2, cef: false }
