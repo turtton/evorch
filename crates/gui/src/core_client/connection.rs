@@ -5,6 +5,7 @@ mod data;
 use super::auto_reconnect::{self, AutoReconnect, LiveCoreBackoff};
 use super::disconnect_log::{Episode, SessionEnd};
 use super::features::data::DataAction;
+use super::launch_progress::{self, LaunchProgress};
 use data::DataReaders;
 
 use std::{
@@ -301,6 +302,7 @@ pub async fn serve(
                     s.disconnect();
                     if may_start {
                         s.status = CONNECTING.into();
+                        s.launch.connecting();
                     }
                 });
                 match live.take() {
@@ -308,7 +310,12 @@ pub async fn serve(
                     None => match await_probe(
                         async {
                             if may_start {
-                                launcher.connect_or_start_with_endpoint().await.map(Some)
+                                launcher
+                                    .connect_or_start_with_endpoint_observed(
+                                        launch_progress::observer(shared.clone(), ctx.clone()),
+                                    )
+                                    .await
+                                    .map(Some)
                             } else {
                                 launcher.connect_existing(LIVE_CORE_PROBE).await
                             }
@@ -345,6 +352,7 @@ pub async fn serve(
                     update(&shared, &ctx, |s| {
                         s.status = auto_reconnect::launch_failure(&e);
                         s.status_detail = Some(e.to_string());
+                        s.launch.failed();
                     });
                 }
                 let delay = live_backoff.next_delay(std::time::Duration::ZERO);
@@ -373,7 +381,10 @@ pub async fn serve(
             resync = false;
             let opened = match prebuilt.take() {
                 Some(opened) => Ok(opened),
-                None => open_session(&client).await,
+                None => {
+                    launch_progress::note(&shared, &ctx, LaunchProgress::reading_state);
+                    open_session(&client).await
+                }
             };
             let mut stream = match opened {
                 Ok(Opened {
@@ -403,6 +414,7 @@ pub async fn serve(
                         s.disconnect();
                         s.status = "Could not read core state. Retrying…".into();
                         s.status_detail = Some(error);
+                        s.launch.failed();
                     });
                     let session = session_at
                         .take()
@@ -607,6 +619,11 @@ pub async fn serve(
         data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| {
             s.disconnect();
+            // However the session ended before a projection was installed, the
+            // wait for it is over: the splash shows the status, not progress.
+            if !reconnect_requested {
+                s.launch.failed();
+            }
             if !orderly
                 && !planned
                 && let Some(error) = &closed

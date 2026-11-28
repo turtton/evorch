@@ -105,7 +105,7 @@ impl CoreBinary {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchStage {
     WaitingForLaunch,
     BeforeSpawn,
@@ -201,7 +201,9 @@ impl Launcher {
     pub async fn connect_or_start_with_endpoint(&self) -> Result<ConnectedCore, LaunchError> {
         self.connect_or_start_with_endpoint_observed(|_| ()).await
     }
-    async fn connect_or_start_with_endpoint_observed(
+    /// [`Self::connect_or_start_with_endpoint`] that reports each stage, for a
+    /// client that shows the launch. The same stage is reported on every poll.
+    pub async fn connect_or_start_with_endpoint_observed(
         &self,
         observe: impl Fn(LaunchStage),
     ) -> Result<ConnectedCore, LaunchError> {
