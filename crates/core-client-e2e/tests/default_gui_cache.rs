@@ -379,6 +379,29 @@ fn user_texts(body: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// Waits for the turn to complete and returns `(input_tokens, cache_read_tokens)` of the
+/// provider requests it made, as the core observed them. The wait is for the turn's own
+/// terminal event, not for a duration; a hang is the runner's to cut off.
+async fn turn_usage(events: &mut event_bus::EventReceiver) -> Vec<(u64, u64)> {
+    let mut usage = Vec::new();
+    loop {
+        match events.recv().await.unwrap().kind {
+            EventKind::Provider(event_bus::ProviderEvent::RequestCompleted {
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => usage.push((input_tokens, cache_read_tokens)),
+            EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted { .. }) => return usage,
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: event_bus::AgentRunPhase::Error,
+                reason,
+                ..
+            }) => panic!("run failed: {reason:?}"),
+            _ => (),
+        }
+    }
+}
+
 const SKILL_BODY: &str = "Step one of the demo.\nStep two of the demo.\n";
 const SKILL_BLOCK: &str = "<skill name=\"demo\">";
 
@@ -471,6 +494,7 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
             .await
             .contains(&"demo".to_owned())
     );
+    let mut usage = Vec::new();
     let named = |text: &str| -> Vec<String> {
         let listed = ["demo".to_owned()];
         text.split_whitespace()
@@ -495,7 +519,7 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
         })
         .await
         .unwrap();
-    turn_completed(&mut core.turns).await;
+    usage.extend(turn_usage(&mut core.turns).await);
     // Listing again between the turns, as a mention starting does.
     assert!(
         skills_listed(&actions, &shared)
@@ -512,7 +536,7 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
         })
         .await
         .unwrap();
-    turn_completed(&mut core.turns).await;
+    usage.extend(turn_usage(&mut core.turns).await);
     actions
         .send(Action::Command {
             command: Command::Conversation(ConversationCommand::SendChat(with_skill(
@@ -523,7 +547,7 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
         })
         .await
         .unwrap();
-    turn_completed(&mut core.turns).await;
+    usage.extend(turn_usage(&mut core.turns).await);
 
     let requests: Vec<_> = core
         .mock
@@ -539,6 +563,13 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
     for pair in requests.windows(2) {
         assert_append_only(CacheProtocol::OpenAi, &pair[0].body, &pair[1].body).unwrap();
         assert!(pair[1].body.to_string().len() > pair[0].body.to_string().len());
+    }
+    // The mock derives its cache from each request's own bytes: what the turn before sent
+    // is read back as cache by the next, though the next adds a skill block.
+    assert_eq!(usage.len(), 3);
+    assert!(usage[0].0 > 0);
+    for pair in usage.windows(2) {
+        assert!(pair[1].1 >= pair[0].0, "{usage:?}");
     }
     let users: Vec<_> = requests.iter().map(|r| user_texts(&r.body)).collect();
     // Each turn adds exactly one user message, and only a turn that named the skill
@@ -561,10 +592,8 @@ async fn a_skill_mentioned_in_the_default_window_joins_only_its_own_turn() {
     }
     assert!(users[2][2].starts_with("third plain") && !users[2][2].contains(SKILL_BLOCK));
 
+    // The actor ends on Shutdown; its end is what is awaited, not a duration.
     actions.send(Action::Shutdown).await.unwrap();
-    tokio::time::timeout(WAIT, window)
-        .await
-        .expect("the actor ends when the window is closed")
-        .expect("the actor does not panic");
+    window.await.expect("the actor does not panic");
     core.finish();
 }

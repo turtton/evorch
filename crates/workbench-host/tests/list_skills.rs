@@ -194,3 +194,22 @@ fn more_skills_than_the_wire_carries_is_a_limit_error_not_a_partial_list() {
     let error = world.list(project()).unwrap_err();
     assert_eq!(error.code, ErrorCode::LimitExceeded);
 }
+
+#[test]
+fn a_multi_line_description_with_tabs_is_flattened_to_one_valid_line() {
+    let world = world(1, "\"first line\\n\\tsecond line\\r\\nthird\\u0007bell\"");
+    let skills = world.list(project()).unwrap();
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name == "skill-000")
+        .unwrap();
+    assert!(
+        !skill.description.contains(char::is_control),
+        "{:?}",
+        skill.description
+    );
+    assert!(skill.description.contains("first line"));
+    assert!(skill.description.contains("second line"));
+    assert!(skill.description.contains("third"));
+    // `world` already validated the reply the way a client does.
+}

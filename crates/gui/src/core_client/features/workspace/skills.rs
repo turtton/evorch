@@ -47,6 +47,8 @@ impl WorkspaceFeature {
 
     /// Asks for `project`'s skills again unless a request is on its way. What is
     /// held stays in use until the answer replaces it.
+    /// A list already held is still used for sending while its refresh is on the way:
+    /// a send waits only on a connection that has no list yet (see `conversation::skills`).
     pub fn refresh_skills(&mut self, project: &ProjectId) {
         if self.skills_fetching(project.as_str()) {
             return;
