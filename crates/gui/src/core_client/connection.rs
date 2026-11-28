@@ -619,6 +619,11 @@ pub async fn serve(
         data.stop(&shared, &ctx).await;
         update(&shared, &ctx, |s| {
             s.disconnect();
+            // However the session ended before a projection was installed, the
+            // wait for it is over: the splash shows the status, not progress.
+            if !reconnect_requested {
+                s.launch.failed();
+            }
             if !orderly
                 && !planned
                 && let Some(error) = &closed

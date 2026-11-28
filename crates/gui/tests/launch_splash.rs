@@ -168,3 +168,54 @@ async fn a_core_that_cannot_be_started_leaves_its_failure_to_the_status_and_reco
     }
     gui.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_core_that_says_goodbye_while_the_first_snapshot_is_paged_leaves_no_progress_shown() {
+    let world = world();
+    let core = FakeCore::start_as(
+        &world.socket,
+        7,
+        Capability::IMPLEMENTED.to_vec(),
+        &world.identity,
+    );
+    core.state().hold_snapshot_page = true;
+    let gui = Gui::start(world.launcher());
+    // The actor has asked for the second page: it is reading the session.
+    core.wait_for(|s| {
+        s.seen.iter().any(|seen| {
+            matches!(
+                seen.body,
+                workbench_protocol::envelope::RequestBody::Query(
+                    workbench_protocol::queries::Query::Projection(
+                        workbench_protocol::namespaces::projection::ProjectionQuery::ReadSnapshot(
+                            _
+                        )
+                    )
+                )
+            )
+        })
+    })
+    .await;
+    assert!(
+        gui.shared.lock().unwrap().launch.headline().is_some(),
+        "the session is being read"
+    );
+    core.push(workbench_protocol::events::UiEvent::Projection(
+        workbench_protocol::namespaces::ProjectionEvent::SubscriptionClosed {
+            reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
+        },
+    ));
+    core.stop_after_flush();
+    gui.until(|s| s.status.contains("announced its shutdown"))
+        .await;
+    {
+        let shared = gui.shared.lock().unwrap();
+        assert_eq!(shared.projection, 0);
+        assert!(shared.launch.covers(shared.projection));
+        assert!(
+            shared.launch.headline().is_none(),
+            "no progress is shown once the session is over: the status and Reconnect are"
+        );
+    }
+    gui.stop().await;
+}
