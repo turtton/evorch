@@ -6,7 +6,7 @@
 // process exit), never by elapsed time.
 import fs from "node:fs";
 import path from "node:path";
-import { holdDirective as HD, MockProvider, tagMarker as TM, toolDirective as TD } from "./mock-provider.mjs";
+import { attachedFilesBlockFor, holdDirective as HD, MockProvider, tagMarker as TM, toolDirective as TD, wireTexts } from "./mock-provider.mjs";
 import * as H from "./harness.mjs";
 import { driverDir, log, png1x1, readJson, writeJson } from "./common.mjs";
 
@@ -213,10 +213,14 @@ export async function generateMain({ env, artifactDir, results, approve = false 
     log(`attachment ref: ${JSON.stringify(attachment)}`);
     manifest.attachments.push({ thread: "lead-main", ...attachment });
     await s.chat("send_chat", "lead-main", "second turn with an image", [attachment.id]);
+    // The product does not send a protocol attachment as an image part: it appends an
+    // "[Attached files ...]" text block listing the file's absolute path (finalize_chat_attachments ->
+    // message_with_paths). The contract is therefore: a provider request of lead-main carries that
+    // block with the attachment's id/path.
     await mock.until((rs) =>
-      rs.some((r) => r.tag === "lead-main" && JSON.stringify(r.body.messages).includes("image")),
+      rs.some((r) => r.tag === "lead-main" && (wireTexts(r.body) ?? []).some((m) => attachedFilesBlockFor(m.text, attachment.id))),
     );
-    log("lead-main: attachment reached the provider");
+    log("lead-main: the attachment's 'Attached files' block reached the provider");
 
     // ---- a completed planned restart of the OLD build (restart + owner progress rows)
     const restart = s.cli(["core", "restart", "request", "--yes"], { async: true });

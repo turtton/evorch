@@ -55,6 +55,24 @@ export function scratchDirOf(messages) {
 }
 
 /** Texts of all messages of a request (for counting what the wire carried). */
+/**
+ * The absolute paths of an attachment in the "[Attached files (read-only; ...)]" text block the product
+ * appends to a user message (it never sends a protocol attachment as an image part). Returns the paths of
+ * the lines that name the attachment id, or null when the text has no such block for that id.
+ */
+export function attachedFilesPaths(text, attachmentId) {
+  const at = text.indexOf("[Attached files");
+  if (at < 0 || !text.includes(attachmentId)) return null;
+  const paths = [];
+  for (const line of text.slice(at).split("\n")) {
+    if (!line.includes(attachmentId)) continue;
+    for (const hit of line.match(/\/[^\s"'\]\[<>|]*/g) ?? []) if (hit.includes(attachmentId)) paths.push(hit);
+  }
+  return paths.length ? [...new Set(paths)] : null;
+}
+
+export const attachedFilesBlockFor = (text, attachmentId) => attachedFilesPaths(text, attachmentId) !== null;
+
 export function wireTexts(body) {
   return (body.messages ?? []).map((m) => ({ role: m.role, text: textOf(m.content) }));
 }

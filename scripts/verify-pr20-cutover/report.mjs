@@ -36,11 +36,9 @@ for (const entry of meta.fixtures) {
 }
 // Known issues that the unmodified old build shows in the same way (so they are not introduced by
 // PR C and are out of its scope). Display only: the status and the exit code are not affected.
-const BASELINE_SHARED = new Set([
-  "existing-thread:history-restored",
-  "attachment:referenced-in-restored-history",
-  "restart:new-restart-completes",
-]);
+// Currently none: the former entries (history restore, attachment reference, restart completion) were
+// fixed in the product or in the driver's judgement. Add an id here only for a failure the old build shares.
+const BASELINE_SHARED = new Set([]);
 const baselineShared = (i) => i.status === "fail" && BASELINE_SHARED.has(i.id);
 const total = { pass: 0, fail: 0, unverified: 0, todo: 0 };
 let incompleteRun = false;

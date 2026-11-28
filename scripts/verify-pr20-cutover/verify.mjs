@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { MockProvider, tagMarker, wireTexts } from "./mock-provider.mjs";
+import { attachedFilesPaths, MockProvider, tagMarker, wireTexts } from "./mock-provider.mjs";
 import * as H from "./harness.mjs";
 import { Session } from "./gen.mjs";
 import { driverDir, log, readJson } from "./common.mjs";
@@ -232,8 +232,25 @@ export async function verifyMain({ env, artifactDir, results, manifest, newIdent
       const carrying = requestsWith(mock, "VERIFY-MAIN-INPUT");
       const last = carrying[carrying.length - 1];
       if (!last) throw new Error("no provider request carried the input to lead-main: the restored history was never observed");
-      const imagesInHistory = (JSON.stringify(last.body.messages).match(/image_url|input_image|image\/png|data:image/g) ?? []).length;
-      results.check("attachment:referenced-in-restored-history", imagesInHistory >= 1, JSON.stringify({ imagesInHistory, messageCount: last.messageCount }));
+      // Contract of the product (old and new build alike): the attachment reaches the model as an
+      // "[Attached files (read-only; ...)]" text block with the file's absolute path, not as an image part.
+      // The restored history must still carry that block, and the file at that path must be intact.
+      const found = wireTexts(last.body)
+        .map((m) => ({ role: m.role, paths: attachedFilesPaths(m.text, att.id) }))
+        .filter((x) => x.paths);
+      const paths = [...new Set(found.flatMap((x) => x.paths))];
+      const intact = paths.map((p) => {
+        try {
+          return { path: p, sha256Matches: sha256(p) === att.sha256 };
+        } catch (error) {
+          return { path: p, sha256Matches: false, error: error.code ?? String(error) };
+        }
+      });
+      results.check(
+        "attachment:referenced-in-restored-history",
+        found.length >= 1 && intact.length >= 1 && intact.every((i) => i.sha256Matches),
+        JSON.stringify({ messagesWithAttachedFilesBlock: found.length, messageCount: last.messageCount, files: intact }),
+      );
     });
 
     // ---- lane delivery: receipt-less and receipt-present notifications are delivered, ACKed once
