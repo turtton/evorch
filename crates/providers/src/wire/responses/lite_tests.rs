@@ -355,12 +355,13 @@ fn mixed_schema() -> Value {
 }
 
 // Given: a schema with the keywords the backend reported as unimplemented (uniqueItems,
-// if/then/else), nested in properties, items, anyOf and allOf, next to keywords it accepted
-// (allOf, anyOf, oneOf, not, min/max items and length, pattern) and one never observed
+// if/then/else, not), nested in properties, items, anyOf and allOf, next to keywords it accepted
+// (allOf, anyOf, oneOf, min/max items and length, pattern) and one never observed
 // (minProperties), plus a property that is merely named `uniqueItems`
 // When: serialized for a Lite Codex model
-// Then: the rejected keywords are gone everywhere, the accepted ones and the property
-// survive, and the canonical tool definition is untouched
+// Then: the rejected keywords are gone everywhere (the oneOf whose branch lost its `not` goes
+// with it), the accepted ones and the property survive, and the canonical tool definition
+// is untouched
 #[test]
 fn lite_tool_schemas_drop_only_the_keywords_the_backend_rejects() {
     let request = schema_request(mixed_schema());
@@ -384,7 +385,7 @@ fn lite_tool_schemas_drop_only_the_keywords_the_backend_rejects() {
         json!({"type": "boolean", "default": {"uniqueItems": true}})
     );
     assert!(parameters["properties"]["nested"]["properties"]["tags"]["items"]["anyOf"].is_array());
-    assert_eq!(parameters["oneOf"], mixed_schema()["oneOf"]);
+    assert!(parameters.get("oneOf").is_none());
     assert!(parameters["allOf"].is_array());
     assert_eq!(parameters["required"], json!(["ids"]));
     assert_eq!(request.tools[0].input_schema, mixed_schema());
@@ -430,7 +431,7 @@ fn lite_schemas_without_rejected_keywords_are_unchanged() {
         },
         "dependentRequired": {"tags": ["meta"]},
         "dependentSchemas": {"meta": {"required": ["tags"]}},
-        "allOf": [{"not": {"required": ["meta"]}}],
+        "allOf": [{"required": ["meta"]}],
         "oneOf": [{"required": ["tags"]}, {"required": ["meta"]}]
     });
     let parameters =
@@ -467,7 +468,7 @@ fn lite_schemas_keep_rejected_keyword_names_used_as_data() {
     assert_eq!(parameters, schema);
 }
 
-// Given: rejected keywords at every schema position (items, additionalProperties, not, the
+// Given: rejected keywords at every schema position (items, additionalProperties, the
 // branches of anyOf, dependentSchemas and patternProperties values, $defs)
 // When: serialized for a Lite Codex model
 // Then: they are all removed, and the names around them are kept
@@ -477,7 +478,6 @@ fn lite_schemas_lose_rejected_keywords_at_every_schema_position() {
         "type": "object",
         "properties": {"a": {"type": "array", "items": {"type": "array", "uniqueItems": true}}},
         "additionalProperties": {"type": "array", "uniqueItems": true},
-        "not": {"if": {"required": ["a"]}, "then": {"required": ["b"]}},
         "anyOf": [{"type": "array", "uniqueItems": true}],
         "dependentSchemas": {"a": {"if": {}, "else": {}}},
         "patternProperties": {"^x": {"uniqueItems": true}},
@@ -491,12 +491,70 @@ fn lite_schemas_lose_rejected_keywords_at_every_schema_position() {
             "type": "object",
             "properties": {"a": {"type": "array", "items": {"type": "array"}}},
             "additionalProperties": {"type": "array"},
-            "not": {},
             "anyOf": [{"type": "array"}],
             "dependentSchemas": {"a": {}},
             "patternProperties": {"^x": {}},
             "$defs": {"d": {}},
             "dependentRequired": {"a": ["b"]}
+        })
+    );
+}
+
+// Given: `wait`-style exclusivity (oneOf branches each carrying `not`), an anyOf with `not`
+// nested inside a property of a branch, and an allOf with `not`
+// When: serialized for a Lite Codex model
+// Then: no `not` is sent; a oneOf / anyOf whose branch lost one is dropped whole (a branch
+// without its `not` would match more than before and break the selection), while allOf is kept
+#[test]
+fn lite_schemas_drop_not_and_the_selections_it_would_distort() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"run_id": {"type": "string"}, "run_ids": {"type": "array"}},
+        "oneOf": [
+            {"required": ["run_id"], "not": {"required": ["run_ids"]}},
+            {"required": ["run_ids"], "not": {"required": ["run_id"]}},
+            {"not": {"anyOf": [{"required": ["run_id"]}, {"required": ["run_ids"]}]}}
+        ],
+        "anyOf": [{"properties": {"x": {"not": {"const": 1}}}}, {"required": ["y"]}],
+        "allOf": [{"not": {"required": ["z"]}, "required": ["w"]}, {"required": ["v"]}]
+    });
+    let request = schema_request(schema.clone());
+    let parameters = first_tool_parameters(&wire_with(&request, Some(astra())));
+    assert_eq!(
+        parameters,
+        json!({
+            "type": "object",
+            "properties": {"run_id": {"type": "string"}, "run_ids": {"type": "array"}},
+            "allOf": [{"required": ["w"]}, {"required": ["v"]}]
+        })
+    );
+    assert_eq!(
+        request.tools[0].input_schema, schema,
+        "canonical schema is untouched"
+    );
+}
+
+// Given: a `not` that only exists inside a `then` (stripped with its `if`) and a property
+// named `not`, both next to a oneOf
+// When: serialized for a Lite Codex model
+// Then: the oneOf and the property named `not` survive, because no `not` keyword was removed
+// from the oneOf's branches
+#[test]
+fn lite_schemas_keep_a_property_named_not_and_selections_it_does_not_touch() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"not": {"type": "string"}},
+        "oneOf": [{"required": ["not"]}, {"required": ["other"]}],
+        "allOf": [{"if": {"required": ["a"]}, "then": {"not": {"required": ["b"]}}}]
+    });
+    let parameters = first_tool_parameters(&wire_with(&schema_request(schema), Some(astra())));
+    assert_eq!(
+        parameters,
+        json!({
+            "type": "object",
+            "properties": {"not": {"type": "string"}},
+            "oneOf": [{"required": ["not"]}, {"required": ["other"]}],
+            "allOf": [{}]
         })
     );
 }

@@ -433,7 +433,7 @@ impl ResponsesDialect {
 
     /// function tool の `parameters`。Responses Lite (`additional_tools` の namespace) では
     /// Codex backend が tool の schema を strict 検査し、未実装の keyword (`uniqueItems`、
-    /// `if` / `then` / `else`) を `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は
+    /// `if` / `then` / `else`、`not`) を `invalid_json_schema` (HTTP 400) で拒否します。tool 定義は
     /// 検証用の完全な schema を持つため、送信直前に非対応 keyword を除いた写しを送ります。
     /// この拒否は Lite の namespace tool でしか観測されていないため、top-level `tools` を使う
     /// 要求と他 dialect の schema は変えません (送信済みの cache prefix を保つ)。
@@ -681,28 +681,45 @@ fn to_wire_tool(tool: &ToolSpec, dialect: ResponsesDialect, lite: bool) -> Tool 
 /// Lite の strict 検査が実装していないと backend が `Unimplemented keys` で実際に報告した
 /// JSON Schema keyword。観測していない keyword は、拒否の有無が不明なため除きません。
 ///
-/// `allOf` / `anyOf` / `oneOf` / `not` / `minItems` / `maxItems` / `minLength` / `maxLength` /
-/// `pattern` は、現行 tool が `if` と同時に持っていても backend の報告に含まれなかった
-/// (受理されている) ため、送信済みの schema を変えないよう残します。
-const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "else"];
+/// `uniqueItems` / `if` / `then` / `else` は #816 で、`not` は `wait` の排他制約
+/// (`oneOf` の各枝の `not`) が拒否されて追加しました。`allOf` / `anyOf` / `oneOf` /
+/// `minItems` / `maxItems` / `minLength` / `maxLength` / `pattern` は受理が確認できている
+/// ため、送信済みの schema を変えないよう残します。
+const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "else", "not"];
 
-/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を取り除きます。
+/// schema から [`STRICT_UNSUPPORTED_KEYWORDS`] を取り除きます。`not` を取り除いた部分木があれば
+/// `true` を返します。
+///
+/// `oneOf` / `anyOf` の枝から `not` が消えると、その枝は元より広い schema になり、排他や選択の
+/// 意味が変わります (`wait` の `oneOf` は `not` を失うと常に複数の枝に一致します)。そのため
+/// 枝のどれかで `not` を取り除いたら、その `oneOf` / `anyOf` ごと取り除きます (`allOf` は
+/// 枝が弱くなるだけなので残します)。取り除いた制約は model への案内でしかなく、tool 側の
+/// 入力検証が改めて強制します。
 ///
 /// schema を値に取る JSON Schema の位置だけを辿ります。`properties` などの名前付きマップは
 /// key (利用者の名前) を保ったまま値を schema として辿り、`dependentRequired` / `required` /
 /// `enum` / `const` / `default` / `examples` などのデータは触りません。
-fn strip_unsupported_keywords(schema: &mut serde_json::Value) {
+fn strip_unsupported_keywords(schema: &mut serde_json::Value) -> bool {
     use serde_json::Value;
-    let Value::Object(map) = schema else { return };
+    let Value::Object(map) = schema else {
+        return false;
+    };
+    let mut weakened = false;
     for keyword in STRICT_UNSUPPORTED_KEYWORDS {
-        map.remove(*keyword);
+        let removed = map.remove(*keyword).is_some();
+        weakened |= removed && *keyword == "not";
     }
+    let mut drop_keys = Vec::new();
     for (key, child) in map.iter_mut() {
         match (key.as_str(), child) {
             (
                 "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas",
                 Value::Object(named),
-            ) => named.values_mut().for_each(strip_unsupported_keywords),
+            ) => {
+                for value in named.values_mut() {
+                    weakened |= strip_unsupported_keywords(value);
+                }
+            }
             (
                 "items"
                 | "additionalItems"
@@ -710,19 +727,39 @@ fn strip_unsupported_keywords(schema: &mut serde_json::Value) {
                 | "unevaluatedItems"
                 | "unevaluatedProperties"
                 | "contains"
-                | "propertyNames"
-                | "not",
+                | "propertyNames",
                 child,
             ) => match child {
-                Value::Array(tuple) => tuple.iter_mut().for_each(strip_unsupported_keywords),
-                child => strip_unsupported_keywords(child),
+                Value::Array(tuple) => {
+                    for value in tuple {
+                        weakened |= strip_unsupported_keywords(value);
+                    }
+                }
+                child => weakened |= strip_unsupported_keywords(child),
             },
-            ("allOf" | "anyOf" | "oneOf" | "prefixItems", Value::Array(branches)) => {
-                branches.iter_mut().for_each(strip_unsupported_keywords);
+            ("allOf" | "prefixItems", Value::Array(branches)) => {
+                for value in branches {
+                    weakened |= strip_unsupported_keywords(value);
+                }
+            }
+            (selection @ ("anyOf" | "oneOf"), Value::Array(branches)) => {
+                // 短絡させず、全ての枝から未対応 keyword を取り除く。
+                let changed = branches
+                    .iter_mut()
+                    .map(strip_unsupported_keywords)
+                    .fold(false, |any, branch| any | branch);
+                if changed {
+                    drop_keys.push(selection.to_owned());
+                    weakened = true;
+                }
             }
             _ => {}
         }
     }
+    for key in drop_keys {
+        map.remove(&key);
+    }
+    weakened
 }
 
 fn image_url(media_type: &str, data: &str) -> InputContent {

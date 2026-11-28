@@ -24,6 +24,8 @@ mod registry;
 pub use registry::META_OPS;
 pub(crate) use registry::MetaOp;
 #[cfg(test)]
+mod codex_lite_schema_tests;
+#[cfg(test)]
 mod role_tests;
 mod runs;
 pub(crate) use runs::drop_ignored_arguments;
