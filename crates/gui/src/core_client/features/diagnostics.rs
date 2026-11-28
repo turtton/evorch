@@ -513,7 +513,9 @@ impl DiagnosticsFeature {
         egui::ScrollArea::vertical()
             .id_salt("usage-live")
             .auto_shrink([false, true])
-            .show(ui, |ui| live::render(ui, live, &mut self.live_window));
+            .show(ui, |ui| {
+                live::render(ui, live, &mut self.live_window, self.quotas.profiles());
+            });
     }
 
     fn context_view(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, refresh: bool) {

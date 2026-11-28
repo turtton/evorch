@@ -31,6 +31,32 @@ impl Backend for Fake {
         result.await.unwrap()
     }
 }
+#[test]
+fn eligible_profiles_follow_the_existing_quota_switch() {
+    let mut config = config::Config::default();
+    for kind in [
+        ProviderTypeConfig::OpenAiCodex,
+        ProviderTypeConfig::AnthropicSubscription,
+        ProviderTypeConfig::Cursor,
+        ProviderTypeConfig::KimiSubscription,
+        ProviderTypeConfig::OpenAi,
+    ] {
+        for enabled in [None, Some(false), Some(true)] {
+            config.providers.insert(
+                "work".into(),
+                ProviderProfileConfig {
+                    provider_type: kind,
+                    show_quota: enabled,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                profiles(&config).len(),
+                usize::from(kind != ProviderTypeConfig::OpenAi && enabled != Some(false))
+            );
+        }
+    }
+}
 fn profile(account: &str) -> Profile {
     Profile {
         name: "work".into(),

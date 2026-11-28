@@ -98,6 +98,20 @@ async fn until(window: &mut Window, shown: impl Fn(&Window) -> bool) {
 fn profiles(window: &Window) -> Vec<ProviderQuota> {
     window.state().rendered.clone()
 }
+async fn refresh(actions: &tokio::sync::mpsc::Sender<Action>, tag: u64, id: &str) {
+    actions
+        .send(Action::Feature(FeatureAction {
+            feature: FeatureId::Settings,
+            tag,
+            request: FeatureRequest::Command(Command::Settings(SettingsCommand::RefreshSettings(
+                RefreshSettings {
+                    operation_id: OperationId::new(id).unwrap(),
+                },
+            ))),
+        }))
+        .await
+        .unwrap();
+}
 const CONFIG: &str = r#"version = 3
 [providers.work]
 provider_type = "openai-codex"
@@ -105,7 +119,7 @@ base_url = "https://unused.invalid"
 credential = { type = "keyring", service = "evorch", account = "never-read" }
 "#;
 #[tokio::test(flavor = "multi_thread")]
-async fn quota_updates_and_profile_removal_reach_footer_without_manual_reload() {
+async fn quota_updates_and_profile_switch_reach_footer_without_manual_reload() {
     let dir = test_socket_dir::SplitDir::new();
     let root = dir.path().canonicalize().unwrap();
     std::fs::write(root.join("config.toml"), CONFIG).unwrap();
@@ -235,23 +249,28 @@ async fn quota_updates_and_profile_removal_reach_footer_without_manual_reload() 
         Some(7500)
     );
     assert!(received.try_recv().is_err());
-    // #852 is not in the base: disappearance uses profile removal, the same
-    // eligible-profile reconciliation path as off once show_quota lands.
-    std::fs::write(root.join("config.toml"), "version = 3\n").unwrap();
-    actions
-        .send(Action::Feature(FeatureAction {
-            feature: FeatureId::Settings,
-            tag: 999,
-            request: FeatureRequest::Command(Command::Settings(SettingsCommand::RefreshSettings(
-                RefreshSettings {
-                    operation_id: OperationId::new("quota-off").unwrap(),
-                },
-            ))),
-        }))
-        .await
-        .unwrap();
+    // The existing profile setting controls both display and acquisition.
+    std::fs::write(
+        root.join("config.toml"),
+        format!("{CONFIG}\nshow_quota = false\n"),
+    )
+    .unwrap();
+    refresh(&actions, 999, "quota-off").await;
     until(&mut window, |w| profiles(w).is_empty()).await;
     assert!(window.query_by_label("Quota work").is_none());
+    assert!(received.try_recv().is_err());
+    std::fs::write(
+        root.join("config.toml"),
+        format!("{CONFIG}\nshow_quota = true\n"),
+    )
+    .unwrap();
+    refresh(&actions, 1000, "quota-on").await;
+    until(&mut window, |w| !profiles(w).is_empty()).await;
+    window.get_by_label("Quota work");
+    let (profile, answer) = received.recv().await.unwrap();
+    assert_eq!(profile, "work");
+    answer.send(Ok(Vec::new())).unwrap();
+    until(&mut window, |w| profiles(w)[0].state == QuotaState::Ready).await;
     actions.send(Action::Shutdown).await.unwrap();
     desktop.await.unwrap();
     let _ = stop.send(true);

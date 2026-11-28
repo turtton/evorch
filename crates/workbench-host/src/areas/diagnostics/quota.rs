@@ -34,16 +34,9 @@ pub(super) struct Profile {
     pub credential: CredentialRefConfig,
 }
 
-/// #852 is not in the stacked base yet. Replace only this predicate with
-/// profile.show_quota_enabled() when it lands; never invent a second setting.
+/// Share the existing setting contract for both acquisition and display.
 fn quota_enabled(profile: &ProviderProfileConfig) -> bool {
-    matches!(
-        profile.provider_type,
-        ProviderTypeConfig::OpenAiCodex
-            | ProviderTypeConfig::AnthropicSubscription
-            | ProviderTypeConfig::Cursor
-            | ProviderTypeConfig::KimiSubscription
-    )
+    profile.show_quota_enabled()
 }
 
 pub(super) fn profiles(config: &config::Config) -> Vec<Profile> {
