@@ -31,6 +31,11 @@ fn violations(schema: &Value, path: &str, found: &mut Vec<String>) {
                     violations(value, &format!("{here}.{name}"), found);
                 }
             }
+            ("dependencies", Value::Object(named)) => {
+                for (name, value) in named.iter().filter(|(_, value)| value.is_object()) {
+                    violations(value, &format!("{here}.{name}"), found);
+                }
+            }
             ("allOf" | "anyOf" | "oneOf" | "prefixItems", Value::Array(branches)) => {
                 for (index, value) in branches.iter().enumerate() {
                     violations(value, &format!("{here}[{index}]"), found);
@@ -75,7 +80,8 @@ fn lite_wire(tools: Vec<ToolSpec>) -> Value {
     .unwrap()
 }
 
-// Given: every runtime meta tool and every compiled standard tool
+// Given: every runtime meta tool, every compiled standard tool and the metadata of the
+// optional browser, web and LSP tools
 // When: serialized as a Codex Responses Lite request (`additional_tools` namespace)
 // Then: no tool's `parameters` carries a keyword the strict schema check rejects
 #[test]
@@ -85,6 +91,15 @@ fn every_runtime_owned_tool_is_free_of_codex_lite_unsupported_keywords() {
         .map(|name| MetaOp::from_name(name).unwrap().spec())
         .collect();
     tools.extend(crate::compiled_standard_tool_catalog());
+    tools.extend(
+        tools::compiled_catalog::optional_tools()
+            .into_iter()
+            .map(|spec| ToolSpec {
+                name: spec.name,
+                description: spec.description,
+                input_schema: spec.input_schema,
+            }),
+    );
     let expected = tools.len();
     let wire = lite_wire(tools);
     let sent = wire["input"][0]["tools"][0]["tools"].as_array().unwrap();
@@ -102,7 +117,7 @@ fn every_runtime_owned_tool_is_free_of_codex_lite_unsupported_keywords() {
 
 // Given: the `wait` tool, whose exclusivity of run_id / run_ids is a `oneOf` of `not` branches
 // When: the Lite wire copy drops them
-// Then: the canonical definition keeps them (the handler still rejects both-or-neither)
+// Then: the canonical definition keeps them (the handler still rejects run_id together with run_ids)
 #[test]
 fn the_canonical_wait_schema_keeps_its_exclusivity_constraint() {
     let spec = MetaOp::from_name("wait").unwrap().spec();

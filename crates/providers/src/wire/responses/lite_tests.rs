@@ -558,3 +558,45 @@ fn lite_schemas_keep_a_property_named_not_and_selections_it_does_not_touch() {
         })
     );
 }
+
+// Given: a Draft-07 `dependencies` map (as an MCP server may send) with a schema value carrying
+// `not` / `uniqueItems` and an array value that lists property names spelled like keywords
+// When: serialized for a Lite Codex model
+// Then: the schema value loses them, the array of names is kept as data
+#[test]
+fn lite_schemas_walk_dependencies_schemas_and_keep_dependency_name_lists() {
+    let schema = json!({
+        "type": "object",
+        "dependencies": {
+            "a": {"required": ["b"], "not": {"required": ["c"]},
+                "properties": {"d": {"type": "array", "uniqueItems": true}}},
+            "not": ["if", "else", "not"]
+        }
+    });
+    let request = schema_request(schema.clone());
+    let parameters = first_tool_parameters(&wire_with(&request, Some(astra())));
+    assert_eq!(
+        parameters,
+        json!({
+            "type": "object",
+            "dependencies": {
+                "a": {"required": ["b"], "properties": {"d": {"type": "array"}}},
+                "not": ["if", "else", "not"]
+            }
+        })
+    );
+    assert_eq!(request.tools[0].input_schema, schema);
+}
+
+// Given: a oneOf whose branch carries `not` inside a `dependencies` schema
+// When: serialized for a Lite Codex model
+// Then: the oneOf is dropped like any other selection that lost a `not`
+#[test]
+fn lite_schemas_drop_a_selection_whose_branch_lost_not_in_dependencies() {
+    let schema = json!({
+        "type": "object",
+        "oneOf": [{"dependencies": {"a": {"not": {"required": ["b"]}}}}, {"required": ["a"]}]
+    });
+    let parameters = first_tool_parameters(&wire_with(&schema_request(schema), Some(astra())));
+    assert_eq!(parameters, json!({"type": "object"}));
+}

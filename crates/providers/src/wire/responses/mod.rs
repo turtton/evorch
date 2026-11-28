@@ -697,7 +697,8 @@ const STRICT_UNSUPPORTED_KEYWORDS: &[&str] = &["uniqueItems", "if", "then", "els
 /// 入力検証が改めて強制します。
 ///
 /// schema を値に取る JSON Schema の位置だけを辿ります。`properties` などの名前付きマップは
-/// key (利用者の名前) を保ったまま値を schema として辿り、`dependentRequired` / `required` /
+/// key (利用者の名前) を保ったまま値を schema として辿り、`dependencies` は schema の値だけを
+/// 辿り (配列は property 名のデータ)、`dependentRequired` / `required` /
 /// `enum` / `const` / `default` / `examples` などのデータは触りません。
 fn strip_unsupported_keywords(schema: &mut serde_json::Value) -> bool {
     use serde_json::Value;
@@ -717,6 +718,13 @@ fn strip_unsupported_keywords(schema: &mut serde_json::Value) -> bool {
                 Value::Object(named),
             ) => {
                 for value in named.values_mut() {
+                    weakened |= strip_unsupported_keywords(value);
+                }
+            }
+            // Draft-07 `dependencies`: a schema value is walked, an array value is a list of
+            // property names (data) and stays as it is.
+            ("dependencies", Value::Object(named)) => {
+                for value in named.values_mut().filter(|value| value.is_object()) {
                     weakened |= strip_unsupported_keywords(value);
                 }
             }
