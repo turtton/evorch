@@ -291,3 +291,160 @@ async fn a_restart_refused_for_a_conflict_points_at_the_undisposed_graphs() {
     assert!(err.contains("1 undisposed graph(s)"), "{err}");
     assert!(err.contains("evorch core graphs list"), "{err}");
 }
+
+#[tokio::test]
+async fn unsupported_graph_references_are_listed_without_becoming_restart_blockers_or_duplicates() {
+    for include_live in [false, true] {
+        let env = env();
+        let core = core(&env, 7);
+        let reference = |graph: &str, revision| GraphReference {
+            graph_id: id(graph),
+            restart_tx_id: id("tx-legacy"),
+            capture_id: id("capture-legacy"),
+            revision: Revision(revision),
+        };
+        let legacy = reference("graph-legacy", 7);
+        let live = reference("graph-live", 9);
+        let mut warnings = vec![legacy.clone()];
+        if include_live {
+            warnings.push(live.clone());
+        }
+        core.state().undisposed = Some(UndisposedGraphs {
+            count: Revision(u64::from(include_live)),
+            references: if include_live {
+                vec![live.clone()]
+            } else {
+                vec![]
+            },
+            snapshot_revision: Revision(6),
+            truncated: false,
+            over_limit_count: Revision(0),
+            incomplete_disposals: IncompleteDisposals {
+                count: Revision(warnings.len() as u64),
+                references: warnings.clone(),
+                truncated: false,
+            },
+        });
+        let run = Run::new();
+        let code = run
+            .drive(&env, AdminCommand::Graphs(GraphsOp::List), &NONE, never())
+            .await;
+        assert_eq!(code, 0, "{}", run.err.text());
+        let output = run.out.text();
+        for graph in warnings {
+            let prefix = format!("  {} (", graph.graph_id.as_str());
+            let listed: Vec<_> = output
+                .lines()
+                .filter(|line| line.starts_with(&prefix))
+                .collect();
+            assert_eq!(listed.len(), 1, "{output}");
+            assert!(
+                listed[0].contains(&format!("revision {})", graph.revision.get())),
+                "{output}"
+            );
+        }
+        assert!(
+            output.starts_with(&format!("{} undisposed graph(s)", u64::from(include_live))),
+            "{output}"
+        );
+        assert!(core.commands().is_empty(), "listing never mutates a graph");
+    }
+}
+
+#[tokio::test]
+async fn a_listed_unsupported_graph_id_can_be_inspected_confirmed_and_released() {
+    let env = env();
+    let core = core(&env, 7);
+    let mut shown = view(7, ActionAvailability::Available);
+    shown.graph_ref = id("graph-legacy");
+    shown.binding.graph.graph_id = id("graph-legacy");
+    core.state().graph = Some(shown.clone());
+    core.state().undisposed = Some(UndisposedGraphs {
+        count: Revision(0),
+        references: vec![],
+        snapshot_revision: Revision(5),
+        truncated: false,
+        over_limit_count: Revision(0),
+        incomplete_disposals: IncompleteDisposals {
+            count: Revision(1),
+            references: vec![GraphReference {
+                graph_id: id("graph-legacy"),
+                restart_tx_id: id("tx-1"),
+                capture_id: id("capture-1"),
+                revision: Revision(5),
+            }],
+            truncated: false,
+        },
+    });
+    let listing = Run::new();
+    assert_eq!(
+        listing
+            .drive(&env, AdminCommand::Graphs(GraphsOp::List), &NONE, never())
+            .await,
+        0,
+        "{}",
+        listing.err.text()
+    );
+    // The operator copies the public id from the listing, as documented.
+    let listed = listing
+        .out
+        .text()
+        .lines()
+        .find_map(|line| {
+            let graph = line.trim().strip_suffix(", revision 5)")?;
+            Some(graph.split_once(" (restart ")?.0.to_owned())
+        })
+        .expect("the unsupported graph is listed with its public id");
+    assert_eq!(listed, "graph-legacy");
+
+    let inspect = Run::new();
+    let show = AdminCommand::Graphs(GraphsOp::Show { graph: id(&listed) });
+    assert_eq!(inspect.drive(&env, show, &NONE, never()).await, 0);
+    assert!(core.commands().is_empty(), "inspection never mutates");
+
+    // Confirmation is the terminal's, not a flag: the same id is asked about once.
+    let terminal = Terminal::answering(true);
+    let released = Run::new();
+    let release = AdminCommand::Graphs(GraphsOp::Release {
+        graph: id(&listed),
+        yes: false,
+    });
+    let (code, _) = both(
+        released.drive(&env, release, &terminal, never()),
+        finished(&core, AdminOutcome::Succeeded),
+    )
+    .await;
+    assert_eq!(code, 0, "{}", released.err.text());
+    assert_eq!(terminal.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let asked_for: Vec<_> = core
+        .state()
+        .seen
+        .iter()
+        .filter_map(|seen| match &seen.body {
+            workbench_protocol::envelope::RequestBody::Query(
+                workbench_protocol::queries::Query::Lifecycle(
+                    workbench_protocol::namespaces::lifecycle::LifecycleQuery::OwnedGraphs(
+                        workbench_protocol::namespaces::lifecycle::owned_graphs::OwnedGraphsQuery::Detail {
+                            graph_ref,
+                        },
+                    ),
+                ),
+            ) => Some(graph_ref.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked_for,
+        [listed.as_str(), listed.as_str()],
+        "inspect and release read the listed id"
+    );
+    let commands = core.commands();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    let Command::Lifecycle(LifecycleCommand::OwnedGraphs(OwnedGraphsCommand::Release(sent))) =
+        &commands[0]
+    else {
+        panic!("not a release: {commands:?}");
+    };
+    assert!(sent.confirmed);
+    assert_eq!(sent.binding.graph.graph_id.as_str(), listed);
+}

@@ -121,7 +121,7 @@ impl Core {
             root.join("sidebar.json"),
             json!({
                 "version":workspace_state::SIDEBAR_SCHEMA_VERSION,
-                "projects":[{"id":"p","name":"p","repo_root":root,"trust":"approved","allowed_directories":[]}],
+                "projects":[{"id":"p","name":"p","repo_root":root,"allowed_directories":[]}],
                 "threads":[]
             })
             .to_string(),

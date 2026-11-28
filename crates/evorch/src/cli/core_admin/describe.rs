@@ -79,9 +79,29 @@ pub(super) fn describe_undisposed(graphs: &UndisposedGraphs) -> Vec<String> {
     }
     if graphs.incomplete_disposals.count.get() > 0 {
         lines.push(format!(
-            "  {} disposal(s) did not finish and are listed above or in `evorch core quarantine list`",
+            "  {} incomplete or unsupported disposal(s); inspect a graph before releasing it:",
             graphs.incomplete_disposals.count.get()
         ));
+        // Unsupported graphs are warnings, not live restart blockers. Their
+        // public references still have to be usable for explicit inspection and
+        // release; counting them alone left legacy records impossible to find.
+        for graph in &graphs.incomplete_disposals.references {
+            if !graphs
+                .references
+                .iter()
+                .any(|listed| listed.graph_id == graph.graph_id)
+            {
+                lines.push(format!(
+                    "  {} (restart {}, revision {})",
+                    graph.graph_id.as_str(),
+                    graph.restart_tx_id.as_str(),
+                    graph.revision.get()
+                ));
+            }
+        }
+        if graphs.incomplete_disposals.truncated {
+            lines.push("  (the disposal list was cut off)".into());
+        }
     }
     lines
 }

@@ -208,7 +208,7 @@ fn save_access(path: &Path, root: &Path, trust: &str) {
 }
 
 #[test]
-fn ordinary_continue_revalidates_current_project_trust_without_a_takeover() {
+fn unapproved_conversations_allow_send_and_continue_but_preserve_the_project_binding() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = test_socket_dir::SplitDir::new();
     let other = tempfile::tempdir().unwrap();
@@ -250,18 +250,6 @@ fn ordinary_continue_revalidates_current_project_trust_without_a_takeover() {
         }))
     };
     save_access(&access, dir.path(), "unapproved");
-    assert_eq!(
-        host.handle_command(continuation(), web()).unwrap_err().code,
-        ErrorCode::PermissionDenied
-    );
-    assert!(
-        !host
-            .service()
-            .bindings
-            .thread_roots
-            .contains_key("thread-1")
-    );
-    save_access(&access, dir.path(), "approved");
     for previous in [None, Some(project().to_string())] {
         host.service_mut().bindings.goal_projects.remove("thread-1");
         if let Some(previous) = &previous {
@@ -291,12 +279,17 @@ fn ordinary_continue_revalidates_current_project_trust_without_a_takeover() {
             previous.as_ref()
         );
     }
-    assert_eq!(
-        host.handle_command(wrong_project(), web())
-            .unwrap_err()
-            .code,
-        ErrorCode::PermissionDenied
-    );
+    let mut wrong_send = send("thread-1", "wrong-project", "Must not change the binding");
+    wrong_send.project = other_project.clone();
+    for command in [
+        wrong_project(),
+        Command::Conversation(ConversationCommand::SendChat(wrong_send)),
+    ] {
+        assert_eq!(
+            host.handle_command(command, web()).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+    }
     assert!(
         !host
             .service()
@@ -306,6 +299,17 @@ fn ordinary_continue_revalidates_current_project_trust_without_a_takeover() {
     );
     let reply = host.handle_command(continuation(), web()).unwrap();
     assert_eq!(reply.run_id.unwrap().as_str(), question.run_id);
+    let sent = host
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "thread-1",
+                "unapproved-existing",
+                "Continue in the unapproved project",
+            ))),
+            web(),
+        )
+        .unwrap();
+    assert_eq!(sent.run_id.unwrap().as_str(), question.run_id);
     let run = question.run_id.parse().unwrap();
     runtime.cancel(run).unwrap();
     rt.block_on(runtime.wait(run)).unwrap();
@@ -317,11 +321,70 @@ fn ordinary_continue_revalidates_current_project_trust_without_a_takeover() {
         ErrorCode::PermissionDenied
     );
     assert_eq!(host.service().bindings.thread_roots["thread-1"], root);
-    save_access(&access, dir.path(), "unapproved");
+    let mut tombstones = storage::thread_retention::TombstoneSet::default();
+    tombstones.threads.insert("thread-1".into());
+    runtime
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(tombstones))
+        .unwrap();
+    for command in [
+        continuation(),
+        Command::Conversation(ConversationCommand::SendChat(send(
+            "thread-1",
+            "deleted-existing",
+            "Must not revive the deleted thread",
+        ))),
+    ] {
+        assert_eq!(
+            host.handle_command(command, web()).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+}
+
+#[test]
+fn new_unapproved_conversations_start_with_a_reserved_thread_row() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, store) = runtime_with_store(dir.path());
+    // Sidebar registration reserves the thread's metadata before its first run.
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "new-thread".into(),
+            project_id: Some(project().to_string()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let sidebar = dir.path().join("sidebar.json");
+    save_access(&sidebar, dir.path(), "unapproved");
+    let service =
+        workbench_host::commands::CommandService::new(runtime.clone(), rt.handle().clone())
+            .with_sidebar_path(sidebar);
+    let mut projects = workbench_host::projects::StaticProjects::default();
+    projects.insert(&project(), dir.path().into());
+    let mut host = workbench_host::CommandHost::new(service).with_projects(projects);
+    let reply = host
+        .handle_command(
+            Command::Conversation(ConversationCommand::SendChat(send(
+                "new-thread",
+                "new-unapproved",
+                "Start the first conversation",
+            ))),
+            web(),
+        )
+        .unwrap();
+    let run: runtime::RunId = reply.run_id.unwrap().as_str().parse().unwrap();
     assert_eq!(
-        host.handle_command(continuation(), web()).unwrap_err().code,
-        ErrorCode::PermissionDenied
+        runtime.thread_of_live_run(run).as_deref(),
+        Some("new-thread")
     );
+    assert_eq!(
+        host.service().bindings.thread_roots["new-thread"],
+        dir.path().canonicalize().unwrap()
+    );
+    runtime.cancel(run).unwrap();
+    rt.block_on(runtime.wait(run)).unwrap();
 }
 
 #[test]

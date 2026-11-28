@@ -97,7 +97,7 @@ fn is_live(host: &CommandHost, run: runtime::RunId) -> bool {
 }
 
 #[test]
-fn cold_existing_thread_invocations_revalidate_project_and_current_trust() {
+fn cold_existing_thread_invocations_reject_a_different_project() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
@@ -123,11 +123,7 @@ fn cold_existing_thread_invocations_revalidate_project_and_current_trust() {
     let project = workspace_state::ProjectId::new("project-1");
     document
         .sidebar
-        .add_project(project.clone(), "Current project", dir.path())
-        .unwrap();
-    document
-        .sidebar
-        .set_project_trust(&project, workspace_state::TrustState::Approved)
+        .add_project(project, "Current project", dir.path())
         .unwrap();
     std::fs::write(&sidebar, serde_json::to_vec(&document).unwrap()).unwrap();
     let wrong = host
@@ -137,15 +133,6 @@ fn cold_existing_thread_invocations_revalidate_project_and_current_trust() {
         )
         .unwrap_err();
     assert_eq!(wrong.code, ErrorCode::PermissionDenied);
-    document
-        .sidebar
-        .set_project_trust(&project, workspace_state::TrustState::Unapproved)
-        .unwrap();
-    std::fs::write(&sidebar, serde_json::to_vec(&document).unwrap()).unwrap();
-    let untrusted = host
-        .handle_command(start("untrusted", dir.path(), Some("thread-1")), cli())
-        .unwrap_err();
-    assert_eq!(untrusted.code, ErrorCode::PermissionDenied);
     assert!(runtime.list_agents().is_empty());
     assert_eq!(host.service().restart_gate().running_invocations(), 0);
     assert_eq!(

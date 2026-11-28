@@ -130,20 +130,14 @@ async fn restart_subprocess_worker() {
     )
     .await
     .unwrap();
-    let ownership_sockets: Vec<_> = std::fs::read_dir(root.join("o"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "sock")
-        })
-        .collect();
-    assert!(!ownership_sockets.is_empty());
-    assert!(
-        ownership_sockets
-            .iter()
-            .all(|path| path.as_os_str().as_encoded_bytes().len() < 108)
-    );
+    assert!(!root.join("o/owners.db").exists());
+    assert!(std::fs::read_dir(root.join("o")).unwrap().all(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|ext| ext != "sock")
+    }));
     let backend = Arc::new(HostBackend::new(
         host.host.clone(),
         instance.identity.clone(),

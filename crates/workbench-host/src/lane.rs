@@ -142,7 +142,8 @@ impl TeamSource<'_> {
 }
 
 /// Resolve persisted thread identity against the current host's project directory.
-/// Neither a client path nor a saved execution recipe grants project access.
+/// Neither a client path nor a saved execution recipe may replace its binding.
+/// Project trust restricts runtime capabilities; it does not prohibit conversation.
 pub(crate) fn current_thread_project(
     runtime: &runtime::AgentRuntime,
     sidebar: Option<&Path>,
@@ -221,12 +222,6 @@ pub(crate) fn current_thread_project(
                     "project is not registered with this core",
                 )
             })?;
-        if project.trust != workspace_state::TrustState::Approved {
-            return Err(fail(
-                ErrorCode::PermissionDenied,
-                "project is not approved by the host",
-            ));
-        }
         if document
             .sidebar
             .threads
