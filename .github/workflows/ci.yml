@@ -176,7 +176,7 @@ jobs:
       # CARGO_TARGET_DIR below; keep that variable scoped to Cargo steps.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       - name: Clippy (workspace)
         env:
@@ -234,7 +234,7 @@ jobs:
       - uses: ./.github/actions/setup-cef
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       # The doctests start owned children through the library policy: the helper
       # bundle of the sealed product reaches them as EVORCH_PROCESS_GUARD_BUNDLE.
@@ -303,7 +303,7 @@ jobs:
           packages: mold ripgrep cmake clang libclang-dev ninja-build perl git
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -344,7 +344,7 @@ jobs:
           packages: mold cmake clang libclang-dev ninja-build perl git
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-product
+          shared-key: ${{ runner.os }}-product-ci-bench-true-miss-before
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build and seal the product artifact
         run: |
@@ -448,7 +448,7 @@ jobs:
       # Restore only: the cache-save job writes the shared dependency cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -742,7 +742,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.scope.outputs.full == 'false' || github.ref == 'refs/heads/main'
         with:
-          shared-key: ${{ runner.os }}-nix-check
+          shared-key: ${{ runner.os }}-nix-check-ci-bench-true-miss-before
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The packages and binaries of shippedCargoArgs in flake.nix (x86_64-linux),
       # release profile, no tests: the Nix package's build minus code generation.
@@ -901,7 +901,7 @@ jobs:
           toolchain: 1.99.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       - name: Install linker and Claude transport build dependencies
         timeout-minutes: 30
@@ -1049,7 +1049,7 @@ jobs:
       # Restore only: the cache-save job writes the shared dependency cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       - name: Install linker and Claude transport build dependencies
         timeout-minutes: 30

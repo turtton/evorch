@@ -77,7 +77,7 @@ jobs:
         id: rust-cache
         if: steps.scope.outputs.relevant == 'true'
         with:
-          shared-key: ${{ runner.os }}-ci-workspace-v2
+          shared-key: ${{ runner.os }}-ci-workspace-v2-ci-bench-true-miss-before
           save-if: false
       # The gui-evidence job of ci that used to share this package list is gone, so no main
       # push saves these .debs any more: a pull request run saves them under its own ref
