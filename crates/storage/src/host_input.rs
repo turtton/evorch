@@ -275,7 +275,7 @@ const HOST_INPUT_EDIT_ATTACHMENTS: u32 = 1024;
 /// only how many there were.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostChatSubmissionEdit {
-    /// The first [`HOST_INPUT_PREVIEW_BYTES`] bytes of the words, cut at a character.
+    /// The first [`HOST_INPUT_PREVIEW_BYTES`] bytes of the masked words, cut at a character.
     pub preview: String,
     pub preview_truncated: bool,
     pub image_count: u32,
@@ -286,19 +286,22 @@ pub struct HostChatSubmissionEdit {
 }
 
 impl HostChatSubmissionEdit {
-    /// Builds the edit data of a message: `text` as typed and its attachment counts.
+    /// Builds the edit data of a message: `text` as typed and its attachment counts. The
+    /// preview is the *masked* words cut at a character: the whole text is masked first, so a
+    /// secret that crosses the cut is not left half in the preview.
     /// `None` when the words are too large to keep for editing.
     pub fn new(text: &str, image_count: u32, attachment_count: u32) -> Option<Self> {
         if text.len() > HOST_INPUT_EDIT_TEXT_BYTES {
             return None;
         }
-        let mut end = text.len().min(HOST_INPUT_PREVIEW_BYTES);
-        while !text.is_char_boundary(end) {
+        let masked = secret_guard::SecretRedactor::from_env().redact(text).text;
+        let mut end = masked.len().min(HOST_INPUT_PREVIEW_BYTES);
+        while !masked.is_char_boundary(end) {
             end -= 1;
         }
         Some(Self {
-            preview: text[..end].to_owned(),
-            preview_truncated: end < text.len(),
+            preview: masked[..end].to_owned(),
+            preview_truncated: end < masked.len(),
             image_count,
             attachment_count,
             original_text: (attachment_count > 0).then(|| text.to_owned()),
@@ -325,9 +328,6 @@ impl HostChatSubmissionEdit {
         if let Some(original) = &self.original_text {
             if original.len() > HOST_INPUT_EDIT_TEXT_BYTES {
                 return Err(bad("words are too large"));
-            }
-            if !original.starts_with(&self.preview) {
-                return Err(bad("preview is not the start of the words"));
             }
         }
         let guard = crate::entity::SecretGuard::from_env();

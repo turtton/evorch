@@ -86,10 +86,11 @@ pub(crate) fn read(
             let Some(stored) = db.host_input_draft(query.submission_id.as_str())? else {
                 return Ok(None);
             };
-            // Thread ownership and a deleted thread are decided by the run's thread.
-            let owner = db.thread_of_run(&stored.run_id)?;
+            // Thread ownership and a deleted thread are decided by the run's thread, in
+            // statements that stand alone (no transaction around the read).
+            let owner = db.resolve_thread_of_run(&stored.run_id)?;
             Ok(owner
-                .filter(|row| row.thread_id == query.thread.as_str())
+                .filter(|thread| thread == query.thread.as_str())
                 .map(|_| stored))
         })
         .map_err(storage_error)?

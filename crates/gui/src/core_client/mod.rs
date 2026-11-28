@@ -1222,7 +1222,12 @@ impl CoreClientScreen {
                 effect,
             );
         }
-        if conversation::settle_queue(&mut shared, &mut self.conversation) {
+        let needs = conversation::settle_queue(&mut shared, &mut self.conversation);
+        let receipts_asked = needs.receipts.is_some();
+        if let Some(thread) = needs.receipts {
+            enqueue(&self.actions, &mut shared, Action::Receipts(thread));
+        }
+        if needs.repaint || receipts_asked {
             ui.ctx().request_repaint();
         }
         self.theme.show(ui.ctx());

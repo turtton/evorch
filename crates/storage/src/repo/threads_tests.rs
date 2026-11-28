@@ -453,6 +453,14 @@ fn legacy_runs_without_bindings_resolve_by_name_and_parent_chain() {
     assert_eq!(resolved("child").unwrap().depth, 1);
     assert_eq!(resolved("host-root").unwrap().thread_id, "host-thread");
     assert_eq!(resolved("unknown"), None);
+    // And: the resolution without a transaction names the same threads.
+    for run in ["ledger-only", "child", "host-root", "unknown"] {
+        assert_eq!(
+            database.resolve_thread_of_run(run).unwrap(),
+            resolved(run).map(|row| row.thread_id),
+            "{run}"
+        );
+    }
     // And: listing the thread finds the same runs.
     assert_eq!(
         database

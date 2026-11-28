@@ -16,7 +16,7 @@ use crate::core_client::attachments::ClientAttachmentDraft;
 use crate::core_client::cache::ReceiptRead;
 use crate::core_client::connection::Action;
 use crate::core_client::features::execution::queued_input::{
-    Guard, Intent, Kind, Poll, QueueView, Request, Stage,
+    Guard, Intent, Kind, Poll, Polled, QueueView, Request, Stage,
 };
 use crate::core_client::shell::Effect;
 use crate::core_client::{Draft, Shared};
@@ -308,19 +308,21 @@ fn edit_button(ui: &mut Ui, label: &str, enabled: bool, has_words: bool, hover: 
 }
 
 /// Once per frame, after the effects: gives the operation the composer's look, and puts what
-/// it found in the composer. Returns whether the feature has a request to send in its next
-/// pass.
-pub(in crate::core_client) fn settle(shared: &mut Shared, pane: &mut ConversationPane) -> bool {
+/// it found in the composer. Returns what the operation wants of the connection.
+pub(in crate::core_client) fn settle(shared: &mut Shared, pane: &mut ConversationPane) -> Needs {
     let (drafts, files, loading) = (
         &shared.drafts,
         &shared.attachment_drafts,
         &shared.loading_attachments,
     );
     let Some(execution) = shared.features.execution_mut() else {
-        return false;
+        return Needs::default();
     };
-    let (poll, wants_pass) =
-        execution.queue_poll(|thread| guard_of(thread, drafts, files, loading));
+    let Polled {
+        poll,
+        wants_pass,
+        receipts,
+    } = execution.queue_poll(|thread| guard_of(thread, drafts, files, loading));
     match poll {
         Poll::Nothing => {}
         Poll::Apply { request, words } => {
@@ -334,23 +336,26 @@ pub(in crate::core_client) fn settle(shared: &mut Shared, pane: &mut Conversatio
             };
             pane.request_composer_focus();
         }
-        Poll::TakenBackButChanged { request, words } => {
-            let need = Reattach::from_counts(words.image_count, words.attachment_count);
-            let mut note = format!(
-                "A follow-up was taken back, but the composer had changed, so it was not replaced. Its text:\n{}",
-                words.text
+        Poll::TakenBackButChanged { request } => {
+            pane.notice(
+                &request.thread,
+                "A follow-up was taken back, but the composer had changed, so its text was not put there and is not kept."
+                    .into(),
             );
-            if !need.is_empty() {
-                note.push_str(&format!(
-                    "\n(It had {} and {}.)",
-                    plural(need.images, "image", "images"),
-                    plural(need.files, "other file", "other files")
-                ));
-            }
-            pane.notice(&request.thread, note);
-            shared.status =
-                "The follow-up was taken back; its text is shown in the conversation.".into();
+            shared.status = "The follow-up was taken back; the composer had changed.".into();
         }
     }
-    wants_pass
+    Needs {
+        repaint: wants_pass,
+        receipts,
+    }
+}
+
+/// What the operation asks of the frame after [`settle`].
+#[derive(Default)]
+pub(in crate::core_client) struct Needs {
+    /// The feature has a request to send in its next pass.
+    pub repaint: bool,
+    /// The thread whose receipts the connection is to read, once.
+    pub receipts: Option<ThreadId>,
 }

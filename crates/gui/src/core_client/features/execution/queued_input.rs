@@ -89,10 +89,23 @@ enum Phase {
         tag: Option<u64>,
         /// The reply was lost: the core's receipt of the command settles it.
         unknown: bool,
-        /// A new session started since the command was sent.
-        session_changed: bool,
+        /// Where the list of the thread's receipts stands, the last way to settle a
+        /// withdrawal whose command receipt the core no longer has.
+        listing: Listing,
     },
     Ready(Words),
+}
+
+/// The thread's receipts read to settle a withdrawal whose outcome is unknown. They are read
+/// for the thread the operation started in, whatever is selected now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// The command's own receipt may still settle it (no new session yet).
+    NotNeeded,
+    /// A new session began and the command's receipt did not settle it: read the list.
+    Wanted,
+    /// The read of the list was asked for.
+    Asked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +113,9 @@ struct Op {
     request: Request,
     /// The selection epoch the operation started in.
     epoch: u64,
+    /// A frame found the composer different from the guard. It stays set when the
+    /// composer is put back, so an attachment added and removed meanwhile counts too.
+    touched: bool,
     phase: Phase,
 }
 
@@ -141,12 +157,21 @@ pub enum Poll {
         request: Request,
         words: Words,
     },
-    /// The input was taken back but the composer changed meanwhile, so the words are
-    /// handed over as a notice instead.
+    /// The input was taken back but the composer changed meanwhile, so the composer was
+    /// left alone. The words are not kept.
     TakenBackButChanged {
         request: Request,
-        words: Words,
     },
+}
+
+/// What a frame's comparison of the composer found, and what the operation wants next.
+#[derive(Debug)]
+pub struct Polled {
+    pub poll: Poll,
+    /// A request is due and only a pass of the feature sends it.
+    pub wants_pass: bool,
+    /// The thread whose receipts are to be read, once, to settle a lost withdrawal.
+    pub receipts: Option<ThreadId>,
 }
 
 #[derive(Default)]
@@ -208,6 +233,7 @@ impl QueuedInputs {
         self.op = Some(Op {
             request,
             epoch: self.epoch,
+            touched: false,
             phase: Phase::Reading { tag: None },
         });
         true
@@ -255,7 +281,7 @@ impl QueuedInputs {
                 words,
                 tag: Some(tag),
                 unknown: false,
-                session_changed: false,
+                listing: Listing::NotNeeded,
             },
             other => other,
         };
@@ -310,7 +336,7 @@ impl QueuedInputs {
                     words,
                     tag: Some(tag),
                     unknown: true,
-                    session_changed: false,
+                    listing: Listing::NotNeeded,
                 };
                 true
             }
@@ -330,14 +356,23 @@ impl QueuedInputs {
                 self.fail("The connection changed before the input was read. Try again.");
             }
             Phase::Withdrawing {
-                session_changed, ..
-            } => *session_changed = true,
+                unknown, listing, ..
+            } => {
+                // The command's receipt was asked for on reconnecting and its resolved
+                // reply, if the core had one, came right after this reset. Without it
+                // the list of the thread's receipts is all that is left to ask.
+                if *unknown {
+                    *listing = Listing::Wanted;
+                }
+            }
             Phase::Ready(_) => {}
         }
     }
 
-    /// Every pass: follows the selection and settles a withdrawal whose outcome was lost
-    /// from the receipts read for the new projection.
+    /// Every pass: follows the selection and, for a withdrawal whose outcome was lost and
+    /// whose command receipt the core could not give, settles it from the thread's receipts
+    /// once they were read. Only the receipt read after the withdrawal was sent counts: a
+    /// list showing the input taken back says nothing about this command until then.
     pub fn maintain(&mut self, selected: Option<&ThreadId>, cache: &Cache) {
         if self.selected.as_ref() != selected {
             self.selected = selected.cloned();
@@ -346,27 +381,47 @@ impl QueuedInputs {
         let Some(op) = self.op.as_mut() else { return };
         let Phase::Withdrawing {
             words,
-            unknown,
-            session_changed,
+            unknown: true,
+            listing: Listing::Asked,
             ..
         } = &op.phase
         else {
             return;
         };
-        let known = cache.receipts.get(op.request.submission.as_str());
-        if known.is_some_and(|receipt| receipt.state == InputReceiptState::Withdrawn) {
-            op.phase = Phase::Ready(words.clone());
-            return;
+        match cache.receipt_read(op.request.thread.as_str()) {
+            Some(ReceiptRead::Loaded) => {
+                let known = cache.receipts.get(op.request.submission.as_str());
+                if known.is_some_and(|receipt| receipt.state == InputReceiptState::Withdrawn) {
+                    op.phase = Phase::Ready(words.clone());
+                } else {
+                    let shown = known.map_or("not listed", |receipt| state_name(receipt.state));
+                    self.fail(format!(
+                        "It could not be confirmed that the input was taken back: it is {shown}."
+                    ));
+                }
+            }
+            Some(ReceiptRead::Failed(reason)) => {
+                let reason = reason.clone();
+                self.fail(format!(
+                    "It could not be confirmed that the input was taken back, and its state could not be read ({reason}). It was not sent again; look at the queue before trying again."
+                ));
+            }
+            Some(ReceiptRead::Loading) | None => {}
         }
-        if *unknown
-            && *session_changed
-            && cache.receipt_read(op.request.thread.as_str()) == Some(&ReceiptRead::Loaded)
-        {
-            let shown = known.map_or("not listed", |receipt| state_name(receipt.state));
-            self.fail(format!(
-                "It could not be confirmed that the input was taken back: it is {shown}."
-            ));
+    }
+
+    /// The thread whose receipts the connection is to read now, once: the operation's own,
+    /// whatever is selected.
+    pub fn take_receipts_wanted(&mut self) -> Option<ThreadId> {
+        let op = self.op.as_mut()?;
+        let Phase::Withdrawing { listing, .. } = &mut op.phase else {
+            return None;
+        };
+        if *listing != Listing::Wanted {
+            return None;
         }
+        *listing = Listing::Asked;
+        Some(op.request.thread.clone())
     }
 
     /// The frame compares the composer with the guard of the operation: `current` reads
@@ -375,11 +430,14 @@ impl QueuedInputs {
         let Some(op) = self.op.as_mut() else {
             return Poll::Nothing;
         };
+        if current(&op.request.guard.thread) != op.request.guard {
+            op.touched = true;
+        }
         let fit = op.epoch == self.epoch
             && self.selected.as_ref() == Some(&op.request.guard.thread)
-            && current(&op.request.guard.thread) == op.request.guard;
+            && !op.touched;
         match std::mem::replace(&mut op.phase, Phase::Reading { tag: None }) {
-            Phase::Checking(_) if !fit => {
+            Phase::Checking(_) | Phase::WithdrawDue(_) if !fit => {
                 self.fail("The composer changed, so nothing was changed.");
                 Poll::Nothing
             }
@@ -400,7 +458,7 @@ impl QueuedInputs {
                 if fit {
                     Poll::Apply { request, words }
                 } else {
-                    Poll::TakenBackButChanged { request, words }
+                    Poll::TakenBackButChanged { request }
                 }
             }
             other => {
@@ -656,9 +714,9 @@ mod tests {
     }
 
     // Given: a withdrawal that succeeded after the person typed in the composer
-    // Then: the composer is left alone and the words are handed over for a notice
+    // Then: the composer is left alone and the words are dropped with the operation
     #[test]
-    fn words_taken_back_for_a_composer_that_changed_are_handed_over() {
+    fn a_composer_that_changed_is_left_alone_and_the_words_are_not_kept() {
         let mut queued = selecting();
         queued.start(request(Kind::Edit));
         read(&mut queued, InputReceiptState::Accepted);
@@ -670,17 +728,64 @@ mod tests {
         assert_eq!(
             queued.poll(typed_in),
             Poll::TakenBackButChanged {
-                request: request(Kind::Edit),
-                words: words()
+                request: request(Kind::Edit)
             }
         );
+        assert_eq!(queued.view(), QueueView::default());
+    }
+
+    // Given: a file added to the composer and removed again while the words are read, or
+    //        while the input is taken back
+    // Then: the composer counts as changed, though it looks as it did at the end
+    #[test]
+    fn an_attachment_added_and_removed_meanwhile_still_counts_as_a_change() {
+        let with_file = |_: &ThreadId| Guard {
+            files: vec!["a.png".into()],
+            ..guard(3)
+        };
+
+        let mut queued = selecting();
+        queued.start(request(Kind::Restore));
+        queued.poll(with_file);
+        read(&mut queued, InputReceiptState::Dropped);
+        assert_eq!(queued.poll(unchanged), Poll::Nothing);
+        assert!(queued.view().failure.is_some(), "nothing was applied");
+
+        let mut queued = selecting();
+        queued.start(request(Kind::Edit));
+        read(&mut queued, InputReceiptState::Accepted);
+        queued.poll(unchanged);
+        queued.next_request(true);
+        queued.sent(2);
+        queued.poll(with_file);
+        queued.withdraw_reply(2, Ok(()));
+        assert!(matches!(
+            queued.poll(unchanged),
+            Poll::TakenBackButChanged { .. }
+        ));
+    }
+
+    // Given: a composer that changes after the words were read and before the withdrawal
+    //        is sent
+    // Then: the withdrawal is never sent
+    #[test]
+    fn a_change_before_the_withdrawal_is_sent_stops_it() {
+        let mut queued = selecting();
+        queued.start(request(Kind::Edit));
+        read(&mut queued, InputReceiptState::Accepted);
+        assert_eq!(queued.poll(unchanged), Poll::Nothing);
+
+        assert_eq!(queued.poll(typed_in), Poll::Nothing);
+
+        assert!(queued.next_request(true).is_none());
+        assert!(queued.view().failure.is_some());
     }
 
     // Given: a withdrawal whose reply was lost
-    // Then: nothing is sent again; the operation waits for the core's receipt of the
-    //       command or, after a new session, for the input's own receipt
+    // Then: nothing is sent again; the core's receipt of the command settles it, and the
+    //       input's own receipt is not looked at while that may still answer
     #[test]
-    fn a_withdrawal_with_an_unknown_outcome_is_settled_by_receipts_never_sent_again() {
+    fn a_withdrawal_with_an_unknown_outcome_is_settled_by_the_command_receipt() {
         let mut queued = selecting();
         queued.start(request(Kind::Edit));
         read(&mut queued, InputReceiptState::Accepted);
@@ -689,43 +794,83 @@ mod tests {
         queued.sent(2);
         assert!(queued.withdraw_reply(2, Err(FeatureError::outcome_unknown("lost"))));
         assert!(queued.next_request(true).is_none());
+        assert_eq!(queued.take_receipts_wanted(), None, "no new session yet");
 
-        // The resolved reply for the same tag arrives after the reset.
+        // The resolved reply for the same tag arrives right after the reset.
         queued.reset();
         assert!(!queued.withdraw_reply(2, Ok(())));
         assert!(matches!(queued.poll(unchanged), Poll::Apply { .. }));
     }
 
-    #[test]
-    fn an_unknown_outcome_ends_from_the_receipt_the_new_session_read() {
-        let receipt = |state: &str| -> workbench_protocol::views::InputReceipt {
-            serde_json::from_value(serde_json::json!({
-                "submission_id": "s", "thread": "t", "run": "r", "state": state,
-                "revision": "1", "sent_by": {"actor": "human", "surface": "desktop"},
-            }))
-            .unwrap()
-        };
-        let lost = |queued: &mut QueuedInputs| {
-            queued.start(request(Kind::Edit));
-            read(queued, InputReceiptState::Accepted);
-            queued.poll(unchanged);
-            queued.next_request(true);
-            queued.sent(2);
-            queued.withdraw_reply(2, Err(FeatureError::outcome_unknown("lost")));
-            queued.reset();
-        };
-        let mut cache = Cache::default();
+    fn receipt(state: &str) -> workbench_protocol::views::InputReceipt {
+        serde_json::from_value(serde_json::json!({
+            "submission_id": "s", "thread": "t", "run": "r", "state": state,
+            "revision": "1", "sent_by": {"actor": "human", "surface": "desktop"},
+        }))
+        .unwrap()
+    }
 
-        // Still waiting while the new session's receipts are not read.
+    /// An edit whose withdrawal was sent and lost, and a new session that could not settle it.
+    fn lost_in_a_new_session(selected: &ThreadId) -> QueuedInputs {
         let mut queued = selecting();
-        lost(&mut queued);
-        queued.maintain(Some(&thread()), &cache);
-        assert!(queued.view().busy.is_some());
+        queued.start(request(Kind::Edit));
+        read(&mut queued, InputReceiptState::Accepted);
+        queued.poll(unchanged);
+        queued.next_request(true);
+        queued.sent(2);
+        queued.withdraw_reply(2, Err(FeatureError::outcome_unknown("lost")));
+        queued.reset();
+        queued.maintain(Some(selected), &Cache::default());
+        queued
+    }
 
-        // Read and still queued: the withdrawal did not happen, so the operation ends.
-        cache.merge_receipt(receipt("accepted"));
+    // Given: another client took the input back before this client's withdrawal was refused
+    // Then: the receipt list showing it taken back does not settle this client's operation,
+    //       and the refusal ends it without any text reaching the composer
+    #[test]
+    fn a_withdrawal_by_another_client_is_not_this_clients_success() {
+        let mut queued = selecting();
+        queued.start(request(Kind::Edit));
+        read(&mut queued, InputReceiptState::Accepted);
+        queued.poll(unchanged);
+        queued.next_request(true);
+        queued.sent(2);
+        let mut cache = Cache::default();
+        cache.merge_receipt(receipt("withdrawn"));
         cache.receipts_read("t", Ok(()));
         queued.maintain(Some(&thread()), &cache);
+        assert_eq!(queued.poll(unchanged), Poll::Nothing, "still waiting");
+        assert!(queued.view().busy.is_some());
+
+        let refused = FeatureError {
+            code: Some(ErrorCode::Conflict),
+            ..FeatureError::new("not queued")
+        };
+        queued.withdraw_reply(2, Err(refused));
+
+        assert_eq!(queued.poll(unchanged), Poll::Nothing);
+        assert!(queued.view().busy.is_none());
+        assert!(queued.view().failure.is_some());
+    }
+
+    // Given: a lost withdrawal that the command's receipt could not settle after a new session
+    // Then: the operation's own thread is read once, whatever is selected, and the list
+    //       decides: taken back is done, anything else ends the operation with that state
+    #[test]
+    fn an_unknown_outcome_ends_from_the_origin_threads_receipts() {
+        let other = ThreadId::new("other").unwrap();
+        let mut cache = Cache::default();
+
+        let mut queued = lost_in_a_new_session(&other);
+        assert_eq!(queued.take_receipts_wanted(), Some(thread()));
+        assert_eq!(queued.take_receipts_wanted(), None, "asked once");
+        cache.receipts_loading("t");
+        queued.maintain(Some(&other), &cache);
+        assert!(queued.view().busy.is_some(), "waits while it is read");
+
+        cache.merge_receipt(receipt("accepted"));
+        cache.receipts_read("t", Ok(()));
+        queued.maintain(Some(&other), &cache);
         assert!(queued.view().busy.is_none());
         assert!(
             queued
@@ -736,12 +881,32 @@ mod tests {
                 .contains("still queued")
         );
 
-        // Taken back: it counts as done.
-        let mut queued = selecting();
-        lost(&mut queued);
+        let mut queued = lost_in_a_new_session(&other);
+        queued.take_receipts_wanted();
         cache.merge_receipt(receipt("withdrawn"));
+        queued.maintain(Some(&other), &cache);
+        assert!(matches!(
+            queued.poll(unchanged),
+            Poll::TakenBackButChanged { .. }
+        ));
+    }
+
+    // Given: the same, with the receipts of the origin thread unreadable
+    // Then: the unknown outcome is shown, the slot is freed and nothing is sent again
+    #[test]
+    fn an_unreadable_receipt_list_frees_the_operation_with_the_outcome_unknown() {
+        let mut cache = Cache::default();
+        let mut queued = lost_in_a_new_session(&thread());
+        queued.take_receipts_wanted();
+        cache.receipts_read("t", Err("offline".into()));
+
         queued.maintain(Some(&thread()), &cache);
-        assert!(matches!(queued.poll(unchanged), Poll::Apply { .. }));
+
+        assert!(queued.view().busy.is_none());
+        let message = queued.view().failure.unwrap().message;
+        assert!(message.contains("could not be confirmed") && message.contains("offline"));
+        assert!(queued.next_request(true).is_none());
+        assert!(queued.start(request(Kind::Edit)));
     }
 
     // Given: a core that refuses or does not know the input

@@ -209,9 +209,13 @@ impl ExecutionFeature {
     pub fn queue_poll(
         &mut self,
         current: impl Fn(&ThreadId) -> queued_input::Guard,
-    ) -> (queued_input::Poll, bool) {
+    ) -> queued_input::Polled {
         let poll = self.queued.poll(current);
-        (poll, self.queued.wants_pass())
+        queued_input::Polled {
+            poll,
+            wants_pass: self.queued.wants_pass(),
+            receipts: self.queued.take_receipts_wanted(),
+        }
     }
 
     pub fn btw_card(&self, thread: &ThreadId) -> Option<BtwCardView<'_>> {

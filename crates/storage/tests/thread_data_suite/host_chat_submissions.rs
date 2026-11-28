@@ -393,3 +393,26 @@ fn a_preview_is_cut_at_a_character_and_edit_data_must_agree_with_itself() {
             .is_empty()
     );
 }
+
+// Given: words whose credential straddles the 1 KiB cut of the preview
+// Then: the whole words are masked before they are cut, so no part of the credential is left
+//       in the preview, which is still within the bound and ends at a character
+#[test]
+fn a_secret_across_the_cut_never_reaches_the_preview() {
+    let token = format!("ghp_{}", "A".repeat(36));
+    let words = format!("{} {token} and then some more words", "a".repeat(999));
+
+    let edit = storage::HostChatSubmissionEdit::new(&words, 0, 0).unwrap();
+
+    assert!(edit.preview.len() <= 1024);
+    assert!(edit.preview.starts_with(&"a".repeat(999)));
+    assert!(edit.preview.contains("[REDACTED"), "{}", edit.preview);
+    assert!(!edit.preview.contains("ghp_") && !edit.preview.contains("AAAA"));
+    assert!(edit.preview_truncated);
+    // The masked preview passes the storage check that the raw cut would have failed.
+    edit.validate().unwrap();
+
+    // With attachments the words as typed hold a credential: no edit data is stored for it.
+    let with_files = storage::HostChatSubmissionEdit::new(&words, 0, 1).unwrap();
+    assert!(with_files.validate().is_err());
+}

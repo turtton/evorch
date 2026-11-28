@@ -323,3 +323,88 @@ fn edit_and_restore_wait_for_an_empty_composer() {
     assert!(screen.execution_requests().is_empty());
     assert_eq!(screen.composer_text(), "half written");
 }
+
+// Given: an edited input that carried 2 images, whose text is in the composer
+// When: the person deletes all the words
+// Then: the hint to attach the images again goes with them, so the next message does not
+//       inherit it
+#[test]
+fn deleting_all_the_restored_words_clears_the_reattach_hint() {
+    let mut screen = queue_screen();
+    let next = screen.press_and_read("Edit", 0, draft_of("sub-a", "accepted", 2, 3));
+    let [(tag, _)] = next.as_slice() else {
+        panic!()
+    };
+    screen.answer(*tag, FeatureReply::Command(Ok(CommandReply::accepted())));
+    screen.harness.get_by_label("Re-attach 2 images");
+
+    screen.harness.get_by_label("Message").focus();
+    screen.harness.run_steps(2);
+    screen
+        .harness
+        .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    screen.harness.run_steps(2);
+    screen.harness.key_press(egui::Key::Backspace);
+    screen.harness.run_steps(2);
+
+    assert_eq!(screen.composer_text(), "");
+    assert!(
+        screen
+            .harness
+            .query_by_label_contains("Re-attach")
+            .is_none()
+    );
+}
+
+// Given: an Edit whose withdrawal reply was lost, in a window that is showing another thread
+//        when the connection comes back
+// Then: the receipts of the thread the Edit started in are asked for, once, whatever is
+//       selected, and the operation ends from what they say
+#[test]
+fn a_lost_withdrawal_reads_the_receipts_of_its_own_thread_after_reconnecting() {
+    let mut screen = queue_screen();
+    let next = screen.press_and_read("Edit", 0, draft_of("sub-a", "accepted", 2, 3));
+    let [(tag, _)] = next.as_slice() else {
+        panic!()
+    };
+    screen.answer(
+        *tag,
+        FeatureReply::Command(Err(FeatureError::outcome_unknown("lost"))),
+    );
+    screen.harness.get_by_label("Taking it back…");
+
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .features
+        .begin_session(&[], Vec::new());
+    screen.harness.run_steps(3);
+    let actions = screen.settle();
+
+    let asked: Vec<_> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Receipts(thread) => Some(thread.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["thr-1"]);
+    assert_eq!(
+        screen.composer_text(),
+        "",
+        "nothing is applied before it is known"
+    );
+    // The read fails: the operation ends, showing why, and the queue is usable again.
+    screen
+        .shared
+        .lock()
+        .unwrap()
+        .cache
+        .receipts_read("thr-1", Err("offline".into()));
+    screen.harness.run_steps(3);
+    screen
+        .harness
+        .get_by_label_contains("could not be confirmed");
+    assert_eq!(screen.composer_text(), "");
+}

@@ -326,6 +326,12 @@ pub(super) fn composer(
                         });
                         if input.changed() {
                             draft.revision += 1;
+                            // Words that were all deleted take the hint to attach again
+                            // with them; a restored image-only input starts empty without
+                            // any change of the input, so its hint stays.
+                            if draft.text.is_empty() {
+                                draft.reattach = Default::default();
+                            }
                         }
                         let enter = input.has_focus()
                             && !ime
