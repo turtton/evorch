@@ -420,7 +420,6 @@ fn the_settings_menu_has_three_groups_of_named_entries() {
         "CORE",
         "VIEW",
         "Model Settings",
-        "Authentication",
         "MCP servers",
         "Appearance",
         "Config file",
@@ -439,7 +438,14 @@ fn the_settings_menu_has_three_groups_of_named_entries() {
             "{label}"
         );
     }
-    for gone in ["Providers", "Routing", "Agent roles", "Settings", "Theme"] {
+    for gone in [
+        "Providers",
+        "Routing",
+        "Agent roles",
+        "Settings",
+        "Theme",
+        "Authentication",
+    ] {
         assert!(screen.harness.query_by_label(gone).is_none(), "{gone}");
     }
     screen.capture("menu");

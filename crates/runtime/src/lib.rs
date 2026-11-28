@@ -96,6 +96,7 @@ pub mod snapshot;
 pub mod state;
 pub mod team;
 pub mod team_context;
+mod thread_context;
 pub mod thread_goals;
 mod thread_lineage;
 pub mod thread_read_dirs;

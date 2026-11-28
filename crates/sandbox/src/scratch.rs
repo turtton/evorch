@@ -15,7 +15,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 mod cleanup;
-pub use cleanup::{resume_scratch_cleanup, stop_scratch_cleanup};
+mod managed;
+pub use cleanup::{request_orphan_scratch_cleanup, resume_scratch_cleanup, stop_scratch_cleanup};
 
 const TRASH_PREFIX: &str = ".trash-";
 /// Records which ownership root a fixed parent belongs to. Dot-prefixed, so
@@ -84,6 +85,8 @@ pub struct ScratchRoot {
     /// The full identity a fixed parent's marker must hold. The parent name carries
     /// only a short prefix of it, so two identities can share a parent.
     identity: Option<String>,
+    managed: Option<managed::Format>,
+    lease: std::sync::Mutex<Option<managed::Lease>>,
 }
 
 impl ScratchRoot {
@@ -111,6 +114,14 @@ impl ScratchRoot {
         )
     }
 
+    /// A fixed root whose newly-created directory can be reclaimed after its owner disappears.
+    /// Existing directories are never marked retroactively.
+    pub fn fixed_for_owner(scope: &str, identity: &str, owner: &Path) -> io::Result<Self> {
+        let mut root = Self::fixed(scope, identity)?;
+        root.managed = Some(managed::Format::new(managed::Kind::Fixed, Some(owner)));
+        Ok(root)
+    }
+
     fn identified(mut self, identity: &str) -> Self {
         self.identity = Some(identity.to_owned());
         self
@@ -122,6 +133,8 @@ impl ScratchRoot {
             parent,
             ephemeral: None,
             identity: None,
+            managed: None,
+            lease: std::sync::Mutex::default(),
         }
     }
 
@@ -130,15 +143,23 @@ impl ScratchRoot {
     /// # Errors
     /// Propagates directory creation failures.
     pub fn ephemeral() -> io::Result<Self> {
+        Self::ephemeral_in(Path::new("/var/tmp"))
+    }
+
+    fn ephemeral_in(base: &Path) -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix(&format!("evo-{}-", euid()))
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/var/tmp")?;
+            .tempdir_in(base)?;
+        let lease = managed::Lease::acquire(directory.path())?;
+        managed::Format::new(managed::Kind::Ephemeral, None).write(lease.fd())?;
         let identity = cleanup::created_identity(directory.path())?;
         Ok(Self {
             parent: directory.keep(),
             ephemeral: Some(identity),
             identity: None,
+            managed: None,
+            lease: std::sync::Mutex::new(Some(lease)),
         })
     }
 
@@ -172,8 +193,21 @@ impl ScratchRoot {
     /// Fails when the parent is not a private directory owned by the current user.
     pub fn prepare(&self, name: &str) -> io::Result<PathBuf> {
         let dir = self.dir(name)?;
-        private_dir(&self.parent)?;
+        // Serialize first creation and hold the shared directory-FD lock for this value's life.
+        let mut lease = self
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let created = private_dir(&self.parent)?;
+        if lease.is_none() {
+            *lease = Some(managed::Lease::acquire(&self.parent)?);
+        }
+        let held = lease.as_ref().expect("lease acquired");
+        held.validate(&self.parent)?;
         self.check_identity(true)?;
+        if created && let Some(format) = &self.managed {
+            format.write(held.fd())?;
+        }
         private_dir(&dir)?;
         ensure_layout(&dir)?;
         Ok(dir)
@@ -347,7 +381,20 @@ impl ScratchRoot {
 
     fn owned_parent(&self) -> io::Result<bool> {
         match fs::symlink_metadata(&self.parent) {
-            Ok(meta) if is_private(&meta) => self.check_identity(false),
+            Ok(meta) if is_private(&meta) => {
+                let mut lease = self
+                    .lease
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if lease.is_none() {
+                    *lease = Some(managed::Lease::acquire(&self.parent)?);
+                }
+                lease
+                    .as_ref()
+                    .expect("lease acquired")
+                    .validate(&self.parent)?;
+                self.check_identity(false)
+            }
             Ok(_) => Err(not_private()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
@@ -432,18 +479,29 @@ impl Drop for ScratchRoot {
 pub(super) struct Scratch {
     path: PathBuf,
     identity: cleanup::Identity,
+    _lease: managed::Lease,
 }
 
 impl Scratch {
     pub(super) fn new() -> io::Result<Self> {
+        Self::new_in(Path::new("/var/tmp"))
+    }
+
+    fn new_in(base: &Path) -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("evo-")
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/var/tmp")?;
+            .tempdir_in(base)?;
+        let lease = managed::Lease::acquire(directory.path())?;
+        managed::Format::new(managed::Kind::Standalone, None).write(lease.fd())?;
         ensure_layout(directory.path())?;
         let identity = cleanup::created_identity(directory.path())?;
         let path = directory.keep();
-        Ok(Self { path, identity })
+        Ok(Self {
+            path,
+            identity,
+            _lease: lease,
+        })
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -478,14 +536,14 @@ pub(super) fn ensure_layout(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn private_dir(path: &Path) -> io::Result<()> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+fn private_dir(path: &Path) -> io::Result<bool> {
+    let created = match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(error),
-    }
+    };
     if is_private(&fs::symlink_metadata(path)?) {
-        Ok(())
+        Ok(created)
     } else {
         Err(not_private())
     }

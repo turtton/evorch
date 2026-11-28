@@ -2286,7 +2286,9 @@ impl AgentRuntime {
         entry.config = task.config.clone();
         let config = entry.config.clone();
         let mailbox = Arc::clone(&entry.mailbox);
-        self.bind_approval_owner(run_id, &config, &entry.execution);
+        let thread =
+            self.registration_thread_context(run_id, parent, &lock_runs(&self.shared.runs));
+        self.bind_approval_owner(run_id, &config, &entry.execution, thread);
         self.shared
             .review_runs
             .lock()
@@ -4006,8 +4008,9 @@ impl AgentRuntime {
         run: RunId,
         config: &RunConfig,
         execution: &Arc<ExecutionControl>,
+        thread: Option<crate::thread_context::TrustedThreadContext>,
     ) {
-        let thread = config.ownership.as_ref().map(|p| p.thread_id.clone());
+        let thread = thread.map(|context| context.thread_id().to_owned());
         sandbox::approval::ApprovalRegistry::for_bus(&self.shared.bus).bind_run(
             &run.to_string(),
             thread,

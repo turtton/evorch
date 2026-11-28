@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use storage::eval_sample::EvalSample;
 
+use crate::changes::Changes;
 use crate::checks::{self, Grading};
 use crate::conversation::Entry;
 use crate::cost::{Cost, PriceTable, RequestUsage, Tokens};
@@ -25,12 +26,14 @@ use crate::judge::{
     self, AspectResult, Judge, Judged, Order, Preferred, ProcessAnalysis, Verdicts,
 };
 use crate::metrics::{self, RunMetrics, RunRecord};
-use crate::output::{self, BindingSummary, Manifest, Outcome};
+use crate::output::{self, BaseContextSummary, BindingSummary, Manifest, Outcome};
 use crate::roles::{self, SwappedRole};
 use crate::runner::{self, BASELINE, CANDIDATE, EvalError, ModelFactory};
 use crate::verify::Verification;
 
+mod breakdown;
 mod checks_only;
+pub use breakdown::{Breakdown, ComparisonValidity, CostLine, Pending, PendingKind};
 pub use checks_only::{Basis, ChecksReport, RunChecks, checks_only_pinned};
 
 const BUS_CAPACITY: usize = 4_096;
@@ -132,7 +135,12 @@ pub struct AspectTally {
     pub aspect: String,
     pub candidate_wins: u32,
     pub baseline_wins: u32,
+    /// Pairs in which both orders answered tie: the replays are alike here.
     pub ties: u32,
+    /// Pairs in which the orders named different winners: no result, which a
+    /// tie both orders gave is not.
+    #[serde(default)]
+    pub order_disagreements: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +153,8 @@ pub enum WarningKind {
     PrepareFailed,
     JudgingFailed,
     NoPriceCatalog,
+    /// The comparison cannot be read as a result yet: see its validity.
+    ComparisonPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,18 +183,28 @@ pub struct Report {
     pub configurations: Vec<String>,
     pub candidate_overlay: Option<String>,
     pub swapped_roles: Vec<SwappedRole>,
+    /// Everything the candidate changes, binding differences included.
+    #[serde(default)]
+    pub changes: Changes,
     pub repeat: u32,
     pub budget: EvalBudgetConfig,
     pub simulator: BindingSummary,
     pub judge: BindingSummary,
     pub prices: PriceSource,
     pub runs: Vec<RunSummary>,
+    /// Replays started and not ended (`label-index`): they have no summary, and
+    /// their cost is unknown. Replays never started are not here.
+    #[serde(default)]
+    pub unfinished: Vec<String>,
     pub costs: Vec<ConfigurationCost>,
     pub overhead: Overhead,
     pub pairs: Vec<PairReport>,
     /// Pairwise winners per aspect over all pairs; never a single ranking.
     pub tally: Vec<AspectTally>,
     pub warnings: Vec<Warning>,
+    /// The comparison split by measure, with its validity.
+    #[serde(default)]
+    pub breakdown: Breakdown,
     pub generated_at: String,
 }
 
@@ -362,6 +382,11 @@ struct LoadedRun {
     conversation: Vec<Entry>,
     diff: String,
     record: RunRecord,
+    /// The replay's initial context, as its runtime recorded it.
+    base_context: Option<BaseContextSummary>,
+    /// The replay left no database: its empty record stands for evidence that
+    /// could not be read.
+    evidence_missing: bool,
 }
 
 fn load_run(
@@ -387,7 +412,14 @@ fn load_run(
         status: outcome.status,
         reason: outcome.reason.clone(),
         metrics: RunMetrics::of(&record, &outcome),
-        cost: table.cost(record.agent_requests()),
+        cost: {
+            let mut cost = table.cost(record.agent_requests());
+            if evidence_missing {
+                cost.unrecorded
+                    .push(format!("{}-{}", entry.label, entry.index));
+            }
+            cost
+        },
         verification: outcome.verification.clone(),
         external_dependencies: metrics::external_dependencies(&record, &outcome),
         pushed_refs: outcome.pushed_refs.len(),
@@ -395,11 +427,17 @@ fn load_run(
             .filter(|sample| !sample.checks.is_empty())
             .map(|sample| grade_run(sample, &record, outcome.status, evidence_missing)),
     };
+    let base_context = run_dir
+        .read(output::BASE_CONTEXT_FILE)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     Ok(LoadedRun {
         summary,
         conversation,
         diff,
         record,
+        base_context,
+        evidence_missing,
     })
 }
 
@@ -481,6 +519,7 @@ async fn report_dir(
         .map_err(|error| EvalError::Usage(format!("not an evaluation directory: {error}")))?;
     let mut runs = Vec::new();
     let mut warnings = Vec::new();
+    let mut preflight_failure = None;
     if dir.is_regular_file(runner::preflight::REPORT_FILE)?
         && let Some(reason) =
             read_json_in::<runner::preflight::Report>(dir, runner::preflight::REPORT_FILE)
@@ -494,7 +533,13 @@ async fn report_dir(
                 runner::preflight::REPORT_FILE,
             ),
         });
+        preflight_failure = Some(reason);
     }
+    let unfinished: Vec<&output::RunEntry> = manifest
+        .runs
+        .iter()
+        .filter(|entry| entry.status.is_none())
+        .collect();
     for entry in &manifest.runs {
         if entry.status.is_none() {
             continue;
@@ -513,13 +558,27 @@ async fn report_dir(
         .collect();
     overhead.user_simulation = Usage {
         tokens: Tokens::of(simulated.iter().copied()),
-        cost: context.table.cost(simulated.iter().copied()),
+        cost: {
+            let mut cost = context.table.cost(simulated.iter().copied());
+            cost.unfinished.extend(
+                unfinished
+                    .iter()
+                    .map(|entry| format!("{}-{}", entry.label, entry.index)),
+            );
+            cost.unrecorded.extend(
+                runs.iter()
+                    .filter(|run| run.evidence_missing)
+                    .map(|run| run.summary.name()),
+            );
+            cost
+        },
     };
     let find = |label: &str, index: u32| {
         runs.iter()
             .find(|run| run.summary.label == label && run.summary.index == index)
     };
     let aspects = judge::aspects(manifest.problem.is_some());
+    let changes = manifest_changes(&manifest);
     let mut judging = Vec::new();
     let mut pairs = Vec::new();
     for index in 1..=manifest.repeat {
@@ -527,8 +586,25 @@ async fn report_dir(
         else {
             continue;
         };
+        let effect = breakdown::effect_of(
+            &changes,
+            manifest
+                .runs
+                .iter()
+                .find(|entry| entry.label == CANDIDATE && entry.index == index),
+        );
         let pair = judge_pair(
-            context, dir, &manifest, &aspects, index, baseline, candidate,
+            context,
+            dir,
+            &Pair {
+                manifest: &manifest,
+                changes: &changes,
+                aspects: &aspects,
+                index,
+                effect: &effect,
+            },
+            baseline,
+            candidate,
         )
         .await;
         judging.extend(pair.usage);
@@ -538,7 +614,7 @@ async fn report_dir(
         tokens: Tokens::of(&judging),
         cost: context.table.cost(&judging),
     };
-    let tally = aspects
+    let tally: Vec<AspectTally> = aspects
         .iter()
         .map(|aspect| {
             let mut tally = AspectTally {
@@ -550,10 +626,13 @@ async fn report_dir(
                 .flat_map(|pair| &pair.verdicts)
                 .filter(|result| result.aspect == *aspect)
             {
-                match result.winner {
-                    Preferred::Candidate => tally.candidate_wins += 1,
-                    Preferred::Baseline => tally.baseline_wins += 1,
-                    Preferred::Tie => tally.ties += 1,
+                match (result.winner, result.basis) {
+                    (Preferred::Candidate, _) => tally.candidate_wins += 1,
+                    (Preferred::Baseline, _) => tally.baseline_wins += 1,
+                    (Preferred::Tie, judge::Basis::OrderDisagreement) => {
+                        tally.order_disagreements += 1;
+                    }
+                    (Preferred::Tie, _) => tally.ties += 1,
                 }
             }
             tally
@@ -569,6 +648,12 @@ async fn report_dir(
                 cost.add(&run.summary.cost);
                 count += 1;
             }
+            cost.unfinished.extend(
+                unfinished
+                    .iter()
+                    .filter(|entry| &entry.label == label)
+                    .map(|entry| format!("{}-{}", entry.label, entry.index)),
+            );
             ConfigurationCost {
                 label: label.clone(),
                 runs: count,
@@ -586,7 +671,7 @@ async fn report_dir(
         });
     }
     if manifest.candidate_overlay.is_some()
-        && let Some(message) = self_preference(context, &manifest.swapped_roles)
+        && let Some(message) = self_preference(context, &manifest.swapped_roles, &changes)
     {
         warnings.push(Warning {
             kind: WarningKind::SelfPreference,
@@ -631,6 +716,28 @@ async fn report_dir(
         }
     }
 
+    let breakdown = breakdown::build(&breakdown::Inputs {
+        changes: &changes,
+        configurations: &manifest.configurations,
+        repeat: manifest.repeat,
+        preflight_failure: preflight_failure.as_deref(),
+        runs: &runs,
+        entries: &manifest.runs,
+        costs: &costs,
+        overhead: &overhead,
+        pairs: &pairs,
+        tally: &tally,
+    });
+    if !breakdown.validity.valid {
+        warnings.push(Warning {
+            kind: WarningKind::ComparisonPending,
+            message: format!(
+                "judgment pending: {} reason(s) hold the comparison back from being read as a result (see Validity)",
+                breakdown.validity.pending.len()
+            ),
+        });
+    }
+
     Ok(Report {
         thread_id: manifest.thread_id.clone(),
         problem: manifest.problem.clone(),
@@ -648,6 +755,7 @@ async fn report_dir(
         configurations: manifest.configurations.clone(),
         candidate_overlay: manifest.candidate_overlay.clone(),
         swapped_roles: manifest.swapped_roles.clone(),
+        changes,
         repeat: manifest.repeat,
         budget: manifest.budget.clone(),
         simulator: manifest.simulator.clone(),
@@ -660,14 +768,35 @@ async fn report_dir(
             note: "models.dev with the configuration's price overrides; recorded costs are ignored"
                 .into(),
         },
+        unfinished: unfinished
+            .iter()
+            .map(|entry| format!("{}-{}", entry.label, entry.index))
+            .collect(),
         runs: runs.into_iter().map(|run| run.summary).collect(),
         costs,
         overhead,
         pairs,
         tally,
         warnings,
+        breakdown,
         generated_at: output::timestamp(SystemTime::now()),
     })
+}
+
+/// What the manifest says the candidate changes, with its role binding
+/// differences folded in, so an evaluation whose manifest recorded only
+/// `swapped_roles` is still described by the roles it swapped.
+fn manifest_changes(manifest: &Manifest) -> Changes {
+    let mut changes = manifest.changes.clone();
+    for role in &manifest.swapped_roles {
+        for list in [&mut changes.bindings, &mut changes.affected_roles] {
+            if !list.contains(&role.role) {
+                list.push(role.role.clone());
+                list.sort();
+            }
+        }
+    }
+    changes
 }
 
 /// The grading of a replay's record against the sample's checks, which also
@@ -750,6 +879,18 @@ pub(crate) fn incomplete_reason(cost: &Cost) -> String {
     if !cost.unreported.is_empty() {
         reasons.push(format!("no reported usage for {}", unreported_list(cost)));
     }
+    if !cost.unfinished.is_empty() {
+        reasons.push(format!(
+            "no recorded end, so an unknown cost, for {}",
+            cost.unfinished.join(", ")
+        ));
+    }
+    if !cost.unrecorded.is_empty() {
+        reasons.push(format!(
+            "no usage record for {}",
+            cost.unrecorded.join(", ")
+        ));
+    }
     reasons.join("; ")
 }
 
@@ -776,14 +917,20 @@ fn model_list(models: &[crate::cost::Unpriced]) -> String {
         .join(", ")
 }
 
-/// A warning when the judge's model line is one the swapped roles use on either side.
-fn self_preference(context: &Context<'_>, swapped: &[SwappedRole]) -> Option<String> {
+/// A warning when the judge's model line is one the changes involve: the models
+/// the swapped roles use on either side, and the models whose tool descriptions
+/// the candidate changes.
+fn self_preference(
+    context: &Context<'_>,
+    swapped: &[SwappedRole],
+    changes: &Changes,
+) -> Option<String> {
     let catalog = context.table.catalog();
     let line =
         |model: &roles::ModelRef| roles::family_line(&roles::family(model, catalog)).to_owned();
     let judge_models = roles::role_models(&context.judge_config, "orchestrator");
     let judge_lines: BTreeSet<String> = judge_models.iter().map(line).collect();
-    let shared: BTreeSet<String> = swapped
+    let mut shared: BTreeSet<String> = swapped
         .iter()
         .flat_map(|role| {
             role.baseline
@@ -793,9 +940,29 @@ fn self_preference(context: &Context<'_>, swapped: &[SwappedRole]) -> Option<Str
                 .map(|model| format!("{} uses {} ({})", role.role, model.model, line(model)))
         })
         .collect();
+    for change in &changes.tool_descriptions {
+        let model = roles::ModelRef {
+            profile: change.profile.clone(),
+            provider_type: context
+                .judge_config
+                .providers
+                .get(&change.profile)
+                .map(|profile| profile.provider_type),
+            model: change.route_model_id.clone(),
+        };
+        if judge_lines.contains(&line(&model)) {
+            shared.insert(format!(
+                "the description of `{}` is changed for {} ({}), used by {}",
+                change.tool,
+                model.model,
+                line(&model),
+                changes.affected_roles.join(", ")
+            ));
+        }
+    }
     (!shared.is_empty()).then(|| {
         format!(
-            "the judge ({}) shares a model family with the swapped roles: {}",
+            "the judge ({}) shares a model family with what the candidate changes: {}",
             judge_models
                 .iter()
                 .map(|model| model.model.as_str())
@@ -810,6 +977,10 @@ fn self_preference(context: &Context<'_>, swapped: &[SwappedRole]) -> Option<Str
 struct Cached<T> {
     baseline: String,
     candidate: String,
+    /// [`judge::compare_identity`] or [`judge::analysis_identity`]: what the
+    /// judge was asked and told. A judgment made under another is not reused.
+    #[serde(default)]
+    identity: String,
     result: T,
     usage: Vec<RequestUsage>,
     judged_at: String,
@@ -820,39 +991,68 @@ struct JudgedPair {
     usage: Vec<RequestUsage>,
 }
 
+/// What judging one baseline–candidate pair is asked about.
+struct Pair<'a> {
+    manifest: &'a Manifest,
+    changes: &'a Changes,
+    aspects: &'a [&'a str],
+    index: u32,
+    /// What the candidate replay really used of the description changes.
+    effect: &'a breakdown::RunEffect,
+}
+
 async fn judge_pair(
     context: &mut Context<'_>,
     dir: &output::PinnedDir,
-    manifest: &Manifest,
-    aspects: &[&str],
-    index: u32,
+    pair: &Pair<'_>,
     baseline: &LoadedRun,
     candidate: &LoadedRun,
 ) -> JudgedPair {
+    let Pair {
+        manifest,
+        changes,
+        aspects,
+        index,
+        effect,
+    } = *pair;
     let names = (baseline.summary.name(), candidate.summary.name());
     let mut usage = Vec::new();
     let mut errors = Vec::new();
     let mut orders: BTreeMap<&str, Verdicts> = BTreeMap::new();
+    // A description that no run of the candidate froze makes no role's output
+    // the effect of the change, so only the runs that used it are the focus.
+    let applied = (!changes.tool_descriptions.is_empty()).then_some(&effect.applied_runs);
+    let baseline_focus = Focus {
+        roles: &changes.affected_roles,
+        bindings: &changes.bindings,
+        applied: None,
+    };
+    let candidate_focus = Focus {
+        applied,
+        ..baseline_focus
+    };
+    let sample = manifest.sample.as_ref().map(|pinned| pinned.hash.as_str());
+    let compare_identity = judge::compare_identity(aspects, changes, sample);
     for order in [Order::BaselineFirst, Order::CandidateFirst] {
         let file = format!("pair-{index}-{}.json", order.as_str());
         let valid =
             |verdicts: &Verdicts| aspects.iter().all(|aspect| verdicts.contains_key(*aspect));
-        let (first, second) = match order {
-            Order::BaselineFirst => (baseline, candidate),
-            Order::CandidateFirst => (candidate, baseline),
+        let ((first, first_focus), (second, second_focus)) = match order {
+            Order::BaselineFirst => ((baseline, &baseline_focus), (candidate, &candidate_focus)),
+            Order::CandidateFirst => ((candidate, &candidate_focus), (baseline, &baseline_focus)),
         };
-        let swapped = &manifest.swapped_roles;
         let payload = serde_json::json!({
             "original_user_messages": manifest.original_turns,
             "problem": manifest.problem,
-            "A": side(first, swapped),
-            "B": side(second, swapped),
+            "changes": judge::comparison_changes(changes, order),
+            "A": side(first, first_focus),
+            "B": side(second, second_focus),
         });
         match cached_or_judge(
             context,
             &manifest.thread_id,
             (dir, &file),
-            &names,
+            (&names, &compare_identity),
             valid,
             async |judge: Judge| judge.compare(&payload, aspects).await,
         )
@@ -875,22 +1075,33 @@ async fn judge_pair(
         (Some(first), Some(second)) => judge::aggregate(first, second, aspects),
         _ => Vec::new(),
     };
-    let swapped: Vec<&str> = manifest
-        .swapped_roles
-        .iter()
-        .map(|role| role.role.as_str())
-        .collect();
     let payload = serde_json::json!({
         "problem": manifest.problem,
-        "swapped_roles": swapped,
-        "baseline": process_side(baseline, &manifest.swapped_roles),
-        "candidate": process_side(candidate, &manifest.swapped_roles),
+        "changes": changes,
+        "affected_roles": changes.affected_roles,
+        "applied": {
+            "recorded": effect.observed,
+            "descriptions": changes
+                .tool_descriptions
+                .iter()
+                .zip(&effect.applied)
+                .map(|(change, applied)| serde_json::json!({
+                    "tool": change.tool,
+                    "profile": change.profile,
+                    "model": change.route_model_id,
+                    "used_by_the_candidate": applied,
+                }))
+                .collect::<Vec<_>>(),
+            "model_fallbacks": effect.fallbacks,
+        },
+        "baseline": process_side(baseline, &baseline_focus),
+        "candidate": process_side(candidate, &candidate_focus),
     });
     let process = cached_or_judge(
         context,
         &manifest.thread_id,
         (dir, &format!("pair-{index}-process.json")),
-        &names,
+        (&names, &judge::analysis_identity(changes, sample)),
         |_: &ProcessAnalysis| true,
         async |judge: Judge| judge.analyze(&payload).await,
     )
@@ -926,7 +1137,7 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
     context: &mut Context<'_>,
     thread: &str,
     (dir, file): (&output::PinnedDir, &str),
-    names: &(String, String),
+    (names, identity): (&(String, String), &str),
     valid: impl Fn(&T) -> bool,
     ask: impl AsyncFnOnce(Judge) -> Judged<T>,
 ) -> Spent<T> {
@@ -934,6 +1145,7 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
         && let Ok(judgments) = dir.open_dir(output::JUDGMENTS_DIR)
         && let Ok(cached) = read_json_in::<Cached<T>>(&judgments, file)
         && (&cached.baseline, &cached.candidate) == (&names.0, &names.1)
+        && cached.identity == identity
         && valid(&cached.result)
     {
         return Ok((cached.result, cached.usage));
@@ -950,6 +1162,7 @@ async fn cached_or_judge<T: Serialize + DeserializeOwned>(
     let cached = Cached {
         baseline: names.0.clone(),
         candidate: names.1.clone(),
+        identity: identity.to_owned(),
         result,
         usage: judged.usage,
         judged_at: output::timestamp(SystemTime::now()),
@@ -1039,26 +1252,54 @@ pub(crate) fn compact_metrics(metrics: &RunMetrics) -> serde_json::Value {
 
 pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
     serde_json::json!({
-        "usd": cost.usd,
+        // Null when any part is unknown: the priced part alone is not the cost.
+        "usd": cost.is_complete().then_some(cost.usd),
+        "priced_usd": cost.usd,
         "api_equivalent": cost.is_api_equivalent(),
         "complete": cost.is_complete(),
         "unpriced_models": unpriced_list(cost),
         "unreported_models": unreported_list(cost),
+        "unrecorded_replays": cost.unrecorded,
+        "unfinished_replays": cost.unfinished,
     })
 }
 
+/// The delegated runs a change is read from: the runs of the roles it can
+/// reach, and, when a tool description changed, only those that really used it.
+#[derive(Clone, Copy)]
+struct Focus<'a> {
+    /// Addresses of the roles the differences can reach.
+    roles: &'a [String],
+    /// Addresses of the roles whose binding differs, which need no description.
+    bindings: &'a [String],
+    /// The runs that used a changed description, when one is changed and this
+    /// side is the one that carries it.
+    applied: Option<&'a BTreeSet<String>>,
+}
+
+impl Focus<'_> {
+    fn contains(&self, role: &str, run_id: &str) -> bool {
+        let Some(address) = roles::address(role) else {
+            return false;
+        };
+        self.roles.iter().any(|reached| reached == address)
+            && self.applied.is_none_or(|applied| {
+                applied.contains(run_id) || self.bindings.iter().any(|bound| bound == address)
+            })
+    }
+}
+
 /// The final output of the delegated runs, apart from the root's conversation.
-/// Runs of a swapped (focus) role come first with a longer excerpt, so a swapped
-/// child role is judged on what it returned. Later runs win when over the cap.
-fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_json::Value> {
-    let is_focus = |role: &str| {
-        roles::address(role).is_some_and(|address| swapped.iter().any(|s| s.role == address))
-    };
+/// Runs the changes reach (the focus) come first with a longer excerpt, so a
+/// changed child role is judged on what it returned. Later runs win when over the cap.
+fn delegated_outputs(record: &RunRecord, focus: &Focus<'_>) -> Vec<serde_json::Value> {
     let children = metrics::child_outputs(record);
-    let (focus, other): (Vec<_>, Vec<_>) = children.iter().partition(|child| is_focus(&child.role));
+    let (focused, other): (Vec<_>, Vec<_>) = children
+        .iter()
+        .partition(|child| focus.contains(&child.role, &child.run_id));
     let mut entries = Vec::new();
-    for (children, max, chars, focused) in [
-        (focus, DELEGATED_FOCUS_MAX, FOCUS_OUTPUT_CHARS, true),
+    for (children, max, chars, is_focus) in [
+        (focused, DELEGATED_FOCUS_MAX, FOCUS_OUTPUT_CHARS, true),
         (other, DELEGATED_OTHER_MAX, OTHER_OUTPUT_CHARS, false),
     ] {
         let omitted = children.len().saturating_sub(max);
@@ -1067,7 +1308,7 @@ fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_j
                 "run_id": child.run_id,
                 "role": child.role,
                 "delegated_by": child.parent_role,
-                "focus": focused,
+                "focus": is_focus,
                 "phase": child.phase.map(|phase| format!("{phase:?}")),
                 "final_output": child.final_output.as_deref().map(|text| clip(text, chars)),
             })
@@ -1075,7 +1316,7 @@ fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_j
         if omitted > 0 {
             entries.push(serde_json::json!({
                 "kind": "omitted",
-                "focus": focused,
+                "focus": is_focus,
                 "runs": omitted,
             }));
         }
@@ -1083,7 +1324,32 @@ fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_j
     entries
 }
 
-fn side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
+/// What the sample's machine checks found in a replay, for the judge: the
+/// condition and the result of each, and whether the replay's record is a
+/// complete account. Nothing in it names the configuration, so it can sit under
+/// either position of a comparison. `null` when the thread declares no checks.
+fn checks_view(run: &LoadedRun) -> serde_json::Value {
+    let Some(grading) = &run.summary.checks else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "quality": grading.quality().label(),
+        "replay_record_complete": grading.validity.valid,
+        "replay_record_issues": grading.validity.issues,
+        "results": grading
+            .results
+            .iter()
+            .map(|result| serde_json::json!({
+                "check": result.description,
+                "verdict": result.verdict,
+                "observed": result.observed,
+                "reason": result.reason,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn side(run: &LoadedRun, focus: &Focus<'_>) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
@@ -1093,33 +1359,38 @@ fn side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
             CONVERSATION_TAIL,
             ENTRY_CHARS,
         ),
-        "delegated_outputs": delegated_outputs(&run.record, swapped),
+        "delegated_outputs": delegated_outputs(&run.record, focus),
         "diff": bounded_diff(&run.diff),
         "verification": run.summary.verification,
+        "checks": checks_view(run),
         "metrics": compact_metrics(&run.summary.metrics),
         "cost": cost_value(&run.summary.cost),
     })
 }
 
-fn process_side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
+fn process_side(run: &LoadedRun, focus: &Focus<'_>) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
         "metrics": compact_metrics(&run.summary.metrics),
-        "delegated_outputs": delegated_outputs(&run.record, swapped),
+        "checks": checks_view(run),
+        "delegated_outputs": delegated_outputs(&run.record, focus),
         "timeline": metrics::timeline(&run.record),
     })
 }
 
+/// A cost as text: the amount when every part of it is known, and otherwise
+/// `unknown` with the priced part, which is a lower bound and not the cost.
 pub(crate) fn usd(cost: &Cost) -> String {
-    let mut text = format!("${:.4}", cost.usd);
+    let mut amount = format!("${:.4}", cost.usd);
     if cost.is_api_equivalent() {
-        text.push_str(" (API-equivalent)");
+        amount.push_str(" (API-equivalent)");
     }
-    if !cost.is_complete() {
-        text.push_str(" (cost incomplete)");
+    if cost.is_complete() {
+        amount
+    } else {
+        format!("unknown (priced part {amount})")
     }
-    text
 }
 
 fn status_name(status: Status) -> String {
@@ -1175,6 +1446,16 @@ pub fn markdown(report: &Report) -> String {
             models(&role.candidate)
         ));
     }
+    for change in &report.changes.tool_descriptions {
+        out.push_str(&format!(
+            "- Tool description `{}` for {}/{} (the model is unchanged): {} → {}\n",
+            change.tool,
+            change.profile,
+            change.route_model_id,
+            change.baseline_hash.chars().take(12).collect::<String>(),
+            change.candidate_hash.chars().take(12).collect::<String>()
+        ));
+    }
     let budget = &report.budget;
     out.push_str(&format!(
         "- Budget per run: {} user turns, {} tokens, {} tool calls, {} s\n",
@@ -1226,6 +1507,11 @@ pub fn markdown(report: &Report) -> String {
             verification
         ));
     }
+    for name in &report.unfinished {
+        out.push_str(&format!(
+            "| {name} | not finished | - | - | - | - | - | - | - | - | unknown (no recorded end) | - |\n"
+        ));
+    }
     out.push_str("\n| run | status reason |\n|---|---|\n");
     for run in &report.runs {
         out.push_str(&format!("| {} | {} |\n", run.name(), cell(&run.reason)));
@@ -1254,13 +1540,18 @@ pub fn markdown(report: &Report) -> String {
         usd(&report.overhead.user_simulation.cost),
         usd(&report.overhead.judging.cost)
     ));
+    out.push_str(&breakdown::markdown(&report.breakdown));
 
     if !report.pairs.is_empty() {
-        out.push_str("\n## Pairwise verdicts\n\nCandidate wins / baseline wins / ties per aspect. Each pair is judged in both orders; disagreeing orders count as a tie.\n\n| aspect | candidate | baseline | tie |\n|---|---|---|---|\n");
+        out.push_str("\n## Pairwise verdicts\n\nCandidate wins / baseline wins per aspect, ties both orders gave, and pairs in which the orders disagreed (no result). Each pair is judged in both orders.\n\n| aspect | candidate | baseline | tie | orders disagreed |\n|---|---|---|---|---|\n");
         for tally in &report.tally {
             out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                tally.aspect, tally.candidate_wins, tally.baseline_wins, tally.ties
+                "| {} | {} | {} | {} | {} |\n",
+                tally.aspect,
+                tally.candidate_wins,
+                tally.baseline_wins,
+                tally.ties,
+                tally.order_disagreements
             ));
         }
         for pair in &report.pairs {
@@ -1273,20 +1564,25 @@ pub fn markdown(report: &Report) -> String {
             }
             for result in &pair.verdicts {
                 out.push_str(&format!(
-                    "- **{}**: {} — baseline first: {}; candidate first: {}\n",
+                    "- **{}**: {}{} — baseline first: {}; candidate first: {}\n",
                     result.aspect,
                     winner_name(result.winner),
+                    match result.basis {
+                        judge::Basis::Agreed => "",
+                        judge::Basis::BothTie => " (tie in both orders)",
+                        judge::Basis::OrderDisagreement => " (orders disagreed: no result)",
+                    },
                     result.baseline_first.reason,
                     result.candidate_first.reason
                 ));
             }
             if let Some(process) = &pair.process {
                 out.push_str(&format!(
-                    "\nProcess analysis:\n\n- Time and tokens: {}\n- Detours: {}\n- Delegation: {}\n- Swapped roles: {}\n- Difference: {}\n",
+                    "\nProcess analysis:\n\n- Time and tokens: {}\n- Detours: {}\n- Delegation: {}\n- Affected roles: {}\n- Difference: {}\n",
                     process.time_and_tokens,
                     process.detours,
                     process.delegation,
-                    process.swapped_roles,
+                    process.affected_roles,
                     process.difference
                 ));
             }
@@ -1305,13 +1601,14 @@ pub fn markdown(report: &Report) -> String {
     out
 }
 
-/// Per-thread win/loss/tie counts per aspect, from the candidate's side, and
+/// Per-thread win/loss/tie counts per aspect, from the candidate's side (the
+/// last count is the pairs in which the judge's two orders disagreed), and
 /// per-thread cost. Threads are listed side by side, never ranked overall.
 pub fn cross_thread_table(reports: &[Report]) -> String {
     let aspects: Vec<&str> = judge::aspects(reports.iter().any(|report| report.problem.is_some()));
     let mut out = String::from("| thread |");
     for aspect in &aspects {
-        out.push_str(&format!(" {aspect} W/L/T |"));
+        out.push_str(&format!(" {aspect} W/L/T/D |"));
     }
     out.push_str(" baseline cost | candidate cost |\n|---|");
     out.push_str(&"---|".repeat(aspects.len() + 2));
@@ -1321,8 +1618,11 @@ pub fn cross_thread_table(reports: &[Report]) -> String {
         for aspect in &aspects {
             match report.tally.iter().find(|tally| tally.aspect == *aspect) {
                 Some(tally) if !report.pairs.is_empty() => out.push_str(&format!(
-                    " {}/{}/{} |",
-                    tally.candidate_wins, tally.baseline_wins, tally.ties
+                    " {}/{}/{}/{} |",
+                    tally.candidate_wins,
+                    tally.baseline_wins,
+                    tally.ties,
+                    tally.order_disagreements
                 )),
                 _ => out.push_str(" - |"),
             }

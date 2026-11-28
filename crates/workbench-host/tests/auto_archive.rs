@@ -752,3 +752,69 @@ mod c0_measure {
         measure(5000)
     }
 }
+
+fn install_deleted_thread(w: &World, host: &Arc<Mutex<CommandHost>>) {
+    w.sql().execute("INSERT INTO thread_tombstones(thread_id,family_key,deleted_at_ns) VALUES('thread','thread',1)", []).unwrap();
+    w.runtime(host)
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
+            storage::thread_retention::TombstoneSet {
+                threads: std::collections::HashSet::from(["thread".into()]),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+}
+#[test]
+fn retention_deleted_scratch_hint_survives_sidebar_prune_disabled_deletion_and_attachment_failure()
+{
+    let w = World::new(1);
+    live!(w, leases, storage, host, a, c);
+    install_deleted_thread(&w, &host);
+    c = c.with_delete_policy(storage::thread_retention::ThreadRetentionPolicy {
+        archived_delete_after_days: 0,
+        ..Default::default()
+    });
+    let attachments = sandbox::attachments::AttachmentRoot::at(w.dir.path().join("attachments"));
+    let busy = attachments.lock_thread("thread").unwrap();
+    c.tick(&host, Some(&a), 1); // first turn is the ordinary archive turn
+    w.scratch_hints.lock().unwrap().clear();
+    let report = c.tick(&host, Some(&a), 1);
+    assert_eq!(report.holds.get("DeletionDisabled"), Some(&1), "{report:?}");
+    assert_eq!(
+        report.holds.get("DeletedAttachmentCleanupPending"),
+        Some(&1),
+        "{report:?}"
+    );
+    assert_eq!(report.scratch_hints, 1);
+    assert_eq!(*w.scratch_hints.lock().unwrap(), vec!["thread"]);
+    assert!(w.store.read_unlocked().unwrap().sidebar.threads.is_empty());
+    drop(busy);
+    // The existing cursor wraps and retries even after the sidebar disappeared.
+    for _ in 0..4 {
+        c.tick(&host, Some(&a), 1);
+    }
+    assert_eq!(*w.scratch_hints.lock().unwrap(), vec!["thread", "thread"]);
+}
+#[test]
+fn retention_deleted_scratch_hint_is_not_sent_when_binding_mismatches() {
+    let w = World::new(1);
+    live!(w, leases, storage, host, a, c);
+    install_deleted_thread(&w, &host);
+    c = c.with_delete_policy(storage::thread_retention::ThreadRetentionPolicy {
+        archived_delete_after_days: 0,
+        ..Default::default()
+    });
+    std::fs::write(
+        w.dir
+            .path()
+            .join(runtime::thread_retention::binding::ROOT_BINDING_FILE),
+        br#"{"db_id":"foreign","db_path":"foreign","bound_at_ns":1}"#,
+    )
+    .unwrap();
+    c.tick(&host, Some(&a), 1);
+    w.scratch_hints.lock().unwrap().clear();
+    let report = c.tick(&host, Some(&a), 1);
+    assert_eq!(report.holds.get("BindingMismatch"), Some(&1), "{report:?}");
+    assert_eq!((report.scratch_hints, report.attachment_calls), (0, 0));
+    assert!(w.scratch_hints.lock().unwrap().is_empty());
+}

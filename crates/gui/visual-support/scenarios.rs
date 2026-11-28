@@ -28,8 +28,8 @@ use workbench_protocol::{
             plan::{PlanProgress, PlanSummary},
         },
         settings::{
-            CredentialRef, ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply,
-            SettingsRevision, SettingsSnapshot,
+            CredentialRef, ModelKind, ModelView, ProviderKind, ProviderView, SettingsQuery,
+            SettingsReply, SettingsRevision, SettingsSnapshot,
         },
         workspace::{FamilyView, LineageType, ProjectAccessView, ThreadDetail, TrustLevel},
     },
@@ -70,11 +70,7 @@ pub const SCENARIOS: &[ScenarioSpec] = &[
     },
     ScenarioSpec {
         id: "settings-models",
-        required: &[
-            "Where models come from, with their sign-in and model list",
-            "+ Add OpenAI-compatible",
-            "qwen3-coder",
-        ],
+        required: &["Add", "Refresh credentials", "ACCOUNT", "qwen3-coder"],
     },
 ];
 
@@ -328,6 +324,13 @@ fn provider(
     models: &[&str],
     credential: CredentialRef,
 ) -> ProviderView {
+    let quota = matches!(
+        kind,
+        ProviderKind::OpenaiCodex
+            | ProviderKind::AnthropicSubscription
+            | ProviderKind::Cursor
+            | ProviderKind::KimiSubscription
+    );
     ProviderView {
         name: name.into(),
         kind,
@@ -338,10 +341,56 @@ fn provider(
             .map(|id| ModelView {
                 id: (*id).into(),
                 enabled: true,
+                kind: ModelKind::Chat,
+                context_override: None,
             })
             .collect(),
         excluded_models: vec![],
         default_model: models[0].into(),
+        show_quota: quota,
+        quota_supported: quota,
+    }
+}
+
+/// What the core says of the credentials of the three providers of the settings fixture.
+fn credential_status() -> workbench_protocol::namespaces::auth::AuthStatus {
+    use workbench_protocol::namespaces::auth::{
+        AuthStatus, CredentialSlot, CredentialState, LoginMethod,
+    };
+    let keyring = |account: &str| CredentialRef::Keyring {
+        service: "evorch".into(),
+        account: account.into(),
+    };
+    let signed_in = CredentialState::Present {
+        expires_at_unix: None,
+    };
+    AuthStatus {
+        revision: Revision(1),
+        slots: vec![
+            CredentialSlot {
+                profile: "local".into(),
+                kind: ProviderKind::OpenaiCompatible,
+                storage: CredentialRef::Env {
+                    var: "LOCAL_KEY".into(),
+                },
+                state: CredentialState::Missing,
+                login: None,
+            },
+            CredentialSlot {
+                profile: "codex".into(),
+                kind: ProviderKind::OpenaiCodex,
+                storage: keyring("codex"),
+                state: signed_in,
+                login: Some(LoginMethod::Codex),
+            },
+            CredentialSlot {
+                profile: "claude".into(),
+                kind: ProviderKind::AnthropicSubscription,
+                storage: keyring("claude"),
+                state: signed_in,
+                login: Some(LoginMethod::Claude),
+            },
+        ],
     }
 }
 
@@ -456,6 +505,43 @@ impl Built {
                     unknown.push(action_name(&action));
                     continue;
                 };
+                if let FeatureRequest::Command(workbench_protocol::commands::Command::Auth(
+                    workbench_protocol::namespaces::auth::AuthCommand::RefreshCredentials(refresh),
+                )) = &request
+                {
+                    // The Providers section has the core read the providers again when it opens.
+                    let ready = workbench_protocol::namespaces::auth::AuthOperationView {
+                        operation: workbench_protocol::operation::OperationView {
+                            operation_id: refresh.operation_id.clone(),
+                            state: workbench_protocol::operation::OperationState::Ready,
+                            revision: Revision(1),
+                            result: None,
+                        },
+                        kind:
+                            workbench_protocol::namespaces::auth::AuthOperationKind::RefreshStatus,
+                        profile: None,
+                        message: None,
+                    };
+                    self.shared
+                        .lock()
+                        .map_err(|_| "the shared state is poisoned".to_owned())?
+                        .features
+                        .reply(
+                            feature,
+                            tag,
+                            FeatureReply::Command(Ok(
+                                workbench_protocol::commands::CommandReply::with_result(
+                                    workbench_protocol::commands::CommandResult::Auth(
+                                        workbench_protocol::namespaces::auth::AuthResult::Operation(
+                                            ready,
+                                        ),
+                                    ),
+                                ),
+                            )),
+                        );
+                    answered = true;
+                    continue;
+                }
                 let reply = match (feature, request) {
                     (FeatureId::Workspace, FeatureRequest::Query(Query::Workspace(query))) => {
                         QueryReply::Workspace(answer(&query, self.attention)?)
@@ -468,6 +554,14 @@ impl Built {
                     ) => {
                         QueryReply::Settings(SettingsReply::Settings(Box::new(settings_snapshot())))
                     }
+                    (
+                        _,
+                        FeatureRequest::Query(Query::Auth(
+                            workbench_protocol::namespaces::auth::AuthQuery::GetCredentialStatus {},
+                        )),
+                    ) => QueryReply::Auth(workbench_protocol::namespaces::auth::AuthReply::Status(
+                        credential_status(),
+                    )),
                     (
                         _,
                         FeatureRequest::Query(Query::Settings(SettingsQuery::ModelChoices {

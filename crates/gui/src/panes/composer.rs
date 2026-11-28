@@ -15,7 +15,6 @@ use workspace_ui::ThreadRunPhase;
 #[path = "composer_images.rs"]
 mod images;
 mod selectors;
-pub(crate) use selectors::sandbox_mode;
 
 #[derive(Clone, Copy, Default)]
 pub struct SandboxPickerContext {
@@ -285,8 +284,6 @@ mod tests {
             },
         )
     }
-
-    include!("composer_capture_test.rs");
 
     #[test]
     fn esc_with_completions_visible_dismisses_them_and_emits_no_action() {

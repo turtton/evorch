@@ -47,6 +47,7 @@ const PROVIDER_KEYS: &[&str] = &[
     "excluded_models",
     "default_model",
     "edit_tool",
+    "show_quota",
 ];
 const KEYRING_KEYS: &[&str] = &["type", "service", "account"];
 const MODEL_ENTRY_KEYS: &[&str] = &[

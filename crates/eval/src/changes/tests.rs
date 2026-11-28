@@ -83,18 +83,6 @@ fn a_description_only_candidate_is_recorded_as_a_description_change_not_a_bindin
 }
 
 #[test]
-fn a_description_change_is_refused_until_the_judge_can_be_told_about_it() {
-    // Given: a valid description-only candidate.
-    let baseline = baseline();
-    let candidate = with_description(baseline.clone(), "m", "read", "Read a file, briefly.");
-
-    // When / Then: the comparison is valid, but is not accepted for judging.
-    assert!(derive(&baseline, &candidate, &catalog()).is_ok());
-    let refused = accept(&baseline, &candidate, &catalog()).unwrap_err();
-    assert!(refused.contains("judge"), "{refused}");
-}
-
-#[test]
 fn a_binding_only_candidate_is_accepted_and_names_the_roles_it_swaps() {
     // Given: a candidate that moves the worker to another route.
     let baseline = baseline();
@@ -102,7 +90,7 @@ fn a_binding_only_candidate_is_accepted_and_names_the_roles_it_swaps() {
     candidate.agents.worker.base.models = vec![ChainEntryConfig::route("other")];
 
     // When: it is accepted.
-    let changes = accept(&baseline, &candidate, &catalog()).unwrap();
+    let changes = derive(&baseline, &candidate, &catalog()).unwrap();
 
     // Then: the binding difference is recorded and no description is.
     assert_eq!(changes.bindings, ["worker"]);
@@ -157,6 +145,51 @@ fn a_description_for_a_model_no_role_uses_or_a_tool_it_cannot_see_reaches_nobody
     for candidate in [unused, invisible] {
         let refused = derive(&baseline, &candidate, &catalog()).unwrap_err();
         assert!(refused.contains("reaches no role"), "{refused}");
+    }
+}
+
+/// The baseline, with the edit interface the provider profile `p` gives its models.
+fn with_edit_tool(mut config: Config, edit_tool: config::EditToolConfig) -> Config {
+    config.providers.get_mut("p").unwrap().edit_tool = Some(edit_tool);
+    config
+}
+
+#[test]
+fn a_description_the_models_edit_interface_never_sends_is_refused_before_any_request() {
+    use config::EditToolConfig::{ApplyPatch, Edit};
+
+    // Given: a model that uses apply-patch, so edit and write are not sent to it, and a model
+    // that uses the edit interface, so apply_patch is not.
+    for (edit_tool, tool) in [
+        (ApplyPatch, "write"),
+        (ApplyPatch, "edit"),
+        (Edit, "apply_patch"),
+        (ApplyPatch, "apply_patch"),
+    ] {
+        let baseline = with_edit_tool(baseline(), edit_tool);
+        let candidate = with_description(baseline.clone(), "m", tool, "x");
+
+        // When / Then: the comparison is refused and says why, not as "no role".
+        let refused = derive(&baseline, &candidate, &catalog()).unwrap_err();
+        assert!(
+            refused.contains(&format!("`{tool}`")) && refused.contains("never sent"),
+            "{edit_tool:?} {tool}: {refused}"
+        );
+    }
+}
+
+#[test]
+fn a_description_of_the_tool_the_models_edit_interface_sends_is_accepted() {
+    use config::EditToolConfig::{ApplyPatch, Edit};
+
+    // Given: the edit interface and its own tool, and apply-patch with a tool it keeps.
+    for (edit_tool, tool) in [(Edit, "edit"), (Edit, "write"), (ApplyPatch, "read")] {
+        let baseline = with_edit_tool(baseline(), edit_tool);
+        let candidate = with_description(baseline.clone(), "m", tool, "x");
+
+        // When / Then: the description is a change that reaches the worker.
+        let changes = derive(&baseline, &candidate, &catalog()).unwrap();
+        assert_eq!(changes.affected_roles, ["worker"], "{edit_tool:?} {tool}");
     }
 }
 

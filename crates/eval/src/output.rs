@@ -26,6 +26,8 @@ pub const DATABASE_FILE: &str = "evorch.db";
 pub const DIFF_FILE: &str = "diff.patch";
 pub const CONVERSATION_FILE: &str = "conversation.json";
 pub const OUTCOME_FILE: &str = "outcome.json";
+/// The replay's initial context as its own runtime composed it.
+pub const BASE_CONTEXT_FILE: &str = "base-context.json";
 pub const REPORT_JSON_FILE: &str = "report.json";
 pub const REPORT_MARKDOWN_FILE: &str = "report.md";
 pub const JUDGMENTS_DIR: &str = "judgments";
@@ -139,6 +141,77 @@ pub struct AppliedDescriptions {
     pub hash: String,
     /// The tools the snapshot overrides; empty when it is the empty snapshot.
     pub tools: Vec<String>,
+    /// The fixed tools whose description reached this run's model: listed in the
+    /// run's own persisted record of the tools offered, and carried by its
+    /// model's edit interface and wire. `None` when that cannot be told (no
+    /// record, or its profile is unknown to the arm), in which case nothing
+    /// counts as sent.
+    #[serde(default)]
+    pub offered: Option<Vec<String>>,
+}
+
+/// The size of what a replay's root run starts with before any task text: its
+/// system prompt and its tools, as the replay's own runtime composed them with
+/// the configuration of that side. The tokens are the runtime's estimate
+/// (bytes / 4), not a provider count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseContextSummary {
+    pub role: String,
+    pub category: Option<String>,
+    /// `profile/model` the run starts on.
+    pub selected_model: String,
+    pub system_bytes: u64,
+    pub system_tokens: u64,
+    pub tools_bytes: u64,
+    pub tools_tokens: u64,
+    pub tool_count: usize,
+    /// Each tool's own estimated tokens, so a changed description shows where.
+    pub tools: Vec<ToolSize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSize {
+    pub name: String,
+    pub description_bytes: u64,
+    pub tokens: u64,
+}
+
+impl BaseContextSummary {
+    pub fn total_tokens(&self) -> u64 {
+        self.system_tokens.saturating_add(self.tools_tokens)
+    }
+
+    pub fn of(report: &runtime::base_context::BaseContextReport) -> Self {
+        let size = |text: &str| u64::try_from(text.len()).unwrap_or(u64::MAX);
+        let tools: Vec<ToolSize> = report
+            .tools
+            .iter()
+            .map(|tool| ToolSize {
+                name: tool.name.clone(),
+                description_bytes: size(&tool.description),
+                tokens: tool.estimated_tokens,
+            })
+            .collect();
+        Self {
+            role: report.role.name().to_owned(),
+            category: report.category.clone(),
+            selected_model: report.selected_model.clone(),
+            system_bytes: report
+                .sections
+                .iter()
+                .map(|section| size(&section.text))
+                .sum(),
+            system_tokens: report.section_tokens(),
+            tools_bytes: report
+                .tools
+                .iter()
+                .map(|tool| size(&tool.description) + size(&tool.input_schema.to_string()))
+                .sum(),
+            tools_tokens: report.tool_tokens(),
+            tool_count: tools.len(),
+            tools,
+        }
+    }
 }
 
 /// The sample an evaluation was started for, as it was when the evaluation

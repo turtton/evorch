@@ -80,8 +80,10 @@ pub struct AreaHandles {
     /// The event database file (PR 13, 17d). Opening it is the storage layer's
     /// business: read through `runtime` or write through `storage`.
     pub database: PathBuf,
-    /// The thread owner; the workspace area hints it after an archive is saved.
+    /// Owner validation for operations that still need it during C0.
     pub owner: Arc<runtime::ownership::OwnerHost>,
+    /// The workspace area hints this independent worker after an archive save.
+    pub scratch_archive: Arc<runtime::scratch::archive::ArchiveService>,
     /// The connections of the clients and the hooks to run when one leaves; an
     /// area that starts work for a client registers one (ADR 0045 §10).
     pub connections: Arc<crate::connections::ConnectionHooks>,

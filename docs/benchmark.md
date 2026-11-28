@@ -3,7 +3,8 @@
 The benchmark runner helps choose a model for an evorch role/category using
 recorded delegations from a complete task. It uses the normal agent runtime,
 prompts and tools. It is an opt-in CLI workflow. ADR 0036 plans to replace it
-with re-running recorded threads.
+with re-running recorded threads; for evaluating tool descriptions and prompts
+that way, see [eval-tool-optimization.md](eval-tool-optimization.md).
 
 ## Usage
 

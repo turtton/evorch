@@ -117,7 +117,8 @@ impl AgentRuntime {
             history_only,
             restored.turn.as_ref(),
         );
-        self.bind_approval_owner(run_id, &config, &execution);
+        let thread = self.registration_thread_context(run_id, parent, runs);
+        self.bind_approval_owner(run_id, &config, &execution, thread);
         if !intent_admitted {
             self.admit_intent(
                 run_id,

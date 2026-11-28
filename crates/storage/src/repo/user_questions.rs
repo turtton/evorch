@@ -324,7 +324,7 @@ pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
 }
 
 fn list(conn: &Connection, sql: &str, arg: &str) -> Result<Vec<UserQuestion>, StorageError> {
-    let mut statement = conn.prepare(sql)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let rows = statement.query_map([arg], |row| row.get::<_, String>(0))?;
     rows.map(|s| hydrate(conn, &s?)).collect()
 }
@@ -347,7 +347,7 @@ fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageErro
     }
     // Links, not a stale event/payload projection, are canonical consumer routing.
     // Insertion order retains the continuation path, including across restarts.
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT run_id FROM user_question_links WHERE question_id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY rowid",
     )?;
     question.recipient_run_ids = statement

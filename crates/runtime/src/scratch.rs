@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::agent_loop::LoopState;
 use crate::{AgentContext, AgentRuntime, RunId};
 
+pub mod archive;
 mod conditional_reset;
 pub(crate) mod usage;
 pub(crate) use conditional_reset::GraphDisposalKey;
@@ -174,7 +175,11 @@ impl ThreadScratch {
     pub fn for_ownership_root(ownership_root: &Path) -> io::Result<Self> {
         let canonical = ownership_root.canonicalize()?;
         let digest = hex_digest(canonical.as_os_str().as_bytes());
-        let mut scratch = Self::new(ScratchRoot::fixed(&digest[..8], &digest)?);
+        let mut scratch = Self::new(ScratchRoot::fixed_for_owner(
+            &digest[..8],
+            &digest,
+            &canonical,
+        )?);
         // Attachments use the complete ownership identity, not the scratch
         // parent's short hash (whose collision guard belongs only to scratch).
         scratch.attachments = sandbox::attachments::AttachmentRoot::for_scope(&canonical);

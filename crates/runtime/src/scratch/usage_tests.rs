@@ -215,15 +215,16 @@ async fn shell_teardown_notification_reclaims_after_the_idle_boundary_without_a_
     h.state.scratch = Some(binding);
     h.scratch = scratch;
     let (consulted, mut received) = tokio::sync::mpsc::unbounded_channel();
-    host.set_scratch_archive_checker(Arc::new(move |_| {
+    let archive = runtime_archive(&host);
+    archive.set_checker(Arc::new(move |_| {
         consulted.send(()).unwrap();
         Ok(true)
     }));
     h.terminal(false);
     h.state.start_scratch_monitor();
     h.state.release_scratch_usage();
-    host.hint_scratch_archive("thread");
-    let pass = host.scratch_archive_barrier();
+    archive.hint("thread");
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
@@ -241,7 +242,7 @@ async fn shell_teardown_notification_reclaims_after_the_idle_boundary_without_a_
     // No new hint or input. Only the monitor's teardown notification wakes the
     // pending archive, and the barrier proves that its rename finished.
     received.recv().await.unwrap();
-    let pass = host.scratch_archive_barrier();
+    let pass = archive.barrier();
     tokio::task::spawn_blocking(move || pass.recv().unwrap())
         .await
         .unwrap();
@@ -484,4 +485,12 @@ fn disposal_observation_distinguishes_unused_in_use_and_unknown() {
         DisposalScratchUse::Unknown
     );
     assert!(scratch.archive_snapshot("thread").is_none());
+}
+
+fn runtime_archive(host: &crate::ownership::OwnerHost) -> crate::scratch::archive::ArchiveService {
+    crate::scratch::archive::ArchiveService::new(
+        &host.thread_scratch(),
+        host.scratch_archive_authority(),
+    )
+    .unwrap()
 }

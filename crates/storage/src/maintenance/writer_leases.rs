@@ -68,7 +68,7 @@ impl DbWriterLease {
     /// Direct writers cooperate in shared mode; a core excludes them.
     pub(crate) fn shared(path: &Path) -> Result<Self, StorageError> {
         let lock = open(&sibling_path(path, ".writer-lock")?)?;
-        lock.try_lock_shared().map_err(|error| invalid(format!("DB writer lease unavailable; a core is running. Connect the GUI to that core instead of --legacy-embedded: {error}")))?;
+        lock.try_lock_shared().map_err(|error| invalid(format!("DB writer lease unavailable; a core is running. Connect the GUI or CLI to that core: {error}")))?;
         Self::from_lock(path, lock)
     }
     fn from_lock(path: &Path, lock: File) -> Result<Self, StorageError> {

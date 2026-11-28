@@ -1,8 +1,14 @@
 use super::*;
+use crate::scratch::archive::{ArchiveService, State, lock, serve};
 use crate::{
     RunId,
     ownership::OwnerHost,
     scratch::{ScratchKey, usage::ScratchUser},
+};
+use std::{
+    collections::HashSet,
+    io,
+    sync::{Mutex, mpsc},
 };
 use std::{
     fs,
@@ -10,6 +16,7 @@ use std::{
 };
 struct Fixture {
     host: OwnerHost,
+    archive: ArchiveService,
     scratch: Arc<ThreadScratch>,
     key: ScratchKey,
     _dir: test_socket_dir::SocketDir,
@@ -17,12 +24,16 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = test_socket_dir::SocketDir::new();
-        let host = OwnerHost::open(
+        let host = OwnerHost::open_with_scratch(
             dir.path(),
             Default::default(),
             Arc::new(event_bus::EventBus::new(32)),
+            true,
+            Some(ThreadScratch::at(dir.path().join("scratch"))),
         )
         .unwrap();
+        let archive =
+            ArchiveService::new(&host.thread_scratch(), host.scratch_archive_authority()).unwrap();
         host.start("thread").unwrap();
         let scratch = host.thread_scratch();
         let key = ScratchKey::Thread("thread".into());
@@ -30,10 +41,19 @@ impl Fixture {
         fs::write(path.join("keep"), "scratch").unwrap();
         Self {
             host,
+            archive,
             scratch,
             key,
             _dir: dir,
         }
+    }
+    fn set_tombstone_guard(
+        &self,
+        guard: crate::thread_retention::TombstoneGuard,
+    ) -> Result<(), crate::thread_retention::TombstoneGuard> {
+        self.host.set_tombstone_guard(guard.clone())?;
+        self.archive.set_guard(guard);
+        Ok(())
     }
     fn db(&self) -> PathBuf {
         self._dir.path().join("owners.db")
@@ -50,12 +70,25 @@ impl Fixture {
             self.host.owner_id(),
             &self.scratch,
             "thread",
-            &checker,
+            Some(&checker),
+            None,
         )
     }
 }
 fn archived() -> Checker {
     Arc::new(|_| Ok(true))
+}
+
+#[test]
+fn owner_worker_stop_does_not_stop_the_independent_archive_worker() {
+    let f = Fixture::new();
+    f.archive.set_checker(archived());
+    f.host.stop_worker_for_exec().unwrap();
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+    f.archive.stop().unwrap();
+    f.archive.stop().unwrap();
 }
 fn run(n: u64) -> RunId {
     RunId::new(n)
@@ -152,8 +185,8 @@ fn hold_installed_during_sidebar_read_wins_write_reservation() {
 #[test]
 fn missing_sidebar_and_checker_failure_are_not_permission_to_delete() {
     let f = Fixture::new();
-    f.host.hint_scratch_archive("thread");
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
     f.present();
     assert!(
         f.attempt(Arc::new(|_| Err(io::Error::other("unreadable sidebar"))))
@@ -167,36 +200,36 @@ fn archive_then_unarchive_while_busy_removes_the_hint_on_last_release() {
     let active = run(4);
     f.scratch.register_execution(&f.key, active, "one").unwrap();
     let saved = Arc::new(AtomicBool::new(true));
-    f.host.set_scratch_archive_checker(Arc::new({
+    f.archive.set_checker(Arc::new({
         let saved = saved.clone();
         move |_| Ok(saved.load(Ordering::SeqCst))
     }));
-    f.host.hint_scratch_archive("thread");
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
     f.present();
     saved.store(false, Ordering::SeqCst);
     f.scratch.release_execution(active, "one");
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.barrier().recv().unwrap();
     f.present();
     // No explicit unarchive invalidation: the actual attempt consumed the hint.
     saved.store(true, Ordering::SeqCst);
     f.scratch.register_execution(&f.key, active, "one").unwrap();
     f.scratch.release_execution(active, "one");
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.barrier().recv().unwrap();
     f.present();
 }
 #[test]
 fn archive_worker_not_caller_runs_checker_and_detaches() {
     let f = Fixture::new();
-    f.host.set_scratch_archive_checker(Arc::new(|_| {
+    f.archive.set_checker(Arc::new(|_| {
         assert_eq!(
             std::thread::current().name(),
             Some("evorch-scratch-archive")
         );
         Ok(true)
     }));
-    f.host.hint_scratch_archive("thread");
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
     assert!(!f.scratch.dir(&f.key).exists());
 }
 #[test]
@@ -266,12 +299,10 @@ fn registry_busy_retains_data_then_uses_one_injected_backoff_before_external_ret
         let waits = Arc::new(AtomicUsize::new(0));
         let worker = std::thread::spawn({
             let state = Arc::clone(&state);
-            let scratch = Arc::clone(&f.scratch);
-            let db = f.db();
-            let owner = f.host.owner_id().to_owned();
+            let attempt = f.host.scratch_archive_authority();
             let waits = Arc::clone(&waits);
             move || {
-                serve(db, owner, scratch, state, rx, move |_| {
+                serve(attempt, state, rx, move |_| {
                     waits.fetch_add(1, Ordering::SeqCst);
                     entered_tx.send(()).unwrap();
                     resume_rx.recv().unwrap();
@@ -313,7 +344,7 @@ fn a_new_archive_hint_survives_an_older_unarchived_result() {
     let entered = Arc::new(std::sync::Barrier::new(2));
     let resume = Arc::new(std::sync::Barrier::new(2));
     let calls = Arc::new(AtomicUsize::new(0));
-    f.host.set_scratch_archive_checker(Arc::new({
+    f.archive.set_checker(Arc::new({
         let entered = Arc::clone(&entered);
         let resume = Arc::clone(&resume);
         let calls = Arc::clone(&calls);
@@ -327,11 +358,11 @@ fn a_new_archive_hint_survives_an_older_unarchived_result() {
             }
         }
     }));
-    f.host.hint_scratch_archive("thread");
+    f.archive.hint("thread");
     entered.wait();
     f.present();
-    f.host.hint_scratch_archive("thread");
-    let next_pass = f.host.scratch_archive_barrier();
+    f.archive.hint("thread");
+    let next_pass = f.archive.barrier();
     resume.wait();
     next_pass.recv().unwrap();
     assert!(!f.scratch.dir(&f.key).exists());
@@ -344,7 +375,7 @@ fn epoch_only_hook_wakes_archive_after_a_competing_observation() {
     let (observed, observations) = mpsc::channel();
     let resume = Arc::new(std::sync::Barrier::new(2));
     let calls = AtomicUsize::new(0);
-    f.host.set_scratch_archive_checker(Arc::new({
+    f.archive.set_checker(Arc::new({
         let resume = resume.clone();
         move |_| {
             let pass = calls.fetch_add(1, Ordering::SeqCst);
@@ -355,13 +386,111 @@ fn epoch_only_hook_wakes_archive_after_a_competing_observation() {
             Ok(true)
         }
     }));
-    f.host.hint_scratch_archive("thread");
+    f.archive.hint("thread");
     assert_eq!(observations.recv().unwrap(), 0);
     f.scratch.advance_usage_epoch(&f.key);
     resume.wait();
     // The first pass sees an epoch mismatch and retains its consumed hint.
     // Nothing releases a user or sends another hint: only the hook wakes it.
     assert_eq!(observations.recv().unwrap(), 1);
-    f.host.scratch_archive_barrier().recv().unwrap();
+    f.archive.barrier().recv().unwrap();
     assert!(!f.scratch.dir(&f.key).exists());
+}
+
+fn deleted_guard(thread: &str) -> crate::thread_retention::TombstoneGuard {
+    crate::thread_retention::TombstoneGuard::new(storage::thread_retention::TombstoneSet {
+        threads: HashSet::from([thread.into()]),
+        ..Default::default()
+    })
+}
+#[test]
+fn tombstoned_scratch_is_reclaimed_after_sidebar_prune_without_an_archive_checker() {
+    let f = Fixture::new();
+    f.set_tombstone_guard(deleted_guard("thread")).unwrap();
+    // The sidebar no longer contains the thread, and no checker is installed.
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+}
+#[test]
+fn tombstoned_scratch_unknown_guard_and_missing_sidebar_are_not_deletion_authority() {
+    let f = Fixture::new();
+    f.set_tombstone_guard(deleted_guard("different-thread"))
+        .unwrap();
+    f.archive.set_checker(Arc::new(|_| Ok(false)));
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    f.present();
+}
+#[test]
+fn tombstoned_scratch_busy_run_and_shell_are_retained_until_the_next_cursor_hint() {
+    let f = Fixture::new();
+    let guard = deleted_guard("thread");
+    let id = run(42);
+    let shell = ScratchUser::Shell {
+        run: id,
+        id: "still-tearing-down".into(),
+    };
+    f.scratch
+        .register_execution(&f.key, id, "incarnation")
+        .unwrap();
+    f.scratch.register_user(&f.key, shell.clone()).unwrap();
+    f.set_tombstone_guard(guard).unwrap();
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    f.present();
+    f.scratch.release_execution(id, "incarnation");
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    f.present();
+    f.scratch.release_user(&f.key, &shell);
+    f.archive.hint("thread");
+    f.archive.barrier().recv().unwrap();
+    assert!(!f.scratch.dir(&f.key).exists());
+}
+#[test]
+fn tombstoned_scratch_without_a_local_lease_consumes_the_hint_instead_of_accumulating() {
+    let f = Fixture::new();
+    assert!(
+        attempt(
+            &f.db(),
+            f.host.owner_id(),
+            &f.scratch,
+            "not-owned",
+            None,
+            Some(&deleted_guard("not-owned"))
+        )
+        .unwrap()
+    );
+    f.present();
+}
+
+#[test]
+fn tombstoned_scratch_stale_ownership_and_protective_holds_keep_data_without_retaining_hints() {
+    for condition in ["foreign", "generation", "hold"] {
+        let f = Fixture::new();
+        Registry::open_existing(&f.db())
+            .unwrap()
+            .update("thread", |owner| {
+                match condition {
+                    "foreign" => owner.lease.owner_id = "foreign".into(),
+                    "generation" => owner.lease.generation += 1,
+                    _ => owner.install_hold("tx", "capture", &Default::default())?,
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            attempt(
+                &f.db(),
+                f.host.owner_id(),
+                &f.scratch,
+                "thread",
+                None,
+                Some(&deleted_guard("thread"))
+            )
+            .unwrap()
+        );
+        f.present();
+    }
 }

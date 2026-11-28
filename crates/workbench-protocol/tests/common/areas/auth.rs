@@ -96,6 +96,8 @@ pub fn samples() -> AreaSamples {
             Command::Auth(AuthCommand::DeleteCredential(DeleteCredential {
                 operation_id: op("op-delete"),
                 profile: "work".into(),
+                account: "work-acct".into(),
+                shared_with: vec!["work-2".into()],
             })),
             Command::Auth(AuthCommand::StartLogin(StartLogin {
                 operation_id: op("login-1"),

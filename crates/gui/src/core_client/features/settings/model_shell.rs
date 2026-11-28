@@ -71,7 +71,7 @@ impl SettingsFeature {
             ModalPart::NavFooter => reload = nav_footer(ui, snapshot.as_ref(), busy),
             ModalPart::Body { height } => match (tab, &snapshot) {
                 (SettingsTab::Providers, Some(snapshot)) => {
-                    provider_action = self.providers_body(ui, snapshot, busy, height);
+                    provider_action = self.providers_body(ui, ctx, snapshot, busy, height);
                 }
                 (SettingsTab::Providers, None) => {
                     ui.label("Loading settings…");
@@ -84,7 +84,12 @@ impl SettingsFeature {
                     }
                 }
             },
-            ModalPart::Footer => (answer, footer_action) = self.footer(ui, busy),
+            ModalPart::Footer => {
+                let (close, footer, provider) = self.footer(ui, busy);
+                answer = close;
+                footer_action = footer;
+                provider_action = provider.or(provider_action.take());
+            }
         });
         match (footer_action, &mut self.modal) {
             (Some(FooterAction::Save), Some(modal)) => save = modal.save_selected().or(save),
@@ -99,6 +104,9 @@ impl SettingsFeature {
                 if let Some(modal) = &mut self.modal {
                     modal.select(tab);
                 }
+                if tab == SettingsTab::Providers {
+                    self.auth.distrust();
+                }
                 self.confirm_close = false;
             }
             Some(SettingsModalAction::Close) => self.request_close(),
@@ -111,6 +119,7 @@ impl SettingsFeature {
         }
         if let (Some(action), Some(snapshot)) = (provider_action, &snapshot) {
             self.apply_provider_action(ctx, snapshot, action);
+            egui_ctx.request_repaint();
         }
         if let Some(save) = save {
             let id = self.send_document(ctx, save.expected_revision.clone(), save.text.clone());
@@ -119,8 +128,17 @@ impl SettingsFeature {
     }
 
     /// The status of the last operation, or the question whether to discard what was edited;
-    /// in Routing and Agent Roles also Discard and Save for the selected route or role.
-    fn footer(&self, ui: &mut egui::Ui, busy: bool) -> (Option<CloseAnswer>, Option<FooterAction>) {
+    /// in Routing and Agent Roles also Discard and Save for the selected route or role, and in
+    /// Providers those of the selected provider.
+    fn footer(
+        &self,
+        ui: &mut egui::Ui,
+        busy: bool,
+    ) -> (
+        Option<CloseAnswer>,
+        Option<FooterAction>,
+        Option<ProviderAction>,
+    ) {
         if self.confirm_close {
             ui.colored_label(palette().WARNING_FG, "Discard unsaved changes and close?");
             let mut answer = None;
@@ -132,21 +150,39 @@ impl SettingsFeature {
                     answer = Some(CloseAnswer::KeepEditing);
                 }
             });
-            return (answer, None);
+            return (answer, None, None);
         }
         let section = self.modal.as_ref().and_then(Modal::footer_state);
+        let providers = self.modal_tab() == Some(SettingsTab::Providers) && self.form.is_some();
         let summary = section.as_ref().and_then(|state| state.summary.clone());
         let state = if busy {
             Some(("Working…".to_owned(), palette().TEXT_MUTED))
         } else if let Some(summary) = summary {
             Some((format!("● {summary}"), palette().WARNING_FG))
         } else if self.modal_dirty() {
-            Some(("● Unsaved changes".to_owned(), palette().WARNING_FG))
+            let name = self
+                .form
+                .as_ref()
+                .filter(|_| providers)
+                .map(|form| form.original.clone().unwrap_or_else(|| form.name.clone()));
+            Some((
+                match name {
+                    Some(name) => format!("● Unsaved changes in {name}"),
+                    None => "● Unsaved changes".to_owned(),
+                },
+                palette().WARNING_FG,
+            ))
         } else {
             None
         };
-        let buttons = if section.is_some() { 210.0 } else { 0.0 };
-        let reserved = buttons + if state.is_some() { 150.0 } else { 0.0 };
+        let buttons = if section.is_some() {
+            210.0
+        } else if providers {
+            190.0
+        } else {
+            0.0
+        };
+        let reserved = buttons + if state.is_some() { 190.0 } else { 0.0 };
         ui.scope(|ui| {
             ui.set_max_width((ui.available_width() - reserved).max(0.0));
             if !self.status.is_empty() {
@@ -155,7 +191,11 @@ impl SettingsFeature {
             }
         });
         let mut chosen = None;
+        let mut provider = None;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if providers {
+                provider = self.provider_buttons(ui, busy);
+            }
             if let Some(section) = &section {
                 let save = ui
                     .add_enabled_ui(!busy && section.can_save, |ui| {
@@ -181,6 +221,6 @@ impl SettingsFeature {
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
             }
         });
-        (None, chosen)
+        (None, chosen, provider)
     }
 }

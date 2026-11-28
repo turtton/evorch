@@ -41,6 +41,7 @@ fn config() -> Config {
                 excluded_models: vec![],
                 default_model: "test-model".into(),
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         ..Config::default()

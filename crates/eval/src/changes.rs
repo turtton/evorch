@@ -43,26 +43,6 @@ pub struct Changes {
     pub affected_roles: Vec<String>,
 }
 
-impl Changes {
-    /// The judge is told that the candidate differs in role bindings only.
-    /// Until it is told about tool descriptions, such a candidate would be
-    /// judged on a false premise, so it is refused.
-    ///
-    /// # Errors
-    /// The candidate changes a tool description.
-    pub fn ensure_judgeable(&self) -> Result<(), String> {
-        if self.tool_descriptions.is_empty() {
-            return Ok(());
-        }
-        Err(
-            "the candidate changes tool descriptions, which the judge is not yet told about \
-             (it would be asked to compare role bindings only); candidates that change tool \
-             descriptions are not accepted until the judge and report handle them"
-                .into(),
-        )
-    }
-}
-
 const NO_CHANGE: &str = "the candidate changes nothing: no role binding, route or preset differs \
 and no tool description it sets differs from the baseline's, so both configurations would be the \
 same; with a role_profile active, change role_profiles.<name>";
@@ -77,6 +57,8 @@ same; with a role_profile active, change role_profiles.<name>";
 ///   could not be told apart
 /// - a changed description reaches no role: no role uses that model or can
 ///   see that tool
+/// - a changed description is never sent to that model: its edit interface or
+///   wire does not carry it (see [`description_delivered`])
 pub fn derive(
     baseline: &Config,
     candidate: &Config,
@@ -102,6 +84,21 @@ pub fn derive(
         for change in &descriptions {
             let reached = reached_roles(candidate, catalog, change);
             if reached.is_empty() {
+                if !description_delivered(
+                    candidate,
+                    catalog,
+                    &change.profile,
+                    &change.route_model_id,
+                    &change.tool,
+                ) {
+                    return Err(format!(
+                        "the description of `{}` for {}/{} is never sent to that model: its edit \
+                         interface or wire does not carry it (`edit` and `write` are sent only \
+                         with the edit interface, and an `apply_patch` description is replaced on \
+                         the Responses wire, so it cannot be confirmed to arrive)",
+                        change.tool, change.profile, change.route_model_id
+                    ));
+                }
                 return Err(format!(
                     "the description of `{}` for {}/{} reaches no role: no role's chain uses \
                      that model, or none of them can see that tool",
@@ -116,20 +113,6 @@ pub fn derive(
         tool_descriptions: descriptions,
         affected_roles: affected.into_iter().collect(),
     })
-}
-
-/// [`derive`], and then the judge's limit on what it can be asked about.
-///
-/// # Errors
-/// As [`derive`] and [`Changes::ensure_judgeable`].
-pub fn accept(
-    baseline: &Config,
-    candidate: &Config,
-    catalog: &BuiltinCatalog,
-) -> Result<Changes, String> {
-    let changes = derive(baseline, candidate, catalog)?;
-    changes.ensure_judgeable()?;
-    Ok(changes)
 }
 
 fn description_changes(
@@ -201,8 +184,23 @@ fn runtime_role(address: &str) -> Option<Role> {
         .find(|role| role.name().eq_ignore_ascii_case(&key))
 }
 
-/// The role addresses whose chains use the changed description's exact model
-/// and that can be offered the tool.
+/// Whether the description of `tool` for `profile`/`model` is sent to the
+/// model at all, by the edit interface `config` gives that model. An unknown
+/// profile delivers nothing.
+pub(crate) fn description_delivered(
+    config: &Config,
+    catalog: &BuiltinCatalog,
+    profile: &str,
+    model: &str,
+    tool: &str,
+) -> bool {
+    config.providers.get(profile).is_some_and(|provider| {
+        catalog.description_reaches_wire(tool, provider.edit_tool_for(model))
+    })
+}
+
+/// The role addresses whose chains use the changed description's exact model,
+/// that can be offered the tool and to whose wire the description is sent.
 fn reached_roles(
     config: &Config,
     catalog: &BuiltinCatalog,
@@ -211,7 +209,13 @@ fn reached_roles(
     roles::ROLES
         .iter()
         .filter(|address| {
-            runtime_role(address).is_some_and(|role| catalog.visible_to(role, &change.tool))
+            description_delivered(
+                config,
+                catalog,
+                &change.profile,
+                &change.route_model_id,
+                &change.tool,
+            ) && runtime_role(address).is_some_and(|role| catalog.visible_to(role, &change.tool))
                 && roles::role_models(config, address).iter().any(|model| {
                     model.profile == change.profile && model.model == change.route_model_id
                 })

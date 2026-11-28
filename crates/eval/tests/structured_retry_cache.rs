@@ -29,7 +29,7 @@ const THREAD: &str = "thread-1";
 
 const PROSE: &str = "Let me think about what to answer first.";
 const DECISION: &str = r#"{"action":"reply","text":"go on","reason":"scripted"}"#;
-const ANALYSIS: &str = r#"{"time_and_tokens":"a","detours":"b","delegation":"c","swapped_roles":"d","difference":"e"}"#;
+const ANALYSIS: &str = r#"{"time_and_tokens":"a","detours":"b","delegation":"c","affected_roles":"d","difference":"e"}"#;
 
 /// The provider wire a retry crosses.
 #[derive(Clone, Copy, Debug)]

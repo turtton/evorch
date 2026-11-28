@@ -63,6 +63,6 @@ to cover intervals, single-flight execution, repository changes, error recovery,
 snapshot preservation. Sidebar and question tests cover lifecycle updates, accessible
 status dots, dense row geometry, and independent question indicators.
 
-The ignored `capture_review_diff_unified_and_split` test renders both views at
-1280×720 and 800×600. CI's offscreen gate runs it with a required adapter and uploads
-PNGs under `target/gui-evidence/diff-review/` as part of the `gui-evidence` artifact.
+The PNG capture of both views at 1280×720 and 800×600 (an ignored test, run by the
+removed offscreen gate and `gui-evidence` job) is gone with them; the layout and refresh
+tests above remain.

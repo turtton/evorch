@@ -1039,6 +1039,17 @@ impl CoreClientScreen {
             project: self.project.clone(),
             thread: self.selected.clone(),
         };
+        let thread_usage = shared
+            .connected
+            .then(|| shared.features.diagnostics())
+            .flatten()
+            .zip(selection.thread.as_ref())
+            .and_then(|(diagnostics, thread)| {
+                if let Some(wait) = diagnostics.thread_usage_wake_in(now) {
+                    ui.ctx().request_repaint_after(wait);
+                }
+                diagnostics.thread_usage(thread).cloned()
+            });
         let project_name = selection
             .project
             .as_ref()
@@ -1096,6 +1107,7 @@ impl CoreClientScreen {
                     sending: &s.sending,
                     loading_attachments: &s.loading_attachments,
                     link_base: link_base.as_deref(),
+                    thread_usage: thread_usage.as_ref(),
                 },
                 selection: &selection,
                 effects: &mut effects,
@@ -1113,6 +1125,7 @@ impl CoreClientScreen {
         };
         self.conversation.end_frame();
         self.window_rects.track(&self.dock, ui.ctx());
+        effects.extend(frame.settings.iter().copied().map(shell::Effect::Settings));
         if !frame.lanes.is_empty() || !frame.pull_requests.is_empty() {
             // What a lane menu chose is sent in the lanes feature's next pass.
             ui.ctx().request_repaint();

@@ -56,7 +56,7 @@ fn analysis() -> Step {
             "time_and_tokens": "the candidate spent its budget on reads",
             "detours": "none",
             "delegation": "appropriate",
-            "swapped_roles": "the worker edited directly",
+            "affected_roles": "the worker edited directly",
             "difference": "the swapped worker differs",
         })
         .to_string(),
@@ -432,7 +432,7 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
     let [report] = reports.as_slice() else {
         panic!("one report");
     };
-    let tally: Vec<(&str, u32, u32, u32)> = report
+    let tally: Vec<(&str, u32, u32, u32, u32)> = report
         .tally
         .iter()
         .map(|tally| {
@@ -441,17 +441,18 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
                 tally.candidate_wins,
                 tally.baseline_wins,
                 tally.ties,
+                tally.order_disagreements,
             )
         })
         .collect();
     assert_eq!(
         tally,
         [
-            ("requirement", 1, 0, 0),
-            ("correctness", 0, 1, 0),
-            ("scope", 0, 0, 1),
-            ("efficiency", 0, 0, 1),
-            ("problem", 1, 0, 0),
+            ("requirement", 1, 0, 0, 0),
+            ("correctness", 0, 1, 0, 0),
+            ("scope", 0, 0, 1, 0),
+            ("efficiency", 0, 0, 0, 1),
+            ("problem", 1, 0, 0, 0),
         ]
     );
     let process = report.pairs[0].process.as_ref().unwrap();
@@ -501,7 +502,7 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
             .contains("+candidate")
     );
     assert_eq!(requests[1]["A"]["status"], "incomplete");
-    assert_eq!(requests[2]["swapped_roles"], serde_json::json!(["worker"]));
+    assert_eq!(requests[2]["affected_roles"], serde_json::json!(["worker"]));
     assert!(requests[2]["baseline"]["timeline"].is_array());
 
     // Then: each side carries the delegated runs' final outputs apart from the root's
@@ -539,8 +540,11 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
         "**Problem:** the worker ignored the failing test",
         "Swapped `worker`: gpt-9 → claude-sonnet-9",
         "| baseline-1 | completed |",
-        "(API-equivalent) (cost incomplete)",
-        "| problem | 1 | 0 | 0 |",
+        "unknown (priced part $3.0000 (API-equivalent))",
+        "| problem | 1 | 0 | 0 | 0 |",
+        "| efficiency | 0 | 0 | 0 | 1 |",
+        "(orders disagreed: no result)",
+        "(tie in both orders)",
         "- Difference: the swapped worker differs",
         "## Warnings",
     ] {
@@ -657,22 +661,22 @@ async fn several_threads_are_tabulated_side_by_side_without_a_ranking() {
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines[0],
-        "| thread | requirement W/L/T | correctness W/L/T | scope W/L/T | efficiency W/L/T | problem W/L/T | baseline cost | candidate cost |"
+        "| thread | requirement W/L/T/D | correctness W/L/T/D | scope W/L/T/D | efficiency W/L/T/D | problem W/L/T/D | baseline cost | candidate cost |"
     );
     assert_eq!(
         lines[2],
-        "| thread-1 | 1/0/0 | 0/1/0 | 0/0/1 | 0/0/1 | 1/0/0 | $1.0000 | $3.0000 (API-equivalent) (cost incomplete) |"
+        "| thread-1 | 1/0/0/0 | 0/1/0/0 | 0/0/1/0 | 0/0/0/1 | 1/0/0/0 | $1.0000 | unknown (priced part $3.0000 (API-equivalent)) |"
     );
     assert!(lines[3].starts_with("| thread-2 | - | - | - | - | - |"));
     assert_eq!(lines.len(), 4);
 }
 
-fn swapped(role: &str) -> Vec<SwappedRole> {
-    vec![SwappedRole {
-        role: role.into(),
-        baseline: Vec::new(),
-        candidate: Vec::new(),
-    }]
+fn focus(roles: &[String]) -> Focus<'_> {
+    Focus {
+        roles,
+        bindings: &[],
+        applied: None,
+    }
 }
 
 fn record(events: Vec<Event>) -> RunRecord {
@@ -787,7 +791,7 @@ fn delegated_output_excerpts_are_cut_at_the_limit_on_a_character_boundary() {
     .collect();
 
     // When: the outputs are bounded for the judge.
-    let entries = delegated_outputs(&record(events), &swapped("worker"));
+    let entries = delegated_outputs(&record(events), &focus(&["worker".to_owned()]));
 
     // Then: an output at the limit is untouched, one over it keeps exactly the limit's
     // characters with a marker that counts them, and nothing is split inside a character.
@@ -846,7 +850,7 @@ fn delegated_outputs_keep_the_newest_runs_of_each_group_and_count_the_rest() {
     .concat();
 
     // When / Then: nothing is omitted and the focus runs come before the others.
-    let entries = delegated_outputs(&record(at_cap), &swapped("worker"));
+    let entries = delegated_outputs(&record(at_cap), &focus(&["worker".to_owned()]));
     assert_eq!(entries.len(), DELEGATED_FOCUS_MAX + DELEGATED_OTHER_MAX);
     assert!(entries.iter().all(|entry| entry["kind"].is_null()));
     assert_eq!(run_ids(&entries)[0], "worker1");
@@ -860,7 +864,7 @@ fn delegated_outputs_keep_the_newest_runs_of_each_group_and_count_the_rest() {
     .concat();
 
     // When: they are bounded.
-    let entries = delegated_outputs(&record(over_cap), &swapped("worker"));
+    let entries = delegated_outputs(&record(over_cap), &focus(&["worker".to_owned()]));
 
     // Then: the oldest runs are dropped, each group is followed by its own omitted count,
     // and the focus group still comes first.
@@ -907,7 +911,7 @@ fn a_run_without_a_usable_answer_has_no_output_and_the_root_is_never_listed() {
     ];
 
     // When: the delegated outputs are read.
-    let entries = delegated_outputs(&record(events), &[]);
+    let entries = delegated_outputs(&record(events), &focus(&[]));
 
     // Then: only the children are listed, none is a focus without swapped roles, blank
     // answers are no output, the phase is kept, and the last non-blank answer wins.
@@ -1042,4 +1046,992 @@ async fn a_run_whose_recorded_database_is_gone_is_not_a_passing_run() {
     assert!(baseline.results[0].reason.contains("evidence is missing"));
     assert!(!baseline.validity.valid);
     assert_ne!(baseline.quality(), checks::Quality::Pass);
+}
+
+use crate::changes::ToolDescriptionChange;
+use crate::metrics::ModelUse;
+use crate::output::{AppliedDescriptions, Observed};
+
+const READ_BASELINE: &str = "hash-of-the-builds-read";
+const READ_CANDIDATE: &str = "hash-of-the-new-read";
+
+fn edit_manifest(fixture: &Fixture, edit: impl FnOnce(&mut Manifest)) {
+    let path = fixture.dir().join(output::MANIFEST_FILE);
+    let mut manifest: Manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut manifest);
+    output::write_json(&path, &manifest).unwrap();
+}
+
+/// The candidate only rewrites the description of `read` for the worker's model `api/gpt-9`;
+/// `observed` is what its replay recorded of what it used.
+fn describe_read(fixture: &Fixture, observed: Option<Observed>) {
+    describe_tool(fixture, "read", observed);
+}
+
+fn describe_tool(fixture: &Fixture, tool: &str, observed: Option<Observed>) {
+    edit_manifest(fixture, |manifest| {
+        manifest.swapped_roles.clear();
+        manifest.changes = Changes {
+            bindings: Vec::new(),
+            tool_descriptions: vec![ToolDescriptionChange {
+                profile: "api".into(),
+                route_model_id: "gpt-9".into(),
+                tool: tool.into(),
+                baseline_hash: READ_BASELINE.into(),
+                candidate_hash: READ_CANDIDATE.into(),
+            }],
+            affected_roles: vec!["worker".into()],
+        };
+        for entry in &mut manifest.runs {
+            entry.observed = if entry.label == CANDIDATE {
+                observed.clone()
+            } else {
+                Some(Observed {
+                    models: vec![model_use("api", "gpt-9")],
+                    tool_descriptions: vec![frozen("baseline-worker", "worker", "gpt-9", &[])],
+                })
+            };
+        }
+    });
+}
+
+/// A run's snapshot for `api`/`model` that overrides `tools`, all of which it was offered.
+fn frozen(run_id: &str, role: &str, model: &str, tools: &[&str]) -> AppliedDescriptions {
+    AppliedDescriptions {
+        run_id: run_id.into(),
+        role: role.into(),
+        profile: Some("api".into()),
+        route_model_id: Some(model.into()),
+        hash: "snapshot".into(),
+        tools: tools.iter().map(|name| (*name).to_owned()).collect(),
+        offered: Some(tools.iter().map(|name| (*name).to_owned()).collect()),
+    }
+}
+
+fn used_by(role: &str, model: &str) -> ModelUse {
+    ModelUse {
+        role: Some(role.into()),
+        ..model_use("api", model)
+    }
+}
+
+fn model_use(profile: &str, model: &str) -> ModelUse {
+    ModelUse {
+        role: Some("worker".into()),
+        provider: profile.into(),
+        profile: Some(profile.into()),
+        model: model.into(),
+        requests: 2,
+    }
+}
+
+/// The candidate's worker run froze the changed description of `read` and used only its model.
+fn applied_read() -> Observed {
+    applied_by("read", "candidate-worker", "worker", &["read", "grep"])
+}
+
+/// A run `run_id` of `role` froze the description of `tool` for the described model, and
+/// its own record says its model was offered `offered`.
+fn applied_by(tool: &str, run_id: &str, role: &str, offered: &[&str]) -> Observed {
+    Observed {
+        models: vec![model_use("api", "gpt-9")],
+        tool_descriptions: vec![AppliedDescriptions {
+            run_id: run_id.into(),
+            role: role.into(),
+            profile: Some("api".into()),
+            route_model_id: Some("gpt-9".into()),
+            hash: "snapshot".into(),
+            tools: vec![tool.into()],
+            offered: Some(offered.iter().map(|name| (*name).to_owned()).collect()),
+        }],
+    }
+}
+
+fn pending_kinds(report: &Report) -> Vec<PendingKind> {
+    report
+        .breakdown
+        .validity
+        .pending
+        .iter()
+        .map(|pending| pending.kind)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_description_only_candidate_is_judged_on_its_real_changes_without_naming_the_sides() {
+    // Given: a candidate that differs only in a tool description, which its worker used.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read(&fixture, Some(applied_read()));
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: both comparisons carry the change by position, each hash under the side that
+    // sends it, and no role binding is claimed.
+    let requests = fixture.judge_requests();
+    assert_eq!(requests.len(), 3);
+    let change = |request: usize, side: &str| {
+        requests[request]["changes"]["tool_descriptions"][0][format!("description_hash_{side}")]
+            .clone()
+    };
+    assert_eq!(change(0, "A"), READ_BASELINE);
+    assert_eq!(change(0, "B"), READ_CANDIDATE);
+    assert_eq!(change(1, "A"), READ_CANDIDATE);
+    assert_eq!(change(1, "B"), READ_BASELINE);
+    for comparison in [&requests[0], &requests[1]] {
+        assert_eq!(
+            comparison["changes"]["role_bindings"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            comparison["changes"]["affected_roles"],
+            serde_json::json!(["worker"])
+        );
+        // The labels never reach the comparison's view of the changes.
+        let shown = comparison["changes"].to_string();
+        assert!(
+            !shown.contains("baseline") && !shown.contains("candidate"),
+            "{shown}"
+        );
+    }
+
+    // Then: the worker that used the description is the focus on both sides, and the analysis
+    // is told the changes, which were used, and that no role was swapped.
+    assert_eq!(requests[0]["A"]["delegated_outputs"][0]["focus"], true);
+    assert_eq!(requests[0]["B"]["delegated_outputs"][0]["focus"], true);
+    assert_eq!(
+        requests[2]["changes"]["tool_descriptions"][0]["tool"],
+        "read"
+    );
+    assert_eq!(requests[2]["changes"]["bindings"], serde_json::json!([]));
+    assert_eq!(
+        requests[2]["applied"]["descriptions"][0]["used_by_the_candidate"],
+        true
+    );
+    assert_eq!(
+        requests[2]["applied"]["model_fallbacks"],
+        serde_json::json!([])
+    );
+
+    // Then: the report records the same changes, and nothing in the description's use holds
+    // the judgment back.
+    let report = &reports[0];
+    assert_eq!(report.changes.tool_descriptions.len(), 1);
+    assert!(report.swapped_roles.is_empty());
+    let kinds = pending_kinds(report);
+    for held in [
+        PendingKind::NotApplied,
+        PendingKind::ModelFallback,
+        PendingKind::EvidenceMissing,
+    ] {
+        assert!(!kinds.contains(&held), "{held:?} in {kinds:?}");
+    }
+    let applied = &report.breakdown.effective_changes.tool_descriptions[0];
+    assert_eq!(applied.applied_in, ["candidate-1"]);
+    assert!(applied.not_applied_in.is_empty());
+}
+
+#[tokio::test]
+async fn a_description_no_run_used_or_a_model_fallback_holds_the_judgment() {
+    // Given: three candidates whose changed description was never frozen, whose worker went
+    // to another model, and whose replay recorded nothing.
+    let unused = Observed {
+        tool_descriptions: Vec::new(),
+        ..applied_read()
+    };
+    let mut fell_back = applied_read();
+    fell_back
+        .models
+        .push(model_use("claude", "claude-sonnet-9"));
+    for (observed, expected) in [
+        (Some(unused), PendingKind::NotApplied),
+        (Some(fell_back), PendingKind::ModelFallback),
+        (None, PendingKind::EvidenceMissing),
+    ] {
+        let fixture = Fixture::new(None, CONFIG);
+        describe_read(&fixture, observed.clone());
+        let deps = fixture.deps(judge_answers_without_problem()).await;
+
+        // When: the directory is reported.
+        let reports = report(fixture.args(false), &deps).await.unwrap();
+
+        // Then: the judgment is held for that reason, and the report warns of it.
+        let report = &reports[0];
+        assert!(!report.breakdown.validity.valid);
+        assert!(
+            pending_kinds(report).contains(&expected),
+            "{expected:?} in {:?}",
+            report.breakdown.validity
+        );
+        assert!(kinds(report).contains(&WarningKind::ComparisonPending));
+
+        // Then: a description the candidate never used does not make its worker the focus.
+        if expected == PendingKind::NotApplied {
+            let requests = fixture.judge_requests();
+            assert_eq!(requests[0]["A"]["delegated_outputs"][0]["focus"], true);
+            assert_eq!(requests[0]["B"]["delegated_outputs"][0]["focus"], false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn judgments_made_under_other_instructions_or_changes_are_not_reused() {
+    // Given: a directory already judged, whose cached first comparison was made under
+    // another identity (an older instruction, payload version or set of changes).
+    let fixture = Fixture::new(None, CONFIG);
+    let answers = judge_answers_without_problem();
+    report(fixture.args(false), &fixture.deps(answers.clone()).await)
+        .await
+        .unwrap();
+    let cached = fixture
+        .dir()
+        .join(output::JUDGMENTS_DIR)
+        .join("pair-1-baseline_first.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cached).unwrap()).unwrap();
+    assert!(
+        value["identity"]
+            .as_str()
+            .is_some_and(|identity| !identity.is_empty())
+    );
+    value["identity"] = "an-older-version".into();
+    std::fs::write(&cached, serde_json::to_vec(&value).unwrap()).unwrap();
+    let judges_before = fixture.judges.lock().unwrap().len();
+
+    // When: it is reported again.
+    let again = report(
+        fixture.args(false),
+        &fixture.deps(vec![answers[0].clone()]).await,
+    )
+    .await
+    .unwrap();
+
+    // Then: only the stale judgment is asked again, once, and the others are reused.
+    assert_eq!(fixture.judges.lock().unwrap().len(), judges_before + 1);
+    let newest = fixture.judges.lock().unwrap().last().unwrap().requests();
+    assert_eq!(newest.len(), 1);
+    assert!(again[0].pairs[0].judging_error.is_none());
+    assert_eq!(again[0].pairs[0].verdicts.len(), 4);
+}
+
+#[tokio::test]
+async fn the_report_splits_context_usage_quality_changes_cost_and_validity() {
+    // Given: an evaluation whose baseline runtime recorded its initial context, whose
+    // candidate recorded none, and whose candidate ran an unpriced model.
+    let fixture = Fixture::new(None, CONFIG);
+    let recorded = output::BaseContextSummary {
+        role: "Worker".into(),
+        category: Some("conversation".into()),
+        selected_model: "api/gpt-9".into(),
+        system_bytes: 4_000,
+        system_tokens: 1_000,
+        tools_bytes: 8_000,
+        tools_tokens: 2_000,
+        tool_count: 1,
+        tools: vec![output::ToolSize {
+            name: "read".into(),
+            description_bytes: 100,
+            tokens: 25,
+        }],
+    };
+    std::fs::write(
+        fixture
+            .dir()
+            .join("runs/baseline-1")
+            .join(output::BASE_CONTEXT_FILE),
+        serde_json::to_vec(&recorded).unwrap(),
+    )
+    .unwrap();
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the initial context is the estimate the runtime recorded, and unknown where none
+    // was.
+    let breakdown = &reports[0].breakdown;
+    assert_eq!(
+        breakdown.initial_context[0].context.as_ref(),
+        Some(&recorded)
+    );
+    assert!(breakdown.initial_context[0].note.contains("estimated"));
+    assert!(breakdown.initial_context[1].context.is_none());
+
+    // Then: the first request and the cumulative usage are separate measurements.
+    let first = breakdown.first_request[0].usage.as_ref().unwrap();
+    assert_eq!(first.input_tokens, 1_000_000);
+    assert_eq!(breakdown.cumulative[0].requests, 1);
+    assert_eq!(breakdown.cumulative[0].input_tokens, 1_000_000);
+    assert!(breakdown.cumulative[0].complete);
+
+    // Then: cost is split by payer; the candidate's unpriced model makes its cost and the
+    // total unknown rather than the priced part.
+    let agent = |label: &str| {
+        &breakdown
+            .cost
+            .agent
+            .iter()
+            .find(|agent| agent.label == label)
+            .unwrap()
+            .cost
+    };
+    assert!((agent(BASELINE).usd.unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(agent(CANDIDATE).usd, None);
+    assert!(
+        agent(CANDIDATE)
+            .unknown
+            .as_deref()
+            .unwrap()
+            .contains("mystery")
+    );
+    assert!((agent(CANDIDATE).priced_usd - 3.0).abs() < 1e-9);
+    assert!((breakdown.cost.simulator.usd.unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(breakdown.cost.judge.requests, 3);
+    assert_eq!(breakdown.cost.total.usd, None);
+
+    // Then: the candidate did not complete, and the judge's efficiency orders disagreed;
+    // both hold the judgment, and neither is counted as a tie.
+    let kinds = pending_kinds(&reports[0]);
+    assert!(kinds.contains(&PendingKind::ReplayIncomplete), "{kinds:?}");
+    assert!(
+        kinds.contains(&PendingKind::JudgeOrderDisagreement),
+        "{kinds:?}"
+    );
+    let efficiency = breakdown
+        .quality
+        .aspects
+        .iter()
+        .find(|aspect| aspect.aspect == "efficiency")
+        .unwrap();
+    assert_eq!((efficiency.ties, efficiency.order_disagreements), (0, 1));
+
+    // Then: the markdown shows each part under its own heading, with unknown spelled out.
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    for expected in [
+        "## Initial context (estimate)",
+        "## First request (measured)",
+        "## Cumulative usage (measured)",
+        "## Cost by payer",
+        "## Validity",
+        "| candidate-1 | unknown | unknown |",
+        "unknown (priced part $3.0000",
+        "**Judgment pending.**",
+    ] {
+        assert!(markdown.contains(expected), "{expected}\n{markdown}");
+    }
+}
+
+#[tokio::test]
+async fn a_first_request_without_reported_usage_is_unknown_and_never_zero() {
+    // Given: a candidate whose only request reported no usage, and a baseline run without a
+    // database at all.
+    let fixture = Fixture::new(None, CONFIG);
+    let mut silent = usage("c1", "claude", "claude-sonnet-9", "agent", 0);
+    silent.usage_reported = false;
+    std::fs::remove_file(
+        fixture
+            .dir()
+            .join("runs/candidate-1")
+            .join(output::DATABASE_FILE),
+    )
+    .unwrap();
+    write_run_db(
+        &fixture
+            .dir()
+            .join("runs/candidate-1")
+            .join(output::DATABASE_FILE),
+        &delegation("candidate", "candidate verdict"),
+        vec![silent],
+    );
+    std::fs::remove_file(
+        fixture
+            .dir()
+            .join("runs/baseline-1")
+            .join(output::DATABASE_FILE),
+    )
+    .unwrap();
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the first request, the cumulative sums and the costs say unknown, with the reason.
+    let breakdown = &reports[0].breakdown;
+    for first in &breakdown.first_request {
+        assert!(
+            first.usage.is_none() && first.unknown.is_some(),
+            "{first:?}"
+        );
+    }
+    assert!(breakdown.cumulative.iter().all(|usage| !usage.complete));
+    for labeled in &breakdown.cost.agent {
+        assert_eq!(labeled.cost.usd, None, "{labeled:?}");
+    }
+    assert!(
+        breakdown.cost.agent[0]
+            .cost
+            .unknown
+            .as_deref()
+            .unwrap()
+            .contains("baseline-1")
+    );
+    let kinds = pending_kinds(&reports[0]);
+    assert!(kinds.contains(&PendingKind::EvidenceMissing), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_description_frozen_only_by_a_role_that_cannot_see_the_tool_is_not_applied() {
+    // Given: a changed `write` description. The orchestrator uses the same model, so its
+    // snapshot lists `write`, but the orchestrator is never offered it and no worker ran.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_tool(
+        &fixture,
+        "write",
+        Some(applied_by(
+            "write",
+            "candidate-root",
+            "Orchestrator",
+            &["delegate", "read"],
+        )),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the change is not in force, the orchestrator's snapshot is no evidence for it, and
+    // the judgment is held.
+    let first = &reports[0];
+    assert!(pending_kinds(first).contains(&PendingKind::NotApplied));
+    let effective = &first.breakdown.effective_changes.tool_descriptions[0];
+    assert_eq!(effective.not_applied_in, ["candidate-1"]);
+    assert!(effective.applied_in.is_empty());
+    let requests = fixture.judge_requests();
+    assert_eq!(requests[0]["B"]["delegated_outputs"][0]["focus"], false);
+
+    // When: the worker, which is offered `write`, froze it.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_tool(
+        &fixture,
+        "write",
+        Some(applied_by(
+            "write",
+            "candidate-worker",
+            "Worker",
+            &["read", "write"],
+        )),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: it is in force.
+    assert!(!pending_kinds(&reports[0]).contains(&PendingKind::NotApplied));
+    assert_eq!(
+        reports[0].breakdown.effective_changes.tool_descriptions[0].applied_in,
+        ["candidate-1"]
+    );
+}
+
+#[tokio::test]
+async fn a_baseline_that_went_to_another_model_holds_the_judgment_too() {
+    // Given: a description change the candidate used, and a baseline whose worker also
+    // sent requests to another model.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read(&fixture, Some(applied_read()));
+    edit_manifest(&fixture, |manifest| {
+        let baseline = manifest
+            .runs
+            .iter_mut()
+            .find(|entry| entry.label == BASELINE)
+            .unwrap();
+        baseline
+            .observed
+            .as_mut()
+            .unwrap()
+            .models
+            .push(model_use("claude", "claude-sonnet-9"));
+    });
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the fallback is named against the baseline replay.
+    let held: Vec<&Pending> = reports[0]
+        .breakdown
+        .validity
+        .pending
+        .iter()
+        .filter(|pending| pending.kind == PendingKind::ModelFallback)
+        .collect();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].subject, "baseline-1");
+}
+
+#[tokio::test]
+async fn replays_never_started_unfinished_or_refused_by_preflight_hold_the_judgment() {
+    // Given: an evaluation of two repetitions of which each configuration recorded only the
+    // first, the candidate's without an end, and a preflight that refused it.
+    let fixture = Fixture::new(None, CONFIG);
+    edit_manifest(&fixture, |manifest| {
+        manifest.repeat = 2;
+        for entry in &mut manifest.runs {
+            if entry.label == CANDIDATE {
+                entry.status = None;
+                entry.finished_at = None;
+            }
+        }
+    });
+    std::fs::write(
+        fixture.dir().join(runner::preflight::REPORT_FILE),
+        r#"{"skipped_fixed_models":false,"checks":[{"label":"candidate","bindings":[],"models":[],"error":"model gpt-9 is unavailable","diagnostics":[]}]}"#,
+    )
+    .unwrap();
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the missing and unfinished replays and the refusal each hold the judgment.
+    let held: Vec<(PendingKind, &str)> = reports[0]
+        .breakdown
+        .validity
+        .pending
+        .iter()
+        .filter(|pending| {
+            matches!(
+                pending.kind,
+                PendingKind::ReplayMissing | PendingKind::PreflightFailed
+            )
+        })
+        .map(|pending| (pending.kind, pending.subject.as_str()))
+        .collect();
+    assert!(
+        held.contains(&(PendingKind::ReplayMissing, "baseline")),
+        "{held:?}"
+    );
+    assert!(
+        held.contains(&(PendingKind::ReplayMissing, "candidate")),
+        "{held:?}"
+    );
+    assert!(
+        held.contains(&(PendingKind::ReplayMissing, "candidate-1")),
+        "{held:?}"
+    );
+    assert!(
+        held.contains(&(PendingKind::PreflightFailed, "preflight")),
+        "{held:?}"
+    );
+    assert!(!reports[0].breakdown.validity.valid);
+}
+
+#[tokio::test]
+async fn a_missing_database_makes_every_cost_view_unknown_and_not_zero() {
+    // Given: an evaluation whose baseline database was deleted after the replay.
+    let fixture = Fixture::new(None, CONFIG);
+    std::fs::remove_file(
+        fixture
+            .dir()
+            .join("runs/baseline-1")
+            .join(output::DATABASE_FILE),
+    )
+    .unwrap();
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the run's cost, its configuration's and the simulator's are incomplete, the
+    // text and the summary say unknown, and the judge was told the same.
+    let report = &reports[0];
+    assert!(!report.runs[0].cost.is_complete());
+    assert!(!report.cost_of(BASELINE).unwrap().is_complete());
+    assert!(!report.overhead.user_simulation.cost.is_complete());
+    assert!(usd(&report.runs[0].cost).starts_with("unknown (priced part $0.0000"));
+    let value = cost_value(&report.runs[0].cost);
+    assert!(value["usd"].is_null(), "{value}");
+    assert_eq!(
+        value["unrecorded_replays"],
+        serde_json::json!(["baseline-1"])
+    );
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(
+        markdown.contains("unknown (priced part $0.0000)"),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("| $0.0000 |"), "{markdown}");
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == WarningKind::CostIncomplete && warning.message.contains("baseline-1")
+    }));
+    let requests = fixture.judge_requests();
+    assert!(requests[0]["A"]["cost"]["usd"].is_null());
+}
+
+#[tokio::test]
+async fn a_failed_first_attempt_is_unknown_and_a_later_success_is_kept_apart() {
+    // Given: a candidate whose first request failed and whose retry succeeded.
+    let fixture = Fixture::new(None, CONFIG);
+    let mut failed = usage("c0", "claude", "claude-sonnet-9", "agent", 0);
+    failed.status = storage::usage::UsageStatus::Failed;
+    failed.at_ns = 1;
+    let mut retry = usage("c1", "claude", "claude-sonnet-9", "agent", 777);
+    retry.at_ns = 2;
+    std::fs::remove_file(
+        fixture
+            .dir()
+            .join("runs/candidate-1")
+            .join(output::DATABASE_FILE),
+    )
+    .unwrap();
+    write_run_db(
+        &fixture
+            .dir()
+            .join("runs/candidate-1")
+            .join(output::DATABASE_FILE),
+        &delegation("candidate", "candidate verdict"),
+        vec![failed, retry],
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the first request is unknown, and the retry is a separate figure.
+    let first = &reports[0].breakdown.first_request[1];
+    assert_eq!(first.run, "candidate-1");
+    assert!(first.usage.is_none());
+    assert!(first.unknown.as_deref().unwrap().contains("failed"));
+    assert_eq!(first.first_success.as_ref().unwrap().input_tokens, 777);
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(markdown.contains("a retry"), "{markdown}");
+}
+
+#[tokio::test]
+async fn the_machine_checks_reach_the_judge_under_each_position_without_naming_the_sides() {
+    // Given: pinned checks that fail in the baseline and cannot be decided in the
+    // unfinished candidate.
+    let fixture = Fixture::new(None, CONFIG);
+    pin_checks(&fixture, vec![shell_errors(0), shell_errors(5)]);
+    end_baseline_runs(&fixture);
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: each position carries the checks of the replay shown there, the first
+    // comparison with the baseline as A and the second with it as B.
+    let requests = fixture.judge_requests();
+    let verdict = |request: usize, side: &str| {
+        requests[request][side]["checks"]["results"][0]["verdict"].clone()
+    };
+    assert_eq!(verdict(0, "A"), "fail");
+    assert_eq!(verdict(0, "B"), "indeterminate");
+    assert_eq!(verdict(1, "A"), "indeterminate");
+    assert_eq!(verdict(1, "B"), "fail");
+    let baseline = &requests[0]["A"]["checks"];
+    assert!(
+        baseline["results"][0]["check"]
+            .as_str()
+            .unwrap()
+            .contains("shell")
+    );
+    assert_eq!(baseline["replay_record_complete"], true);
+    assert_eq!(requests[0]["B"]["checks"]["replay_record_complete"], false);
+    for request in [0, 1] {
+        for side in ["A", "B"] {
+            let shown = requests[request][side]["checks"].to_string();
+            assert!(
+                !shown.contains("baseline") && !shown.contains("candidate"),
+                "{shown}"
+            );
+        }
+    }
+
+    // Then: the analysis, which names the sides, gets both.
+    assert_eq!(requests[2]["baseline"]["checks"]["quality"], "fail");
+    assert_ne!(requests[2]["candidate"]["checks"]["quality"], "pass");
+}
+
+#[tokio::test]
+async fn a_thread_without_checks_tells_the_judge_so_and_other_checks_are_judged_afresh() {
+    // Given: an evaluation judged without any checks.
+    let fixture = Fixture::new(None, CONFIG);
+    let answers = judge_answers_without_problem();
+    report(fixture.args(false), &fixture.deps(answers.clone()).await)
+        .await
+        .unwrap();
+    let first = fixture.judge_requests();
+    assert!(first[0]["A"]["checks"].is_null() && first[0]["B"]["checks"].is_null());
+    let judges = fixture.judges.lock().unwrap().len();
+
+    // When: checks are pinned to its manifest and it is reported again.
+    pin_checks(&fixture, vec![shell_errors(0)]);
+    report(fixture.args(false), &fixture.deps(answers).await)
+        .await
+        .unwrap();
+
+    // Then: none of the judgments made without them is reused.
+    assert_eq!(fixture.judges.lock().unwrap().len(), judges + 1);
+    let newest = fixture.judges.lock().unwrap().last().unwrap().requests();
+    assert_eq!(newest.len(), 3);
+}
+
+#[tokio::test]
+async fn a_description_of_a_tool_a_child_worker_was_never_offered_is_not_applied() {
+    // Given: a changed `handoff_to_lane` description. A worker is the only run that started,
+    // and it is a child: its snapshot lists the tool, but its own record of the tools
+    // offered to the model leaves it out.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_tool(
+        &fixture,
+        "handoff_to_lane",
+        Some(applied_by(
+            "handoff_to_lane",
+            "candidate-child-worker",
+            "Worker",
+            &["read", "write", "send"],
+        )),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the description is not in force, however permissive the role's static catalog is.
+    assert!(pending_kinds(&reports[0]).contains(&PendingKind::NotApplied));
+    assert!(
+        reports[0].breakdown.effective_changes.tool_descriptions[0]
+            .applied_in
+            .is_empty()
+    );
+
+    // When: the record does not say what was offered at all.
+    let fixture = Fixture::new(None, CONFIG);
+    let mut unknown = applied_by("read", "candidate-worker", "Worker", &[]);
+    unknown.tool_descriptions[0].offered = None;
+    describe_read(&fixture, Some(unknown));
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: it is not assumed offered either.
+    assert!(pending_kinds(&reports[0]).contains(&PendingKind::NotApplied));
+}
+
+#[tokio::test]
+async fn a_replay_started_and_not_ended_makes_every_cost_view_unknown_apart_from_one_never_started()
+{
+    // Given: two repetitions of which the candidate's first was started and never ended,
+    // and whose second was never started at all.
+    let fixture = Fixture::new(None, CONFIG);
+    edit_manifest(&fixture, |manifest| {
+        manifest.repeat = 2;
+        for entry in &mut manifest.runs {
+            if entry.label == CANDIDATE {
+                entry.status = None;
+                entry.finished_at = None;
+            }
+        }
+    });
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the unfinished replay is named, not summed as nothing, in the candidate's cost,
+    // the simulator's and the markdown; the baseline's own cost is still known.
+    let report = &reports[0];
+    assert_eq!(report.unfinished, ["candidate-1"]);
+    let candidate = report.cost_of(CANDIDATE).unwrap();
+    assert!(!candidate.is_complete());
+    assert_eq!(candidate.unfinished, ["candidate-1"]);
+    assert!(candidate.unrecorded.is_empty());
+    assert!(report.cost_of(BASELINE).unwrap().is_complete());
+    assert!(!report.overhead.user_simulation.cost.is_complete());
+    let value = cost_value(candidate);
+    assert!(value["usd"].is_null(), "{value}");
+    assert_eq!(
+        value["unfinished_replays"],
+        serde_json::json!(["candidate-1"])
+    );
+    assert!(report.breakdown.cost.agent[1].cost.usd.is_none());
+    assert!(report.breakdown.cost.simulator.usd.is_none());
+    assert!(report.breakdown.cost.total.usd.is_none());
+    let markdown =
+        std::fs::read_to_string(fixture.dir().join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(
+        markdown.contains("| candidate-1 | not finished |") && markdown.contains("no recorded end"),
+        "{markdown}"
+    );
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == WarningKind::CostIncomplete && warning.message.contains("candidate-1")
+    }));
+    // The replay that was never started is a missing replay, not an unknown cost.
+    assert!(
+        !candidate
+            .unfinished
+            .iter()
+            .any(|name| name == "candidate-2")
+    );
+    assert!(
+        report
+            .breakdown
+            .validity
+            .pending
+            .iter()
+            .any(|pending| pending.kind == PendingKind::ReplayMissing
+                && pending.subject == "candidate")
+    );
+}
+
+#[tokio::test]
+async fn a_description_the_models_edit_interface_did_not_send_is_not_applied_in_the_report() {
+    // Given: a worker's snapshot that lists `write` and `edit`; the replay's observation
+    // kept only the tools whose description its model's edit interface sends.
+    for (tool, offered, applied) in [
+        // apply-patch model: edit and write are narrowed away before the request.
+        ("write", vec!["read"], false),
+        ("edit", vec!["read"], false),
+        // edit model: its own tool arrives.
+        ("edit", vec!["read", "edit", "write"], true),
+    ] {
+        let fixture = Fixture::new(None, CONFIG);
+        describe_tool(
+            &fixture,
+            tool,
+            Some(applied_by(tool, "candidate-worker", "Worker", &offered)),
+        );
+        let deps = fixture.deps(judge_answers_without_problem()).await;
+
+        // When: the directory is reported.
+        let reports = report(fixture.args(false), &deps).await.unwrap();
+
+        // Then: the change is in force only when the description could reach the wire.
+        assert_eq!(
+            !pending_kinds(&reports[0]).contains(&PendingKind::NotApplied),
+            applied,
+            "{tool} with {offered:?}"
+        );
+    }
+}
+
+/// Both the worker's model `api/a` and the reviewer's `api/b` have a changed `read`.
+fn describe_read_for_two_models(fixture: &Fixture, baseline: Observed, candidate: Observed) {
+    edit_manifest(fixture, |manifest| {
+        manifest.swapped_roles.clear();
+        manifest.changes = Changes {
+            bindings: Vec::new(),
+            tool_descriptions: ["a", "b"]
+                .into_iter()
+                .map(|model| ToolDescriptionChange {
+                    profile: "api".into(),
+                    route_model_id: model.into(),
+                    tool: "read".into(),
+                    baseline_hash: READ_BASELINE.into(),
+                    candidate_hash: READ_CANDIDATE.into(),
+                })
+                .collect(),
+            affected_roles: vec!["reviewer".into(), "worker".into()],
+        };
+        for entry in &mut manifest.runs {
+            entry.observed = Some(if entry.label == CANDIDATE {
+                candidate.clone()
+            } else {
+                baseline.clone()
+            });
+        }
+    });
+}
+
+fn two_model_replay(prefix: &str, worker_sent_to: &str) -> Observed {
+    Observed {
+        models: vec![used_by("worker", worker_sent_to), used_by("reviewer", "b")],
+        tool_descriptions: vec![
+            frozen(&format!("{prefix}-worker"), "worker", "a", &["read"]),
+            frozen(&format!("{prefix}-reviewer"), "reviewer", "b", &["read"]),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn a_fallback_to_another_described_model_is_told_from_each_roles_own_fixed_model() {
+    // Given: the worker is fixed to `a` and the reviewer to `b`, and both models' descriptions
+    // changed. In both replays the worker fell back to `b`, which is also described.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read_for_two_models(
+        &fixture,
+        two_model_replay("baseline", "b"),
+        two_model_replay("candidate", "b"),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the worker's fallback is found in the baseline and in the candidate, and the
+    // reviewer, which stayed on its own model, is not accused.
+    let held: Vec<(&str, &str)> = reports[0]
+        .breakdown
+        .validity
+        .pending
+        .iter()
+        .filter(|pending| pending.kind == PendingKind::ModelFallback)
+        .map(|pending| (pending.subject.as_str(), pending.reason.as_str()))
+        .collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    for (subject, reason) in &held {
+        assert!(["baseline-1", "candidate-1"].contains(subject), "{subject}");
+        assert!(
+            reason.contains("worker is fixed to api/a") && reason.contains("api/b"),
+            "{reason}"
+        );
+    }
+    assert!(!reports[0].breakdown.validity.valid);
+
+    // When: each role stays on its own model.
+    let fixture = Fixture::new(None, CONFIG);
+    describe_read_for_two_models(
+        &fixture,
+        two_model_replay("baseline", "a"),
+        two_model_replay("candidate", "a"),
+    );
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: nothing is held for a fallback.
+    assert!(!pending_kinds(&reports[0]).contains(&PendingKind::ModelFallback));
+}
+
+#[tokio::test]
+async fn a_role_whose_runs_do_not_fix_one_model_cannot_be_told_from_a_fallback() {
+    // Given: two worker runs fixed to different described models, and a worker request that
+    // went to one of them; a replay in which the reviewer left no snapshot at all.
+    let mut two_workers = two_model_replay("candidate", "a");
+    two_workers
+        .tool_descriptions
+        .push(frozen("candidate-worker-2", "worker", "b", &["read"]));
+    let mut unrecorded_reviewer = two_model_replay("candidate", "a");
+    unrecorded_reviewer.tool_descriptions.truncate(1);
+    for candidate in [two_workers, unrecorded_reviewer] {
+        let fixture = Fixture::new(None, CONFIG);
+        describe_read_for_two_models(&fixture, two_model_replay("baseline", "a"), candidate);
+        let deps = fixture.deps(judge_answers_without_problem()).await;
+
+        // When: the directory is reported.
+        let reports = report(fixture.args(false), &deps).await.unwrap();
+
+        // Then: the candidate's judgment is held, since no unique fixed model decides it.
+        let held: Vec<&str> = reports[0]
+            .breakdown
+            .validity
+            .pending
+            .iter()
+            .filter(|pending| pending.kind == PendingKind::ModelFallback)
+            .map(|pending| pending.subject.as_str())
+            .collect();
+        assert_eq!(held, ["candidate-1"]);
+    }
 }

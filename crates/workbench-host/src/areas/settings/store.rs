@@ -13,8 +13,8 @@ use std::{
     sync::Arc,
 };
 use workbench_protocol::namespaces::settings::{
-    CredentialRef, MAX_DOCUMENT_BYTES, ModelInput, ModelView, OpenaiCompatibleKind, ProviderInput,
-    ProviderKind, ProviderView, SettingsProblem, SettingsRevision, SettingsSnapshot,
+    CredentialRef, MAX_DOCUMENT_BYTES, ModelInput, ModelKind, ModelView, OpenaiCompatibleKind,
+    ProviderInput, ProviderKind, ProviderView, SettingsProblem, SettingsRevision, SettingsSnapshot,
     SubscriptionKind,
 };
 
@@ -36,6 +36,8 @@ pub(super) enum SaveError {
     RestartTargets,
     /// The file could not be read or written.
     Io(String),
+    /// The file has no such provider.
+    NoSuchProvider,
 }
 
 impl From<ConfigError> for SaveError {
@@ -220,11 +222,42 @@ impl ConfigStore {
         expected: &SettingsRevision,
         original_name: Option<&str>,
         input: &ProviderInput,
-    ) -> Result<SettingsRevision, SaveError> {
+    ) -> Result<Saved, SaveError> {
         self.check_revision(expected)?;
         let existing = self.existing_models(original_name.unwrap_or_else(|| input_name(input)))?;
-        self.typed_save(|| self.save_provider_unchecked(original_name, input, &existing))?;
-        self.revision()
+        let before = Config::load_unresolved(&self.options()).ok();
+        let effective = before
+            .as_ref()
+            .and_then(|config| {
+                config
+                    .providers
+                    .get(original_name.unwrap_or_else(|| input_name(input)))
+            })
+            .map(|profile| profile.models.clone())
+            .unwrap_or_default();
+        self.typed_save(|| {
+            self.save_provider_unchecked(original_name, input, &existing, &effective)
+        })?;
+        let after = Config::load_unresolved(&self.options()).ok();
+        Ok(Saved {
+            revision: self.revision()?,
+            models_unchanged: before
+                .zip(after)
+                .is_some_and(|(before, after)| same_but_quota(before, after)),
+        })
+    }
+
+    /// The provider `name` of the file at `expected`, as the effective configuration holds it.
+    pub(super) fn provider_at(
+        &self,
+        expected: &SettingsRevision,
+        name: &str,
+    ) -> Result<ProviderProfileConfig, SaveError> {
+        self.check_revision(expected)?;
+        Config::load_unresolved(&self.options())?
+            .providers
+            .remove(name)
+            .ok_or(SaveError::NoSuchProvider)
     }
 
     fn save_provider_unchecked(
@@ -232,11 +265,16 @@ impl ConfigStore {
         original_name: Option<&str>,
         input: &ProviderInput,
         existing: &[ModelEntryConfig],
+        effective: &[ModelEntryConfig],
     ) -> Result<(), ConfigError> {
         let options = self.options();
-        let context = config::LayeredSaveContext::new(&options);
+        let context = config::LayeredSaveContext::new(&options).with_show_quota(match input {
+            ProviderInput::OpenaiCompatible { show_quota, .. }
+            | ProviderInput::Codex { show_quota, .. }
+            | ProviderInput::Subscription { show_quota, .. } => *show_quota,
+        });
         let path = self.path();
-        let model_entries = |models: &[ModelInput]| model_entries(models, existing);
+        let model_entries = |models: &[ModelInput]| model_entries(models, existing, effective);
         match input {
             ProviderInput::OpenaiCompatible {
                 name,
@@ -246,6 +284,7 @@ impl ConfigStore {
                 models,
                 excluded_models,
                 default_model,
+                ..
             } => context.save_openai_compatible_provider_edit(
                 &path,
                 &OpenAiCompatibleProviderInput {
@@ -282,6 +321,7 @@ impl ConfigStore {
                 base_url,
                 models,
                 default_model,
+                ..
             } => context.save_codex_provider_edit(
                 &path,
                 &CodexProviderInput {
@@ -306,6 +346,7 @@ impl ConfigStore {
                 models,
                 excluded_models,
                 default_model,
+                ..
             } => context.save_subscription_provider_edit(
                 &path,
                 &SubscriptionProviderInput {
@@ -534,20 +575,44 @@ impl Drop for Scratch {
     }
 }
 
-/// The entries a client's model list stands for. A client names a model by id and
-/// whether it is enabled; whatever else the file already says about that id (preset,
-/// context window, prices, effort levels, edit tool, kind) is kept, so a save that
-/// carries only those two fields does not erase it.
-fn model_entries(models: &[ModelInput], existing: &[ModelEntryConfig]) -> Vec<ModelEntryConfig> {
+/// The entries a client's model list stands for. A client names a model by id and says
+/// whether it is enabled, its kind and its context override; whatever else the file already
+/// says about that id (preset, prices, effort levels, edit tool) is kept.
+///
+/// What the client left as the effective configuration (`effective`: the file with its
+/// drop-ins and the provider's defaults) already has it is not written over what the file
+/// says: a context window that a drop-in overrides stays as the file has it, and a model that
+/// only the defaults list is not given an explicit kind, so a save that edits nothing of the
+/// models writes the same models back.
+fn model_entries(
+    models: &[ModelInput],
+    existing: &[ModelEntryConfig],
+    effective: &[ModelEntryConfig],
+) -> Vec<ModelEntryConfig> {
     models
         .iter()
         .map(|model| {
-            let mut entry = existing
-                .iter()
-                .find(|entry| entry.id == model.id)
-                .cloned()
-                .unwrap_or_else(|| ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()));
+            let in_file = existing.iter().find(|entry| entry.id == model.id);
+            let was = effective.iter().find(|entry| entry.id == model.id);
+            let mut entry = match (in_file, was) {
+                (Some(entry), _) => entry.clone(),
+                (None, Some(_)) => ModelEntryConfig::enabled(model.id.clone()),
+                (None, None) => ModelEntryConfig::enabled_with_inferred_kind(model.id.clone()),
+            };
             entry.enabled = model.enabled;
+            if let Some(kind) = model.kind {
+                let kind = match kind {
+                    ModelKind::Chat => config::ModelKind::Chat,
+                    ModelKind::ImageGeneration => config::ModelKind::ImageGeneration,
+                };
+                if was.is_none_or(|was| was.effective_kind() != kind) {
+                    entry.kind = Some(kind);
+                }
+            }
+            match was {
+                Some(was) if was.context_window == model.context_override => {}
+                _ => entry.context_window = model.context_override,
+            }
             entry
         })
         .collect()
@@ -573,11 +638,37 @@ fn provider_view((name, profile): (&String, &ProviderProfileConfig)) -> Provider
             .map(|model| ModelView {
                 id: model.id.clone(),
                 enabled: model.enabled,
+                kind: match model.effective_kind() {
+                    config::ModelKind::Chat => ModelKind::Chat,
+                    config::ModelKind::ImageGeneration => ModelKind::ImageGeneration,
+                },
+                context_override: model.context_window,
             })
             .collect(),
         excluded_models: profile.excluded_models.clone(),
         default_model: profile.default_model.clone(),
+        show_quota: profile.show_quota_enabled(),
+        quota_supported: profile.quota_supported(),
     }
+}
+
+/// What a provider save wrote.
+pub(super) struct Saved {
+    pub revision: SettingsRevision,
+    /// The effective configuration is the same but for `show_quota`, so the
+    /// models the runs use do not differ from what the file now says.
+    pub models_unchanged: bool,
+}
+
+fn same_but_quota(mut before: Config, mut after: Config) -> bool {
+    for profile in before
+        .providers
+        .values_mut()
+        .chain(after.providers.values_mut())
+    {
+        profile.show_quota = None;
+    }
+    before == after
 }
 
 pub(in crate::areas) fn provider_kind(kind: ProviderTypeConfig) -> ProviderKind {
@@ -613,6 +704,29 @@ mod tests {
     }
 
     const WITH_TARGET: &str = "version = 2\n[core.restart.targets.web]\npath = \"/usr/bin/true\"\n";
+
+    #[test]
+    fn the_wire_inference_of_a_model_kind_is_the_one_of_the_configuration() {
+        for id in [
+            "gpt-image-2",
+            "GPT-IMAGE-1",
+            " dall-e-3",
+            "chatgpt-image-latest",
+            "gpt-5",
+            "image-gpt",
+            "",
+        ] {
+            let wire = match config::ModelKind::infer(id) {
+                config::ModelKind::Chat => ModelKind::Chat,
+                config::ModelKind::ImageGeneration => ModelKind::ImageGeneration,
+            };
+            assert_eq!(ModelKind::infer(id), wire, "{id:?}");
+        }
+        assert_eq!(
+            workbench_protocol::namespaces::settings::IMAGE_GENERATION_MODEL_PREFIXES,
+            config::types::provider::IMAGE_GENERATION_MODEL_PREFIXES
+        );
+    }
 
     #[test]
     fn the_local_view_never_reads_a_neighbour_of_the_real_directory() {

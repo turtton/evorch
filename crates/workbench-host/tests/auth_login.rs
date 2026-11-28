@@ -625,11 +625,7 @@ async fn a_key_is_saved_deleted_and_never_run_twice_for_one_operation_id() {
         );
     }
 
-    f.run(AuthCommand::DeleteCredential(DeleteCredential {
-        operation_id: op("delete-1"),
-        profile: "key".into(),
-    }))
-    .unwrap();
+    f.run(delete("delete-1", "key", "key-acct", &[])).unwrap();
     assert_eq!(
         f.settled("delete-1").await.operation.state,
         OperationState::Ready
@@ -888,4 +884,191 @@ async fn a_cursor_api_key_is_exchanged_and_stored_as_a_login() {
         }
     );
     assert_eq!(f.store.value("cursor-acct"), None);
+}
+
+fn delete(id: &str, profile: &str, account: &str, shared: &[&str]) -> AuthCommand {
+    AuthCommand::DeleteCredential(DeleteCredential {
+        operation_id: op(id),
+        profile: profile.into(),
+        account: account.into(),
+        shared_with: shared.iter().map(|name| (*name).to_owned()).collect(),
+    })
+}
+
+impl Fixture {
+    /// The configuration file changed behind the core's back: nothing is refreshed.
+    fn rewrite(&self, edit: impl FnOnce(&str) -> String) {
+        let path = self._dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, edit(&text)).unwrap();
+    }
+
+    fn put(&self, account: &str) {
+        self.store
+            .values
+            .lock()
+            .unwrap()
+            .insert(account.to_owned(), "secret".to_owned());
+    }
+
+    async fn deleted(&mut self, id: &str, command: AuthCommand) -> OperationState {
+        self.run(command).unwrap();
+        self.settled(id).await.operation.state
+    }
+
+    fn account_of(&self, profile: &str) -> Option<String> {
+        match self.query(AuthQuery::GetCredentialStatus {}) {
+            AuthReply::Status(status) => status
+                .slots
+                .into_iter()
+                .find(|slot| slot.profile == profile)
+                .and_then(|slot| match slot.storage {
+                    workbench_protocol::namespaces::settings::CredentialRef::Keyring {
+                        account,
+                        ..
+                    } => Some(account),
+                    _ => None,
+                }),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+const STALE: OperationState = OperationState::Failed {
+    code: ErrorCode::StaleRevision,
+};
+
+/// A deletion goes through when the account and the providers sharing it are what the person
+/// confirmed, and the file is read again for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_matching_its_confirmation_deletes() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    let state = f
+        .deleted("d-1", delete("d-1", "key", "key-acct", &[]))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert_eq!(f.store.value("key-acct"), None);
+}
+
+/// The file moved the provider to another account without a refresh: the confirmation named the
+/// old one, so nothing is deleted, under either account, and the status shows what the file says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_confirmed_for_an_account_the_file_no_longer_names_deletes_nothing() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    f.put("key-acct-2");
+    f.rewrite(|text| text.replace("account = 'key-acct'", "account = 'key-acct-2'"));
+    let state = f
+        .deleted("d-1", delete("d-1", "key", "key-acct", &[]))
+        .await;
+    assert_eq!(state, STALE);
+    assert!(f.store.value("key-acct").is_some());
+    assert!(f.store.value("key-acct-2").is_some());
+    assert_eq!(
+        f.account_of("key").as_deref(),
+        Some("key-acct-2"),
+        "the failed deletion brought the status up to the file"
+    );
+    // Confirmed again against the new account, it goes through.
+    let state = f
+        .deleted("d-2", delete("d-2", "key", "key-acct-2", &[]))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert_eq!(f.store.value("key-acct-2"), None);
+    assert!(f.store.value("key-acct").is_some());
+}
+
+/// Another provider was pointed at the same account in the file without a refresh: a deletion
+/// that did not list it deletes nothing; one that lists it goes through. The service does not
+/// matter, the account is what the credential store keys on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_that_does_not_list_everyone_who_loses_the_credential_deletes_nothing() {
+    for service in ["evorch", "another-service"] {
+        let mut f = Fixture::new();
+        f.put("key-acct");
+        f.rewrite(|text| {
+            text.replace(
+                "credential = { type = 'keyring', service = 'evorch', account = 'cursor-acct' }",
+                &format!(
+                    "credential = {{ type = 'keyring', service = '{service}', account = 'key-acct' }}"
+                ),
+            )
+        });
+        let state = f
+            .deleted("d-1", delete("d-1", "key", "key-acct", &[]))
+            .await;
+        assert_eq!(state, STALE, "{service}");
+        assert!(f.store.value("key-acct").is_some(), "{service}");
+        let state = f
+            .deleted("d-2", delete("d-2", "key", "key-acct", &["cur"]))
+            .await;
+        assert_eq!(state, OperationState::Ready, "{service}");
+        assert_eq!(f.store.value("key-acct"), None, "{service}");
+    }
+}
+
+/// A provider listed as sharing that does not is as much a difference as one missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_that_lists_a_provider_that_no_longer_shares_deletes_nothing() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    let state = f
+        .deleted("d-1", delete("d-1", "key", "key-acct", &["cur"]))
+        .await;
+    assert_eq!(state, STALE);
+    assert!(f.store.value("key-acct").is_some());
+}
+
+/// The same id with another confirmation is another request.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_operation_id_with_another_confirmation_conflicts() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    f.run(delete("d-1", "key", "key-acct", &[])).unwrap();
+    f.settled("d-1").await;
+    let other = [
+        delete("d-1", "key", "other-acct", &[]),
+        delete("d-1", "key", "key-acct", &["cur"]),
+    ];
+    for command in other {
+        assert_eq!(f.run(command).unwrap_err().code, ErrorCode::Conflict);
+    }
+    // The order of the providers is not part of what was confirmed.
+    f.run(delete("d-2", "key", "key-acct", &["a", "b"]))
+        .unwrap();
+    f.run(delete("d-2", "key", "key-acct", &["b", "a"]))
+        .unwrap();
+}
+
+/// The file was made unreadable after the core started (with other providers than the file had):
+/// a deletion, and a stored key, are refused with a fixed sentence, and nothing is touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_file_is_a_failure_not_the_configuration_the_core_started_with() {
+    let mut f = Fixture::new();
+    f.put("key-acct");
+    f.rewrite(|_| "version = 3\n[providers.key\nthis is not toml".to_owned());
+    f.run(delete("d-1", "key", "key-acct", &[])).unwrap();
+    let view = f.settled("d-1").await;
+    assert_eq!(
+        view.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::StorageUnavailable
+        }
+    );
+    assert_eq!(
+        view.message.as_deref(),
+        Some("the configuration file could not be read"),
+        "a fixed sentence, nothing of the file"
+    );
+    assert!(f.store.value("key-acct").is_some());
+
+    f.run(save_key("k-1", "key", "new-value")).unwrap();
+    assert_eq!(
+        f.settled("k-1").await.operation.state,
+        OperationState::Failed {
+            code: ErrorCode::StorageUnavailable
+        }
+    );
+    assert_eq!(f.store.value("key-acct").as_deref(), Some("secret"));
 }

@@ -21,6 +21,7 @@ fn profile(name: &str) -> ProviderProfile {
         excluded_models: Vec::new(),
         default_model: format!("{name}-model"),
         edit_tool: None,
+        show_quota: None,
     };
     ProviderProfile::try_from((name, &config)).expect("profile")
 }

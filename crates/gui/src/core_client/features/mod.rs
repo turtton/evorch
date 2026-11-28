@@ -118,7 +118,6 @@ pub enum FeatureId {
     Teams,
     Lanes,
     Settings,
-    Auth,
     Diagnostics,
     Memory,
     Improvement,
@@ -140,7 +139,6 @@ impl FeatureId {
             Self::Teams => "teams",
             Self::Lanes => "lanes",
             Self::Settings => "settings",
-            Self::Auth => "auth",
             Self::Diagnostics => "diagnostics",
             Self::Memory => "memory",
             Self::Improvement => "improvement",
@@ -455,6 +453,12 @@ pub trait Feature: Send {
     /// One delivered event of this feature's namespace.
     fn event(&mut self, _event: &UiEvent) {}
 
+    /// Whether the events of `namespace` are delivered to this feature: its own, and those of a
+    /// controller it holds (the settings feature holds the `auth` one).
+    fn listens_to(&self, namespace: &str) -> bool {
+        self.id().namespace() == namespace
+    }
+
     /// The answer to the request tagged `tag`.
     fn reply(&mut self, _tag: u64, _reply: FeatureReply) {}
 
@@ -523,6 +527,11 @@ pub trait Feature: Send {
 
     /// The diagnostics feature itself, for the footer's cost of today.
     fn as_diagnostics(&self) -> Option<&diagnostics::DiagnosticsFeature> {
+        None
+    }
+
+    /// The diagnostics feature itself, for a test that must not wait out the gap between two reads.
+    fn as_diagnostics_mut(&mut self) -> Option<&mut diagnostics::DiagnosticsFeature> {
         None
     }
 
@@ -602,7 +611,6 @@ impl Default for Features {
                 Box::<teams::TeamsFeature>::default(),
                 Box::<lanes::LanesFeature>::default(),
                 Box::<settings::SettingsFeature>::default(),
-                Box::<auth::AuthFeature>::default(),
                 Box::<diagnostics::DiagnosticsFeature>::default(),
                 Box::<memory::MemoryFeature>::default(),
                 Box::<improvement::ImprovementFeature>::default(),
@@ -818,6 +826,12 @@ impl Features {
         self.features.iter().find_map(|f| f.as_diagnostics())
     }
 
+    pub fn diagnostics_mut(&mut self) -> Option<&mut diagnostics::DiagnosticsFeature> {
+        self.features
+            .iter_mut()
+            .find_map(|f| f.as_diagnostics_mut())
+    }
+
     pub fn execution_mut(&mut self) -> Option<&mut execution::ExecutionFeature> {
         self.features.iter_mut().find_map(|f| f.as_execution_mut())
     }
@@ -931,7 +945,7 @@ fn invalidates_model_catalog(event: &UiEvent) -> bool {
 fn route_event(features: &mut [Box<dyn Feature>], event: &UiEvent) {
     let namespace = event.namespace();
     for feature in features {
-        if feature.id().namespace() == namespace {
+        if feature.listens_to(namespace) {
             feature.event(event);
         }
     }
@@ -1300,6 +1314,7 @@ impl FeatureFrame {
         self.previews.extend(other.previews);
         self.lanes.extend(other.lanes);
         self.pull_requests.extend(other.pull_requests);
+        self.settings.extend(other.settings);
         if !other.observations.is_empty() {
             self.observations = other.observations;
         }

@@ -1,6 +1,6 @@
 //! Fork and rewind boundaries inside a transcript.
 
-use workspace_ui::{ForkPoint, LineageKind};
+use workspace_ui::ForkPoint;
 
 use super::{TranscriptEntry, TranscriptModel};
 
@@ -134,34 +134,5 @@ impl TranscriptModel {
             TranscriptEntry::UserMessage { text, .. } => Some(text),
             _ => None,
         }
-    }
-
-    /// A new transcript holding this history up to `point` and a branch marker.
-    /// `None` when the boundary is not (or no longer) in this transcript.
-    pub(crate) fn branch_at(
-        &self,
-        point: Option<&ForkPoint>,
-        kind: LineageKind,
-        source_thread_id: &str,
-    ) -> Option<Self> {
-        let end = match point {
-            None => 0,
-            Some(point) => {
-                self.entries.iter().rposition(|entry| {
-                    matches!(entry, TranscriptEntry::TurnEnd { run_id, context_len }
-                        if run_id == &point.run_id && *context_len == point.context_len)
-                })? + 1
-            }
-        };
-        let mut branch = Self::with_capacity(self.capacity);
-        branch.agent_names.clone_from(&self.agent_names);
-        for entry in &self.entries[..end] {
-            branch.push(entry.clone());
-        }
-        branch.push(TranscriptEntry::Branch {
-            kind,
-            source_thread_id: source_thread_id.into(),
-        });
-        Some(branch)
     }
 }

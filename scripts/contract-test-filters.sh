@@ -26,6 +26,14 @@
 # Q2 recovery_disposal is an independent registration-only runtime/core leaf target.
 # Existing quiesce recovery_cache_tests and startup_recovery stay the input-derived
 # wire-prefix proof until the leaf adds its own scenarios.
+# The embedded GUI's cache and I/O registrations (gui::artifact_pages_cache,
+# pull_requests_cache, pull_request_phase2_gui_cache, harness_notice_recovery, the
+# lane_delivery_host attention scenario, the evorch-gui bin tests and
+# ownership_close_headless) were replaced before they were deleted: the cache
+# contracts by core_renderer_cache and core-client-e2e's default_gui_cache,
+# gui_pull_request_cache (pull request operations and notice through the window) and
+# execution_teams_lanes' pending-attention test, the writer-drain contracts by recorder's
+# storage_bridge and the host's flush test.
 # (No comments inside the filter itself: nextest does not parse them.)
 # scripts/tests/test_check_central_files.sh checks that every binary named in
 # CACHE_CONTRACT_FILTER has a test target.
@@ -82,9 +90,8 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_e2e)))
   | (package(=evorch-core) & (binary(=core_cache) | binary(=planned_exec_cache) | binary(=core_mcp_cache) | binary(=core_workspace_cache) | binary(=startup_recovery) | binary(=core_settings_cache) | binary(=core_pr_cache) | binary(=core_eval_cache) | binary(=core_cli_run_cache) | binary(=core_renderer_cache) | binary(=f4_product_cache) | binary(=agent_observation_cache) | binary(=public_restart_cache) | binary(=cli_continuity_cache) | binary(=recovery_disposal)))
   | (package(=tools) & binary(=bounded_output))
-  | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache) | binary(=harness_notice_recovery)
-      | (binary(=lane_delivery_host) & test(attention_query_and_display))))
-  | (package(=core-client-e2e) & binary(=default_gui_cache))
+  | (package(=core-client-e2e) & (binary(=default_gui_cache) | binary(=gui_pull_request_cache)
+      | (binary(=execution_teams_lanes) & test(pending_lane_attention_read_and_shown))))
 '
 IO_CONTRACT_FILTER='
   (package(=storage) & (binary(=lane_delivery) | binary(=conversation_plan) | binary(=pull_request_auto_fix) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))
@@ -93,12 +100,9 @@ IO_CONTRACT_FILTER='
   | (package(=workbench-host) & (binary(=conversation_plan_reads) | (kind(lib) & test(areas::execution::plan::tests))))
   | (package(=runtime) & kind(lib) & test(lane_delivery::tests::harness::))
   | (package(=runtime) & binary(=pull_request_log_source_io))
-  | (package(=gui) & (
-      (kind(lib) & test(storage_bridge))
-      | binary(=evorch-gui)
-      | binary(=storage_bridge)
-      | binary(=diagnostic_ledger)
-      | binary(=ownership_close_headless)))
+  | (package(=recorder) & binary(=storage_bridge))
+  | (package(=workbench-host) & kind(lib) & test(bootstrap::tests::core_catalog_prices_usage_and_diagnostics_are_flushed_once))
+  | (package(=gui) & binary(=diagnostic_ledger))
 '
 
 # Explicit D-3a2-A registration in the existing remaining inventory (not cache

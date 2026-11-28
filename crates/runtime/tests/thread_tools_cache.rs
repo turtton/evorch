@@ -429,6 +429,7 @@ async fn indexed_search_preserves_http_wire_prefix_and_input_derived_cache() {
                 default_model: MODEL.into(),
                 excluded_models: vec![],
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: config::RoutingConfig {

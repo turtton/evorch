@@ -294,3 +294,130 @@ mock-openai と scripted model を使って、次を決定的にテストする�
 - LLM の採点には位置の偏りと自己優遇が残る。順序の入れ替えと警告で弱めるが、なくすことはできない。
 - 1 thread の勝敗を一般的な model の順位として扱わない。構成を採用する前に、回帰確認のサンプルでも比べる。
 - 実行ごとに provider の費用が 2 実行分以上かかる。繰り返しを含めると、相談 1 件で元 thread の数倍になる。
+
+## Addendum（2026-11-28、実失敗に基づくツール説明・プロンプトの評価）
+
+### Context
+
+実際の失敗から作った sample で、モデルごとのツール説明とプロンプトの精度と context 量を比べたい。
+そのために、本 ADR の評価を次のとおり拡張した（#829 sample の checks、#836 モデル別ツール説明、#844 共通 overlay と changes、#856 judge と report）。
+別の評価基盤、ケース DB、scheduler は作らない。1 thread = 1 sample のまま、既存の thread 再実行を使う。
+手順は [docs/eval-tool-optimization.md](../../../docs/eval-tool-optimization.md) に置く。
+
+以下は §6（overlay の対象）、§7（採点）、§8（費用）、§1 の sample の保存を補う。矛盾する記述はこの追補を優先する。
+
+### 1. sample の checks と出典
+
+- `EvalSample` に次を加える（`eval_samples.spec` JSON 列、storage schema v78。旧形式の互換層は作らない）。
+  - `kind`: `failure`（既定。実際の失敗）と `regression`（うまくいった thread。変更で壊れないことの確認）。
+  - `source_refs`: 問題を観測した run、event、改善候補。存在と thread への所属を保存時に検査する。証拠の参照であり、replay の run と一致させる条件ではない。
+  - `tags`（判定の意味には使わない）、`checks`、`check_version`（採点意味論の版）。
+- `checks` は型付きの 3 種だけで、式言語は持たない。
+  - tool の成功呼び出し数（下限、上限のどちらか、または両方）
+  - tool のエラー数の上限
+  - 診断コードの発生数の上限
+- 各 check は、対象範囲（delegation 木全体、または role 集合）と、呼び出し範囲（直接の呼び出しのみ、または `run_js` 内の子呼び出しを含む）を持つ。role/category の新しい分類体系は導入しない。
+- 上限は checks 32 件、追加メタデータ 64 KiB。超過は切り詰めずに拒否する。追加した文字列にも既存の秘密情報検査をかける。
+- checks は任意である。宣言しない sample と、sample を持たない `eval run` は従来どおり動き、report に「機械判定なし」と示す。
+- 保存時の検査（`eval_save_sample`）。provider を呼ばず、元 thread の記録に checks を当てる。
+  - checks を宣言した `failure` sample は、fail する check が 1 つも無ければ受理しない。
+  - `regression` sample は、完全な記録で全 check が pass であることを求める。
+  - 元の記録で fail することは、replay で失敗が再発する証明ではない。再発率は有料の baseline 反復でしか測れない。
+- 採点は共通のイベント採点関数（`eval/src/checks.rs`）で行い、`pass` / `fail` / `indeterminate` と理由・根拠参照を返す。`RunMetrics` の集計は正本にしない。
+  - 成功は終端イベントで数え、`parent_call_id` で親子を二重に数えない。
+  - 記録の欠落、読み取り上限による切り捨て、対象 role の未出現、未終端の call を検出する。未観測を根拠にした pass は出さない。観測済みの上限超過は fail にできる。
+  - check の結果と replay の有効性は別に示す。未完了の replay は、全 check が pass でも品質合格にしない。
+- `evorch eval report --checks-only` は、記録済みの証跡だけを読んで再採点する。judge、simulator、検証コマンド、provider を使わず、`checks-<sample hash>.{json,md}` を別に書く。manifest と `report.json` は書き換えない。sample を固定していない旧い評価は、現在の sample による「事後分析」と明記する。
+- runner は元 DB の sample を読み、開始時に manifest の `sample`（hash 付き）へ固定する。checks 本体は CLI 引数で渡さない。後から sample を書き換えても、過去の manifest は変わらない。
+
+### 2. overlay の合成と対象
+
+§6 の overlay は role binding と `role_profile` を差し替えるものだった。これを次のとおり広げる。
+
+- 構成は 4 層で合成する。
+
+  ```text
+  baseline  = user 設定 + project 設定 + common
+  candidate = baseline + candidate
+  ```
+
+  - project 層が設定できるのは `role_profile` の選択だけである。replay の構成は、再現した project 設定で作る。
+  - **common**（`--common`、`eval_start` の `common`）は、baseline と candidate の両方に掛かる。対象は `agents`、`routing`、`role_profile`、`role_profiles` に限る。評価するモデルを両群で固定するために使い、比較の対象にはしない。日常利用の設定は変えない。
+  - **candidate** は `eval`、`tools`、`comment_checker` を変更できない。common では `model_tool_descriptions` を設定できない。
+  - simulator、judge、budget は両群で共通で、common と candidate では変えられない。
+- candidate が変えられるものに `model_tool_descriptions` を加える。
+  - キーは provider profile と、routing 上の正確な model ID（`+fast` は別の ID）。`tools` の下には置かない。
+  - 対象は、build が所有する固定の builtin tool のトップレベルの説明だけである。tool 名、引数 schema、順序、権限、公開範囲、実装は変えない。
+  - `run_js` の生成説明、動的な team tool、MCP tool、外部 host tool への指定は拒否する。
+  - 1 説明は非空で 8 KiB 以下（UTF-8）、1 モデル 64 tool 以下、run が保存する snapshot は 128 KiB 以下。超過と秘密情報は拒否する。
+- プロンプトの比較には、role binding の appendix preset だけを使う。baseline 用と candidate 用に別名の preset を用意し、開始時に内容の hash を固定する。`family-*` は family 単位で共有の presets ディレクトリから解決されるため、overlay では差し替えられない。モデルごとの system 全文の差し替えは対象外とする。
+- manifest に `changes` を持つ。`swapped_roles` は binding の差分だけを表し、説明だけの candidate を架空のモデル交換として詰め込まない。
+  - `changes` は、変わった binding、ツール説明（profile、route の model ID、tool 名、baseline と candidate の hash）、差分が及び得る role（`affected_roles`）を持つ。
+  - `eval_start` は、実効的な changes が空なら拒否する。
+- provider を呼ぶ前に、次の比較を拒否する。
+  - 何も変えない candidate
+  - 固定 builtin でない tool の説明
+  - ある role のモデル設定と説明を同時に変える candidate
+  - どの role にも届かない説明、wire に届かない説明
+- manifest の `pins` に、sample、common、candidate、設定、prompt preset の hash、承認 digest、build、設定上のモデルを固定する。run ごとに、実際に使ったモデルと、run が固定した説明の snapshot を `observed` に記録する。
+  - `eval_start` は thread ごとの digest を承認の前後で照合し、承認待ちの間に sample、overlay、設定、preset が変わっていたら再確認を求める。runner も `--approved-digest` と不一致なら実行せず、各 replay の前にも照合する。
+
+### 3. 判定は機械判定を主とし、LLM judge は補助とする
+
+- 品質の判定は、決定的な checks と既存の検証コマンド（`--verify`）を主とする。LLM judge は意味的な品質の補助で、機械判定の退行を平均点や費用の削減で相殺しない。
+- judge には実際の `changes` を渡す。「candidate は `swapped_roles` だけが違う」という前提は削除した。比較の payload は A/B の位置で表し、順序を入れ替えてもどちらが baseline か分からない。
+- 両順序の判定を残し、両方 tie と、判定の食い違いによる tie（`order_disagreement`）を区別する。prompt と payload の版を judge cache の同一性に含める。
+- 自己優遇の警告は、changes に基づき、説明を変えたモデルも対象にする。
+- report は、初期 context、初回 request の usage、累積 usage、品質、実効差分、費用、有効性を分けて示す。
+  - 初期 system / tools の量は、各 replay の runtime が `BaseContextReport` から取る概算（bytes / 4）で、実測の token ではない。初回 request の usage は provider の報告で、履歴なども含むため、ツール説明だけの token とは呼ばない。
+  - usage や価格が欠ける費用は `unknown` とし、0 円にしない。agent、simulator、judge は別に示す。
+- 次は判定保留（pending）とし、成功にも退行にも数えない: 説明が使われなかった、別モデルへ fallback した、replay の記録が無い、replay が未完了、checks が確定しない、judge の順序が食い違った、judge が失敗した、preflight が拒否した。
+- 採用は人が判断する。baseline も candidate も pass なら、改善ではなく正常の維持として扱う。採用した設定は利用者管理の設定として反映し、新規 run から有効にする。`eval_apply_config` は agents と routing だけを保存し、この追補では拡張しない。
+
+### 4. モデル別ツール説明は run 開始時に固定し、cache 境界を作らない
+
+- run が入るときに、routing が選んだ候補（profile と model ID）で 1 回だけ説明を選び、その run では変えない。モデル切替には追随しない。
+  - 選んだ identity、説明の map（空でも）、hash、開始時の family を snapshot として、既存の `run_contexts.config_json` に最初の provider request の前に保存する。保存に失敗したら実行を続けない。
+  - restore と fork は保存済みの snapshot を使い、現在の設定から選び直さない。snapshot が無い古い record は「override なし」として復元する。壊れた snapshot は復元を拒否する。
+  - 子 run は自身の開始時のモデルと設定で選び、親の map を継承しない。
+  - 開始時の family も固定する。binding を編集してから restore しても、`delegate` の追記は変わらない（意図した挙動）。
+- 適用は `tool_catalog` の 1 つの純粋な処理にまとめ、live loop、preview、restore、planned handoff が共用する。説明の差し替えは、role の可視性 filter、`run_js` の生成説明、harness が付ける hint や family の追記より前に行う。harness の追記は override で消せない。
+- `prepare_model_switch` と送信直前の compose には、再選択も適用器も足さない。履歴、送信済みの ToolResult、cache affinity、system、model と設定は、説明のために書き換えない。
+- したがって、説明の override は新しい cache 境界を作らない。設定の編集も境界ではない。既存の境界（model switch、compaction、build 更新を伴う restart の tools-only 境界）の扱いは変えない。
+- build の更新で対象の tool が無くなったときは、保存済みの override を適用せず、診断を残す。再公開も別名への転用もせず、snapshot は書き換えない。新規 run は、現在の設定に未知の tool があれば実行前に拒否する。
+- benchmark の記録と replay は、override が掛かる場合に provider を呼ぶ前に拒否する。
+- AGENTS.md の Cache correctness gate は変更しない。cache E2E は、入力から導いた mock cache と独立した wire 検査で、通常 turn、モデル指定、`ResponsesScopeChanged`、compaction、fallback、子 run、fork、restore、planned handoff、build 更新後の restart と、境界直後の次 turn の prefix 再利用を確かめている（#836）。
+
+### 5. 費用と停止策の限界
+
+- 評価の費用は、既存の価格表（§8）と実測の usage から出す。usage や価格が欠けたら 0 円ではなく「不明」とする。
+- `eval_start` は、承認の前に次を示す。replay と judge の組の数、agent のモデル、budget、budget の token 上限を既知の最高単価で換算した額（replay ごと、全体）、simulator と judge の別枠、停止条件。
+  - **この換算額は、厳密なドル上限ではない。** budget は request が完了してから判定するため、進行中の request と並行する子 run は超過し得る。単価は最も高い値であり、典型的な request の支払いではない。simulator と judge は、この額に含めない。価格が不明なら換算も不明とする。
+  - 新しいドル予算管理の仕組みは作らない。厳密なドル上限が必要なら、provider 側の強制上限を確認できるまで実行しない。
+- 停止策は、既存の `eval.budget`（1 replay の delegation 木全体の token、tool 呼び出し、user turn、経過時間）だけである。超えた replay は未完了として記録し、停止を要求した後は次の replay を始めない。`evals/run-js` の watchdog や `--cost-limit` は、thread replay には無い。
+- 実測の参考値（固定課題のハーネス `evals/run-js`、thread replay の予測値ではない）: r4 は 72 run で $28.407（1 run あたり約 $0.39）。暴走した 1 run は 487 request、約 $12.6 を使った。
+- 有料の実行は、対象、件数、budget、換算額を示した利用者の承認のたびに行う。この ADR と計画の承認は、有料 pilot の承認を含まない。
+
+### 6. 「適用済み」の条件と既知の制限
+
+説明の override は、次の 4 つがすべて成り立つときだけ「適用済み」と数える。どれか 1 つでも確認できなければ、適用済みと数えない。
+
+1. run の snapshot が、changes の (profile, route の model ID) を選んでいて、その tool を含む。
+2. その tool が、run 自身の記録の `tool_names` にある。
+3. その role の request がすべて、その role の run が固定した (profile, base model) に応答されている（usage の台帳で確認する。baseline と candidate の両方）。1 つの既知のモデルに固定されない role は、fallback と区別できないので判定保留にする。
+4. 説明が、そのモデルの wire に届く（`BuiltinCatalog::description_reaches_wire`。preflight と同じ関数）。
+
+既知の制限:
+
+- **tool calling に対応しないモデル**: 送信時に tools が空になる。評価は、router が通常は tool calling に対応するモデルを選ぶことを前提にし、確認はしない。
+- **`apply_patch` の説明は確認できない**: Responses の wire は説明を固定の文に置き換え、他の wire は確認していない。そのため `apply_patch` は数えず、評価ではその説明だけの override を拒否する。通常の run の設定は受理するが、Responses 系のモデルでは wire に届かない（runbook の注意欄を参照）。
+- **role 単位の保守的な照合**: 3 は role 単位で判定する。同じ role の run のモデルが一意に決まらなければ、実際に説明が使われていても保留になる。
+- edit interface の絞り込み（`edit_tools::narrow`）は、apply-patch interface のモデルには `edit` と `write` を、edit interface のモデルには `apply_patch` を送らない。送られない tool の説明は、4 を満たさない。
+- 実際の thread での再発率と、実 provider での費用は、この追補の時点で未確認である。
+
+### 7. この追補で変えないこと
+
+- 別の評価基盤、ケース DB、scheduler、任意 script を埋め込む checks、一般の採点 DSL、自動最適化は作らない。
+- role/category の再設計は対象外とし、妨げない。
+- モデルごとの system 全文の差し替えと、tool の引数 schema 内の説明の変更は含めない。
+- AGENTS.md の Cache correctness gate と Compatibility policy は変更しない。

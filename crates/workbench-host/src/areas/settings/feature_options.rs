@@ -249,7 +249,6 @@ impl Inner {
         // Held to the end: the write, the effective configuration read after it, what is
         // applied from that and the announcement are one step for every other save.
         let _writer = self.writer.clone().lock_owned().await;
-        let applied_before = lock(&self.state).snapshot.applied_revision.clone();
         let SaveFeatureSettings {
             expected_revision,
             changes,
@@ -283,10 +282,10 @@ impl Inner {
         .await?
         .map_err(Failure::from)?;
         let message = self.apply_features(&sections, effective);
-        self.reread().await?;
-        if applied_before.as_ref() == Some(&expected_revision) {
-            self.set_applied(Some(revision.clone()), None);
-        }
+        // Applied from the moment the new file is published, as for a save of the quota switch:
+        // the same step that makes the snapshot is the one that advances what is applied.
+        self.reread_applying(Some((expected_revision, revision.clone())))
+            .await?;
         Ok(Done {
             revision: Some(revision),
             message,

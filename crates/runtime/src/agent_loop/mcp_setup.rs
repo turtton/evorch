@@ -79,12 +79,7 @@ impl LoopState {
             crate::ownership::authority::watch_mcp(permit, &fenced);
         }
         let (registered, lease) = tokio::sync::oneshot::channel::<Arc<crate::mcp::RunMcpLease>>();
-        let thread_id = self
-            .task
-            .config
-            .ownership
-            .as_ref()
-            .map(|permit| permit.thread_id.clone());
+        let thread_id = self.thread_id.clone();
         let bus = self.shared.bus.clone();
         let mut interrupts = self.channels.cancel_rx.clone();
         let bridge = tokio::spawn(async move {

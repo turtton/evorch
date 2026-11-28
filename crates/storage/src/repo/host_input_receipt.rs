@@ -370,7 +370,7 @@ pub(crate) fn headers_for_run(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Vec<crate::host_input::HostInputReceiptHeader>, StorageError> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare_cached(
         "SELECT prompt_id, run_id, status FROM host_input_receipts WHERE run_id=?1
         AND json_extract(provenance_json,'$.kind')='user'
         AND run_id NOT IN (SELECT run_id FROM run_tombstones)

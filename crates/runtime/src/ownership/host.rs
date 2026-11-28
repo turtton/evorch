@@ -38,9 +38,7 @@ pub struct OwnerHost {
     scratch: Arc<ThreadScratch>,
     /// Threads retention deleted; set once after the startup phase.
     tombstones: OnceLock<TombstoneGuard>,
-    writer_leases: OnceLock<Arc<storage::WriterLeases>>,
     worker: Mutex<Option<WorkerControl>>,
-    archive: super::scratch_archive::ArchiveService,
 }
 
 struct WorkerControl {
@@ -75,9 +73,6 @@ impl OwnerHost {
     ) -> Result<Self, RegistryError> {
         Self::open_mode(root, settings, bus, false)
     }
-    pub fn retain_writer_leases(&self, leases: Arc<storage::WriterLeases>) {
-        let _ = self.writer_leases.set(leases);
-    }
     pub fn enable_normal_shutdown(&self) {
         self.release_on_drop.store(true, Ordering::SeqCst);
     }
@@ -86,6 +81,28 @@ impl OwnerHost {
         settings: config::OwnershipConfig,
         bus: Arc<EventBus>,
         ordinary: bool,
+    ) -> Result<Self, RegistryError> {
+        Self::open_with_scratch(root, settings, bus, ordinary, None)
+    }
+
+    // Isolates the fixtures that exercise scratch without changing production selection.
+    pub(crate) fn open_with_scratch(
+        root: &Path,
+        settings: config::OwnershipConfig,
+        bus: Arc<EventBus>,
+        ordinary: bool,
+        scratch: Option<ThreadScratch>,
+    ) -> Result<Self, RegistryError> {
+        Self::open_with_shared_scratch(root, settings, bus, ordinary, scratch.map(Arc::new))
+    }
+
+    /// Bootstrap supplies the same scratch Arc to runtime and host services.
+    pub fn open_with_shared_scratch(
+        root: &Path,
+        settings: config::OwnershipConfig,
+        bus: Arc<EventBus>,
+        ordinary: bool,
+        scratch: Option<Arc<ThreadScratch>>,
     ) -> Result<Self, RegistryError> {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(std::io::Error::other)?;
@@ -105,7 +122,10 @@ impl OwnerHost {
         let socket_identity = (metadata.dev(), metadata.ino());
         let mut registry = Registry::open(&root.join("owners.db"))?;
         let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
-        let scratch = Arc::new(ThreadScratch::for_ownership_root(root)?);
+        let scratch = match scratch {
+            Some(scratch) => scratch,
+            None => Arc::new(ThreadScratch::for_ownership_root(root)?),
+        };
         if ordinary {
             sweep_scratch(&scratch, root, &owner_id, &mut registry);
         }
@@ -117,11 +137,6 @@ impl OwnerHost {
         let release_deferred = Arc::new(AtomicBool::new(false));
         let worker_deferred = Arc::clone(&release_deferred);
         let worker_db = root.join("owners.db");
-        let archive = super::scratch_archive::ArchiveService::new(
-            root.join("owners.db"),
-            owner_id.clone(),
-            Arc::clone(&scratch),
-        )?;
         let worker = std::thread::spawn(move || {
             serve(
                 registry,
@@ -138,7 +153,6 @@ impl OwnerHost {
             )
         });
         Ok(Self {
-            archive,
             root: root.into(),
             owner_id,
             settings,
@@ -149,7 +163,6 @@ impl OwnerHost {
             release_on_drop: AtomicBool::new(ordinary),
             scratch,
             tombstones: OnceLock::new(),
-            writer_leases: OnceLock::new(),
             worker: Mutex::new(Some(WorkerControl {
                 stop,
                 join: Some(worker),
@@ -471,13 +484,11 @@ impl OwnerHost {
         Ok(self.permit(&owner))
     }
 
-    /// Armed readback -> stop/join -> identity-checked unlink -> exec. No Drop,
-    /// release or PID-liveness assumption. Idempotent after successful stopping.
+    /// Stop/join heartbeat and IPC, then identity-check and unlink its socket.
+    /// The caller separately stops archive and scratch cleanup for exec.
+    /// No Drop, release or PID-liveness assumption; idempotent on success.
     pub fn stop_worker_for_exec(&self) -> Result<(), RegistryError> {
-        let archive_result = self.archive.stop().map_err(RegistryError::from);
-        let owner_result = self.stop_owner_worker();
-        let cleanup_result = sandbox::scratch::stop_scratch_cleanup().map_err(RegistryError::from);
-        archive_result.and(owner_result).and(cleanup_result)
+        self.stop_owner_worker()
     }
 
     fn stop_owner_worker(&self) -> Result<(), RegistryError> {
@@ -520,7 +531,6 @@ impl OwnerHost {
     /// Restore only owner heartbeat/IPC after failed exec. Admission and run
     /// gates stay closed; call clear_planned_hold for every installed hold.
     pub fn restart_worker_failed_closed(&self) -> Result<(), RegistryError> {
-        sandbox::scratch::resume_scratch_cleanup()?;
         let mut slot = self
             .worker
             .lock()
@@ -575,24 +585,9 @@ impl OwnerHost {
         Ok(())
     }
 
-    /// Inject saved shared-sidebar state. Called only on the archive worker.
-    pub fn set_scratch_archive_checker(&self, checker: Arc<super::ScratchArchiveChecker>) {
-        self.archive.set_checker(checker);
-    }
-    /// Best effort hint after a successful archive save, outside its save lock.
-    pub fn hint_scratch_archive(&self, thread: &str) {
-        self.archive.hint(thread);
-    }
-    /// Call after producers have stopped, runs drained and ownership released.
-    pub fn stop_scratch_cleanup(&self) -> Result<(), RegistryError> {
-        let archive = self.archive.stop().map_err(RegistryError::from);
-        let cleanup = sandbox::scratch::stop_scratch_cleanup().map_err(RegistryError::from);
-        archive.and(cleanup)
-    }
-    #[cfg(any(test, feature = "idle-test-support"))]
-    #[doc(hidden)]
-    pub fn scratch_archive_barrier(&self) -> std::sync::mpsc::Receiver<()> {
-        self.archive.barrier()
+    /// Owner validation adapter for the host-owned scratch archive worker.
+    pub fn scratch_archive_authority(&self) -> Arc<crate::scratch::archive::ArchiveAttempt> {
+        super::scratch_archive::authority(self.db(), self.owner_id.clone(), self.scratch.clone())
     }
 
     fn reader(&self) -> Result<MutexGuard<'_, Registry>, RegistryError> {
@@ -666,7 +661,6 @@ impl Drop for OwnerHost {
         if self.release_on_drop.load(Ordering::SeqCst) {
             let _ = self.quiesce();
         }
-        let _ = self.archive.stop();
         let _ = self.stop_owner_worker();
     }
 }

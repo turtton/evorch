@@ -2,9 +2,23 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::ownership::{Lease, OwnerState};
 use serde::{Deserialize, Serialize};
 mod persistence;
+
+/// A team task claim, independent of process/thread ownership.
+/// Field names and expiry semantics intentionally preserve persisted team state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskLease {
+    pub owner_id: String,
+    pub generation: u64,
+    pub expires_at: u64,
+}
+
+impl TaskLease {
+    pub const fn is_live(&self, now: u64) -> bool {
+        now < self.expires_at
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,7 +30,7 @@ pub struct TaskSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimState {
     Ready,
-    Claimed(Lease),
+    Claimed(TaskLease),
     Complete,
 }
 
@@ -75,7 +89,7 @@ impl TeamBoard {
         })
     }
 
-    pub fn claim(&self, id: &str, worker: &str, now: u64) -> Result<Lease, TeamError> {
+    pub fn claim(&self, id: &str, worker: &str, now: u64) -> Result<TaskLease, TeamError> {
         self.update(|tasks| {
             let task = tasks.get(id).ok_or(TeamError::NotReady)?;
             if task.state != ClaimState::Ready {
@@ -96,7 +110,7 @@ impl TeamBoard {
             }
             let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
             task.generation = task.generation.checked_add(1).ok_or(TeamError::Exhausted)?;
-            let lease = Lease {
+            let lease = TaskLease {
                 owner_id: worker.into(),
                 generation: task.generation,
                 expires_at: now.saturating_add(5_000),
@@ -106,7 +120,7 @@ impl TeamBoard {
         })
     }
 
-    pub fn heartbeat(&self, id: &str, token: &Lease, now: u64) -> Result<(), TeamError> {
+    pub fn heartbeat(&self, id: &str, token: &TaskLease, now: u64) -> Result<(), TeamError> {
         self.update(|tasks| {
             let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
             let lease = live_lease(task, token, now)?;
@@ -115,7 +129,7 @@ impl TeamBoard {
         })
     }
 
-    pub fn complete(&self, id: &str, token: &Lease, now: u64) -> Result<(), TeamError> {
+    pub fn complete(&self, id: &str, token: &TaskLease, now: u64) -> Result<(), TeamError> {
         self.update(|tasks| {
             let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
             live_lease(task, token, now)?;
@@ -129,7 +143,7 @@ impl TeamBoard {
             let mut expired = Vec::new();
             for (id, task) in tasks.iter_mut() {
                 if let ClaimState::Claimed(lease) = &task.state
-                    && lease.observe(now, 0) == OwnerState::Stale
+                    && !lease.is_live(now)
                 {
                     task.state = ClaimState::Ready;
                     expired.push(id.clone());
@@ -177,7 +191,7 @@ impl TeamBoard {
         for task in tasks.values() {
             if let ClaimState::Claimed(lease) = &task.state
                 && lease.owner_id == worker
-                && lease.observe(now, 0) == OwnerState::Running
+                && lease.is_live(now)
                 && task.spec.paths.iter().any(|owned| path.starts_with(owned))
             {
                 return Ok(());
@@ -189,14 +203,14 @@ impl TeamBoard {
 
 fn live_lease<'a>(
     task: &'a mut TeamTask,
-    token: &Lease,
+    token: &TaskLease,
     now: u64,
-) -> Result<&'a mut Lease, TeamError> {
+) -> Result<&'a mut TaskLease, TeamError> {
     match &mut task.state {
         ClaimState::Claimed(lease)
             if lease.owner_id == token.owner_id
                 && lease.generation == token.generation
-                && lease.observe(now, 0) == OwnerState::Running =>
+                && lease.is_live(now) =>
         {
             Ok(lease)
         }
@@ -213,4 +227,55 @@ fn validate_path(path: &Path) -> Result<(), TeamError> {
         return Err(TeamError::InvalidPath);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn task_expiry_boundary_and_reclaim_fence_are_unchanged() {
+        let board = TeamBoard::default();
+        board
+            .enqueue(TaskSpec {
+                id: "task".into(),
+                paths: vec![],
+            })
+            .unwrap();
+        let lease = board.claim("task", "worker", 10).unwrap();
+        assert_eq!(lease.expires_at, 5_010);
+        assert!(board.expire(5_009).unwrap().is_empty());
+        assert!(matches!(
+            board.heartbeat("task", &lease, 5_010),
+            Err(TeamError::Fenced)
+        ));
+        assert_eq!(board.expire(5_010).unwrap(), ["task"]);
+        let next = board.claim("task", "worker", 5_010).unwrap();
+        assert_eq!(next.generation, lease.generation + 1);
+        assert!(matches!(
+            board.complete("task", &lease, 5_011),
+            Err(TeamError::Fenced)
+        ));
+        board.complete("task", &next, 5_011).unwrap();
+    }
+
+    #[test]
+    fn task_lease_saturates_and_keeps_its_persisted_shape() {
+        let board = TeamBoard::default();
+        board
+            .enqueue(TaskSpec {
+                id: "task".into(),
+                paths: vec![],
+            })
+            .unwrap();
+        let lease = board.claim("task", "worker", u64::MAX - 1).unwrap();
+        assert!(lease.is_live(u64::MAX - 1));
+        assert!(!lease.is_live(u64::MAX));
+        assert_eq!(
+            serde_json::to_value(&lease).unwrap(),
+            serde_json::json!({
+                "owner_id": "worker", "generation": 1, "expires_at": u64::MAX
+            })
+        );
+    }
 }

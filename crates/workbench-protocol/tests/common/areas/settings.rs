@@ -36,10 +36,14 @@ fn models() -> Vec<ModelInput> {
         ModelInput {
             id: "model-a".into(),
             enabled: true,
+            kind: Some(ModelKind::Chat),
+            context_override: Some(200_000),
         },
         ModelInput {
             id: "model-b".into(),
             enabled: false,
+            kind: None,
+            context_override: None,
         },
     ]
 }
@@ -61,9 +65,13 @@ pub fn snapshot() -> SettingsSnapshot {
             models: vec![ModelView {
                 id: "model-a".into(),
                 enabled: true,
+                kind: ModelKind::Chat,
+                context_override: Some(200_000),
             }],
             excluded_models: vec!["model-z".into()],
             default_model: "model-a".into(),
+            show_quota: false,
+            quota_supported: true,
         }],
         problem: None,
     }
@@ -141,6 +149,7 @@ pub fn samples() -> AreaSamples {
                     models: models(),
                     excluded_models: vec![],
                     default_model: "model-a".into(),
+                    show_quota: Some(false),
                 },
             }))),
             Command::Settings(SettingsCommand::DeleteProvider(DeleteProvider {
@@ -164,6 +173,11 @@ pub fn samples() -> AreaSamples {
                     }),
                 },
             })),
+            Command::Settings(SettingsCommand::FetchProviderModels(FetchProviderModels {
+                operation_id: op("op-fetch"),
+                expected_revision: revision(0x11),
+                provider: "work".into(),
+            })),
         ],
         queries: vec![
             Query::Settings(SettingsQuery::ModelChoices {
@@ -175,6 +189,9 @@ pub fn samples() -> AreaSamples {
                 operation_id: op("op-1"),
             }),
             Query::Settings(SettingsQuery::ListSettingsOperations {}),
+            Query::Settings(SettingsQuery::GetProviderModels {
+                operation_id: op("op-fetch"),
+            }),
         ],
         ui_events: vec![
             UiEvent::Settings(SettingsEvent::SettingsSnapshotChanged {
@@ -204,6 +221,12 @@ pub fn samples() -> AreaSamples {
                 OperationState::Pending,
                 SettingsOperationKind::ReloadModels,
             ))),
+            QueryReply::Settings(SettingsReply::ProviderModels(ProviderModelCandidates {
+                operation_id: op("op-fetch"),
+                provider: "work".into(),
+                models: vec!["model-a".into(), "model-b".into()],
+                truncated: true,
+            })),
             QueryReply::Settings(SettingsReply::Operations {
                 operations: vec![
                     operation(

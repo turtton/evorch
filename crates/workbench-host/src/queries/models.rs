@@ -58,12 +58,15 @@ fn saved_phase(value: &str) -> RunPhase {
 }
 pub(crate) fn collect(
     runtime: &AgentRuntime,
+    reader: Option<&storage::Database>,
     projects: &[(ProjectId, PathBuf)],
     names: &BTreeMap<String, String>,
 ) -> Result<Models, storage::StorageError> {
     let mut m = Models::default();
     let live = runtime.list_agents();
-    runtime.with_storage_reader(|db| {
+    // Each query finishes its own read. Do not wrap the full collection in a
+    // transaction: an old WAL snapshot can block the writer's FULL checkpoint.
+    let mut read = |db: &storage::Database| {
         for (project, root) in projects {
             let mut cursor = None;
             loop {
@@ -207,7 +210,12 @@ pub(crate) fn collect(
             }
         }
         Ok(())
-    })?;
+    };
+    if let Some(db) = reader {
+        read(db)?;
+    } else {
+        runtime.with_storage_reader(read)?;
+    }
     for (id, _) in projects {
         let mut project = ProjectSummary {
             id: id.clone(),

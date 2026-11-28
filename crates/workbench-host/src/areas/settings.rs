@@ -17,12 +17,14 @@
 //! I/O, it never waits for a person.
 pub mod feature_options;
 pub(in crate::areas) mod operations;
+pub mod provider_models;
 pub(in crate::areas) mod store;
 
 use super::{AreaHandles, ProjectionSource, ReloadModels};
 use crate::bootstrap::BootstrapError;
 use crate::bootstrap::restart::HostCommandPermit;
 use operations::{Lookup, Operations, Tracked, digest_of};
+use provider_models::{FetchFailure, ModelFetch};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use store::{ConfigStore, SaveError, revision_of};
 use workbench_protocol::{
@@ -30,8 +32,8 @@ use workbench_protocol::{
     events::UiEvent,
     ids::OperationId,
     namespaces::settings::{
-        MAX_MESSAGE_BYTES, MAX_OPERATIONS, SettingsCommand, SettingsEvent, SettingsOperationView,
-        SettingsRevision, SettingsSnapshot,
+        MAX_MESSAGE_BYTES, MAX_OPERATIONS, ProviderModelCandidates, SettingsCommand, SettingsEvent,
+        SettingsOperationView, SettingsRevision, SettingsSnapshot,
     },
     operation::{OperationState, OperationView},
 };
@@ -64,6 +66,8 @@ pub struct SettingsParts {
     pub source: ProjectionSource,
     /// What the Features screen follows at once in the running core.
     pub features: Arc<dyn feature_options::FeatureRuntime>,
+    /// How `fetch_provider_models` asks a provider for its models.
+    pub model_fetch: ModelFetch,
 }
 
 type QuotaUpdates = (
@@ -77,6 +81,7 @@ struct Inner {
     tasks: super::AreaTasks,
     source: ProjectionSource,
     features: Arc<dyn feature_options::FeatureRuntime>,
+    model_fetch: ModelFetch,
     state: Mutex<State>,
     quota_changed: tokio::sync::watch::Sender<u64>,
     /// One writer at a time, held across compare, check and write.
@@ -95,6 +100,8 @@ struct State {
     /// replaces what a newer one already published.
     reads_started: u64,
     reads_published: u64,
+    /// What finished fetches found, kept while their operation is in the table.
+    found: Vec<ProviderModelCandidates>,
 }
 
 /// How an accepted command stands.
@@ -152,6 +159,10 @@ impl From<SaveError> for Failure {
                 code: ErrorCode::StorageUnavailable,
                 message,
             },
+            SaveError::NoSuchProvider => Self {
+                code: ErrorCode::NotFound,
+                message: "the saved configuration has no such provider".into(),
+            },
         }
     }
 }
@@ -168,6 +179,7 @@ impl SettingsArea {
             tasks: handles.tasks.clone(),
             source,
             features: Arc::new(handles.runtime.clone()),
+            model_fetch: ModelFetch::production(handles.credentials.clone()),
         }))
     }
 
@@ -185,12 +197,14 @@ impl SettingsArea {
                 tasks: parts.tasks,
                 source: parts.source,
                 features: parts.features,
+                model_fetch: parts.model_fetch,
                 state: Mutex::new(State {
                     operations: Operations::new(MAX_OPERATIONS),
                     snapshot,
                     features,
                     reads_started: 0,
                     reads_published: 0,
+                    found: Vec::new(),
                 }),
                 writer: Arc::default(),
                 quota_changed: tokio::sync::watch::channel(0).0,
@@ -329,6 +343,31 @@ impl SettingsArea {
         }
     }
 
+    /// What the finished fetch `id` found.
+    ///
+    /// # Errors
+    /// `NotFound` for an operation the core does not hold, one that did not end
+    /// `Ready`, or one that was no fetch.
+    pub fn provider_models(
+        &self,
+        id: &OperationId,
+    ) -> Result<ProviderModelCandidates, WorkbenchError> {
+        let state = lock(&self.inner()?.state);
+        state
+            .operations
+            .get(id)
+            .filter(|view| view.operation.state == OperationState::Ready)
+            .and_then(|_| state.found.iter().find(|found| &found.operation_id == id))
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::NotFound,
+                    "no models were found by this operation",
+                    RetryAdvice::Never,
+                )
+            })
+    }
+
     /// The retained operations, newest first.
     ///
     /// # Errors
@@ -401,9 +440,11 @@ impl Inner {
             }
             SettingsCommand::SaveProvider(save) => {
                 let store = self.store.clone();
-                let guard = self.writer.clone().lock_owned().await;
-                let revision = Self::blocking(move || {
-                    let _writer = guard;
+                // Held through the re-read: a reload (which needs this lock) cannot
+                // change what is applied between the write and the decision below.
+                let _writer = self.writer.clone().lock_owned().await;
+                let expected = save.expected_revision.clone();
+                let saved = Self::blocking(move || {
                     store.save_provider(
                         &save.expected_revision,
                         save.original_name.as_deref(),
@@ -412,12 +453,20 @@ impl Inner {
                 })
                 .await?
                 .map_err(Failure::from)?;
-                self.reread().await?;
+                // A save that changes nothing the runs use (the quota switch) leaves
+                // them as applied as they were: no reload is waiting for it.
+                self.reread_applying(
+                    saved
+                        .models_unchanged
+                        .then(|| (expected, saved.revision.clone())),
+                )
+                .await?;
                 Ok(Done {
-                    revision: Some(revision),
+                    revision: Some(saved.revision),
                     message: None,
                 })
             }
+            SettingsCommand::FetchProviderModels(fetch) => self.fetch_provider_models(fetch).await,
             SettingsCommand::DeleteProvider(delete) => {
                 let store = self.store.clone();
                 let guard = self.writer.clone().lock_owned().await;
@@ -502,6 +551,17 @@ impl Inner {
     /// published, and the applied revision is always the one the state holds
     /// when the result is published, not the one seen when the read began.
     async fn reread(&self) -> Result<(), Failure> {
+        self.reread_applying(None).await
+    }
+
+    /// [`Self::reread`]; with `advance` = (the revision the save quoted, the one it
+    /// wrote), a state that was applied at the first is applied at the second
+    /// from the moment the new file is published, so no client sees the save as
+    /// waiting for a reload.
+    async fn reread_applying(
+        &self,
+        advance: Option<(SettingsRevision, SettingsRevision)>,
+    ) -> Result<(), Failure> {
         let (ticket, applied) = {
             let mut state = lock(&self.state);
             state.reads_started += 1;
@@ -516,7 +576,19 @@ impl Inner {
         // Only the snapshot update and its publication are serialized here;
         // file I/O stays outside the state lock.
         let mut state = lock(&self.state);
+        let advances = advance.is_some_and(|(from, to)| {
+            state.snapshot.applied_revision.as_ref() == Some(&from) && fresh.revision == to
+        });
         if ticket < state.reads_published {
+            // A newer read published first, and it read this write too.
+            if advances && state.snapshot.revision == fresh.revision {
+                let revision = fresh.revision;
+                state.snapshot.applied_revision = Some(revision.clone());
+                self.publish(SettingsEvent::SettingsSnapshotChanged {
+                    revision: revision.clone(),
+                    applied_revision: Some(revision),
+                });
+            }
             return Ok(());
         }
         state.reads_published = ticket;
@@ -524,6 +596,9 @@ impl Inner {
         fresh
             .applied_revision
             .clone_from(&state.snapshot.applied_revision);
+        if advances {
+            fresh.applied_revision = Some(fresh.revision.clone());
+        }
         fresh
             .apply_failure
             .clone_from(&state.snapshot.apply_failure);
@@ -538,6 +613,53 @@ impl Inner {
             });
         }
         Ok(())
+    }
+
+    /// Ask the provider for its models. The file is read once to take the
+    /// profile; the network wait holds no lock, so saves go on meanwhile, and it
+    /// ends at the deadline whatever the provider does.
+    async fn fetch_provider_models(
+        &self,
+        fetch: workbench_protocol::namespaces::settings::FetchProviderModels,
+    ) -> Result<Done, Failure> {
+        let store = self.store.clone();
+        let (expected, name) = (fetch.expected_revision.clone(), fetch.provider.clone());
+        let profile = Self::blocking(move || store.provider_at(&expected, &name))
+            .await?
+            .map_err(Failure::from)?;
+        let asked = (self.model_fetch.fetcher)(fetch.provider.clone(), profile);
+        let found = match tokio::time::timeout(self.model_fetch.timeout, asked).await {
+            Ok(Ok(models)) => models,
+            Ok(Err(FetchFailure::Unsupported)) => {
+                return Err(Failure {
+                    code: ErrorCode::UnsupportedCapability,
+                    message: "this kind of provider cannot list its models".into(),
+                });
+            }
+            Ok(Err(FetchFailure::Failed(message))) => {
+                return Err(Failure {
+                    code: ErrorCode::Internal,
+                    message: sanitize(&message),
+                });
+            }
+            Err(_) => {
+                return Err(Failure {
+                    code: ErrorCode::Internal,
+                    message: "the provider did not answer in time".into(),
+                });
+            }
+        };
+        let candidates = provider_models::candidates(fetch.operation_id, fetch.provider, found);
+        let mut state = lock(&self.state);
+        let State {
+            operations, found, ..
+        } = &mut *state;
+        found.retain(|kept| operations.get(&kept.operation_id).is_some());
+        found.push(candidates);
+        Ok(Done {
+            revision: None,
+            message: None,
+        })
     }
 
     fn finish(&self, id: &OperationId, outcome: Result<Done, Failure>) {

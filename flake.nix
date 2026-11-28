@@ -305,8 +305,7 @@
         }));
         evorch = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
-          # Only the shipped programs; the QA fixtures (headless_capture,
-          # native_qa_window) are built with cargo where they are used.
+          # Only the shipped programs.
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
           # Recorded in self-improvement evidence; kept out of commonArgs so deps stay cached.

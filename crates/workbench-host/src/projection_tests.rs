@@ -253,6 +253,130 @@ async fn refresh_wakeups_coalesce_a_ready_burst_but_leave_a_bounded_suffix() {
     assert_eq!(RefreshWakeups::drain(&mut events, Ok(last)).await, batch);
 }
 
+#[tokio::test(start_paused = true)]
+async fn refresh_wakeups_coalesce_spaced_bursts_and_keep_the_trailing_dirty() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 128, Default::default());
+    let mut completed = p.model_refreshes.subscribe();
+    bus.emit(wakeup(0));
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    // Six separately scheduled bursts used to cause six additional collects.
+    for burst in 1..=6 {
+        tokio::time::advance(std::time::Duration::from_millis(50)).await;
+        for n in 0..8 {
+            bus.emit(wakeup(burst * 8 + n));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(*completed.borrow(), 1);
+    }
+    tokio::time::advance(std::time::Duration::from_millis(199)).await;
+    bus.emit(wakeup(99)); // The last dirty, just before the minimum interval.
+    tokio::task::yield_now().await;
+    assert_eq!(*completed.borrow(), 1);
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 2);
+    tokio::time::advance(MIN_REFRESH_INTERVAL * 2).await;
+    tokio::task::yield_now().await;
+    assert_eq!(*completed.borrow(), 2); // No periodic collect while clean.
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_interval_starts_at_completion_not_at_collect_start() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 128, Default::default());
+    let mut completed = p.model_refreshes.subscribe();
+    let (entered_tx, entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let released = Mutex::new(released);
+    p.state.lock().unwrap().refresh_hook = Some(Arc::new(move || {
+        entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+    }));
+    bus.emit(wakeup(0));
+    entered.await.unwrap();
+    tokio::time::advance(MIN_REFRESH_INTERVAL * 10).await;
+    bus.emit(wakeup(1)); // A change during collect must not disappear.
+    release.send(()).unwrap();
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    tokio::time::advance(MIN_REFRESH_INTERVAL - std::time::Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(*completed.borrow(), 1);
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_cooldown_keeps_draining_fragments_without_lag_or_extra_collects() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let epoch = p.instance_epoch();
+    let mut completed = p.model_refreshes.subscribe();
+    let mut drained = p.model_event_batches.subscribe();
+    bus.emit(wakeup(0));
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    drained.borrow_and_update();
+    let cooldown_started = tokio::time::Instant::now();
+    // Pace batches on receiver progress, not a clock or scheduler guess. The
+    // total exceeds the bus capacity while refresh remains in its cooldown.
+    for _ in 0..16 {
+        for _ in 0..8 {
+            bus.emit(Event::new(event_bus::MessageEvent::ReasoningDelta {
+                run_id: None,
+                delta: "fragment".into(),
+            }));
+        }
+        drained.changed().await.unwrap();
+        drained.borrow_and_update();
+        assert_eq!(tokio::time::Instant::now(), cooldown_started);
+        assert_eq!(p.instance_epoch(), epoch);
+        assert_eq!(*completed.borrow(), 1);
+    }
+    bus.emit(wakeup(1));
+    drained.changed().await.unwrap();
+    tokio::time::advance(MIN_REFRESH_INTERVAL).await;
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 2);
+    assert_eq!(p.instance_epoch(), epoch);
+}
+
+#[tokio::test]
+async fn refresh_receiver_releases_projection_before_yielding() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let weak = Arc::downgrade(&p);
+    let mut drained = p.model_event_batches.subscribe();
+    bus.emit(Event::new(event_bus::MessageEvent::ReasoningDelta {
+        run_id: None,
+        delta: "fragment".into(),
+    }));
+    drained.changed().await.unwrap();
+    // The receiver signals progress before yielding. Dropping the last client
+    // must not require another poll of that receiver to release the runtime.
+    drop(p);
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_with_a_trailing_dirty_does_not_wait_for_the_refresh_timer() {
+    let (p, bus) = make(&tokio::runtime::Handle::current(), 8, Default::default());
+    let weak = Arc::downgrade(&p);
+    let mut completed = p.model_refreshes.subscribe();
+    bus.emit(wakeup(0));
+    completed.changed().await.unwrap();
+    assert_eq!(*completed.borrow_and_update(), 1);
+    let mut drained = p.model_event_batches.subscribe();
+    let now = tokio::time::Instant::now();
+    bus.emit(wakeup(1));
+    drained.changed().await.unwrap();
+    assert_eq!(*completed.borrow(), 1, "dirty is pending in the cooldown");
+    drop(p);
+    assert!(weak.upgrade().is_none());
+    assert!(completed.changed().await.is_err());
+    assert_eq!(tokio::time::Instant::now(), now);
+}
+
 #[tokio::test]
 async fn fragments_do_not_hide_a_state_change_or_lag_in_the_same_refresh_batch() {
     use event_bus::MessageEvent;
@@ -334,6 +458,53 @@ fn stored() -> (
     (dir, store, bus, runtime)
 }
 
+/// Diagnostic only: wall time is reported, never a correctness assertion.
+/// 250 threads / 5,000 total runs mirrors the profiling report, without opening
+/// the operator's database. Run with --ignored --nocapture in a release build.
+#[test]
+#[ignore = "synthetic collect measurement"]
+fn measure_collect_synthetic() {
+    let (dir, _store, _bus, runtime) = stored();
+    let mut conn = rusqlite::Connection::open(dir.path().join("host.db")).unwrap();
+    let tx = conn.transaction().unwrap();
+    for thread in 0..250 {
+        let id = format!("thread-{thread}");
+        tx.execute(
+            "INSERT INTO threads(thread_id,project_id,project_root,title,created_at_ns,updated_at_ns,source)
+             VALUES(?1,'project',?2,?1,0,0,'host')",
+            rusqlite::params![id, dir.path().to_string_lossy()],
+        ).unwrap();
+        for run in 0..20 {
+            let run_id = format!("run-{thread}-{run}");
+            tx.execute(
+                "INSERT INTO run_contexts(run_id,role,name,config_json,checkpoints_json,terminal_phase,restorable,updated_at_ns)
+                 VALUES(?1,'worker',?1,'{}','[]','done',0,0)",
+                [&run_id],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO thread_runs(run_id,thread_id,root_run_id,depth) VALUES(?1,?2,?1,0)",
+                rusqlite::params![run_id, id],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let projects = [(ProjectId::new("project").unwrap(), dir.path().to_path_buf())];
+    let reader = runtime.open_storage_reader().unwrap().unwrap();
+    for sample in 0..6 {
+        let start = std::time::Instant::now();
+        let models =
+            queries::collect(&runtime, Some(&reader), &projects, &Default::default()).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(models.threads.len(), 250);
+        assert_eq!(models.runs.len(), 5000);
+        println!(
+            "collect sample={sample} elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 #[test]
 fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -405,6 +576,134 @@ fn a_change_during_refresh_reaches_the_subscriber_without_an_extra_wakeup() {
 }
 
 #[test]
+fn a_project_rename_during_a_snapshot_cut_is_reannounced_after_publication() {
+    project_change_during_snapshot_cut(false);
+}
+
+#[test]
+fn a_project_registration_during_a_snapshot_cut_is_reannounced_after_publication() {
+    project_change_during_snapshot_cut(true);
+}
+
+fn project_change_during_snapshot_cut(register: bool) {
+    // Background actors are not polled until the cut and publication are fixed.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (p, _) = make(rt.handle(), 64, Default::default());
+    let project = ProjectId::new("project").unwrap();
+    let mut projects = vec![(project, PathBuf::from("/workspace/project"))];
+    p.configure_projects(
+        projects.clone(),
+        BTreeMap::from([("project".into(), "before".into())]),
+    )
+    .unwrap();
+    // The workspace area publishes before the host resynchronizes the project
+    // directory. A new subscriber can include this event in its high-water cut.
+    p.source("workspace")
+        .unwrap()
+        .publish(UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged {
+            revision: Revision(1),
+        }))
+        .unwrap();
+    let announced = p.state.lock().unwrap().cursor();
+    let expected = if register {
+        projects.push((
+            ProjectId::new("new-project").unwrap(),
+            PathBuf::from("/workspace/new-project"),
+        ));
+        BTreeMap::from([
+            ("project".to_owned(), "before".to_owned()),
+            ("new-project".to_owned(), "registered".to_owned()),
+        ])
+    } else {
+        BTreeMap::from([("project".to_owned(), "renamed".to_owned())])
+    };
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let (entered, release) = (entered.clone(), release.clone());
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    let configuring = {
+        let p = p.clone();
+        let names = expected.clone();
+        std::thread::spawn(move || p.configure_projects(projects, names))
+    };
+    entered.wait(); // New models collected, but not published.
+    let subscription = p.subscribe_with_snapshot(&all(None));
+    release.wait();
+    configuring.join().unwrap().unwrap();
+    let mut sub = subscription.unwrap();
+    assert_eq!(sub.started.high_water, announced);
+    let snapshot: BTreeMap<_, _> = sub
+        .started
+        .initial_page
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Project(project) => {
+                Some((project.id.as_str(), project.display_name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshot, BTreeMap::from([("project", "before")]));
+    // A nonterminal marker bounds the receive loop even on the broken version.
+    // Unsubscribe would clear queued events, including the notification we need.
+    let marker = event(99);
+    p.source("lifecycle")
+        .unwrap()
+        .publish(marker.clone())
+        .unwrap();
+    let mut reannounced = false;
+    while let Some(envelope) = rt.block_on(sub.recv()) {
+        if envelope.event == marker {
+            break;
+        }
+        if matches!(
+            envelope.event,
+            UiEvent::Workspace(WorkspaceEvent::WorkspaceChanged { .. })
+        ) {
+            assert!(envelope.cursor.sequence > sub.started.high_water.sequence);
+            let reply = p
+                .query(&Query::Workspace(WorkspaceQuery::ListProjects(
+                    Default::default(),
+                )))
+                .unwrap();
+            let QueryReply::Workspace(WorkspaceReply::Projects(page)) = reply else {
+                panic!("expected project listing");
+            };
+            let names: BTreeMap<_, _> = page
+                .items
+                .into_iter()
+                .map(|project| (project.id.as_str().to_owned(), project.display_name))
+                .collect();
+            assert_eq!(names, expected);
+            reannounced = true;
+        }
+    }
+    assert!(
+        reannounced,
+        "stale snapshot needs a new workspace notification"
+    );
+    p.unsubscribe(&sub.started.subscription_id);
+    let published = p.state.lock().unwrap().cursor();
+    p.refresh_models().unwrap();
+    assert_eq!(
+        p.state.lock().unwrap().cursor(),
+        published,
+        "unchanged projects do not create a refetch loop"
+    );
+}
+
+#[test]
 fn hello_epoch_and_status_do_not_wait_for_a_refresh() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (p, _) = make(rt.handle(), 64, Default::default());
@@ -435,6 +734,115 @@ fn hello_epoch_and_status_do_not_wait_for_a_refresh() {
     assert_eq!(p.cached_status(), status);
     release.wait();
     refreshing.join().unwrap().unwrap();
+}
+
+#[test]
+fn collect_has_its_own_reader_and_leaves_history_and_snapshot_cuts_available() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (dir, store, _bus, runtime) = stored();
+    let project = ProjectId::new("project").unwrap();
+    let projects = vec![(project.clone(), dir.path().to_path_buf())];
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread".into(),
+            project_id: Some(project.as_str().into()),
+            project_root: Some(dir.path().to_string_lossy().into_owned()),
+            title: Some("before".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let p = Projection::new(runtime.clone(), rt.handle(), Default::default());
+    p.configure_projects(projects.clone(), Default::default())
+        .unwrap();
+    let initial = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let snapshot_id = initial.started.snapshot_id.clone().unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    p.state.lock().unwrap().refresh_hook = Some({
+        let (entered, release) = (entered.clone(), release.clone());
+        Arc::new(move || {
+            entered.wait();
+            release.wait();
+        })
+    });
+    // Hold the shared runtime reader until collect has completed on its own
+    // connection. This would deadlock if collect fell back to that reader.
+    let refreshing = runtime
+        .with_storage_reader(|_| {
+            let p = p.clone();
+            let refreshing = std::thread::spawn(move || p.refresh_models());
+            entered.wait();
+            Ok(refreshing)
+        })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        p.model_refresh.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    ));
+    assert!(p.state.try_lock().is_ok());
+    let history = p
+        .query(&Query::Conversation(
+            ConversationQuery::ReadCommittedHistory(
+                workbench_protocol::queries::ReadCommittedHistory {
+                    thread: ThreadId::new("thread").unwrap(),
+                    run: None,
+                    direction: Default::default(),
+                    page: Default::default(),
+                },
+            ),
+        ))
+        .unwrap();
+    assert!(
+        matches!(history, QueryReply::Conversation(ConversationReply::CommittedHistory(page)) if page.items.is_empty())
+    );
+    let mut sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let page = p
+        .read_snapshot(&ReadSnapshot {
+            snapshot_id,
+            page: Default::default(),
+        })
+        .unwrap();
+    assert_eq!(page.high_water, initial.started.high_water);
+    // The dedicated connection must not retain a read transaction between
+    // queries (or during diff/publish), even after a concurrent write.
+    store
+        .handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "thread".into(),
+            title: Some("after".into()),
+            ..Default::default()
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("host.db")).unwrap();
+    let (busy, log, checkpointed): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(FULL)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(busy, 0);
+    assert_eq!(log, checkpointed);
+    let reconfigured = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            p.configure_projects(
+                projects,
+                BTreeMap::from([("project".into(), "renamed".into())]),
+            )
+        })
+    };
+    release.wait();
+    refreshing.join().unwrap().unwrap();
+    reconfigured.join().unwrap().unwrap();
+    let changed = rt.block_on(sub.recv()).unwrap();
+    assert!(changed.cursor.sequence > page.high_water.sequence);
+    assert!(
+        matches!(changed.event, UiEvent::Workspace(WorkspaceEvent::ThreadChanged { thread }) if thread.title == "after")
+    );
+    let state = p.state.lock().unwrap();
+    assert_eq!(state.models.threads["thread"].summary.title, "after");
+    assert_eq!(state.models.projects["project"].display_name, "renamed");
 }
 
 #[test]

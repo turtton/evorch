@@ -295,6 +295,7 @@ fn missing_tree_completes_but_enumeration_and_io_errors_preserve_data() {
         entries: 0,
         step: None,
         enumeration_error: None,
+        foreign_inode: None,
         throttle: None,
     };
     assert_eq!(
@@ -318,8 +319,10 @@ fn missing_tree_completes_but_enumeration_and_io_errors_preserve_data() {
 
 #[test]
 fn last_scratch_drop_deletes_without_a_living_producer() {
-    let scratch = super::super::Scratch::new().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let scratch = super::super::Scratch::new_in(temp.path()).unwrap();
     let path = scratch.path().to_path_buf();
+    assert!(path.join(super::super::managed::MARKER).is_file());
     fs::write(path.join("file"), "remove").unwrap();
     let (tx, rx) = mpsc::channel();
     lock(&service().shared.work)
@@ -330,8 +333,9 @@ fn last_scratch_drop_deletes_without_a_living_producer() {
     drop(scratch);
     rx.recv().unwrap();
     assert!(!path.exists());
-    let root = ScratchRoot::ephemeral().unwrap();
+    let root = ScratchRoot::ephemeral_in(temp.path()).unwrap();
     let parent = root.parent().to_path_buf();
+    assert!(parent.join(super::super::managed::MARKER).is_file());
     root.prepare("thread").unwrap();
     let (tx, rx) = mpsc::channel();
     lock(&service().shared.work)

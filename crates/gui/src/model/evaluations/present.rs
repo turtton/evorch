@@ -21,19 +21,32 @@ pub fn usd(value: f64) -> String {
     }
 }
 
-/// A cost, with what makes it less than the whole truth.
+/// A cost, with what makes it less than the whole truth. When any part of it is
+/// unknown the amount is only what could be priced, and is shown as such rather
+/// than as the cost.
 pub fn cost_text(cost: &Cost) -> String {
-    let mut text = usd(cost.usd);
+    let mut known = usd(cost.usd);
     if cost.is_api_equivalent() {
-        text.push_str(" (includes API-equivalent subscription use)");
+        known.push_str(" (includes API-equivalent subscription use)");
     }
-    let missing = cost.unpriced.len() + cost.unreported.len();
-    if missing > 0 {
-        text.push_str(&format!(
-            ", incomplete: {missing} model(s) unpriced or without usage"
+    if cost.is_complete() {
+        return known;
+    }
+    let mut unknown = Vec::new();
+    let models = cost.unpriced.len() + cost.unreported.len();
+    if models > 0 {
+        unknown.push(format!("{models} model(s) unpriced or without usage"));
+    }
+    if !cost.unrecorded.is_empty() {
+        unknown.push(format!(
+            "{} replay(s) left no usage record",
+            cost.unrecorded.len()
         ));
     }
-    text
+    if !cost.unfinished.is_empty() {
+        unknown.push(format!("{} replay(s) not finished", cost.unfinished.len()));
+    }
+    format!("unknown (known part {known}; {})", unknown.join("; "))
 }
 
 pub fn trial_cost_text(cost: &TrialCost) -> String {
@@ -223,6 +236,8 @@ mod tests {
             api_equivalent_usd: 0.0,
             unpriced: Vec::new(),
             unreported: Vec::new(),
+            unrecorded: Vec::new(),
+            unfinished: Vec::new(),
         }
     }
 
@@ -267,8 +282,25 @@ mod tests {
             requests: 4,
         });
         let text = cost_text(&cost);
-        assert!(text.starts_with("$2.00"), "{text}");
-        assert!(text.contains("incomplete"), "{text}");
+        assert!(text.starts_with("unknown (known part $2.00"), "{text}");
+        assert!(text.contains("unpriced"), "{text}");
+    }
+
+    #[test]
+    fn replays_without_a_record_or_an_end_make_a_cost_unknown_with_its_known_part() {
+        let mut missing = priced(1.5);
+        missing.unrecorded.push("baseline-1".into());
+        let text = cost_text(&missing);
+        assert_eq!(
+            text,
+            "unknown (known part $1.50; 1 replay(s) left no usage record)"
+        );
+        let mut unfinished = priced(0.0);
+        unfinished.unfinished.push("candidate-2".into());
+        let text = cost_text(&unfinished);
+        assert!(text.starts_with("unknown (known part $0.0000"), "{text}");
+        assert!(text.contains("1 replay(s) not finished"), "{text}");
+        assert_eq!(cost_text(&priced(1.5)), "$1.50");
     }
 
     #[test]
