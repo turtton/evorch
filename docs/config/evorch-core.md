@@ -77,8 +77,15 @@ lane・escalation などの active wait、shell job、background/area 作業、�
 P9（段階 06）の復旧が完了するまでは、未回答の質問（blocking でないものや
 停止済み requester の質問を含む）と承認権限も保持理由とし、保存済み質問の
 読み取りに失敗した場合は終了しない。18a はそれらの復旧や自動回答を追加しない。
-SIGTERM/SIGINT も同じ終了経路（受付停止、接続/SSE 閉鎖、owner quiesce、
+SIGTERM/SIGINT も同じ終了経路（受付停止、接続/SSE 閉鎖、
 run/checkpoint と shell の drain、永続化 flush、lease・lock 解放）を使う。
+（以前の終了経路にあった owner quiesce は、ADR 0024 の owner 機構とともに PR 20（#866）で撤去された。）
+
+> **歴史的記述（PR 20 / #866 で撤去済み）。** 次の段落の ADR 0024 の owner registry
+> （`owners.db`）は撤去され、core は `owners.db` を作らず、読みも書きもしない。
+> 新しい chat thread の owner 行の予約も、他 GUI 所有による `PermissionDenied` もない。
+> 切り替え手順は [single-core-integration.md](../single-core-integration.md) の
+> 「PR 20 以降の更新（旧 core からの切り替え）」を参照。
 
 P7a は ADR 0024 の追加 owner。registry は GUI と同じ
 `${XDG_STATE_HOME:-~/.local/state}/evorch/threads/owners.db` を使う。

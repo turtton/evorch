@@ -1,5 +1,11 @@
 # DG-3 — 本番 RecipeSource と再開対象の固定
 
+> **PR 20（#866）後の注記（履歴）**: この文書は 5a-V 当時の設計・調査の記録である。文中の owner／ownership
+> （`GraphOwnershipSummary`、`RunConfig.ownership`、owner claim・release、`owners.db` など）は ADR 0024 の
+> プロセス間 owner 機構を指し、PR 20 で撤去された（未処分述語 `is_undisposed` は現在
+> `crates/workbench-host/src/admin/bindings.rs`）。現在の切り替え手順は
+> [single-core-integration.md](../single-core-integration.md) の「PR 20 以降の更新」を参照。
+
 ## 0. 前提・範囲
 
 設計提案。V1b-2a の実装前に DG-1〜3 を一括で独立レビューへ出す（V-06／J3）。本メモは承認・実行権限の根拠ではない。

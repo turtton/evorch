@@ -205,7 +205,7 @@ Orchestrator in a detached, independent top-level lane conversation
 `escalation-{new_run_id}`. This origin link does not join retention families. The source conversation retains its Worker root and
 history. The Orchestrator and its delegates belong to the target conversation;
 the source project and transferred workspace remain fixed across UI project
-changes. Runtime prepares the child's ownership permit before starting work.
+changes. (Until PR 20 (#866) the runtime also prepared the child's ADR 0024 ownership permit here; the permit was removed with the ownership mechanism.)
 History replay reconstructs the conversation without acquiring write authority.
 Preparation failure retains the source workspace. If provider admission fails or
 is stopped, the child's memo and workspace remain available for explicit resume
@@ -226,11 +226,12 @@ Public handoff events appear in this order: source terminal state,
 handoff memo. Subsequent requests within each root retain their existing wire
 prefix and prompt cache contract.
 
-Events linking the source and child validate both ownership generations. If
-acquiring a later guard encounters a writer, all previously acquired guards are
-released before waiting, then every generation is revalidated. This prevents
-ownership checkpoints and multi-run event validation from waiting on each
-other's SQLite locks without accepting an unvalidated event.
+> Historical (removed in PR 20, #866): events linking the source and child used to
+> validate both ADR 0024 ownership generations. If acquiring a later guard
+> encountered a writer, all previously acquired guards were released before
+> waiting, then every generation was revalidated, so that ownership checkpoints
+> and multi-run event validation did not wait on each other's SQLite locks. The
+> ownership generations no longer exist; this paragraph is kept as history only.
 
 ## Shell execution environment
 

@@ -2,6 +2,11 @@
 
 本文書は [ADR 0044: lane を独立した Orchestrator thread として管理する](../intents/evorch/decisions/0044-lane-threads.md) の段階的実装計画である。
 
+> **PR 20（#866）後の注記（履歴）**: 本文は計画当時の記述である。ADR 0024 のプロセス間 owner 機構
+> （`crates/runtime/src/ownership/` の `host.rs` など、`owners.db`、claim、heartbeat、`readonly_threads`、
+> thread ownership 取得）は PR 20 で撤去され、`crates/gui/src/app/shared_sidebar.rs` と
+> `crates/workspace-ui/src/sidebar.rs` も現在は存在しない。以下の関連する箇所はその撤去前の設計・ファイル名を指す。
+
 > **進捗・統合状況（単一コア化・イベント待機一本化）**:
 > - **4b-D-2a（PR #627）マージ済み**: core 経路への単一 ledger 注入、checked shutdown、ready 同期、bwrap 絶対パス canonicalize、cold learning cleanup を反映。D-2b（predecessor coordinator / finalization）は後続。
 > - **wait 一本化（PR #630）マージ済み**: 返信専用の `wait_reply` を廃止し、一般ロール向けに引数なし `wait()`、新しい待機元（lane、review、shell job、親）、提示時 ACK、未読優先の即時戻り `no_wait_sources` への一本化を完了。
@@ -246,7 +251,7 @@ C が処理全体を所有し、A が transaction/event 契約、B が runtime �
 - working 等は保留し、次ターンに bounded に集約。
 - runtime と host の両方で Stop を確認。
 - **claim lease と NACK/解放**: host が処理できない場合（`thread_of_run` 不明、他 GUI 所有の `readonly_threads` 等）は明示的に NACK/lease 解放を行う（単一コア構成ではコア内で完結予定）。
-- **再駆動契機**: thread ownership 取得時、runtime 起動時の未 ACK 走査、ユーザー入力時。
+- **再駆動契機**: thread ownership 取得時（ownership は PR 20 で撤去済み）、runtime 起動時の未 ACK 走査、ユーザー入力時。
 - 入力の永続受領と ACK、crash repair。
 - 直接対話の介入通知。
 

@@ -477,13 +477,16 @@ without a scratch directory (benchmarks, and executors shared by runs of a
 runtime without a sandbox root) falls back to a private directory of its own
 and adds no system-message block.
 
-Contents last only while this process owns the thread (ADR 0024). Starting or
-claiming a thread empties its directory before use; releasing it or handing
-it off deletes the directory. Opening an ownership host deletes discarded
-trees, directories of threads without a live owner (unknown liveness keeps
-them), and unbound-run directories when no other owner process may be live.
-Runtimes without an ownership host use a private parent removed with the
-runtime. Removal renames the tree aside immediately, then a process-wide background
+Contents are retained across normal input, Stop and planned restart. Only an
+exclusive cold-start sweep, an authorized archive, retention or an explicit
+disposal detaches them (`runtime::scratch` module documentation). The sweep
+(`ThreadScratch::sweep`) deletes discarded trees, directories of threads outside
+the live set, and unbound-run directories unless another process may be live.
+(Until PR 20 (#866) the contents lasted only while the process owned the thread
+under ADR 0024: claiming emptied the directory and releasing or handing off
+deleted it. That owner lifetime and the ownership host that swept at open were
+removed.) Runtimes without a shared ownership root (`ThreadScratch::ephemeral`)
+use a private parent removed with the runtime. Removal renames the tree aside immediately, then a process-wide background
 collector deletes it with throttled, symlink-safe traversal; nothing scans or
 deletes on the UI thread.
 
@@ -494,8 +497,8 @@ archive action each send a hint (thread IDs only, for every family member) once
 the archive is saved and the sidebar save lock is released, and before any
 attachment removal; a repeated archive request hints again, and a failed save,
 a busy attachment lock or a restore sends none. The sender only queues the IDs
-in memory: sidebar reads, ownership transactions and renames run on a
-dedicated archive thread of the ownership host, never on the UI thread or in a
+in memory: sidebar reads, the fenced revalidation and renames run on a
+dedicated archive thread (`evorch-scratch-archive`, `runtime::scratch::archive`), never on the UI thread or in a
 host command, and an archive's result never waits for or depends on scratch
 recovery. For each hinted thread that no run uses, the archive thread asks the
 checker both entry points inject whether the saved shared sidebar says the
@@ -511,21 +514,21 @@ without taking the save lock. A thread whose family cannot be resolved, a
 missing shared sidebar and a read error all keep the directory; a known
 unarchived thread drops the hint. Attachments are not touched: scratch
 recovery never calls the attachment removal API, takes no attachment lock and
-does not open the attachment root. The existing restart/takeover reset
-contract is unchanged.
+does not open the attachment root. Normal Stop, shutdown and planned restart do
+not delete thread scratch (the former restart/takeover reset was removed with
+the ownership mechanism in PR 20).
 
 On disk the `.trash-*` entries under the scratch parent are the source of
 truth for pending physical deletion. They are discovered at startup and when
 notified, so a crash after a rename leaves nothing the next start cannot
-collect. Deletion is throttled: 2 ms after every 256 entries, and a Busy
-ownership transaction is retried once after 100 ms. A failed tree is not retried
+collect. Deletion is throttled: 2 ms after every 256 entries, and a contended
+archive attempt (`ArchiveError` with `contention`) is retried once after 100 ms. A failed tree is not retried
 again in that pass or self-scheduled: another notification or startup retries it.
-Normal shutdown stops producers, attempts drain and ownership release, then
-stops the archive worker and collector; failures are reported without skipping
+Normal shutdown stops producers and attempts drain (the ownership release
+step was removed in PR 20), then stops the archive worker and collector; failures are reported without skipping
 collector shutdown.
 
-Known limits: a thread archived by a process that does not own it is not
-collected by this one, so its directory can remain; pending hints live in
+Known limits: pending hints live in
 memory only, so a planned handoff drops them and the next release or a normal
 start collects the directory; without a shared sidebar archive-time detachment is skipped;
 a saved archive and the physical deletion are separate events, and the second

@@ -89,7 +89,7 @@ allowed directories are not eligible. Parents must already exist. Reads reuse
 the artifact openat boundary, bound the read to 8 MiB per reference, and check
 extension/magic and decode validity. References larger than 2048 pixels on the
 longest side are downscaled to PNG before transmission. Output writes validate
-the mutation ownership permit and writable boundary, and use a temporary file
+the caller run's artifact-mutation authority (`validate_artifact_mutation`; the ADR 0024 ownership permit it used to check was removed in PR 20) and writable boundary, and use a temporary file
 and rename in the destination directory. Symlinks cannot redirect writes.
 Team Workers must have their own unexpired path claims for both the original
 and the derived variant, just as for `write`. Claims are checked before the

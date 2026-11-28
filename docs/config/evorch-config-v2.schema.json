@@ -117,6 +117,7 @@
       }
     },
     "ownership": {
+      "description": "歴史的（historical）: v2 の [ownership]（ADR 0024 のプロセス間所有権）。ADR 0045 の PR 20（#866）で機構ごと撤去され、現行の設定（v3）には存在しない。残っていると厳格な読み込み（Config::load_strict。core の起動が使う）が拒否する（\"the [ownership] section was removed ...\"）。節ごと削除すること。",
       "$ref": "#/$defs/OwnershipConfig",
       "default": {
         "grace_ms": 10000,
@@ -943,6 +944,7 @@
       "additionalProperties": false
     },
     "OwnershipConfig": {
+      "description": "歴史的（historical）: ADR 0024 のプロセス間所有権の設定。PR 20（#866）で撤去済みで、v3 の schema には無い。",
       "type": "object",
       "properties": {
         "grace_ms": {

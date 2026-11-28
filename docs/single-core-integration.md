@@ -718,7 +718,7 @@ implementation:
 | **O-V3** | After O-V2 and the basic restart check: observation plus Stop/restart/cache |
 | **A** | After 19a: remove the old embedded GUI (`--legacy-embedded`) and GUI-only verification infrastructure |
 | **C0** | After A: separate responsibilities other than ownership without changing behavior |
-| **20 (C)** | After C0: remove old ownership such as owners.db, claim and shared_feed; this resolves the delayed persistence of Stop |
+| **20 (C)** | After C0: remove old ownership such as owners.db, claim and shared_feed; this resolves the delayed persistence of Stop. Done in #866; see [PR 20 以降の更新（旧 core からの切り替え）](#pr-20-以降の更新旧-core-からの切り替え) for the cutover procedure |
 | **19b-G (B)** | After 20: remove GUI internal-crate dependencies; although it has no technical dependency on C, its broad GUI/protocol changes follow C to avoid collisions with parallel lanes |
 | **19b-C (D)** | After 19b-G: zero the full internal-dependency allowlist, including CLI |
 | **Q1/Q2 GUI and read-only parity** | After 19a; management recovery remains available through the admin CLI |
@@ -727,6 +727,60 @@ implementation:
 | **Packaged GUI/CLI sharing smoke** | With the distribution actually installed, verify the GUI and CLI share the same core |
 | **Restart preflight observation change (PR A, #781 S3)** | Some requests can end as `Cancelled` if the observed state changes inside preflight; this is the safe-side behavior, with follow-up still needed |
 | **Read current Agent web-tool setting** | Add a way for clients to obtain the current value from the core |
+
+## PR 20 以降の更新（旧 core からの切り替え）
+
+PR C（#866、ADR 0045 §20）は ADR 0024 のプロセス間 owner 機構（owners.db、heartbeat、
+claim、Take over、`readonly_threads`、`shared_feed` など）を撤去した。旧 core（この PR より前の
+binary）が動いている環境から新しい binary へ切り替える手順と、その根拠を示す。
+
+根拠: `crates/evorch-core/src/restart/README.md`（「PR 20: current restart/recovery authority」）、
+`crates/config/src/strict.rs` の `reject_removed_sections`、PR 20 の merge 前に行った旧 build → 新 build の
+cutover 検証（旧 binary で作ったデータを新 binary が開く手動検証。恒久的な CI ではない）。
+
+### `evorch core restart request` は切り替えに使えない
+
+- target を指定しないと、旧 core は旧 binary のまま再起動する（binary は切り替わらない）。
+- `--target next` は、旧 core が出す handoff（format 1）と新 binary が受け付ける handoff（format 2）が
+  一致しないため、handoff 1/2 の不一致として拒否される。
+- 新 binary が受け付ける planned handoff は owner を含まない format 2 だけで、古い handoff は adoption の前に
+  拒否される。README は「old-to-new update requires stopping the old core and cold starting」と定めている。
+
+### 手順
+
+1. **GUI と CLI を閉じる。** 旧 GUI は core との接続が切れても自動で再接続し、停止中の旧 core を起こしてしまう。
+2. **実行中の run を完了させる。** SIGTERM による drain は run を停止し、新 core の起動後に自動では再開しない。
+3. **設定ファイルの `[ownership]` を節ごと削除する。** 場所は
+   `grep -rn '^\[ownership\]' ~/.config/evorch/` で探す。`[ownership]` が残っていると、新 binary は
+   `the [ownership] section was removed together with inter-process thread ownership (ADR 0045); delete the whole
+   [ownership] section from the config file` という `InvalidField`（path は `ownership`）で起動を拒否する。
+   黙って無視することも自動で書き換えることもしない。
+4. **旧 core を停止する。** `pgrep -af evorch-core` で旧 core の PID を確認し、`kill -TERM <pid>` を送って、
+   プロセスが消えるまで待つ（`pgrep` で何も出なくなることを確認する）。**SIGKILL は使わない。**
+5. **新しい GUI を起動する。** または `evorch-core --config-dir <dir>` で cold 起動する。
+
+### 起動で起きること
+
+- 初回の起動で storage の migration v81 が適用される（`restart_transactions.format_version` の追加、
+  `lane_delivery_destinations.owner_json` からの `ownership_generation` の削除、
+  `recovery_graph_thread_progress` の `recovery_graph_thread_progress_v1` への退避と再作成）。
+  **downgrade はできない**（pre-v1 の方針で、互換層も移行層もない）。旧 binary へ戻す可能性があるなら、
+  切り替える前に `evorch-events.db*`（`-wal` / `-shm` を含む）を退避しておく。
+- `owners.db` は新 binary が作らず、読みも書きもしない。残っていても害はないので、残してかまわない。
+- `.ownership-lock` と `.ownership-writer-lock` は**削除しない**。名前に ownership が残っているが、
+  保守 lease と root writer lease の lock ファイルで、新 binary も使い続ける（lock ファイルは unlink しない契約）。
+- 旧 build が保存した復元記録（restart format 1）は、起動時に relational な header だけを読んで判別する。
+  新 binary はそれらを自動では復元せず、旧 graph として `core graphs list` に出す。旧 graph は明示的な
+  `graphs release` で処分する（snapshot、Stop、外部リソース、scratch は残る）。
+
+### 起動後に確認すること
+
+- `evorch core restart status`: 再起動の状態に異常がない。
+- `evorch core graphs list`: 旧 build から残った graph が出る。出た graph は
+  `evorch core graphs release <ID> --yes` で処分し、そのあと GUI で Continue する。
+- `evorch core quarantine list`: 隔離された graph がない、または内容を把握している。
+- 既存 thread への Send が通る（unapproved な project でも会話の送信・Continue は拒否されない）。
+- `owners.db` の mtime が切り替え前から変わっていない（新 core が触っていない）。
 
 ## Review and acceptance policy for this migration
 

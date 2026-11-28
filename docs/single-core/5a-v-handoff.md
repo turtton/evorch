@@ -1,5 +1,11 @@
 # 5a-V 引き継ぎ事項（対象PR本文の調査）
 
+> **PR 20（#866）後の注記（履歴）**: この文書は 5a-V 当時の設計・調査の記録である。文中の owner／ownership
+> （`GraphOwnershipSummary`、`RunConfig.ownership`、owner claim・release、`owners.db` など）は ADR 0024 の
+> プロセス間 owner 機構を指し、PR 20 で撤去された（未処分述語 `is_undisposed` は現在
+> `crates/workbench-host/src/admin/bindings.rs`）。現在の切り替え手順は
+> [single-core-integration.md](../single-core-integration.md) の「PR 20 以降の更新」を参照。
+
 指定された16件について `gh pr view <番号> --json title,body,mergeCommit` で本文を確認し、V/5a-V に関係する配線・残件を抽出した。引用はPR本文からの短い抜粋。後続PRの本文で実施済みと分かるものは、その旨を併記した。5a-Vとは別領域の残件も、指定PR本文に明記されているため区別して記載する。
 
 ## PRごとの記述

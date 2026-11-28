@@ -43,7 +43,8 @@ persistence = "warnings"
 enabled = true
 ```
 
-GUI 保存では通常の ownership heartbeat と、表示専用のイベントを保存しない。
+GUI 保存では表示専用のイベントを保存しない（かつて保存しなかった ownership heartbeat は、
+ADR 0024 の owner 機構とともに PR 20（#866）で撤去され、もう存在しない）。
 保存する種別と保持の詳細は次節に示す。元の event bus には変更を加えない。
 `StorageBridge::monitor().snapshot()` は未保存件数・バイト数・最古の待ち時間、
 保存・結合・省略・失敗件数をメモリ上で返す。5 秒以上の滞留警告は stderr へ
@@ -51,9 +52,9 @@ GUI 保存では通常の ownership heartbeat と、表示専用のイベント�
 
 本番GUIは `OwnedStorageBridge` が停止時の有限snapshotと結合待ちの差分を保存し、
 bridgeをjoinしてからSQLiteを閉じる。起動途中の失敗でも同じ順序になる。
-所有権は先にquiesceして新規turnを止め、heartbeatによる解放を保留する。
-flush barrierで先行保存の完了を確認してから解放し、Released通知も最終排出で保存する。
-保存待ちの同一世代は有効に保ち、外部の世代変更による拒否は維持する。
+flush barrierで先行保存の完了を確認する。
+（以前はここで ownership を先に quiesce して heartbeat による解放を保留し、flush 後に解放して
+Released 通知も最終排出で保存していた。この owner 手順は PR 20（#866）で撤去された。）
 停止要求をbridgeが観測した時点のsnapshotを区切りとし、その後のイベントは
 終了待ちを延長しない。プロセス強制終了は正常終了の保証に含まれない。
 
@@ -209,7 +210,7 @@ CPU 時間は OS の clock tick 精度なので短い処理では 0 になり得
 複数セッションを再集計していた段階の10万件・同じ300件保存は2.999秒、論理readは
 約6.445GBだった。最終版は履歴件数に依存しない通常保存になった。
 authoritativeな容量集計のため、保存1件あたり2ページの更新は追加される。
-GUIの512差分を2行にまとめるテスト、heartbeat省略、空flushの無書き込みを合わせて、
+GUIの512差分を2行にまとめるテスト、heartbeat省略（当時の ownership heartbeat。PR 20 で撤去）、空flushの無書き込みを合わせて、
 発生件数と1件あたりの費用をそれぞれ検証する。
 
 決定的ゲートでは128/8,192件の履歴に96件保存したVM命令数が単一writerで

@@ -124,7 +124,10 @@ stopped. A refusal leaves the checkpoint available for a later safe continuation
   have no runtime-owned worktree since
   [ADR 0031](../intents/evorch/decisions/0031-remove-isolated-workspaces.md).)
 - Memory/finding configuration on child runs remains blocked. The existing
-  ownership-only renewal rule is unchanged.
+  ownership-only renewal rule is unchanged. (PR 20, #866, removed the ADR 0024
+  ownership mechanism itself. "Ownership-only" now names legacy saved snapshots
+  recorded under it; the code still recognizes them through
+  `renewable_ownership_only`, but no live ownership permit exists.)
 - A root's persisted TeamStore identity cannot, by itself, enable a GUI button to
   reconstruct authority. GUI callers must use their current project/thread setup.
 - A restore refusal does not consume the last checkpoint. Ordinary snapshots

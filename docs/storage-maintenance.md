@@ -371,8 +371,8 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   2 つの family を併合するときの staging 行の付け替え、family 破棄（unresolved・機能の無効化）での staging 削除、
   探索済み family のメンバー一覧の読み出しは、以前に溜めた staging の量に比例する。起動時の排他フェーズで
   だけ呼ぶこと（通常回収の固定サイズ transaction とは別枠）。
-- **除外。** pinned、評価サンプル（`eval_samples`）、owner が保持する thread
-  （`owner_blocks`）、family に非 due・未アーカイブ・sidebar 未知のメンバーがいる場合は
+- **除外。** pinned、評価サンプル（`eval_samples`）、呼び出し側が thread 単位で渡す安全保留（`SafetyHold`。
+  以前は owner が保持する thread（`owner_blocks`）がここに入っていたが、PR 20 で owner の保持は撤去された）、family に非 due・未アーカイブ・sidebar 未知のメンバーがいる場合は
   確定しない。`archived_delete_after_days = 0` は新規確定を行わない（staging は破棄、
   mirror は同期する）。時刻のない legacy アーカイブは `Immediate`（即 due）。
   `event` の `run_id` / Orchestrator の帰属補完（backfill の第 2 対象）が終わるまで
@@ -410,13 +410,21 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   `db_done → files_pending → done | files_failed` に記録する。
 - **残すもの。** usage（`usage_requests` / `usage_daily` / `usage_run_threads`）、学習系
   （claims、improvement、memory）、索引の要求履歴、`sessions` と集計、`eval_samples`。
-  run に帰属できない events（Ownership、Diagnostic、routing など）も残る。全表の扱いは
+  run に帰属できない events（Ownership（旧 build が保存した行）、Diagnostic、routing など）も残る。全表の扱いは
   `repo/thread_retention/catalog.rs` に一覧があり、テストがスキーマと突き合わせる。
 - **会計。** 回収は events の日次・session 集計、`sessions.total_event_bytes`、索引の
   `charged_bytes` を同じ transaction で更新する。tombstone 済み run の索引行は fence のため
   最後の block を消すまで課金を減らさず、最後に `deleted` として 0 にする。
 
 ## スレッドの期限削除（runtime：起動フェーズ・束縛・回収）
+
+> **PR 20（#866、ADR 0045 §20）後の読み方。** ADR 0024 のプロセス間 owner 機構（`OwnerHost`、`owners.db`、
+> heartbeat、claim、Take over、`readonly_threads`）は撤去された。以下の「owner」「OwnerHost」に触れる記述は、
+> 撤去前の仕様の履歴として残し、個別に注記している。「ownership root」は語として残るが、
+> 今は scratch・lock ファイル（`.ownership-lock`、`.ownership-writer-lock`）・束縛ファイルを置く共有 root
+> ディレクトリを指し、owner registry は含まない。sidebar の 3-way merge（`workspace-state` の `merge_keyed`）と
+> `shared_sidebar_transact` も撤去された（保存ロックと `read_unlocked` は残る）。
+> legacy embedded（`--legacy-embedded`）の起動経路は PR A（#854）で撤去済み（GUI は `--legacy-embedded` を受け付けない）。
 
 `crates/runtime/src/thread_retention/` が、上の storage 基盤を「いつ確定し、誰が回収するか」へつなぐ。
 新規確定の駆動は core の background tick で、GUI 接続・再起動に依存しない。設定は
@@ -430,10 +438,10 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   **後に** tombstone と束縛を読み直す。`Storage::open_with_lease` が DB のリースを writer スレッドへ渡す。
   回収の実行者は `<db>.reclaim-lock` を排他で持つ 1 プロセスだけ。
 - **新規確定は active core のオンライン engine だけ。** authority・binding・設定・closure・案 C を再検査し、同一 IMMEDIATE writer transaction で seal→tombstone/job→commit→共通 guard 公開→seal 解放を行う（詳細は PR2b 節）。起動時の新規候補探索・owner 分類・予算倍増 fallback は行わない。
-- **起動フェーズは回収専用。** `run_exclusive_phase` は束縛確認、bounded backfill、確定済み tombstone の owner/scratch 整理、巨大行、既存 incremental vacuum、artifact blob GC を行う。legacy embedded でも新規確定しない。回収は件数で区切り、crash・失敗で削除を取り消さず、次の起動で再開する。
-- **保守は保持期間と束縛に依存しない。** backfill と確定済み owner/scratch・巨大行・vacuum の回収は `archived_delete_after_days = 0` でも動き、
+- **起動フェーズは回収専用。** `run_exclusive_phase` は束縛確認、bounded backfill、確定済み tombstone の scratch 整理（owner 行の整理は PR 20 で撤去）、巨大行、既存 incremental vacuum、artifact blob GC を行う。legacy embedded でも新規確定しない。回収は件数で区切り、crash・失敗で削除を取り消さず、次の起動で再開する。
+- **保守は保持期間と束縛に依存しない。** backfill と確定済み scratch・巨大行・vacuum の回収は `archived_delete_after_days = 0` でも動き、
   他の変更が登録した巨大行（`reclaim_oversized`）も回収する。巨大行回収と vacuum は DB だけを触るので、束縛が
-  不一致の起動でも動く（`Skipped { BindingMismatch, maintenance }`）。owner 行と scratch は動かない。
+  不一致の起動でも動く（`Skipped { BindingMismatch, maintenance }`）。scratch は動かない。
 - **scratch は実際に消えたことで完了とする。** `ThreadScratch::remove_thread(thread, max_entries)` は管理
   領域内を link をたどらずに 1 entry ずつ同期的に消し、`complete` は dir 自体を消せたときだけ true。
   予算（`scratch_dirs` と `scratch_entries`）に収まらない tree は部分的に残り、`ScratchReport.incomplete` に
@@ -441,31 +449,33 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   entry も予算から引く（失敗しても後続の dir が予算を超えて消すことはない）。存在確認も同じ規則で、
   明示的な NotFound だけが「無い」を意味し、それ以外の失敗は `failed` として報告する。
 - **archive 時の scratch 回収（稼働中）。** 削除確定とは別に、family を archive した時点で scratch を
-  解放する。既存の archive 可否判定は変えず、新たな拒否や run の停止は追加しない。host の `SetFamilyArchived` と native GUI の archive は、sidebar の保存成功後・保存ロック解放後・
-  添付削除の前に、family の全 thread の ID だけをヒントとして ownership host へ送る（archived=true の再要求でも
+  解放する。既存の archive 可否判定は変えず、新たな拒否や run の停止は追加しない。host の `SetFamilyArchived`（旧 native GUI の archive は PR A で撤去）は、sidebar の保存成功後・保存ロック解放後・
+  添付削除の前に、family の全 thread の ID だけをヒントとして archive service（`runtime::scratch::archive`）へ送る（archived=true の再要求でも
   送る。保存失敗・添付 Busy・restore では送らない）。ヒントはメモリに集約するだけで、sidebar の読み・
-  ownership write transaction での検証・rename は UI スレッドにも host command にも置かず、専用の archive スレッドが行う。
+  現在の authority での再検証と rename は UI スレッドにも host command にも置かず、専用の archive スレッドが行う（以前は ownership write transaction で検証していた。PR 20 で撤去）。
   archive の成否と応答は回収に依存しない。使われていない thread は rename して `.trash-*` に退避し、物理削除は
   非同期の collector が行う。利用中の thread は全利用者が終わってから回収し、完了した turn の入力待ちは idle とみなす。
   tool/question 待ちは idle ではなく、run 本体・子 run・shell job を個別の identity で保護する。shell job は終端かつ
   teardown 確認済みになってから解除する。
-  再開すると同じパスを再 prepare し、消失通知を一度だけ追記する。判定する checker は host と GUI が
+  再開すると同じパスを再 prepare し、消失通知を一度だけ追記する。判定する checker は host が
   `workbench_host::scratch_archive::install` で注入し、共有 sidebar を保存ロックなしの `read_unlocked` で読む。
   family を解決できない thread、共有 sidebar がない構成、読取エラーは削除せず保持し、既知の unarchived はヒントを捨てる。
   添付の削除 API・ロック・root には触れない。**`.trash-*` がディスク上の正本**で、起動時と通知時に回収する。
   負荷は 256 entry ごとに 2 ms、Busy は 1 回だけ 100 ms 待って再試行する。失敗 tree は同じ pass で再試行せず、
   自己 wake も行わず、次の通知または起動で再試行する。通常 shutdown では producer の停止・
-  drain・owner の release の後に `stop_scratch_cleanup` を呼ぶ。既存の restart/takeover 時の reset の契約は変わらない。
-  既知の制限: 他プロセスが owner の archived thread はこのプロセスでは回収されず残り得る。保留中のヒントはメモリだけ
+  drain の後に `stop_scratch_cleanup` を呼ぶ（以前はここに owner の release もあったが、ADR 0024 の owner 機構とともに PR 20（#866）で撤去された。
+  restart/takeover 時の reset も同じく撤去済みで、通常の Stop・shutdown・planned restart は thread scratch を消さない）。
+  既知の制限（以前あった「他プロセスが owner の archived thread は回収されず残り得る」は owner の撤去で無くなった）: 保留中のヒントはメモリだけ
   なので planned handoff で失われ、次の release か通常起動で回収する。archive の成功と物理削除の完了は別で、
   後者は遅れる。削除できない tree は診断を出して残る。
 - **進捗。** `run_exclusive_phase_with_progress` が回収段の開始・終了を呼び出し元のスレッドで
   順に通知する（`tracing` の `thread_retention` target にも info で出す）。
-- **owner 行は削除許可に使わない。** 稼働中の案 C 判定は owners.db を読まない。起動時排他保守は、既に commit された tombstone に限り owner 行の残骸を整理する。
+- **owners.db は使わない。** PR 20 で owner registry が撤去され、稼働中の案 C 判定も起動時排他保守も owners.db を読まず、新たに作らず、owner 行の整理もしない。
+  （以前は、起動時排他保守が既に commit された tombstone に限り owner 行の残骸を整理していた。）
 - **束縛。** DB と ownership root の組を最初の自動 root 整理より前に両側に記録する（DB: `retention_identity` と
   `retention_binding`、root: `.evorch-retention-binding.json`。root 側を先に durable に書き、DB 側を writer で確定して一致を確認する。上書きしない）。
   どちらかが欠ける、`db_id` が違う、sidebar（`--state` で別ファイルを渡した起動を含む）や root が違う場合は
-  不一致で、新規の確定・owner 行の除去・scratch の削除をしない。DB 側の回収、artifacts の meta の削除、
+  不一致で、新規の確定・scratch の削除をしない（owner 行の除去は PR 20 で撤去）。DB 側の回収、artifacts の meta の削除、
   検索除外は続く。rebind は提供しない。root のファイルが同じ DB を指し DB 側の行がないだけの状態は、
   最初の試みが途中で止まった跡として再開する。
 - **回収（`ReclaimExecutor`）。** reclaim-lock を持つプロセスが 5 秒ごとに backfill の残り、`reclaim_step`、
@@ -481,7 +491,7 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   blob は触らない（起動フェーズの段 7 だけが消す）。通常稼働中は owners.db と
   scratch を触らない。停止は `shutdown()` で join してから storage を閉じる。
 - **ガード。** 起動時 tombstone とオンライン commit を同じ更新可能 guard に反映し、削除済みの thread・run を受け取る実行入口を
-  `ThreadDeleted` で拒否する: `OwnerHost::start / claim / attach`、`bind_thread_root`、
+  `ThreadDeleted` で拒否する: （`OwnerHost::start / claim / attach` は PR 20 で撤去）`bind_thread_root`、
   `create_thread_goal` / `restore_thread_goal` / `restore_thread_todo`、
   `set_thread_read_only_directories`、run の復元と継続（`resume_chat` / `wake_chat` / `continue_goal`）、
   `delegate_chat(_seeded)`、fork seed、escalation seed、host input の配送、保存済み root の compaction、
@@ -541,7 +551,7 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   進捗はスプラッシュ（`gui::app::splash`）に段ごとに出る（● 実行中 / ✓ 完了、確定した family 数、経過時間）。
   フェーズが終わるまでウィンドウの閉じる操作は無視される。他のプロセスがロックを持っていれば（`NoExclusive`）
   フェーズは飛ばして通常起動し、`--demo` はフェーズを行わない。③ 1 フレーム内で `build_workbench`
-  （`Storage::open_with_lease` → 参照を記録する artifact store（`store_with_refs`）→ `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
+  （`Storage::open_with_lease` → 参照を記録する artifact store（`store_with_refs`）→（`OwnerHost::open` は PR 20 で撤去）→ tombstone guard → 回収 executor → 履歴の復元）。
   段 7（artifact の実体回収）もスプラッシュに段として出る。
   ②・③の失敗はスプラッシュと stderr に出て、ウィンドウを閉じるとコード 1 で終わる。
 - **sidebar の採番（family が状態を持つ）。** archive と pin は **family 単位**で、スレッド記録は状態を持たない。
@@ -552,14 +562,14 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
   `SidebarState::refresh_derived`（唯一の書き手）が family から導いて表示に使う**派生値で、保存しない**。
   GUI・DB への mirror・起動時の保守入力・60 秒ごとの schedule は、すべて `SidebarState::resolve_states`（同じ解決関数）を読む。
   - **採番する操作は archive / unarchive / pin / unpin だけ。** 保存ロックの中で最新の sidebar（ファイル＋手元の
-    3-way merge）に対して family の該当系列だけを採番して書き（`shared_sidebar_transact`）、直後に DB へ mirror する。
+    3-way merge）に対して family の該当系列だけを採番して書き（撤去前は `shared_sidebar_transact`。PR A で撤去）、直後に DB へ mirror する。
     archive は pin を、pin は archive を動かさない。pin は family 全体（過去の版・fork・escalation を含む）に効く。
     ロックを取れなければ手元の状態は変えず、エラーを表示する。no-op の操作でも、他者が保存した内容は取り込む。
   - **子の追加と版切替は所属を足すだけ。** fork・rewind・escalation の子の作成と版切替は、状態をコピーも採番もしない
     （子は family の状態をそのまま読む）。fork・rewind・版切替は、ID の重複を防ぐため保存ロックの中で行い、ロックを取れない・
     ファイルを読めない場合は何も作らない。escalation の子はイベントの畳み込み中に作るので失敗させず、手元に足して
     次の保存で merge する（状態を持たないので、ロックが取れない間も状態は食い違わない）。
-  - **merge。** `families` はキーの和集合で、系列ごとに revision の高い側を採る（同値で内容が割れたら保護側 =
+  - **merge。**（歴史的記述: 2 つの sidebar の 3-way merge は PR 20 で撤去された。以下は撤去前の規則。）`families` はキーの和集合で、系列ごとに revision の高い側を採る（同値で内容が割れたら保護側 =
     archived / pinned。archive の時刻が 2 つあれば遅い方。どちらが local でも同じ結果）。どちらか一方にしか無い状態は残す。古い画面の再追加・replay・import・再起動で、保存済みの revision は戻らない。
   - **DB への射影。** DB のスレッド単位の列は、family 状態からの射影（派生）。family の状態が変わると、全メンバーの
     upsert を作り直して送る（新しいメンバーにも同じ状態が付く）。再送は冪等で、プロセスが落ちても次の起動が sidebar から再構成する。
@@ -586,11 +596,11 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
     import が失敗したときも、通常保存は同じファイルを読み直して merge し、読めない間は上書きしない。
 - **確定後の片付け。** 再読込した tombstone に載るスレッドは、sidebar・`user_messages`・下書き・選択から外れ、
   sidebar の 3-way merge・import・復元・保存直前（merge しない保存も）でも戻らない（tombstone が merge の
-  「他方の編集を残す」規則に優先する）。
-- **guard。** core では runtime・OwnerHost・host・planned 経路が同一の更新可能 guard を共有する。legacy embedded は起動時の同じ tombstone snapshot を runtime と OwnerHost に設定する（新規確定しない）。
+  「他方の編集を残す」規則に優先する）。（3-way merge 自体は PR 20 で撤去済み。）
+- **guard。** core では runtime・host・planned 経路が同一の更新可能 guard を共有する（以前はここに OwnerHost も含まれ、legacy embedded は起動時の同じ tombstone snapshot を runtime と OwnerHost に設定していた。どちらも撤去済み）。
   runtime への設定は、目標・手順の復元など runtime の入口を使う前に行い、復元関数は設定した証拠を引数に取る。
 - **表示。** アーカイブ一覧のタイトルのホバーに "Deletes in N days" / "Waiting for online cleanup" /
-  "Deletion on hold (reason)" を出す（owner が保持している間は "owner active until <ローカル日時>"）（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
+  "Deletion on hold (reason)" を出す（以前は owner が保持している間 "owner active until <ローカル日時>" も出していたが、owner の撤去で無くなった）（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
   起動後・60 秒ごと・archive / unarchive / pin の後に計算し、探索済みの family の保留理由（pin・owner・
   未期限の関連スレッド・系統の未解決・探索中）も含む。束縛が不一致のときは "Deletion disabled (configuration mismatch)"。
   GUI の文言は既存の GUI に合わせて英語。
@@ -673,7 +683,7 @@ archived_delete_after_days = 7
 - root writer lease（`.ownership-writer-lock`）は DB の後に一度だけ試行する。別 config-dir／別 DB の core が同じ ownership root を使う場合、後発も起動するが、自動 archive・オンライン削除確定・自動 root 配下整理を `AuthorityUnavailable` として無効にする。root に触れない既存 DB reclaim は継続する。先発終了後も昇格せず、再起動まで無効のまま。保留 tick は DB・sidebar・添付を開かず、host mutex も sidebar／添付 lock も取らない。起動ログに理由を出す。
 - writer lease と既存 maintenance lease は別物。core と read-only inspect は maintenance を共有し、offline 保守は排他のまま。lock ファイルは unlink しない。直接 `Storage::open` と旧 `--legacy-embedded` は DB writer lease を共有取得するため、core 稼働中は接続案内付きで拒否される。新 lease を守らない古いバイナリとの同時利用は保証しない。
 - 自動添付整理／scratch hint は、両 writer lease の authority と DB/root/sidebar の binding 一致が条件。Unbound は host lock の外で root 側を durable に書き、writer ACK で DB 側を確定し、再確認してから整理する。Mismatch でも archive 自体は保存するが、自動 root 配下操作はしない。symlink は辿らず root 外を消さない。
-- planned successor も DB 必須／root 試行で取得し、adopt・activation 前に retention producer を起動しない。停止時は新規 tick 停止→worker join→storage barrier／終了の順で、writer・OwnerHost・producer の寿命を lease が覆う。保守は core の idle busy 理由を増やさず、core 終了後には処理しない。
+- planned successor も DB 必須／root 試行で取得し、adopt・activation 前に retention producer を起動しない。停止時は新規 tick 停止→worker join→storage barrier／終了の順で、writer・producer の寿命を lease が覆う（以前は OwnerHost も含んでいたが撤去済み）。保守は core の idle busy 理由を増やさず、core 終了後には処理しない。
 - archive は従来の sidebar family、削除は既存 closure（親子・run binding・usage・lane management・未退役 recovery manifest 等）の全件かゼロ。後述のオンライン削除は archive と同じ案 C を再利用する。
 - **判定は派生状態を持たない。** 1 tick は 1 family だけを、host mutex の `try_lock` と sidebar lock の同一区間で、正本（events・受理表・`run_contexts`・質問・評価サンプル・lane・`lane_handoffs`）から直接判定する。tick を跨いで持つのは巡回位置だけで、判定の途中結果・投影・backfill・trigger はない。v75 は索引 4 本だけを足す（表・trigger なし）。
 - 判定の手順は、sidebar 再読込、admission の gate stamp（全体・thread・run）採取、メモリ上の確認（実行中 run、メモリ上の goal）、stamp 採取後に始めた 1 つの read transaction での DB 判定、stamp の一致確認、保存・mirror・通知の順。stamp 採取から再確認までの間に前景の admission や event の publish が入ると publish しない。再確認後の admission は archive 済み family 上の通常操作として扱う。
@@ -717,7 +727,7 @@ archived_delete_after_days = 7
 - 最終 stamp 比較と seal は同じ memory mutex 内で行う。queue 待ちは seal しない。同期 writer request と bus publish は 1 commit の seal 解放まで待ち、Busy による内部失敗・イベント破棄にしない。commit 成功後、共有の更新可能 tombstone guard に公開してから解放する。rollback/error/panic は解放し、commit 失敗は guard に公開しない。削除後の terminal entry は実行できず、sidebar に復活させない。sidebar 保存/通知の後処理失敗は tombstone を正本に次 tick で修復する。
 - 1 候補の予算は member（thread＋run）64、edge 2,048、task 256、副作用行 1,024、1 MiB。上限超過 closure は部分削除せず、理由付きの恒久保留・診断にする。起動時の予算倍増 fallback はない。保留・失敗・巨大行待ちが後続候補を止めないよう巡回する。v77 はオンライン SQL の索引のみで、新しい永続判定表・trigger・cursor は作らない。
 - 既存 reclaim job/cursor を使い、オンライン writer request は 1 transaction ずつ、共通の送信枠で積み上げず処理する。添付は authority＋matching binding の下で、sidebar から消えていても tombstone から再開する。通常行・参照・添付・freelist の回収は段階的で、ファイルサイズの即時縮小を保証しない。vacuum は既存 maintenance()/run_budgeted_vacuum のみ。全 VACUUM や reader を待つ強制 WAL TRUNCATE は追加しない。
-- 巨大単一行、artifact 全域 GC、旧 owner 行と scratch ディレクトリの全域整理は起動時排他保守に残す。オンライン経路は owner 行や scratch ディレクトリを直接消さない。巨大 closure の救済のための起動時削除確定はしない。
+- 巨大単一行、artifact 全域 GC、scratch ディレクトリの全域整理は起動時排他保守に残す（旧 owner 行の整理は PR 20 で撤去）。オンライン経路は scratch ディレクトリを直接消さない。巨大 closure の救済のための起動時削除確定はしない。
 - 保守は idle busy 理由を増やさず、idle_grace_secs=60 で core が終了した後には処理しない。短い稼働だけでは backlog が残り、次回 activation で再開する。停止は新規要求停止→進行中要求の writer 応答→producer join→storage barrier の順。常駐 daemon は追加しない。
 
 新規削除確定は core のみ。旧 embedded 起動 wrapper は確定済み tombstone/job の回収専用で、owner 判定・候補探索・予算倍増を行わない。

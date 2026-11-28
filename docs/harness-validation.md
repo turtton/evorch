@@ -69,6 +69,12 @@ rendering, browser and Nix environments. Local tests call no external model.
   ownership handoff during answer, history/live binding, diagnostic invalidation,
   and restored context without reviving running timers.
 
+Note (PR 20, #866): the "stale ownership" renewal and "ownership handoff during
+answer" scenarios above, and "stale owners including admission", described the
+ADR 0024 ownership mechanism, which was removed. The
+`crates/runtime/tests/escalation_ownership/ownership*.rs` tests were deleted and the
+test target was renamed `escalation_runtime`.
+
 Reproduce with [the harness script](../scripts/check-harness.sh). Implementation
 limits, including PTY line buffering, are in [the runtime notes](harness-runtime-improvements.md).
 

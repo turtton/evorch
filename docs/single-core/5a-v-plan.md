@@ -84,7 +84,7 @@
 - **F4-E：** CEFを含む確認、二回連続restart、旧世代残存／リークの確認。基本の一回restartはPR Aで重複計上しない。20の変更前に基準を採る。
 - **O-V2／O-V3：** 実browser／GUIのagent observation、およびobservation＋Stop／restart＋cacheの横断確認。O-V2の後にO-V3を行う。
 - **Q1／Q2専用GUI画面、read-only GUI parity：** 管理CLIで代替する。誤表示・事実と異なる説明は後回しにしない。
-- **20：** 旧owners.db／claim／shared_feed等の所有権撤去。19a後。
+- **20：** 旧owners.db／claim／shared_feed等の所有権撤去。19a後。（#866 で完了。切り替え手順は [single-core-integration.md](../single-core-integration.md) の「PR 20 以降の更新」を参照。）
 - **19b：** client crate内部依存allowlistのゼロ化。20後。
 - **SetThreadExtraReadDirs画面：** 19aで後回しにした。現在は未対応と表示する。
 - **CLI crash-continuity結合試験：** 実際にcoreをcrashさせ、実行中CLIのrunが復活しないことを確認する。
