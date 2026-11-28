@@ -5,7 +5,7 @@
 //! within the shared crash budget, and nothing is ever resent.
 //!
 //! Real sockets and real time throughout: no paused clock. Every wait is on an
-//! event (the state the actor published), and the whole scenario is bounded.
+//! event (the state the actor published); nextest owns hang detection.
 #![cfg(target_os = "linux")]
 
 #[path = "../../evorch/tests/restart_admin/fake_core.rs"]
@@ -21,7 +21,6 @@ use gui::core_client::{
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::sync::mpsc;
 use workbench_client::ClientConfig;
@@ -31,8 +30,6 @@ use workbench_protocol::{
     namespaces::lifecycle::RestartPhase,
     wire::InstanceEpoch,
 };
-
-const BOUND: Duration = Duration::from_secs(60);
 
 struct World {
     config: tempfile::TempDir,
@@ -183,7 +180,7 @@ impl Gui {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no_core_is_started() {
-    tokio::time::timeout(BOUND, async {
+    {
         let world = world();
         let predecessor = world.core(7);
         let gui = Gui::start(world.launcher());
@@ -234,9 +231,7 @@ async fn after_the_cores_own_restart_evidence_the_successor_is_waited_for_and_no
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();
         successor.stop();
-    })
-    .await
-    .expect("the scenario finishes");
+    }
 }
 
 /// How many times the core binary was started: it appends a line when run.
@@ -245,58 +240,41 @@ fn starts(world: &World) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_abnormal_loss_starts_a_core_once_within_the_budget_and_then_waits_for_the_person() {
-    tokio::time::timeout(BOUND, async {
-        let world = world();
-        let first = world.core(7);
-        let gui = Gui::start(world.launcher());
-        gui.until(|s| Gui::epoch(s) == Some(7)).await;
-        // Gone with no goodbye and no restart evidence: not a planned restart, so
-        // nothing is waited for connect-only; the launcher is asked once. The test
-        // binary exits at once without a core, which the launcher reports.
-        first.stop();
-        gui.until(|s| s.status.contains("Connection failed")).await;
-        assert_eq!(starts(&world), 1, "one automatic start, no more");
-        let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
-        assert_eq!(
-            core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
-            1,
-            "the start that never became a core is a counted crash"
-        );
-        // A request now is refused as for any lost connection; that it is, is
-        // the proof the actor is waiting for the person and not reconnecting.
-        let second = world.core(8);
-        gui.pass().await;
-        gui.actions
-            .send(Action::Feature(gui::core_client::features::FeatureAction {
-                feature: gui::core_client::features::FeatureId::Restart,
-                tag: 1,
-                request: gui::core_client::features::FeatureRequest::Query(
-                    workbench_protocol::queries::Query::Lifecycle(
-                        workbench_protocol::namespaces::lifecycle::LifecycleQuery::Restart(
-                            workbench_protocol::namespaces::lifecycle::restart::RestartQuery::Status,
-                        ),
-                    ),
-                ),
-            }))
-            .await
-            .unwrap();
-        gui.until(|s| s.status.contains("Not sent: the core is disconnected")).await;
-        assert!(second.state().seen.is_empty(), "no one connected to it");
-        gui.actions.send(Action::Reconnect).await.unwrap();
-        gui.until(|s| Gui::epoch(s) == Some(8)).await;
-        assert_eq!(starts(&world), 1, "joining a running core starts nothing");
-        gui.actions.send(Action::Shutdown).await.unwrap();
-        gui.actor.await.unwrap();
-        second.stop();
+async fn an_abnormal_loss_attempts_one_start_then_recovers_connect_only_without_input() {
+    let world = world();
+    let first = world.core(7);
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    first.stop();
+    gui.until(|s| {
+        s.status_detail
+            .as_deref()
+            .is_some_and(|e| e.contains("core exited"))
     })
-    .await
-    .expect("the scenario finishes");
+    .await;
+    assert_eq!(starts(&world), 1, "one automatic start, no more");
+    let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
+    assert_eq!(
+        core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
+        1
+    );
+    let second = world.core(8);
+    gui.until(|s| Gui::epoch(s) == Some(8)).await;
+    assert_eq!(
+        starts(&world),
+        1,
+        "recovery only joins the externally started core"
+    );
+    assert!(gui.shared.lock().unwrap().status_detail.is_none());
+    assert!(second.commands().is_empty());
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    second.stop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_exhausted_budget_is_shown_with_its_reason_and_nothing_is_started_or_retried() {
-    tokio::time::timeout(BOUND, async {
+async fn an_exhausted_budget_keeps_its_hover_reason_and_recovers_without_starting() {
+    {
         let world = world();
         // Three crashes already on record for this config directory.
         let config = core_instance::ConfigIdentity::new(world.config.path()).unwrap();
@@ -316,23 +294,34 @@ async fn an_exhausted_budget_is_shown_with_its_reason_and_nothing_is_started_or_
         let gui = Gui::start(world.launcher());
         gui.until(|s| Gui::epoch(s) == Some(7)).await;
         first.stop();
-        gui.until(|s| s.status.contains("not retried")).await;
-        let shown = gui.shared.lock().unwrap().status.clone();
-        assert!(
-            shown.contains("3 core crashes"),
-            "the reason is shown: {shown}"
+        gui.until(|s| {
+            s.status_detail
+                .as_deref()
+                .is_some_and(|e| e.contains("3 core crashes"))
+        })
+        .await;
+        {
+            let state = gui.shared.lock().unwrap();
+            assert!(
+                !state.status.contains("3 core crashes"),
+                "details are hover-only"
+            );
+        }
+        let second = world.core(8);
+        gui.until(|s| Gui::epoch(s) == Some(8)).await;
+        assert_eq!(
+            starts(&world),
+            0,
+            "connect-only ignores no budget: it starts nothing"
         );
-        assert!(shown.contains("Reconnect"), "and what to do next: {shown}");
-        assert_eq!(starts(&world), 0, "nothing was started");
         assert_eq!(
             core_launcher::CrashBudget::recent_crashes(config.config_dir()).unwrap(),
             3
         );
+        second.stop();
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();
-    })
-    .await
-    .expect("the scenario finishes");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -340,7 +329,7 @@ async fn a_goodbye_and_the_end_of_the_stream_arriving_together_is_still_a_goodby
     // The actor's select may see the close first; the goodbye is already queued.
     // Repeated so that either order is taken, each time against a new core.
     for _ in 0..24 {
-        tokio::time::timeout(BOUND, async {
+        {
             let world = world();
             let core = world.core(7);
             let gui = Gui::start(world.launcher());
@@ -356,15 +345,13 @@ async fn a_goodbye_and_the_end_of_the_stream_arriving_together_is_still_a_goodby
             assert_eq!(starts(&world), 0, "a goodbye is not a crash");
             gui.actions.send(Action::Shutdown).await.unwrap();
             gui.actor.await.unwrap();
-        })
-        .await
-        .expect("the scenario finishes");
+        }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
-    tokio::time::timeout(BOUND, async {
+    {
         let world = world();
         let core = world.core(7);
         core.state().hold_snapshot_page = true;
@@ -391,7 +378,8 @@ async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
             },
         ));
         core.stop_after_flush();
-        gui.until(|s| s.status.contains("announced its shutdown")).await;
+        gui.until(|s| s.status.contains("announced its shutdown"))
+            .await;
         assert_eq!(
             starts(&world),
             0,
@@ -399,14 +387,12 @@ async fn a_goodbye_read_while_the_snapshot_is_paged_is_still_a_goodbye() {
         );
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();
-    })
-    .await
-    .expect("the scenario finishes");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_core_that_said_goodbye_is_not_started_again() {
-    tokio::time::timeout(BOUND, async {
+    {
         let world = world();
         let first = world.core(7);
         let gui = Gui::start(world.launcher());
@@ -424,9 +410,7 @@ async fn a_core_that_said_goodbye_is_not_started_again() {
         assert_eq!(starts(&world), 0, "an orderly stop is not restarted");
         gui.actions.send(Action::Shutdown).await.unwrap();
         gui.actor.await.unwrap();
-    })
-    .await
-    .expect("the scenario finishes");
+    }
 }
 
 /// The core's own notice that this subscriber fell behind: the end of the
@@ -497,7 +481,7 @@ async fn an_ended_subscription_read_during_the_session_is_read_again() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_goodbye_read_while_paging_from_a_core_that_stays_up_is_not_reconnected() {
+async fn a_goodbye_read_while_paging_reconnects_without_starting_a_core() {
     let world = world();
     let core = world.core(7);
     core.state().hold_snapshot_page = true;
@@ -508,13 +492,145 @@ async fn a_goodbye_read_while_paging_from_a_core_that_stays_up_is_not_reconnecte
             reason: workbench_protocol::events::CloseReason::CoreShuttingDown,
         },
     ));
-    // The actor decided once it says so, and it says so after deciding.
-    gui.until(|s| s.status.contains("announced its shutdown"))
+    core.state().hold_snapshot_page = false;
+    core.wait_for(|s| s.subscribes.iter().any(|(conn, ..)| *conn >= 2))
         .await;
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
     assert_eq!(
-        core.state().subscribes.len(),
-        1,
-        "a core that announced its shutdown is not connected to again"
+        starts(&world),
+        0,
+        "goodbye permits connect-only, not a start"
+    );
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_initial_start_failure_recovers_when_an_external_core_appears() {
+    let world = world();
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| s.status_detail.is_some()).await;
+    assert_eq!(starts(&world), 1);
+    let core = world.core(7);
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    assert_eq!(starts(&world), 1);
+    assert!(core.commands().is_empty());
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_loss_recovers_automatically_without_starting_or_replaying() {
+    let world = world();
+    let core = world.core(7);
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    let projection = gui.shared.lock().unwrap().projection;
+    core.disconnect_clients();
+    gui.until(|s| s.connected && s.projection > projection)
+        .await;
+    assert_eq!(starts(&world), 0);
+    assert!(core.commands().is_empty());
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_compatibility_failure_keeps_connecting_until_a_matching_core_appears() {
+    let world = world();
+    let incompatible = world.core(6);
+    incompatible.state().reject_handshake = true;
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| s.status.contains("compatibility mismatch"))
+        .await;
+    assert_eq!(starts(&world), 0, "an incompatible core is never replaced");
+    incompatible.stop();
+    let core = world.core(7);
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    assert_eq!(starts(&world), 0);
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscribe_failure_is_retried_without_manual_reconnect() {
+    let world = world();
+    let core = world.core(7);
+    core.state().fail_subscribes = 1;
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    {
+        let state = core.state();
+        assert_eq!(state.fail_subscribes, 0);
+        assert_eq!(
+            state
+                .seen
+                .iter()
+                .filter(|s| matches!(
+                    s.body,
+                    workbench_protocol::envelope::RequestBody::Control(
+                        workbench_protocol::envelope::Control::Subscribe(_)
+                    )
+                ))
+                .count(),
+            2
+        );
+    }
+    assert!(gui.shared.lock().unwrap().status_detail.is_none());
+    assert_eq!(starts(&world), 0);
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_failure_is_retried_without_manual_reconnect() {
+    let world = world();
+    let core = world.core(7);
+    core.state().subscribe_mode = SubscribeMode::AlwaysReplay;
+    let gui = Gui::start(world.launcher());
+    core.wait_for(|s| s.subscribes.len() >= 2).await;
+    core.state().subscribe_mode = SubscribeMode::Honest;
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    assert!(gui.shared.lock().unwrap().status_detail.is_none());
+    assert_eq!(starts(&world), 0);
+    gui.actions.send(Action::Shutdown).await.unwrap();
+    gui.actor.await.unwrap();
+    core.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_first_history_page_is_recorded_and_forgotten_on_reconnect() {
+    let world = world();
+    let core = world.core(7);
+    let gui = Gui::start(world.launcher());
+    gui.until(|s| Gui::epoch(s) == Some(7)).await;
+    let projection = gui.shared.lock().unwrap().projection;
+    // The restart fake rejects conversation reads. The real actor must record
+    // that failure, rather than leaving only a transient status message.
+    gui.actions
+        .send(Action::History(
+            workbench_protocol::ids::ThreadId::new("selected-thread").unwrap(),
+            None,
+            false,
+        ))
+        .await
+        .unwrap();
+    gui.until(|s| s.cache.history_read_failed("selected-thread"))
+        .await;
+    core.disconnect_clients();
+    gui.until(|s| s.connected && s.projection > projection)
+        .await;
+    assert!(
+        !gui.shared
+            .lock()
+            .unwrap()
+            .cache
+            .history_read_failed("selected-thread")
     );
     assert_eq!(starts(&world), 0);
     gui.actions.send(Action::Shutdown).await.unwrap();

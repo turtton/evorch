@@ -61,6 +61,8 @@ pub struct Shared {
     pub outcome_unknown: std::collections::BTreeSet<String>,
     pub connected: bool,
     pub status: String,
+    /// The last connection/session failure, shown only on hover until recovery.
+    pub status_detail: Option<String>,
     pub changed: Arc<tokio::sync::Notify>,
     /// What the connected core offers; features are shown only for what it does.
     pub capabilities: Vec<Capability>,
@@ -139,6 +141,7 @@ impl Shared {
         self.features.begin_session(delivered, held);
         self.connected = true;
         self.status = CONNECTED.into();
+        self.status_detail = None;
     }
 
     /// Replace a disposable cut without discarding human input or uncertainty.
@@ -820,6 +823,14 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             }
             image.uploading = true;
         }
+        Action::History(thread, None, false) => {
+            // No session can consume this read. The selected thread is asked for
+            // after the next projection, even when selection happened offline.
+            if !shared.connected {
+                return;
+            }
+            shared.cache.history_asked(thread.as_str());
+        }
         // One ask per scope at a time: the page it returns moves the cursor on.
         Action::History(thread, run, true) => {
             let id = run.as_ref().map_or(thread.as_str(), |run| run.as_str());
@@ -864,6 +875,7 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
                     .attachment_draft(project, thread.as_str(), file)
                     .uploading = false;
             }
+            Action::History(thread, None, false) => shared.cache.history_not_asked(thread.as_str()),
             // The run's first page was not asked for: the next frame asks again.
             Action::History(_, Some(run), false) => shared.cache.forget_run(run.as_str()),
             Action::History(thread, run, true) => shared
@@ -1005,6 +1017,7 @@ impl CoreClientScreen {
                         stats: stats.as_ref(),
                         today_cost,
                         status: &shared.status,
+                        status_detail: shared.status_detail.as_deref(),
                         connected: shared.connected,
                         outcome_unknown: &shared.outcome_unknown,
                         unsupported: &unsupported,
@@ -1210,6 +1223,19 @@ impl CoreClientScreen {
             self.save_with(&shared, true);
         }
         if shared.connected {
+            if let Some(thread) = &self.selected
+                && shared.cache.want_history(thread.as_str())
+                && shared.cache.threads.contains_key(thread.as_str())
+            {
+                enqueue(
+                    &self.actions,
+                    &mut shared,
+                    Action::History(thread.clone(), None, false),
+                );
+                if shared.cache.want_history(thread.as_str()) {
+                    ui.ctx().request_repaint();
+                }
+            }
             // A tab drawn reads its run's history, and so does one whose history a new
             // session's projection (a reconnect or resync) lacks. A window opened on
             // many subagents asks a few per frame, so the client's queue keeps room for
@@ -1492,7 +1518,10 @@ mod navigation_tests {
     #[test]
     fn navigation_changes_the_selection_like_the_built_in_selector() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let mut shared = Shared::default();
+        let mut shared = Shared {
+            connected: true,
+            ..Default::default()
+        };
         let (id, thread) = ids();
         let (mut project, mut selected) = (None, None);
         let frame = |navigation| FeatureFrame {
@@ -1553,7 +1582,10 @@ mod navigation_tests {
     #[test]
     fn a_run_history_the_queue_refuses_is_asked_for_again() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let mut shared = Shared::default();
+        let mut shared = Shared {
+            connected: true,
+            ..Default::default()
+        };
         let (_, thread) = ids();
         enqueue(
             &tx,

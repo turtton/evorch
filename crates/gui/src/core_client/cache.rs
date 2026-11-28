@@ -23,6 +23,10 @@ pub struct Cache {
     pub approvals: BTreeMap<String, ApprovalView>,
     pub receipts: BTreeMap<String, InputReceipt>,
     pub history: BTreeMap<String, Vec<CommittedMessage>>,
+    /// First pages requested in this projection (including failed reads).
+    history_asked: std::collections::BTreeSet<String>,
+    /// A failed first page can be explicitly retried; a new projection forgets it.
+    history_failed: std::collections::BTreeSet<String>,
     pub older: BTreeMap<String, Option<PageCursor>>,
     /// The committed messages of each run a run tab shows, keyed by run. An entry
     /// exists only while a tab wants that run ([`Self::want_run`]).
@@ -45,6 +49,27 @@ pub struct Cache {
 }
 
 impl Cache {
+    pub fn want_history(&self, thread: &str) -> bool {
+        !self.history_asked.contains(thread)
+    }
+
+    pub fn history_asked(&mut self, thread: &str) {
+        self.history_asked.insert(thread.into());
+        self.history_failed.remove(thread);
+    }
+    pub fn history_failed(&mut self, thread: &str) {
+        self.history_asked.insert(thread.into());
+        self.history_failed.insert(thread.into());
+    }
+
+    pub fn history_read_failed(&self, thread: &str) -> bool {
+        self.history_failed.contains(thread)
+    }
+
+    pub fn history_not_asked(&mut self, thread: &str) {
+        self.history_asked.remove(thread);
+    }
+
     pub fn snapshot(&mut self, item: SnapshotItem) {
         match item {
             SnapshotItem::CoreStatus(_) => (),
@@ -272,6 +297,9 @@ impl Cache {
     }
 
     pub fn history_page(&mut self, thread: &str, page: Page<CommittedMessage>, older: bool) {
+        if !older {
+            self.history_asked(thread);
+        }
         if older {
             self.older_loading.remove(thread);
         } else {

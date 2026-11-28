@@ -668,12 +668,25 @@ stderr, which can hold credentials): the core's `evorch_core::connection_log`,
   the handler panicked or was cancelled (same `conn=N`), `connection limit
   reached` when a 64th connection is dropped, and handler panics.
 
-Reconnect pacing: when the connection broke but the core still answers a
-connect-only probe, the GUI reconnects without spending the 3-in-5-minutes
-allowance (that allowance guards starts of a core that keeps dying; the shared
-crash budget is untouched because nothing is started). It reconnects at once after
-a session that lasted a minute, and otherwise waits 1, 2, 4, … up to 30 seconds.
-When no core answers, the previous behaviour applies unchanged.
+Reconnect pacing: the GUI keeps reconnecting without user input, including after
+connection/start failures, compatibility mismatches and exhausted start budgets.
+The first retry is immediate, then waits are 1, 2, 4, 8, 16 and at most 30 seconds;
+a session lasting at least 60 seconds resets the pace. In-session resync is
+immediate on the same client; subscribe/snapshot failures use that retry pace.
+Only the initial attempt, an abnormal loss allowed by the GUI's 3-in-5-minutes
+allowance, and explicit Reconnect may start a core, always subject to the shared
+launcher crash budget. After a failed start, an exhausted allowance, orderly
+shutdown or expired planned-successor wait, recovery is connect-only. Elapsing
+the budget window does not allow starts again: only an opened session or manual
+Reconnect does. Planned restarts still wait for their successor first. A
+compatibility mismatch is retried connect-only so an externally updated core can
+recover; this can add handshake info/warn logs every 30 seconds until repaired.
+The footer has no permanent Reconnect button: right-click its connection status.
+Failure details are hover-only, retained through retries and cleared when a
+session opens. Commands are never replayed; only uncertain receipts are queried.
+A new projection (reconnect/resync) rereads the selected thread's first history
+page once, including when its previous read was refused offline or by a full
+client queue.
 
 Current migration status and 19a boundary:
 

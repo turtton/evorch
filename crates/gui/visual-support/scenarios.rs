@@ -209,6 +209,7 @@ fn populated(attention: bool) -> Shared {
     } else {
         "`next` を使うように変更し、テストもすべて成功しました。"
     };
+    cache.history_asked("thr-1"); // The fixture starts with its first page already read.
     cache.history.insert(
         "thr-1".into(),
         vec![

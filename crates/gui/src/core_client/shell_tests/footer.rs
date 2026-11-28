@@ -322,10 +322,10 @@ fn the_footer_shows_the_machine_bars_beside_the_cost_of_today() {
 
     let harness = &screen.harness;
     harness.get_by_label("$2.34 today");
-    let reconnect = harness.get_by_label("Reconnect").rect();
+    let status = harness.get_by_label("Connected").rect();
     for bar in ["CPU", "Mem"] {
         let rect = harness.get_by_label(bar).rect();
-        assert!(rect.left() > reconnect.right(), "{bar} at {rect:?}");
+        assert!(rect.left() > status.right(), "{bar} at {rect:?}");
         assert!(rect.top() > 850.0, "{bar} at {rect:?}");
     }
     assert!(harness.query_by_label("Disk").is_none());
@@ -337,7 +337,7 @@ fn is_japanese(c: char) -> bool {
 }
 
 // Given: each status the connection, the automatic reconnect and the restart wait can set
-// When: the footer is drawn / Then: it reads in English and Reconnect stays offered
+// When: the footer is drawn / Then: it reads in English with no permanent Reconnect
 #[test]
 fn the_status_line_reads_english_in_every_connection_state() {
     use crate::core_client::{auto_reconnect, connection, restart::text};
@@ -381,13 +381,16 @@ fn the_status_line_reads_english_in_every_connection_state() {
         }
         screen.harness.run_steps(2);
         screen.harness.get_by_label(&status);
-        screen.harness.get_by_label("Reconnect");
+        assert!(screen.harness.query_by_label("Reconnect").is_none());
     }
 }
 
 #[test]
 fn a_new_session_says_it_is_connected_in_english() {
-    let mut shared = Shared::default();
+    let mut shared = Shared {
+        status_detail: Some("previous connection failure".into()),
+        ..Default::default()
+    };
     shared.begin_session(
         crate::core_client::cache::Cache::default(),
         Vec::new(),
@@ -395,6 +398,7 @@ fn a_new_session_says_it_is_connected_in_english() {
         Vec::new(),
     );
     assert_eq!(shared.status, "Connected to the core");
+    assert!(shared.status_detail.is_none());
     assert!(
         shared
             .features
@@ -658,4 +662,52 @@ mod theme {
             style_for(ThemePreset::HighContrast).visuals
         );
     }
+}
+
+#[test]
+fn reconnect_is_only_in_the_status_context_menu_and_is_sent_once() {
+    for connected in [true, false] {
+        let mut screen = screen(egui::vec2(1440.0, 900.0));
+        screen.shared.lock().unwrap().connected = connected;
+        screen.settle();
+        assert!(screen.harness.query_by_label("Reconnect").is_none());
+        let status = screen.shared.lock().unwrap().status.clone();
+        screen.harness.get_by_label(&status).click_secondary();
+        screen.harness.run_steps(2);
+        screen.harness.get_by_label("Reconnect").click();
+        let actions = screen.settle();
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::Reconnect))
+                .count(),
+            1
+        );
+        screen.harness.run_steps(2); // Publish the popup's closed accessibility tree.
+        assert!(screen.harness.query_by_label("Reconnect").is_none());
+        assert!(
+            !screen
+                .settle()
+                .iter()
+                .any(|a| matches!(a, Action::Reconnect))
+        );
+    }
+}
+
+#[test]
+fn a_connection_failure_is_short_normally_and_complete_only_on_hover() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    let detail = "Connection refused at /private/core.sock: injected full error detail";
+    {
+        let mut shared = screen.shared.lock().unwrap();
+        shared.connected = false;
+        shared.status = "Connection failed. Waiting for a running core…".into();
+        shared.status_detail = Some(detail.into());
+    }
+    screen.settle();
+    assert!(screen.harness.query_by_label(detail).is_none());
+    let status = screen.shared.lock().unwrap().status.clone();
+    screen.harness.get_by_label(&status).hover();
+    screen.harness.run();
+    screen.harness.get_by_label(detail);
 }
