@@ -125,7 +125,7 @@ run() { # <group> <env assignments...>
   local group=$1
   shift
   rm -f "$work/record"
-  env "$@" FAKE_RECORD="$work/record" EVORCH_RELEASE_EXPIRY_GUARD_CARGO="$work/guard" "$tree_script" run "$work/meta" "$group" "$work/evidence"
+  env -u LD_LIBRARY_PATH -u CEF_PATH GITHUB_ACTIONS= "$@" FAKE_RECORD="$work/record" EVORCH_RELEASE_EXPIRY_GUARD_CARGO="$work/guard" "$tree_script" run "$work/meta" "$group" "$work/evidence"
 }
 ok "a group runs with its filter and flags" run chromium FAKE_EVIDENCE='expiry_chromium_t expiry_chromium_stopped_t'
 for want in 'run' '--cargo-metadata' "$work/meta/cargo.json" '--binaries-metadata' "$work/meta/default-binaries.json" \
