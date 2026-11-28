@@ -655,6 +655,7 @@ pub struct FooterState<'a> {
     pub stats: Option<&'a crate::panes::system_footer::stats::SystemSnapshot>,
     pub today_cost: Option<String>,
     pub status: &'a str,
+    pub status_detail: Option<&'a str>,
     pub connected: bool,
     pub outcome_unknown: &'a BTreeSet<String>,
     pub unsupported: &'a [(&'static str, &'static str)],
@@ -844,13 +845,18 @@ fn footer_content(ui: &mut Ui, state: FooterState<'_>, effects: &mut Vec<Effect>
         } else {
             "Not connected. Nothing runs in this window in the core's place."
         });
-        ui.label(muted(state.status).size(FONT_SMALL));
-        if ghost_icon_button(ui, icons::ARROWS_CLOCKWISE, "Reconnect")
-            .on_hover_text("Reconnect to the core and read its state again")
-            .clicked()
-        {
-            effects.push(Effect::send(Action::Reconnect));
-        }
+        let status = ui.add(egui::Label::new(muted(state.status).size(FONT_SMALL))
+            .sense(egui::Sense::click()));
+        accessible(&status, state.status);
+        let status = status.on_hover_text(state.status_detail.unwrap_or(
+            "Right-click for Reconnect. Reconnect may start the core within its start budget."
+        ));
+        status.context_menu(|ui| {
+            if ui.button("Reconnect").clicked() {
+                effects.push(Effect::send(Action::Reconnect));
+                ui.close();
+            }
+        });
         if !state.outcome_unknown.is_empty() {
             let text = format!(
                 "{} outcome{} unknown",

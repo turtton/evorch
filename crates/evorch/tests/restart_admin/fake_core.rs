@@ -75,6 +75,9 @@ pub struct State {
     pub subscribe_mode: SubscribeMode,
     /// Read subscribe requests but never answer them.
     pub hold_subscribe: bool,
+    /// Fail this many subscriptions before answering normally.
+    pub fail_subscribes: usize,
+    pub reject_handshake: bool,
     /// Offer a second snapshot page that is never answered, so that the snapshot
     /// stays unread while the core says something else.
     pub hold_snapshot_page: bool,
@@ -157,6 +160,8 @@ impl FakeCore {
                 on_request: OnRequest::Accept,
                 subscribe_mode: SubscribeMode::Honest,
                 hold_subscribe: false,
+                fail_subscribes: 0,
+                reject_handshake: false,
                 hold_snapshot_page: false,
                 hold_operation_status: false,
                 blockers: None,
@@ -283,6 +288,13 @@ impl FakeCore {
         }
     }
 
+    /// Drop sockets without stopping the core's listener.
+    pub fn disconnect_clients(&self) {
+        for (_, _, task) in self.shared.connections.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }
+
     /// The core goes away: the socket disappears, then every connection ends.
     ///
     /// A real core ends its sessions first, but it removes its socket before it
@@ -371,6 +383,14 @@ fn react(shared: &Shared, conn: usize, request: &RequestEnvelope) -> Reaction {
         body: request.body.clone(),
     });
     let reaction = match &request.body {
+        RequestBody::Control(Control::Subscribe(_)) if state.fail_subscribes > 0 => {
+            state.fail_subscribes -= 1;
+            Reaction::Reply(ReplyResult::Error(WorkbenchError::new(
+                ErrorCode::Internal,
+                "injected subscribe failure",
+                RetryAdvice::Never,
+            )))
+        }
         RequestBody::Control(Control::Subscribe(_)) if state.hold_subscribe => Reaction::Silent,
         RequestBody::Query(Query::Projection(
             workbench_protocol::namespaces::projection::ProjectionQuery::ReadSnapshot(_),
@@ -560,7 +580,16 @@ async fn serve(
                 while let Ok(Some(payload)) = decoder.next_payload() {
                     if !accepted {
                         let _: ClientHello = decode_payload(&payload).expect("a hello first");
-                        let reply = encode_frame(&HandshakeReply::Accepted(hello(&shared)), u32::MAX).unwrap();
+                        let reply = if shared.state.lock().unwrap().reject_handshake {
+                            use workbench_protocol::handshake::{HandshakeRejected, RejectReason, RecommendedAction};
+                            HandshakeReply::Rejected(HandshakeRejected {
+                                reason: RejectReason::UnsupportedVersion,
+                                message: "injected incompatible core".into(),
+                                supported_versions: vec![], missing_capabilities: vec![],
+                                recommended_action: RecommendedAction::UpgradeCore,
+                            })
+                        } else { HandshakeReply::Accepted(hello(&shared)) };
+                        let reply = encode_frame(&reply, u32::MAX).unwrap();
                         if write.write_all(&reply).await.is_err() { return }
                         accepted = true;
                         continue;

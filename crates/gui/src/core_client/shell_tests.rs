@@ -240,6 +240,7 @@ fn populated() -> Shared {
         ..Shared::default()
     };
     let cache = &mut shared.cache;
+    cache.history_asked("thr-1"); // The fixture starts with this first page already read.
     for (id, name, _) in PROJECTS {
         cache.projects.insert(id.into(), project(id, name));
     }
@@ -3102,6 +3103,7 @@ mod session;
 mod attention;
 
 mod footer;
+mod history_refresh;
 
 mod settings;
 

@@ -127,7 +127,7 @@ impl Pending {
 
 pub(crate) const CONNECTING: &str = "Connecting to the core…";
 pub(crate) const NOT_SENT: &str =
-    "Not sent: the core is disconnected. Your input is kept; press Reconnect to connect again.";
+    "Not sent: the core is disconnected. Your input is kept while reconnection continues.";
 
 const SNAPSHOT_BUFFER_EVENTS: usize = 256;
 const SNAPSHOT_BUFFER_BYTES: usize = 2 * 1024 * 1024;
@@ -272,6 +272,9 @@ pub async fn serve(
     let mut auto = AutoReconnect::default();
     let mut live_backoff = LiveCoreBackoff::default();
     let mut episode = Episode::default();
+    // A start is authorized only initially, by the allowance after an abnormal
+    // loss, or by a manual reconnect. Failed recovery stays connect-only.
+    let mut start = true;
     // A core that still answered after the connection to it was lost, connected
     // and waiting for its reconnect pace to elapse.
     let mut live: Option<core_launcher::ConnectedCore> = None;
@@ -284,43 +287,78 @@ pub async fn serve(
     let mut successor: Option<(core_launcher::ConnectedCore, Opened)> = None;
     loop {
         let mut prebuilt = None;
+        let may_start = std::mem::take(&mut start);
         let connected = match successor.take() {
             Some((core, opened)) => {
                 prebuilt = Some(opened);
-                Ok(core)
+                Ok(Some(core))
             }
             None => {
                 update(&shared, &ctx, |s| {
                     s.disconnect();
-                    s.status = CONNECTING.into();
+                    if may_start {
+                        s.status = CONNECTING.into();
+                    }
                 });
                 match live.take() {
-                    Some(core) => Ok(core),
-                    None => launcher.connect_or_start_with_endpoint().await,
+                    Some(core) => Ok(Some(core)),
+                    None => match await_probe(
+                        async {
+                            if may_start {
+                                launcher.connect_or_start_with_endpoint().await.map(Some)
+                            } else {
+                                launcher.connect_existing(LIVE_CORE_PROBE).await
+                            }
+                        },
+                        &mut actions,
+                        &shared,
+                        &ctx,
+                    )
+                    .await
+                    {
+                        Probed::Done(result) => result,
+                        Probed::Reconnect => {
+                            start = true;
+                            auto.allow_start();
+                            continue;
+                        }
+                        Probed::Stop => return,
+                    },
                 }
             }
         };
         let connected_at = std::time::Instant::now();
         let (client, endpoint) = match connected {
-            Ok(connected) => (connected.client, connected.endpoint),
-            Err(e) => {
-                tracing::warn!(
-                    stage = "connect-or-start",
-                    error = %e,
-                    since_loss_ms = ?episode.since_loss_ms(connected_at),
-                    "could not connect to or start the core"
-                );
-                update(&shared, &ctx, |s| {
-                    s.status = auto_reconnect::launch_failure(&e)
-                });
-                if !wait_reconnect(&mut actions, &shared, &ctx).await {
-                    return;
+            Ok(Some(connected)) => (connected.client, connected.endpoint),
+            result => {
+                auto.connect_only();
+                if let Err(e) = result {
+                    tracing::warn!(
+                        stage = if may_start { "connect-or-start" } else { "connect-only" },
+                        error = %e,
+                        since_loss_ms = ?episode.since_loss_ms(connected_at),
+                        "could not connect to or start the core"
+                    );
+                    update(&shared, &ctx, |s| {
+                        s.status = auto_reconnect::launch_failure(&e);
+                        s.status_detail = Some(e.to_string());
+                    });
+                }
+                let delay = live_backoff.next_delay(std::time::Duration::ZERO);
+                match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
+                    Paused::Elapsed => (),
+                    Paused::Reconnect => {
+                        start = true;
+                        auto.allow_start();
+                    }
+                    Paused::Stop => return,
                 }
                 continue;
             }
         };
         reconcile_uncertain(&client, &shared, &ctx, &mut uncertain, &mut held).await;
         let mut data = DataReaders::default();
+        let mut session_at = None;
         let mut resync = true;
         let mut reconnect_requested = false;
         let mut orderly = false;
@@ -344,14 +382,43 @@ pub async fn serve(
                     update(&shared, &ctx, |s| {
                         s.begin_session(cache, capabilities, &delivered, std::mem::take(&mut held));
                     });
+                    session_at = Some(std::time::Instant::now());
+                    auto.allow_start();
                     episode.recovered(std::time::Instant::now());
                     ended_by = None;
                     stream
                 }
-                Err(OpenFailed::Subscribe(error)) => {
-                    tracing::warn!(stage = "subscribe", %error, since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()), "could not subscribe to the core");
-                    update(&shared, &ctx, |s| s.status = error);
-                    break;
+                Err(failure @ (OpenFailed::Subscribe(_) | OpenFailed::Snapshot(_))) => {
+                    let (stage, error) = match failure {
+                        OpenFailed::Subscribe(error) => ("subscribe", error),
+                        OpenFailed::Snapshot(error) => ("snapshot", error),
+                        OpenFailed::Ended(_) => unreachable!(),
+                    };
+                    tracing::warn!(stage, %error, "could not rebuild the core session");
+                    auto.connect_only();
+                    update(&shared, &ctx, |s| {
+                        s.disconnect();
+                        s.status = "Could not read core state. Retrying…".into();
+                        s.status_detail = Some(error);
+                    });
+                    let session = session_at
+                        .take()
+                        .map_or(std::time::Duration::ZERO, |at| at.elapsed());
+                    let delay = live_backoff.next_delay(session);
+                    match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
+                        Paused::Elapsed => {
+                            resync = matches!(
+                                client.connection_state(),
+                                workbench_client::ConnectionState::Connected
+                            );
+                        }
+                        Paused::Reconnect => {
+                            reconnect_requested = true;
+                            break;
+                        }
+                        Paused::Stop => return,
+                    }
+                    continue;
                 }
                 Err(OpenFailed::Ended(events)) => {
                     // The core spoke while the snapshot was paged: its goodbye
@@ -369,18 +436,6 @@ pub async fn serve(
                         });
                     }
                     break;
-                }
-                Err(OpenFailed::Snapshot(error)) => {
-                    tracing::warn!(stage = "snapshot", %error, since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()), "could not read the snapshot from the core");
-                    update(&shared, &ctx, |s| s.status = error);
-                    if matches!(
-                        client.connection_state(),
-                        workbench_client::ConnectionState::Connected
-                    ) {
-                        resync = true;
-                        tokio::task::yield_now().await;
-                    }
-                    continue;
                 }
             };
             loop {
@@ -440,6 +495,7 @@ pub async fn serve(
                                         s.status = format!("Could not read the history: {}", failure_reason(&other));
                                         if older { s.cache.older_failed(run.as_ref().map_or(thread.as_str(), |run| run.as_str())); }
                                         else if let Some(run) = &run { s.cache.run_failed(run.as_str()); }
+                                        else { s.cache.history_failed(thread.as_str()); }
                                     }),
                                 }
                                 // Receipts belong to the thread, not to one run of it.
@@ -531,7 +587,7 @@ pub async fn serve(
             workbench_client::ConnectionState::Closed(error) => Some(error),
             workbench_client::ConnectionState::Connected => None,
         };
-        let session = connected_at.elapsed();
+        let session = session_at.map_or(std::time::Duration::ZERO, |at| at.elapsed());
         episode.session_ended(
             std::time::Instant::now(),
             &SessionEnd {
@@ -546,8 +602,31 @@ pub async fn serve(
             },
         );
         data.stop(&shared, &ctx).await;
-        update(&shared, &ctx, |s| s.disconnect());
+        update(&shared, &ctx, |s| {
+            s.disconnect();
+            if !orderly
+                && !planned
+                && let Some(error) = &closed
+            {
+                s.status_detail.get_or_insert_with(|| error.to_string());
+            }
+        });
+        // Work queued for the lost session must not leak into the next one.
+        // In particular, never replay a queued command, or duplicate a first
+        // history page that the new projection will ask for itself.
+        while let Ok(action) = actions.try_recv() {
+            match action {
+                Action::Shutdown => return,
+                Action::Reconnect => reconnect_requested = true,
+                action => refuse_while_disconnected(&shared, &ctx, action),
+            }
+        }
+        if actions.is_closed() {
+            return;
+        }
         if reconnect_requested {
+            start = true;
+            auto.allow_start();
             continue;
         }
         #[cfg(target_os = "linux")]
@@ -557,7 +636,11 @@ pub async fn serve(
                     successor = Some(*next);
                     continue;
                 }
-                Waited::Reconnect => continue,
+                Waited::Reconnect => {
+                    start = true;
+                    auto.allow_start();
+                    continue;
+                }
                 Waited::Stop => return,
                 Waited::Failed => {}
             }
@@ -575,7 +658,11 @@ pub async fn serve(
             .await
             {
                 Probed::Done(probed) => probed,
-                Probed::Reconnect => continue,
+                Probed::Reconnect => {
+                    start = true;
+                    auto.allow_start();
+                    continue;
+                }
                 Probed::Stop => return,
             };
             match probed {
@@ -593,8 +680,13 @@ pub async fn serve(
                         s.status = auto_reconnect::reconnecting_live(delay)
                     });
                     match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
-                        Paused::Elapsed | Paused::Reconnect => {
+                        Paused::Elapsed => {
                             live = Some(core);
+                            continue;
+                        }
+                        Paused::Reconnect => {
+                            start = true;
+                            auto.allow_start();
                             continue;
                         }
                         Paused::Stop => return,
@@ -624,6 +716,13 @@ pub async fn serve(
                     update(&shared, &ctx, |s| {
                         s.status = auto_reconnect::retrying(attempt)
                     });
+                    start = true;
+                    let delay = live_backoff.next_delay(session);
+                    match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
+                        Paused::Elapsed => (),
+                        Paused::Reconnect => auto.allow_start(),
+                        Paused::Stop => return,
+                    }
                     continue;
                 }
                 None => {
@@ -631,7 +730,7 @@ pub async fn serve(
                         stage = "auto-reconnect",
                         limit = auto_reconnect::MAX_ATTEMPTS,
                         since_loss_ms = ?episode.since_loss_ms(std::time::Instant::now()),
-                        "automatic reconnection gave up; waiting for a manual reconnect"
+                        "automatic starts paused; continuing connect-only"
                     );
                     update(&shared, &ctx, |s| s.status = auto_reconnect::gave_up());
                 }
@@ -639,8 +738,15 @@ pub async fn serve(
         } else if orderly && !planned {
             update(&shared, &ctx, |s| s.status = auto_reconnect::orderly_stop());
         }
-        if !wait_reconnect(&mut actions, &shared, &ctx).await {
-            return;
+        auto.connect_only();
+        let delay = live_backoff.next_delay(session);
+        match pause_for_reconnect(delay, &mut actions, &shared, &ctx).await {
+            Paused::Elapsed => (),
+            Paused::Reconnect => {
+                start = true;
+                auto.allow_start();
+            }
+            Paused::Stop => return,
         }
     }
 }
@@ -744,7 +850,7 @@ async fn wait_for_successor(
             action = actions.recv() => match action {
                 None | Some(Action::Shutdown) => return Waited::Stop,
                 Some(Action::Reconnect) => return Waited::Reconnect,
-                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+                Some(action) => refuse_while_disconnected(shared, ctx, action),
             },
         }
     };
@@ -754,10 +860,11 @@ async fn wait_for_successor(
         }
         Err(error) => {
             update(shared, ctx, |s| {
-                s.status = match &error {
+                s.status = "Could not confirm the restart. Waiting for a running core…".into();
+                s.status_detail = Some(match &error {
                     ReconnectError::Expired(stage) => text::expired(*stage).to_owned(),
-                    other => format!("Could not confirm that the restart finished: {other}"),
-                };
+                    _ => error.to_string(),
+                });
             });
             Waited::Failed
         }
@@ -1089,7 +1196,7 @@ async fn await_probe<T>(
             action = actions.recv() => match action {
                 None | Some(Action::Shutdown) => return Probed::Stop,
                 Some(Action::Reconnect) => return Probed::Reconnect,
-                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+                Some(action) => refuse_while_disconnected(shared, ctx, action),
             },
         }
     }
@@ -1118,37 +1225,16 @@ async fn pause_for_reconnect(
             action = actions.recv() => match action {
                 None | Some(Action::Shutdown) => return Paused::Stop,
                 Some(Action::Reconnect) => return Paused::Reconnect,
-                Some(action) => refuse_while_disconnected(shared, ctx, action, false),
+                Some(action) => refuse_while_disconnected(shared, ctx, action),
             },
         }
     }
 }
 
-async fn wait_reconnect(
-    actions: &mut mpsc::Receiver<Action>,
-    shared: &Arc<Mutex<Shared>>,
-    ctx: &egui::Context,
-) -> bool {
-    while let Some(action) = actions.recv().await {
-        if matches!(action, Action::Reconnect) {
-            return true;
-        }
-        if matches!(action, Action::Shutdown) {
-            return false;
-        }
-        refuse_while_disconnected(shared, ctx, action, true);
-    }
-    false
-}
-
 /// Nothing is sent while there is no session: the action is refused and the
 /// human input it came from is kept.
-fn refuse_while_disconnected(
-    shared: &Arc<Mutex<Shared>>,
-    ctx: &egui::Context,
-    action: Action,
-    say: bool,
-) {
+fn refuse_while_disconnected(shared: &Arc<Mutex<Shared>>, ctx: &egui::Context, action: Action) {
+    let say = matches!(&action, Action::Command { .. } | Action::Upload { .. });
     update(shared, ctx, |s| {
         match action {
             Action::Command {
@@ -1165,6 +1251,7 @@ fn refuse_while_disconnected(
             } => {
                 s.attachment_draft(project, thread.as_str(), file).uploading = false;
             }
+            Action::History(thread, None, false) => s.cache.history_not_asked(thread.as_str()),
             Action::Feature(action) => s.features.refuse(&action, "disconnected"),
             Action::Data(action) if s.features.data.current(&action) => {
                 s.features.data_notice(
@@ -1251,6 +1338,11 @@ mod tests {
             Probed::Done(value) => assert_eq!(value, 7),
             _ => panic!("the probe answered"),
         }
+        drop(tx);
+        assert!(matches!(
+            await_probe(std::future::pending::<u8>(), &mut rx, &shared, &ctx).await,
+            Probed::Stop
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1297,9 +1389,42 @@ mod tests {
             pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
             Paused::Stop
         ));
+        drop(tx);
+        assert!(matches!(
+            pause_for_reconnect(pace, &mut rx, &shared, &ctx).await,
+            Paused::Stop
+        ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_waits_follow_virtual_time_and_keep_the_last_error() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().status_detail = Some("last failure".into());
+        let ctx = egui::Context::default();
+        let (_tx, mut rx) = mpsc::channel(8);
+        let paused =
+            pause_for_reconnect(std::time::Duration::from_secs(30), &mut rx, &shared, &ctx);
+        tokio::pin!(paused);
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(paused.as_mut(), cx))
+        })
+        .await;
+        assert!(pending.is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(paused.as_mut(), cx))
+        })
+        .await;
+        assert!(pending.is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(matches!(paused.await, Paused::Elapsed));
+        assert_eq!(
+            shared.lock().unwrap().status_detail.as_deref(),
+            Some("last failure")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn disconnect_keeps_unwritten_input_but_never_replays_queued_commands() {
         let (tx, mut rx) = mpsc::channel(4);
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -1334,7 +1459,16 @@ mod tests {
         .await
         .unwrap();
         tx.send(Action::Reconnect).await.unwrap();
-        assert!(wait_reconnect(&mut rx, &shared, &egui::Context::default()).await);
+        assert!(matches!(
+            pause_for_reconnect(
+                std::time::Duration::from_secs(30),
+                &mut rx,
+                &shared,
+                &egui::Context::default()
+            )
+            .await,
+            Paused::Reconnect
+        ));
         let state = shared.lock().unwrap();
         assert_eq!(state.drafts["t"].text, "not written");
         assert!(!state.sending.contains("t"));
