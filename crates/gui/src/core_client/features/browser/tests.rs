@@ -2542,13 +2542,13 @@ fn a_preview_waiting_for_its_session_is_lost_when_the_snapshot_is_replaced() {
     assert_eq!(rig.core.count("open"), 1);
 }
 
-// ---- every state before the OpenPreview is sent, against every event ----------
+// ---- every state before the OpenPreview reaches the connection, against every event ----
 
 #[derive(Clone, Copy, Debug)]
 enum Unsent {
-    /// Accepted by the browser area, waiting for its session to be created.
+    /// Accepted by the browser area, waiting for its session to be created (nothing to send yet).
     WaitingForSession,
-    /// Refused as busy once: the command waits to be sent again.
+    /// Refused as busy once: the next send waits for the back-off to pass.
     BackingOff,
 }
 
@@ -2582,11 +2582,12 @@ impl Rig {
     }
 }
 
-// Given: a preview of the conversation `t` that the core has not accepted yet
+// Given: a preview of the conversation `t` whose OpenPreview is not handed to the connection yet
 // Then: a disconnect, a new snapshot or another thread ends it, and nothing is opened later
 //       however long it takes; the same thread, as a control, still opens it
 #[test]
-fn an_open_the_core_has_not_accepted_is_not_sent_after_the_session_or_conversation_changed() {
+fn an_open_not_yet_handed_to_the_connection_is_not_sent_after_the_session_or_conversation_changed()
+{
     use Cause::*;
     use Unsent::*;
     for state in [WaitingForSession, BackingOff] {
@@ -2641,4 +2642,112 @@ fn an_open_the_core_has_not_accepted_is_not_sent_after_the_session_or_conversati
             }
         }
     }
+}
+
+impl Rig {
+    /// Like `pump`, but the answer of an `OpenPreview` is kept back: the command counts as
+    /// sent, its tag is returned, and the test answers it when it wants to.
+    fn pump_holding_open(&mut self) -> Option<u64> {
+        let mut held = None;
+        for _ in 0..60 {
+            self.harness.run_steps(2);
+            let (actions, data) = {
+                let frame = &mut self.harness.state_mut().frame;
+                (
+                    std::mem::take(&mut frame.actions),
+                    std::mem::take(&mut frame.data),
+                )
+            };
+            if actions.is_empty() && data.is_empty() {
+                return held;
+            }
+            for action in data {
+                self.data_action(action);
+            }
+            for action in actions {
+                match &action.request {
+                    FeatureRequest::Command(
+                        command @ Command::Artifacts(ArtifactsCommand::OpenPreview { .. }),
+                    ) => {
+                        self.core.commands.push(command.clone());
+                        held = Some(action.tag);
+                    }
+                    _ => self.answer(action),
+                }
+            }
+        }
+        panic!("the feature kept asking");
+    }
+}
+
+// Given: an OpenPreview of the conversation `t` that was handed to the connection and not answered
+// Then: after a disconnect, a new snapshot or another thread, a busy answer that comes later does
+//       not make it repeat: it loses the preview, and only a reopen sends it again; the same
+//       thread, as a control, repeats it as before
+#[test]
+fn a_busy_answer_after_the_session_or_conversation_changed_is_not_repeated() {
+    use Cause::*;
+    for cause in [Disconnect, NewSnapshot, OtherThread, SameThread] {
+        let mut rig = Rig::new();
+        rig.select("t");
+        rig.feature().open_preview(artifact(1));
+        let tag = rig.pump_holding_open().expect("the OpenPreview was sent");
+        assert_eq!(rig.core.count("open"), 1);
+        assert!(matches!(rig.preview(0).phase, Phase::Opening(_)));
+        match cause {
+            Disconnect => {
+                rig.core.keys.clear();
+                rig.feature().disconnected();
+            }
+            NewSnapshot => rig.reset(),
+            OtherThread => rig.select("other"),
+            SameThread => rig.select("t"),
+        }
+        rig.feature().reply(
+            tag,
+            FeatureReply::Command(Err(busy(RetryAdvice::SameRequest))),
+        );
+        rig.advance(Duration::from_secs(10));
+        rig.pump();
+        if matches!(cause, SameThread) {
+            assert_eq!(rig.core.count("open"), 2, "{cause:?}");
+            assert_eq!(rig.preview(0).phase, Phase::Open, "{cause:?}");
+        } else {
+            assert_eq!(rig.core.count("open"), 1, "{cause:?}: nothing is repeated");
+            assert!(
+                matches!(rig.preview(0).phase, Phase::Lost(_)),
+                "{cause:?}: {:?}",
+                rig.preview(0).phase
+            );
+            let id = rig.preview(0).id;
+            rig.request(UiRequest::Reopen(id));
+            assert_eq!(rig.core.count("open"), 2, "{cause:?}: a reopen sends it");
+        }
+    }
+}
+
+// Given: a busy answer that ended an OpenPreview after the conversation changed, and a new
+//        snapshot before the next pass settles it
+// Then: the preview is not left opening for ever: it is lost
+#[test]
+fn a_new_snapshot_between_a_busy_answer_and_the_next_pass_does_not_strand_the_opening() {
+    let mut rig = Rig::new();
+    rig.select("t");
+    rig.feature().open_preview(artifact(1));
+    let tag = rig.pump_holding_open().expect("the OpenPreview was sent");
+    rig.select("other");
+    rig.feature().reply(
+        tag,
+        FeatureReply::Command(Err(busy(RetryAdvice::SameRequest))),
+    );
+    rig.core.keys.clear();
+    rig.reset();
+    rig.advance(Duration::from_secs(10));
+    rig.pump();
+    assert!(
+        matches!(rig.preview(0).phase, Phase::Lost(_)),
+        "{:?}",
+        rig.preview(0).phase
+    );
+    assert_eq!(rig.core.count("open"), 1);
 }
