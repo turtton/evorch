@@ -23,21 +23,33 @@ use workbench_protocol::{
     handshake::Capability,
     ids::{OperationId, PageCursor, RunId},
     namespaces::diagnostics::{
-        ContextMessage, DiagnosticsEvent, DiagnosticsQuery, DiagnosticsReply, GetRunContext,
-        GetUsageSummary, RunContextOverview, UsageRange, UsageTotals,
+        ContextMessage, DiagnosticsEvent, DiagnosticsQuery, DiagnosticsReply, GetLiveUsage,
+        GetRunContext, GetUsageSummary, LiveUsage, RunContextOverview, ThreadUsage, UsageRange,
+        UsageTotals,
     },
     operation::OperationState,
     queries::{PageRequest, Query, QueryReply},
 };
 
 mod context;
+mod live;
 pub(crate) mod read;
+mod thread_usage;
 mod usage;
+
+pub(crate) use thread_usage::{cost_hint, cost_text};
 
 pub const TODAY_REFRESH: Duration = Duration::from_secs(60);
 
 /// The open tab reads its range again this often, as the legacy Usage tab does.
 pub const USAGE_REFRESH: Duration = Duration::from_secs(30);
+
+/// The open Live view reads again this often, so its minutes keep moving.
+pub const LIVE_REFRESH: Duration = Duration::from_secs(30);
+
+/// The shortest time between two reads of the Live view that a notice asks for. Each
+/// read goes through the ledger of the month, so a busy run must not set the pace.
+pub const LIVE_REASK_GAP: Duration = Duration::from_secs(5);
 
 const RANGES: [(UsageRange, &str); 6] = [
     (UsageRange::Today, "Today"),
@@ -53,16 +65,18 @@ enum View {
     #[default]
     Overview,
     Breakdown,
+    Live,
     Context,
 }
 
 impl View {
-    const ALL: [Self; 3] = [Self::Overview, Self::Breakdown, Self::Context];
+    const ALL: [Self; 4] = [Self::Overview, Self::Breakdown, Self::Live, Self::Context];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Breakdown => "Breakdown",
+            Self::Live => "Live",
             Self::Context => "Context",
         }
     }
@@ -72,6 +86,8 @@ impl View {
 enum Pending {
     Usage { generation: u64 },
     Today { generation: u64 },
+    Thread { generation: u64 },
+    Live { generation: u64 },
     Context { generation: u64, append: bool },
 }
 
@@ -102,6 +118,14 @@ pub struct DiagnosticsFeature {
     today_request: Option<GetUsageSummary>,
     today: Option<UsageTotals>,
     today_next: Option<Instant>,
+    thread_usage: thread_usage::ThreadUsageState,
+    live_read: Read,
+    live_request: Option<GetLiveUsage>,
+    live: Option<LiveUsage>,
+    live_due: bool,
+    live_asked: Option<Instant>,
+    live_next: Option<Instant>,
+    live_window: usize,
 }
 
 impl Default for DiagnosticsFeature {
@@ -133,6 +157,14 @@ impl Default for DiagnosticsFeature {
             today_request: None,
             today: None,
             today_next: None,
+            thread_usage: thread_usage::ThreadUsageState::default(),
+            live_read: Read::default(),
+            live_request: None,
+            live: None,
+            live_due: true,
+            live_asked: None,
+            live_next: None,
+            live_window: live::DEFAULT_WINDOW,
         }
     }
 }
@@ -202,6 +234,101 @@ impl DiagnosticsFeature {
         self.usage_next
             .filter(|next| settled && *next > now)
             .map(|next| next - now)
+    }
+
+    /// The cost of `thread`, once the core answered for it.
+    pub fn thread_usage(&self, thread: &workbench_protocol::ids::ThreadId) -> Option<&ThreadUsage> {
+        self.thread_usage.usage(thread)
+    }
+
+    /// How long until a notice about the selected thread may be asked, so the screen
+    /// wakes for it.
+    pub fn thread_usage_wake_in(&self, now: Instant) -> Option<Duration> {
+        self.thread_usage.wake_in(now)
+    }
+
+    /// Lets a test that drives a real core read the thread again without waiting out the
+    /// gap between two reads.
+    #[doc(hidden)]
+    pub fn set_thread_reask_gap(&mut self, gap: Duration) {
+        self.thread_usage.set_gap(gap);
+    }
+
+    fn keep_thread_usage(
+        &mut self,
+        ctx: &mut FeatureContext<'_>,
+        visibility: Visibility,
+        now: Instant,
+    ) {
+        let active = visibility.available && !visibility.minimized;
+        let selected = ctx.selection().thread.clone();
+        if let Some(request) = self
+            .thread_usage
+            .due(selected.as_ref(), ctx.cache(), now, active)
+        {
+            let tag = self.tag(Pending::Thread {
+                generation: self.thread_usage.generation(),
+            });
+            ctx.query(
+                tag,
+                Query::Diagnostics(DiagnosticsQuery::GetThreadUsage(request)),
+            );
+        }
+    }
+
+    /// The live usage while its view is drawn: asked when due (the first time, after a
+    /// notice, never sooner than [`LIVE_REASK_GAP`] after the last ask), asked again once
+    /// the operation settled, and read anew every [`LIVE_REFRESH`].
+    fn keep_live(&mut self, ctx: &mut FeatureContext<'_>, now: Instant) {
+        if *self.live_read.phase() == Phase::Waiting {
+            if self.live_read.take_ask_again()
+                && let Some(request) = self.live_request.clone()
+            {
+                self.send_live(ctx, request);
+            }
+            return;
+        }
+        let refresh = self.live_next.is_some_and(|next| now >= next);
+        let gap_over = self
+            .live_asked
+            .is_none_or(|asked| now >= asked + LIVE_REASK_GAP);
+        if refresh || (self.live_due && gap_over) {
+            self.live_due = false;
+            self.live_asked = Some(now);
+            self.live_next = Some(now + LIVE_REFRESH);
+            let request = GetLiveUsage {
+                operation_id: self.live_read.begin("diagnostics-live"),
+            };
+            self.live_request = Some(request.clone());
+            self.send_live(ctx, request);
+        }
+    }
+
+    fn send_live(&mut self, ctx: &mut FeatureContext<'_>, request: GetLiveUsage) {
+        let tag = self.tag(Pending::Live {
+            generation: self.live_read.generation(),
+        });
+        ctx.query(
+            tag,
+            Query::Diagnostics(DiagnosticsQuery::GetLiveUsage(request)),
+        );
+    }
+
+    /// How long until the settled live usage is read again, so the screen wakes for it.
+    fn live_refresh_in(&self, now: Instant) -> Option<Duration> {
+        if *self.live_read.phase() == Phase::Waiting {
+            return None;
+        }
+        let mut wake = self
+            .live_next
+            .map(|next| next.saturating_duration_since(now));
+        if self.live_due
+            && let Some(asked) = self.live_asked
+        {
+            let gap = (asked + LIVE_REASK_GAP).saturating_duration_since(now);
+            wake = Some(wake.map_or(gap, |wake| wake.min(gap)));
+        }
+        wake.filter(|wake| !wake.is_zero())
     }
 
     /// Whether a further page of the run's messages was asked and not yet answered.
@@ -296,19 +423,20 @@ impl DiagnosticsFeature {
     }
 
     fn active_phase(&self) -> &Phase {
-        if self.view == View::Context {
-            self.context_read.phase()
-        } else {
-            self.usage_read.phase()
+        match self.view {
+            View::Context => self.context_read.phase(),
+            View::Live => self.live_read.phase(),
+            _ => self.usage_read.phase(),
         }
     }
 
-    /// Returns whether a refresh was asked for.
+    /// Returns whether a refresh was asked for. The Live view has no refresh to ask
+    /// for: it reads again by itself.
     fn toolbar(&mut self, ui: &mut egui::Ui) -> bool {
         let waiting = *self.active_phase() == Phase::Waiting;
         ui.horizontal_wrapped(|ui| {
             ui.label(h3("Usage"));
-            if self.view != View::Context {
+            if matches!(self.view, View::Overview | View::Breakdown) {
                 let before = self.range;
                 egui::ComboBox::from_id_salt("usage-range")
                     .selected_text(range_label(self.range))
@@ -328,7 +456,7 @@ impl DiagnosticsFeature {
                     )));
                 }
             }
-            let refresh = ui.button("Refresh").clicked();
+            let refresh = self.view != View::Live && ui.button("Refresh").clicked();
             if waiting {
                 crate::theme::widgets::spinner(ui);
             }
@@ -365,6 +493,23 @@ impl DiagnosticsFeature {
                 },
             );
         }
+    }
+
+    fn live_body(&mut self, ui: &mut egui::Ui) {
+        if let Phase::Failed(text) = self.live_read.phase() {
+            crate::theme::widgets::reason_label(ui, crate::theme::tokens::palette().ERROR_FG, text);
+        }
+        let Some(live) = &self.live else {
+            if *self.live_read.phase() == Phase::Waiting {
+                ui.label(muted("Loading usage…"));
+            }
+            return;
+        };
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("usage-live")
+            .auto_shrink([false, true])
+            .show(ui, |ui| live::render(ui, live, &mut self.live_window));
     }
 
     fn context_view(&mut self, ui: &mut egui::Ui, ctx: &mut FeatureContext<'_>, refresh: bool) {
@@ -460,8 +605,14 @@ impl Feature for DiagnosticsFeature {
         Some(self)
     }
 
+    fn as_diagnostics_mut(&mut self) -> Option<&mut DiagnosticsFeature> {
+        Some(self)
+    }
+
     fn maintain(&mut self, ctx: &mut FeatureContext<'_>, visibility: Visibility) {
-        self.keep_today(ctx, visibility, Instant::now());
+        let now = Instant::now();
+        self.keep_today(ctx, visibility, now);
+        self.keep_thread_usage(ctx, visibility, now);
     }
 
     fn selection_changed(&mut self, ctx: &mut FeatureContext<'_>) {
@@ -488,18 +639,35 @@ impl Feature for DiagnosticsFeature {
         self.usage = None;
         self.usage_due = true;
         self.usage_next = None;
+        self.thread_usage.forget();
+        self.live_read.forget();
+        self.live = None;
+        self.live_due = true;
+        self.live_asked = None;
+        self.live_next = None;
         self.forget_context();
         self.context_due = self.run.is_some();
     }
 
     fn event(&mut self, event: &UiEvent) {
-        let UiEvent::Diagnostics(DiagnosticsEvent::DiagnosticsOperationChanged { view }) = event
-        else {
+        let UiEvent::Diagnostics(event) = event else {
             return;
         };
-        self.usage_read.event(view);
-        self.context_read.event(view);
-        self.today_read.event(view);
+        match event {
+            DiagnosticsEvent::DiagnosticsOperationChanged { view } => {
+                self.usage_read.event(view);
+                self.context_read.event(view);
+                self.today_read.event(view);
+                self.thread_usage.read().event(view);
+                self.live_read.event(view);
+            }
+            DiagnosticsEvent::UsageChanged { change } => {
+                // The live usage changes with every request; the selected thread's only
+                // when the notice names it, which needs the cache and is decided when asking.
+                self.live_due = true;
+                self.thread_usage.notice(change);
+            }
+        }
     }
 
     fn reply(&mut self, tag: u64, reply: FeatureReply) {
@@ -519,6 +687,12 @@ impl Feature for DiagnosticsFeature {
                     }
                     Pending::Today { generation } => {
                         self.today_read.fail(generation, error.message);
+                    }
+                    Pending::Thread { generation } => {
+                        self.thread_usage.read().fail(generation, error.message);
+                    }
+                    Pending::Live { generation } => {
+                        self.live_read.fail(generation, error.message);
                     }
                     Pending::Context { generation, .. } => {
                         self.context_read.fail(generation, error.message);
@@ -542,6 +716,23 @@ impl Feature for DiagnosticsFeature {
                         .accept(generation, &outcome.operation, outcome.data)
                 {
                     self.today = Some(summary.totals);
+                }
+            }
+            (Pending::Thread { generation }, DiagnosticsReply::ThreadUsage(outcome)) => {
+                if let Some(usage) =
+                    self.thread_usage
+                        .read()
+                        .accept(generation, &outcome.operation, outcome.data)
+                {
+                    self.thread_usage.accept(usage);
+                }
+            }
+            (Pending::Live { generation }, DiagnosticsReply::LiveUsage(outcome)) => {
+                if let Some(live) =
+                    self.live_read
+                        .accept(generation, &outcome.operation, outcome.data)
+                {
+                    self.live = Some(live);
                 }
             }
             (Pending::Context { generation, append }, DiagnosticsReply::Context(outcome)) => {
@@ -594,6 +785,15 @@ impl Feature for DiagnosticsFeature {
             self.context_view(ui, ctx, refresh);
             return;
         }
+        if self.view == View::Live {
+            let now = Instant::now();
+            self.keep_live(ctx, now);
+            if let Some(wait) = self.live_refresh_in(now) {
+                ui.ctx().request_repaint_after(wait);
+            }
+            self.live_body(ui);
+            return;
+        }
         if refresh {
             self.usage_due = true;
         }
@@ -608,3 +808,6 @@ impl Feature for DiagnosticsFeature {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod live_tests;

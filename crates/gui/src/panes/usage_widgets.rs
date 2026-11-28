@@ -271,6 +271,17 @@ pub struct Tile {
     pub value: String,
     pub detail: String,
     pub sparkline: Option<Vec<f64>>,
+    /// Why the value is what it is (a lower bound, say), added to its tooltips.
+    pub hint: Option<String>,
+}
+
+impl Tile {
+    fn tooltip(&self, text: &str) -> String {
+        match &self.hint {
+            Some(hint) => format!("{text}\n{hint}"),
+            None => text.to_owned(),
+        }
+    }
 }
 
 /// Lays tiles out in rows that fit the available width. Frames report their
@@ -290,14 +301,14 @@ pub fn tiles(ui: &mut Ui, width: f32, tiles: Vec<Tile>) {
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
                             ui.set_width(width);
-                            ui.label(muted(tile.title));
+                            ui.label(muted(tile.title.clone()));
                             ui.add(
                                 egui::Label::new(crate::theme::text::h2(tile.value.clone()))
                                     .truncate(),
                             )
-                            .on_hover_text(&tile.value);
+                            .on_hover_text(tile.tooltip(&tile.value));
                             ui.add(egui::Label::new(muted(tile.detail.clone())).truncate())
-                                .on_hover_text(&tile.detail);
+                                .on_hover_text(tile.tooltip(&tile.detail));
                             if let Some(values) = &tile.sparkline {
                                 sparkline(ui, values, SERIES[0], vec2(width, 26.0));
                             }
@@ -639,6 +650,7 @@ pub fn overview_tiles_over(
             value,
             detail,
             sparkline: Some(values),
+            hint: None,
         })
         .collect()
 }
