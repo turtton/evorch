@@ -275,6 +275,12 @@ pub struct SaveApiKey {
 pub struct DeleteCredential {
     pub operation_id: OperationId,
     pub profile: String,
+    /// The keychain account the client's confirmation named. The core deletes only when the
+    /// provider still uses this account.
+    pub account: String,
+    /// The other providers whose credential is that account, as the confirmation listed them.
+    /// The core deletes only when this is the set it finds now (in any order).
+    pub shared_with: Vec<String>,
 }
 
 /// Begin a browser login for `profile`. `operation_id` names the login too.
@@ -328,7 +334,14 @@ impl AuthCommand {
                 check_line("profile", &c.profile, MAX_NAME_BYTES, false)?;
                 c.value.validate("value")
             }
-            Self::DeleteCredential(c) => check_line("profile", &c.profile, MAX_NAME_BYTES, false),
+            Self::DeleteCredential(c) => {
+                check_line("profile", &c.profile, MAX_NAME_BYTES, false)?;
+                check_line("account", &c.account, MAX_NAME_BYTES, false)?;
+                check_count("shared_with", c.shared_with.len(), MAX_SLOTS)?;
+                c.shared_with
+                    .iter()
+                    .try_for_each(|name| check_line("shared_with", name, MAX_NAME_BYTES, false))
+            }
             Self::StartLogin(c) => check_line("profile", &c.profile, MAX_NAME_BYTES, false),
             Self::SubmitLoginInput(c) => c.input.validate("input"),
         }

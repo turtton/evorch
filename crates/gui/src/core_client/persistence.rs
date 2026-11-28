@@ -1207,14 +1207,13 @@ mod tests {
 
     /// The names the file keeps the features by. They must not change, or saved layouts
     /// lose their tabs.
-    const PINNED: [(FeatureId, &str); 16] = [
+    const PINNED: [(FeatureId, &str); 15] = [
         (FeatureId::Workspace, "workspace"),
         (FeatureId::Mcp, "mcp"),
         (FeatureId::Execution, "execution"),
         (FeatureId::Teams, "teams"),
         (FeatureId::Lanes, "lanes"),
         (FeatureId::Settings, "settings"),
-        (FeatureId::Auth, "auth"),
         (FeatureId::Diagnostics, "diagnostics"),
         (FeatureId::Memory, "memory"),
         (FeatureId::Improvement, "improvement"),
@@ -1235,16 +1234,15 @@ mod tests {
             FeatureId::Teams => 3,
             FeatureId::Lanes => 4,
             FeatureId::Settings => 5,
-            FeatureId::Auth => 6,
-            FeatureId::Diagnostics => 7,
-            FeatureId::Memory => 8,
-            FeatureId::Improvement => 9,
-            FeatureId::Evaluation => 10,
-            FeatureId::PullRequests => 11,
-            FeatureId::Maintenance => 12,
-            FeatureId::Artifacts => 13,
-            FeatureId::Browser => 14,
-            FeatureId::Restart => 15,
+            FeatureId::Diagnostics => 6,
+            FeatureId::Memory => 7,
+            FeatureId::Improvement => 8,
+            FeatureId::Evaluation => 9,
+            FeatureId::PullRequests => 10,
+            FeatureId::Maintenance => 11,
+            FeatureId::Artifacts => 12,
+            FeatureId::Browser => 13,
+            FeatureId::Restart => 14,
         }
     }
 

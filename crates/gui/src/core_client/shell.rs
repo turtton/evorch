@@ -269,7 +269,6 @@ pub fn feature_icon(feature: FeatureId) -> &'static str {
         FeatureId::Teams => icons::USERS_THREE,
         FeatureId::Lanes => icons::STACK,
         FeatureId::Settings => icons::FILE_TEXT,
-        FeatureId::Auth => icons::KEY,
         FeatureId::Diagnostics => icons::CHART_BAR,
         FeatureId::Memory => icons::BRAIN,
         FeatureId::Improvement => icons::LIGHTBULB,
@@ -719,12 +718,6 @@ fn settings_menu(ui: &mut Ui, state: &FooterState<'_>, effects: &mut Vec<Effect>
     {
         effects.push(Effect::Settings(SettingsIntent::Features));
     }
-    // Until Providers takes sign-in over, credentials are managed in their own tab.
-    if shown(FeatureId::Auth)
-        && menu_item(ui, feature_icon(FeatureId::Auth), "Authentication", None)
-    {
-        open(effects, FeatureId::Auth);
-    }
     if shown(FeatureId::Mcp) && menu_item(ui, feature_icon(FeatureId::Mcp), "MCP servers", None) {
         open(effects, FeatureId::Mcp);
     }
@@ -800,11 +793,9 @@ fn panels_menu(ui: &mut Ui, state: &FooterState<'_>, effects: &mut Vec<Effect>) 
             }
         }
         for (feature, name) in state.titles {
-            // Config file and Authentication have their own entries in the menu above.
-            if matches!(
-                feature,
-                FeatureId::Workspace | FeatureId::Settings | FeatureId::Auth
-            ) || state.placeholders.contains(feature)
+            // Config file has its own entry in the menu above.
+            if matches!(feature, FeatureId::Workspace | FeatureId::Settings)
+                || state.placeholders.contains(feature)
             {
                 continue;
             }

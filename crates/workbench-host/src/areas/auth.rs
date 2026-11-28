@@ -144,9 +144,17 @@ fn options(dir: &std::path::Path) -> config::LoadOptions {
     }
 }
 
+/// The providers of the file at `dir`, or why it cannot be read. What the core started with is no
+/// answer to "what does the file say now".
+fn load_profiles(dir: &std::path::Path) -> Result<Vec<Profile>, config::ConfigError> {
+    config::Config::load_unresolved(&options(dir)).map(|config| profiles_of(&config))
+}
+
 fn read_profiles(dir: &std::path::Path, startup: &config::Config) -> Vec<Profile> {
-    let loaded = config::Config::load_unresolved(&options(dir));
-    let config = loaded.as_ref().unwrap_or(startup);
+    load_profiles(dir).unwrap_or_else(|_| profiles_of(startup))
+}
+
+fn profiles_of(config: &config::Config) -> Vec<Profile> {
     config
         .providers
         .iter()
@@ -173,6 +181,22 @@ fn account_of(credential: &config::CredentialRefConfig) -> Option<&str> {
         config::CredentialRefConfig::Keyring { account, .. } => Some(account),
         config::CredentialRefConfig::Env { .. } => None,
     }
+}
+
+/// The keychain account of the provider `name` among `profiles`, and its kind.
+fn key_account_in(
+    profiles: &[Profile],
+    name: &str,
+) -> Result<(String, config::ProviderTypeConfig), Failure> {
+    let profile = profiles.iter().find(|p| p.name == name).ok_or(Failure {
+        code: ErrorCode::NotFound,
+        message: "unknown profile",
+    })?;
+    let account = account_of(&profile.credential).ok_or(Failure {
+        code: ErrorCode::InvalidRequest,
+        message: "this profile reads its key from an environment variable",
+    })?;
+    Ok((account.to_owned(), profile.kind))
 }
 
 fn expiry(kind: config::ProviderTypeConfig, secret: &str) -> Option<u64> {
@@ -359,16 +383,29 @@ impl AuthArea {
                     value: Secret::from(save.value.expose().to_owned()),
                 },
             ),
-            AuthCommand::DeleteCredential(delete) => inner.start_operation(
-                delete.operation_id,
-                AuthOperationKind::DeleteCredential,
-                Some(delete.profile.clone()),
-                digest_of(&[b"delete_credential", delete.profile.as_bytes()]),
-                accepted,
-                Work::Delete {
-                    profile: delete.profile,
-                },
-            ),
+            AuthCommand::DeleteCredential(delete) => {
+                let mut shared = delete.shared_with;
+                shared.sort();
+                shared.dedup();
+                let mut digest = vec![
+                    b"delete_credential".as_slice(),
+                    delete.profile.as_bytes(),
+                    delete.account.as_bytes(),
+                ];
+                digest.extend(shared.iter().map(String::as_bytes));
+                inner.start_operation(
+                    delete.operation_id,
+                    AuthOperationKind::DeleteCredential,
+                    Some(delete.profile.clone()),
+                    digest_of(&digest),
+                    accepted,
+                    Work::Delete {
+                        profile: delete.profile,
+                        account: delete.account,
+                        shared_with: shared,
+                    },
+                )
+            }
         }
     }
 
@@ -434,8 +471,16 @@ impl AuthArea {
 
 enum Work {
     Refresh,
-    Save { profile: String, value: Secret },
-    Delete { profile: String },
+    Save {
+        profile: String,
+        value: Secret,
+    },
+    /// A deletion the client confirmed against an account and the providers sharing it.
+    Delete {
+        profile: String,
+        account: String,
+        shared_with: Vec<String>,
+    },
 }
 
 enum Settle {
@@ -626,8 +671,32 @@ impl Inner {
                         message: "the credential could not be saved",
                     })?;
             }
-            Work::Delete { profile } => {
-                let (account, _) = self.key_account(&profile).await?;
+            Work::Delete {
+                profile,
+                account: confirmed,
+                shared_with,
+            } => {
+                // The providers are read again now: the key that is deleted is the one the file
+                // names at this moment, and the question the person answered must have named it
+                // and everyone who loses it.
+                let profiles = self.read_fresh().await?;
+                let account = key_account_in(&profiles, &profile)?.0;
+                let mut sharing: Vec<String> = profiles
+                    .iter()
+                    .filter(|other| {
+                        other.name != profile && account_of(&other.credential) == Some(&account)
+                    })
+                    .map(|other| other.name.clone())
+                    .collect();
+                sharing.sort();
+                if account != confirmed || sharing != shared_with {
+                    // Nothing is deleted; the status is brought up to what the file says now.
+                    let _ = self.reread().await;
+                    return Err(Failure {
+                        code: ErrorCode::StaleRevision,
+                        message: "the account or the providers sharing it changed since it was confirmed",
+                    });
+                }
                 let store = self.credentials.clone();
                 Self::blocking(move || store.delete(&account))
                     .await?
@@ -645,15 +714,33 @@ impl Inner {
         &self,
         name: &str,
     ) -> Result<(String, config::ProviderTypeConfig), Failure> {
-        let profile = self.profile(name).await.ok_or(Failure {
-            code: ErrorCode::NotFound,
-            message: "unknown profile",
-        })?;
-        let account = account_of(&profile.credential).ok_or(Failure {
-            code: ErrorCode::InvalidRequest,
-            message: "this profile reads its key from an environment variable",
-        })?;
-        Ok((account.to_owned(), profile.kind))
+        // Read from the file, not from what was known: a key is stored where the file names it now.
+        let profiles = self.read_fresh().await?;
+        key_account_in(&profiles, name)
+    }
+
+    /// Every provider of the file as it is now, kept as what the core knows.
+    async fn read_fresh(&self) -> Result<Vec<Profile>, Failure> {
+        let dir = self.config_dir.clone();
+        // A file that cannot be read is a failure, never the configuration the core started with:
+        // a deletion confirmed against that could remove what the file no longer says is unused.
+        // The reason is fixed: an error from the loader may quote the file.
+        let fresh = Self::blocking(move || load_profiles(&dir))
+            .await?
+            .map_err(|_| Failure {
+                code: ErrorCode::StorageUnavailable,
+                message: "the configuration file could not be read",
+            })?;
+        let copy = fresh
+            .iter()
+            .map(|p| Profile {
+                name: p.name.clone(),
+                kind: p.kind,
+                credential: p.credential.clone(),
+            })
+            .collect();
+        lock(&self.state).profiles = copy;
+        Ok(fresh)
     }
 
     /// Read the profiles and the credential store again into the status, and

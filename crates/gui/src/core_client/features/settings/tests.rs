@@ -122,6 +122,58 @@ pub(super) fn open_modal(screen: &mut Harness<'static, Screen>, tab: &str) {
         .expect("the settings feature")
         .open_modal(tab);
     screen.run();
+    if tab == SettingsTab::Providers {
+        // The credential status is asked for when Providers is shown; these tests are about
+        // what the settings ask.
+        let _ = asked(screen);
+    }
+}
+
+/// What the screen asked since the last call, without the questions of the credential
+/// controller.
+pub(super) fn settings_asked(
+    screen: &mut Harness<'static, Screen>,
+) -> Vec<crate::core_client::features::FeatureAction> {
+    asked(screen)
+        .into_iter()
+        .filter(|action| {
+            !matches!(
+                &action.request,
+                crate::core_client::features::FeatureRequest::Query(Query::Auth(_))
+            )
+        })
+        .collect()
+}
+
+/// Chooses the provider named `name` in the list.
+pub(super) fn select_provider(screen: &mut Harness<'static, Screen>, name: &str) {
+    screen.get_by_role_and_label(Role::Button, name).click();
+    screen.run();
+}
+
+/// Adds a provider of the kind named `title` in the Add menu.
+pub(super) fn add_provider(screen: &mut Harness<'static, Screen>, title: &str) {
+    screen.get_by_label("Add").click();
+    screen.run();
+    screen.get_by_role_and_label(Role::Button, title).click();
+    screen.run();
+}
+
+/// Types into the form of the selected provider, so that it has something to save.
+pub(super) fn edit_provider(screen: &mut Harness<'static, Screen>) {
+    const LABEL: &str = "Excluded models";
+    screen
+        .get_by_role_and_label(Role::MultilineTextInput, LABEL)
+        .scroll_to_me();
+    screen.run();
+    screen
+        .get_by_role_and_label(Role::MultilineTextInput, LABEL)
+        .focus();
+    screen.run_steps(4);
+    screen
+        .get_by_role_and_label(Role::MultilineTextInput, LABEL)
+        .type_text("x");
+    screen.run_steps(4);
 }
 
 fn type_into_document(screen: &mut Harness<'static, Screen>, text: &str) {
@@ -533,8 +585,7 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
     use workbench_protocol::namespaces::settings::ProviderInput;
     let mut screen = loaded('a');
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("Edit").click();
-    screen.run();
+    edit_provider(&mut screen);
     screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1, "one click, one command");
@@ -609,7 +660,10 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
     )));
     screen.run_steps(4);
     screen.get_by_label("Provider settings updated. Reload models to apply them.");
-    assert!(screen.query_by_label("Save").is_none());
+    assert!(
+        screen.get_by_label("Save").accesskit_node().is_disabled(),
+        "the saved provider is open again as saved, with nothing to save"
+    );
 }
 
 // Given: a new OpenAI-compatible form, which starts without a base URL
@@ -619,11 +673,10 @@ fn an_edited_provider_is_saved_with_its_revision_and_the_outcome_is_shown() {
 fn a_new_provider_form_names_what_is_missing_and_sends_nothing() {
     let mut screen = loaded('a');
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("+ Add OpenAI-compatible").click();
-    screen.run();
+    add_provider(&mut screen, "OpenAI-compatible");
     assert!(
         screen
-            .query_all_by_label_contains("Store the API key itself in Authentication")
+            .query_all_by_label_contains("its API key is stored from this card afterwards")
             .next()
             .is_some()
     );
@@ -644,11 +697,10 @@ fn a_new_provider_form_names_what_is_missing_and_sends_nothing() {
 fn a_provider_form_saves_against_the_revision_it_was_opened_from() {
     let mut screen = loaded('a');
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("Edit").click();
-    screen.run();
+    edit_provider(&mut screen);
     // Another client changes the file; this screen reads the new snapshot.
     screen.state_mut().feature.reset();
-    let read = asked(&mut screen);
+    let read = settings_asked(&mut screen);
     assert_eq!(read.len(), 1);
     answer(&mut screen, read[0].tag, snapshot('b', 'b'));
     screen.run_steps(2);
@@ -691,28 +743,32 @@ fn a_provider_form_saves_against_the_revision_it_was_opened_from() {
 
     screen
         .get_by_label("Reopen with the latest settings")
-        .click();
+        .scroll_to_me();
     screen.run();
+    screen
+        .get_by_label("Reopen with the latest settings")
+        .click();
+    screen.run_steps(4);
     assert!(
         screen
             .query_all_by_label_contains("Reopen with the latest settings")
             .next()
             .is_none()
     );
+    edit_provider(&mut screen);
     screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     assert_eq!(provider_save(&sent[0]).expected_revision, revision('b'));
 }
 
 // Given: a provider save that is running
-// When: its form is closed, the save ends, another form is opened, and the end is seen again
-// Then: the form opened since stays open
+// When: it ends, another provider is added, and the end is seen again
+// Then: the form opened since stays open, and nothing can be added while the save runs
 #[test]
 fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
     let mut screen = loaded('a');
     open_modal(&mut screen, "Providers");
-    screen.get_by_label("Edit").click();
-    screen.run();
+    edit_provider(&mut screen);
     screen.get_by_label("Save").click();
     let sent = asked(&mut screen);
     let save = provider_save(&sent[0]);
@@ -725,9 +781,13 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
             OperationState::Pending,
         )),
     );
-    // The form is dropped while the save runs; no other form can be opened until it ends.
-    screen.get_by_label("Back to list").click();
-    screen.run();
+    // While the save runs the list, Add and Discard wait for it.
+    assert!(
+        screen
+            .get_by_label("Discard")
+            .accesskit_node()
+            .is_disabled()
+    );
     let ready = completed(view(
         &save.operation_id,
         SettingsOperationKind::SaveProvider,
@@ -735,13 +795,12 @@ fn a_finished_save_does_not_close_a_form_it_was_not_made_from() {
     ));
     screen.state_mut().feature.event(&ready);
     screen.run_steps(2);
-    screen.get_by_label("+ Add OpenAI-compatible").click();
-    screen.run();
-    screen.get_by_label("Save");
+    add_provider(&mut screen, "OpenAI-compatible");
+    assert!(screen.query_all_by_label("openai-compat").next().is_some());
     // The end of the earlier save, seen again, does not close the form opened since.
     screen.state_mut().feature.event(&ready);
     screen.run_steps(2);
-    screen.get_by_label("Save");
+    assert!(screen.query_all_by_label("openai-compat").next().is_some());
 }
 
 // Given: a reload whose reply was lost

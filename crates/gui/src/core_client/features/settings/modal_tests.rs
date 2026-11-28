@@ -2,7 +2,10 @@
 //! its draft was made from, keeps what it does not edit, and waits for the core's next
 //! snapshot when the file moved under it.
 use super::modal::STALE_DRAFT;
-use super::tests::{open_modal, provider, provider_save, revision, settings_command, view};
+use super::tests::{
+    add_provider, open_modal, provider, provider_save, revision, select_provider, settings_command,
+    view,
+};
 use super::*;
 use crate::core_client::features::FeatureRequest;
 use crate::core_client::features::execution::tests::{Screen, answer, asked, query_of, screen};
@@ -178,13 +181,17 @@ fn a_provider_row_names_its_type_and_is_deleted_only_after_its_confirmation() {
     open_modal(&mut screen, "Providers");
     screen.get_by_label("Where models come from, with their sign-in and model list");
     screen.get_by_label("OpenAI-compatible");
+    select_provider(&mut screen, "api");
     screen.get_by_label("Claude API");
-    screen.get_all_by_label("Edit").nth(1).unwrap().click();
-    screen.run();
-    assert!(screen.query_by_label("Back to list").is_none());
+    screen.get_by_label("Open Config file");
+    assert!(
+        screen.query_by_label("Save").is_none(),
+        "a type the form cannot write has nothing to save"
+    );
+    select_provider(&mut screen, "local");
 
     let delete_local = |screen: &mut Harness<'static, Screen>| {
-        screen.get_all_by_label("Delete").next().unwrap().click();
+        screen.get_by_label("Delete provider").click();
         screen.run();
     };
     delete_local(&mut screen);
@@ -212,7 +219,7 @@ fn a_provider_row_names_its_type_and_is_deleted_only_after_its_confirmation() {
 fn a_stale_provider_delete_asks_the_core_to_re_read_the_file() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Providers");
-    screen.get_all_by_label("Delete").next().unwrap().click();
+    screen.get_by_label("Delete provider").click();
     screen.run();
     click(&mut screen, "Confirm delete");
     let sent = asked(&mut screen);
@@ -264,7 +271,7 @@ fn a_tab_opened_before_the_first_snapshot_says_it_is_loading() {
 fn a_kimi_subscription_is_added_with_its_defaults() {
     let mut screen = loaded_with(DOCUMENT, None);
     open_modal(&mut screen, "Providers");
-    click(&mut screen, "+ Add Kimi subscription");
+    add_provider(&mut screen, "Kimi");
     click(&mut screen, "Save");
     let sent = asked(&mut screen);
     assert_eq!(sent.len(), 1);
@@ -833,7 +840,6 @@ fn renaming_an_existing_subscription_keeps_its_keychain_account() {
         ))))),
     );
     open_modal(&mut screen, "Providers");
-    click(&mut screen, "Edit");
     type_into(&mut screen, "Name", "-work");
     click(&mut screen, "Save");
     let sent = asked(&mut screen);
@@ -899,16 +905,30 @@ fn the_snapshot_is_asked_for_by_maintain_once_while_the_modal_is_open() {
     let mut screen = screen(Box::<SettingsFeature>::default(), None);
     settings(&mut screen).open_modal(SettingsTab::Providers);
     screen.run_steps(6);
-    let snapshots = asked(&mut screen)
+    let sent = asked(&mut screen);
+    let snapshots = sent
         .iter()
         .filter(|action| {
             matches!(
-                query_of(action),
-                Query::Settings(SettingsQuery::GetSettingsSnapshot {})
+                &action.request,
+                FeatureRequest::Query(Query::Settings(SettingsQuery::GetSettingsSnapshot {}))
             )
         })
         .count();
     assert_eq!(snapshots, 1);
+    // The core reads the providers again once, so the credential status follows the saved ones.
+    let refreshes = sent
+        .iter()
+        .filter(|action| {
+            matches!(
+                &action.request,
+                FeatureRequest::Command(Command::Auth(
+                    workbench_protocol::namespaces::auth::AuthCommand::RefreshCredentials(_)
+                ))
+            )
+        })
+        .count();
+    assert_eq!(refreshes, 1);
     screen.run_steps(6);
     assert!(
         asked(&mut screen).is_empty(),
