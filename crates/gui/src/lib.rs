@@ -32,6 +32,3 @@ pub mod restore_metrics;
 pub mod terminal;
 pub mod theme;
 pub mod window;
-
-/// CI benchmark probe (DO NOT MERGE).
-pub const CI_M2_PROBE: u32 = 1;
