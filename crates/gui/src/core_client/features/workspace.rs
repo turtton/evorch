@@ -8,11 +8,16 @@
 //! particular a conflict with another client, is shown as such and nothing is
 //! assumed applied. Window selection and anything the user has not sent stay
 //! client state (`Selection`, drafts).
+mod body_search;
 mod dialogs;
+mod search;
 mod sidebar;
 mod skills;
 mod tree;
 
+pub use self::body_search::{
+    BodyHit, Scope as SearchScope, SearchView, State as SearchState, Stop as SearchStop,
+};
 pub use self::skills::ProjectSkills;
 
 use self::tree::RunState;
@@ -72,6 +77,8 @@ enum Inflight {
     TrustCommand(String),
     ProjectCommand(String),
     Register,
+    /// The thread search's request, with the epoch it was asked in.
+    Search(u64),
 }
 
 /// What the user asked for on a project's access, to be sent once its revision is known.
@@ -247,6 +254,8 @@ pub struct WorkspaceFeature {
     lane_menu: Option<super::lanes::LaneMenu>,
     /// What the pull requests feature shows in the rows and menus; `None` while it cannot.
     pull_request_menu: Option<super::pull_requests::PullRequestMenu>,
+    /// What the Ctrl+K thread search found in the core's thread bodies.
+    search: body_search::BodySearch,
 }
 
 impl WorkspaceFeature {
@@ -681,6 +690,10 @@ impl WorkspaceFeature {
             self.skills_answered(project, generation, reply);
             return;
         }
+        if let Inflight::Search(epoch) = what {
+            self.on_search_reply(epoch, reply);
+            return;
+        }
         match (what, reply) {
             (
                 Inflight::Models(project, generation),
@@ -939,7 +952,9 @@ impl Feature for WorkspaceFeature {
         // A new snapshot is not a run ending: what is unread stays, and states are
         // learned again from the snapshot.
         self.last_state.clear();
-        // The tags in flight and the intent behind them stay.
+        // The tags in flight and the intent behind them stay. The search forgets its
+        // request and starts again from the first page if the modal still holds it.
+        self.search.reset();
         self.stale = true;
     }
 
@@ -1035,6 +1050,7 @@ impl Feature for WorkspaceFeature {
         for intent in pull_requests {
             ctx.pull_request(intent);
         }
+        self.drive_search(ctx.cache());
         self.flush(ctx);
         true
     }

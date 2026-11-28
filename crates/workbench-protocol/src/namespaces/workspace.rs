@@ -31,6 +31,13 @@ pub use skills::{MAX_SKILL_DESCRIPTION_BYTES, MAX_SKILL_SUMMARIES, SkillSummary,
 
 use serde::{Deserialize, Serialize};
 
+mod search;
+pub use search::{
+    MAX_THREAD_SEARCH_CURSOR_BYTES, MAX_THREAD_SEARCH_KIND_BYTES, MAX_THREAD_SEARCH_QUERY_BYTES,
+    MAX_THREAD_SEARCH_SNIPPET_BYTES, SearchThreads, THREAD_SEARCH_PAGE_SIZE, ThreadSearchCursor,
+    ThreadSearchHit, ThreadSearchIndex, ThreadSearchResults,
+};
+
 pub const COMMAND_OPERATIONS: &[&str] = &[
     "register_project",
     "rename_project",
@@ -51,6 +58,7 @@ pub const QUERY_OPERATIONS: &[&str] = &[
     "get_thread_detail",
     "get_retention",
     "list_skills",
+    "search_threads",
 ];
 pub const EVENT_TYPES: &[&str] = &["thread_changed", "workspace_changed"];
 /// Tagged choices inside a command's payload that classification names.
@@ -323,6 +331,7 @@ pub enum WorkspaceQuery {
     GetThreadDetail(ThreadTarget),
     GetRetention(PageRequest),
     ListSkills(ProjectTarget),
+    SearchThreads(SearchThreads),
 }
 
 impl WorkspaceQuery {
@@ -340,6 +349,7 @@ impl WorkspaceQuery {
             | Self::GetProjectAccess(_)
             | Self::GetThreadDetail(_)
             | Self::ListSkills(_) => Ok(()),
+            Self::SearchThreads(search) => search.validate(),
         }
     }
 }
@@ -501,6 +511,7 @@ pub enum WorkspaceReply {
     Retention(Page<RetentionEntry>),
     ThreadDetail(Box<ThreadDetail>),
     Skills(Vec<SkillSummary>),
+    ThreadSearchResults(ThreadSearchResults),
 }
 
 impl WorkspaceReply {
@@ -524,6 +535,7 @@ impl WorkspaceReply {
                 )?;
                 check_bytes("title", &detail.title, MAX_TITLE_BYTES, true)
             }
+            Self::ThreadSearchResults(results) => results.validate(),
         }
     }
 }

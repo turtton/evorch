@@ -1,26 +1,29 @@
 //! The Ctrl+K thread search: a modal that narrows the threads this client already holds by
-//! title and opens the one chosen (ADR 0045, E5).
+//! title at once, adds what the core's `search_threads` finds in the thread texts of the
+//! project it was opened in, and opens the one chosen (ADR 0045, E5).
 //!
-//! This is the client-side first step. The core's `search_threads {project, query, cursor}`
-//! does not exist yet; when it does, [`search_titles`] is the one place to replace with a
-//! request, and its caller keeps showing whatever rows it returns.
+//! The title rows never wait for the core. The core's page-by-page search (its rules are in
+//! `features::workspace`'s `body_search`) only adds rows: a thread this client can open
+//! that the titles did not list, and the snippet around the first match.
 use workbench_protocol::{
     ids::{ProjectId, ThreadId},
     views::ThreadSummary,
 };
 
 use super::cache::Cache;
-use super::features::workspace::SidebarModel;
+use super::features::workspace::{SearchScope, SearchState, SearchStop, SearchView, SidebarModel};
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::surface_frame;
 
-const QUERY_HINT: &str = "Search threads by title";
+const QUERY_HINT: &str = "Search threads by title and text";
+const NEEDS_PROJECT: &str = "Select a project to search the text of its threads";
+const SEARCHING: &str = "Searching thread text…";
+const INDEX_OFF: &str = "Thread text search is switched off; only titles are searched";
+const TITLE_SCAN_LIMITED: &str = "Older titles matched whole words only";
 pub(super) const QUERY_LABEL: &str = "Thread search query";
 const NO_MATCHES: &str = "No matching threads";
 const RESULT_MAX_HEIGHT: f32 = 360.0;
-/// Rows drawn at most: a long list is narrowed by typing, not by scrolling.
-const MAX_ROWS: usize = 50;
 
 /// One thread the search offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,8 @@ pub struct Row {
     pub title: String,
     /// Known only once the thread's detail is read.
     pub archived: bool,
+    /// Redacted text around the first match in the thread, when the core found one.
+    pub snippet: Option<String>,
 }
 
 /// The threads of `project` (every project when `None`) whose title holds each word of
@@ -58,6 +63,7 @@ pub fn search_titles(
                     thread: summary.id.clone(),
                     title: title.to_owned(),
                     archived: detail.is_some_and(|detail| detail.archived),
+                    snippet: None,
                 };
                 (summary, row)
             })
@@ -67,6 +73,50 @@ pub fn search_titles(
         (right.updated_at, &right.id).cmp(&(left.updated_at, &left.id))
     });
     found.into_iter().map(|(_, row)| row).collect()
+}
+
+/// The title rows plus what the core found for the same project and query: its snippets
+/// go to the rows already listed, and a thread this client can open that the titles did not
+/// list is added after them. The core's hits of another query or project are not shown.
+fn merge_rows(
+    mut rows: Vec<Row>,
+    view: &SearchView<'_>,
+    cache: &Cache,
+    model: Option<&SidebarModel>,
+    scope: Option<&SearchScope>,
+) -> Vec<Row> {
+    let Some(scope) = scope.filter(|scope| view.scope == Some(*scope)) else {
+        return rows;
+    };
+    for hit in view.hits {
+        let snippet = hit
+            .snippet
+            .as_ref()
+            .filter(|_| hit.snippet_kind.as_deref() != Some("title"))
+            .cloned();
+        if let Some(row) = rows.iter_mut().find(|row| row.thread == hit.thread) {
+            if row.snippet.is_none() {
+                row.snippet = snippet;
+            }
+            continue;
+        }
+        let Some(summary) = cache
+            .threads
+            .get(hit.thread.as_str())
+            .filter(|summary| summary.project == scope.project)
+        else {
+            continue;
+        };
+        let detail = model.and_then(|model| model.details.get(summary.id.as_str()));
+        rows.push(Row {
+            project: summary.project.clone(),
+            thread: summary.id.clone(),
+            title: detail.map_or(summary.title.clone(), |detail| detail.title.clone()),
+            archived: hit.archived || detail.is_some_and(|detail| detail.archived),
+            snippet,
+        });
+    }
+    rows
 }
 
 /// Keys pressed this frame that act on the search.
@@ -84,6 +134,15 @@ pub enum Outcome {
     Close,
 }
 
+/// A button of the core search's status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// Search more: the next pages of the core's search.
+    Continue,
+    /// Search again from the first page.
+    Research,
+}
+
 #[derive(Default)]
 pub struct ThreadSearch {
     open: bool,
@@ -95,11 +154,54 @@ pub struct ThreadSearch {
     /// An IME conversion is open in the query field.
     composing: bool,
     keys: Keys,
+    /// The status line's button clicked this frame, for the window to pass on.
+    request: Option<Request>,
+    /// Where the rows are scrolled to and how tall the view was in the last frame.
+    scroll_y: f32,
+    view_height: f32,
+    /// The text changed: the rows start from the top again.
+    scroll_reset: bool,
+    /// The query as of the last frame that had no IME conversion open.
+    settled: String,
 }
 
 impl ThreadSearch {
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// What the core is asked to search: the project the modal was opened in and the
+    /// trimmed query. `None` while closed, without a project, or with a blank query.
+    ///
+    /// The query is the last one typed outside an IME conversion: while one is open the
+    /// field holds text still being converted, which is not searched until it is committed.
+    pub fn scope(&self) -> Option<SearchScope> {
+        let query = self.settled.trim();
+        (self.open && !query.is_empty())
+            .then(|| {
+                self.project.clone().map(|project| SearchScope {
+                    project,
+                    query: query.to_owned(),
+                })
+            })
+            .flatten()
+    }
+
+    /// The status line's button clicked in the last frame, once.
+    pub fn take_request(&mut self) -> Option<Request> {
+        self.request.take()
+    }
+
+    /// Where the rows are scrolled to and how tall their view is, for the tests.
+    #[cfg(test)]
+    pub(super) fn scroll_view(&self) -> (f32, f32) {
+        (self.scroll_y, self.view_height)
+    }
+
+    fn settle_query(&mut self) {
+        if !self.composing {
+            self.settled.clone_from(&self.query);
+        }
     }
 
     fn open(&mut self, project: Option<ProjectId>) {
@@ -155,6 +257,7 @@ impl ThreadSearch {
         ctx: &egui::Context,
         cache: &Cache,
         model: Option<&SidebarModel>,
+        search: SearchView<'_>,
     ) -> Option<Outcome> {
         if !self.open {
             return None;
@@ -163,11 +266,23 @@ impl ThreadSearch {
         let mut outcome = keys.escape.then_some(Outcome::Close);
         let focus = std::mem::take(&mut self.focus_pending);
         let query_before = self.query.clone();
-        let rows = search_titles(cache, model, self.project.as_ref(), &self.query);
-        let shown = rows.len().min(MAX_ROWS);
+        let scope = self.scope();
+        let rows = merge_rows(
+            search_titles(cache, model, self.project.as_ref(), &self.query),
+            &search,
+            cache,
+            model,
+            scope.as_ref(),
+        );
+        let searched = scope
+            .as_ref()
+            .is_some_and(|scope| search.scope == Some(scope));
+        let waiting_for_project = self.project.is_none() && !self.query.trim().is_empty();
+        let mut request = None;
         // The rows were found for the text as it was before this frame's typing, so a
         // key that arrives with a keystroke acts on those rows, as the person saw them.
-        self.selected = step(self.selected, shown, keys.up, keys.down);
+        self.selected = step(self.selected, rows.len(), keys.up, keys.down);
+        let reset_scroll = std::mem::take(&mut self.scroll_reset);
         let mut clicked = None;
         let modal = egui::Modal::new(egui::Id::new("core-thread-search"))
             .backdrop_color(palette().OVERLAY)
@@ -189,38 +304,81 @@ impl ThreadSearch {
                 if focus {
                     query.request_focus();
                 }
-                if rows.is_empty() {
+                let searching =
+                    searched && matches!(search.state, SearchState::Ready | SearchState::Searching);
+                if rows.is_empty() && !searching {
                     ui.label(muted(NO_MATCHES));
                 }
-                let moved = keys.up || keys.down;
-                egui::ScrollArea::vertical()
-                    .max_height(RESULT_MAX_HEIGHT)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for (index, row) in rows.iter().take(shown).enumerate() {
+                // Every row can be scrolled to and chosen. Only the rows in view are laid out, so
+                // a project with thousands of threads costs no more than one with a few.
+                let lines = if rows.iter().any(|row| row.snippet.is_some()) {
+                    2.0
+                } else {
+                    1.0
+                };
+                let spacing = ui.spacing().item_spacing.y;
+                let row_height = ui.spacing().interact_size.y * lines + spacing * (lines - 1.0);
+                let pitch = row_height + spacing;
+                // The view's height follows from the rows, not from last frame's layout, so
+                // it does not creep while rows are added.
+                let height = (rows.len() as f32 * pitch).min(RESULT_MAX_HEIGHT);
+                let mut area = egui::ScrollArea::vertical()
+                    .min_scrolled_height(height)
+                    .max_height(height)
+                    .auto_shrink([false, false]);
+                if reset_scroll {
+                    area = area.vertical_scroll_offset(0.0);
+                } else if keys.up || keys.down {
+                    let top = self.selected as f32 * pitch;
+                    let bottom = top + row_height;
+                    if top < self.scroll_y {
+                        area = area.vertical_scroll_offset(top);
+                    } else if bottom > self.scroll_y + self.view_height {
+                        area = area.vertical_scroll_offset(bottom - self.view_height);
+                    }
+                }
+                let selected = self.selected;
+                let output = area.show_rows(ui, row_height, rows.len(), |ui, range| {
+                    for index in range {
+                        let row = &rows[index];
+                        ui.scope(|ui| {
+                            ui.set_min_height(row_height);
                             let label = if row.archived {
                                 format!("{} (archived)", row.title)
                             } else {
                                 row.title.clone()
                             };
-                            let response = ui.selectable_label(index == self.selected, &label);
-                            if moved && index == self.selected {
-                                response.scroll_to_me(None);
-                            }
-                            if response.clicked() {
+                            // One line, cut with an ellipsis: a wrapped title would be taller
+                            // than the fixed row the scroll position is worked out from, and
+                            // the chosen row could stay below the view.
+                            let title = egui::Button::selectable(index == selected, label)
+                                .truncate()
+                                .min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add(title).clicked() {
                                 clicked = Some(row.clone());
                             }
-                        }
-                    });
-                if rows.len() > shown {
-                    ui.label(muted(format!(
-                        "Showing the newest {shown} of {} matches. Type to narrow them.",
-                        rows.len()
-                    )));
+                            if let Some(snippet) = &row.snippet {
+                                ui.add(egui::Label::new(muted(snippet)).truncate());
+                            }
+                        });
+                    }
+                });
+                self.scroll_y = output.state.offset.y;
+                self.view_height = output.inner_rect.height();
+                if waiting_for_project {
+                    ui.label(muted(NEEDS_PROJECT));
+                }
+                if searched {
+                    request = status_line(ui, &search);
                 }
             });
+        if request.is_some() {
+            self.request = request;
+        }
+        self.settle_query();
         if self.query != query_before {
             self.selected = 0;
+            self.scroll_reset = true;
         } else if keys.enter && outcome.is_none() {
             outcome = rows.get(self.selected).cloned().map(Outcome::Open);
         }
@@ -235,6 +393,45 @@ impl ThreadSearch {
         }
         outcome
     }
+}
+
+/// What the core's search is doing, and the button that goes on when it paused or stopped.
+fn status_line(ui: &mut egui::Ui, search: &SearchView<'_>) -> Option<Request> {
+    let mut request = None;
+    if let Some(index) = search.index {
+        if index.enabled == Some(false) {
+            ui.label(muted(INDEX_OFF));
+        } else if index.unindexed > 0 || index.backfill_in_progress {
+            ui.label(muted(format!(
+                "{} runs are not searchable yet; their text may match later",
+                index.unindexed
+            )));
+        }
+    }
+    if search.title_scan_limited {
+        ui.label(muted(TITLE_SCAN_LIMITED));
+    }
+    match search.state {
+        SearchState::Ready | SearchState::Searching => {
+            ui.label(muted(SEARCHING));
+        }
+        SearchState::Paused => {
+            if ui.button("Search more").clicked() {
+                request = Some(Request::Continue);
+            }
+        }
+        SearchState::Stopped(stop) => {
+            ui.label(muted(match stop {
+                SearchStop::Conflict => "The thread text search was interrupted by a change",
+                SearchStop::Failed(message) => message.as_str(),
+            }));
+            if ui.button("Search again").clicked() {
+                request = Some(Request::Research);
+            }
+        }
+        SearchState::Idle | SearchState::Done => {}
+    }
+    request
 }
 
 /// Whether this frame's Enter, Esc and arrows belong to an IME conversion, and whether one
@@ -361,6 +558,67 @@ mod tests {
         assert_eq!(titles(&rows), ["Renamed spike"]);
         assert!(rows[0].archived);
         assert!(search_titles(&cache, Some(&model), None, "old").is_empty());
+    }
+
+    // Given: sixty title matches and a thread only the core's text search found
+    // When: the rows are merged
+    // Then: none is dropped, and the core's thread is the last row
+    #[test]
+    fn merged_rows_are_not_capped_and_the_core_row_follows_the_titles() {
+        let threads: Vec<(String, String, u64)> = (0..60)
+            .map(|n| (format!("t{n}"), format!("bulk {n}"), n))
+            .collect();
+        let mut specs: Vec<(&str, &str, &str, u64)> = threads
+            .iter()
+            .map(|(id, title, updated)| (id.as_str(), "p1", title.as_str(), *updated))
+            .collect();
+        specs.push(("body", "p1", "unrelated title", 0));
+        let cache = cache_of(&specs);
+        let scope = SearchScope {
+            project: ProjectId::new("p1").unwrap(),
+            query: "bulk".into(),
+        };
+        let hit = crate::core_client::features::workspace::BodyHit {
+            thread: ThreadId::new("body").unwrap(),
+            title: None,
+            snippet_kind: Some("user".into()),
+            snippet: Some("the text".into()),
+            archived: false,
+        };
+        let hits = [hit];
+        let state = SearchState::Done;
+        let view = SearchView {
+            scope: Some(&scope),
+            hits: &hits,
+            state: &state,
+            index: None,
+            title_scan_limited: false,
+        };
+        let titles = search_titles(&cache, None, Some(&scope.project), "bulk");
+        assert_eq!(titles.len(), 60);
+        let rows = merge_rows(titles, &view, &cache, None, Some(&scope));
+        assert_eq!(rows.len(), 61);
+        assert_eq!(rows[60].thread.as_str(), "body");
+        assert_eq!(rows[60].snippet.as_deref(), Some("the text"));
+    }
+
+    // Given: an IME conversion open with text still being converted in the field
+    // When: the scope is read, and then the conversion is committed
+    // Then: the core is asked about the last committed text, and about the new one after
+    #[test]
+    fn the_core_is_asked_about_committed_text_not_a_conversion() {
+        let mut search = ThreadSearch::default();
+        search.open(Some(ProjectId::new("p1").unwrap()));
+        search.query = "cook".into();
+        search.settle_query();
+        assert_eq!(search.scope().unwrap().query, "cook");
+        search.composing = true;
+        search.query = "cookに".into();
+        search.settle_query();
+        assert_eq!(search.scope().unwrap().query, "cook");
+        search.composing = false;
+        search.settle_query();
+        assert_eq!(search.scope().unwrap().query, "cookに");
     }
 
     fn preedit(text: &str) -> egui::Event {

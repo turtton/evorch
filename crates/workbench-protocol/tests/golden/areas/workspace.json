@@ -160,6 +160,17 @@
     },
     "type": "workspace"
   },
+  "query/workspace/search_threads": {
+    "payload": {
+      "payload": {
+        "cursor": "host:titles:20",
+        "project": "proj-1",
+        "query": "migration plan"
+      },
+      "type": "search_threads"
+    },
+    "type": "workspace"
+  },
   "query_reply/workspace/families": {
     "payload": {
       "payload": {
@@ -283,6 +294,30 @@
         "title": "Plan"
       },
       "type": "thread_detail"
+    },
+    "type": "workspace"
+  },
+  "query_reply/workspace/thread_search_results": {
+    "payload": {
+      "payload": {
+        "hits": [
+          {
+            "archived": false,
+            "snippet": "...the migration plan needs a rollback...",
+            "snippet_kind": "user",
+            "thread": "thr-1",
+            "title": "Plan the migration"
+          }
+        ],
+        "index": {
+          "backfill_in_progress": true,
+          "enabled": true,
+          "unindexed": 2
+        },
+        "next_cursor": "host:body-start",
+        "title_scan_limited": false
+      },
+      "type": "thread_search_results"
     },
     "type": "workspace"
   },

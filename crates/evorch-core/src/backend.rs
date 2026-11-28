@@ -333,6 +333,14 @@ impl HostBackend {
                         .map(ReplyPayload::Command)
                 }
                 RequestBody::Query(query) => {
+                    // A thread search reads storage: prepare it under the lock,
+                    // release the lock, then run it. Provenance and validation
+                    // above and the transport's provenance are the same as for
+                    // every other query.
+                    if let Some(prepared) = host.prepare_thread_search(&query, &provenance) {
+                        drop(host);
+                        return prepared?.run().map(ReplyPayload::Query);
+                    }
                     // The transport's provenance, as for commands: never a surface
                     // or owner the request body names.
                     host.handle_query(&request.session_id, &query, &provenance)

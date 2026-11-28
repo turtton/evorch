@@ -1031,6 +1031,15 @@ impl CoreClientScreen {
         // Ctrl+K, and while the search is open every key belongs to it, not to the chords.
         self.thread_search
             .begin_frame(ui.ctx(), self.project.as_ref());
+        // The core is asked to search the text of the project's threads for the query
+        // the modal holds; closing the modal, a blank query or a lost connection drops it.
+        let search_scope = shared
+            .connected
+            .then(|| self.thread_search.scope())
+            .flatten();
+        if let Some(workspace) = shared.features.workspace_mut() {
+            workspace.want_search(search_scope);
+        }
         let chord = if self.thread_search.is_open() {
             None
         } else {
@@ -1188,13 +1197,22 @@ impl CoreClientScreen {
             );
         }
         self.theme.show(ui.ctx());
-        let model = shared
-            .features
-            .workspace()
-            .map(|workspace| workspace.model());
-        if let Some(thread_search::Outcome::Open(row)) =
-            self.thread_search.show(ui.ctx(), &shared.cache, model)
+        let (model, search) = shared.features.workspace().map_or(
+            (None, features::workspace::SearchView::empty()),
+            |workspace| (Some(workspace.model()), workspace.search_view()),
+        );
+        let outcome = self
+            .thread_search
+            .show(ui.ctx(), &shared.cache, model, search);
+        if let Some(request) = self.thread_search.take_request()
+            && let Some(workspace) = shared.features.workspace_mut()
         {
+            match request {
+                thread_search::Request::Continue => workspace.continue_search(),
+                thread_search::Request::Research => workspace.research(),
+            }
+        }
+        if let Some(thread_search::Outcome::Open(row)) = outcome {
             let navigation = Navigation::SelectThread {
                 project: row.project,
                 thread: row.thread,
