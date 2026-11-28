@@ -14,6 +14,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod input_draft;
+pub use input_draft::{GetInputDraft, InputDraft, MAX_INPUT_DRAFT_BYTES};
+
 /// Base64 bound keeps a complete upload below the default 1 MiB frame.
 pub const ATTACHMENT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
@@ -36,7 +39,11 @@ pub const COMMAND_OPERATIONS: &[&str] = &[
     "withdraw_follow_up",
 ];
 /// Wire names of the namespace's queries.
-pub const QUERY_OPERATIONS: &[&str] = &["get_input_receipts", "read_committed_history"];
+pub const QUERY_OPERATIONS: &[&str] = &[
+    "get_input_receipts",
+    "get_input_draft",
+    "read_committed_history",
+];
 /// Wire names of the namespace's events.
 pub const EVENT_TYPES: &[&str] = &["input_receipt_changed", "message_committed"];
 /// Tagged choices inside a command's payload that classification names (none).
@@ -204,13 +211,15 @@ pub enum ConversationResult {
 )]
 pub enum ConversationQuery {
     GetInputReceipts(ThreadQuery),
+    /// The words of one input a person can edit or restore, read on demand.
+    GetInputDraft(GetInputDraft),
     ReadCommittedHistory(ReadCommittedHistory),
 }
 
 impl ConversationQuery {
     pub fn required_capability(&self) -> Capability {
         match self {
-            Self::GetInputReceipts(_) => Capability::InputReceipts,
+            Self::GetInputReceipts(_) | Self::GetInputDraft(_) => Capability::InputReceipts,
             Self::ReadCommittedHistory(_) => Capability::CommittedBodies,
         }
     }
@@ -218,6 +227,7 @@ impl ConversationQuery {
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
             Self::GetInputReceipts(q) => q.page.validate(),
+            Self::GetInputDraft(_) => Ok(()),
             Self::ReadCommittedHistory(q) => q.page.validate(),
         }
     }
@@ -232,6 +242,7 @@ impl ConversationQuery {
 )]
 pub enum ConversationReply {
     InputReceipts(Page<InputReceipt>),
+    InputDraft(InputDraft),
     CommittedHistory(Page<CommittedMessage>),
 }
 
@@ -239,6 +250,7 @@ impl ConversationReply {
     pub fn validate(&self, _limits: &WireLimits) -> Result<(), ValidationError> {
         match self {
             Self::InputReceipts(page) => page.validate_with(InputReceipt::validate),
+            Self::InputDraft(draft) => draft.validate(),
             Self::CommittedHistory(page) => page.validate_with(CommittedMessage::validate),
         }
     }

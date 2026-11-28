@@ -45,6 +45,17 @@ use workspace_ui::KeyAction;
 pub struct Draft {
     pub text: String,
     pub revision: u64,
+    /// What a restored input carried that the person has to add again (E7).
+    pub reattach: conversation::Reattach,
+}
+
+impl Draft {
+    /// The draft is sent or dropped: no words, and nothing left to add again.
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.revision += 1;
+        self.reattach = conversation::Reattach::default();
+    }
 }
 
 #[derive(Default)]
@@ -829,6 +840,7 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
             }
             image.uploading = true;
         }
+        Action::Receipts(thread) => shared.cache.receipts_loading(thread.as_str()),
         Action::History(thread, None, false) => {
             // No session can consume this read. The selected thread is asked for
             // after the next projection, even when selection happened offline.
@@ -881,6 +893,9 @@ pub fn enqueue(tx: &tokio::sync::mpsc::Sender<Action>, shared: &mut Shared, acti
                     .attachment_draft(project, thread.as_str(), file)
                     .uploading = false;
             }
+            Action::Receipts(thread) => shared
+                .cache
+                .receipts_read(thread.as_str(), Err(QUEUE_FULL.into())),
             Action::History(thread, None, false) => shared.cache.history_not_asked(thread.as_str()),
             // The run's first page was not asked for: the next frame asks again.
             Action::History(_, Some(run), false) => shared.cache.forget_run(run.as_str()),
@@ -1183,6 +1198,7 @@ impl CoreClientScreen {
                 shell::Effect::Goal(_)
                     | shell::Effect::AskBtw { .. }
                     | shell::Effect::CloseBtw(_)
+                    | shell::Effect::Queue(_)
                     | shell::Effect::Lane(_)
                     | shell::Effect::PullRequest(_)
                     | shell::Effect::PullRequestChip(_)
@@ -1205,6 +1221,9 @@ impl CoreClientScreen {
                 &mut shared,
                 effect,
             );
+        }
+        if conversation::settle_queue(&mut shared, &mut self.conversation) {
+            ui.ctx().request_repaint();
         }
         self.theme.show(ui.ctx());
         let (model, search) = shared.features.workspace().map_or(
@@ -1373,6 +1392,11 @@ fn apply_effect(
             } => {
                 if let Some(execution) = shared.features.execution_mut() {
                     execution.ask_btw(thread, operation, question);
+                }
+            }
+            shell::Effect::Queue(intent) => {
+                if let Some(execution) = shared.features.execution_mut() {
+                    execution.queue_intent(intent);
                 }
             }
             shell::Effect::CloseBtw(thread) => {

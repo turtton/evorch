@@ -2,6 +2,7 @@
 //! a query and collection revision; none contain storage paths or SQL offsets.
 pub(crate) mod approval;
 mod history;
+pub(crate) mod input_draft;
 mod models;
 
 use serde::Serialize;

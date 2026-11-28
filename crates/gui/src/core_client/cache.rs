@@ -22,6 +22,8 @@ pub struct Cache {
     pub questions: BTreeMap<String, QuestionView>,
     pub approvals: BTreeMap<String, ApprovalView>,
     pub receipts: BTreeMap<String, InputReceipt>,
+    /// How the last read of each thread's input receipts ended in this projection.
+    receipt_reads: BTreeMap<String, ReceiptRead>,
     pub history: BTreeMap<String, Vec<CommittedMessage>>,
     /// First pages requested in this projection (including failed reads).
     history_asked: std::collections::BTreeSet<String>,
@@ -51,7 +53,54 @@ pub struct Cache {
     cursor: Option<CursorTracker>,
 }
 
+/// How the read of a thread's input receipts ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptRead {
+    /// Every page was read.
+    Loaded,
+    /// A read is on its way (a retry).
+    Loading,
+    /// A page could not be read, so the list may be incomplete.
+    Failed(String),
+}
+
 impl Cache {
+    /// Takes a receipt the core reported, by query or by event. An input that reached a
+    /// final state never goes back to `Accepted`: a read that raced with the event of its
+    /// acceptance must not bring the old state back.
+    pub fn merge_receipt(&mut self, receipt: InputReceipt) {
+        let id = receipt.submission_id.as_str();
+        if receipt.state == InputReceiptState::Accepted
+            && self
+                .receipts
+                .get(id)
+                .is_some_and(|known| known.state != InputReceiptState::Accepted)
+        {
+            return;
+        }
+        self.receipts.insert(id.to_owned(), receipt);
+    }
+
+    /// The read of `thread`'s receipts ended; `Err` carries why it did not finish.
+    pub fn receipts_read(&mut self, thread: &str, result: Result<(), String>) {
+        self.receipt_reads.insert(
+            thread.to_owned(),
+            match result {
+                Ok(()) => ReceiptRead::Loaded,
+                Err(reason) => ReceiptRead::Failed(reason),
+            },
+        );
+    }
+
+    pub fn receipts_loading(&mut self, thread: &str) {
+        self.receipt_reads
+            .insert(thread.to_owned(), ReceiptRead::Loading);
+    }
+
+    pub fn receipt_read(&self, thread: &str) -> Option<&ReceiptRead> {
+        self.receipt_reads.get(thread)
+    }
+
     pub fn want_history(&self, thread: &str) -> bool {
         !self.history_asked.contains(thread)
     }
@@ -177,8 +226,7 @@ impl Cache {
                 self.approvals.insert(approval.id.to_string(), approval);
             }
             UiEvent::Conversation(ConversationEvent::InputReceiptChanged { receipt }) => {
-                self.receipts
-                    .insert(receipt.submission_id.to_string(), receipt);
+                self.merge_receipt(receipt);
             }
             UiEvent::Conversation(ConversationEvent::MessageCommitted { message }) => {
                 self.live_tools_committed(std::iter::once(&message));

@@ -13,9 +13,10 @@ use workbench_protocol::namespaces::{
 use workbench_protocol::{commands::*, ids::*, views::*};
 use workspace_ui::ThreadRunPhase;
 
-use super::cache::Cache;
+use super::cache::{Cache, ReceiptRead};
 use super::connection::Action;
 use super::features::diagnostics::{cost_hint, cost_text};
+use super::features::execution::queued_input::QueueView;
 use super::features::execution::{BtwCardView, ExecutionBand};
 use super::features::lanes::{CardChoice, CardPlace, LaneCardAction, LaneCardView, lane_body};
 use super::features::pull_requests::{PullRequestBar, PullRequestChips};
@@ -44,8 +45,12 @@ mod btw;
 mod composer;
 mod mentions;
 mod new_chat;
+mod queue;
 mod skills;
 mod slash;
+
+pub use queue::Reattach;
+pub(super) use queue::settle as settle_queue;
 
 const MAX_ANSWER_BYTES: usize = 4096;
 
@@ -218,6 +223,8 @@ pub struct Bands<'a> {
     pub chips: Option<PullRequestChips<'a>>,
     /// The selected thread's side question, drawn directly above the composer.
     pub btw: Option<BtwCardView<'a>>,
+    /// The Edit or Restore of a queued input in progress, and why the last one ended.
+    pub queue: QueueView,
 }
 
 /// `root` is the thread's current root run, as its detail names it.
@@ -232,6 +239,7 @@ pub fn show(
         pull_request,
         chips,
         btw,
+        queue,
     }: Bands<'_>,
     root: Option<&RunId>,
     effects: &mut Vec<Effect>,
@@ -286,7 +294,7 @@ pub fn show(
                     // The band sits flush on the composer, as in the embedded workbench.
                     let vertical_spacing = ui.spacing().item_spacing.y;
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    progress(ui, io.cache, &thread, band, details_max, effects);
+                    progress(ui, io, &thread, band, &queue, details_max, effects);
                     if let Some(card) = &btw
                         && let Some(btw::BtwChoice::Close) =
                             btw::btw_card(ui, card, io.link_base, details_max)
@@ -857,17 +865,29 @@ fn approval_card(ui: &mut Ui, cache: &Cache, approval: &ApprovalView, effects: &
 /// the composer, as the embedded workbench draws them.
 fn progress(
     ui: &mut Ui,
-    cache: &Cache,
+    io: &ConversationIo<'_>,
     thread: &ThreadId,
     band: Option<ExecutionBand<'_>>,
+    queue_view: &QueueView,
     details_max: f32,
     effects: &mut Vec<Effect>,
 ) {
+    let cache = io.cache;
     let receipts = queued_receipts(cache, thread);
+    let queue_shown = !receipts.is_empty()
+        || queue_view
+            .failure
+            .as_ref()
+            .is_some_and(|f| &f.thread == thread)
+        || matches!(
+            cache.receipt_read(thread.as_str()),
+            Some(ReceiptRead::Failed(_))
+        );
     let goal = band
         .and_then(|band| band.goal)
         .map(|goal| goal_view(thread, goal));
-    let queue = (!receipts.is_empty()).then_some(|ui: &mut Ui| queue_rows(ui, &receipts, thread));
+    let queue = queue_shown
+        .then_some(|ui: &mut Ui| queue::queue_rows(ui, io, &receipts, thread, queue_view));
     let output = progress_band(
         ui,
         thread.as_str(),
@@ -934,46 +954,6 @@ fn queued_receipts<'a>(cache: &'a Cache, thread: &ThreadId) -> Vec<&'a InputRece
                 )
         })
         .collect()
-}
-
-fn queue_rows(ui: &mut Ui, receipts: &[&InputReceipt], thread: &ThreadId) -> Option<Effect> {
-    let mut withdraw = None;
-    for receipt in receipts {
-        ui.horizontal(|ui| {
-            let (icon, text, color) = match receipt.state {
-                InputReceiptState::Accepted => {
-                    (icons::QUEUE, "Queued follow-up", palette().TEXT_MUTED)
-                }
-                InputReceiptState::Dropped => {
-                    (icons::WARNING, "Follow-up dropped", palette().WARNING_FG)
-                }
-                _ => (
-                    icons::QUESTION,
-                    "Follow-up state unknown",
-                    palette().WARNING_FG,
-                ),
-            };
-            ui.label(
-                RichText::new(icons::with_icon(icon, text))
-                    .size(FONT_SMALL)
-                    .color(color),
-            )
-            .on_hover_text(receipt.submission_id.as_str());
-            if receipt.state == InputReceiptState::Accepted
-                && let Some(run) = &receipt.run
-                && ui.add(ghost("Withdraw")).clicked()
-            {
-                withdraw = Some(Effect::send(command(Command::Conversation(
-                    ConversationCommand::WithdrawFollowUp(WithdrawFollowUp {
-                        thread: thread.clone(),
-                        run: run.clone(),
-                        submission_id: receipt.submission_id.clone(),
-                    }),
-                ))));
-            }
-        });
-    }
-    withdraw
 }
 
 fn status_strip(

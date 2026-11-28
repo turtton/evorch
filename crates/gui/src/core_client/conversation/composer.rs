@@ -153,7 +153,7 @@ impl ConversationPane {
         }
     }
 
-    fn notice(&mut self, thread: &ThreadId, text: String) {
+    pub(super) fn notice(&mut self, thread: &ThreadId, text: String) {
         let notices = self.notices.entry(thread.to_string()).or_default();
         notices.push(text);
         if notices.len() > MAX_NOTICES {
@@ -230,6 +230,7 @@ pub(super) fn composer(
                     }
                 }
                 attachments(ui, io, project, thread, effects);
+                super::queue::reattach_hint(ui, io, thread);
                 // As tall as the input, so the attach "+" on its left and the buttons on
                 // its right sit at its bottom.
                 let row = egui::vec2(ui.available_width(), wanted);
@@ -559,10 +560,7 @@ fn submit(
         exists,
         role: pane.composer_role,
     };
-    let clear = |draft: &mut crate::core_client::Draft| {
-        draft.text.clear();
-        draft.revision += 1;
-    };
+    let clear = crate::core_client::Draft::clear;
     match slash::dispatch(&draft.text, &ctx) {
         Outcome::Chat => {}
         // As a message, the text stays until the core accepts it, so a refused

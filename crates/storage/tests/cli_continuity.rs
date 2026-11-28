@@ -870,6 +870,7 @@ fn undoing_v72_then_opening_migrates_again() {
     drop(f.storage.take());
     let sql = f.sql();
     sql.execute_batch(concat!(
+        include_str!("../undo/undo_v82.sql"),
         include_str!("../undo/undo_v81.sql"),
         include_str!("../undo/undo_v80.sql"),
         include_str!("../undo/undo_v79.sql"),
@@ -895,7 +896,7 @@ fn undoing_v72_then_opening_migrates_again() {
         .sql()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 81);
+    assert_eq!(version, 82);
     assert_eq!(
         database
             .issue_cli_continuity(&binding("inv-a", "r1"), &token(1), 1)

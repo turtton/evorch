@@ -421,6 +421,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v82.sql"),
                     include_str!("../undo/undo_v81.sql"),
                     include_str!("../undo/undo_v80.sql"),
                     include_str!("../undo/undo_v79.sql"),
@@ -533,7 +534,10 @@ fn owner_free_schema_has_fixed_cost_for_unrelated_thread_history() {
         drop(Database::open(&config(&path)).unwrap());
         let observer = Connection::open(&path).unwrap();
         observer
-            .execute_batch(include_str!("../undo/undo_v81.sql"))
+            .execute_batch(concat!(
+                include_str!("../undo/undo_v82.sql"),
+                include_str!("../undo/undo_v81.sql")
+            ))
             .unwrap();
         observer
             .execute_batch(&format!(
@@ -561,7 +565,9 @@ fn owner_free_schema_has_fixed_cost_for_unrelated_thread_history() {
     let small = cost(10);
     let large = cost(100_000);
     println!("owner-free v81: 10 rows {small:?}, 100,000 rows {large:?} (frames, VM steps)");
-    assert!(small.0 > 0 && large.0 <= 18, "bounded empty-schema DDL");
+    // Undoing v81 also undoes v82, so this reopen applies both: v82's five nullable
+    // ADD COLUMNs add 2 fixed frames (14/20 frames, 26,519 VM steps at both sizes).
+    assert!(small.0 > 0 && large.0 <= 20, "bounded empty-schema DDL");
     assert!(small.1 > 0, "profiler must observe owner-free DDL");
     assert_eq!(
         small.1, large.1,

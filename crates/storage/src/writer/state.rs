@@ -632,9 +632,9 @@ pub(super) fn run_writer_with_index(
             Ok(Command::HostInputReceipts(ids, reply)) => {
                 let _ = reply.send(crate::repo::host_input_receipt::for_ids(&state.conn, &ids));
             }
-            Ok(Command::RecordHostChatSubmission(submission, reply)) => {
+            Ok(Command::RecordHostChatSubmission(submission, edit, reply)) => {
                 let result = review_transaction(&state, |conn| {
-                    crate::repo::host_chat_submission::insert(conn, &submission)
+                    crate::repo::host_chat_submission::insert(conn, &submission, edit.as_ref())
                 });
                 let _ = reply.send(result);
             }

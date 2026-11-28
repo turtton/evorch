@@ -436,6 +436,7 @@ async fn desktop_and_web_share_images_order_questions_approvals_and_runs_outlive
             gui::core_client::Draft {
                 text: initial.text.clone(),
                 revision: 1,
+                ..Default::default()
             },
         );
         state.sending.insert("t".into());

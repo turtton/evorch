@@ -11,7 +11,7 @@ use crate::limits::{
     MAX_INLINE_MESSAGE_BYTES, MAX_NAME_BYTES, MAX_OPTION_BYTES, MAX_OPTIONS, MAX_PAGE_SIZE,
     MAX_TEXT_BYTES, MAX_TITLE_BYTES, MIN_BODY_CHUNK_BYTES,
 };
-use crate::validation::{ValidationError, check_bytes, check_count};
+use crate::validation::{ValidationError, check_bytes, check_count, check_text};
 use crate::wire::{ByteOffset, InstanceEpoch, Revision, Sequence, UnixMillis};
 use serde::{Deserialize, Serialize};
 
@@ -269,6 +269,50 @@ pub struct InputReceipt {
     pub state: InputReceiptState,
     pub revision: Revision,
     pub sent_by: Provenance,
+    /// A short look at an input a person can still edit or restore (`Accepted`,
+    /// `Dropped`, `Unknown`). Absent in every other state, and for an input the core
+    /// holds no editable words of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<InputPreview>,
+}
+
+/// Longest preview of an input, in bytes.
+pub const MAX_INPUT_PREVIEW_BYTES: usize = 1024;
+/// Most attachments an input records, for validation.
+pub const MAX_INPUT_ATTACHMENTS: u32 = 1024;
+
+/// The start of an input's words and how many attachments it carried. The attachments
+/// themselves are never kept: a person adds them again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputPreview {
+    pub text: String,
+    /// The words were longer than `text`.
+    pub truncated: bool,
+    pub image_count: u32,
+    /// Every attachment, images included.
+    pub attachment_count: u32,
+}
+
+impl InputPreview {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_text("preview", &self.text, MAX_INPUT_PREVIEW_BYTES, true)?;
+        validate_attachment_counts(self.image_count, self.attachment_count)
+    }
+}
+
+/// Images are attachments, so there are never more of them than of attachments.
+pub fn validate_attachment_counts(
+    image_count: u32,
+    attachment_count: u32,
+) -> Result<(), ValidationError> {
+    if image_count > attachment_count || attachment_count > MAX_INPUT_ATTACHMENTS {
+        return Err(ValidationError::OutOfRange {
+            field: "attachment_count",
+            reason: "image count exceeds attachment count or attachments are too many",
+        });
+    }
+    Ok(())
 }
 
 /// What a committed-history row is. `Tool` rows carry a [`ToolCallView`]; no other role does.
@@ -543,6 +587,21 @@ impl ApprovalView {
 
 impl InputReceipt {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.sent_by.validate()
+        self.sent_by.validate()?;
+        if let Some(preview) = &self.preview {
+            if !matches!(
+                self.state,
+                InputReceiptState::Accepted
+                    | InputReceiptState::Dropped
+                    | InputReceiptState::Unknown
+            ) {
+                return Err(ValidationError::OutOfRange {
+                    field: "preview",
+                    reason: "only an input that can still be edited or restored has a preview",
+                });
+            }
+            preview.validate()?;
+        }
+        Ok(())
     }
 }

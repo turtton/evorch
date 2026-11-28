@@ -1,0 +1,27 @@
+{
+  "query/conversation/get_input_draft": {
+    "payload": {
+      "payload": {
+        "submission_id": "sub-a",
+        "thread": "thread-1"
+      },
+      "type": "get_input_draft"
+    },
+    "type": "conversation"
+  },
+  "query_reply/conversation/input_draft": {
+    "payload": {
+      "payload": {
+        "attachment_count": 3,
+        "image_count": 2,
+        "run": "run-1",
+        "state": "dropped",
+        "submission_id": "sub-a",
+        "text": "look at these",
+        "thread": "thread-1"
+      },
+      "type": "input_draft"
+    },
+    "type": "conversation"
+  }
+}

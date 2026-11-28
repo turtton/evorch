@@ -34,6 +34,7 @@ fn reconnect_and_resync_read_the_selected_history_once_and_restore_the_conversat
         crate::core_client::Draft {
             text: "keep this unsent draft".into(),
             revision: 1,
+            ..Default::default()
         },
     );
     screen.settle();

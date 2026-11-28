@@ -198,7 +198,11 @@ enum Command {
     ),
     UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
     HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
-    RecordHostChatSubmission(crate::HostChatSubmission, ReplyTx<bool>),
+    RecordHostChatSubmission(
+        crate::HostChatSubmission,
+        Option<crate::HostChatSubmissionEdit>,
+        ReplyTx<bool>,
+    ),
     HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmissionState>>),
     TombstonedRuns(Vec<String>, ReplyTx<Vec<String>>),
     HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
@@ -1104,16 +1108,20 @@ impl StorageHandle {
         self.request(|reply| Command::HostInputReceipts(prompt_ids.to_vec(), reply))
     }
 
-    /// Keep a fingerprint of an accepted chat message. The first record for an id stays;
-    /// returns whether this call stored it.
+    /// Keep a fingerprint of an accepted chat message, with the `edit` data that lets a
+    /// client edit or restore it. The first record for an id stays; returns whether this
+    /// call stored it.
     ///
     /// # Errors
     /// Rejects an invalid record, a tombstoned run, suspended writes or SQLite failure.
     pub fn record_host_chat_submission(
         &self,
         submission: &crate::HostChatSubmission,
+        edit: Option<&crate::HostChatSubmissionEdit>,
     ) -> Result<bool, StorageError> {
-        self.request(|reply| Command::RecordHostChatSubmission(submission.clone(), reply))
+        self.request(|reply| {
+            Command::RecordHostChatSubmission(submission.clone(), edit.cloned(), reply)
+        })
     }
 
     /// The recorded chat submissions among `submission_ids`, after all earlier writer requests.

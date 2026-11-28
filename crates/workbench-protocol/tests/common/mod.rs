@@ -432,6 +432,7 @@ pub fn receipt() -> InputReceipt {
         state: InputReceiptState::Delivered,
         revision: Revision(8),
         sent_by: human(),
+        preview: None,
     }
 }
 
