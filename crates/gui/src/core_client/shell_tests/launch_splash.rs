@@ -141,6 +141,7 @@ fn a_loss_after_the_first_projection_keeps_the_conversation_and_the_draft_in_vie
             Draft {
                 text: "unsent words".into(),
                 revision: 1,
+                ..Default::default()
             },
         );
     });
