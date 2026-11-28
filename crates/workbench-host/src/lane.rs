@@ -141,30 +141,6 @@ impl TeamSource<'_> {
     }
 }
 
-#[cfg(test)]
-mod binding_observation_tests {
-    use super::*;
-    #[test]
-    fn equal_binding_aba_and_exhaustion_never_revalidate_an_observation() {
-        let table = BindingTable::default();
-        let proof = table.observe();
-        assert!(proof.is_current());
-        table.replace(Default::default());
-        table.replace(Default::default());
-        assert!(!proof.is_current());
-        assert!(table.observe().is_current());
-        table
-            .1
-            .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
-        let last = table.observe();
-        table.replace(Default::default());
-        assert!(!last.is_current());
-        assert!(!table.observe().is_current());
-        table.replace(Default::default());
-        assert!(!table.observe().is_current());
-    }
-}
-
 /// Resolve persisted thread identity against the current host's project directory.
 /// Neither a client path nor a saved execution recipe grants project access.
 pub(crate) fn current_thread_project(
@@ -265,4 +241,28 @@ pub(crate) fn current_thread_project(
         }
     }
     Ok(Some(root))
+}
+
+#[cfg(test)]
+mod binding_observation_tests {
+    use super::*;
+    #[test]
+    fn equal_binding_aba_and_exhaustion_never_revalidate_an_observation() {
+        let table = BindingTable::default();
+        let proof = table.observe();
+        assert!(proof.is_current());
+        table.replace(Default::default());
+        table.replace(Default::default());
+        assert!(!proof.is_current());
+        assert!(table.observe().is_current());
+        table
+            .1
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
+        let last = table.observe();
+        table.replace(Default::default());
+        assert!(!last.is_current());
+        assert!(!table.observe().is_current());
+        table.replace(Default::default());
+        assert!(!table.observe().is_current());
+    }
 }

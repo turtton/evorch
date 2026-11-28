@@ -66,10 +66,9 @@ fn adopt_for_stop(
     let run = paused.claim().members[0].run_id.parse().unwrap();
     let authority = prepared_adoption::authority(f, run);
     let (proof, startup, root) = prepared_adoption::evidence(f, &paused.claim().claim_id);
-    let adopted = runtime
+    runtime
         .adopt_prepared_claim(proof, startup, &root, &authority)
-        .unwrap();
-    adopted
+        .unwrap()
 }
 
 #[test]

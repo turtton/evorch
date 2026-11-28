@@ -183,17 +183,13 @@ async fn phase(events: &mut event_bus::EventReceiver, run: RunId, expected: Agen
     loop {
         let event = events.recv().await.unwrap();
         if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-            run_id,
-            to,
-            reason,
-            ..
+            run_id, to, reason, ..
         }) = event.kind
+            && run_id == run.to_string()
         {
-            if run_id == run.to_string() {
-                assert_ne!(to, AgentRunPhase::Error, "{reason:?}");
-                if to == expected {
-                    return;
-                }
+            assert_ne!(to, AgentRunPhase::Error, "{reason:?}");
+            if to == expected {
+                return;
             }
         }
     }

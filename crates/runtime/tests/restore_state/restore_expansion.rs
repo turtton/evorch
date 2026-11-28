@@ -491,9 +491,8 @@ async fn single_history_allows_live_children_and_concurrent_roots_for_all_descri
             name: Some(format!("chat:Worker:{marker}")),
             ..Default::default()
         };
-        match marker {
-            "context" => config.memory = Some(runtime::memory::MemoryBoundary::default()),
-            _ => {}
+        if marker == "context" {
+            config.memory = Some(runtime::memory::MemoryBoundary::default());
         }
         let root = runtime.delegate_background(Role::Worker, "single root history".into(), config);
         assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);

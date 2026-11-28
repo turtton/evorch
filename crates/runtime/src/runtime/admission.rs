@@ -340,7 +340,6 @@ impl AgentRuntime {
 
     /// Handoff already reserved this execution before taking Q. Only A is
     /// needed here; never reacquire I from the handoff callback.
-
     pub(crate) fn fail_reserved_admission(
         &self,
         run: RunId,

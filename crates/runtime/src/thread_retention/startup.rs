@@ -456,11 +456,6 @@ impl Ran {
     }
 }
 
-/// The owner registry, or `None` when this root has none yet.
-///
-/// Only an explicit "not found" means there is none. A path that cannot be examined (a
-/// loop, a permission error) is an error: who holds the threads is then unknown.
-
 /// Delete the scratch directories of deleted threads, entry by entry, within the
 /// directory and entry budgets. A directory counts as removed only after the call
 /// that emptied and unlinked it reported completion; anything else stays listed

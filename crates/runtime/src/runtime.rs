@@ -2026,12 +2026,13 @@ impl AgentRuntime {
             config.budget = config.budget.clone().with_unlimited_resources();
         }
         self.shared.bind_project(parent, &mut config);
-        if inherit_parent && let Some(parent) = parent {
-            if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
-                config.topology = entry.config.topology;
-                config.team = entry.config.team.clone();
-                config.delegation_value = entry.config.delegation_value.clone();
-            }
+        if inherit_parent
+            && let Some(parent) = parent
+            && let Some(entry) = lock_runs(&self.shared.runs).get(&parent)
+        {
+            config.topology = entry.config.topology;
+            config.team = entry.config.team.clone();
+            config.delegation_value = entry.config.delegation_value.clone();
         }
         if inherit_parent && parent.is_none() {
             config.team = None;

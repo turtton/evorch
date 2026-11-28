@@ -17,6 +17,11 @@ use workbench_protocol::{
     wire::{InstanceEpoch, Revision},
 };
 
+type ObservedGraphs = (
+    BTreeMap<String, GraphFact>,
+    BTreeMap<String, GraphReference>,
+);
+
 pub struct LiveGraphCollector {
     pub(super) state: Mutex<LiveState>,
     storage: StorageConfig,
@@ -82,7 +87,7 @@ impl LiveGraphCollector {
             }),
         })
     }
-    /// Stop observing before successor owner release; never reopen management.
+    /// Stop observing before retiring this core; never reopen management.
     pub fn invalidate(&self) {
         let mut state = self
             .state
@@ -121,16 +126,7 @@ impl LiveGraphCollector {
     /// legacy graphs to show. Only the sealed adopted inventory can acquire
     /// live tickets; cold and legacy database rows never extend it through a
     /// later claim.
-    fn observe(
-        &self,
-        manifest: Option<&str>,
-    ) -> Result<
-        (
-            BTreeMap<String, GraphFact>,
-            BTreeMap<String, GraphReference>,
-        ),
-        AdminFailure,
-    > {
+    fn observe(&self, manifest: Option<&str>) -> Result<ObservedGraphs, AdminFailure> {
         // Never read storage while holding the state.
         let live_epoch = self.state.lock().map_err(|_| unavailable())?.epoch;
         let (graphs, headers) = storage::Database::read_owned_graphs(&self.storage, |db| {

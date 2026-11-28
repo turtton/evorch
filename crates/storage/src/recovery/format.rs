@@ -146,8 +146,8 @@ pub(super) fn discard_legacy(
     {
         return Err(invalid("not a legacy recovery graph"));
     }
-    if let Some(r) = &current.restart {
-        if !matches!(
+    if let Some(r) = &current.restart
+        && (!matches!(
             r.phase,
             RestartPhase::Invalidated
                 | RestartPhase::Aborted
@@ -156,10 +156,9 @@ pub(super) fn discard_legacy(
         ) || current
             .component
             .as_ref()
-            .is_some_and(|c| c.disposition == restart::RestartDisposition::RetryPending)
-        {
-            return Err(invalid("legacy graph must be quarantined first"));
-        }
+            .is_some_and(|c| c.disposition == restart::RestartDisposition::RetryPending))
+    {
+        return Err(invalid("legacy graph must be quarantined first"));
     }
     let mut after = expected.clone();
     after.superseded = true;

@@ -365,39 +365,41 @@ export async function verifyGraph({ env, artifactDir, results, manifest }) {
       results.pass("graph:isolation-unrelated-thread-usable", "input to an unrelated thread reached the provider while the old graph is unresolved");
     });
 
-    // List the isolated graph(s) through the new core's management CLI.
+    // List the old graph(s) through the new core's management CLI: `graphs list` names an old graph
+    // as "  ID (restart R, revision N)"; for an old graph only `graphs release ID --yes` applies
+    // (resume is refused). `quarantine list` is read for the record only.
     let abandoned = false;
-    const listings = [];
-    for (const group of ["quarantine", "graphs"]) {
-      const r = await s.cli(["core", group, "list"]);
-      listings.push({ group, ...r });
-    }
-    const ids = [...new Set(listings.find((l) => l.group === "quarantine")?.stdout.split("\n").map((l) => /^ {2}(\S+) \(revision \d+\)/.exec(l)?.[1]).filter(Boolean) ?? [])];
-    log(`graph listings: ${JSON.stringify(listings.map((l) => ({ group: l.group, code: l.code, out: l.stdout.slice(0, 300), err: l.stderr.slice(0, 200) })))}`);
+    const listGraphIds = (stdout) => stdout.split("\n").map((l) => /^ {2}(\S+) \(restart [^,)]*, revision \d+\)/.exec(l)?.[1]).filter(Boolean);
+    const graphsList = await s.cli(["core", "graphs", "list"]);
+    const quarantineList = await s.cli(["core", "quarantine", "list"]);
+    const ids = [...new Set(listGraphIds(graphsList.stdout))];
+    log(`graph listings: ${JSON.stringify({ graphs: { code: graphsList.code, out: graphsList.stdout.slice(0, 400), err: graphsList.stderr.slice(0, 200) }, quarantine: { code: quarantineList.code, out: quarantineList.stdout.slice(0, 400) } })}`);
     if (ids.length === 0) {
       results.todo(
         "graph:old-graph-listed",
-        `TODO(depends on the integration worker's CLI/recovery wiring for listing old graphs, run-01m8fq354a7a62wc2k6c5zawhn): 'evorch core quarantine list' named no graph (the old build's cold start quarantines it; a new build must list or isolate it). quarantine list: ${JSON.stringify(listings[0]?.stdout.slice(0, 300))}; graphs list: ${JSON.stringify(listings[1]?.stdout.slice(0, 300))} ${JSON.stringify(listings[1]?.stderr.slice(0, 200))}`,
+        `TODO(depends on the integration worker's old-graph listing, OwnedGraphsFacade legacy_listed, run-01m8fq354a7a62wc2k6c5zawhn): 'evorch core graphs list' named no graph. graphs list: ${JSON.stringify(graphsList.stdout.slice(0, 300))} ${JSON.stringify(graphsList.stderr.slice(0, 200))}; quarantine list: ${JSON.stringify(quarantineList.stdout.slice(0, 300))}`,
       );
-      results.todo("graph:explicit-abandon", "TODO: depends on the old-graph listing/abandon CLI; not attempted");
+      results.todo("graph:explicit-abandon", "TODO: depends on the old-graph listing (graphs list); not attempted");
     } else {
-      results.pass("graph:old-graph-listed", `${ids.length} graph(s): ${ids.join(", ")}`);
+      results.pass("graph:old-graph-listed", `${ids.length} graph(s) in 'graphs list': ${ids.join(", ")}`);
       await step(results, "graph:explicit-abandon", async () => {
         const outcomes = [];
         for (const id of ids) {
-          const r = await s.cli(["core", "quarantine", "discard", id, "--yes"]);
-          outcomes.push({ id, code: r.code, out: r.stdout.slice(0, 400), err: r.stderr.slice(0, 200) });
+          const shown = await s.cli(["core", "graphs", "show", id]);
+          const r = await s.cli(["core", "graphs", "release", id, "--yes"]);
+          outcomes.push({ id, showCode: shown.code, show: shown.stdout.slice(0, 300), code: r.code, out: r.stdout.slice(0, 400), err: r.stderr.slice(0, 200) });
         }
-        const ok = outcomes.every((o) => o.code === 0 && !/partial|failed|conflict/i.test(o.out));
+        const ok = outcomes.every((o) => o.code === 0 && !/partial|failed|conflict|refused|rejected/i.test(o.out));
         abandoned = ok;
-        results.check("graph:explicit-abandon", ok, JSON.stringify(outcomes));
+        const after = await s.cli(["core", "graphs", "list"]);
+        results.check("graph:explicit-abandon", ok, JSON.stringify({ outcomes, listedAfterRelease: listGraphIds(after.stdout) }));
       });
     }
 
     // After the explicit abandon the thread of the old graph can Continue normally.
     await step(results, "graph:continue-after-abandon", async () => {
-      if (ids.length === 0) return results.todo("graph:continue-after-abandon", "TODO: not attempted because the old graph could not be abandoned through the CLI yet");
-      if (!abandoned) return results.unverified("graph:continue-after-abandon", "not attempted as a pass condition: the explicit abandon did not succeed, so 'Continue after abandon' was not established");
+      if (ids.length === 0) return results.todo("graph:continue-after-abandon", "TODO: not attempted because the old graph was not listed by 'graphs list' yet");
+      if (!abandoned) return results.unverified("graph:continue-after-abandon", "not attempted as a pass condition: the explicit abandon did not succeed, so 'Continue after release' was not established");
       const mk = "VERIFY-GRAPH-CONTINUE";
       await s.chat("send_chat", "lead-graph", `${mk} continue after the explicit abandon`);
       await waitFact(s, "provider saw the continue", () => requestsWith(mock, mk).length > 0);

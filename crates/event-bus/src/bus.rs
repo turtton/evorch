@@ -242,39 +242,37 @@ impl EventReceiver {
     /// 正常に受信できるまで fault の再 emit を止めることで、この
     /// fault 再 emit が自らの lag を誘発するループを防ぐために存在する。
     pub async fn recv(&mut self) -> Result<Event, RecvError> {
-        loop {
-            match self.rx.recv().await {
-                Ok(event) => {
-                    self.lag_gate.note_ok();
-                    return Ok(event);
-                }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let (warn, fault) = self.lag_gate.note_lag();
-                    if warn {
-                        tracing::warn!(
-                            subscriber_id = self.subscriber_id,
-                            skipped = skipped,
-                            "event subscriber lagged; dropped events"
-                        );
-                    } else {
-                        tracing::debug!(
-                            subscriber_id = self.subscriber_id,
-                            skipped = skipped,
-                            "event subscriber lagged; dropped events"
-                        );
-                    }
-                    if fault {
-                        // 受信者がゼロの場合 fault は届かないが、それは観測者が
-                        // 存在しないことと同義であるため送信結果は無視してよい。
-                        let _ = self.tx.send(Event::new(FaultEvent::SubscriberLagged {
-                            subscriber_id: self.subscriber_id,
-                            skipped,
-                        }));
-                    }
-                    return Err(RecvError::Lagged(skipped));
-                }
-                Err(broadcast::error::RecvError::Closed) => return Err(RecvError::Closed),
+        match self.rx.recv().await {
+            Ok(event) => {
+                self.lag_gate.note_ok();
+                Ok(event)
             }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                let (warn, fault) = self.lag_gate.note_lag();
+                if warn {
+                    tracing::warn!(
+                        subscriber_id = self.subscriber_id,
+                        skipped = skipped,
+                        "event subscriber lagged; dropped events"
+                    );
+                } else {
+                    tracing::debug!(
+                        subscriber_id = self.subscriber_id,
+                        skipped = skipped,
+                        "event subscriber lagged; dropped events"
+                    );
+                }
+                if fault {
+                    // 受信者がゼロの場合 fault は届かないが、それは観測者が
+                    // 存在しないことと同義であるため送信結果は無視してよい。
+                    let _ = self.tx.send(Event::new(FaultEvent::SubscriberLagged {
+                        subscriber_id: self.subscriber_id,
+                        skipped,
+                    }));
+                }
+                Err(RecvError::Lagged(skipped))
+            }
+            Err(broadcast::error::RecvError::Closed) => Err(RecvError::Closed),
         }
     }
 }

@@ -167,12 +167,12 @@ pub fn start(
                         ) => (Some(run_id.as_str()), None),
                         _ => (None, None),
                     };
-                    if let Some(thread) = thread {
-                        if run.is_none() {
-                            return weak.upgrade().is_some_and(|runtime| {
-                                runtime.latest_chat_run(thread).ok().flatten().is_some()
-                            });
-                        }
+                    if let Some(thread) = thread
+                        && run.is_none()
+                    {
+                        return weak.upgrade().is_some_and(|runtime| {
+                            runtime.latest_chat_run(thread).ok().flatten().is_some()
+                        });
                     }
                     if let Some(run) = run {
                         return run
