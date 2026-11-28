@@ -45,6 +45,7 @@ use workbench_protocol::{
 mod config_file;
 mod feature_options;
 mod modal;
+mod model_fetch;
 mod model_shell;
 mod provider_form;
 mod providers;
@@ -53,6 +54,7 @@ mod routing;
 mod rows;
 use feature_options::FeatureOptions;
 use modal::{Modal, ModalSave};
+use model_fetch::Fetch;
 use provider_form::{FormAction, FormKind, ProviderForm};
 use providers::{LoginAfterSave, ProviderAction, form_edited};
 
@@ -77,6 +79,8 @@ enum Pending {
     Command(OperationId),
     /// The Features modal's view of the settings.
     FeatureView,
+    /// The read of what a finished fetch of provider models found.
+    ProviderModels(OperationId),
 }
 
 /// The document being edited and what it was made from.
@@ -125,6 +129,9 @@ pub struct SettingsFeature {
     /// The name the running provider save writes: it is selected when the save worked.
     saving_name: Option<String>,
     login_after_save: Option<LoginAfterSave>,
+    /// The model fetch of the provider being edited, and the fetches whose result is to be read.
+    fetch: Option<Fetch>,
+    read_models: Vec<OperationId>,
     /// What the controller of the `auth` area holds: the credential of every provider.
     auth: AuthFeature,
     modal: Option<Modal>,
@@ -161,6 +168,8 @@ impl Default for SettingsFeature {
             selected: None,
             saving_name: None,
             login_after_save: None,
+            fetch: None,
+            read_models: Vec::new(),
             auth: AuthFeature::default(),
             modal: None,
             modal_saves: BTreeMap::new(),
@@ -237,10 +246,14 @@ impl SettingsFeature {
         self.next_tag
     }
 
+    /// Whether a save or reload is running. A model fetch waits on a provider, not on the file,
+    /// so it does not hold the screen.
     fn running(&self) -> bool {
-        self.operations
-            .iter()
-            .any(|(id, view)| !view.operation.state.is_final() && !self.lost.contains(id))
+        self.operations.iter().any(|(id, view)| {
+            !view.operation.state.is_final()
+                && !self.lost.contains(id)
+                && view.kind != SettingsOperationKind::FetchProviderModels
+        })
     }
 
     /// Opens the settings modal on `tab`, or shows `tab` in the open one. A running save keeps
@@ -266,6 +279,7 @@ impl SettingsFeature {
         self.form = None;
         self.selected = None;
         self.login_after_save = None;
+        self.fetch = None;
         self.auth.cancel_confirm();
         self.confirm_delete = None;
         self.confirm_close = false;
@@ -313,6 +327,10 @@ impl SettingsFeature {
         self.provider_quoted.remove(id);
         self.modal_saves.remove(id);
         self.drop_login_after(id);
+        self.fetch_lost(
+            id,
+            "The result of the fetch could not be confirmed. Fetch again.",
+        );
         if self.provider_saving.as_ref() == Some(id) {
             self.provider_saving = None;
             self.saving_name = None;
@@ -365,6 +383,10 @@ impl SettingsFeature {
             if state.is_final() {
                 self.feature_save_ended(&id, state, message);
             }
+            return;
+        }
+        if kind == SettingsOperationKind::FetchProviderModels {
+            self.fetch_ended(&id, state, message);
             return;
         }
         if state.is_final() && !matches!(state, OperationState::Ready) {
@@ -580,6 +602,12 @@ impl Feature for SettingsFeature {
         self.snapshot = None;
         self.snapshot_in_flight = false;
         self.stale = true;
+        self.read_models.clear();
+        if let Some(fetch) = &mut self.fetch {
+            fetch.phase = model_fetch::FetchPhase::Failed(
+                "The connection to the core was reset. Fetch again.".into(),
+            );
+        }
         // What was asked before the snapshot is answered, if at all, by a reply
         // that is no longer wanted; the operations are asked for again.
         self.pending
@@ -646,6 +674,14 @@ impl Feature for SettingsFeature {
                     self.status = format!("{} {}", self.status, error.message);
                 }
             },
+            (Pending::ProviderModels(id), FeatureReply::Query(result)) => {
+                let found = match result {
+                    Ok(QueryReply::Settings(SettingsReply::ProviderModels(found))) => Ok(found),
+                    Ok(_) => Err("The core answered with something else.".to_owned()),
+                    Err(error) => Err(error.message),
+                };
+                self.fetch_read(&id, found);
+            }
             (Pending::Command(id), FeatureReply::Command(result)) => match result {
                 Ok(reply) => {
                     if let Some(CommandResult::Settings(SettingsResult::Operation(view))) =
@@ -656,6 +692,9 @@ impl Feature for SettingsFeature {
                 }
                 Err(error) => {
                     self.status = error.message.clone();
+                    if !error.outcome_unknown {
+                        self.fetch_lost(&id, &error.message);
+                    }
                     // A save whose end is not known starts no sign-in, whatever it turns out to be.
                     self.drop_login_after(&id);
                     if error.outcome_unknown {
@@ -687,6 +726,13 @@ impl Feature for SettingsFeature {
         self.auth
             .maintain(ctx, self.modal_tab() == Some(SettingsTab::Providers));
         self.start_login_after_save(ctx);
+        for id in std::mem::take(&mut self.read_models) {
+            let tag = self.tag(Pending::ProviderModels(id.clone()));
+            ctx.query(
+                tag,
+                Query::Settings(SettingsQuery::GetProviderModels { operation_id: id }),
+            );
+        }
         // The snapshot is read for whatever shows it: the Config file tab, or the Model Settings
         // modal over any tab. What was started is looked up whether or not anything shows it.
         let shown = visibility.is_visible() || self.modal.is_some();

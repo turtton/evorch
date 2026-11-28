@@ -94,29 +94,50 @@ pub fn compose_providers(
     let mut providers = BTreeMap::new();
 
     for (name, profile_config) in &config.providers {
-        let profile = ProviderProfile::try_from((name.as_str(), profile_config))?;
-        let client = build_provider_client(
-            &profile,
-            Arc::clone(&deps.credential_store),
-            deps.event_bus.clone(),
+        let composed = compose_provider(
+            name,
+            profile_config,
+            &deps.credential_store,
+            deps.event_bus.as_ref(),
+            deps.env.as_ref(),
             &deps.factory,
         )?;
-        let auth = resolve_auth(&profile, deps.env.as_ref(), deps.credential_store.as_ref())?;
-        catalog.merge_discovered(profile.models.clone());
-        profiles.push(profile.clone());
-        providers.insert(
-            name.clone(),
-            ComposedProvider {
-                profile,
-                client: Arc::from(client),
-                auth,
-            },
-        );
+        catalog.merge_discovered(composed.profile.models.clone());
+        profiles.push(composed.profile.clone());
+        providers.insert(name.clone(), composed);
     }
 
     let router = Router::new(profiles, &config.routing, catalog)?;
 
     Ok(ComposedProviders { router, providers })
+}
+
+/// 1件のprofileからclientと認証を構築します。`compose_providers`が全profileに使うのと同じ経路で、
+/// 稼働中のcoreと同じtoken storeとrefresh lockを使います。
+///
+/// # Errors
+/// profile・client・認証のいずれかを構築できない場合に[`RoutingError`]を返します。
+pub fn compose_provider(
+    name: &str,
+    profile_config: &config::ProviderProfileConfig,
+    credential_store: &Arc<dyn CredentialStore>,
+    event_bus: Option<&Arc<EventBus>>,
+    env: &dyn EnvLookup,
+    factory: &FactoryOptions,
+) -> Result<ComposedProvider, RoutingError> {
+    let profile = ProviderProfile::try_from((name, profile_config))?;
+    let client = build_provider_client(
+        &profile,
+        Arc::clone(credential_store),
+        event_bus.cloned(),
+        factory,
+    )?;
+    let auth = resolve_auth(&profile, env, credential_store.as_ref())?;
+    Ok(ComposedProvider {
+        profile,
+        client: Arc::from(client),
+        auth,
+    })
 }
 
 fn resolve_auth(

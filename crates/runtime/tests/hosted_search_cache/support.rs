@@ -39,6 +39,7 @@ pub(super) async fn model(
                 excluded_models: vec![],
                 default_model: MODEL.into(),
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: config::RoutingConfig {

@@ -63,6 +63,7 @@ fn configured() -> Config {
                 excluded_models: Vec::new(),
                 default_model: MODEL.to_string(),
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: config::RoutingConfig {

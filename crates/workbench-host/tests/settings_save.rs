@@ -62,6 +62,16 @@ struct Fixture {
 
 impl Fixture {
     fn new(initial: &str) -> Self {
+        Self::with_fetch(
+            initial,
+            workbench_host::areas::settings::provider_models::ModelFetch::unsupported(),
+        )
+    }
+
+    fn with_fetch(
+        initial: &str,
+        model_fetch: workbench_host::areas::settings::provider_models::ModelFetch,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), initial).unwrap();
         let reload = Arc::new(Reload::default());
@@ -98,6 +108,7 @@ impl Fixture {
             tasks: AreaTasks::new(tokio::runtime::Handle::current()),
             source,
             features: Arc::new(workbench_host::areas::settings::feature_options::Unwired),
+            model_fetch,
         });
         let host = host.with_areas(Areas {
             settings: settings.clone(),
@@ -169,12 +180,19 @@ fn provider(name: &str, default_model: &str) -> ProviderInput {
         credential: CredentialRef::Env {
             var: "EVORCH_TEST_ABSENT_KEY".into(),
         },
-        models: vec![ModelInput {
-            id: default_model.into(),
-            enabled: true,
-        }],
+        models: vec![model(default_model, true)],
         excluded_models: vec![],
         default_model: default_model.into(),
+        show_quota: None,
+    }
+}
+
+fn model(id: &str, enabled: bool) -> ModelInput {
+    ModelInput {
+        id: id.into(),
+        enabled,
+        kind: None,
+        context_override: None,
     }
 }
 
@@ -743,14 +761,9 @@ default_model = 'm'\n",
     let revision = f.snapshot().revision;
     let mut input = provider("local", "m");
     if let ProviderInput::OpenaiCompatible { models, .. } = &mut input {
-        models.push(ModelInput {
-            id: "other".into(),
-            enabled: false,
-        });
-        models.push(ModelInput {
-            id: "fresh".into(),
-            enabled: true,
-        });
+        models[0].context_override = Some(123_456);
+        models.push(model("other", false));
+        models.push(model("fresh", true));
     }
     f.run(SettingsCommand::SaveProvider(Box::new(SaveProvider {
         operation_id: op("keep"),
@@ -810,7 +823,13 @@ async fn a_provider_save_keeps_model_detail_when_the_file_is_valid_only_with_its
         operation_id: op("layered"),
         expected_revision: revision,
         original_name: Some("local".into()),
-        provider: provider("local", "m"),
+        provider: {
+            let mut input = provider("local", "m");
+            if let ProviderInput::OpenaiCompatible { models, .. } = &mut input {
+                models[0].context_override = Some(123_456);
+            }
+            input
+        },
     })))
     .unwrap();
     let state = f.settings.wait_operation(&op("layered")).await.unwrap();
@@ -853,4 +872,505 @@ async fn a_provider_save_is_refused_when_the_existing_models_cannot_be_read() {
         "the reason is shown: {state:?}"
     );
     assert_eq!(f.file(), initial, "nothing was written");
+}
+
+const QUOTA_FILE: &str = "version = 3\n\
+[providers.codex]\n\
+type = 'openai-codex'\n\
+api_protocol = 'openai-codex-responses'\n\
+base_url = 'https://chatgpt.example.invalid/backend-api'\n\
+credential = { type = 'keyring', service = 'evorch', account = 'codex' }\n\
+models = ['gpt-6-astra']\n\
+default_model = 'gpt-6-astra'\n";
+
+fn codex(show_quota: Option<bool>) -> ProviderInput {
+    ProviderInput::Codex {
+        name: "codex".into(),
+        account: "codex".into(),
+        base_url: "https://chatgpt.example.invalid/backend-api".into(),
+        models: vec![model("gpt-6-astra", true)],
+        default_model: "gpt-6-astra".into(),
+        show_quota,
+    }
+}
+
+fn applied(f: &Fixture) -> bool {
+    !f.snapshot().pending_apply()
+}
+
+/// The footer switch is saved with the provider in one write, defaults to on for a
+/// subscription kind, and is not a model change: it must not leave a reload waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quota_only_save_does_not_wait_for_a_reload_but_a_model_change_does() {
+    let mut f = Fixture::new(QUOTA_FILE);
+    let view = |f: &Fixture| {
+        f.snapshot()
+            .providers
+            .into_iter()
+            .find(|p| p.name == "codex")
+            .unwrap()
+    };
+    assert!(
+        view(&f).quota_supported && view(&f).show_quota,
+        "on by default"
+    );
+    // Everything starts applied: the first reload makes the file the applied one.
+    let reload = f
+        .finish(
+            "reload-0",
+            SettingsCommand::ReloadModels(ReloadModels {
+                operation_id: op("reload-0"),
+            }),
+        )
+        .await;
+    assert_eq!(reload, OperationState::Ready);
+    assert!(applied(&f));
+
+    // Given the models of the provider as the file has them, a save that only
+    // turns the quota off ends applied, and writes the key.
+    let revision = f.snapshot().revision;
+    let same = codex(Some(false));
+    let state = f
+        .finish("quota-1", save_provider("quota-1", revision, same))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.file().contains("show_quota = false"), "{}", f.file());
+    assert!(!view(&f).show_quota);
+    assert!(applied(&f), "a quota-only save leaves nothing to reload");
+    let snapshot = f.snapshot();
+    assert_eq!(snapshot.applied_revision, Some(snapshot.revision.clone()));
+
+    // A save that also changes the models is waiting for a reload, as before.
+    let revision = f.snapshot().revision;
+    let mut changed = codex(Some(false));
+    if let ProviderInput::Codex { models, .. } = &mut changed {
+        models.push(model("gpt-5.5", true));
+    }
+    let state = f
+        .finish("quota-2", save_provider("quota-2", revision, changed))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.snapshot().pending_apply());
+
+    // And a quota-only save on top of a pending one does not make it applied.
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish("quota-3", save_provider("quota-3", revision, codex(None)))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(
+        f.snapshot().pending_apply(),
+        "an unapplied model change stays pending"
+    );
+    assert!(
+        !f.file().contains("show_quota"),
+        "None writes the default, no key"
+    );
+}
+
+/// A kind that has no quota to show never turns the switch on, whatever was written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_without_a_quota_reports_it_off_and_unsupported() {
+    let f = Fixture::new(&format!("version = 3\n{PROVIDER}show_quota = true\n"));
+    let local = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "local")
+        .unwrap();
+    assert!(!local.quota_supported);
+    assert!(!local.show_quota);
+}
+
+/// A model's kind and context window are edited by the client; the rest of the model
+/// is kept, and an image model cannot be the default chat model.
+#[tokio::test(flavor = "multi_thread")]
+async fn model_kind_and_context_are_saved_and_an_image_model_is_no_default() {
+    let mut f = Fixture::new(&format!("version = 3\n{PROVIDER}"));
+    let revision = f.snapshot().revision;
+    let mut input = provider("local", "m");
+    if let ProviderInput::OpenaiCompatible { models, .. } = &mut input {
+        models[0].context_override = Some(64_000);
+        models.push(ModelInput {
+            id: "paint".into(),
+            enabled: true,
+            kind: Some(ModelKind::ImageGeneration),
+            context_override: None,
+        });
+    }
+    let state = f
+        .finish("kinds", save_provider("kinds", revision, input))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    let local = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "local")
+        .unwrap();
+    let paint = local.models.iter().find(|m| m.id == "paint").unwrap();
+    assert_eq!(paint.kind, ModelKind::ImageGeneration);
+    assert_eq!(local.models[0].context_override, Some(64_000));
+    assert_eq!(local.models[0].kind, ModelKind::Chat);
+
+    let before = f.file();
+    let revision = f.snapshot().revision;
+    let mut input = provider("local", "paint");
+    if let ProviderInput::OpenaiCompatible { models, .. } = &mut input {
+        models.push(ModelInput {
+            id: "paint".into(),
+            enabled: true,
+            kind: Some(ModelKind::ImageGeneration),
+            context_override: None,
+        });
+    }
+    let state = f
+        .finish("bad-default", save_provider("bad-default", revision, input))
+        .await;
+    assert_eq!(
+        state,
+        OperationState::Failed {
+            code: ErrorCode::InvalidRequest
+        }
+    );
+    assert_eq!(f.file(), before, "the refused save wrote nothing");
+}
+
+mod fetch {
+    use super::*;
+    use std::time::Duration;
+    use workbench_host::areas::settings::provider_models::{FetchFailure, ModelFetch};
+
+    fn fetching(
+        timeout: Duration,
+        fetcher: impl Fn(
+            String,
+            config::ProviderProfileConfig,
+        ) -> workbench_host::areas::settings::provider_models::FetchFuture
+        + Send
+        + Sync
+        + 'static,
+    ) -> ModelFetch {
+        ModelFetch {
+            fetcher: Arc::new(fetcher),
+            timeout,
+        }
+    }
+
+    fn fetch_command(id: &str, expected: SettingsRevision, provider: &str) -> SettingsCommand {
+        SettingsCommand::FetchProviderModels(FetchProviderModels {
+            operation_id: op(id),
+            expected_revision: expected,
+            provider: provider.into(),
+        })
+    }
+
+    fn found(f: &Fixture, id: &str) -> Result<ProviderModelCandidates, WorkbenchError> {
+        match f.host.handle_query(
+            &SessionId::new("session").unwrap(),
+            &Query::Settings(SettingsQuery::GetProviderModels {
+                operation_id: op(id),
+            }),
+            &workbench_host::provenance::local_desktop(),
+        )? {
+            QueryReply::Settings(SettingsReply::ProviderModels(found)) => Ok(found),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fetch_reads_the_saved_provider_bounds_the_answer_and_changes_no_setting() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let mut f = Fixture::with_fetch(
+            &format!("version = 3\n{PROVIDER}"),
+            fetching(Duration::from_secs(30), move |name, profile| {
+                record
+                    .lock()
+                    .unwrap()
+                    .push((name, profile.base_url.clone()));
+                Box::pin(async {
+                    let mut models: Vec<String> =
+                        (0..MAX_MODELS + 3).map(|i| format!("m{i:04}")).collect();
+                    models.push("m0000".into());
+                    Ok(models)
+                })
+            }),
+        );
+        let before = (f.file(), f.snapshot());
+        let revision = f.snapshot().revision;
+        let state = f
+            .finish("fetch-1", fetch_command("fetch-1", revision, "local"))
+            .await;
+        assert_eq!(state, OperationState::Ready);
+        let candidates = found(&f, "fetch-1").unwrap();
+        assert_eq!(candidates.provider, "local");
+        assert_eq!(candidates.models.len(), MAX_MODELS);
+        assert!(candidates.truncated, "the cut is said");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [(
+                "local".to_owned(),
+                "https://llm.example.invalid/v1".to_owned()
+            )],
+            "the profile comes from the saved file, not from the client"
+        );
+        assert_eq!(
+            (f.file(), f.snapshot()),
+            before,
+            "a fetch changes no setting"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unsupported_kind_a_stale_revision_and_an_unknown_provider_end_as_failures() {
+        let mut f = Fixture::new(&format!("version = 3\n{PROVIDER}"));
+        let revision = f.snapshot().revision;
+        let state = f
+            .finish("u", fetch_command("u", revision.clone(), "local"))
+            .await;
+        assert_eq!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::UnsupportedCapability
+            }
+        );
+        assert_eq!(found(&f, "u").unwrap_err().code, ErrorCode::NotFound);
+        let state = f.finish("n", fetch_command("n", revision, "nobody")).await;
+        assert_eq!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::NotFound
+            }
+        );
+        let state = f
+            .finish(
+                "s",
+                fetch_command("s", SettingsRevision::from_bytes(&[9; 32]), "local"),
+            )
+            .await;
+        assert_eq!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::StaleRevision
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failure_message_carries_no_secret() {
+        let mut f = Fixture::with_fetch(
+            &format!("version = 3\n{PROVIDER}"),
+            fetching(Duration::from_secs(30), |_, _| {
+                Box::pin(async {
+                    Err(FetchFailure::Failed(
+                        "the provider answered HTTP 401".into(),
+                    ))
+                })
+            }),
+        );
+        let revision = f.snapshot().revision;
+        let state = f
+            .finish("fail", fetch_command("fail", revision, "local"))
+            .await;
+        assert_eq!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::Internal
+            }
+        );
+        let view = f.settings.operation(&op("fail")).unwrap();
+        assert_eq!(
+            view.message.as_deref(),
+            Some("the provider answered HTTP 401")
+        );
+    }
+
+    /// A provider that never answers ends as a failure at the deadline, and nothing
+    /// waits for it meanwhile: a save is accepted and finishes while the fetch pends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_provider_that_never_answers_fails_at_the_deadline_and_blocks_no_save() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let mut f = Fixture::with_fetch(
+            &format!("version = 3\n{PROVIDER}"),
+            fetching(Duration::from_millis(1500), move |_, _| {
+                signal.notify_one();
+                Box::pin(std::future::pending())
+            }),
+        );
+        let revision = f.snapshot().revision;
+        f.run(fetch_command("hang", revision.clone(), "local"))
+            .unwrap();
+        entered.notified().await;
+        let saved = f
+            .finish(
+                "save-meanwhile",
+                save_provider("save-meanwhile", revision, provider("other", "x")),
+            )
+            .await;
+        assert_eq!(
+            saved,
+            OperationState::Ready,
+            "the save did not wait for the fetch"
+        );
+        assert_eq!(
+            f.settings.operation(&op("hang")).unwrap().operation.state,
+            OperationState::Pending,
+            "the fetch is still waiting for the provider when the save is done"
+        );
+        let state = tokio::time::timeout(
+            Duration::from_secs(20),
+            f.settings.wait_operation(&op("hang")),
+        )
+        .await
+        .expect("the fetch ended within its deadline")
+        .unwrap()
+        .operation
+        .state;
+        assert_eq!(
+            state,
+            OperationState::Failed {
+                code: ErrorCode::Internal
+            }
+        );
+        assert_eq!(
+            f.settings
+                .operation(&op("hang"))
+                .unwrap()
+                .message
+                .as_deref(),
+            Some("the provider did not answer in time")
+        );
+    }
+}
+
+/// What the client reads of a provider, sent back as it is: the models it shows, nothing edited.
+fn unedited_codex(view: &ProviderView, show_quota: Option<bool>) -> ProviderInput {
+    ProviderInput::Codex {
+        name: view.name.clone(),
+        account: "codex".into(),
+        base_url: view.base_url.clone(),
+        models: view
+            .models
+            .iter()
+            .map(|m| ModelInput {
+                id: m.id.clone(),
+                enabled: m.enabled,
+                kind: None,
+                context_override: m.context_override,
+            })
+            .collect(),
+        default_model: view.default_model.clone(),
+        show_quota,
+    }
+}
+
+/// A provider that leaves its models to the defaults is not given explicit ones by a save of
+/// the quota switch: the models stay what they were, so nothing waits for a reload.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quota_save_of_a_provider_with_default_models_writes_no_kind_and_waits_for_nothing() {
+    let without_models = QUOTA_FILE.replace("models = ['gpt-6-astra']\n", "");
+    let mut f = Fixture::new(&without_models);
+    let view = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "codex")
+        .unwrap();
+    assert!(!view.models.is_empty(), "the defaults are the models");
+    let reload = f
+        .finish(
+            "reload-0",
+            SettingsCommand::ReloadModels(ReloadModels {
+                operation_id: op("reload-0"),
+            }),
+        )
+        .await;
+    assert_eq!(reload, OperationState::Ready);
+
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish(
+            "quota-defaults",
+            save_provider(
+                "quota-defaults",
+                revision,
+                unedited_codex(&view, Some(false)),
+            ),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.file().contains("show_quota = false"), "{}", f.file());
+    assert!(
+        !f.file().contains("kind"),
+        "no kind is written for a model nobody edited: {}",
+        f.file()
+    );
+    assert!(applied(&f), "a quota-only save leaves nothing to reload");
+}
+
+/// A context window that a drop-in overrides is shown as the drop-in has it; saving something
+/// else does not write that value over the one of the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_does_not_write_a_drop_in_context_window_into_the_file() {
+    let initial = format!(
+        "version = 3\n{}",
+        QUOTA_FILE.trim_start_matches("version = 3\n").replace(
+            "models = ['gpt-6-astra']",
+            "models = [{ id = 'gpt-6-astra', enabled = true, context_window = 100000 }]"
+        )
+    );
+    let mut f = Fixture::new(&initial);
+    let drop_ins = f.dir.path().join("config.d");
+    std::fs::create_dir(&drop_ins).unwrap();
+    std::fs::write(
+        drop_ins.join("ctx.toml"),
+        "[providers.codex]\ntype = 'openai-codex'\napi_protocol = 'openai-codex-responses'\nbase_url = 'https://chatgpt.example.invalid/backend-api'\ncredential = { type = 'keyring', service = 'evorch', account = 'codex' }\nmodels = [{ id = 'gpt-6-astra', enabled = true, context_window = 200000 }]\ndefault_model = 'gpt-6-astra'\n",
+    )
+    .unwrap();
+    let state = f
+        .finish(
+            "refresh-ctx",
+            SettingsCommand::RefreshSettings(RefreshSettings {
+                operation_id: op("refresh-ctx"),
+            }),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    let view = f
+        .snapshot()
+        .providers
+        .into_iter()
+        .find(|p| p.name == "codex")
+        .unwrap();
+    assert_eq!(
+        view.models[0].context_override,
+        Some(200_000),
+        "the drop-in wins"
+    );
+
+    let revision = f.snapshot().revision;
+    let state = f
+        .finish(
+            "quota-ctx",
+            save_provider("quota-ctx", revision, unedited_codex(&view, Some(false))),
+        )
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    let file = f.file();
+    assert!(file.contains("context_window = 100000"), "{file}");
+    assert!(!file.contains("200000"), "{file}");
+
+    // An edit of it is written.
+    let revision = f.snapshot().revision;
+    let mut edited = unedited_codex(&view, Some(false));
+    if let ProviderInput::Codex { models, .. } = &mut edited {
+        models[0].context_override = Some(300_000);
+    }
+    let state = f
+        .finish("edit-ctx", save_provider("edit-ctx", revision, edited))
+        .await;
+    assert_eq!(state, OperationState::Ready);
+    assert!(f.file().contains("context_window = 300000"), "{}", f.file());
 }

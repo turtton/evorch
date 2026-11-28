@@ -319,6 +319,7 @@ async fn an_observed_run_keeps_the_provider_wire_prefix_and_the_input_derived_ca
                 default_model: MODEL.into(),
                 excluded_models: vec![],
                 edit_tool: None,
+                show_quota: None,
             },
         )]),
         routing: config::RoutingConfig {

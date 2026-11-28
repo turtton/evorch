@@ -390,9 +390,12 @@ async fn no_client_can_change_the_restart_targets_by_saving_settings() {
                 models: vec![ModelInput {
                     id: "m".into(),
                     enabled: true,
+                    kind: None,
+                    context_override: None,
                 }],
                 excluded_models: vec![],
                 default_model: "m".into(),
+                show_quota: None,
             },
         }))),
     )

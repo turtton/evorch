@@ -16,8 +16,8 @@ use egui_kittest::{
 };
 use workbench_protocol::commands::CommandReply;
 use workbench_protocol::namespaces::settings::{
-    ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply, SettingsRevision,
-    SettingsSnapshot,
+    ModelKind, ModelView, ProviderKind, ProviderView, SettingsQuery, SettingsReply,
+    SettingsRevision, SettingsSnapshot,
 };
 
 const SECRET: &str = "SENTINEL-d41d8cd98f00b204";
@@ -140,9 +140,13 @@ fn provider(name: &str, kind: ProviderKind, credential: CredentialRef) -> Provid
         models: vec![ModelView {
             id: "m".into(),
             enabled: true,
+            kind: ModelKind::Chat,
+            context_override: None,
         }],
         excluded_models: vec![],
         default_model: "m".into(),
+        show_quota: false,
+        quota_supported: false,
     }
 }
 

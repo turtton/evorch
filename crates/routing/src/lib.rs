@@ -14,7 +14,9 @@ mod router;
 
 pub use affinity::{RoutePin, SessionAffinity};
 pub use chain::{Chain, ChainMember, FallbackCycle, FallbackStep};
-pub use compose::{ComposeDeps, ComposedProvider, ComposedProviders, compose_providers};
+pub use compose::{
+    ComposeDeps, ComposedProvider, ComposedProviders, compose_provider, compose_providers,
+};
 pub use credential::CredentialRef;
 pub use env::{EnvLookup, MapEnv, ProcessEnv};
 pub use error::RoutingError;

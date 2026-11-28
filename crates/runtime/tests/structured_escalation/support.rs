@@ -113,6 +113,7 @@ fn harness_with_model(
         excluded_models: vec![],
         default_model: MODEL.into(),
         edit_tool: None,
+        show_quota: None,
     };
     let mut config = Config {
         providers: BTreeMap::from([("local".into(), profile)]),
@@ -205,6 +206,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                         excluded_models: vec![],
                         default_model: MODEL.into(),
                         edit_tool: None,
+                        show_quota: None,
                     },
                 )
             })

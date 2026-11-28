@@ -88,6 +88,9 @@ impl CommandHost {
             SettingsQuery::GetSettingsOperation { operation_id } => {
                 SettingsReply::Operation(settings.operation(operation_id)?)
             }
+            SettingsQuery::GetProviderModels { operation_id } => {
+                SettingsReply::ProviderModels(settings.provider_models(operation_id)?)
+            }
             SettingsQuery::ListSettingsOperations {} => SettingsReply::Operations {
                 operations: settings.operations()?,
             },

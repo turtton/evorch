@@ -132,6 +132,7 @@ mod tests {
             excluded_models: Vec::new(),
             default_model: "model-b".to_string(),
             edit_tool: None,
+            show_quota: None,
         }
     }
 

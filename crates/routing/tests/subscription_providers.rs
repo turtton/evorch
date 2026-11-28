@@ -42,6 +42,7 @@ fn subscription_composition_does_not_treat_the_token_bundle_as_a_request_api_key
                 default_model: "model".into(),
                 excluded_models: vec![],
                 edit_tool: None,
+                show_quota: None,
             },
         );
         let composed = compose_providers(
