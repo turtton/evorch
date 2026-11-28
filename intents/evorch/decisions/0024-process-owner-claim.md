@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0045](0045-single-core-and-client-protocol.md)（owner 機構は PR 20、#866、main `4f02becf` で撤去済み）
 
 ## Context
 

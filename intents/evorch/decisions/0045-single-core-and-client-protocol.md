@@ -181,7 +181,7 @@ CLI（`evorch run` 等）は次の方針とする。
 6. **デスクトップ GUI のクライアント化（opt-in）**: デスクトップ GUI の接続先をコアプロセスへ切り替える。初期は opt-in の core-client モードとし、embedded runtime への fallback は禁止する。デフォルトの切り替えは 19a で行う（安全点再起動機構が安定する前には切り替えない）。
 7. **旧 embedded GUI と専用検証基盤の削除（A）**: `--legacy-embedded` と旧 GUI 専用検証基盤を削除する。
 8. **owner 以外の責務の分離（C0）**: 挙動を変えずに owner 以外の責務を分離する準備 PR。
-9. **ADR 0024 の撤去（C / PR 20）**: 旧所有権機構・共有 DB 同期として `owners.db`、heartbeat/claim、`readonly_threads`、`shared_feed`、`sidebar.json` merge を完全削除する。
+9. **ADR 0024 の撤去（C / PR 20）**: 旧所有権機構・共有 DB 同期として `owners.db`、heartbeat/claim、`readonly_threads`、`shared_feed`、`sidebar.json` merge を完全削除する。**完了**（#866、main `4f02becf`）。以後の排他は単一 core 前提の次の三つである: core lifetime lock、DB writer lock、`.ownership-lock` lease の下での root 全体の scratch sweep（起動時に DB と root の排他 lease を取れた core だけが行い、同じ root を共有する別 config が稼働中なら行わない）。同じ config を使う複数 core の同時運用はサポートしない。旧 core から新 core への更新は、旧 core を止めてから新 build を cold 起動する。`restart request` では handoff 1/2 の不一致のため切り替えられない（詳細は `docs/single-core-integration.md` と `crates/evorch-core/src/restart/README.md`）。
 10. **GUI の内部 crate 依存ゼロ化（B / 19b-G）**: GUI の内部 crate への直接依存をなくす。
 11. **依存 allowlist 全体のゼロ化（D / 19b-C）**: §11 の allowlist を CLI を含めて 0 にし、内部 crate への直接依存を CI で禁止する。
 
@@ -247,7 +247,7 @@ CLI（`evorch run` 等）は次の方針とする。
 - [ADR 0005](0005-headless-kernel-and-gui-separation.md): Headless Agent Kernel と GUI の分離。
 - [ADR 0009](0009-platform-linux-first-gui-only.md): プラットフォーム方針（Linux first GUI）。
 - [ADR 0017](0017-event-bus-transport.md): Event Bus の transport（in-process tokio broadcast のコア内維持）。
-- [ADR 0024](0024-process-owner-claim.md): thread process owner / claim モデル（本 ADR により置換・撤去予定）。
+- [ADR 0024](0024-process-owner-claim.md): thread process owner / claim モデル（本 ADR により置換・撤去済み）。
 - [ADR 0027](0027-restore-contract.md): 復旧契約（restore contract）。
 - [ADR 0037](0037-owner-checkpoint-metadata.md): owner checkpoint metadata。
 - [ADR 0042](0042-event-driven-waits.md): イベント駆動待機。
@@ -255,5 +255,6 @@ CLI（`evorch run` 等）は次の方針とする。
 
 ## 改訂履歴
 
+- 2026-11-28: §12 に PR 20（ADR 0024 の撤去、#866、main `4f02becf`）の完了、単一 core 前提の排他、複数 core 非サポート、旧 core からの更新手順を追記。
 - 2026-11-10: §12 に PR 20 までの移行期間の既知制約（Stop の永続化遅延、一時的な二重 MCP 接続、MCP 結果と credential redaction の扱い）を追記。
 - 2026-11-09: §2（ロック 2 本、AlreadyRunning の再接続扱い、connect-or-start）、§3（CEF renderer helper の分離）、§6（CLI の Provenance、切断時の扱い）、§8（restart transaction、予定再起動、CLI の再接続）、§9（ローカル限定の自動再起動、永続予算、CLI run の非復活）、§10（CLI の全面改訂）、§11（allowlist のゼロ化）、§12（opt-in 移行と 19a / 20 / 19b の順序）を反映。
