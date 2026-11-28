@@ -502,7 +502,7 @@ pub(super) fn is_host_input_notice(event: &event_bus::Event) -> bool {
 }
 
 #[tokio::test]
-async fn ownership_only_record_with_an_uncertain_effect_is_not_restored() {
+async fn ownership_only_record_with_an_uncertain_effect_reuses_history() {
     // Given: a legacy ownership-only record that also lost a side-effecting call.
     let fixture = Fixture::new();
     let run = fixture.terminal().await;
@@ -536,17 +536,16 @@ async fn ownership_only_record_with_an_uncertain_effect_is_not_restored() {
         may_have_side_effects: true,
     }];
     save(&mut record, &descriptor);
-    // When: history is reused, inspected, or forked from this record.
+    assert!(renewable(&fixture));
+    assert!(descriptor.has_uncertain_effects() && descriptor.renewable_ownership_only());
+    assert!(crate::restore::RestoredState::from_record(&record).is_err());
+    // Only history is reused; uncertainty still blocks disk execution restore.
     let result = fixture
         .runtime
         .continue_goal(run, "continue".into(), RunConfig::default());
-    // Then: the unresolved effect still refuses it; the marker is not an exception.
-    assert!(
-        matches!(result, Err(RuntimeError::RunRestoreFailed { reason: RunRestoreFailure::UnsupportedConfig(ref reason), .. }) if reason == "復元対象外の実行状態: ownership"),
-        "{result:?}"
-    );
-    assert!(!renewable(&fixture));
-    assert!(descriptor.has_uncertain_effects() && !descriptor.renewable_ownership_only());
+    assert_eq!(result.unwrap(), run);
+    fixture.runtime.stop(run, StopScope::SelfOnly).unwrap();
+    fixture.runtime.wait(run).await.unwrap();
 }
 
 #[tokio::test]

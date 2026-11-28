@@ -1482,17 +1482,24 @@ async fn observed_child_completion_preserves_the_wire_prefix_without_an_extra_tu
 
 #[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
-    interrupted_tool_recovery(Some("Explain the interrupted result"), false).await;
+    interrupted_tool_recovery(Some("Explain the interrupted result"), false, false).await;
+}
+
+#[tokio::test]
+async fn legacy_ownership_recovery_reports_unknown_effects_and_preserves_the_wire_prefix() {
+    for prompt in [None, Some("Explain the interrupted result")] {
+        interrupted_tool_recovery(prompt, false, true).await;
+    }
 }
 
 #[tokio::test]
 async fn continue_after_stop_or_error_preserves_the_wire_prefix() {
     for stopped in [false, true] {
-        interrupted_tool_recovery(None, stopped).await;
+        interrupted_tool_recovery(None, stopped, false).await;
     }
 }
 
-async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
+async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool, legacy_ownership: bool) {
     let read = Arc::new(GatedRead {
         started: Notify::new(),
         release: Notify::new(),
@@ -1536,6 +1543,22 @@ async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
     };
     let mut events = through_phase(&mut harness.receiver, run, phase).await;
     harness.runtime.wait(run).await.unwrap();
+    if legacy_ownership {
+        let mut record = storage::Database::open(&config)
+            .unwrap()
+            .run_context(&run.to_string())
+            .unwrap()
+            .unwrap();
+        let mut descriptor: runtime::restore::RunRestoreDescriptor =
+            serde_json::from_str(&record.config_json).unwrap();
+        descriptor.restorable = false;
+        descriptor.non_restorable_reason = Some("復元対象外の実行状態: ownership".into());
+        // Old records may conservatively mark an interrupted tool as effectful.
+        descriptor.interrupted_tool_calls[0].may_have_side_effects = true;
+        record.restorable = false;
+        record.config_json = serde_json::to_string(&descriptor).unwrap();
+        storage.handle().upsert_run_context(&record).unwrap();
+    }
     if let Some(prompt) = prompt {
         harness
             .runtime

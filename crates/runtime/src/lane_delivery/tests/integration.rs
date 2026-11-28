@@ -2,6 +2,7 @@
 use super::*;
 #[path = "accepted_answer_retention.rs"]
 mod accepted_answer_retention;
+mod legacy_checkpoint;
 use crate::runtime::questions::routing::LaneAnswerRequest;
 use event_bus::lane::{LaneAttentionFilter, LaneAttentionItem, LaneAttentionKind};
 
