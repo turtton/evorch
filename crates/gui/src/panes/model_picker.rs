@@ -36,6 +36,26 @@ pub fn model_picker(
     context: ModelPickerContext<'_>,
     state: &mut ModelPickerState,
 ) -> Option<Option<ModelPreference>> {
+    model_picker_with(ui, context, state, ButtonStyle::default())
+}
+
+/// How the model button sits in its row.
+#[derive(Clone, Copy, Default)]
+pub struct ButtonStyle<'a> {
+    /// Widest the button may be. A longer name is elided with an ellipsis; without
+    /// a cap the button may fill the row.
+    pub max_width: Option<f32>,
+    /// Appended to the button's hover text on its own line.
+    pub hover_note: Option<&'a str>,
+}
+
+/// [`model_picker`] with the button's width capped and its hover text extended.
+pub fn model_picker_with(
+    ui: &mut egui::Ui,
+    context: ModelPickerContext<'_>,
+    state: &mut ModelPickerState,
+    style: ButtonStyle<'_>,
+) -> Option<Option<ModelPreference>> {
     let enabled = context.enabled && !context.profiles.is_empty();
     let label = context
         .preference
@@ -48,9 +68,33 @@ pub fn model_picker(
     // Keys act on the modal only when it was already open; the Enter that pressed
     // this button must not also pick a row.
     let was_open = state.open;
-    let button = ui
-        .add_enabled(enabled, egui::Button::new(&label).truncate())
-        .on_hover_text("Choose the model and reasoning effort");
+    let hover = match style.hover_note {
+        Some(note) => format!("Choose the model and reasoning effort\n{note}"),
+        None => "Choose the model and reasoning effort".to_owned(),
+    };
+    let button = egui::Button::new(&label).truncate();
+    let button = match style.max_width {
+        // The slot is allocated in the row's own layout, so a button that does not
+        // fit beside its neighbours moves to the next row of a wrapping one.
+        Some(max) => {
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let natural = ui
+                .painter()
+                .layout_no_wrap(label.clone(), font, egui::Color32::PLACEHOLDER)
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x
+                + 2.0;
+            // Nor wider than the row, or a pane narrower than `max` would cut it off.
+            let width = natural.min(max).min(ui.available_width());
+            let slot = egui::vec2(width, ui.spacing().interact_size.y);
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.allocate_ui_with_layout(slot, layout, |ui| ui.add_enabled(enabled, button))
+                .inner
+        }
+        None => ui.add_enabled(enabled, button),
+    }
+    .on_hover_text(hover);
     if button.clicked() {
         state.open(context.preference, context.profiles);
     }

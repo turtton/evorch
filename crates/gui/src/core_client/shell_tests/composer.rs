@@ -796,3 +796,172 @@ fn shift_enter_with_the_list_open_inserts_a_newline() {
     assert_eq!(screen.draft("thr-1"), "see @READ\n");
     assert!(screen.commands().is_empty());
 }
+
+/// Sets the model catalog the next [`Screen::settle`] of the screen built last answers: the role default model
+/// and one provider profile offering `m1` and `m2`.
+fn offer_models(default: &str) {
+    use workbench_protocol::namespaces::settings::{ModelProfileChoice, ProviderKind};
+    MODEL_FIXTURE.with_borrow_mut(|fixture| {
+        *fixture = (
+            default.into(),
+            vec![ModelProfileChoice {
+                name: "p".into(),
+                provider_type: ProviderKind::Anthropic,
+                models: vec!["m1".into(), "m2".into()],
+                default_model: None,
+                effort_levels: Default::default(),
+            }],
+        );
+    });
+}
+
+// Given: the composer of thr-1 at a normal width
+// When: it is drawn
+// Then: the role button, the model button and the team toggle are one row in that
+//       order, the input follows that row directly (no row of its own for the model
+//       or its note), and the note is the model button's hover text
+#[test]
+fn the_model_button_sits_between_the_role_and_team_buttons_on_one_row() {
+    let mut screen = composer();
+    screen.harness.run_steps(2);
+    let harness = &screen.harness;
+    let role = harness.get_by_label("Role: Worker").rect();
+    let model = harness.get_by_label("fixture/default").rect();
+    let team = harness.get_by_label_contains("Team objective").rect();
+    let input = harness.get_by_label("Message").rect();
+    assert!(
+        role.max.x <= model.min.x && model.max.x <= team.min.x,
+        "{role:?} {model:?} {team:?}"
+    );
+    for other in [model, team] {
+        assert!(
+            other.center().y > role.min.y && other.center().y < role.max.y,
+            "one row: {role:?} {other:?}"
+        );
+    }
+    // A row of the model (or of its note) between the buttons and the input would put
+    // the input a button's height lower.
+    assert!(
+        input.min.y - role.max.y < role.height(),
+        "{role:?} {input:?}"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Applies to next message")
+            .is_none()
+    );
+}
+
+// Given: the same composer, with a model name far wider than the button may be
+// When: it is drawn at a normal and at a narrow width
+// Then: the model button is capped and stays inside the window, and the team toggle
+//       moves to the next row when the three no longer fit
+#[test]
+fn a_long_model_name_is_capped_and_the_row_wraps_in_a_narrow_composer() {
+    let long = "a-provider/an-extraordinarily-long-model-name-that-keeps-going-and-going-and-going";
+    let width = |size| {
+        let mut screen = screen(size);
+        offer_models(long);
+        screen.settle();
+        screen.harness.run_steps(4);
+        let harness = &screen.harness;
+        let role = harness.get_by_label("Role: Worker").rect();
+        let model = harness.get_by_label_contains("a-provider").rect();
+        let team = harness.get_by_label_contains("Team objective").rect();
+        let input = harness.get_by_label("Message").rect();
+        assert!(
+            model.width() <= crate::panes::core_model_picker::MAX_BUTTON_WIDTH + 1.0,
+            "{model:?}"
+        );
+        assert!(
+            team.max.x <= size.x && model.max.x <= size.x,
+            "{model:?} {team:?}"
+        );
+        (role, model, team, input)
+    };
+    let (role, model, team, _) = width(egui::vec2(1440.0, 900.0));
+    assert!(
+        model.center().y > role.min.y
+            && team.center().y > role.min.y
+            && team.center().y < role.max.y
+    );
+    let (role, model, team, input) = width(egui::vec2(620.0, 600.0));
+    assert!(
+        team.min.y >= role.max.y || model.min.y >= role.max.y,
+        "wraps: {role:?} {model:?} {team:?}"
+    );
+    assert!(
+        input.min.y >= team.max.y.min(model.max.y),
+        "{team:?} {input:?}"
+    );
+}
+
+// Given: a core offering the model m1 of provider p, and thr-1 on the role default
+// When: the model button is opened and m1 chosen
+// Then: m1 reaches the core as the thread's model choice, and the button is disabled
+//       until the core answers
+#[test]
+fn choosing_a_model_beside_the_role_button_saves_it_for_the_thread() {
+    use workbench_protocol::namespaces::workspace::WorkspaceCommand;
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    offer_models("fixture/default");
+    screen.settle();
+    screen.harness.run_steps(2);
+    screen.harness.get_by_label("fixture/default").click();
+    screen.harness.run_steps(2);
+    screen.press(Key::ArrowDown);
+    screen.press(Key::Enter);
+    screen.harness.run_steps(2);
+    let mut commands = Vec::new();
+    while let Ok(action) = screen.actions.try_recv() {
+        if let Action::Feature(FeatureAction {
+            request: FeatureRequest::Command(Command::Workspace(command)),
+            ..
+        }) = action
+        {
+            commands.push(command);
+        }
+    }
+    let [WorkspaceCommand::SetThreadModelChoice(save)] = commands.as_slice() else {
+        panic!("one model choice: {commands:?}");
+    };
+    assert_eq!(save.thread.as_str(), "thr-1");
+    let workbench_protocol::commands::ModelChoice::Explicit(chosen) = &save.choice else {
+        panic!("an explicit choice: {:?}", save.choice);
+    };
+    assert_eq!(
+        (chosen.profile.as_str(), chosen.model.as_deref()),
+        ("p", Some("m1"))
+    );
+    // The choice is being saved: the button waits for the core's answer.
+    screen.harness.run_steps(2);
+    let button = screen.harness.get_by_label("fixture/default");
+    assert!(button.accesskit_node().is_disabled());
+}
+
+// Given: thr-1 on a core offering models, while the thread's message is being sent
+// When: the composer is drawn
+// Then: the model button is disabled
+#[test]
+fn the_model_button_waits_while_the_thread_is_sending() {
+    let mut screen = screen(egui::vec2(1440.0, 900.0));
+    offer_models("fixture/default");
+    screen.settle();
+    screen.harness.run_steps(2);
+    assert!(
+        !screen
+            .harness
+            .get_by_label("fixture/default")
+            .accesskit_node()
+            .is_disabled()
+    );
+    screen.shared.lock().unwrap().sending.insert("thr-1".into());
+    screen.harness.run_steps(2);
+    assert!(
+        screen
+            .harness
+            .get_by_label("fixture/default")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
