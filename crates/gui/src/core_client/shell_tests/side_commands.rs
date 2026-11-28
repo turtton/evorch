@@ -244,3 +244,47 @@ fn a_background_run_creates_a_worker_thread_and_keeps_the_screen() {
     assert_eq!(screen.harness.state().selected.as_ref(), Some(&new_thread));
     screen.harness.get_by_label("What should we do in evorch?");
 }
+
+// Given: a side question the core failed with a provider error of hundreds of lines
+// When: the card is drawn
+// Then: the failure scrolls inside the card, so the composer and the close button stay
+//       inside the window and the card can still be closed
+#[test]
+fn a_long_failure_does_not_push_the_composer_out_of_the_window() {
+    let mut screen = composer();
+    screen.send_text("/btw what changed?");
+    let long = (0..400)
+        .map(|n| format!("provider error line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (_, _) = screen.drain_btw(&|operation| {
+        Some(view(json!({
+            "operation": {
+                "operation_id": operation.as_str(),
+                "state": {"type": "failed", "code": "internal"},
+                "revision": "2",
+            },
+            "thread": "thr-1",
+            "failure": long,
+            "truncated": false,
+        })))
+    });
+    screen
+        .harness
+        .get_by_label_contains("provider error line 0");
+    let window = screen.harness.ctx.content_rect();
+    let composer = screen.harness.get_by_label("Message").rect();
+    let close = screen.harness.get_by_label("Close side question").rect();
+    assert!(
+        window.contains_rect(composer) && window.contains_rect(close),
+        "composer {composer:?} and close {close:?} stay inside {window:?}"
+    );
+    screen.harness.get_by_label("Close side question").click();
+    screen.harness.run_steps(3);
+    assert!(
+        screen
+            .harness
+            .query_by_label_contains("provider error line 0")
+            .is_none()
+    );
+}

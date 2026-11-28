@@ -33,7 +33,9 @@ use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use workbench_client::{ClientConfig, UnixTransport, WorkbenchClient};
 use workbench_host::areas::{AreaTasks, Areas, execution::ExecutionArea};
 use workbench_host::{CommandHost, commands::CommandService, projects::StaticProjects};
-use workbench_protocol::commands::{Command, CommandResult, ComposerRole, SendChat};
+use workbench_protocol::commands::{
+    Command, CommandDisposition, CommandResult, ComposerRole, SendChat,
+};
 use workbench_protocol::events::{Subscribe, SubscriptionScope, UiEvent};
 use workbench_protocol::handshake::BuildInfo;
 use workbench_protocol::ids::{ClientId, OperationId, ProjectId, SubmissionId, ThreadId};
@@ -774,6 +776,186 @@ async fn a_side_question_between_two_turns_leaves_the_model_prefix_alone() {
         second_cached >= first_input,
         "{first_usage:?} {later_usage:?}"
     );
+
+    actions.send(Action::Shutdown).await.unwrap();
+    window.await.expect("the actor does not panic");
+    core.finish();
+}
+
+struct ReleaseOnDrop(mock_openai::ResponseGate);
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+fn ask_btw(operation: &OperationId, question: &str) -> Command {
+    Command::Execution(ExecutionCommand::AskBtw(AskBtw {
+        operation_id: operation.clone(),
+        thread: ThreadId::new("thread").unwrap(),
+        question: question.into(),
+    }))
+}
+
+// A side question held at the provider: the core keeps answering other requests meanwhile,
+// the same id with the same request joins it while another request under the id is a
+// conflict, and a cancel settles it as requested without an answer. The provider's reply
+// is held by a gate the test opens, and every wait is for the gate's arrival or the
+// operation's own change event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_side_question_held_at_the_provider_joins_conflicts_and_cancels() {
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    let release = ReleaseOnDrop(gate.clone());
+    let mut core = Core::start(
+        vec![
+            ScriptedResponse::text_stream("first", "mock-model", ["hello"]),
+            ScriptedResponse::text_stream("side", "mock-model", [SIDE_ANSWER]).with_gate(gate),
+        ],
+        &[],
+    )
+    .await;
+    let (actions, rx) = tokio::sync::mpsc::channel(64);
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let window = tokio::spawn(serve(
+        core.new_launcher(),
+        rx,
+        shared.clone(),
+        egui::Context::default(),
+    ));
+    connected(&shared).await;
+    actions
+        .send(Action::Command {
+            command: Command::Conversation(ConversationCommand::CreateExecution(chat(
+                "one",
+                "first prompt",
+            ))),
+            draft: None,
+        })
+        .await
+        .unwrap();
+    turn_usage(&mut core.turns).await;
+
+    let client = WorkbenchClient::connect(
+        UnixTransport::connect(&core.instance.socket).await.unwrap(),
+        ClientConfig::new(
+            ClientId::new("btw-held").unwrap(),
+            BuildInfo {
+                name: "test".into(),
+                version: "1".into(),
+                revision: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let mut subscription = client
+        .subscribe(Subscribe {
+            scope: SubscriptionScope::All,
+            after: None,
+        })
+        .await
+        .unwrap();
+    let operation = OperationId::new("btw-held-1").unwrap();
+    let first = client
+        .command(ask_btw(&operation, SIDE_QUESTION))
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, CommandDisposition::Accepted);
+    // The request has reached the provider and waits at the gate.
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+
+    // The same request joins the operation; another request under the id is refused.
+    let joined = client
+        .command(ask_btw(&operation, SIDE_QUESTION))
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, CommandDisposition::AlreadyApplied);
+    let Err(workbench_client::ClientError::Server(refused)) = client
+        .command(ask_btw(&operation, "another question"))
+        .await
+    else {
+        panic!("a different request under the id is refused");
+    };
+    assert_eq!(
+        refused.code,
+        workbench_protocol::errors::ErrorCode::Conflict
+    );
+
+    // While the provider holds the answer, the core answers other requests and shows the
+    // operation as pending without an answer.
+    let QueryReply::Execution(ExecutionReply::Btw(pending)) = client
+        .query(Query::Execution(ExecutionQuery::GetBtw(GetBtw {
+            operation_id: operation.clone(),
+        })))
+        .await
+        .unwrap()
+    else {
+        panic!("the side question's view");
+    };
+    assert_eq!(pending.operation.state, OperationState::Pending);
+    assert!(pending.answer.is_none());
+    client
+        .query(Query::Execution(ExecutionQuery::GetThreadExecution(
+            workbench_protocol::commands::ThreadTarget {
+                thread: ThreadId::new("thread").unwrap(),
+            },
+        )))
+        .await
+        .unwrap();
+
+    // A cancel settles it as requested; asking it to cancel again changes nothing.
+    client
+        .command(Command::Execution(ExecutionCommand::CancelBtw(
+            workbench_protocol::namespaces::execution::CancelBtw {
+                operation_id: operation.clone(),
+            },
+        )))
+        .await
+        .unwrap();
+    loop {
+        let event = subscription
+            .next()
+            .await
+            .expect("the subscription stays open");
+        if let UiEvent::Execution(ExecutionEvent::BtwChanged {
+            operation: changed, ..
+        }) = &event.event
+            && changed.operation_id == operation
+            && changed.state.is_final()
+        {
+            break;
+        }
+    }
+    let QueryReply::Execution(ExecutionReply::Btw(settled)) = client
+        .query(Query::Execution(ExecutionQuery::GetBtw(GetBtw {
+            operation_id: operation.clone(),
+        })))
+        .await
+        .unwrap()
+    else {
+        panic!("the side question's view");
+    };
+    assert_eq!(
+        settled.operation.state,
+        OperationState::Cancelled {
+            reason: workbench_protocol::operation::CancelReason::Requested
+        }
+    );
+    assert!(settled.answer.is_none());
+    let again = client
+        .command(Command::Execution(ExecutionCommand::CancelBtw(
+            workbench_protocol::namespaces::execution::CancelBtw {
+                operation_id: operation.clone(),
+            },
+        )))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, CommandDisposition::AlreadyApplied);
+
+    // The mock joins its worker threads when it is dropped, so the held response goes first.
+    drop(release);
 
     actions.send(Action::Shutdown).await.unwrap();
     window.await.expect("the actor does not panic");

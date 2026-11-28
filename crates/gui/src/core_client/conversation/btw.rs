@@ -77,7 +77,13 @@ pub(super) fn btw_card(
                 }
             }
             CardState::Failed(reason) => {
-                ui.colored_label(palette().ERROR_FG, reason);
+                egui::ScrollArea::vertical()
+                    .id_salt(("btw-failure", card.operation.as_str()))
+                    .max_height(body_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.colored_label(palette().ERROR_FG, reason);
+                    });
             }
         }
     });
