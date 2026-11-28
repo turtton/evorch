@@ -50,6 +50,7 @@ struct World {
     drops: mpsc::UnboundedReceiver<()>,
     config: Arc<Mutex<Vec<Profile>>>,
     changed: watch::Sender<u64>,
+    gate: HostRestartGate,
 }
 fn world() -> World {
     let tasks = AreaTasks::new(tokio::runtime::Handle::current());
@@ -59,6 +60,7 @@ fn world() -> World {
     let config = Arc::new(Mutex::new(vec![profile("first")]));
     let load = config.clone();
     let (changed, updates) = watch::channel(0);
+    let gate = HostRestartGate::default();
     let service = Quotas::new(Parts {
         tasks: tasks.clone(),
         announce: Arc::new(move || {
@@ -74,7 +76,7 @@ fn world() -> World {
                 drops: drops.clone(),
             }))
         }),
-        gate: HostRestartGate::default(),
+        gate: gate.clone(),
     })
     .unwrap();
     World {
@@ -85,6 +87,7 @@ fn world() -> World {
         drops: dropped,
         config,
         changed,
+        gate,
     }
 }
 fn network() -> QuotaIssue {
@@ -205,5 +208,24 @@ async fn off_cancels_inflight_on_restarts_and_account_change_cannot_publish_old_
     new.answer.send(Ok(vec![])).unwrap();
     w.event().await;
     assert!(w.service.snapshot().profiles[0].windows.is_empty());
+    w.tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_gate_cancels_pending_fetch_and_reopens_without_another_query() {
+    let mut w = world();
+    w.event().await;
+    w.service.get();
+    let old = w.calls.recv().await.unwrap();
+    assert!(w.gate.transition(1, HostRestartPhase::Sealing));
+    w.drops.recv().await.unwrap();
+    assert!(old.answer.send(Ok(windows())).is_err());
+    tokio::time::advance(Duration::from_secs(600)).await;
+    assert!(w.calls.try_recv().is_err());
+    assert!(w.gate.transition(1, HostRestartPhase::Open));
+    let resumed = w.calls.recv().await.unwrap();
+    resumed.answer.send(Ok(windows())).unwrap();
+    w.event().await;
+    assert_eq!(w.service.snapshot().profiles[0].state, QuotaState::Ready);
     w.tasks.shutdown().await.unwrap();
 }

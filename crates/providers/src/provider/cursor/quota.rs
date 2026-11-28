@@ -160,11 +160,12 @@ async fn fetch_json(request: reqwest::RequestBuilder) -> Result<Value, ProviderE
         }
     })
 }
+fn percentage(value: &Value) -> Option<f64> {
+    // Unlike monetary/count fields, an invalid ratio retains its window as unknown.
+    value.as_f64().or_else(|| value.as_str()?.parse().ok())
+}
 fn number(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str()?.parse().ok())
-        .filter(|n| n.is_finite() && *n >= 0.0)
+    percentage(value).filter(|n| n.is_finite() && *n >= 0.0)
 }
 fn reset(value: &Value) -> Option<u64> {
     for key in ["billingCycleEnd", "endOfMonth", "resetsAt", "nextReset"] {
@@ -246,18 +247,23 @@ fn parse_unified(individual: &Value, weekly_resets_at: Option<u64>) -> Vec<Curso
     let plan = &individual["plan"];
     if plan.get("enabled").and_then(Value::as_bool) != Some(false) {
         let limit_cents = plan.get("limit").and_then(number).filter(|v| *v > 0.0);
-        let total_percent = plan.get("totalPercentUsed").and_then(number);
+        let total_percent = plan.get("totalPercentUsed").and_then(percentage);
         if let Some(limit_cents) = limit_cents {
             let used_cents = plan.get("used").and_then(number);
-            let fraction = total_percent
-                .map_or(0.0, |p| p / 100.0)
-                .max(used_cents.map_or(0.0, |used| used / limit_cents));
+            let fraction =
+                if total_percent.is_some_and(|p| !p.is_finite() || !(0.0..=100.0).contains(&p)) {
+                    f64::NAN
+                } else {
+                    total_percent
+                        .map_or(0.0, |p| p / 100.0)
+                        .max(used_cents.map_or(0.0, |used| used / limit_cents))
+                };
             let limit = limit_cents / 100.0;
             windows.push(CursorQuotaWindow {
                 label: "Cursor Models".into(),
                 used_percent: Some(fraction * 100.0),
                 resets_at: weekly_resets_at,
-                used: Some((limit * fraction).min(limit)),
+                used: fraction.is_finite().then(|| (limit * fraction).min(limit)),
                 limit: Some(limit),
                 unit: "usd".into(),
             });
@@ -309,15 +315,15 @@ fn parse_summary(value: &Value, weekly_resets_at: Option<u64>) -> CursorQuotaSna
                 .and_then(number)
                 .filter(|v| *v > 0.0)
                 .map(|v| v / 100.0);
-            if let Some(auto) = plan.get("autoPercentUsed").and_then(number) {
+            if let Some(auto) = plan.get("autoPercentUsed").and_then(percentage) {
                 windows.push(percent(auto, "Cursor Models", None, resets_at));
             }
-            if let Some(api) = plan.get("apiPercentUsed").and_then(number) {
+            if let Some(api) = plan.get("apiPercentUsed").and_then(percentage) {
                 // plan.limit is not the Other Models pool, so this stays a percentage.
                 windows.push(percent(api, "Other Models", None, resets_at));
             }
             if windows.is_empty() {
-                if let Some(total) = plan.get("totalPercentUsed").and_then(number) {
+                if let Some(total) = plan.get("totalPercentUsed").and_then(percentage) {
                     windows.push(percent(total, "Personal Usage", limit, resets_at));
                 } else if let Some(window) = cents(plan, "Personal Usage", resets_at) {
                     windows.push(window);

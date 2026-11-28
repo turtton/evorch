@@ -233,10 +233,12 @@ fn window(label: &str, raw: &Value, percentage: &str) -> Option<ClaudeQuotaWindo
     let used = raw[percentage]
         .as_f64()
         .or_else(|| raw[percentage].as_str()?.parse().ok())?;
-    if !used.is_finite() {
-        return None;
-    }
-    let used_percent = used.clamp(0.0, 100.0);
+    // Retain non-finite percentages as unknown for diagnostics, not missing windows.
+    let remaining_percent = if used.is_finite() {
+        100.0 - used.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
     let resets_at = raw["resets_at"]
         .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -245,7 +247,7 @@ fn window(label: &str, raw: &Value, percentage: &str) -> Option<ClaudeQuotaWindo
         label: label.into(),
         // Preserve the source value so diagnostics can mark out-of-range as unknown.
         used_percent: used,
-        remaining_percent: 100.0 - used_percent,
+        remaining_percent,
         resets_at,
     })
 }

@@ -319,6 +319,9 @@ impl Backend for Native {
     }
 }
 #[cfg(test)]
+mod native_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

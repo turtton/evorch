@@ -52,6 +52,8 @@ impl runtime::SandboxFactory for Unisolated {
     }
 }
 struct Screen {
+    // Conditions must observe what this frame drew, not a later actor update.
+    rendered: Vec<ProviderQuota>,
     shared: Arc<Mutex<Shared>>,
     actions: tokio::sync::mpsc::Sender<Action>,
 }
@@ -73,8 +75,8 @@ fn draw(ui: &mut egui::Ui, screen: &mut Screen) {
             selection: &Selection::default(),
         },
     );
-    let quotas = features.diagnostics().unwrap().quotas.profiles();
-    footer(ui, quotas);
+    screen.rendered = features.diagnostics().unwrap().quotas.profiles().to_vec();
+    footer(ui, &screen.rendered);
     for action in frame.actions {
         enqueue(&screen.actions, &mut shared, Action::Feature(action));
     }
@@ -94,17 +96,7 @@ async fn until(window: &mut Window, shown: impl Fn(&Window) -> bool) {
     }
 }
 fn profiles(window: &Window) -> Vec<ProviderQuota> {
-    window
-        .state()
-        .shared
-        .lock()
-        .unwrap()
-        .features
-        .diagnostics()
-        .unwrap()
-        .quotas
-        .profiles()
-        .to_vec()
+    window.state().rendered.clone()
 }
 const CONFIG: &str = r#"version = 3
 [providers.work]
@@ -187,6 +179,7 @@ async fn quota_updates_and_profile_removal_reach_footer_without_manual_reload() 
         .build_ui_state(
             draw,
             Screen {
+                rendered: Vec::new(),
                 shared: shared.clone(),
                 actions: actions.clone(),
             },
@@ -258,7 +251,6 @@ async fn quota_updates_and_profile_removal_reach_footer_without_manual_reload() 
         .await
         .unwrap();
     until(&mut window, |w| profiles(w).is_empty()).await;
-    window.run_steps(2); // Draw the snapshot just observed in shared state.
     assert!(window.query_by_label("Quota work").is_none());
     actions.send(Action::Shutdown).await.unwrap();
     desktop.await.unwrap();
