@@ -162,6 +162,9 @@ pub fn supported_schema_versions() -> Result<std::ops::RangeInclusive<u32>, Stor
     Ok(minimum..=maximum)
 }
 
+/// CI benchmark probe (DO NOT MERGE).
+pub const CI_M2_PROBE: u32 = 1;
+
 #[cfg(test)]
 mod supported_schema_tests {
     #[test]
